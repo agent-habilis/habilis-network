@@ -2,7 +2,7 @@
  * The wasm-bindgen module's shape, as this package consumes it.
  *
  * Declared here rather than imported from the generated `.d.ts` because the
- * glue under `../wasm/` is a build artifact (`cargo task wasm-peer`), and the
+ * glue under `../wasm/` is a build artifact (`cargo task build-wasm`), and the
  * package must type-check before it has been built. The contract's source of
  * truth is `crates/fofoca-wasm/src/lib.rs`; change one, change the other.
  */
@@ -11,23 +11,43 @@ export interface MeshPeerHandle {
   id(): string
   nick(): string
   name(): string
-  maxChunk(): number
-  /** Splits at `maxChunk()` on the Rust side; `to` absent = broadcast. */
-  send(to: string | undefined, bytes: Uint8Array): Promise<void>
-  sendEof(to: string | undefined): Promise<void>
+  /** The longest message in bytes that always fits one frame. */
+  maxMsg(): number
+  /** One whole message; refused, not split, when it does not fit. `to` absent = broadcast. */
+  send(to: string | undefined, text: string): Promise<void>
   /**
-   * The next inbound frame as JSON (`{nick, directed, eof, bytes: number[]}`),
-   * or `undefined` once the mesh is gone. One in-flight call at a time is the
+   * The next inbound message as JSON (`{nick, directed, text}`), or
+   * `undefined` once the mesh is gone. One in-flight call at a time is the
    * intended shape; a concurrent second call waits.
    */
-  nextFrame(): Promise<string | undefined>
-  /** The next `PipeEvent` as JSON, or `undefined` once the mesh is gone. */
+  nextMsg(): Promise<string | undefined>
+  /** The next `MembershipEvent` as JSON, or `undefined` once the mesh is gone. */
   nextEvent(): Promise<string | undefined>
   peersJson(): Promise<string>
   peerCount(): Promise<number>
   stateJson(): Promise<string>
   /** Applies an RFC 7386 merge document; resolves with the resulting state. */
   stateMerge(patchJson: string): Promise<string>
+  close(): Promise<void>
+}
+
+export interface StreamNodeHandle {
+  create(): Promise<ProducerHandle>
+  open(hash: string): Promise<ReaderHandle>
+  close(): Promise<void>
+}
+
+export interface ProducerHandle {
+  hash(): string
+  attached(): Promise<void>
+  write(bytes: Uint8Array): Promise<void>
+  close(): Promise<void>
+  abandon(): Promise<void>
+}
+
+export interface ReaderHandle {
+  /** The next bytes, or `undefined` at the end of the stream. */
+  read(): Promise<Uint8Array | undefined>
   close(): Promise<void>
 }
 
@@ -39,6 +59,10 @@ export interface FofocaWasmModule {
   MeshPeer: {
     open(optsJson: string): Promise<MeshPeerHandle>
   }
+  StreamNode: {
+    bind(optsJson: string): Promise<StreamNodeHandle>
+    forHash(hash: string): Promise<StreamNodeHandle>
+  }
 }
 
 let cached: Promise<FofocaWasmModule> | null = null
@@ -49,7 +73,7 @@ let cached: Promise<FofocaWasmModule> | null = null
  * wasm-bindgen's one-shot `default()`.
  *
  * `glueUrl` overrides where the generated glue lives; the default expects
- * `wasm/fofoca_wasm.js` beside `src/`, which `cargo task wasm-peer` produces.
+ * `wasm/fofoca_wasm.js` beside `src/`, which `cargo task build-wasm` produces.
  */
 export function loadWasm(glueUrl?: string): Promise<FofocaWasmModule> {
   cached ??= (async () => {

@@ -4,7 +4,7 @@
 //! Folded in from its own crate: it isolated no dependency of its own — every
 //! name it used was already one of this crate's — so the split bought a
 //! manifest, two feature sets and a cross-crate public API where a module
-//! does. See `docs/mesh-slimming.md`.
+//! does.
 //!
 //! A mesh created with `--advertise[=<name>]` re-broadcasts its own
 //! mesh id into a **directory**; a consumer's discovery command browses it. A directory

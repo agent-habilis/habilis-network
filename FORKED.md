@@ -18,8 +18,7 @@ their new homes.
 mallorca's 40.7 MiB release binary**, with the engine's own code accounting for
 0.75 MiB of `__text` and the rest being its dependency closure. Cargo features
 cannot be selected per-consumer across a dependency edge, so making that closure
-optional required crate boundaries. `docs/mesh-slimming.md` has the analysis and
-the p2panda-derived rules the split follows.
+optional required crate boundaries.
 
 ## Crate layout
 
@@ -149,10 +148,8 @@ Divergences from upstream, in the order they were made.
     `LICENSE` (every crate already declared MIT), a root `README.md`, and CI.
     `crates/*/version` moved to `version.workspace = true` — `fofoca-ffi` had
     drifted to `0.0.0` while the rest sat at `0.5.0`.
-17. `docs/mesh-slimming.md` came along from mallorca: it is the rationale for
-    the crate split, so it belongs beside the crates. `docs/ffi-cost.md` and
-    `scripts/measure-ffi-cost.sh` stayed behind — they measure mallorca's
-    binary, not this workspace.
+17. `docs/ffi-cost.md` and `scripts/measure-ffi-cost.sh` stayed behind in
+    mallorca — they measure mallorca's binary, not this workspace.
 
 **From reclaiming the `fofoca-blobs` name:**
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { NativeLibrary, NativePointer, NativeValue } from './dlopen/native.ts'
 import { createEngine } from './engine.ts'
-import { encodeFrame } from './frame.ts'
+import { encodeMsg } from './msg.ts'
 import type { Command, FromWorker, OpenReply, WireOpts } from './protocol.ts'
 
 const OPTS: WireOpts = {
@@ -19,11 +19,10 @@ const OPTS: WireOpts = {
 
 const OPEN: Command = { t: 'open', id: 1, opts: OPTS, lib: '/fake' }
 
-interface FakeFrame {
+interface FakeMsg {
   readonly nick: string
   readonly directed: boolean
-  readonly eof: boolean
-  readonly payload: Uint8Array
+  readonly text: string
 }
 
 /**
@@ -34,7 +33,7 @@ function fakeLib(
   overrides: {
     openFails?: boolean
     sendResult?: number
-    recv?: (FakeFrame | 'fail')[]
+    recv?: (FakeMsg | 'fail')[]
     lastError?: string
   } = {},
 ) {
@@ -42,7 +41,7 @@ function fakeLib(
   const state = {
     roster: '{"count":1,"peers":[]}',
     state: '{}',
-    sends: [] as { to: string | null; bytes: Uint8Array }[],
+    sends: [] as { to: string | null; text: string }[],
     closes: 0,
   }
   const recvQueue = overrides.recv ?? []
@@ -60,60 +59,68 @@ function fakeLib(
   const lib: NativeLibrary = {
     call: (name, ...args) => {
       switch (name) {
-        case 'fofoca_max_chunk':
-          return 64n
-        case 'fofoca_id':
+        case 'fofoca_max_msg':
+          return 1408n
+        case 'fofoca_mesh_id':
           return 'mesh-id'
-        case 'fofoca_name':
+        case 'fofoca_mesh_name':
           return 'mesh-name'
-        case 'fofoca_nickname':
+        case 'fofoca_mesh_nickname':
           return 'ana'
         case 'fofoca_version':
           return '0.0.0-test'
         case 'fofoca_last_error':
           return overrides.lastError ?? 'boom'
-        case 'fofoca_peers_json':
+        case 'fofoca_mesh_peers_json':
           return writeDocument(state.roster, args)
-        case 'fofoca_state_json':
+        case 'fofoca_mesh_state_json':
           return writeDocument(state.state, args)
-        case 'fofoca_send': {
-          state.sends.push({ to: args[1] as string | null, bytes: (args[2] as Uint8Array).slice() })
+        case 'fofoca_msg_send': {
+          state.sends.push({ to: args[1] as string | null, text: args[2] as string })
           return overrides.sendResult ?? 0
         }
-        case 'fofoca_send_eof':
-          return 0
-        case 'fofoca_state_merge': {
+        case 'fofoca_mesh_state_merge': {
           state.state = `{"merged":${JSON.stringify(args[1] as string)}}`
           return 0
         }
-        case 'fofoca_recv': {
-          const next = recvQueue.shift()
+        case 'fofoca_msg_recv': {
+          const next = recvQueue[0]
           if (next === undefined) {
             return 0n
           }
           if (next === 'fail') {
+            recvQueue.shift()
             return -1n
           }
-          const payload = args[1] as Uint8Array
-          payload.set(next.payload, 0)
+          const text = utf8.encode(next.text)
           const meta = args[4] as Uint8Array
-          meta.set(
-            encodeFrame({
-              nick: next.nick,
-              directed: next.directed,
-              eof: next.eof,
-              len: next.payload.byteLength,
-            }),
-            0,
-          )
+          meta.set(encodeMsg({ nick: next.nick, directed: next.directed, len: text.byteLength }), 0)
+          const buffer = args[1] as Uint8Array
+          if (text.byteLength >= Number(args[2] as bigint)) {
+            // Kept, as the engine keeps it, for a retry with a bigger buffer.
+            return -2n
+          }
+          recvQueue.shift()
+          buffer.set(text, 0)
+          buffer[text.byteLength] = 0
           return 1n
         }
-        case 'fofoca_close': {
+        case 'fofoca_mesh_close': {
           state.closes += 1
           return 0
         }
-        case 'fofoca_open':
-        case 'fofoca_peer_count':
+        case 'fofoca_mesh_open':
+        case 'fofoca_mesh_peer_count':
+        case 'fofoca_streams_bind':
+        case 'fofoca_streams_bind_for':
+        case 'fofoca_streams_close':
+        case 'fofoca_stream_create':
+        case 'fofoca_stream_hash':
+        case 'fofoca_stream_write':
+        case 'fofoca_stream_close':
+        case 'fofoca_stream_open':
+        case 'fofoca_stream_read':
+        case 'fofoca_reader_close':
           throw new Error(`${name} is not part of the engine's vocabulary`)
         default:
           name satisfies never
@@ -159,7 +166,7 @@ describe('createEngine', () => {
       nick: 'ana',
       rosterJson: '{"count":1,"peers":[]}',
       stateJson: '{}',
-      maxChunk: 64,
+      maxMsg: 1408,
       version: '0.0.0-test',
     })
   })
@@ -168,23 +175,28 @@ describe('createEngine', () => {
     const { lib } = fakeLib({ openFails: true, lastError: 'no such mesh' })
     const { port, posted } = fakePort()
     createEngine(lib, port, () => 0).handle(OPEN)
-    expect(posted[0]).toEqual({ t: 'err', id: 1, message: 'fofoca_open: no such mesh' })
+    expect(posted[0]).toEqual({ t: 'err', id: 1, message: 'fofoca_mesh_open: no such mesh' })
   })
 
-  test('a received frame crosses with its payload transferred', () => {
-    const payload = new TextEncoder().encode('hi')
-    const { lib } = fakeLib({ recv: [{ nick: 'bo', directed: true, eof: false, payload }] })
-    const { port, posted, transfers } = fakePort()
+  test('a received message crosses with its author, kind and text', () => {
+    const { lib } = fakeLib({ recv: [{ nick: 'bo', directed: true, text: 'olá' }] })
+    const { port, posted } = fakePort()
     const engine = createEngine(lib, port, () => 0)
     engine.handle(OPEN)
     expect(engine.pumpOnce()).toBe('idle')
-    const frame = posted[1] as Extract<FromWorker, { t: 'frame' }>
-    expect(frame.t).toBe('frame')
-    expect(frame.from).toBe('bo')
-    expect(frame.directed).toBe(true)
-    expect(frame.eof).toBe(false)
-    expect(Array.from(new Uint8Array(frame.bytes))).toEqual(Array.from(payload))
-    expect(transfers[1]).toEqual([frame.bytes])
+    expect(posted[1]).toEqual({ t: 'msg', from: 'bo', directed: true, text: 'olá' })
+  })
+
+  test('a message too big for the buffer is taken on the next pump, whole', () => {
+    const text = 'x'.repeat(5000)
+    const { lib } = fakeLib({ recv: [{ nick: 'bo', directed: false, text }] })
+    const { port, posted } = fakePort()
+    const engine = createEngine(lib, port, () => 0)
+    engine.handle(OPEN)
+    engine.pumpOnce()
+    expect(posted).toHaveLength(1)
+    engine.pumpOnce()
+    expect(posted[1]).toEqual({ t: 'msg', from: 'bo', directed: false, text })
   })
 
   test('a recv failure closes the mesh and the handle', () => {
@@ -193,24 +205,21 @@ describe('createEngine', () => {
     const engine = createEngine(lib, port, () => 0)
     engine.handle(OPEN)
     expect(engine.pumpOnce()).toBe('closed')
-    expect(posted[1]).toEqual({ t: 'closed', reason: 'fofoca_recv: engine gone' })
+    expect(posted[1]).toEqual({ t: 'closed', reason: 'fofoca_msg_recv: engine gone' })
     expect(state.closes).toBe(1)
     // Terminal for commands too.
-    engine.handle({ t: 'sendEof', id: 9, to: null })
+    engine.handle({ t: 'send', id: 9, to: null, text: 'late' })
     expect(posted[2]).toEqual({ t: 'err', id: 9, message: 'the mesh is closed' })
   })
 
-  test('send forwards bytes and replies; a failure carries the error', () => {
+  test('send forwards the text and replies; a failure carries the error', () => {
     const { lib, state } = fakeLib({ sendResult: 0 })
     const { port, posted } = fakePort()
     const engine = createEngine(lib, port, () => 0)
     engine.handle(OPEN)
-    const bytes = new TextEncoder().encode('hello')
-    engine.handle({ t: 'send', id: 2, to: 'bo', bytes: bytes.slice().buffer as ArrayBuffer })
+    engine.handle({ t: 'send', id: 2, to: 'bo', text: 'hello' })
     expect(posted[1]).toEqual({ t: 'ok', id: 2, value: null })
-    expect(state.sends).toHaveLength(1)
-    expect(state.sends[0]?.to).toBe('bo')
-    expect(Array.from(state.sends[0]?.bytes ?? [])).toEqual(Array.from(bytes))
+    expect(state.sends).toEqual([{ to: 'bo', text: 'hello' }])
   })
 
   test('stateMerge replies with the resulting document', () => {

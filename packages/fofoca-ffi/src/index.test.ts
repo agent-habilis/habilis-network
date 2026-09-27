@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { BackendFrame, BackendSink } from 'fofoca-api'
+import type { BackendMsg, BackendSink } from 'fofoca-api'
 import { createWire, ffiOpener, joinWire } from './index.ts'
 import type { Command, FromWorker, OpenReply } from './protocol.ts'
 import type { WorkerHost } from './worker-host.ts'
@@ -10,7 +10,7 @@ const OPEN_REPLY: OpenReply = {
   nick: 'ana',
   rosterJson: '{"count":1,"peers":[]}',
   stateJson: '{}',
-  maxChunk: 64,
+  maxMsg: 1408,
   version: '0.0.0-test',
 }
 
@@ -45,20 +45,20 @@ const openOnly = (command: Command, emit: (message: FromWorker) => void) => {
 }
 
 function recordingSink() {
-  const frames: BackendFrame[] = []
+  const msgs: BackendMsg[] = []
   const rosters: string[] = []
   const states: string[] = []
   const failures: string[] = []
   const closes: string[] = []
   const sink: BackendSink = {
-    frame: (frame) => frames.push(frame),
+    msg: (msg) => msgs.push(msg),
     roster: (json) => rosters.push(json),
     state: (json) => states.push(json),
     presence: () => {},
     failed: (message) => failures.push(message),
     closed: (reason) => closes.push(reason),
   }
-  return { sink, frames, rosters, states, failures, closes }
+  return { sink, msgs, rosters, states, failures, closes }
 }
 
 describe('ffiOpener', () => {
@@ -72,7 +72,7 @@ describe('ffiOpener', () => {
     expect(posted[0]).toMatchObject({ t: 'open', lib: '/fake/libfofoca_ffi.dylib' })
     expect(opened.backend.id).toBe('mesh-id')
     expect(opened.backend.nick).toBe('ana')
-    expect(opened.backend.maxChunk).toBe(64)
+    expect(opened.backend.maxMsg).toBe(1408)
     expect(opened.rosterJson).toBe(OPEN_REPLY.rosterJson)
     expect(opened.stateJson).toBe(OPEN_REPLY.stateJson)
     expect(opened.pushesPresence).toBe(false)
@@ -89,26 +89,23 @@ describe('ffiOpener', () => {
     expect(terminatedCount()).toBe(1)
   })
 
-  test('pushed frames, rosters and states reach the sink', async () => {
+  test('pushed messages, rosters and states reach the sink', async () => {
     const { host, emit } = fakeHost(openOnly)
     const recorder = recordingSink()
     await ffiOpener(joinWire({ topic: 'tea' }), { spawn: async () => host, lib: '/fake' })(
       recorder.sink,
     )
-    const payload = new TextEncoder().encode('hi')
-    emit({ t: 'frame', from: 'bo', directed: false, eof: false, bytes: payload.slice().buffer as ArrayBuffer })
+    emit({ t: 'msg', from: 'bo', directed: false, text: 'hi' })
     emit({ t: 'roster', json: '{"count":2,"peers":[]}' })
     emit({ t: 'state', json: '{"a":1}' })
     emit({ t: 'failed', message: 'poll hiccup' })
-    expect(recorder.frames).toHaveLength(1)
-    expect(recorder.frames[0]?.from).toBe('bo')
-    expect(Array.from(recorder.frames[0]?.bytes ?? [])).toEqual(Array.from(payload))
+    expect(recorder.msgs).toEqual([{ from: 'bo', directed: false, text: 'hi' }])
     expect(recorder.rosters).toEqual(['{"count":2,"peers":[]}'])
     expect(recorder.states).toEqual(['{"a":1}'])
     expect(recorder.failures).toEqual(['poll hiccup'])
   })
 
-  test('send copies the payload before transferring it', async () => {
+  test('send posts the text and the addressee', async () => {
     const { host, posted } = fakeHost((command, emit) => {
       if (command.t === 'open' || command.t === 'send') {
         emit({ t: 'ok', id: command.id, value: command.t === 'open' ? OPEN_REPLY : null })
@@ -119,42 +116,9 @@ describe('ffiOpener', () => {
       spawn: async () => host,
       lib: '/fake',
     })(sink)
-    const bytes = new TextEncoder().encode('hello')
-    await opened.backend.send('bo', bytes)
-    const sent = posted[1] as Extract<Command, { t: 'send' }>
-    expect(sent.to).toBe('bo')
-    expect(sent.bytes).not.toBe(bytes.buffer)
-    expect(Array.from(new Uint8Array(sent.bytes))).toEqual(Array.from(bytes))
-    // The caller's view is untouched.
-    expect(bytes.byteLength).toBe(5)
+    await opened.backend.send('bo', 'hello')
+    expect(posted[1]).toMatchObject({ t: 'send', to: 'bo', text: 'hello' })
   })
-
-  test('send posts only the bytes of a Buffer view, not its backing pool', async () => {
-    const { host, posted } = fakeHost((command, emit) => {
-      if (command.t === 'open' || command.t === 'send') {
-        emit({ t: 'ok', id: command.id, value: command.t === 'open' ? OPEN_REPLY : null })
-      }
-    })
-    const { sink } = recordingSink()
-    const opened = await ffiOpener(joinWire({ topic: 'tea' }), {
-      spawn: async () => host,
-      lib: '/fake',
-    })(sink)
-    // Node and Bun hand out small Buffers as views over a shared pool, and
-    // `Buffer.prototype.slice` is `subarray`: a view, not a copy. Transferring
-    // `.buffer` of that view would post the whole pool and detach it under
-    // every other Buffer that lives there.
-    const pool = new Uint8Array(16)
-    pool.set([0x68, 0x69], 3)
-    const bytes = Buffer.from(pool.buffer, 3, 2)
-    await opened.backend.send('bo', bytes)
-    const sent = posted[1] as Extract<Command, { t: 'send' }>
-    expect(sent.bytes.byteLength).toBe(2)
-    expect(Array.from(new Uint8Array(sent.bytes))).toEqual([0x68, 0x69])
-    expect(sent.bytes).not.toBe(pool.buffer)
-    expect(pool.buffer.byteLength).toBe(16)
-  })
-
   test('close awaits the worker reply and terminates it', async () => {
     const { host, terminatedCount } = fakeHost((command, emit) => {
       if (command.t === 'open') {
@@ -189,7 +153,7 @@ describe('ffiOpener', () => {
       spawn: async () => host,
       lib: '/fake',
     })(recorder.sink)
-    const hanging = opened.backend.send(null, new Uint8Array([1]))
+    const hanging = opened.backend.send(null, 'hi')
     emitOutside({ t: 'closed', reason: 'engine gone' })
     await expect(hanging).rejects.toThrow('the mesh closed: engine gone')
     expect(recorder.closes).toEqual(['engine gone'])

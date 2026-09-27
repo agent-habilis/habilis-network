@@ -75,7 +75,7 @@ jobs:
       # that is a substantial amount of code no other job compiles:
       # `fofoca-chunks`'s IndexedDB backend, the whole `web` backend of the
       # WebRTC transport, the portable half of the engine, `fofoca-netplay`'s
-      # simulation, `fofoca-pipe`'s wire contract, and `fofoca-wasm`, the
+      # simulation, `fofoca-stream`'s byte streams, and `fofoca-wasm`, the
       # browser peer, which has no other target at all. Without these steps
       # that code rots silently, and the `#[expect(...)]` attributes inside it
       # are never lint-checked either.
@@ -109,12 +109,9 @@ jobs:
           # between a browser and a terminal only works if both run a
           # bit-identical simulation.
           cargo check --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features
-          # fofoca-pipe is the wire contract a browser tab and a terminal
-          # share. If it stops compiling here the browser package cannot be
-          # built at all, and that package is its own cargo workspace — so
-          # this is the only place the breakage is caught from inside the
-          # workspace.
-          cargo check --target wasm32-unknown-unknown -p fofoca-pipe
+          # fofoca-stream runs unchanged in a tab: both the producer's accept
+          # side and the consumer's dial.
+          cargo check --target wasm32-unknown-unknown -p fofoca-stream
           # The browser peer itself (packages/fofoca-wasm's Rust half).
           cargo check --target wasm32-unknown-unknown -p fofoca-wasm
 
@@ -124,9 +121,15 @@ jobs:
           cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-pipe -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-stream -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-wasm -- -D warnings
 
+      # Runs fofoca-stream's integration tests too, relay and WebRTC-only ones
+      # included, on purpose: they are the only CI proof of the stream's
+      # direct-path gate, and each stands up a local relay rather than the
+      # engine's multi-peer rounds that `Check (relay-policy tests compile)`
+      # keeps out of CI. It also runs the binaries-only end to end
+      # (fofoca-stream-cli/tests/binary.rs); the browser one is e2e.yml.
       - name: Test
         run: cargo test --workspace
 
@@ -149,11 +152,10 @@ jobs:
       # and the webrtc graft tests — never even compiled by CI, free to rot
       # behind a green tick.
       #
-      # `--no-run`, not a test run: two of those tests are red on the pinned
-      # iroh revs until the fork fixes land (issue #2) and carry `#[ignore]`,
-      # and the rest stand up real relays and JSEP rounds that are too
-      # timing-sensitive for a shared runner. Compiling them is what catches
-      # the rot; the mesh e2e suite is what proves the behaviour.
+      # `--no-run`, not a test run: they stand up real relays and JSEP rounds
+      # between several peers, too timing-sensitive for a shared runner.
+      # Compiling them is what catches the rot; the mesh e2e suite is what
+      # proves the behaviour.
       - name: Check (relay-policy tests compile)
         run: cargo test -p fofoca --features iroh-test-utils --all-targets --no-run
 
@@ -184,16 +186,16 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      # Five projects: fofoca-api, fofoca-ffi, chat/bun-ffi, fofoca-wasm,
-      # chat/web. tsconfig.base.json has no `references`, so each is a
-      # standalone `tsc -p` and this is the complete set.
+      # Six projects: fofoca-api, fofoca-ffi, chat/bun-ffi, fofoca-wasm,
+      # fofoca-stream-web, chat/web. tsconfig.base.json has no `references`,
+      # so each is a standalone `tsc -p` and this is the complete set.
       - name: Typecheck
         run: bun run typecheck
 
       # Includes the `fofoca_opts` layout test, the other side of the
       # `size_of::<FofocaOpts>()` assert in crates/fofoca-ffi/src/ffi.rs.
       - name: Test
-        run: bun test packages
+        run: bun run test
 
   # The C ABI is the whole point of fofoca-ffi and its only non-Rust consumer
   # links the staticlib. Build it the way that consumer does.
@@ -204,27 +206,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # `llvm-nm` that matches rustc: with thin LTO the C ABI lives in
+          # LLVM bitcode, which an older system `nm` cannot read.
+          components: llvm-tools
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build staticlib
-        run: cargo build --release -p fofoca-ffi
-
-      - name: Confirm the archive exists and exports the ABI
-        run: |
-          ls -lh target/release/libfofoca_ffi.a
-          # Every function declared in include/fofoca.h must be present in the
-          # archive, or a downstream link fails long after this job went green.
-          nm -gU target/release/libfofoca_ffi.a 2>/dev/null \
-            | grep -oE '_fofoca_[a-z_]+$' | sort -u > /tmp/exported.txt
-          grep -oE '\bfofoca_[a-z_]+(?=\()' -P crates/fofoca-ffi/include/fofoca.h \
-            | sort -u | sed 's/^/_/' > /tmp/declared.txt
-          echo "--- declared in fofoca.h ---"; cat /tmp/declared.txt
-          missing=$(comm -23 /tmp/declared.txt /tmp/exported.txt)
-          if [ -n "$missing" ]; then
-            echo "::error::declared in fofoca.h but not exported by the staticlib:"
-            echo "$missing"
-            exit 1
-          fi
+      # Builds the staticlib the way that consumer links it, then checks both
+      # directions against include/fofoca.h: every declaration exported, and
+      # every exported `fofoca_*` symbol declared. The same check runs locally.
+      - name: Build the staticlib and check it against the header
+        run: cargo task ffi
 
   # `crates/fofoca-netplay/examples/light-cycles/native/` is its own cargo
   # workspace (a separate `rust-toolchain.toml` pins it to nightly —

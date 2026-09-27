@@ -17,7 +17,7 @@ use super::LOG_TARGET;
 /// starts as soon as the connection has both sides' candidates, and a first
 /// round lands within seconds; a punch that has not landed by now is
 /// retried later rather than waited on.
-pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(15);
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Close code an inbound gossip connection gets when the relay is lookup
 /// only and no direct path was selected within the deadline. Distinct from
@@ -51,7 +51,7 @@ pub(crate) const RELAY_REFUSED: &str =
 /// Wait until `conn`'s selected path is not the relay, or `deadline` passes.
 /// Every path event is a reason to re-read the path list: the event's own
 /// address may be stale by the time it is handled.
-pub(crate) async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
+pub async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
     let mut events = conn.path_events();
     let proven = async {
         loop {
@@ -73,7 +73,7 @@ pub(crate) async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
 /// iroh to select a non-relay path, and on timeout close `conn` with
 /// `close_code` so the other end reads the cause. Returns whether payload
 /// may flow on `conn`.
-pub(crate) async fn refuse_unless_direct(
+pub async fn refuse_unless_direct(
     conn: &Connection,
     relay_transport: bool,
     deadline: Duration,

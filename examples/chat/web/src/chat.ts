@@ -132,15 +132,7 @@ async function main(): Promise<void> {
 
   void (async () => {
     for await (const message of mesh.messages()) {
-      if (message.eof) {
-        continue
-      }
-      showMessage(
-        message.from,
-        message.text ?? `[${message.bytes.length} bytes]`,
-        message.directed,
-        false,
-      )
+      showMessage(message.from, message.text, message.directed, false)
     }
   })()
 

@@ -10,11 +10,10 @@
 
 import type { MeshEvent } from './types.ts'
 
-export interface BackendFrame {
+export interface BackendMsg {
   readonly from: string
-  readonly bytes: Uint8Array
+  readonly text: string
   readonly directed: boolean
-  readonly eof: boolean
 }
 
 /**
@@ -25,7 +24,7 @@ export interface BackendFrame {
  * has anywhere to put an exception.
  */
 export interface BackendSink {
-  frame(frame: BackendFrame): void
+  msg(msg: BackendMsg): void
   /**
    * A `RosterSnapshot` JSON document, verbatim. Push freely and often — an
    * identical document is discarded on a string compare before any parse.
@@ -55,11 +54,10 @@ export interface MeshBackend {
   readonly name: string
   /** The nickname the *engine* assigned, which is not always the one requested. */
   readonly nick: string
-  /** The largest payload one frame carries. Bodies above it are split. */
-  readonly maxChunk: number
+  /** The longest message in bytes that always fits one frame. */
+  readonly maxMsg: number
 
-  send(to: string | null, bytes: Uint8Array): Promise<void>
-  sendEof(to: string | null): Promise<void>
+  send(to: string | null, text: string): Promise<void>
   /**
    * Apply an RFC 7386 merge document, and resolve with the *resulting* state
    * JSON.
@@ -102,7 +100,7 @@ export interface BackendOpen {
 /**
  * Opening a mesh: hand the backend a sink and get the handle back.
  *
- * `sink` is passed *in* rather than returned alongside, so a frame arriving
+ * `sink` is passed *in* rather than returned alongside, so a message arriving
  * during open has somewhere to land before the promise resolves.
  */
 export type Opener = (sink: BackendSink) => Promise<BackendOpen>

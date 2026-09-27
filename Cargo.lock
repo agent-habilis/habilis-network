@@ -628,6 +628,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chat"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "fofoca",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1402,7 +1413,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1535,8 +1546,10 @@ name = "fofoca-ffi"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "fofoca",
- "fofoca-pipe",
+ "fofoca-stream",
+ "n0-future",
  "serde_json",
  "tokio",
 ]
@@ -1624,21 +1637,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fofoca-pipe"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "base64",
- "fofoca",
- "n0-future",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "fofoca-protocol"
 version = "0.6.0"
 dependencies = [
@@ -1665,6 +1663,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-stream"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "fofoca",
+ "n0-future",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fofoca-stream-cli"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fofoca",
+ "fofoca-stream",
+ "libc",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fofoca-util"
 version = "0.6.0"
 dependencies = [
@@ -1682,7 +1709,8 @@ dependencies = [
  "anyhow",
  "console_error_panic_hook",
  "fofoca",
- "fofoca-pipe",
+ "fofoca-stream",
+ "n0-future",
  "serde_json",
  "tokio",
  "tracing",
@@ -2440,7 +2468,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=aef12f2ad0c07dac57c5fa7f196d53921d61d485#aef12f2ad0c07dac57c5fa7f196d53921d61d485"
+source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
 dependencies = [
  "axum",
  "backon",
@@ -2491,7 +2519,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=aef12f2ad0c07dac57c5fa7f196d53921d61d485#aef12f2ad0c07dac57c5fa7f196d53921d61d485"
+source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
 dependencies = [
  "curve25519-dalek 5.0.0-rc.0",
  "data-encoding",
@@ -2509,7 +2537,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=aef12f2ad0c07dac57c5fa7f196d53921d61d485#aef12f2ad0c07dac57c5fa7f196d53921d61d485"
+source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2532,7 +2560,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=640ec2981960ecef51238e7d25a3dd7e9accf634#640ec2981960ecef51238e7d25a3dd7e9accf634"
+source = "git+https://github.com/fofoca-network/iroh-gossip?rev=e66061b298a350141938046e3a84b29628ebb899#e66061b298a350141938046e3a84b29628ebb899"
 dependencies = [
  "blake3",
  "bytes",
@@ -2558,7 +2586,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=43f39cc7bb3d704c767bd165319ca0ca2e36da91#43f39cc7bb3d704c767bd165319ca0ca2e36da91"
+source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=556f5027c6a0abf228267305e5dd89d0c2a6f23d#556f5027c6a0abf228267305e5dd89d0c2a6f23d"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2575,7 +2603,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=43f39cc7bb3d704c767bd165319ca0ca2e36da91#43f39cc7bb3d704c767bd165319ca0ca2e36da91"
+source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=556f5027c6a0abf228267305e5dd89d0c2a6f23d#556f5027c6a0abf228267305e5dd89d0c2a6f23d"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -2629,7 +2657,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=aef12f2ad0c07dac57c5fa7f196d53921d61d485#aef12f2ad0c07dac57c5fa7f196d53921d61d485"
+source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
 dependencies = [
  "blake3",
  "bytes",
@@ -3292,7 +3320,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4088,7 +4116,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4180,7 +4208,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4311,7 +4339,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4800,7 +4828,6 @@ dependencies = [
  "anstyle",
  "clap",
  "fofoca",
- "fofoca-pipe",
  "serde",
  "serde_json",
  "tokio",
@@ -4819,7 +4846,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4829,7 +4856,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5616,7 +5643,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

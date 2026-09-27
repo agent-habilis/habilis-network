@@ -24,6 +24,8 @@ mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
 mod server;
+#[cfg(feature = "mesh")]
+mod stream;
 mod webdriver;
 
 use server::Harness;
@@ -58,6 +60,9 @@ const FAILED_SCRIPT: &str =
 #[derive(ClapArgs)]
 pub(crate) struct Args {
     /// Only browsers whose name contains this (e.g. `cft`, `chrome`, `safari`).
+    /// The suites that drive one tab (`stream`, `chat`, `mesh`) take the first
+    /// match, so name one browser there: `cft`, `chrome-ci`, `chrome-151`,
+    /// `safari`, `safari-tp`. Without it they open `safari-tp`.
     #[arg(long)]
     only: Option<String>,
     /// Only this build profile (`release`, `release-slow`). Each one is a
@@ -85,6 +90,14 @@ pub(crate) struct Args {
 }
 
 impl Args {
+    /// The one browser a suite that drives a single tab opens: `--only`, or
+    /// Safari Technology Preview, the next `WebKit`, where a browser-only
+    /// regression shows first.
+    #[cfg(feature = "mesh")]
+    fn page_browser(&self) -> &str {
+        self.only.as_deref().unwrap_or("safari-tp")
+    }
+
     fn profiles(&self) -> Vec<Profile> {
         if self.quick {
             return vec![Profile::Release];
@@ -120,6 +133,10 @@ enum Suite {
     /// The chat example end to end: the native terminal chat in robot mode
     /// against the browser chat page, over a local relay.
     Chat,
+    /// A stream end to end: the `fofoca-stream` CLI against the stream web
+    /// page, over a local relay: bytes in on one side, the same bytes out on
+    /// the other, each side as producer once.
+    Stream,
 }
 
 /// Which wasm build a cell runs.
@@ -199,10 +216,27 @@ fn browsers() -> Vec<Browser> {
             // ~110 s and has never yet answered differently.
             pressures: &[0],
         },
+        // Any Chrome, driven through chromedriver: what a CI runner has, where
+        // there is no `agent-browse` and so no Chrome for Testing over CDP.
+        // `CHROME_BIN` and `CHROMEDRIVER` name the two binaries.
+        Browser {
+            name: "chrome-ci",
+            backend: Backend::WebDriver,
+            binary: std::env::var("CHROME_BIN").unwrap_or_default(),
+            pressures: &[0],
+        },
         Browser {
             name: "safari",
             backend: Backend::WebDriver,
             binary: "/Applications/Safari.app/Contents/MacOS/Safari".to_owned(),
+            pressures: &[0],
+        },
+        // The next WebKit, driven by its own safaridriver, which needs its own
+        // `sudo … safaridriver --enable` once.
+        Browser {
+            name: "safari-tp",
+            backend: Backend::WebDriver,
+            binary: "/Applications/Safari Technology Preview.app/Contents/MacOS/Safari Technology Preview".to_owned(),
             pressures: &[0],
         },
     ]
@@ -258,10 +292,10 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
     if !args.list {
         build::check_tooling()?;
     }
-    if args.suite == Suite::Mesh {
-        mesh::run(args)
-    } else {
-        chat::run(args)
+    match args.suite {
+        Suite::Mesh => mesh::run(args),
+        Suite::Stream => stream::run(args),
+        Suite::Chat | Suite::Matrix | Suite::Loopback => chat::run(args),
     }
 }
 
@@ -294,7 +328,7 @@ fn run_engine_suite(_: &Args) -> TaskOutcome {
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
-    if matches!(args.suite, Suite::Mesh | Suite::Chat) {
+    if matches!(args.suite, Suite::Mesh | Suite::Chat | Suite::Stream) {
         return run_engine_suite(args);
     }
 

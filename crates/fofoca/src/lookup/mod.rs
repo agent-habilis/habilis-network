@@ -208,6 +208,39 @@ impl TransportOpts {
     }
 }
 
+/// Per-node path switches a consumer hands over as plain data (a C struct, a
+/// browser's options object). Not the mesh's transport policy: that says what
+/// payload *may* ride and is in the id; this says what *this node* has. Only the
+/// two a consumer plausibly turns off are exposed: the relay stays (it is the
+/// rendezvous) and multihop stays an engine concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct PathFlags {
+    /// Direct UDP and hole-punched paths.
+    pub ip: bool,
+    /// QUIC over a `WebRTC` data channel.
+    pub webrtc: bool,
+}
+
+impl Default for PathFlags {
+    fn default() -> Self {
+        Self {
+            ip: true,
+            webrtc: true,
+        }
+    }
+}
+
+impl From<PathFlags> for TransportOpts {
+    fn from(paths: PathFlags) -> Self {
+        Self {
+            ip: paths.ip,
+            webrtc: paths.webrtc,
+            ..Self::default()
+        }
+    }
+}
+
 /// # Errors
 /// Returns an error if the inputs are invalid or the operation fails.
 #[cfg_attr(
@@ -452,7 +485,7 @@ pub fn check_injected_identity(
 ///
 /// # Errors
 /// Returns an error if the endpoint fails to bind.
-pub(crate) async fn build_peer_webrtc(
+pub async fn build_peer_webrtc(
     lookups: &LookupOpts,
     opts: TransportOpts,
 ) -> Result<(Endpoint, fofoca_iroh_webrtc_transport::WebRtcHandle)> {

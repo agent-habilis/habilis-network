@@ -20,8 +20,7 @@ function roster(...peers: string[]): string {
 interface Fake {
   readonly mesh: Mesh
   readonly sink: BackendSink
-  readonly sent: { to: string | null; bytes: Uint8Array }[]
-  readonly eofs: (string | null)[]
+  readonly sent: { to: string | null; text: string }[]
   closes: number
   /** What the next `stateMerge` resolves with. */
   nextState: string
@@ -32,10 +31,8 @@ async function fake(
 ): Promise<Fake> {
   let captured: BackendSink | undefined
   const sent: Fake['sent'] = []
-  const eofs: Fake['eofs'] = []
   const handle = {
     sent,
-    eofs,
     closes: 0,
     nextState: options.state ?? '{}',
   } as Fake & { mesh: Mesh; sink: BackendSink }
@@ -47,13 +44,9 @@ async function fake(
         id: 'mesh-id',
         name: 'a-name',
         nick: 'assigned',
-        maxChunk: 2112,
-        send: (to, bytes) => {
-          sent.push({ to, bytes })
-          return Promise.resolve()
-        },
-        sendEof: (to) => {
-          eofs.push(to)
+        maxMsg: 1408,
+        send: (to, text) => {
+          sent.push({ to, text })
           return Promise.resolve()
         },
         stateMerge: () => Promise.resolve(handle.nextState),
@@ -89,7 +82,7 @@ describe('identity and the opening snapshot', () => {
     expect(mesh.nick).toBe('assigned')
     expect(mesh.id).toBe('mesh-id')
     expect(mesh.name).toBe('a-name')
-    expect(mesh.maxChunk).toBe(2112)
+    expect(mesh.maxMsg).toBe(1408)
   })
 
   test('peers and state are populated before the first push', async () => {
@@ -108,54 +101,27 @@ describe('identity and the opening snapshot', () => {
 })
 
 describe('messages', () => {
-  test('bytes that decode as UTF-8 carry text', async () => {
+  test('a message carries its author, its text and whether it was directed', async () => {
     const { mesh, sink } = await fake()
-    const messages = drain(mesh.messages(), 1)
-    sink.frame({
-      from: 'ana',
-      bytes: new TextEncoder().encode('hello'),
-      directed: false,
-      eof: false,
-    })
+    const messages = drain(mesh.messages(), 2)
+    sink.msg({ from: 'ana', text: 'hello', directed: false })
+    sink.msg({ from: 'bo', text: 'just you', directed: true })
 
     expect(await messages).toEqual([
-      {
-        from: 'ana',
-        bytes: new TextEncoder().encode('hello'),
-        text: 'hello',
-        directed: false,
-        eof: false,
-      },
+      { from: 'ana', text: 'hello', directed: false },
+      { from: 'bo', text: 'just you', directed: true },
     ] satisfies Message[])
   })
 
-  test('bytes that do not decode omit text rather than mangling it', async () => {
-    const { mesh, sink } = await fake()
-    const messages = drain(mesh.messages(), 1)
-    sink.frame({ from: 'ana', bytes: new Uint8Array([0xff, 0xfe]), directed: true, eof: false })
-
-    const [message] = await messages
-    expect(message).not.toHaveProperty('text')
-    expect(message?.directed).toBe(true)
-  })
-
-  test('a string body is encoded; bytes pass through', async () => {
+  test('send hands the text and the addressee to the backend', async () => {
     const { mesh, sent } = await fake()
     await mesh.send('hi')
-    await mesh.send(new Uint8Array([1, 2]), { to: 'ana' })
+    await mesh.send('psst', { to: 'ana' })
 
     expect(sent).toEqual([
-      { to: null, bytes: new TextEncoder().encode('hi') },
-      { to: 'ana', bytes: new Uint8Array([1, 2]) },
+      { to: null, text: 'hi' },
+      { to: 'ana', text: 'psst' },
     ])
-  })
-
-  test('sendEof reaches the backend', async () => {
-    const { mesh, eofs } = await fake()
-    await mesh.sendEof()
-    await mesh.sendEof({ to: 'ana' })
-
-    expect(eofs).toEqual([null, 'ana'])
   })
 })
 
@@ -286,11 +252,11 @@ describe('lifecycle', () => {
   test('a backend-reported failure is an error, and the mesh stays open', async () => {
     const { mesh, sink } = await fake()
     const events = drain(mesh.events(), 2)
-    sink.failed('fofoca_recv failed: out of memory')
+    sink.failed('fofoca_msg_recv failed: out of memory')
 
     expect(await events).toEqual([
       { kind: 'ready' },
-      { kind: 'error', message: 'fofoca_recv failed: out of memory' },
+      { kind: 'error', message: 'fofoca_msg_recv failed: out of memory' },
     ])
     await mesh.send('still works')
   })

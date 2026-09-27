@@ -1,20 +1,22 @@
-//! A terminal chat over the byte pipe — the chat example's native half
+//! A terminal chat on a fofoca mesh — the chat example's native half
 //! (`examples/chat/` holds the browser half and the README).
 //!
 //! ```text
-//! cargo run -p fofoca-pipe --example chat -- --topic room
-//! cargo run -p fofoca-pipe --example chat -- --topic room --nick ana --relay-url http://127.0.0.1:3340/
-//! cargo run -p fofoca-pipe --example chat -- --topic room --transport p2p,relay
+//! cargo run -p chat -- --topic room
+//! cargo run -p chat -- --topic room --nick ana --relay-url http://127.0.0.1:3340/
+//! cargo run -p chat -- --topic room --transport p2p,relay
 //! ```
 //!
 //! Type to broadcast; `/msg <nick> <text>` sends directed; `/peers` prints
 //! the roster; `/quit` leaves. `--robot` swaps the prose for one JSON object
-//! per line — the engine's own events pass through verbatim, frames become
-//! `{"kind":"frame",...}` — which is what `cargo task e2e --suite chat`
+//! per line — the engine's own events pass through verbatim, messages become
+//! `{"kind":"msg",...}` — which is what `cargo task e2e --suite chat`
 //! reads. Tracing goes to stderr either way, so stdout *is* the chat.
 
 use anyhow::{Context as _, Result, bail};
-use fofoca_pipe::{Inbound, Opts, Request, data_body, data_tag, depart, join, json_sink, parse_to};
+use fofoca::membership::{
+    Inbound, Membership, Opts, Request, depart, join, json_sink, msg_body, parse_to,
+};
 use tokio::sync::oneshot;
 
 struct Args {
@@ -64,9 +66,9 @@ async fn main() -> Result<()> {
 
     let args = parse_args()?;
     let (sink, mut events) = json_sink();
-    let mut session = join(&args.opts, sink).await?;
+    let mut membership = join(&args.opts, sink).await?;
 
-    // Stdin on its own thread: the pipe owns no stdio, and tokio's own stdin
+    // Stdin on its own thread: the engine owns no stdio, and tokio's own stdin
     // wants the `io-std` feature this crate deliberately leaves off.
     let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
     std::thread::spawn(move || {
@@ -83,13 +85,13 @@ async fn main() -> Result<()> {
         tokio::select! {
             maybe = lines.recv() => {
                 let Some(line) = maybe else { break };
-                if !handle_line(&session, line.trim(), args.robot).await? {
+                if !handle_line(&membership, line.trim(), args.robot).await? {
                     break;
                 }
             }
-            maybe = session.inbound.recv() => {
-                let Some(frame) = maybe else { break };
-                show_frame(&frame, args.robot);
+            maybe = membership.inbound.recv() => {
+                let Some(msg) = maybe else { break };
+                show_msg(&msg, args.robot);
             }
             maybe = events.recv() => {
                 let Some(event) = maybe else { break };
@@ -97,11 +99,11 @@ async fn main() -> Result<()> {
             }
         }
     }
-    depart(session.node).await
+    depart(membership.node).await
 }
 
 /// One line of input. `false` ends the chat.
-async fn handle_line(session: &fofoca_pipe::Session, line: &str, robot: bool) -> Result<bool> {
+async fn handle_line(membership: &Membership, line: &str, robot: bool) -> Result<bool> {
     if line.is_empty() {
         return Ok(true);
     }
@@ -109,7 +111,7 @@ async fn handle_line(session: &fofoca_pipe::Session, line: &str, robot: bool) ->
         return Ok(false);
     }
     if line == "/peers" {
-        let roster = request(session, |reply| Request::Peers { reply }).await?;
+        let roster = request(membership, |reply| Request::Peers { reply }).await?;
         println!("{roster}");
         return Ok(true);
     }
@@ -123,14 +125,14 @@ async fn handle_line(session: &fofoca_pipe::Session, line: &str, robot: bool) ->
         (None, line)
     };
     let to = parse_to(to)?;
-    let body = data_body(text.as_bytes())?;
-    let sent = request(session, |reply| Request::Send {
-        tag: data_tag(),
-        to,
-        body,
-        reply,
-    })
-    .await?;
+    let body = match msg_body(text) {
+        Ok(body) => body,
+        Err(error) => {
+            report_error(robot, &format!("send failed: {error}"));
+            return Ok(true);
+        }
+    };
+    let sent = request(membership, |reply| Request::Send { to, body, reply }).await?;
     if let Err(refusal) = sent {
         report_error(robot, &format!("send failed: {refusal}"));
     }
@@ -138,38 +140,30 @@ async fn handle_line(session: &fofoca_pipe::Session, line: &str, robot: bool) ->
 }
 
 async fn request<T>(
-    session: &fofoca_pipe::Session,
+    membership: &Membership,
     build: impl FnOnce(oneshot::Sender<T>) -> Request,
 ) -> Result<T> {
-    session
+    membership
         .request(build)
         .await
         .map_err(|error| anyhow::anyhow!(error))
 }
 
-fn show_frame(frame: &Inbound, robot: bool) {
+fn show_msg(msg: &Inbound, robot: bool) {
     if robot {
         println!(
             "{}",
             serde_json::json!({
-                "kind": "frame",
-                "from": frame.nick,
-                "text": String::from_utf8_lossy(&frame.bytes),
-                "directed": frame.directed,
-                "eof": frame.eof,
+                "kind": "msg",
+                "from": msg.nick,
+                "text": msg.text,
+                "directed": msg.directed,
             })
         );
         return;
     }
-    if frame.eof {
-        return;
-    }
-    let mark = if frame.directed { " (direct)" } else { "" };
-    println!(
-        "{}{mark}: {}",
-        frame.nick,
-        String::from_utf8_lossy(&frame.bytes)
-    );
+    let mark = if msg.directed { " (direct)" } else { "" };
+    println!("{}{mark}: {}", msg.nick, msg.text);
 }
 
 /// Engine events arrive as JSON already; the robot passes them through and
@@ -198,7 +192,7 @@ fn report_error(robot: bool, message: &str) {
     if robot {
         println!(
             "{}",
-            serde_json::json!({ "kind": "error", "message": message })
+            serde_json::json!({ "kind": "error", "text": message })
         );
     } else {
         println!("! {message}");

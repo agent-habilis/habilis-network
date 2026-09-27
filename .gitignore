@@ -10,3 +10,6 @@ node_modules/
 # wasm-bindgen output of `cargo task wasm-peer`; the package type-checks
 # without it and the mesh e2e suite rebuilds it.
 packages/fofoca-wasm/wasm/
+
+# The static build of the stream web app (`bun run build` in that package).
+packages/fofoca-stream-web/dist/

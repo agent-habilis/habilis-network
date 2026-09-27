@@ -1,7 +1,7 @@
 //! `cargo task e2e --suite mesh` — the native↔browser matrix.
 //!
 //! One local plain-HTTP relay both sides can reach, one in-process native
-//! peer (`fofoca_pipe`), one real browser on the harness page
+//! peer (`fofoca::membership`), one real browser on the harness page
 //! (`packages/fofoca-wasm/harness`), driven cell by cell:
 //!
 //! - **policy** — the mesh's `relay_transport`, on or off;
@@ -23,6 +23,10 @@ use std::time::Duration;
 
 use crate::TaskOutcome;
 use crate::util::{output, repo_root, wait_for};
+
+use fofoca::membership;
+use fofoca::net::PathFlags;
+use fofoca::protocol::Transport;
 
 use super::{Args, Skip, build, cdp, webdriver};
 
@@ -183,26 +187,26 @@ fn drain_logs() -> String {
 
 // ── the native peer ─────────────────────────────────────────────────────
 
-/// The in-process side of a cell: a live pipe session plus everything a
-/// check reads — inbound frames, surfaced events, the roster on demand.
+/// The in-process side of a cell: a live membership plus everything a check
+/// reads — inbound messages, surfaced events, the roster on demand.
 struct Native {
-    session: fofoca_pipe::Session,
+    membership: membership::Membership,
     events: tokio::sync::mpsc::UnboundedReceiver<String>,
     seen_events: Vec<serde_json::Value>,
-    seen_frames: Vec<fofoca_pipe::Inbound>,
+    seen_msgs: Vec<membership::Inbound>,
 }
 
 impl Native {
-    async fn open(opts: &fofoca_pipe::Opts) -> Result<Self, Skip> {
-        let (sink, events) = fofoca_pipe::json_sink();
-        let session = fofoca_pipe::join(opts, sink)
+    async fn open(opts: &membership::Opts) -> Result<Self, Skip> {
+        let (sink, events) = membership::json_sink();
+        let membership = membership::join(opts, sink)
             .await
             .map_err(|error| Skip(format!("native peer failed to open: {error:#}")))?;
         Ok(Self {
-            session,
+            membership,
             events,
             seen_events: Vec::new(),
-            seen_frames: Vec::new(),
+            seen_msgs: Vec::new(),
         })
     }
 
@@ -212,8 +216,8 @@ impl Native {
                 self.seen_events.push(event);
             }
         }
-        while let Ok(frame) = self.session.inbound.try_recv() {
-            self.seen_frames.push(frame);
+        while let Ok(msg) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(msg);
         }
     }
 
@@ -225,45 +229,40 @@ impl Native {
         })
     }
 
-    fn saw_frame(&mut self, text: &str, directed: bool) -> bool {
+    fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
         self.pump();
-        self.seen_frames
+        self.seen_msgs
             .iter()
-            .any(|frame| frame.directed == directed && frame.bytes == text.as_bytes())
+            .any(|msg| msg.directed == directed && msg.text == text)
     }
 
     async fn request<T>(
         &self,
-        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> fofoca_pipe::Request,
+        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> membership::Request,
     ) -> Result<T, String> {
-        self.session.request(build).await
+        self.membership.request(build).await
     }
 
     async fn roster_json(&self) -> String {
-        self.request(|reply| fofoca_pipe::Request::Peers { reply })
+        self.request(|reply| membership::Request::Peers { reply })
             .await
             .unwrap_or_default()
     }
 
     async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
-        let to = fofoca_pipe::parse_to(to).map_err(|error| error.to_string())?;
-        let body = fofoca_pipe::data_body(text.as_bytes()).map_err(|error| error.to_string())?;
-        self.request(|reply| fofoca_pipe::Request::Send {
-            tag: fofoca_pipe::data_tag(),
-            to,
-            body,
-            reply,
-        })
-        .await?
+        let to = membership::parse_to(to).map_err(|error| error.to_string())?;
+        let body = membership::msg_body(text).map_err(|error| error.to_string())?;
+        self.request(|reply| membership::Request::Send { to, body, reply })
+            .await?
     }
 
     async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
-        self.request(|reply| fofoca_pipe::Request::StateMerge { merge, reply })
+        self.request(|reply| membership::Request::StateMerge { merge, reply })
             .await?
     }
 
     async fn state_json(&self) -> String {
-        self.request(|reply| fofoca_pipe::Request::StateJson { reply })
+        self.request(|reply| membership::Request::StateJson { reply })
             .await
             .unwrap_or_default()
     }
@@ -282,6 +281,24 @@ impl Page {
         match self {
             Self::Cdp(browser) => browser.navigate(url),
             Self::WebDriver(session) => session.navigate(url),
+        }
+    }
+
+    /// [`Page::navigate`], recording the console for `window` where the
+    /// driver can. `WebDriver` has no console stream, so it only navigates.
+    pub(super) fn navigate_watching_console(&self, url: &str, window: Duration) {
+        match self {
+            Self::Cdp(browser) => browser.navigate_watching_console(url, window),
+            Self::WebDriver(session) => session.navigate(url),
+        }
+    }
+
+    /// What [`Page::navigate_watching_console`] recorded; blocks until its
+    /// window is over.
+    pub(super) fn console(&self) -> String {
+        match self {
+            Self::Cdp(browser) => browser.console(),
+            Self::WebDriver(_) => String::new(),
         }
     }
 
@@ -327,7 +344,8 @@ async fn native_send_with_retry(
 
 async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), CellFailure> {
     let fail = |message: String| CellFailure(message);
-    let frames_text = || page.evaluate("(document.getElementById('frames')||{}).textContent||''");
+    let messages_text =
+        || page.evaluate("(document.getElementById('messages')||{}).textContent||''");
 
     // ── broadcast both ways ─────────────────────────────────────────
     native_send_with_retry(native, None, "native-broadcast")
@@ -335,14 +353,14 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
         .map_err(|error| fail(format!("native broadcast refused: {error}")))?;
     call_page(page, "harness", "send(null, 'browser-broadcast')").map_err(&fail)?;
     let broadcast_both = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
-        (frames_text().contains("native-broadcast") && native.saw_frame("browser-broadcast", false))
+        (messages_text().contains("native-broadcast") && native.saw_msg("browser-broadcast", false))
             .then_some(())
     });
     if broadcast_both.is_none() {
         return Err(fail(format!(
             "a broadcast did not arrive on both sides (browser got native's: {}, native got browser's: {})",
-            frames_text().contains("native-broadcast"),
-            native.saw_frame("browser-broadcast", false),
+            messages_text().contains("native-broadcast"),
+            native.saw_msg("browser-broadcast", false),
         )));
     }
 
@@ -352,12 +370,12 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
         .map_err(|error| fail(format!("native directed send refused: {error}")))?;
     call_page(page, "harness", "send('native', 'browser-directed')").map_err(&fail)?;
     let directed_both = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
-        (frames_text().contains("native-directed") && native.saw_frame("browser-directed", true))
+        (messages_text().contains("native-directed") && native.saw_msg("browser-directed", true))
             .then_some(())
     });
     if directed_both.is_none() {
         return Err(fail(
-            "a directed frame did not arrive on both sides".to_owned(),
+            "a directed message did not arrive on both sides".to_owned(),
         ));
     }
 
@@ -475,8 +493,8 @@ impl fmt::Display for CellFailure {
     }
 }
 
-fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> fofoca_pipe::Opts {
-    let mut opts = fofoca_pipe::Opts::default();
+fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> membership::Opts {
+    let mut opts = membership::Opts::default();
     match selector {
         NativeSelector::Topic(topic) => opts.topic = Some(topic.to_owned()),
         NativeSelector::Create => {}
@@ -484,19 +502,19 @@ fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> fo
     opts.nick = Some("native".to_owned());
     opts.relay_urls = vec![relay_url.to_owned()];
     opts.transport = match cell.policy {
-        Policy::RelayTransport => vec![fofoca_pipe::Transport::P2p, fofoca_pipe::Transport::Relay],
-        Policy::LookupOnly => vec![fofoca_pipe::Transport::P2p],
+        Policy::RelayTransport => vec![Transport::P2p, Transport::Relay],
+        Policy::LookupOnly => vec![Transport::P2p],
     };
     opts.paths = match cell.native {
-        NativeTransports::Default => fofoca_pipe::PathFlags {
+        NativeTransports::Default => PathFlags {
             ip: true,
             webrtc: true,
         },
-        NativeTransports::WebRtcOnly => fofoca_pipe::PathFlags {
+        NativeTransports::WebRtcOnly => PathFlags {
             ip: false,
             webrtc: true,
         },
-        NativeTransports::RelayOnly => fofoca_pipe::PathFlags {
+        NativeTransports::RelayOnly => PathFlags {
             ip: false,
             webrtc: false,
         },
@@ -567,7 +585,7 @@ async fn run_cell(
             let native = Native::open(&native_opts(cell, relay_url, NativeSelector::Create))
                 .await
                 .map_err(|Skip(reason)| fail(reason))?;
-            let id = native.session.node.mesh_id().to_string();
+            let id = native.membership.node.mesh_id().to_string();
             (
                 native,
                 format!("mesh={urlencoded}", urlencoded = urlencode(&id)),
@@ -733,7 +751,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         &format!("relay {relay_url} · harness {}", harness.url),
     );
 
-    let only = args.only.clone().unwrap_or_else(|| "cft".to_owned());
+    let only = args.page_browser().to_owned();
     // `MESH_CELL=<substring>` narrows the sweep to matching cell labels —
     // for iterating on one failing cell without paying for the rest.
     let cell_filter = std::env::var("MESH_CELL").ok();
@@ -777,13 +795,10 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
                         "(document.getElementById('events')||{}).textContent||''",
                     ),
                     (
-                        "frames",
-                        "(document.getElementById('frames')||{}).textContent||''",
+                        "messages",
+                        "(document.getElementById('messages')||{}).textContent||''",
                     ),
-                    (
-                        "console",
-                        "(document.getElementById('log')||{}).textContent||''",
-                    ),
+                    ("console", "(window.harnessLog||[]).join('\\n')"),
                 ]
                 .map(|(name, expr)| {
                     format!(
@@ -815,6 +830,12 @@ pub(super) fn launch_page(only: &str) -> Result<Page, Skip> {
     for browser in super::browsers() {
         if !browser.name.contains(only) {
             continue;
+        }
+        if browser.binary.is_empty() {
+            return Err(Skip(format!(
+                "{}: set $CHROME_BIN and $CHROMEDRIVER to run it",
+                browser.name
+            )));
         }
         if !PathBuf::from(&browser.binary).exists() {
             return Err(Skip(format!("not installed: {}", browser.binary)));

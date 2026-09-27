@@ -25,7 +25,7 @@ test-fixtures = []
 # `bounded_read` is the crate's only async code, and its only consumer is the
 # engine's IPC listener. Gating it keeps tokio out of the wire crates
 # (fofoca-protocol, -doc, -logging), which then have no async runtime at
-# all. See docs/mesh-slimming.md.
+# all.
 # `tokio/io-util` is what carries `AsyncBufReadExt`, which `bounded_read` calls.
 # Naming it here rather than relying on another crate to turn it on: without it
 # `cargo check -p fofoca-protocol` fails, and the workspace build only worked

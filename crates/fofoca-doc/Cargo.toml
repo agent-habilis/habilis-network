@@ -31,7 +31,7 @@ fofoca-protocol = { path = "../fofoca-protocol", default-features = false }
 fofoca-util = { path = "../fofoca-util", default-features = false }
 # The only crate in the workspace that names automerge. Swapping the CRDT for
 # something cheaper (an LWW map is enough for a two-scalar transport doc) is a
-# change to this crate alone. See docs/mesh-slimming.md.
+# change to this crate alone.
 automerge.workspace = true
 serde.workspace = true
 serde_json.workspace = true

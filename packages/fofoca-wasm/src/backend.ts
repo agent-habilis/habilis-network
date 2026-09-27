@@ -1,7 +1,7 @@
 /**
  * The browser backend: a wasm [`MeshPeerHandle`] behind the `fofoca-api`
  * [`Opener`] seam. Two drain loops carry everything the engine surfaces —
- * frames and events — and a slow roster poll picks up what no event
+ * messages and events — and a slow roster poll picks up what no event
  * announces (a peer's `transport` lane flipping from `relay-only` to
  * `unicast` once a path is proven, say).
  */
@@ -14,11 +14,10 @@ import type { FofocaWasmModule, MeshPeerHandle } from './module.ts'
  * identical document is discarded on a string compare before any parse. */
 const ROSTER_POLL_MS = 500
 
-interface WireFrame {
+interface WireMsg {
   nick: string
   directed: boolean
-  eof: boolean
-  bytes: number[]
+  text: string
 }
 
 type WireEvent =
@@ -34,7 +33,7 @@ type WireEvent =
 
 /**
  * Build the [`Opener`] for one membership. `optsJson` is a JSON encoding of
- * `fofoca_pipe::Opts` — the same object the C ABI takes.
+ * `fofoca::membership::Opts` — the same object the C ABI takes.
  */
 export function openWasm(module: FofocaWasmModule, optsJson: string): Opener {
   return async (sink: BackendSink): Promise<BackendOpen> => {
@@ -49,19 +48,14 @@ export function openWasm(module: FofocaWasmModule, optsJson: string): Opener {
       }
     }
 
-    const frames = async () => {
+    const msgs = async () => {
       for (;;) {
-        const json = await peer.nextFrame()
+        const json = await peer.nextMsg()
         if (json === undefined || json === null) {
           return
         }
-        const frame = JSON.parse(json) as WireFrame
-        sink.frame({
-          from: frame.nick,
-          bytes: new Uint8Array(frame.bytes),
-          directed: frame.directed,
-          eof: frame.eof,
-        })
+        const msg = JSON.parse(json) as WireMsg
+        sink.msg({ from: msg.nick, text: msg.text, directed: msg.directed })
       }
     }
 
@@ -109,7 +103,7 @@ export function openWasm(module: FofocaWasmModule, optsJson: string): Opener {
       }
     }
 
-    void frames()
+    void msgs()
     void events()
     const poll = setInterval(() => {
       if (!closed) {
@@ -123,9 +117,8 @@ export function openWasm(module: FofocaWasmModule, optsJson: string): Opener {
         id: peer.id(),
         name: peer.name(),
         nick: peer.nick(),
-        maxChunk: peer.maxChunk(),
-        send: (to, bytes) => peer.send(to ?? undefined, bytes),
-        sendEof: (to) => peer.sendEof(to ?? undefined),
+        maxMsg: peer.maxMsg(),
+        send: (to, text) => peer.send(to ?? undefined, text),
         stateMerge: (patchJson) => peer.stateMerge(patchJson),
         close: async () => {
           closed = true

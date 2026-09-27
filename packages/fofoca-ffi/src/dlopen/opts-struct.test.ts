@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { WireOpts } from '../protocol.ts'
-import { encodeOpts, OPTS_BYTES } from './opts-struct.ts'
+import { encodeOpts, encodeStreamOpts, OPTS_BYTES, STREAM_OPTS_BYTES } from './opts-struct.ts'
 
 const BASE: WireOpts = {
   mesh: null,
@@ -96,5 +96,30 @@ describe('encodeOpts', () => {
     const { keepAlive } = encodeOpts({ ...BASE, nick: 'ana' }, fakePointers().pointerOf)
     expect(keepAlive.length).toBe(1)
     expect(keepAlive[0]?.at(-1)).toBe(0)
+  })
+})
+
+describe('encodeStreamOpts', () => {
+  // The literal, for the reason the 72 above is one: the other side is the
+  // layout assert on `FofocaStreamOpts` in crates/fofoca-ffi/src/ffi.rs.
+  test('the struct is the 32 bytes the C header lays out', () => {
+    expect(STREAM_OPTS_BYTES).toBe(32)
+  })
+
+  test('the lists and the path switches land at their offsets', () => {
+    const pointers = fakePointers()
+    const { struct, keepAlive } = encodeStreamOpts(
+      { lookup: 'relay', transport: null, relayUrls: 'http://a/', disableIp: true, disableWebrtc: false },
+      pointers.pointerOf,
+    )
+    expect(struct.byteLength).toBe(STREAM_OPTS_BYTES)
+    const view = new DataView(struct.buffer)
+    expect(view.getBigUint64(0, true)).toBe(0x1000n) // lookup
+    expect(view.getBigUint64(8, true)).toBe(0n) // transport
+    expect(view.getBigUint64(16, true)).toBe(0x1100n) // relay_urls
+    expect(view.getInt32(24, true)).toBe(1) // disable_ip
+    expect(view.getInt32(28, true)).toBe(0) // disable_webrtc
+    expect(keepAlive.length).toBe(2)
+    expect(Array.from(pointers.buffers[0] ?? [])).toEqual([...new TextEncoder().encode('relay'), 0])
   })
 })

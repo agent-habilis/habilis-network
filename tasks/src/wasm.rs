@@ -10,7 +10,7 @@ use crate::util::output;
 
 const TARGET: &str = "wasm32-unknown-unknown";
 
-/// `cargo task wasm-peer` — build the browser peer and emit its JS glue.
+/// `cargo task build-wasm` — build fofoca-wasm and emit its JS glue.
 ///
 /// The one wasm build that ships to a page rather than to a test harness:
 /// `packages/fofoca-wasm` (and the mesh e2e suite's harness) load the glue

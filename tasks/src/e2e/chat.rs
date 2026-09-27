@@ -26,6 +26,10 @@ use super::{Args, Skip, build};
 const LINK_TIMEOUT: Duration = Duration::from_secs(150);
 /// One payload hop on a linked pair.
 const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the tab's console is recorded: past the page's one-minute open
+/// and the link wait, so a failure at either still has the whole console.
+const CONSOLE_WINDOW: Duration =
+    Duration::from_secs(60 + LINK_TIMEOUT.as_secs() + PAYLOAD_TIMEOUT.as_secs());
 
 // ── the terminal half ───────────────────────────────────────────────────
 
@@ -60,7 +64,10 @@ impl Robot {
                 relay_url,
                 "--robot",
             ])
-            .env("RUST_LOG", "fofoca=info")
+            .env(
+                "RUST_LOG",
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "fofoca=info".to_owned()),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -121,9 +128,9 @@ impl Robot {
         self.seen.iter().any(pred)
     }
 
-    fn saw_frame(&mut self, text: &str, directed: bool) -> bool {
+    fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
         self.saw(|value| {
-            value.get("kind").and_then(serde_json::Value::as_str) == Some("frame")
+            value.get("kind").and_then(serde_json::Value::as_str) == Some("msg")
                 && value.get("text").and_then(serde_json::Value::as_str) == Some(text)
                 && value.get("directed").and_then(serde_json::Value::as_bool) == Some(directed)
         })
@@ -184,7 +191,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     build::ensure_bun("the chat suite serves its page with bun")?;
     build::build_browser_peer()?;
     output::status("Building", "the native chat example");
-    let chat_binary = build::build_example("fofoca-pipe", "chat")?;
+    let chat_binary = build::build_binary("chat", "chat")?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -220,12 +227,15 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         return fail(&mut robot, None, "the terminal never claimed the beacon");
     }
 
-    let page = launch_page("cft").map_err(|Skip(reason)| reason)?;
-    page.navigate(&format!(
-        "{}/?topic={topic}&nick=browser&relay={}&log=fofoca=info",
-        server.url,
-        urlencode(relay_url.as_str()),
-    ));
+    let page = launch_page(args.page_browser()).map_err(|Skip(reason)| reason)?;
+    page.navigate_watching_console(
+        &format!(
+            "{}/?topic={topic}&nick=browser&relay={}&log=fofoca=info",
+            server.url,
+            urlencode(relay_url.as_str()),
+        ),
+        CONSOLE_WINDOW,
+    );
     output::status("Running", "terminal \u{2194} browser chat");
 
     if wait_for(Duration::from_mins(1), Duration::from_millis(500), || {
@@ -259,12 +269,14 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // Broadcast both ways: send once per side, then wait on receipt alone.
     // Re-sending inside the receipt poll looked like a retry but was not —
     // the page call itself blocks up to the payload budget, so one iteration
-    // consumed the window while duplicate frames piled into the mesh.
+    // consumed the window while duplicate messages piled into the mesh.
     robot.send_line("hello-from-terminal")?;
-    call_page(&page, "chat", "send('hello-from-web')")?;
+    if let Err(error) = call_page(&page, "chat", "send('hello-from-web')") {
+        return fail(&mut robot, Some(&page), &error);
+    }
     let broadcast = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
         (page_text(&page, "messages").contains("hello-from-terminal")
-            && robot.saw_frame("hello-from-web", false))
+            && robot.saw_msg("hello-from-web", false))
         .then_some(())
     });
     if broadcast.is_none() {
@@ -277,10 +289,12 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
 
     // Directed both ways, same shape.
     robot.send_line("/msg browser direct-from-terminal")?;
-    call_page(&page, "chat", "send('/msg terminal direct-from-web')")?;
+    if let Err(error) = call_page(&page, "chat", "send('/msg terminal direct-from-web')") {
+        return fail(&mut robot, Some(&page), &error);
+    }
     let directed = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(500), || {
         (page_text(&page, "messages").contains("direct-from-terminal")
-            && robot.saw_frame("direct-from-web", true))
+            && robot.saw_msg("direct-from-web", true))
         .then_some(())
     });
     if directed.is_none() {
@@ -303,16 +317,25 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
 /// Dump both surfaces to a file and fail the suite — twenty lines of tail
 /// answered nothing, twice, in the mesh suite's bring-up.
 fn fail(robot: &mut Robot, page: Option<&Page>, reason: &str) -> TaskOutcome {
-    let mut dump = robot.transcript();
+    // The page first, the console last among them: the console blocks until
+    // its window closes, and the native transcript is read after it so both
+    // logs cover the same stretch of time.
+    let mut browser = String::new();
     if let Some(page) = page {
         for id in ["status", "messages", "peers", "events"] {
             let _ = write!(
-                dump,
+                browser,
                 "\n\u{2500}\u{2500} browser {id} \u{2500}\u{2500}\n{}\n",
                 page_text(page, id)
             );
         }
+        let _ = write!(
+            browser,
+            "\n\u{2500}\u{2500} browser console \u{2500}\u{2500}\n{}\n",
+            page.console()
+        );
     }
+    let dump = robot.transcript() + &browser;
     let path = repo_root().join("target/chat-e2e.log");
     let _ = std::fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));

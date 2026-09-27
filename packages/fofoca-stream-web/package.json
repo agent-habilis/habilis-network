@@ -1,0 +1,16 @@
+{
+  "name": "fofoca-stream-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The fofoca-stream web app: one end of a byte stream in a tab, with its runtime exposed as WebMCP tools",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "serve": "bun run serve.ts",
+    "build": "bun run build.ts"
+  },
+  "dependencies": {
+    "fofoca-wasm": "workspace:*"
+  }
+}

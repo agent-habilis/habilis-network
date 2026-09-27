@@ -23,6 +23,9 @@ pub mod ops;
 // whatsoever to run a node, which made the wasm CI leg a compile check of code
 // nobody could call.
 pub mod runtime;
+// One embedded membership of a mesh, over `runtime`: what the C ABI, the
+// browser peer and the chat example share, so they resolve a mesh one way.
+pub mod membership;
 
 pub(crate) mod beacon;
 // The blob-offload side-channel, re-exported through [`ops::blob`]. Its own
@@ -38,7 +41,7 @@ pub(crate) mod lookup;
 // Extracted leaf crates. Each owns one dependency the engine would otherwise
 // carry unconditionally — automerge, tracing-subscriber — and each depends only
 // on `fofoca-protocol`/`-util`, never back on this crate. Aliased so
-// engine code keeps its `crate::doc::…` paths. See docs/mesh-slimming.md.
+// engine code keeps its `crate::doc::…` paths.
 pub(crate) use fofoca_doc as doc;
 pub(crate) use fofoca_logging as logging;
 

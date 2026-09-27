@@ -6,7 +6,7 @@
  * const mesh = await join({ topic: 'standup' })
  * ```
  *
- * The wasm glue must exist first: `cargo task wasm-peer` drops it under
+ * The wasm glue must exist first: `cargo task build-wasm` drops it under
  * `wasm/`.
  */
 
@@ -21,6 +21,8 @@ import { loadWasm } from './module.ts'
 export { openWasm } from './backend.ts'
 export { loadWasm } from './module.ts'
 export type { FofocaWasmModule, MeshPeerHandle } from './module.ts'
+export { bindStreams, bindStreamsFor } from './stream.ts'
+export type { Producer, Reader, StreamOpts, Streams } from './stream.ts'
 
 /** Extras every open accepts, beside the mesh selectors. */
 export interface WasmOpts {
@@ -65,8 +67,8 @@ export async function create(opts: CreateOpts & WasmOpts): Promise<Mesh> {
   )
 }
 
-async function open(pipeOpts: Record<string, unknown>, extras: WasmOpts): Promise<Mesh> {
+async function open(meshOpts: Record<string, unknown>, extras: WasmOpts): Promise<Mesh> {
   const module = await loadWasm(extras.glueUrl)
   module.initTracing(extras.log ?? 'info')
-  return openMesh(openWasm(module, JSON.stringify(pipeOpts)))
+  return openMesh(openWasm(module, JSON.stringify(meshOpts)))
 }

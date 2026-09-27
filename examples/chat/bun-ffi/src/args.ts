@@ -1,6 +1,6 @@
 /**
  * The command line. Exactly one way in — a topic, a mesh id, or a create —
- * because `fofoca_open` treats "neither selector" as create and a chat that
+ * because `fofoca_mesh_open` treats "neither selector" as create and a chat that
  * silently creates a loopback mesh of one hears nobody, forever.
  */
 

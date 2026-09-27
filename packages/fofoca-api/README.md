@@ -9,7 +9,7 @@ re-exports everything here and adds `join` / `create`.
 - Types: `Mesh`, `Peer`, `Message`, `MeshEvent`, `StateDoc`, `Lane`,
   `Reach`.
 - Values: `openMesh`, `randomNick`, `randomTopic`, `Fanout`.
-- The backend seam: `MeshBackend`, `BackendFrame`, `BackendSink`,
+- The backend seam: `MeshBackend`, `BackendMsg`, `BackendSink`,
   `Opener`. A consumer never needs these; a third backend would.
 
 See [`../README.md`](../README.md) for the workspace rules, and

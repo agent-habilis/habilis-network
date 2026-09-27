@@ -28,13 +28,7 @@ export type Command =
    * `postMessage` arriving before anything is listening.
    */
   | { readonly t: 'open'; readonly id: number; readonly opts: WireOpts; readonly lib: string }
-  | {
-      readonly t: 'send'
-      readonly id: number
-      readonly to: string | null
-      readonly bytes: ArrayBuffer
-    }
-  | { readonly t: 'sendEof'; readonly id: number; readonly to: string | null }
+  | { readonly t: 'send'; readonly id: number; readonly to: string | null; readonly text: string }
   | { readonly t: 'stateMerge'; readonly id: number; readonly json: string }
   | { readonly t: 'close'; readonly id: number }
 
@@ -44,7 +38,7 @@ export interface OpenReply {
   readonly nick: string
   readonly rosterJson: string
   readonly stateJson: string
-  readonly maxChunk: number
+  readonly maxMsg: number
   readonly version: string
 }
 
@@ -53,13 +47,7 @@ export type Reply = OpenReply | string | null
 export type FromWorker =
   | { readonly t: 'ok'; readonly id: number; readonly value: Reply }
   | { readonly t: 'err'; readonly id: number; readonly message: string }
-  | {
-      readonly t: 'frame'
-      readonly from: string
-      readonly directed: boolean
-      readonly eof: boolean
-      readonly bytes: ArrayBuffer
-    }
+  | { readonly t: 'msg'; readonly from: string; readonly directed: boolean; readonly text: string }
   | { readonly t: 'roster'; readonly json: string }
   | { readonly t: 'state'; readonly json: string }
   /** A failure with nobody waiting on it. The mesh stays open. */

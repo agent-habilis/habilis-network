@@ -8,6 +8,7 @@ import { watch } from 'node:fs'
 
 import index from './src/index.html'
 import { wasmAsset, wasmResponse, writeWasmPath } from './scripts/wasm-asset.ts'
+import { serveOnLadder } from './scripts/serve-ladder.ts'
 
 const WASM_DIST = `${import.meta.dir}/wasm/dist`
 /** Rebuilds touch several files; coalesce them into one reload. */
@@ -16,22 +17,25 @@ const DEBOUNCE_MS = 150
 let asset = await wasmAsset()
 await writeWasmPath(asset)
 
-const server = Bun.serve({
-  port: Number(process.env.PORT ?? 3000),
-  routes: {
-    // Ahead of the catch-all on purpose: a request for a hash we no longer
-    // hold must 404, not fall through to `index.html` and reach the runtime
-    // as a `.wasm` whose first bytes are `<!do`.
-    '/wasm/:name': (request) => {
-      if (request.params.name !== asset.name) {
-        return new Response('stale wasm — reload the page', { status: 404 })
-      }
-      return wasmResponse(asset)
+const explicit = process.env.PORT === undefined ? undefined : Number(process.env.PORT)
+const server = serveOnLadder(explicit, 3000, (port) =>
+  Bun.serve({
+    port,
+    routes: {
+      // Ahead of the catch-all on purpose: a request for a hash we no longer
+      // hold must 404, not fall through to `index.html` and reach the runtime
+      // as a `.wasm` whose first bytes are `<!do`.
+      '/wasm/:name': (request) => {
+        if (request.params.name !== asset.name) {
+          return new Response('stale wasm — reload the page', { status: 404 })
+        }
+        return wasmResponse(asset)
+      },
+      '/*': index,
     },
-    '/*': index,
-  },
-  development: { hmr: true, console: true },
-})
+    development: { hmr: true, console: true },
+  }),
+)
 
 let pending: ReturnType<typeof setTimeout> | undefined
 watch(WASM_DIST, () => {

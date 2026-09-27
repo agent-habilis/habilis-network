@@ -10,8 +10,8 @@
  * Thrown by an iterator that fell too far behind and was dropped.
  *
  * Dropping loudly rather than silently, because the engine already drops
- * silently one layer down: `fofoca-pipe`'s inbound queue is bounded at 256
- * frames and a full one only logs. A second silent drop here would make a lost
+ * silently one layer down: the engine's inbound queue is bounded at 256
+ * messages and a full one only surfaces one error per stall. A second silent drop here would make a lost
  * line indistinguishable from packet loss.
  */
 export class MeshOverflowError extends Error {
@@ -25,9 +25,9 @@ export class MeshOverflowError extends Error {
 }
 
 /**
- * Per-iterator buffer depth. At the 2112-byte frame budget a full one is about
- * 2 MiB, and an iterator can only get there if its *consumer* stalled — the
- * engine's own 256-frame queue bounds the network side long before this.
+ * Per-iterator buffer depth. At one frame per message a full one is a few
+ * MiB, and an iterator can only get there if its *consumer* stalled — the
+ * engine's own 256-message queue bounds the network side long before this.
  */
 export const DEFAULT_CAPACITY = 1024
 

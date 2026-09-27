@@ -67,8 +67,7 @@ blob = ["host"]
 # that only needs relay-reachable meshes can turn them off and drop
 # swarm-discovery/acto and n0-mainline/lru entirely. (`interprocess` still
 # builds unconditionally: IpcMessage is in the event loop signatures, so
-# gating it needs ipc.rs split by dependency first.) See
-# docs/mesh-slimming.md in the mallorca repo.
+# gating it needs ipc.rs split by dependency first.)
 default = ["host", "mdns", "dht"]
 # Both need real UDP sockets, so each implies `host`.
 mdns = ["host", "dep:iroh-mdns-address-lookup"]
@@ -184,7 +183,7 @@ iroh = { workspace = true, features = [
 iroh-gossip.workspace = true
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "aef12f2ad0c07dac57c5fa7f196d53921d61d485", default-features = false, optional = true }
+iroh-relay = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:
 # iroh's defaults (portmapper, fast-apple-datapath, metrics) are host-only and

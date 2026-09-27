@@ -82,13 +82,19 @@ The user-facing word in the CLI is **gossip**, and that word never reaches the w
 
 ## 3. Workspace structure
 
-The workspace is a virtual manifest with twelve member crates.
+The workspace is a virtual manifest: fourteen crates under `crates/`, plus `tasks` and the chat example.
 All crates share one version from `[workspace.package]`.
 Dependencies point strictly downward.
 
 ```mermaid
 graph TD
-    ffi["fofoca-ffi<br>C ABI shim"] --> engine
+    ffi["fofoca-ffi<br>C ABI shim"] --> stream["fofoca-stream<br>1-1 byte streams"]
+    wasm["fofoca-wasm<br>browser peer"] --> stream
+    cli["fofoca-stream-cli<br>the binary"] --> stream
+    cli --> engine
+    ffi --> engine
+    wasm --> engine
+    stream --> engine
     engine["fofoca<br>the engine"] --> doc["fofoca-doc<br>CRDT channels"]
     engine --> logging["fofoca-logging<br>tracing sink"]
     engine --> mh["fofoca-iroh-multihop-transport"]
@@ -110,14 +116,14 @@ The engine depends on `fofoca-iroh-webrtc-transport` on both targets: the `nativ
 | `fofoca-doc` | The `state` and `meta` CRDT channels (automerge). |
 | `fofoca-logging` | Tracing sink and directive filter. |
 | `fofoca` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
-| `fofoca-ffi` | A C-ABI shim, so a non-Rust process joins a mesh in-process. |
-| `fofoca-pipe` | The byte pipe: one `Opts`-to-`Session` contract a tab and a terminal share. Reaches wasm32. |
-| `fofoca-wasm` | The browser peer — that pipe as a wasm-bindgen class. Builds only for wasm32. |
+| `fofoca-ffi` | A C-ABI shim, so a non-Rust process joins a mesh or opens byte streams in-process. |
+| `fofoca-stream` | 1-1 byte streams addressed by a hash, over a direct path by default (the relay only when the stream allows it), never gossip (§9.4). Reaches wasm32. |
+| `fofoca-stream-cli` | The `fofoca-stream` binary: stdin to one reader, or a stream to stdout. |
+| `fofoca-wasm` | The browser peer: `fofoca::membership` and `fofoca-stream` as wasm-bindgen classes. Runs only on wasm32. |
 | `fofoca-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `fofoca-blobs`. |
 | `fofoca-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `fofoca-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
 
-The crate split follows the rules in `docs/mesh-slimming.md`.
 The measurement that drove the split was a consumer binary where the engine cost 39.4 MiB of 40.7 MiB.
 
 ### 3.1 The iroh quarantine
@@ -507,6 +513,35 @@ QUIC runs end to end, so relays forward opaque, already-encrypted packets.
 The transport owns a dedicated underlay endpoint, because the application endpoint cannot recursively carry itself.
 The reverse route derives from the forward route, so a reply needs no fresh lookup.
 
+### 9.4 Byte streams
+
+`fofoca-stream` carries bytes from one producer to one consumer.
+It uses no gossip: the bytes ride the `fofoca/stream/1` ALPN.
+By default they ride a direct path: QUIC over IP, or a WebRTC data channel when one end is a browser.
+A stream created with `transport: ['p2p', 'relay']` lets them fall back to the relay when no direct path exists; the node must then also name `relay` among its lookups, which a browser always does.
+
+A producer creates a stream and gets a hash.
+The hash holds a random 16-byte id, a 32-byte secret, the lookups, the relay policy, and the address of the producer.
+The first consumer that presents the id and the secret gets the stream.
+A wrong secret reads the same as an unknown id, so the refusal tells an attacker nothing.
+
+The relay policy comes from the hash.
+With the default lookup-only policy, the producer refuses a consumer whose only path is the relay.
+When one end has no IP path, the consumer negotiates the WebRTC lane over the relay before it connects, because iroh does not move a live connection onto a transport added later.
+QUIC flow control paces the producer to the consumer.
+
+Either end closes the connection with one of five codes. The reader sends `DONE` at the end of the stream, and a consumer whose own probe finds only the relay sends `RELAY_REFUSED`:
+
+| Code | Meaning |
+|---|---|
+| 0 `DONE` | The stream ended normally. |
+| 1 `UNKNOWN` | No open stream has this hash: never created, closed, or abandoned. |
+| 2 `TAKEN` | Another consumer holds the stream. |
+| 3 `RELAY_REFUSED` | The only path is the relay, and the policy refuses it. |
+| 4 `ABANDONED` | The producer dropped the stream before it closed it. |
+
+The same stream is reachable from Rust, from C (`fofoca_stream_*`), from the browser (`bindStreams` in `packages/fofoca-wasm`), from the `fofoca-stream` binary, and from the stream web page.
+
 ## 10. Embedding the engine
 
 ### 10.1 The facade
@@ -519,7 +554,8 @@ The public surface of the engine is grouped by consumer role, not by internal to
 | `fofoca::embed` | The seams a consumer implements. |
 | `fofoca::runtime` | Start and stop: setup, node, parameters. |
 | `fofoca::ops` | What a hook can do: broadcast, send, merge state. |
-| `fofoca::net` | The quarantined iroh corner: endpoints, probes, transport handles. |
+| `fofoca::net` | The quarantined iroh corner: endpoints, probes, transport handles, the direct-path gate. |
+| `fofoca::membership` | A mesh in a few calls: `join`, then whole text messages (`msg`) in and out. |
 | `fofoca::util` | Host helpers (re-export of `fofoca-util`). |
 
 ### 10.2 The seam traits
@@ -556,7 +592,9 @@ The socket module compiles out on wasm32, and a browser binds nothing.
 
 ### 10.4 The C ABI
 
-`fofoca-ffi` exposes an opaque handle and blocking byte and JSON calls, declared in `include/fofoca.h`.
+`fofoca-ffi` exposes opaque handles and blocking calls, declared in `include/fofoca.h`.
+A mesh handle (`fofoca_mesh_*`) sends and receives whole text messages (`fofoca_msg_send`, `fofoca_msg_recv`) and reads the shared state as JSON.
+A stream node (`fofoca_streams_*`, `fofoca_stream_*`) creates and opens byte streams (§9.4).
 Panics stop at the boundary through `catch_unwind`.
 For this reason the release profile keeps unwinding and does not set `panic = "abort"`.
 
@@ -573,6 +611,11 @@ Measured numbers from the `chat-webrtc` example workspace:
 
 - Native-to-native over the WebRTC data channel moves about 6 times less throughput, at 36 times the latency, than the hole-punched iroh path.
 - Browser-to-native transfers measured 4 to 19 MB/s.
+
+Measured with the `fofoca-stream` binary on one machine (2026-09-27), 1 GiB from `head -c 1G /dev/zero` into the producer, 2 runs each:
+
+- Native to native, release build, over a direct path: 99 to 101 MB/s.
+- Native to the stream page in Chrome, over its WebRTC data channel: 10.6 to 11.0 MB/s once the page has opened (the open took 1.6 to 2.1 s). The producer was the e2e suite's debug build, so this is a floor.
 
 Capacity ceilings:
 
@@ -595,7 +638,6 @@ In this repository:
 - `README.md` — workspace overview, build and test commands.
 - `crates/fofoca/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
 - `FORKED.md` — fork provenance and the pin contract.
-- `docs/mesh-slimming.md` — the crate-split rules and their cost measurements.
 - `crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
 - Per-crate READMEs under `crates/*/README.md`.
 

@@ -24,7 +24,8 @@ fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
         ├── fofoca-doc          shared-state CRDT channels
         ├── fofoca-logging      tracing sink + filter
         └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
-              ├── fofoca-pipe                   the byte pipe, tab and terminal
+              ├── fofoca-stream                 1-1 byte streams, tab and terminal
+              │     ├── fofoca-stream-cli       the `fofoca-stream` binary
               │     ├── fofoca-ffi              the C ABI
               │     └── fofoca-wasm             the browser peer (wasm32 only)
               ├── fofoca-netplay                rollback netcode for p2p games
@@ -79,9 +80,7 @@ one. The other two meet it in a consumer.
 That is the whole reason the split exists. Cargo features cannot be selected
 per-consumer across a dependency edge, so a consumer that wants the wire
 vocabulary without the network stack needs a crate boundary, not a feature flag.
-[`docs/mesh-slimming.md`](docs/mesh-slimming.md) has the measurements and the
-p2panda-derived rules the split follows — the engine was 39.4 MiB of mallorca's
-40.7 MiB release binary before it.
+The engine was 39.4 MiB of mallorca's 40.7 MiB release binary before it.
 
 The crates are versioned in lockstep from `[workspace.package]`. They were carved
 out of one engine to control the dependency closure, not to be released on
@@ -203,9 +202,12 @@ a build-profile and main-thread-pressure sweep: `cargo task e2e`, or
 The native↔browser matrix — the one that proves a terminal and a tab exchange
 payload on every lane under every relay policy — is
 `cargo task e2e --suite mesh` (`--quick` for the four-cell pass). It needs the
-wasm glue built first (`cargo task wasm-peer` — the mesh suite also builds
-it itself), bun, and
-`agent-browse` with Chrome for Testing. The suite runs with the task runner's
+wasm glue built first (`cargo task build-wasm` — the mesh suite also builds
+it itself), bun, and a browser. The suites that drive one tab (`mesh`,
+`stream`, `chat`) open Safari Technology Preview by default; `--only` picks
+another (`safari`, `cft` for Chrome for Testing through `agent-browse`,
+`chrome-ci` for Chrome through chromedriver). Each Safari needs
+`sudo <its safaridriver> --enable` once. The suite runs with the task runner's
 `mesh` feature, which it turns on by re-running itself through cargo, so the
 first run builds the engine a second time with its test relay.
 

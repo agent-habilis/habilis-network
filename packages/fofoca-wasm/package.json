@@ -11,7 +11,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build-wasm": "cargo task wasm-peer",
+    "build-wasm": "cargo task build-wasm",
     "harness": "bun run harness/serve.ts"
   },
   "dependencies": {

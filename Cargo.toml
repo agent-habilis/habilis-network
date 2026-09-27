@@ -4,10 +4,10 @@
 # drives, and what puts it inside the workspace lint pass — a runner that
 # defines the quality gate should be held to it.
 #
-# `crates/*` matches one directory down and no further, so the examples under
-# `crates/*/examples/` are not members. Each says at its own root why it must
-# not be.
-members = ["crates/*", "tasks"]
+# `crates/*` matches one directory down and no further. The native chat is a
+# member so the e2e suite builds it against the same lockfile; it is host-only,
+# which is safe because the wasm checks name their packages with `-p`.
+members = ["crates/*", "tasks", "examples/chat/rust"]
 # Load-bearing on a *virtual* manifest: a root package on edition 2024 implies
 # `resolver = "3"`, but a virtual workspace inherits nothing from its members
 # and silently defaults to the edition-2015 `resolver = "1"`. Left implicit, the
@@ -62,6 +62,8 @@ serde = { version = "1", features = ["derive"] }
 # `--output json` stream.
 serde_json = { version = "1", features = ["raw_value"] }
 anyhow = "1"
+# Named by `tasks` and `fofoca-stream-cli`, so the version lives here.
+clap = { version = "4", features = ["derive"] }
 # Named by `fofoca-chunks`, and kept in the workspace table so a second namer
 # cannot drift. The floor is the OFF position:
 # `default-features = false` keeps the wasm build honest, and `std` comes back
@@ -111,18 +113,20 @@ uuid = { version = "1", features = ["v4"] }
 #
 # Branch fix/netwatch-fork-pin: the mapped_addrs eviction (iroh#4294), the
 # relay-teardown `join_next` drain, and netwatch/portmapper pinned to the
-# net-tools fork so the RTM_MISS fix arrives transitively too.
-iroh = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "aef12f2ad0c07dac57c5fa7f196d53921d61d485", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+# net-tools fork so the RTM_MISS fix arrives transitively too. Fork main also
+# carries the Initial fan-out (fofoca-network/iroh#2): a WebRTC path learned
+# after a relay selection can carry a connection, which a browser needs.
+iroh = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 # The dependency-light half of iroh: keys, endpoint addresses, relay URLs — no
 # QUIC, TLS or DNS. `fofoca-protocol` depends on this rather than `iroh` so the
-# wire vocabulary carries no network stack (docs/mesh-slimming.md). Same repo and
-# rev as `iroh` above, necessarily: the forked `iroh` uses its workspace-local
-# copy, and mixing that with the published one is the two-`iroh_base` failure.
+# wire vocabulary carries no network stack. Same repo and rev as `iroh` above,
+# necessarily: the forked `iroh` uses its workspace-local copy, and mixing
+# that with the published one is the two-`iroh_base` failure.
 # `relay` is a default `fofoca-protocol` adds back; the transports do not need it.
-iroh-base = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "aef12f2ad0c07dac57c5fa7f196d53921d61d485", default-features = false, features = ["key"] }
+iroh-base = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c", default-features = false, features = ["key"] }
 # Only `iroh-mainline-address-lookup` names it, and only under `dht`. Pinned to
 # the same rev for the same reason as `iroh-base`.
-iroh-dns = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "aef12f2ad0c07dac57c5fa7f196d53921d61d485" }
+iroh-dns = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c" }
 # The mDNS + mainline-DHT address-lookup providers, extracted from iroh core in
 # the 1.0 line. Forked for one reason only: they sat between this crate and iroh
 # and named iroh/iroh-base/iroh-dns from crates.io, which is what forced every
@@ -132,15 +136,15 @@ iroh-dns = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh",
 # (rkuhn/swarm-discovery#28). Neither change has an upstream path — n0 will
 # not point their crates at ours — so delete the fork the moment the iroh pins
 # become unnecessary and swarm-discovery 0.6.4+ ships.
-iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "43f39cc7bb3d704c767bd165319ca0ca2e36da91" }
-iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "43f39cc7bb3d704c767bd165319ca0ca2e36da91" }
+iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "556f5027c6a0abf228267305e5dd89d0c2a6f23d" }
+iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "556f5027c6a0abf228267305e5dd89d0c2a6f23d" }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
 # Branch fix/fofoca-iroh-pin: the connection-churn leak fix (upstream PR
 # n0-computer/iroh-gossip#147) plus its own iroh/iroh-base repoint, since this
 # crate is another that sat between us and iroh.
-iroh-gossip = { version = "=0.101.0", git = "https://github.com/fofoca-network/iroh-gossip", rev = "640ec2981960ecef51238e7d25a3dd7e9accf634", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.101.0", git = "https://github.com/fofoca-network/iroh-gossip", rev = "e66061b298a350141938046e3a84b29628ebb899", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.

@@ -11,7 +11,7 @@ publish = false
 # Forwarded from the engine so an embedder can drop the discovery legs it does
 # not use. `default` matches the engine's, so a plain build is unchanged; a
 # relay-only embedder builds with --no-default-features and sheds
-# swarm-discovery/acto and n0-mainline/lru. See docs/mesh-slimming.md.
+# swarm-discovery/acto and n0-mainline/lru.
 default = ["mdns", "dht"]
 mdns = ["fofoca/mdns"]
 dht = ["fofoca/dht"]
@@ -31,11 +31,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [dependencies]
 # The ONLY mesh dependency — this crate never touches agent-gossip / a2a.
 fofoca = { path = "../fofoca", default-features = false }
-# The portable half of what used to be `src/pipe.rs`, shared with the browser
-# peer. Feature-less by design (see its manifest), so the `mdns` / `dht`
-# forwards above stay this crate's decision and cargo unifies them onto the one
-# `fofoca` build.
-fofoca-pipe = { path = "../fofoca-pipe" }
+# The byte streams behind `fofoca_stream_*`, shared with the browser peer.
+# Feature-less by design (see its manifest), so the `mdns` / `dht` forwards
+# above stay this crate's decision and cargo unifies them onto the one `fofoca`
+# build.
+fofoca-stream = { path = "../fofoca-stream" }
+bytes.workspace = true
+n0-future.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

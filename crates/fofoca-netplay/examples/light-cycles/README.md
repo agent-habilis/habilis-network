@@ -101,7 +101,7 @@ cd crates/fofoca-netplay/examples/light-cycles/web
 ./build-wasm.sh
 bun install
 bun run dev
-# open http://localhost:3000 — "create game" or paste a room code to join
+# open the URL dev printed (3000, or the next free port) — "create game" or paste a room code to join
 ```
 
 ### Cross-play

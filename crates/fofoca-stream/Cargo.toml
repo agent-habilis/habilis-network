@@ -1,0 +1,43 @@
+[package]
+name = "fofoca-stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "1-1 byte streams between two peers, addressed by a hash: QUIC direct or over a WebRTC data channel, never through gossip"
+readme = "README.md"
+publish = false
+
+# No features, on purpose. The discovery legs (`mdns` / `dht`) gate engine
+# dependencies, and which ones a build has is the final binary's decision: the
+# CLI and `fofoca-ffi` forward them to `fofoca` itself, and cargo unifies them
+# onto the one `fofoca` build. A forward here would be a second place to make
+# that choice, and the browser peer, which builds this crate too, can have
+# neither.
+
+[lints]
+workspace = true
+
+[dependencies]
+# The engine, portable half, for its endpoint, transports and direct-path gate
+# (`fofoca::net`). Nothing here touches the gossip mesh. `default-features =
+# false` because this crate must compile for wasm32.
+fofoca = { path = "../fofoca", default-features = false }
+anyhow.workspace = true
+bytes.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+rand.workspace = true
+# `sync` only: the attach hand-off is a oneshot. No `rt`, no `time`: wasm32 has
+# no thread pool, and `tokio::time` has no driver there.
+tokio = { workspace = true, default-features = false, features = ["sync"] }
+# The portable timer. Off wasm32 it is a re-export of `tokio::time`; in a browser
+# `tokio::time` panics for want of a driver.
+n0-future.workspace = true
+
+# Target-scoped, not plain: an unscoped `tokio` dev-dependency turns on `net`
+# -> `mio`, which breaks `cargo check --target wasm32-unknown-unknown` for this
+# crate before it reaches any code (`crates/fofoca/Cargo.toml` has the same scar).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+fofoca = { path = "../fofoca", default-features = false, features = ["host", "iroh-test-utils"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

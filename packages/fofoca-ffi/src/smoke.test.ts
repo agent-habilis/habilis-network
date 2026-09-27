@@ -19,7 +19,7 @@ describe.skipIf(library.path === null)('smoke over the built library', () => {
       expect(mesh.id.length).toBeGreaterThan(0)
       expect(mesh.name.length).toBeGreaterThan(0)
       expect(mesh.nick.length).toBeGreaterThan(0)
-      expect(mesh.maxChunk).toBeGreaterThan(0)
+      expect(mesh.maxMsg).toBeGreaterThan(0)
       expect(mesh.peers).toEqual([])
 
       await mesh.state.merge({ lunch: 'yes' })

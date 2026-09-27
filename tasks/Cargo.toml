@@ -13,7 +13,7 @@ publish = false
 # the commands that are a single foreground call. Anything whose child has to
 # outlive the call — the harness server, the drivers — uses
 # `std::process::Command` directly so it can be killed on drop.
-clap = { version = "4", features = ["derive"] }
+clap = { workspace = true }
 xshell = "0.2"
 # Cargo's `--message-format=json` for artifact discovery, and the WebDriver
 # wire format. Both already in `Cargo.lock` via the workspace entries.
@@ -32,7 +32,6 @@ anstream = "0.6"
 # The `mesh` feature's deps: the mesh and chat suites run a real native peer
 # in-process and a local relay, so the runner depends on the engine it drives.
 fofoca = { path = "../crates/fofoca", features = ["iroh-test-utils"], optional = true }
-fofoca-pipe = { path = "../crates/fofoca-pipe", optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"], optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
@@ -42,7 +41,7 @@ tracing-subscriber = { workspace = true, optional = true }
 # into `fofoca` (`tasks` is a workspace member, and cargo takes the union of
 # every selected package's features); `cargo task e2e --suite mesh|chat`
 # re-runs itself with this on.
-mesh = ["dep:fofoca", "dep:fofoca-pipe", "dep:tokio", "dep:tracing-subscriber"]
+mesh = ["dep:fofoca", "dep:tokio", "dep:tracing-subscriber"]
 
 [lints]
 workspace = true

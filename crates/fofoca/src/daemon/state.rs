@@ -268,6 +268,11 @@ pub struct EventLoopState {
     /// session — true for a webrtc-shaped node on a lookup-only mesh; see
     /// `transport::webrtc::rendezvous_graftable`.
     pub(crate) rendezvous_graft_needs_session: bool,
+    /// Whether this node runs IP transports (`TransportOpts::ip`, and never
+    /// on wasm). The local half of every `WebRTC` lane decision — read from
+    /// here, not from the endpoint address, which is empty whenever the relay
+    /// link is down.
+    pub(crate) local_ip_transport: bool,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -340,6 +345,10 @@ pub struct EventLoopState {
     /// rival started within seconds of us; later rounds run the steady
     /// jittered cadence.
     pub(crate) rival_recheck_rounds: u32,
+    /// Consecutive due sheds held back because a data-channel peer depends
+    /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
+    /// fresh claim (`beacon_arm::schedule_rival_recheck`).
+    pub(crate) rival_recheck_deferrals: u32,
     /// Recently-seen message ids, for duplicate suppression. Gossip
     /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
     /// re-sends, the rendezvous double-path) can deliver the same message
@@ -618,6 +627,7 @@ impl EventLoopState {
             rendezvous_offer_fallback: false,
             rendezvous_probe_read_free: false,
             rendezvous_graft_needs_session: false,
+            local_ip_transport: true,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
@@ -631,6 +641,7 @@ impl EventLoopState {
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
+            rival_recheck_deferrals: 0,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]

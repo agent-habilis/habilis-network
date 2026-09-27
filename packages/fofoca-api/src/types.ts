@@ -95,21 +95,14 @@ export interface Peer {
 }
 
 /**
- * One inbound frame.
- *
- * A frame, not a message: `send` splits a body larger than `MAX_CHUNK` and the
- * receiver sees one of these per chunk, with nothing to rejoin them by. A
- * consumer that needs whole messages frames them itself.
+ * One inbound message: a whole text, as it was sent. Bulk bytes do not ride
+ * the mesh; they take a stream.
  */
 export interface Message {
   from: string
-  bytes: Uint8Array
-  /** Set when `bytes` decode as UTF-8. */
-  text?: string
-  /** True when the frame was addressed to us alone. */
+  text: string
+  /** True when the message was addressed to us alone. */
   directed: boolean
-  /** An end-of-stream marker. `bytes` is empty. */
-  eof: boolean
 }
 
 export type MeshEvent =
@@ -141,22 +134,20 @@ export interface Mesh extends AsyncDisposable {
   readonly peers: Peer[]
   readonly state: StateDoc
   /**
-   * The largest payload one frame carries. `send` splits on it for you; a
-   * caller that would rather refuse an over-long body than have it arrive in
-   * pieces checks against this first.
+   * The longest message in bytes that always fits one frame. Most text fits
+   * well past it; a message that does not fit is refused by `send`, not split.
    *
    * On the mesh rather than a module constant because the FFI backend learns it
-   * from `fofoca_max_chunk()`, and a module constant would mean loading the
+   * from `fofoca_max_msg()`, and a module constant would mean loading the
    * native library at import time.
    */
-  readonly maxChunk: number
+  readonly maxMsg: number
 
-  send(body: string | Uint8Array, opts?: { to?: string }): Promise<void>
-  sendEof(opts?: { to?: string }): Promise<void>
+  send(text: string, opts?: { to?: string }): Promise<void>
 
   /**
-   * Every frame from the moment this iterator was created. Each call gets its
-   * own buffer, so two consumers never split one queue.
+   * Every message from the moment this iterator was created. Each call gets
+   * its own buffer, so two consumers never split one queue.
    */
   messages(signal?: AbortSignal): AsyncIterable<Message>
   events(signal?: AbortSignal): AsyncIterable<MeshEvent>

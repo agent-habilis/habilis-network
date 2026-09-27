@@ -53,20 +53,23 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         &format!("{} declarations against the archive", declared.len()),
     );
 
-    let missing: Vec<&str> = declared
-        .iter()
-        .filter(|name| !exported.contains(*name))
-        .map(String::as_str)
-        .collect();
-    if missing.is_empty() {
+    // Both ways: a declaration with no export is a link error for the caller,
+    // and an export with no declaration is a call nobody outside can see.
+    let missing: Vec<&str> = declared.difference(&exported).map(String::as_str).collect();
+    let undeclared: Vec<&str> = exported.difference(&declared).map(String::as_str).collect();
+    if missing.is_empty() && undeclared.is_empty() {
         return Ok(());
     }
     for name in &missing {
-        output::detail(name);
+        output::detail(&format!("{name} (declared, not exported)"));
+    }
+    for name in &undeclared {
+        output::detail(&format!("{name} (exported, not declared)"));
     }
     Err(format!(
-        "declared in {HEADER} but not exported by the staticlib: {}",
-        missing.len()
+        "{HEADER} and the staticlib disagree: {} declared but not exported, {} exported but not declared",
+        missing.len(),
+        undeclared.len()
     )
     .into())
 }
@@ -142,7 +145,14 @@ fn exported(nm: &str) -> BTreeSet<String> {
     nm.lines()
         .filter_map(|line| line.split_whitespace().next_back())
         .map(|symbol| symbol.strip_prefix('_').unwrap_or(symbol))
-        .filter(|symbol| symbol.starts_with("fofoca_"))
+        // The shape of a C entry point. `nm` also prints archive member names
+        // (`fofoca_util-….rcgu.o:`) as headers, and those are not symbols.
+        .filter(|symbol| {
+            symbol.starts_with("fofoca_")
+                && symbol
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        })
         .map(str::to_owned)
         .collect()
 }

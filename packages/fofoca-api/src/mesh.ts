@@ -13,18 +13,6 @@ import { Fanout } from './fanout.ts'
 import { parseRoster, rosterPresence } from './roster.ts'
 import type { Mesh, MeshEvent, Message, Peer, StateDoc } from './types.ts'
 
-const encoder = new TextEncoder()
-/** `fatal`, so invalid UTF-8 leaves `text` absent rather than full of U+FFFD. */
-const decoder = new TextDecoder('utf-8', { fatal: true })
-
-function decode(bytes: Uint8Array): string | undefined {
-  try {
-    return decoder.decode(bytes)
-  } catch {
-    return undefined
-  }
-}
-
 /** Freeze a parsed document all the way down, once per change. */
 function freeze<T>(value: T): T {
   if (value !== null && typeof value === 'object') {
@@ -105,16 +93,7 @@ export async function openMesh(open: Opener): Promise<Mesh> {
   }
 
   const sink: BackendSink = {
-    frame: (frame) => {
-      const text = decode(frame.bytes)
-      messages.push({
-        from: frame.from,
-        bytes: frame.bytes,
-        directed: frame.directed,
-        eof: frame.eof,
-        ...(text === undefined ? {} : { text }),
-      })
-    },
+    msg: (msg) => messages.push({ from: msg.from, text: msg.text, directed: msg.directed }),
     roster: (json) => applyRoster(json, announcePresence),
     state: applyState,
     presence: (event) => events.push(event),
@@ -152,19 +131,14 @@ export async function openMesh(open: Opener): Promise<Mesh> {
     id: backend.id,
     name: backend.name,
     nick: backend.nick,
-    maxChunk: backend.maxChunk,
+    maxMsg: backend.maxMsg,
     get peers() {
       return peers
     },
     state,
-    send: async (body, opts) => {
+    send: async (text, opts) => {
       refuseIfClosed()
-      const bytes = typeof body === 'string' ? encoder.encode(body) : body
-      await backend.send(opts?.to ?? null, bytes)
-    },
-    sendEof: async (opts) => {
-      refuseIfClosed()
-      await backend.sendEof(opts?.to ?? null)
+      await backend.send(opts?.to ?? null, text)
     },
     messages: (signal) => messages.iterate(signal),
     events: (signal) => {

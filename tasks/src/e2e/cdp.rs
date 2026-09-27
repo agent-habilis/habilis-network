@@ -18,8 +18,12 @@
 //! backend. The pressure axis is created inside the page either way, so no
 //! browser is short-changed by which transport drives it.
 
+#[cfg(feature = "mesh")]
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(feature = "mesh")]
+use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use super::{Harvest, Skip, server};
@@ -28,10 +32,18 @@ use super::{Harvest, Skip, server};
 #[derive(Debug)]
 pub(super) struct Browser {
     folder: PathBuf,
+    /// The console watch [`Browser::navigate_watching_console`] started.
+    #[cfg(feature = "mesh")]
+    console: RefCell<Option<Child>>,
 }
 
 impl Drop for Browser {
     fn drop(&mut self) {
+        #[cfg(feature = "mesh")]
+        if let Some(mut watch) = self.console.get_mut().take() {
+            let _ = watch.kill();
+            let _ = watch.wait();
+        }
         let _ = Command::new("agent-browse")
             .arg("quit")
             .arg(&self.folder)
@@ -78,7 +90,11 @@ impl Browser {
                 }
             )));
         }
-        Ok(Self { folder })
+        Ok(Self {
+            folder,
+            #[cfg(feature = "mesh")]
+            console: RefCell::new(None),
+        })
     }
 
     /// Open `url` in the launched window.
@@ -88,6 +104,44 @@ impl Browser {
             "Page.navigate",
             &serde_json::json!({ "url": url }).to_string(),
         );
+    }
+
+    /// Open `url` and record the page's console for `window`. A CDP init
+    /// script would catch the first line too, but it dies with the call that
+    /// added it, and each `agent-browse cdp` is its own connection. `watch`
+    /// navigates on the connection it listens on, so nothing is missed.
+    #[cfg(feature = "mesh")]
+    pub(super) fn navigate_watching_console(&self, url: &str, window: Duration) {
+        let watch = Command::new("agent-browse")
+            .arg("watch")
+            .arg("--folder")
+            .arg(&self.folder)
+            .args(["--group", "console"])
+            .arg(window.as_millis().to_string())
+            .arg(url)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        match watch {
+            Ok(watch) => *self.console.borrow_mut() = Some(watch),
+            Err(_) => self.navigate(url),
+        }
+    }
+
+    /// The console lines the watch recorded. `watch` prints only when its
+    /// window closes, and an interrupt discards what it held, so this blocks
+    /// until the window is over.
+    #[cfg(feature = "mesh")]
+    pub(super) fn console(&self) -> String {
+        let Some(watch) = self.console.borrow_mut().take() else {
+            return String::new();
+        };
+        watch
+            .wait_with_output()
+            .ok()
+            .and_then(|output| serde_json::from_slice(&output.stdout).ok())
+            .map(|events| console_lines(&events))
+            .unwrap_or_default()
     }
 
     /// One raw CDP call, as JSON.
@@ -125,6 +179,66 @@ impl Browser {
             })
             .unwrap_or_else(|| "unknown".to_owned())
     }
+}
+
+/// One line per console call. A `%c` in the first argument styles the text
+/// and takes the next argument as its CSS, so both are dropped.
+#[cfg(feature = "mesh")]
+fn console_lines(events: &serde_json::Value) -> String {
+    let events = events.as_array().map(Vec::as_slice).unwrap_or_default();
+    let lines: Vec<String> = events
+        .iter()
+        .filter_map(|event| {
+            let params = event.get("params")?;
+            let at = time_of_day(params);
+            let Some(args) = params.get("args").and_then(serde_json::Value::as_array) else {
+                return params
+                    .pointer("/exceptionDetails/exception/description")
+                    .or_else(|| params.pointer("/entry/text"))
+                    .map(|text| format!("{at} {}", super::json_to_string(text)));
+            };
+            let mut texts = args.iter().map(|arg| {
+                arg.get("value")
+                    .or_else(|| arg.get("description"))
+                    .map(super::json_to_string)
+                    .unwrap_or_default()
+            });
+            let first = texts.next().unwrap_or_default();
+            let styles = first.matches("%c").count();
+            let line = std::iter::once(first.replace("%c", ""))
+                .chain(texts.skip(styles))
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(format!("{at} {line}"))
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// An event's UTC time of day, spelled as the native log spells it, so the
+/// two logs line up. CDP stamps console calls in epoch milliseconds, and log
+/// entries under `entry`.
+#[cfg(feature = "mesh")]
+fn time_of_day(params: &serde_json::Value) -> String {
+    let millis = params
+        .get("timestamp")
+        .or_else(|| params.pointer("/entry/timestamp"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_default();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "an epoch-millisecond stamp is positive and far inside u64"
+    )]
+    let millis = millis as u64;
+    let seconds = millis / 1000 % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}Z",
+        seconds / 3600,
+        seconds / 60 % 60,
+        seconds % 60,
+        millis % 1000
+    )
 }
 
 /// Run one cell and harvest what the page published.

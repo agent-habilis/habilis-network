@@ -1,22 +1,22 @@
-//! Selecting a mesh, standing it up, and leaving it — the one ritual both
-//! consumers run.
+//! Selecting a mesh, standing it up, and leaving it — the one ritual every
+//! embedding runs.
 
 use std::sync::Arc;
 
+use crate::embed::NodeSink;
+use crate::net::TransportOpts;
+use crate::protocol::JoinTarget;
+use crate::protocol::Nickname;
+use crate::protocol::{DirectorySelection, Lookup, MeshConfig, MeshName, RelayLadder, Transport};
+use crate::runtime::{CreateParams, JoinParams, Node, Resolved};
+use crate::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
+use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 use anyhow::{Context, Result};
-use fofoca::embed::NodeSink;
-use fofoca::net::TransportOpts;
-use fofoca::protocol::JoinTarget;
-use fofoca::protocol::Nickname;
-use fofoca::protocol::{DirectorySelection, Lookup, MeshConfig, MeshName, RelayLadder, Transport};
-use fofoca::runtime::{CreateParams, JoinParams, Node, Resolved};
-use fofoca::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
-use fofoca::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use crate::app::{Inbound, PipeApp};
-use crate::wire::{DEPARTURE_GRACE, INBOUND_CAP};
+use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
+use crate::net::PathFlags;
 
 /// How the caller selects a mesh — an id to join, a shared string to derive one
 /// from, or a create over the choices below.
@@ -64,29 +64,6 @@ pub struct Opts {
     pub max_peers: usize,
 }
 
-/// Per-node path switches, mirrored from the engine's `TransportOpts`. Not
-/// the mesh's transport policy: that says what payload *may* ride and is in
-/// the id; this says what *this node* has. Only the two a consumer plausibly
-/// turns off are exposed: the relay stays (it is the rendezvous) and multihop
-/// stays an engine concern.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct PathFlags {
-    /// Direct UDP and hole-punched paths.
-    pub ip: bool,
-    /// QUIC over a `WebRTC` data channel.
-    pub webrtc: bool,
-}
-
-impl Default for PathFlags {
-    fn default() -> Self {
-        Self {
-            ip: true,
-            webrtc: true,
-        }
-    }
-}
-
 /// The ladder these options name, or `None` for the default. Parsed as one
 /// list, so an empty or bad entry is an error rather than a shrunk ladder.
 fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
@@ -104,26 +81,25 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
     missing_debug_implementations,
     reason = "Node's Debug is manual and says nothing a caller wants; the identity a reader would look for is on `node` already"
 )]
-pub struct Session {
-    pub node: Node<PipeApp>,
-    /// Inbound `pipe_*` frames in arrival order, bounded at
-    /// [`INBOUND_CAP`](crate::wire::INBOUND_CAP).
+pub struct Membership {
+    pub node: Node<MembershipApp>,
+    /// Inbound `msg` frames in arrival order, bounded at [`INBOUND_CAP`].
     pub inbound: mpsc::Receiver<Inbound>,
 }
 
 /// Resolve `opts`, stand the mesh up, and spawn the event loop.
 ///
-/// The single setup ritual both consumers run. A browser and a terminal reach
+/// The single setup ritual every embedding runs. A browser and a terminal reach
 /// each other only if they agree on the mesh id, the transports and the spawn
 /// flags, so none of those is written twice. The one thing that differs is
 /// `sink`: the C caller passes `SilentSink` because it can only poll, and the
-/// browser passes [`json_sink`](crate::event::json_sink)'s because it has a
+/// browser passes [`json_sink`](super::json_sink)'s because it has a
 /// callback.
 ///
 /// # Errors
 /// An unparseable id/topic/nickname, conflicting selectors, a mesh no peer on
 /// this target could reach, or a failure standing up the endpoint and overlay.
-pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Session> {
+pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
     let nickname = opts
         .nick
         .clone()
@@ -168,20 +144,16 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Session> {
             sink,
             // The engine binds its own endpoint and serves no extra
             // ALPNs here: injecting either is for a consumer that
-            // already owns an iroh endpoint, which a byte pipe does
+            // already owns an iroh endpoint, which an embedded member does
             // not.
             endpoint: None,
             protocols: Vec::new(),
             // The caller's switches over everything this target has. In a
             // browser the WebRTC lane is the only one that exists, and the
             // engine attaches it per target.
-            transports: TransportOpts {
-                ip: opts.paths.ip,
-                webrtc: opts.paths.webrtc,
-                ..TransportOpts::default()
-            },
+            transports: TransportOpts::from(opts.paths),
             multihop: false,
-            // A byte pipe publishes no per-peer identity, so `meta`
+            // An embedded member publishes no per-peer identity, so `meta`
             // stays free-form.
             per_peer_gate: None,
             cohost: None,
@@ -197,24 +169,24 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Session> {
     // traps signals itself and closes the handle.
     let node = Node::spawn(
         config,
-        PipeApp::new(inbound_tx),
+        MembershipApp::new(inbound_tx),
         /* push */ None,
         /* handle_signals */ false,
     );
 
-    Ok(Session { node, inbound })
+    Ok(Membership { node, inbound })
 }
 
-impl Session {
+impl Membership {
     /// Push a request into the event loop and await its reply — the dance
-    /// every consumer of the pipe (the wasm peer, the task runner's native
+    /// every embedding (the wasm peer, the C ABI, the task runner's native
     /// side, the chat example) had re-implemented on its own.
     ///
     /// # Errors
     /// The event loop stopped, or dropped the reply.
     pub async fn request<T>(
         &self,
-        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> crate::Request,
+        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> Request,
     ) -> Result<T, String> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.node
@@ -239,7 +211,7 @@ impl Session {
 ///
 /// # Errors
 /// The event loop returned an error or panicked.
-pub async fn depart(node: Node<PipeApp>) -> Result<()> {
+pub async fn depart(node: Node<MembershipApp>) -> Result<()> {
     n0_future::time::sleep(DEPARTURE_GRACE).await;
     node.leave().await
 }
@@ -317,8 +289,8 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
 
 #[cfg(test)]
 mod tests {
-    use fofoca::protocol::{LookupOpts, RelayChoice};
-    use fofoca::runtime::derive_topic_mesh_with;
+    use crate::protocol::{LookupOpts, RelayChoice};
+    use crate::runtime::derive_topic_mesh_with;
 
     use super::*;
 
@@ -642,7 +614,7 @@ mod tests {
 #[cfg(test)]
 mod resolve_tests {
     use super::*;
-    use fofoca::runtime::TopicParams;
+    use crate::runtime::TopicParams;
 
     /// The collapse of the bare-topic early return rests on this identity: a
     /// tab and a terminal meet only if the no-override arm keeps deriving the

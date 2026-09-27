@@ -47,7 +47,7 @@ cargo run -p chat-native -- host
 ./build-wasm.sh
 cd web && bun install && bun run dev
 
-# 3. open the URL the room printed — http://localhost:3000/#<ticket>
+# 3. open the URL the room printed — http://localhost:3000/#<ticket>, on the port dev printed
 ```
 
 Another terminal peer, over `WebRTC` like a tab:

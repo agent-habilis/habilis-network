@@ -8,16 +8,16 @@ they all meet in the same mesh, so a tab and a terminal chat to each other.
 ## Run
 
 ```sh
-cargo task wasm-peer     # once, builds the browser peer
+cargo task build-wasm    # once, builds the browser peer
 bun install              # once, at the repo root
 
-bun run serve            # then open the printed URL
-bun run serve 4000       # or on another port
+bun run serve            # 3010, or the next free port up to 3019; open the printed URL
+bun run serve 4000       # exactly 4000, or fail
 ```
 
 `serve.ts` bundles `src/chat.ts` on each request and serves the wasm glue from
 `packages/fofoca-wasm/wasm/`, so a page reload picks up an edit with no build
-step. Without `cargo task wasm-peer` there is no glue to serve.
+step. Without `cargo task build-wasm` there is no glue to serve.
 
 ## Selectors
 

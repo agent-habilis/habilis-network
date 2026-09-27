@@ -30,7 +30,7 @@ path = "src/lib.rs"
 fofoca-protocol = { path = "../fofoca-protocol", default-features = false }
 fofoca-util = { path = "../fofoca-util", default-features = false }
 # The only crate that names tracing-subscriber, which drags in the regex engine
-# behind EnvFilter (~0.7 MiB of __text). See docs/mesh-slimming.md.
+# behind EnvFilter (~0.7 MiB of __text).
 tracing.workspace = true
 # The file sink only exists on a host; a browser logs to the console.
 tracing-subscriber = { workspace = true, optional = true }

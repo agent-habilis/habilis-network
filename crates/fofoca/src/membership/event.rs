@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use fofoca::embed::{NodeEvent, NodeSink};
-use fofoca::protocol::{MessageKind, PresenceSubtype};
+use crate::embed::{NodeEvent, NodeSink};
+use crate::protocol::{MessageKind, PresenceSubtype};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 /// already has a byte array.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PipeEvent {
+pub enum MembershipEvent {
     Ready {
         mesh: String,
         name: String,
@@ -66,13 +66,13 @@ pub enum PipeEvent {
 ///
 /// No `_ =>` arm: `clippy::wildcard_enum_match_arm` is a workspace warn, so a
 /// new [`NodeEvent`] variant fails this build instead of vanishing.
-fn classify(event: NodeEvent) -> Option<PipeEvent> {
+fn classify(event: NodeEvent) -> Option<MembershipEvent> {
     match event {
         NodeEvent::Ready {
             mesh,
             name,
             nickname,
-        } => Some(PipeEvent::Ready {
+        } => Some(MembershipEvent::Ready {
             mesh: mesh.as_str().to_owned(),
             name: name.as_str().to_owned(),
             nick: nickname.to_string(),
@@ -92,27 +92,27 @@ fn classify(event: NodeEvent) -> Option<PipeEvent> {
                         subtype: PresenceSubtype::Left
                     }
                 ) {
-                    PipeEvent::Left { nick }
+                    MembershipEvent::Left { nick }
                 } else {
-                    PipeEvent::Joined { nick }
+                    MembershipEvent::Joined { nick }
                 },
             )
         }
         NodeEvent::PeerTimeout {
             nickname,
             last_seen_secs_ago,
-        } => Some(PipeEvent::Quiet {
+        } => Some(MembershipEvent::Quiet {
             nick: nickname.to_string(),
             last_seen_secs_ago,
         }),
-        NodeEvent::PeerReturn { nickname } => Some(PipeEvent::Returned {
+        NodeEvent::PeerReturn { nickname } => Some(MembershipEvent::Returned {
             nick: nickname.to_string(),
         }),
         NodeEvent::Fork {
             nickname,
             pubkey,
             seq,
-        } => Some(PipeEvent::Fork {
+        } => Some(MembershipEvent::Fork {
             nick: nickname.to_string(),
             pubkey,
             seq,
@@ -122,14 +122,14 @@ fn classify(event: NodeEvent) -> Option<PipeEvent> {
             event,
             document,
             is_self,
-        } => Some(PipeEvent::StateChanged {
+        } => Some(MembershipEvent::StateChanged {
             channel: channel.label().to_owned(),
             author: event.author.to_string(),
             document,
             is_self,
         }),
-        NodeEvent::Info(text) => Some(PipeEvent::Info { text }),
-        NodeEvent::Error(text) => Some(PipeEvent::Error { text }),
+        NodeEvent::Info(text) => Some(MembershipEvent::Info { text }),
+        NodeEvent::Error(text) => Some(MembershipEvent::Error { text }),
         NodeEvent::PingReport { .. } => None,
     }
 }
@@ -160,7 +160,7 @@ impl NodeSink for JsonSink {
                 let _ = self.events.send(json);
             }
             Err(error) => tracing::warn!(
-                target: "fofoca::messages",
+                target: "crate::messages",
                 %error,
                 "dropping an unserializable node event"
             ),
@@ -170,7 +170,7 @@ impl NodeSink for JsonSink {
 
 /// A sink plus the queue it fills.
 ///
-/// Unbounded, unlike the frame queue: dropping a `pipe_data` frame costs one
+/// Unbounded, unlike the frame queue: dropping an app frame costs one
 /// message, where dropping a `left` leaves a phantom peer in the consumer's
 /// mirror forever. Events are small and rare.
 #[must_use]

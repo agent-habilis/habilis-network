@@ -25,7 +25,7 @@ export { MeshOverflowError } from './fanout.ts'
 
 // The seam. A consumer never needs these; a third backend would.
 export type {
-  BackendFrame,
+  BackendMsg,
   BackendOpen,
   BackendSink,
   MeshBackend,

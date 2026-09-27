@@ -1,4 +1,4 @@
-# The browser build of the byte-pipe embedding: `fofoca-pipe` behind a
+# The browser build of the mesh embedding: `fofoca::membership` behind a
 # wasm-bindgen class. The counterpart of `fofoca-ffi` — one wire contract,
 # two builds — and the crate behind `packages/fofoca-wasm`.
 #
@@ -9,7 +9,7 @@
 # the lint pass and the shared lockfile.
 [package]
 name = "fofoca-wasm"
-description = "fofoca mesh peer for the browser: the fofoca-pipe embedding behind a wasm-bindgen class"
+description = "fofoca mesh peer for the browser: fofoca::membership behind a wasm-bindgen class"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
@@ -25,12 +25,15 @@ anyhow.workspace = true
 # `--no-default-features`: the portable half only — no `host`, no IPC
 # listener, no state file, nothing a browser has no equivalent of.
 fofoca = { path = "../fofoca", default-features = false }
-fofoca-pipe = { path = "../fofoca-pipe" }
+# The byte streams behind the `StreamNode` class.
+fofoca-stream = { path = "../fofoca-stream" }
 serde_json.workspace = true
 # Deliberately not the workspace entry: that one turns on `net`, which drags
 # `mio`, which refuses to build for wasm32. `sync` alone is the plain
 # channel/mutex data structures — no runtime, no `tokio::spawn`.
 tokio = { version = "1", default-features = false, features = ["sync"] }
+# `future::or`: a stream handle's waits race its close.
+n0-future.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

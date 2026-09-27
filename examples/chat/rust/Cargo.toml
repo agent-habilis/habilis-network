@@ -1,0 +1,30 @@
+[package]
+name = "chat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The chat example's native half: a terminal chat on the fofoca mesh"
+publish = false
+
+# LAN and DHT lookups for a `--topic` chat, forwarded the way the stream CLI
+# forwards them: they gate engine dependencies, so they are named on `fofoca`.
+[features]
+default = ["mdns", "dht"]
+mdns = ["fofoca/mdns"]
+dht = ["fofoca/dht"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "chat"
+path = "src/main.rs"
+
+[dependencies]
+# The engine without its defaults; the lookups come back through the features
+# above.
+fofoca = { path = "../../../crates/fofoca", default-features = false }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

@@ -15,12 +15,7 @@ export async function runHuman(mesh: Mesh): Promise<void> {
 
   const messagesLoop = (async () => {
     for await (const message of mesh.messages()) {
-      if (message.eof) {
-        console.log(`* ${message.from} ended their stream`)
-      } else {
-        const shown = message.text ?? `<${message.bytes.byteLength} binary bytes>`
-        console.log(`${message.from}${message.directed ? ' (to you)' : ''}: ${shown}`)
-      }
+      console.log(`${message.from}${message.directed ? ' (to you)' : ''}: ${message.text}`)
     }
   })()
 

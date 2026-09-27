@@ -34,7 +34,7 @@ path = "src/lib.rs"
 # `iroh-base`, which is the dependency-light half of iroh (serde, postcard,
 # url — no QUIC, no TLS, no DNS). The gossip topic is a local 32-byte newtype
 # (`topic::TopicId`) precisely so this crate need not name iroh-gossip; the
-# engine converts at the gossip boundary. See docs/mesh-slimming.md.
+# engine converts at the gossip boundary.
 [dependencies]
 fofoca-util = { path = "../fofoca-util", default-features = false }
 # `relay` is an iroh-base default that the workspace entry turns off for the

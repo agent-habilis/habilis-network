@@ -98,7 +98,7 @@ export function loadWithBun(path: string): NativeLibrary {
     isNull: (pointer) => pointer === null || pointer === 0,
     open: (opts: WireOpts) => {
       const encoded = encodeOpts(opts, (buffer) => BigInt(ptr(buffer)))
-      const handle = call('fofoca_open', ptr(encoded.struct))
+      const handle = call('fofoca_mesh_open', ptr(encoded.struct))
       // Read after the call so the optimizer cannot collect the string
       // buffers while the engine is still reading their addresses.
       void encoded.keepAlive.length

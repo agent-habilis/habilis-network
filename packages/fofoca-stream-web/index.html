@@ -1,0 +1,57 @@
+<!doctype html>
+<!--
+  The stream page. A person opens the URL a `fofoca-stream` printed and
+  watches the stream land, or opens it bare to produce one; an agent drives the
+  same tab through WebMCP; the e2e driver reads the same DOM. See src/main.ts
+  for the URL and DOM contracts.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fofoca stream</title>
+    <style>
+      body {
+        font: 14px/1.5 ui-monospace, monospace;
+        margin: 0;
+        display: grid;
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto 1fr auto;
+        height: 100vh;
+      }
+      header { padding: 0.5rem 1rem; border-bottom: 1px solid #ddd; display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; }
+      h1 { font-size: 1rem; margin: 0; }
+      #status, #webmcp { color: #666; }
+      #webmcp[data-registered='true'] { color: #1a7f37; }
+      #streams { margin: 0; padding: 1rem; overflow-y: auto; }
+      #streams pre { margin: 0 0 1rem; padding: 0.5rem 0.75rem; white-space: pre-wrap; word-break: break-word; border-left: 3px solid #7326d3; background: #faf8fd; }
+      #streams pre[data-self='true'] { border-left-color: #999; background: #f6f6f6; }
+      #streams pre[data-self='true']::before { content: attr(data-from) ' (you)'; color: #666; }
+      #streams pre[data-complete='true']::after { content: '⏹ end of stream'; display: block; color: #999; margin-top: 0.25rem; }
+      #share { padding: 0.5rem 1rem; border-bottom: 1px solid #ddd; word-break: break-all; }
+      #share[data-attached='true'] #share-state { color: #1a7f37; }
+      #composer { display: flex; border-top: 1px solid #ddd; }
+      #input { flex: 1; font: inherit; border: 0; padding: 0.75rem 1rem; outline: none; resize: none; height: 3rem; }
+      button { font: inherit; border: 0; background: #7326d3; color: white; padding: 0 1.5rem; cursor: pointer; }
+      #close { background: #666; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>fofoca stream</h1>
+      <div id="status">opening…</div>
+      <div id="webmcp" data-registered="false"></div>
+    </header>
+    <div id="share" hidden>
+      hash <code id="share-hash"></code> · <span id="share-link"></span> ·
+      <span id="share-state">waiting for a reader</span>
+    </div>
+    <div id="streams"></div>
+    <div id="composer" hidden>
+      <textarea id="input" placeholder="text to write…"></textarea>
+      <button id="send" type="button">write</button>
+      <button id="close" type="button" title="end the stream">close</button>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

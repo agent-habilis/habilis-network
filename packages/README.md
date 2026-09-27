@@ -11,8 +11,8 @@ roster and merge the shared document without writing any Rust.
 
 Two backends because the two hosts reach the engine differently: a tab has no
 UDP socket, a terminal has real ones. They meet on the mesh because both speak
-[`crates/fofoca-pipe`](../crates/fofoca-pipe)'s wire contract, which exists as
-one crate for exactly that reason.
+`fofoca::membership` (in [`crates/fofoca`](../crates/fofoca)), which exists as
+one module for exactly that reason.
 
 ```ts
 import { join } from 'fofoca-ffi' // or 'fofoca-wasm'
@@ -49,19 +49,52 @@ cannot open a direct path stays unlinked for data. `transport: ['p2p',
 joiners inherit whatever the creator chose. `relayUrls` says *which* relay
 and nothing about its role.
 
+## Byte streams
+
+A mesh carries short text messages. To move bytes from one peer to one other,
+use a stream: it never rides the gossip. By default it rides a direct path (a
+WebRTC data channel from a tab), and with `transport: ['p2p', 'relay']` it can
+fall back to the relay (the node must also name `relay` among its lookups; a
+browser always does).
+
+A write waits for the reader to attach, so the two ends run in two places:
+here, two tabs.
+
+```ts
+// The producing tab.
+import { bindStreams } from 'fofoca-wasm'
+
+const producer = await (await bindStreams({ lookup: ['relay'] })).create()
+share(producer.hash) // whoever holds the hash can read the stream, once
+await producer.write('hello') // waits here until the reader attaches
+await producer.close()
+```
+
+```ts
+// The reading tab, given the hash.
+import { bindStreamsFor } from 'fofoca-wasm'
+
+const reader = await (await bindStreamsFor(hash)).open(hash)
+for await (const chunk of reader) { … }
+```
+
+[`fofoca-stream-web`](fofoca-stream-web) is a page built on this: it reads the
+stream in its URL fragment, or produces one. The `fofoca-stream` binary
+(`crates/fofoca-stream-cli`) is the terminal end.
+
 ## The harness page
 
 `fofoca-wasm` ships a driverless test page: build the wasm
-(`cargo task wasm-peer`), serve it
+(`cargo task build-wasm`), serve it
 (`bun run harness -- 3000`), and open
 
 ```
 http://127.0.0.1:3000/?topic=room&transport=p2p&log=fofoca=info
 ```
 
-The page joins the mesh the query names and mirrors the roster, every frame,
+The page joins the mesh the query names and mirrors the roster, every message,
 every event and the shared state into the DOM; `window.harness` exposes
-`send`/`sendEof`/`stateMerge`/`close`. `cargo task e2e --suite mesh` drives
+`send`/`stateMerge`/`close`. `cargo task e2e --suite mesh` drives
 this page against a real native peer and a local relay — the native↔web
 matrix.
 

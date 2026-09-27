@@ -243,7 +243,7 @@ pub(crate) fn ensure_bun(why: &str) -> TaskOutcome {
 }
 
 /// The whole browser-peer preamble the two e2e suites and `cargo task
-/// wasm-peer` share: tooling check, wasm env, build, announce.
+/// build-wasm` share: tooling check, wasm env, build, announce.
 pub(crate) fn build_browser_peer() -> Result<PathBuf, String> {
     check_wasm_bindgen().map_err(|error| error.to_string())?;
     let env = wasm_env()?;
@@ -253,10 +253,15 @@ pub(crate) fn build_browser_peer() -> Result<PathBuf, String> {
     Ok(glue)
 }
 
-/// Build one cargo example and take its path from cargo's own JSON, for the
+/// Build one binary target and take its path from cargo's own JSON, for the
 /// same stale-artifact reason [`build`] does.
 #[cfg(feature = "mesh")]
-pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, String> {
+pub(crate) fn build_binary(package: &str, bin: &str) -> Result<PathBuf, String> {
+    build_target(package, "--bin", bin)
+}
+
+#[cfg(feature = "mesh")]
+fn build_target(package: &str, kind: &str, name: &str) -> Result<PathBuf, String> {
     let built = Command::new("cargo")
         .current_dir(repo_root())
         .args([
@@ -264,8 +269,8 @@ pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, Str
             "--quiet",
             "-p",
             package,
-            "--example",
-            example,
+            kind,
+            name,
             "--message-format=json",
         ])
         .output()
@@ -282,7 +287,7 @@ pub(crate) fn build_example(package: &str, example: &str) -> Result<PathBuf, Str
         .next_back();
     artifact.filter(|path| path.is_file()).ok_or_else(|| {
         format!(
-            "could not build the {example} example:
+            "could not build {name} ({kind}):
 {}",
             String::from_utf8_lossy(&built.stderr).trim()
         )

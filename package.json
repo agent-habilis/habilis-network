@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "typecheck:node": "tsc --noEmit -p packages/fofoca-api && tsc --noEmit -p packages/fofoca-ffi && tsc --noEmit -p examples/chat/bun-ffi",
-    "typecheck:web": "tsc --noEmit -p packages/fofoca-wasm && tsc --noEmit -p examples/chat/web",
+    "typecheck:web": "tsc --noEmit -p packages/fofoca-wasm && tsc --noEmit -p packages/fofoca-stream-web && tsc --noEmit -p examples/chat/web",
     "typecheck": "bun run typecheck:node && bun run typecheck:web",
     "test": "bun test packages"
   },

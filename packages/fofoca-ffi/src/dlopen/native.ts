@@ -36,14 +36,14 @@ export interface NativeLibrary {
   isNull(ptr: NativePointer): boolean
 
   /**
-   * `fofoca_open`, at loader level because it is the one struct-by-pointer
+   * `fofoca_mesh_open`, at loader level because it is the one struct-by-pointer
    * call: embedding string pointers into a byte-encoded struct is the single
    * thing the three runtimes cannot spell the same way. Returns the handle,
    * which is NULL on failure — check with [`isNull`].
    */
   open(opts: WireOpts): NativePointer
 
-  /** Release the dlopen handle itself. The mesh handle is closed via `fofoca_close`. */
+  /** Release the dlopen handle itself. The mesh handle is closed via `fofoca_mesh_close`. */
   close(): void
 }
 

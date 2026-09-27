@@ -84,9 +84,8 @@ enum Task {
     },
     /// Build the C ABI staticlib and diff its exports against `fofoca.h`.
     Ffi,
-    /// Build the browser peer (fofoca-wasm) and emit its JS glue into
-    /// packages/fofoca-wasm/wasm.
-    WasmPeer,
+    /// Build fofoca-wasm and emit its JS glue into packages/fofoca-wasm/wasm.
+    BuildWasm,
     /// Drive the WebRTC browser tests against real browsers.
     ///
     /// The default `matrix` suite sweeps browser × build profile × main-thread
@@ -128,7 +127,7 @@ fn dispatch(sh: &Shell, task: Task) -> TaskOutcome {
         Task::Test { scope } => scoped(sh, &scope, dev::test),
         Task::Wasm { scope } => scoped(sh, &scope, wasm::run),
         Task::Ffi => ffi::run(sh),
-        Task::WasmPeer => wasm::build_peer(sh),
+        Task::BuildWasm => wasm::build_peer(sh),
         Task::E2e(args) => e2e::run(&args),
         Task::Clean => dev::clean(sh),
     }

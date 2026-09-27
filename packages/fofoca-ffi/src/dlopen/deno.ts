@@ -133,7 +133,7 @@ export function loadWithDeno(path: string): NativeLibrary {
     isNull: (pointer) => pointer === null,
     open: (opts: WireOpts) => {
       const encoded = encodeOpts(opts, (buffer) => deno.UnsafePointer.value(deno.UnsafePointer.of(buffer)))
-      const handle = call('fofoca_open', deno.UnsafePointer.of(encoded.struct))
+      const handle = call('fofoca_mesh_open', deno.UnsafePointer.of(encoded.struct))
       void encoded.keepAlive.length
       return handle
     },

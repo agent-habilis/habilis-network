@@ -64,13 +64,8 @@ export function ffiOpener(wire: WireOpts, deps: OpenerDeps = {}): Opener {
           pending.delete(message.id)
           break
         }
-        case 'frame': {
-          sink.frame({
-            from: message.from,
-            directed: message.directed,
-            eof: message.eof,
-            bytes: new Uint8Array(message.bytes),
-          })
+        case 'msg': {
+          sink.msg({ from: message.from, directed: message.directed, text: message.text })
           break
         }
         case 'roster': {
@@ -123,17 +118,9 @@ export function ffiOpener(wire: WireOpts, deps: OpenerDeps = {}): Opener {
       id: reply.id,
       name: reply.name,
       nick: reply.nick,
-      maxChunk: reply.maxChunk,
-      send: async (to, bytes) => {
-        // Copy before transferring: the caller's view may outlive this call,
-        // and a transferred buffer is detached under it. A constructor copy,
-        // not `slice()`: a Node or Bun `Buffer` is a `Uint8Array` whose
-        // `slice` is `subarray`, a view over a shared pool.
-        const copy = new Uint8Array(bytes)
-        await request({ t: 'send', to, bytes: copy.buffer }, [copy.buffer])
-      },
-      sendEof: async (to) => {
-        await request({ t: 'sendEof', to })
+      maxMsg: reply.maxMsg,
+      send: async (to, text) => {
+        await request({ t: 'send', to, text })
       },
       stateMerge: async (json) => (await request({ t: 'stateMerge', json })) as string,
       close: async () => {
@@ -176,7 +163,7 @@ export function joinWire(opts: JoinOpts): WireOpts {
   const topic = opts.topic ?? null
   const mesh = opts.id ?? null
   if (topic === null && mesh === null) {
-    // `fofoca_open` with neither selector *creates* a mesh — join({}) would
+    // `fofoca_mesh_open` with neither selector *creates* a mesh — join({}) would
     // silently mint a loopback mesh of one and hear nobody, ever.
     throw new Error('join needs a topic or an id; to start a fresh mesh use create()')
   }

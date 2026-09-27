@@ -39,7 +39,7 @@ use super::admission::{Refusal, SignalAdmission};
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
 /// [`super::UNICAST_ALPN`] is: both ends must agree, so it moves only with a
 /// deliberate protocol break.
-pub(crate) const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1";
+pub const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1";
 
 /// How long to let one negotiation run before giving up.
 ///
@@ -154,16 +154,9 @@ impl SignalDeadlines {
 /// the browser backend ignores it, because a tab is never a loopback peer — it
 /// has no loopback peers to reach.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct IceProfile {
+pub struct IceProfile {
     /// Gather host candidates only: no STUN, no TURN, no packets off the box.
-    #[cfg_attr(
-        target_arch = "wasm32",
-        expect(
-            dead_code,
-            reason = "the browser backend ignores it; kept on both targets per the note above"
-        )
-    )]
-    pub(crate) host_only: bool,
+    pub host_only: bool,
 }
 
 /// The peer refused us at its direct-peer ceiling.
@@ -234,7 +227,7 @@ fn refused_at_cap(conn: &Connection) -> bool {
 /// routing it through the loop would put a multi-second negotiation on the one
 /// task that must never block.
 #[derive(Debug, Clone)]
-pub(crate) struct WebRtcSignalAcceptor {
+pub struct WebRtcSignalAcceptor {
     handle: WebRtcHandle,
     /// For registering the peer's transport address on attach; see
     /// [`register_session_addr`].
@@ -249,7 +242,8 @@ pub(crate) struct WebRtcSignalAcceptor {
 }
 
 impl WebRtcSignalAcceptor {
-    pub(crate) fn new(
+    #[must_use]
+    pub fn new(
         handle: WebRtcHandle,
         endpoint: Endpoint,
         local: EndpointId,
@@ -431,7 +425,7 @@ async fn answer_one(
 /// # Errors
 /// The signalling dial fails, the peer refuses, or the negotiation does not
 /// complete before the deadline.
-pub(crate) async fn dial_signal(
+pub async fn dial_signal(
     endpoint: &Endpoint,
     peer: EndpointAddr,
     handle: &WebRtcHandle,
@@ -594,12 +588,28 @@ pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
     !addr.is_empty() && addr.ip_addrs().next().is_none()
 }
 
-/// The local-node twin of [`needs_webrtc_lane`]: whether *this* node's
-/// rendezvous graft must wait for a data-channel session. A wasm node never
-/// has IP transports whatever the flags say; with the relay allowed as a
-/// transport nothing needs holding.
+/// The local-node twin of [`needs_webrtc_lane`]: does *this* node need the
+/// lane? Answered from the node's own transport set, never from its address
+/// snapshot — that snapshot is empty while the relay link is down, and empty
+/// reads as "unknown" for a remote but must not for ourselves. A wasm node
+/// never has IP transports whatever the flags say.
+pub(crate) fn local_needs_webrtc_lane(has_ip_transport: bool) -> bool {
+    cfg!(target_arch = "wasm32") || !has_ip_transport
+}
+
+/// Whether a pair needs the lane: **either** end lacking IP is enough. The
+/// remote is judged by its advertised address, this node by what it knows
+/// about itself.
+#[must_use]
+pub fn pair_needs_lane(remote: &EndpointAddr, local_has_ip_transport: bool) -> bool {
+    needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_ip_transport)
+}
+
+/// Whether *this* node's rendezvous graft must wait for a data-channel
+/// session: a lane-needing node on a lookup-only mesh. With the relay allowed
+/// as a transport nothing needs holding.
 pub(crate) fn node_graft_needs_session(relay_transport: bool, has_ip_transport: bool) -> bool {
-    !relay_transport && (cfg!(target_arch = "wasm32") || !has_ip_transport)
+    !relay_transport && local_needs_webrtc_lane(has_ip_transport)
 }
 
 pub(crate) fn negotiate_session(
@@ -626,7 +636,7 @@ pub(crate) fn negotiate_session(
     // browser that evaluates this. It would see the native peer's IP, skip,
     // and the native — waiting to be dialled — would never offer. The pair
     // would silently never get a channel.
-    if !needs_webrtc_lane(&addr) && !needs_webrtc_lane(&ctx.endpoint.addr()) {
+    if !pair_needs_lane(&addr, state.local_ip_transport) {
         tracing::debug!(
             target: LOG_TARGET,
             %peer,
@@ -708,8 +718,12 @@ fn spawn_offer_round(
 /// is the liveness proof — so [`negotiate_rendezvous_session`] reports it
 /// through the loop's `DirectOutcome` channel and the graft fires there,
 /// within the freshly proven window.
+///
+/// An IP-capable node joins that rule once it falls back to offering: a
+/// beacon it could not punch to in a whole heal interval is a tab, and a
+/// timer graft there is the same doomed dial.
 pub(crate) fn rendezvous_graftable(state: &crate::daemon::state::EventLoopState) -> bool {
-    !state.rendezvous_graft_needs_session
+    !state.rendezvous_graft_needs_session && !state.rendezvous_offer_fallback
 }
 
 /// Offer a `WebRTC` session to the **rendezvous** itself.
@@ -738,7 +752,7 @@ pub(crate) fn negotiate_rendezvous_session(
     let Some(handle) = state.webrtc.clone() else {
         return;
     };
-    if !needs_webrtc_lane(&ctx.endpoint.addr()) && !state.rendezvous_offer_fallback {
+    if !local_needs_webrtc_lane(state.local_ip_transport) && !state.rendezvous_offer_fallback {
         // An IP-capable peer normally reaches the rendezvous by punching
         // inside the bootstrap connection — the data channel would be a
         // worse path — so the punch gets the first heal tick. But IP
@@ -791,6 +805,23 @@ pub(crate) fn negotiate_rendezvous_session(
         guard,
         Some("webrtc session attached to the rendezvous"),
     );
+}
+
+/// The first rendezvous offer, made when the loop starts. The heal tick that
+/// otherwise makes it is a whole interval away, and until it runs a
+/// browser-shaped node has no path onto a lookup-only mesh; a beacon that
+/// re-checks inside that window finds nobody negotiating and sheds.
+///
+/// Only a node that needs the lane: an IP-capable node's first call arms the
+/// offer fallback, which holds its timer grafts before its punch has had a
+/// heal interval to land.
+pub(crate) fn offer_rendezvous_at_start(
+    state: &mut crate::daemon::state::EventLoopState,
+    ctx: &crate::daemon::ctx::HandlerCtx<'_>,
+) {
+    if local_needs_webrtc_lane(state.local_ip_transport) {
+        negotiate_rendezvous_session(state, ctx);
+    }
 }
 
 // ── Per-target JSEP ───────────────────────────────────────────────────────
@@ -1038,6 +1069,11 @@ pub(crate) fn retry_sessions(
     // them. The cheap disqualifiers run before the clone — a peer whose
     // session is already attached (admission would refuse it with
     // `HaveSession` anyway) or a pure-IP pair costs a map walk, nothing more.
+    // Judged by the address snapshot on purpose, unlike `negotiate_session`:
+    // a browser's own address reads as "unknown" here, so its retry pass
+    // covers relay-only peers (other tabs) and leaves natives to dial it.
+    // Read through `local_needs_webrtc_lane` the pass re-offered to every
+    // native each tick, colliding with the native's own dial.
     let own_addr = ctx.endpoint.addr();
     let own_needs_lane = needs_webrtc_lane(&own_addr);
     let mut peers: Vec<EndpointAddr> = state
@@ -1171,6 +1207,28 @@ mod tests {
         assert!(
             !pair_needs_lane(&native, &native),
             "two native peers must stay on iroh's own transports"
+        );
+    }
+
+    /// **A node's own lane is a fact about the node, not about its address
+    /// snapshot.** A browser whose relay link just dropped has an empty
+    /// endpoint address for a moment; read through `needs_webrtc_lane` that
+    /// is "unknown", and a pair with a native peer was left on iroh's own
+    /// transports — which a browser does not have. Observed in Safari: every
+    /// probe timed out and the peer stayed relay-only for good.
+    #[test]
+    fn a_node_without_ip_needs_the_lane_even_while_its_own_address_is_empty() {
+        let native = native_shaped(SecretKey::from_bytes(&[7u8; 32]).public());
+        // The address is not consulted at all for the local end; a node
+        // without IP transports needs the lane, full stop.
+        assert!(
+            pair_needs_lane(&native, false),
+            "a node with no IP transport must offer whatever its address says"
+        );
+        assert!(local_needs_webrtc_lane(false));
+        assert!(
+            !pair_needs_lane(&native, true),
+            "two IP-capable peers stay on iroh's own transports"
         );
     }
 
@@ -1587,7 +1645,6 @@ mod tests {
     /// failing; everything below the relay's presence is covered by
     /// [`a_gossip_graft_by_bare_id_rides_the_attached_session`].
     #[cfg(feature = "iroh-test-utils")]
-    #[ignore = "red on the pinned iroh revs until the fork fixes land; see issue #2. Run with --ignored"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_graft_prefers_the_session_over_the_relay() {
         use futures_util::StreamExt as _;
@@ -1699,13 +1756,106 @@ mod tests {
         client.close().await;
     }
 
+    /// A relayed connection still open when the session attaches, which is
+    /// what the beacon's accept gate does to a graft for up to its deadline:
+    /// iroh then holds a selected relay path to the remote and consults no
+    /// address lookup for it, so registering the session address in a lookup
+    /// alone left every later bare-id dial on the relay. Observed as a
+    /// browser-first mesh cell that never linked.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bare_id_dial_rides_the_session_past_a_held_relay_link() {
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler};
+
+        /// Keeps every accepted connection open until the dialer closes it.
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        const HOLD_ALPN: &[u8] = b"fofoca/test-hold";
+
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        // No IP on either side, as between a tab and a tab-held beacon: the
+        // relay and the session are the only paths there are.
+        let relay_only = |key: SecretKey, handle: &WebRtcHandle| {
+            let builder = Endpoint::builder(presets::Minimal)
+                .secret_key(key)
+                .relay_mode(RelayMode::custom([relay_url.clone()]))
+                .add_custom_transport(handle.transport())
+                .path_selector(handle.path_selector())
+                .clear_ip_transports();
+            async move { builder.bind().await.expect("bind relay-only endpoint") }
+        };
+        let server_key = SecretKey::generate();
+        let server_hub = WebRtcHandle::new(WebRtcTransport::new(server_key.public()));
+        let server = relay_only(server_key, &server_hub).await;
+        let client_key = SecretKey::generate();
+        let client_hub = WebRtcHandle::new(WebRtcTransport::new(client_key.public()));
+        let client = relay_only(client_key, &client_hub).await;
+
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = Router::builder(server.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                WebRtcSignalAcceptor::new(
+                    server_hub.clone(),
+                    server.clone(),
+                    server.id(),
+                    admission.clone(),
+                    IceProfile { host_only: true },
+                ),
+            )
+            .accept(HOLD_ALPN, Hold)
+            .spawn();
+
+        let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+        let held = client
+            .connect(relay_addr.clone(), HOLD_ALPN)
+            .await
+            .expect("a relayed connection before any session");
+        dial_signal_with(
+            &client,
+            relay_addr,
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session");
+
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.connect(EndpointAddr::new(server.id()), HOLD_ALPN),
+        )
+        .await
+        .expect("a bare-id dial must not hang")
+        .expect("a bare-id dial must connect");
+        let direct = super::super::path::wait_direct(&conn, Duration::from_secs(10)).await;
+        conn.close(0u32.into(), b"done");
+        held.close(0u32.into(), b"done");
+        assert!(
+            direct,
+            "a dial after the attach must reach the session, not only the relay"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+        server.close().await;
+    }
+
     /// The real join order: the graft is attempted *before* any session
     /// exists — the gate holds the relayed connection for its deadline and
     /// closes it — and only then does the session attach. The re-graft after
     /// the refusal must still link; if a refused connection poisons later
     /// dials to the same peer, this is the test that says so.
     #[cfg(feature = "iroh-test-utils")]
-    #[ignore = "red on the pinned iroh revs until the fork fixes land; see issue #2. Run with --ignored"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_graft_recovers_after_a_refused_relay_attempt() {
         use futures_util::StreamExt as _;
@@ -1919,5 +2069,23 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         client.close().await;
+    }
+
+    /// An IP-capable node that fell back to offering the rendezvous a
+    /// session — the beacon is a tab, with no UDP to punch to — grafts on the
+    /// attach, never on a timer. A timer graft dials before the session
+    /// exists, so its connection has only the relay path; the tab's accept
+    /// gate holds it and refuses it after `PROBE_DEADLINE`, and the attach
+    /// that follows does not replace it. Observed every 30 s for a whole
+    /// browser-first cell.
+    #[test]
+    fn an_offer_fallback_holds_the_timer_graft() {
+        let mut state = crate::testing::fresh_state();
+        assert!(
+            rendezvous_graftable(&state),
+            "an IP-capable node grafts on its timer until it falls back"
+        );
+        state.rendezvous_offer_fallback = true;
+        assert!(!rendezvous_graftable(&state));
     }
 }

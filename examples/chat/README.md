@@ -6,7 +6,7 @@ program a person can run, and the same program the e2e suite drives.
 
 | | |
 |---|---|
-| [`rust/`](rust) | A pointer to the native half, [`crates/fofoca-pipe/examples/chat.rs`](../../crates/fofoca-pipe/examples/chat.rs): a terminal chat over the byte-pipe wire contract. |
+| [`rust/`](rust) | The native half: a terminal chat on `fofoca::membership`, the `chat` package. |
 | [`web/`](web) | The browser half: `fofoca-wasm` behind a chat page. |
 | [`bun-ffi/`](bun-ffi) | A terminal chat in TypeScript: Bun on `packages/fofoca-ffi`, which `dlopen`s the C ABI. |
 
@@ -18,9 +18,9 @@ and outside a browser its direct lane has no WebRTC to stand on.
 Build the wasm once, serve the page, start a terminal peer, meet on a topic:
 
 ```sh
-cargo task wasm-peer                               # once, and after engine changes
-cd examples/chat/web && bun run serve              # http://127.0.0.1:3010/
-cargo run -p fofoca-pipe --example chat -- --topic room --nick terminal
+cargo task build-wasm                              # once, and after engine changes
+cd examples/chat/web && bun run serve              # prints its URL, 3010 or the next free port
+cargo run -p chat -- --topic room --nick terminal
 ```
 
 A third peer from Bun, on the C ABI:
@@ -30,7 +30,7 @@ cargo build --release -p fofoca-ffi                # once
 cd examples/chat/bun-ffi && bun run start --topic room --nick bun
 ```
 
-Open `http://127.0.0.1:3010/?topic=room&nick=browser` and chat. Type to
+Open the printed URL with `?topic=room&nick=browser` and chat. Type to
 broadcast; `/msg <nick> <text>` sends a direct message (`relay-only` peers
 refuse it by design — payload never rides the relay unless the mesh says
 so); `/peers` prints the roster; `/quit` leaves.

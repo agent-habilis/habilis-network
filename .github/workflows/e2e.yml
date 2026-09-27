@@ -1,0 +1,62 @@
+name: E2E
+
+# A real browser against the real binary: heavier than the checks in ci.yml
+# (a wasm build, Chrome, a browser pairing), so it runs as its own workflow.
+# The binaries-only end-to-end test (crates/fofoca-stream-cli/tests/binary.rs)
+# runs in ci.yml's `cargo test --workspace` on every change.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The stream end to end: the real `fofoca-stream` binary against the real
+  # stream page in a real browser, over a local relay, both directions. It is
+  # the only CI run of a browser and a native peer pairing. Chrome here is
+  # driven through chromedriver (`--only chrome-ci`): the default Chrome for
+  # Testing backend needs `agent-browse`, which a runner does not have.
+  stream:
+    name: e2e (stream)
+    runs-on: ubuntu-latest
+    # Each scenario bounds its own waits (open, attach, payload, exit), so a
+    # healthy run ends well inside this; a hang ends as a red check.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      # The same rule as light-cycles (web) in ci.yml: the CLI's version is
+      # read out of Cargo.lock, so the glue and the wasm cannot disagree. The
+      # CLI also brings `wasm-bindgen-test-runner`, which the runner checks for.
+      - name: Install wasm-bindgen-cli
+        run: |
+          version=$(cargo pkgid wasm-bindgen | sed 's/.*[@#]//')
+          echo "wasm-bindgen resolved to $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+        with:
+          install-chromedriver: true
+
+      - name: Stream suite
+        run: cargo task e2e --suite stream --only chrome-ci
+        env:
+          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
+          CHROMEDRIVER: ${{ steps.chrome.outputs.chromedriver-path }}

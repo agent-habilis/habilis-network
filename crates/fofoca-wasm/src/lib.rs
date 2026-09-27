@@ -1,18 +1,20 @@
-//! A fofoca mesh peer for the browser: [`fofoca_pipe`] behind one
+//! A fofoca mesh peer for the browser: [`fofoca::membership`] behind one
 //! wasm-bindgen class.
 //!
-//! Everything crosses the JS boundary as a JSON string — options in, frames,
+//! Everything crosses the JS boundary as a JSON string — options in, messages,
 //! events, roster and state out — because a `js_sys::Function` is neither
 //! `Send` nor `Sync` and could never be held by the engine's sink; the JS
-//! side polls [`MeshPeer::next_frame`] / [`MeshPeer::next_event`] instead
+//! side polls [`MeshPeer::next_msg`] / [`MeshPeer::next_event`] instead
 //! (the same shape `packages/fofoca-api` was designed around). One in-flight
 //! call per queue: the receivers are behind async mutexes, so a second
-//! concurrent `nextFrame()` waits rather than panics.
+//! concurrent `nextMsg()` waits rather than panics.
+
+mod stream;
 
 use std::cell::RefCell;
 
+use fofoca::membership::{Inbound, MAX_MSG, MembershipApp, Opts, Request, json_sink};
 use fofoca::runtime::Node;
-use fofoca_pipe::{Inbound, Opts, PipeApp, Request, json_sink};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use wasm_bindgen::prelude::*;
 
@@ -24,20 +26,19 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct MeshPeer {
     /// `Some` until [`MeshPeer::close`]; `Drop` aborts the loop either way.
-    node: RefCell<Option<Node<PipeApp>>>,
+    node: RefCell<Option<Node<MembershipApp>>>,
     sender: mpsc::Sender<Request>,
     inbound: Mutex<mpsc::Receiver<Inbound>>,
     events: Mutex<mpsc::UnboundedReceiver<String>>,
     id: String,
     nick: String,
     name: String,
-    chunk: usize,
 }
 
 #[wasm_bindgen]
 impl MeshPeer {
     /// Join (or create) the mesh `opts_json` selects — a JSON encoding of
-    /// `fofoca_pipe::Opts`, the same object `fofoca-ffi` takes. Resolves to
+    /// `fofoca::membership::Opts`, the same object `fofoca-ffi` takes. Resolves to
     /// the live peer once the mesh is set up.
     ///
     /// # Errors
@@ -48,17 +49,16 @@ impl MeshPeer {
         let opts: Opts = serde_json::from_str(&opts_json)
             .map_err(|error| to_js_error(&format!("invalid options: {error}")))?;
         let (sink, events) = json_sink();
-        let session = fofoca_pipe::join(&opts, sink)
+        let membership = fofoca::membership::join(&opts, sink)
             .await
             .map_err(|error| to_js_error(&format!("{error:#}")))?;
-        let node = session.node;
+        let node = membership.node;
         Ok(MeshPeer {
             id: node.mesh_id().to_string(),
             nick: node.nickname().to_string(),
             name: node.name().to_string(),
-            chunk: fofoca_pipe::default_chunk(),
             sender: node.sender(),
-            inbound: Mutex::new(session.inbound),
+            inbound: Mutex::new(membership.inbound),
             events: Mutex::new(events),
             node: RefCell::new(Some(node)),
         })
@@ -82,50 +82,43 @@ impl MeshPeer {
         self.name.clone()
     }
 
-    /// The largest payload one frame carries; bigger sends are split.
-    #[wasm_bindgen(js_name = maxChunk)]
+    /// The longest message in bytes that always fits one frame. Most text
+    /// fits well past it; a send that does not fit is refused, not split.
+    #[wasm_bindgen(js_name = maxMsg)]
     #[must_use]
-    pub fn max_chunk(&self) -> usize {
-        self.chunk
+    pub fn max_msg(&self) -> usize {
+        MAX_MSG
     }
 
-    /// Send `bytes` — broadcast with `to` absent, directed at that nickname
-    /// otherwise. Splits at the single-frame budget.
+    /// Send one message — broadcast with `to` absent, directed at that
+    /// nickname otherwise.
     ///
     /// # Errors
-    /// The event loop has stopped, the addressee is unknown, or the engine
-    /// refused a frame (a directed frame held for a direct path, say).
-    pub async fn send(&self, to: Option<String>, bytes: Vec<u8>) -> Result<(), JsValue> {
-        let to = fofoca_pipe::parse_to(to.as_deref()).map_err(|error| to_js_error(&error))?;
-        for slice in bytes.chunks(self.chunk) {
-            let body = fofoca_pipe::data_body(slice).map_err(|error| to_js_error(&error))?;
-            self.request_send(fofoca_pipe::data_tag(), to.clone(), body)
-                .await?;
-        }
-        Ok(())
+    /// The message does not fit one frame, the addressee is not a valid
+    /// nickname, the event loop has stopped, or the engine refused the frame
+    /// (a directed frame held for a direct path, say).
+    pub async fn send(&self, to: Option<String>, text: String) -> Result<(), JsValue> {
+        let to =
+            fofoca::membership::parse_to(to.as_deref()).map_err(|error| to_js_error(&error))?;
+        let body = fofoca::membership::msg_body(&text).map_err(|error| to_js_error(&error))?;
+        let (reply, answer) = oneshot::channel();
+        self.request(Request::Send { to, body, reply }).await?;
+        answer
+            .await
+            .map_err(|_| to_js_error("mesh event loop has stopped"))?
+            .map_err(|error| to_js_error(&error))
     }
 
-    /// Send the end-of-stream marker.
-    ///
-    /// # Errors
-    /// As for [`MeshPeer::send`].
-    #[wasm_bindgen(js_name = sendEof)]
-    pub async fn send_eof(&self, to: Option<String>) -> Result<(), JsValue> {
-        let to = fofoca_pipe::parse_to(to.as_deref()).map_err(|error| to_js_error(&error))?;
-        let body = fofoca_pipe::eof_body().map_err(|error| to_js_error(&error))?;
-        self.request_send(fofoca_pipe::eof_tag(), to, body).await
+    /// The next inbound message, as JSON: `{"nick","directed","text"}`.
+    /// `null` once the mesh is gone and the queue is drained.
+    #[wasm_bindgen(js_name = nextMsg)]
+    pub async fn next_msg(&self) -> Option<String> {
+        let msg = self.inbound.lock().await.recv().await?;
+        Some(msg_json(&msg))
     }
 
-    /// The next inbound frame, as JSON:
-    /// `{"nick","directed","eof","bytes":[…u8]}`. `null` once the mesh is
-    /// gone and the queue is drained.
-    #[wasm_bindgen(js_name = nextFrame)]
-    pub async fn next_frame(&self) -> Option<String> {
-        let frame = self.inbound.lock().await.recv().await?;
-        Some(frame_json(&frame))
-    }
-
-    /// The next surfaced node event (`fofoca_pipe::PipeEvent`), as JSON.
+    /// The next surfaced node event (`fofoca::membership::MembershipEvent`),
+    /// as JSON.
     /// `null` once the mesh is gone and the queue is drained.
     #[wasm_bindgen(js_name = nextEvent)]
     pub async fn next_event(&self) -> Option<String> {
@@ -202,29 +195,9 @@ impl MeshPeer {
         let Some(node) = node else {
             return Ok(());
         };
-        fofoca_pipe::depart(node)
+        fofoca::membership::depart(node)
             .await
             .map_err(|error| to_js_error(&format!("{error:#}")))
-    }
-
-    async fn request_send(
-        &self,
-        tag: fofoca::protocol::AppTag,
-        to: Option<fofoca::protocol::Nickname>,
-        body: fofoca::protocol::MessageBody,
-    ) -> Result<(), JsValue> {
-        let (reply, answer) = oneshot::channel();
-        self.request(Request::Send {
-            tag,
-            to,
-            body,
-            reply,
-        })
-        .await?;
-        answer
-            .await
-            .map_err(|_| to_js_error("mesh event loop has stopped"))?
-            .map_err(|error| to_js_error(&error))
     }
 
     async fn request(&self, request: Request) -> Result<(), JsValue> {
@@ -235,17 +208,16 @@ impl MeshPeer {
     }
 }
 
-fn frame_json(frame: &Inbound) -> String {
+fn msg_json(msg: &Inbound) -> String {
     serde_json::json!({
-        "nick": frame.nick,
-        "directed": frame.directed,
-        "eof": frame.eof,
-        "bytes": frame.bytes,
+        "nick": msg.nick,
+        "directed": msg.directed,
+        "text": msg.text,
     })
     .to_string()
 }
 
-fn to_js_error(message: &(impl std::fmt::Display + ?Sized)) -> JsValue {
+pub(crate) fn to_js_error(message: &(impl std::fmt::Display + ?Sized)) -> JsValue {
     JsValue::from_str(&message.to_string())
 }
 

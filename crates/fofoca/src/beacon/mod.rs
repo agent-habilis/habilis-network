@@ -108,9 +108,43 @@ pub(crate) struct Rendezvous {
     /// dead beacon lingers as a zombie until the idle timeout, stalling the
     /// post-shed re-graft.
     endpoint: Endpoint,
+    /// The beacon's own `WebRTC` answerer: the handle a tab's session to the
+    /// rendezvous attaches to, and the admission its negotiations hold a
+    /// slot in. The peer endpoint has its own pair, which says nothing about
+    /// who depends on the beacon. `None` where the beacon carries no lane.
+    lane: Option<(
+        fofoca_iroh_webrtc_transport::WebRtcHandle,
+        crate::transport::SignalAdmission,
+    )>,
 }
 
 impl Rendezvous {
+    /// How many peers depend on this beacon's data channel: sessions attached
+    /// to its answerer, plus rounds still negotiating one.
+    pub(crate) fn dependents(&self) -> usize {
+        self.lane.as_ref().map_or(0, |(handle, admission)| {
+            handle.session_count() + admission.in_flight()
+        })
+    }
+
+    /// A beacon holding `endpoint` whose answerer is `lane`, for a test that
+    /// needs a held beacon without a claim.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        endpoint: Endpoint,
+        lane: Option<(
+            fofoca_iroh_webrtc_transport::WebRtcHandle,
+            crate::transport::SignalAdmission,
+        )>,
+    ) -> Self {
+        Self {
+            task: n0_future::task::spawn(std::future::pending()),
+            monitor: None,
+            endpoint,
+            lane,
+        }
+    }
+
     /// Release the beacon *gracefully*: abort the tasks, then close the
     /// endpoint off-loop so every peer holding a link to it (including our
     /// own peer) sees an immediate `NeighborDown` instead of a
@@ -697,14 +731,20 @@ async fn claim(
     // A *public* rendezvous answers JSEP (`build_rendezvous_endpoint` put
     // the transport on the endpoint): a browser-shaped peer has no other
     // way onto a mesh whose relay is lookup only.
+    let lane = webrtc.map(|handle| {
+        (
+            handle,
+            crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS),
+        )
+    });
     let (gossip, router) = build_mesh(
         endpoint.clone(),
         crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
-        webrtc.map(|handle| {
+        lane.clone().map(|(handle, admission)| {
             (
                 handle,
-                crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS),
+                admission,
                 crate::transport::IceProfile { host_only: false },
             )
         }),
@@ -771,6 +811,7 @@ async fn claim(
         task,
         monitor,
         endpoint: rendezvous_endpoint,
+        lane,
     });
     true
 }
@@ -825,6 +866,7 @@ mod tests {
             task,
             monitor: None,
             endpoint,
+            lane: None,
         }
     }
 
@@ -942,6 +984,7 @@ mod tests {
                 task: n0_future::task::spawn(std::future::pending()),
                 monitor: Some(monitor),
                 endpoint,
+                lane: None,
             };
 
             rendezvous.shed_and_wait().await;
@@ -1116,6 +1159,7 @@ mod tests {
             task: n0_future::task::spawn(std::future::pending()),
             monitor: None,
             endpoint: endpoint.clone(),
+            lane: None,
         });
 
         assert!(!releasable(&mut slot), "a live beacon is not releasable");

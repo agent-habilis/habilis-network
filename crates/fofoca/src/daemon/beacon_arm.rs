@@ -295,15 +295,35 @@ pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: Endpoin
     let jitter_ms = rand::Rng::random_range(&mut rand::rng(), 0..=base_secs.saturating_mul(1000));
     Duration::from_secs(base_secs) + Duration::from_millis(jitter_ms)
 }
+/// How many steady intervals a shed may be held back while a data-channel
+/// peer depends on this beacon.
+///
+/// A shed drops the rendezvous a browser reached us through, and a browser
+/// has no second path to fall back on: the tab's roster empties and its
+/// transfer stops. Native peers re-dial, so the wait is for the lane that
+/// cannot. Bounded rather than indefinite because the shed is also how two
+/// split holders discover each other, and a pair that each kept a tab would
+/// otherwise never merge.
+const MAX_SHED_DEFERRALS: u32 = 3;
+
+/// Whether this due shed waits a round: someone is on the data channel, or
+/// negotiating one, and we have not already waited our limit.
+pub(super) fn defer_shed(dependents: usize, deferrals: u32) -> bool {
+    dependents > 0 && deferrals < MAX_SHED_DEFERRALS
+}
+
 /// Arm the next rival re-check after a fresh claim (a `None` → live
 /// `beacon::ensure` transition). No-op for sessions the shed doesn't
-/// apply to, so every claim site can call it unconditionally.
+/// apply to, so every claim site can call it unconditionally. A fresh claim
+/// is a new beacon, so it also starts with the full shed wait: a beacon
+/// replaced without a shed would otherwise inherit its predecessor's count.
 pub(super) fn schedule_rival_recheck(
     state: &mut EventLoopState,
     policy: CoHostPolicy,
     params: &beacon::RendezvousParams,
     endpoint: &Endpoint,
 ) {
+    state.rival_recheck_deferrals = 0;
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
@@ -337,6 +357,22 @@ pub(super) fn shed_rival_beacon_if_due(
     if !due {
         return false;
     }
+    let dependents = rendezvous
+        .as_ref()
+        .map_or(0, beacon::Rendezvous::dependents);
+    if defer_shed(dependents, state.rival_recheck_deferrals) {
+        state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
+        state.next_rival_recheck =
+            Some(Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()));
+        tracing::info!(
+            target: "fofoca::gossip",
+            dependents,
+            deferrals = state.rival_recheck_deferrals,
+            "beacon rival re-check deferred: a data-channel peer is hanging off this beacon"
+        );
+        return false;
+    }
+    state.rival_recheck_deferrals = 0;
     tracing::info!(
         target: "fofoca::gossip",
         "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
@@ -369,10 +405,125 @@ pub(super) fn shed_rival_beacon_if_due(
 mod tests {
     use super::super::config::CoHostPolicy;
     use super::{
-        claims_at_startup, next_recheck_delay, probes_before_claim, regrafts_rendezvous,
-        rival_recheck_applies,
+        MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
+        regrafts_rendezvous, rival_recheck_applies,
     };
     use std::time::Duration;
+
+    /// A shed cuts the rendezvous a browser reached us through, and the tab
+    /// has nothing else: its roster empties mid-transfer. Observed as a
+    /// terminal cycling claim and release while a tab saw no peers at all.
+    #[test]
+    fn a_due_shed_waits_while_a_data_channel_peer_depends_on_us() {
+        assert!(defer_shed(1, 0), "a tab is hanging off this beacon");
+        assert!(!defer_shed(0, 0), "nobody on the channel: shed on time");
+    }
+
+    /// Public-mesh rendezvous parameters: the rival re-check applies to them.
+    fn public_params() -> crate::beacon::RendezvousParams {
+        let secret = iroh::SecretKey::generate();
+        crate::beacon::RendezvousParams {
+            topic_id: iroh_gossip::proto::TopicId::from_bytes([7u8; 32]),
+            id: secret.public(),
+            secret,
+            bind_ports: Vec::new(),
+            lookups: crate::protocol::mesh::LookupOpts::loopback(),
+            relay_transport: false,
+            bootstrap_relay: None,
+            rung_tx: tokio::sync::watch::channel(None).0,
+        }
+    }
+
+    async fn loopback_endpoint() -> iroh::Endpoint {
+        crate::lookup::build_endpoint(
+            &crate::protocol::mesh::LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            crate::lookup::TransportHandles::default(),
+        )
+        .await
+        .expect("loopback endpoint")
+    }
+
+    /// A held beacon with one tab negotiating on it. The tab counts as a
+    /// dependent for as long as the returned guard lives.
+    fn beacon_with_a_negotiating_tab(
+        params: &crate::beacon::RendezvousParams,
+        endpoint: iroh::Endpoint,
+    ) -> (Option<crate::beacon::Rendezvous>, impl Sized) {
+        use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
+        let handle = crate::lookup::new_webrtc_handle(params.id);
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let tab = iroh::SecretKey::generate().public();
+        let round = admission.try_admit(tab, &handle).expect("a free slot");
+        let rendezvous = crate::beacon::Rendezvous::for_test(endpoint, Some((handle, admission)));
+        (Some(rendezvous), round)
+    }
+
+    /// A tab negotiating with the beacon has no session yet, and a shed then
+    /// cuts the rendezvous it is about to link through. Observed: a shed 7 ms
+    /// before the tab's session attached, after which the tab found the
+    /// rendezvous free and claimed it. The count is the beacon's own answerer:
+    /// the peer's handle never holds a tab's session with the beacon.
+    #[tokio::test]
+    async fn a_due_shed_waits_for_a_tab_negotiating_with_the_beacon() {
+        let params = public_params();
+        let arm = super::CohostArm {
+            policy: CoHostPolicy::EagerProbed,
+            params: &params,
+            started: crate::util::clock::Instant::now(),
+        };
+        let mut state = crate::testing::fresh_state();
+        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        let (mut rendezvous, _round) =
+            beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
+
+        assert!(!super::shed_rival_beacon_if_due(
+            &mut state,
+            &arm,
+            &mut rendezvous
+        ));
+        assert!(rendezvous.is_some(), "the beacon is still held");
+    }
+
+    /// A beacon claimed after another went without a shed (a co-host task
+    /// ended, `ensure` claimed again) is a new beacon: the deferrals its
+    /// predecessor used up must not cut short the wait for a tab on this one.
+    #[tokio::test]
+    async fn a_new_claim_starts_with_the_full_wait() {
+        let params = public_params();
+        let arm = super::CohostArm {
+            policy: CoHostPolicy::EagerProbed,
+            params: &params,
+            started: crate::util::clock::Instant::now(),
+        };
+        let endpoint = loopback_endpoint().await;
+        let mut state = crate::testing::fresh_state();
+        // The previous beacon waited its limit.
+        state.rival_recheck_deferrals = MAX_SHED_DEFERRALS;
+
+        super::schedule_rival_recheck(&mut state, arm.policy, &params, &endpoint);
+
+        let (mut rendezvous, _round) = beacon_with_a_negotiating_tab(&params, endpoint);
+        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        assert!(
+            !super::shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous),
+            "the new beacon's first due shed must wait for its tab"
+        );
+        assert!(rendezvous.is_some(), "the beacon is still held");
+    }
+
+    /// Bounded, or two holders that each kept a tab would never find each
+    /// other and the overlays would stay split for good.
+    #[test]
+    fn the_wait_runs_out() {
+        assert!(defer_shed(2, MAX_SHED_DEFERRALS - 1));
+        assert!(
+            !defer_shed(2, MAX_SHED_DEFERRALS),
+            "past the limit the shed happens anyway, so split holders still merge"
+        );
+    }
 
     /// Regression for a two-peer loopback mesh that never formed: a peer
     /// whose rendezvous link dropped in the first milliseconds after

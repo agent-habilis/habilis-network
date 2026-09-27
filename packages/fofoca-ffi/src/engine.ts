@@ -10,7 +10,7 @@
  */
 
 import type { NativeLibrary, NativePointer } from './dlopen/native.ts'
-import { FRAME_BYTES, decodeFrame } from './frame.ts'
+import { MSG_BYTES, decodeMsg } from './msg.ts'
 import {
   type Command,
   type FromWorker,
@@ -32,14 +32,23 @@ export interface Engine {
   pumpOnce(): EngineStatus
 }
 
+/**
+ * The receive buffer's starting size: past the largest signed frame the engine
+ * accepts, so a `-2` (buffer too small) is a surprise rather than the norm.
+ * The engine keeps the message on `-2`, and the buffer grows for the retry.
+ */
+const RECV_BYTES = 4096
+
+const utf8 = new TextDecoder()
+
 export function createEngine(
   lib: NativeLibrary,
   port: EnginePort,
   now: () => number = Date.now,
 ): Engine {
   let handle: NativePointer | null = null
-  let payload = new Uint8Array(0)
-  const meta = new Uint8Array(FRAME_BYTES)
+  let payload = new Uint8Array(RECV_BYTES)
+  const meta = new Uint8Array(MSG_BYTES)
   let closed = false
   let lastPoll = 0
 
@@ -52,7 +61,9 @@ export function createEngine(
     throw new Error(lastError(call))
   }
 
-  const cstring = (call: 'fofoca_id' | 'fofoca_name' | 'fofoca_nickname' | 'fofoca_version') => {
+  const cstring = (
+    call: 'fofoca_mesh_id' | 'fofoca_mesh_name' | 'fofoca_mesh_nickname' | 'fofoca_version',
+  ) => {
     const pointer =
       call === 'fofoca_version'
         ? (lib.call(call) as NativePointer)
@@ -63,7 +74,7 @@ export function createEngine(
     return lib.readCString(pointer)
   }
 
-  const readDoc = (name: 'fofoca_state_json' | 'fofoca_peers_json'): string =>
+  const readDoc = (name: 'fofoca_mesh_state_json' | 'fofoca_mesh_peers_json'): string =>
     readDocument(name, (buffer, cap) => lib.call(name, handle, buffer, cap) as bigint, raise)
 
   const ok = (id: number, value: OpenReply | string | null) => {
@@ -83,20 +94,18 @@ export function createEngine(
     }
     const opened = lib.open(command.opts)
     if (lib.isNull(opened)) {
-      err(id, lastError('fofoca_open'))
+      err(id, lastError('fofoca_mesh_open'))
       return
     }
     handle = opened
-    const maxChunk = Number(lib.call('fofoca_max_chunk') as bigint)
-    payload = new Uint8Array(maxChunk)
     lastPoll = now()
     ok(id, {
-      id: cstring('fofoca_id'),
-      name: cstring('fofoca_name'),
-      nick: cstring('fofoca_nickname'),
-      rosterJson: readDoc('fofoca_peers_json'),
-      stateJson: readDoc('fofoca_state_json'),
-      maxChunk,
+      id: cstring('fofoca_mesh_id'),
+      name: cstring('fofoca_mesh_name'),
+      nick: cstring('fofoca_mesh_nickname'),
+      rosterJson: readDoc('fofoca_mesh_peers_json'),
+      stateJson: readDoc('fofoca_mesh_state_json'),
+      maxMsg: Number(lib.call('fofoca_max_msg') as bigint),
       version: cstring('fofoca_version'),
     })
   }
@@ -117,31 +126,11 @@ export function createEngine(
             err(command.id, 'no open mesh')
             break
           }
-          const bytes = new Uint8Array(command.bytes)
-          const code = lib.call(
-            'fofoca_send',
-            handle,
-            command.to,
-            bytes,
-            BigInt(bytes.byteLength),
-          ) as number
+          const code = lib.call('fofoca_msg_send', handle, command.to, command.text) as number
           if (code === 0) {
             ok(command.id, null)
           } else {
-            err(command.id, lastError('fofoca_send'))
-          }
-          break
-        }
-        case 'sendEof': {
-          if (handle === null) {
-            err(command.id, 'no open mesh')
-            break
-          }
-          const code = lib.call('fofoca_send_eof', handle, command.to) as number
-          if (code === 0) {
-            ok(command.id, null)
-          } else {
-            err(command.id, lastError('fofoca_send_eof'))
+            err(command.id, lastError('fofoca_msg_send'))
           }
           break
         }
@@ -150,20 +139,20 @@ export function createEngine(
             err(command.id, 'no open mesh')
             break
           }
-          const code = lib.call('fofoca_state_merge', handle, command.json) as number
+          const code = lib.call('fofoca_mesh_state_merge', handle, command.json) as number
           if (code === 0) {
             // Reply with the *resulting* document: `MeshBackend.stateMerge`'s
             // read-your-write contract, which the next poll is up to half a
             // second too late for.
-            ok(command.id, readDoc('fofoca_state_json'))
+            ok(command.id, readDoc('fofoca_mesh_state_json'))
           } else {
-            err(command.id, lastError('fofoca_state_merge'))
+            err(command.id, lastError('fofoca_mesh_state_merge'))
           }
           break
         }
         case 'close': {
           if (handle !== null) {
-            lib.call('fofoca_close', handle)
+            lib.call('fofoca_mesh_close', handle)
             handle = null
           }
           closed = true
@@ -186,31 +175,37 @@ export function createEngine(
       return status()
     }
     const code = lib.call(
-      'fofoca_recv',
+      'fofoca_msg_recv',
       handle,
       payload,
       BigInt(payload.byteLength),
       RECV_TIMEOUT_MS,
       meta,
     ) as bigint
-    if (code === 1n) {
-      let frame
+    if (code === 1n || code === -2n) {
+      let msg
       try {
-        frame = decodeFrame(meta)
+        msg = decodeMsg(meta)
       } catch (error) {
         port.post({ t: 'failed', message: String(error) })
         return status()
       }
-      const bytes = payload.slice(0, frame.len)
-      port.post(
-        { t: 'frame', from: frame.nick, directed: frame.directed, eof: frame.eof, bytes: bytes.buffer },
-        [bytes.buffer],
-      )
+      if (code === -2n) {
+        // Kept by the engine; the next pump takes it into the bigger buffer.
+        payload = new Uint8Array(msg.len + 1)
+        return status()
+      }
+      port.post({
+        t: 'msg',
+        from: msg.nick,
+        directed: msg.directed,
+        text: utf8.decode(payload.subarray(0, msg.len)),
+      })
     } else if (code < 0n) {
       // A recv failure is terminal: the engine's inbound channel is gone, and
       // pretending otherwise would spin on the same error 20 times a second.
-      const reason = lastError('fofoca_recv')
-      lib.call('fofoca_close', handle)
+      const reason = lastError('fofoca_msg_recv')
+      lib.call('fofoca_mesh_close', handle)
       handle = null
       closed = true
       port.post({ t: 'closed', reason })
@@ -220,8 +215,8 @@ export function createEngine(
     if (now() - lastPoll >= POLL_MS) {
       lastPoll = now()
       try {
-        port.post({ t: 'roster', json: readDoc('fofoca_peers_json') })
-        port.post({ t: 'state', json: readDoc('fofoca_state_json') })
+        port.post({ t: 'roster', json: readDoc('fofoca_mesh_peers_json') })
+        port.post({ t: 'state', json: readDoc('fofoca_mesh_state_json') })
       } catch (error) {
         // A poll failure has no caller waiting on it. Surface and keep going.
         port.post({ t: 'failed', message: error instanceof Error ? error.message : String(error) })
