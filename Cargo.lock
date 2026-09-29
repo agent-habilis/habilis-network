@@ -1511,6 +1511,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fofoca-bench-wasm"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "console_error_panic_hook",
+ "fofoca-iroh-webrtc-transport",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
 name = "fofoca-chunks"
 version = "0.6.0"
 dependencies = [
@@ -4828,6 +4841,7 @@ dependencies = [
  "anstyle",
  "clap",
  "fofoca",
+ "fofoca-iroh-webrtc-transport",
  "serde",
  "serde_json",
  "tokio",

@@ -96,7 +96,7 @@ pub struct SelfWriteGate {
 struct Pending {
     frame: Message,
     change: Change,
-    seq: u64,
+    arrival: u64,
 }
 
 /// One channel's automerge document plus the bookkeeping to apply changes in
@@ -121,10 +121,10 @@ pub struct MeshDoc {
     /// dependencies will ever arrive. An author who gossips a chain while
     /// withholding its first link parks every later one here for good.
     pending: HashMap<ChangeHash, Pending>,
-    /// Insertion order for `pending`, so the per-author ceiling can evict that
-    /// author's stalest orphan. A counter rather than a clock: this crate runs
-    /// in a browser too, where `Instant` is not available.
-    pending_seq: u64,
+    /// Insertion order for `pending`, so the per-author ceiling picks the same
+    /// victim among equal seqs on every run. A counter rather than a clock:
+    /// this crate runs in a browser too, where `Instant` is not available.
+    pending_arrivals: u64,
     /// Dedup keys of orphan frames dropped from `pending` since the last
     /// [`Self::take_dropped`]. The receive path marked them seen on arrival, so
     /// unless it forgets them the author's re-send is discarded as a repeat and
@@ -185,7 +185,7 @@ impl MeshDoc {
             applied,
             frames: HashMap::new(),
             pending: HashMap::new(),
-            pending_seq: 0,
+            pending_arrivals: 0,
             dropped: Vec::new(),
             gate,
             key: None,
@@ -299,12 +299,27 @@ impl MeshDoc {
         self.doc.get_heads().iter().map(encode_hash).collect()
     }
 
+    /// How many changes this document holds, the internal genesis included.
+    #[must_use]
+    pub fn change_count(&self) -> usize {
+        self.applied.len()
+    }
+
     /// The signed frames for changes a peer with heads `have` is missing, newest
     /// causal frontier first, capped at `max`. Undecodable heads are ignored (we
     /// then over-serve, never under-serve). The genesis change has no frame and
     /// is never sent — every replica constructs it locally.
     #[must_use]
     pub fn changes_since(&self, have: &[String], max: usize) -> Vec<Message> {
+        self.changes_since_not_by(have, "", max)
+    }
+
+    /// [`Self::changes_since`] without the frames signed by `pubkey`: a peer
+    /// holds every change it signed, since a change's actor is its signer's
+    /// key and a session key lives no longer than its document. Skipped
+    /// before the cap, so the budget goes to what the peer can lack.
+    #[must_use]
+    pub fn changes_since_not_by(&self, have: &[String], pubkey: &str, max: usize) -> Vec<Message> {
         let have: Vec<ChangeHash> = have
             .iter()
             .filter_map(|encoded| decode_hash(encoded))
@@ -312,9 +327,21 @@ impl MeshDoc {
         self.doc
             .get_changes(&have)
             .into_iter()
-            .filter_map(|change| self.frames.get(&change.hash()).cloned())
+            .filter_map(|change| self.frames.get(&change.hash()))
+            .filter(|frame| pubkey.is_empty() || frame.pubkey != pubkey)
             .take(max)
+            .cloned()
             .collect()
+    }
+
+    /// Whether this document holds every change in `heads`, Base58-encoded as
+    /// [`Self::heads`] gives them: a peer that advertises these heads is not
+    /// ahead of us. A head that does not decode counts as not held.
+    #[must_use]
+    pub fn holds_heads(&self, heads: &[String]) -> bool {
+        heads.iter().all(|encoded| {
+            decode_hash(encoded).is_some_and(|hash| self.doc.get_change_by_hash(&hash).is_some())
+        })
     }
 
     /// The derived document as JSON — the shape a consumer's `state`/`meta` read returns.
@@ -365,6 +392,14 @@ impl MeshDoc {
         let Ok(change) = Change::from_bytes(bytes) else {
             return Ingested::Ignored;
         };
+        if change.actor_id().to_hex_string() != frame.pubkey {
+            tracing::warn!(
+                target: LOG_TARGET,
+                author = %frame.author,
+                "dropping a channel change whose actor is not its signer's key"
+            );
+            return Ingested::Ignored;
+        }
         let hash = change.hash();
         if self.applied.contains(&hash) {
             return Ingested::Duplicate;
@@ -430,26 +465,36 @@ impl MeshDoc {
 
     /// Buffer an orphan under the per-author and global ceilings.
     ///
-    /// The author ceiling evicts *that author's* stalest orphan, so a peer
-    /// flooding orphans exhausts only itself. A global breach refuses the
-    /// newcomer instead: evicting across authors would let one hostile stream
-    /// push a joiner's honest backfill out of the buffer, which is the failure
-    /// the ceiling exists to prevent. Both mirror the reassembly store.
+    /// The author ceiling keeps *that author's* lowest seqs, so a peer flooding
+    /// orphans exhausts only itself. The lowest seqs are the links next to what
+    /// this doc holds, so they drain first; a kept tail waits on every link
+    /// below it. A global breach refuses the newcomer instead: evicting across
+    /// authors would let one hostile stream push a joiner's honest backfill out
+    /// of the buffer, which is the failure the ceiling exists to prevent. Both
+    /// mirror the reassembly store.
     fn buffer_orphan(&mut self, hash: ChangeHash, change: Change, frame: &Message) -> Ingested {
         if self.pending.contains_key(&hash) {
             return Ingested::Buffered;
         }
-        while self.pending_by(&frame.pubkey) >= DOC_PENDING_AUTHOR_MAX {
-            let Some(victim) = self.stalest_of(&frame.pubkey) else {
-                break;
-            };
+        if self.pending_by(&frame.pubkey) >= DOC_PENDING_AUTHOR_MAX
+            && let Some((victim, victim_seq)) = self.highest_of(&frame.pubkey)
+        {
+            if change.seq() >= victim_seq {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    author = %frame.author,
+                    "channel orphan buffer full for this author; incoming higher-seq orphan refused"
+                );
+                self.dropped.push(frame.dedup_key());
+                return Ingested::Ignored;
+            }
             if let Some(evicted) = self.pending.remove(&victim) {
                 self.dropped.push(evicted.frame.dedup_key());
             }
             tracing::warn!(
                 target: LOG_TARGET,
                 author = %frame.author,
-                "channel orphan buffer full for this author; stalest orphan evicted"
+                "channel orphan buffer full for this author; highest-seq orphan evicted"
             );
         }
         if self.pending.len() >= DOC_PENDING_TOTAL_MAX {
@@ -461,13 +506,13 @@ impl MeshDoc {
             self.dropped.push(frame.dedup_key());
             return Ingested::Ignored;
         }
-        self.pending_seq += 1;
+        self.pending_arrivals += 1;
         self.pending.insert(
             hash,
             Pending {
                 frame: frame.clone(),
                 change,
-                seq: self.pending_seq,
+                arrival: self.pending_arrivals,
             },
         );
         Ingested::Buffered
@@ -489,14 +534,15 @@ impl MeshDoc {
             .count()
     }
 
-    /// This pubkey's earliest-buffered orphan. Keyed on the pubkey rather than
-    /// the nickname, which an author picks freely.
-    fn stalest_of(&self, pubkey: &str) -> Option<ChangeHash> {
+    /// This pubkey's highest-seq orphan and its seq, the latest arrival among
+    /// equals. Keyed on the pubkey rather than the nickname, which an author
+    /// picks freely.
+    fn highest_of(&self, pubkey: &str) -> Option<(ChangeHash, u64)> {
         self.pending
             .iter()
             .filter(|(_, entry)| entry.frame.pubkey == pubkey)
-            .min_by_key(|(_, entry)| entry.seq)
-            .map(|(hash, _)| *hash)
+            .max_by_key(|(_, entry)| (entry.change.seq(), entry.arrival))
+            .map(|(hash, entry)| (*hash, entry.change.seq()))
     }
 
     /// Accounting snapshot `(pending, max_author_pending)` for the adversarial
@@ -774,22 +820,28 @@ fn put_number(
 mod tests {
     use super::wire::change_body;
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
+    use automerge::Change;
     use fofoca_protocol::{Channel, MeshId, Message, Nickname};
     use serde_json::{Value, json};
+    use std::collections::HashSet;
 
     fn nick(name: &str) -> Nickname {
         Nickname::from(name)
     }
 
-    /// Wrap change bytes in a signed-frame stand-in (the doc layer reads only
-    /// `author` + `body`; a valid signature is `gossip::ingest`'s job).
+    /// Wrap change bytes in a signed-frame stand-in, signed by the change's
+    /// actor. The doc layer reads `author`, `pubkey` and `body`; a valid
+    /// signature is `gossip::ingest`'s job.
     fn frame(who: &Nickname, bytes: &[u8]) -> Message {
-        Message::new_channel_event(
+        let change = Change::from_bytes(bytes.to_vec()).expect("a change");
+        let mut frame = Message::new_channel_event(
             &MeshId::from("test"),
             who,
             change_body(bytes, None).expect("body"),
             Channel::State,
-        )
+        );
+        frame.pubkey = change.actor_id().to_hex_string();
+        frame
     }
 
     /// Author a merge on `doc` (build + ingest, as the daemon does) and return
@@ -993,9 +1045,19 @@ mod tests {
         // One honest orphan parked first, from its own author.
         let honest_nick = nick("honest");
         let mut honest_source = MeshDoc::new_ungated();
-        let _honest_root = author(&mut honest_source, &honest_nick, &json!({"a": 1}));
-        let mut honest = author(&mut honest_source, &honest_nick, &json!({"b": 2}));
-        honest.pubkey = "11".repeat(32);
+        let honest_key = [0x11_u8; 32];
+        let _honest_root = author_as(
+            &mut honest_source,
+            &honest_nick,
+            &honest_key,
+            &json!({"a": 1}),
+        );
+        let honest = author_as(
+            &mut honest_source,
+            &honest_nick,
+            &honest_key,
+            &json!({"b": 2}),
+        );
         assert!(matches!(sink.ingest(&honest), Ingested::Buffered));
 
         // Sybil authors, each staying under the per-author ceiling, until the
@@ -1004,9 +1066,9 @@ mod tests {
         for who in 0..DOC_PENDING_TOTAL_MAX {
             let sybil = nick("sybil");
             let mut source = MeshDoc::new_ungated();
-            let _sybil_root = author(&mut source, &sybil, &json!({"a": who}));
-            let mut orphan = author(&mut source, &sybil, &json!({"b": who}));
-            orphan.pubkey = format!("{who:064x}");
+            let key = who.to_be_bytes();
+            let _sybil_root = author_as(&mut source, &sybil, &key, &json!({"a": who}));
+            let orphan = author_as(&mut source, &sybil, &key, &json!({"b": who}));
             if matches!(sink.ingest(&orphan), Ingested::Ignored) {
                 refused = true;
                 break;
@@ -1039,9 +1101,9 @@ mod tests {
         for who in 0..=DOC_PENDING_TOTAL_MAX {
             let sybil = nick("sybil");
             let mut source = MeshDoc::new_ungated();
-            let _root = author(&mut source, &sybil, &json!({"a": who}));
-            let mut orphan = author(&mut source, &sybil, &json!({"b": who}));
-            orphan.pubkey = format!("{who:064x}");
+            let key = who.to_be_bytes();
+            let _root = author_as(&mut source, &sybil, &key, &json!({"a": who}));
+            let orphan = author_as(&mut source, &sybil, &key, &json!({"b": who}));
             if matches!(sink.ingest(&orphan), Ingested::Ignored) {
                 refused = Some(orphan);
                 break;
@@ -1063,20 +1125,16 @@ mod tests {
         let mallory = nick("mallory");
 
         let mut alices = MeshDoc::new_ungated();
-        let alice_root = author(&mut alices, &alice, &json!({"a": 1}));
-        let mut alice_orphan = author(&mut alices, &alice, &json!({"b": 2}));
-        alice_orphan.pubkey = "aa".repeat(32);
+        let alice_key = [0xaa_u8; 32];
+        let alice_root = author_as(&mut alices, &alice, &alice_key, &json!({"a": 1}));
+        let alice_orphan = author_as(&mut alices, &alice, &alice_key, &json!({"b": 2}));
 
         let mut sink = MeshDoc::new_ungated();
         assert!(matches!(sink.ingest(&alice_orphan), Ingested::Buffered));
 
         let mut mallorys = MeshDoc::new_ungated();
         let flood: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 32)
-            .map(|step| {
-                let mut frame = author(&mut mallorys, &mallory, &json!({ "m": step }));
-                frame.pubkey = "bb".repeat(32);
-                frame
-            })
+            .map(|step| author_as(&mut mallorys, &mallory, &[0xbb; 32], &json!({ "m": step })))
             .collect();
         for frame in flood.iter().skip(1) {
             sink.ingest(frame);
@@ -1096,6 +1154,144 @@ mod tests {
         );
     }
 
+    /// A chain one change per key, `k0` first, authored by one actor.
+    fn keyed_chain(len: usize) -> Vec<Message> {
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        (0..len)
+            .map(|step| author(&mut source, &alice, &json!({ format!("k{step}"): step })))
+            .collect()
+    }
+
+    /// The number of chain changes that landed in `doc`.
+    fn landed(doc: &MeshDoc) -> usize {
+        doc.to_json().as_object().map_or(0, serde_json::Map::len)
+    }
+
+    /// Feed `order` into a fresh sink, then the root prefix `0..root_len`.
+    fn deliver(chain: &[Message], order: &[usize], root_len: usize) -> MeshDoc {
+        let mut sink = MeshDoc::new_ungated();
+        for &step in order {
+            sink.ingest(&chain[step]);
+        }
+        for frame in &chain[..root_len] {
+            sink.ingest(frame);
+        }
+        sink
+    }
+
+    /// A long backfill often reaches a joiner tail first. The buffer must keep
+    /// the links next to what the joiner holds, the lowest seqs: a kept tail
+    /// cannot drain until every link below it arrives again.
+    #[test]
+    fn a_full_orphan_buffer_keeps_the_lowest_seqs_of_an_author() {
+        let chain = keyed_chain(300);
+        let tail: Vec<usize> = (100..300).collect();
+        let sink = deliver(&chain, &tail, 100);
+        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+    }
+
+    /// Guard: when the tail arrives lowest seq last, the old arrival order and
+    /// the seq order keep the same links.
+    #[test]
+    fn a_reversed_tail_keeps_the_lowest_seqs_of_an_author() {
+        let chain = keyed_chain(300);
+        let tail: Vec<usize> = (100..300).rev().collect();
+        let sink = deliver(&chain, &tail, 100);
+        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+    }
+
+    /// The arrival order does not change which links stay.
+    #[test]
+    fn a_shuffled_tail_keeps_the_lowest_seqs_of_an_author() {
+        let chain = keyed_chain(300);
+        // 7919 shares no factor with 200, so it walks all 200 slots once each.
+        let tail: Vec<usize> = (0..200).map(|slot| 100 + slot * 7919 % 200).collect();
+        let sink = deliver(&chain, &tail, 100);
+        assert_eq!(landed(&sink), 100 + DOC_PENDING_AUTHOR_MAX);
+    }
+
+    /// Every link the buffer let go is handed back to the receive path, and
+    /// only those: the rest drain and must stay seen.
+    #[test]
+    fn a_full_orphan_buffer_reports_the_links_it_let_go() {
+        let chain = keyed_chain(300);
+        let tail: Vec<usize> = (100..300).collect();
+        let mut sink = deliver(&chain, &tail, 100);
+        let dropped: HashSet<[u8; 16]> = sink.take_dropped().into_iter().collect();
+        let let_go: HashSet<[u8; 16]> = chain[100 + DOC_PENDING_AUTHOR_MAX..]
+            .iter()
+            .map(Message::dedup_key)
+            .collect();
+        assert_eq!(dropped, let_go);
+    }
+
+    /// A change at the highest buffered seq is refused, not swapped in, even
+    /// when its content differs: seq is the only order the buffer trusts.
+    #[test]
+    fn a_full_orphan_buffer_refuses_a_second_change_at_its_highest_seq() {
+        let chain = keyed_chain(DOC_PENDING_AUTHOR_MAX + 1);
+        let alice = nick("alice");
+        let mut fork = MeshDoc::new_ungated();
+        let rival = (0..=DOC_PENDING_AUTHOR_MAX)
+            .map(|step| author(&mut fork, &alice, &json!({ format!("r{step}"): step })))
+            .last()
+            .expect("a rival chain");
+
+        let mut sink = MeshDoc::new_ungated();
+        for frame in &chain[1..] {
+            assert!(matches!(sink.ingest(frame), Ingested::Buffered));
+        }
+        assert!(matches!(sink.ingest(&rival), Ingested::Ignored));
+        assert_eq!(sink.take_dropped(), vec![rival.dedup_key()]);
+    }
+
+    /// automerge takes one change per `(actor, seq)`. A frame whose signer does
+    /// not own the change's actor could take an author's next seq, and the
+    /// author's real change would then be refused on every replica.
+    #[test]
+    fn a_change_signed_by_another_key_cannot_take_an_authors_next_seq() {
+        let (alice, mallory) = (nick("alice"), nick("mallory"));
+        let alice_key = [0xaa_u8; 32];
+
+        let mut source = MeshDoc::new_ungated();
+        let root = author_as(&mut source, &alice, &alice_key, &json!({"a": 1}));
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&root), Ingested::Applied { .. }));
+
+        let forged = sink
+            .build_change(&json!({"a": "forged"}), &alice_key)
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        let mut forged = frame(&mallory, &forged);
+        forged.pubkey = "bb".repeat(32);
+        assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
+        assert_eq!(sink.pending_stats().0, 0);
+
+        let real = author_as(&mut source, &alice, &alice_key, &json!({"a": 2}));
+        assert!(matches!(sink.ingest(&real), Ingested::Applied { .. }));
+        assert_eq!(sink.to_json(), json!({"a": 2}));
+    }
+
+    /// A forged change whose parents are missing takes no place in the orphan
+    /// buffer of its signer.
+    #[test]
+    fn a_change_signed_by_another_key_is_not_buffered() {
+        let alice_key = [0xaa_u8; 32];
+        let mut source = MeshDoc::new_ungated();
+        let _root = author_as(&mut source, &nick("alice"), &alice_key, &json!({"a": 1}));
+        let orphan = source
+            .build_change(&json!({"a": "forged"}), &alice_key)
+            .expect("merge applies")
+            .expect("merge is not a no-op");
+        let mut forged = frame(&nick("mallory"), &orphan);
+        forged.pubkey = "bb".repeat(32);
+
+        let mut sink = MeshDoc::new_ungated();
+        assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
+        assert_eq!(sink.pending_stats().0, 0);
+    }
+
     #[test]
     fn out_of_order_change_is_buffered_then_drains() {
         let alice = nick("alice");
@@ -1110,6 +1306,29 @@ mod tests {
         // The first change unblocks the buffered second in one ingest.
         assert!(matches!(sink.ingest(&first), Ingested::Applied { .. }));
         assert_eq!(sink.to_json(), json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn a_doc_holds_its_own_and_earlier_heads_only() {
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        author(&mut source, &alice, &json!({"a": 1}));
+        let earlier = source.heads();
+        author(&mut source, &alice, &json!({"b": 2}));
+        let mut joiner = MeshDoc::new_ungated();
+
+        assert!(source.holds_heads(&source.heads()), "its own heads");
+        assert!(source.holds_heads(&earlier), "heads it has moved past");
+        assert!(source.holds_heads(&joiner.heads()), "a fresh doc's genesis");
+        assert!(!joiner.holds_heads(&source.heads()), "heads it never saw");
+        assert!(
+            !source.holds_heads(&["not-a-hash".to_owned()]),
+            "a head that does not decode"
+        );
+        for carrier in &source.changes_since(&joiner.heads(), 100) {
+            joiner.ingest(carrier);
+        }
+        assert!(joiner.holds_heads(&source.heads()), "after the backfill");
     }
 
     #[test]
@@ -1146,8 +1365,9 @@ mod tests {
         let (wire, _plain) = author_doc
             .compose_wire_body(&bytes, Some(&merge))
             .expect("compose");
-        let carrier =
+        let mut carrier =
             Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State);
+        carrier.pubkey = automerge::ActorId::from(alice.as_str().as_bytes()).to_hex_string();
         assert!(
             !carrier.body.as_str().contains("value"),
             "the plaintext value must not appear on the wire"

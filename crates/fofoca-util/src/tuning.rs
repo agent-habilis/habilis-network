@@ -641,6 +641,36 @@ pub const RIVAL_RECHECK_OFFSET_SPAN_SECS: u64 = 8;
 /// [`ANTIENTROPY_INTERVAL_SECS`], so the honest cadence is never refused.
 pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = 5;
 
+/// How many state digest answers one asker may get per channel on the unicast
+/// plane in one [`ANTIENTROPY_SERVE_COOLDOWN_SECS`] window; the same heads get
+/// an answer again only after [`FAST_ROUND_MIN_INTERVAL_MS`]. A backfilling
+/// node asks again as long as a peer's heads show it is behind (a fast round),
+/// so it needs several per window; eight answers of
+/// [`ANTIENTROPY_MAX_RESEND`] frames cover 512 changes, and still bound a node
+/// whose fast rounds misbehave.
+pub const ANTIENTROPY_SERVES_PER_WINDOW: usize = 8;
+
+/// The shortest time between two direct fast-round digests to one peer, for
+/// one channel. A peer that advertises heads nobody can hold then costs one
+/// small frame per interval.
+pub const FAST_ROUND_MIN_INTERVAL_MS: u64 = 200;
+
+/// How long after a direct fast-round digest a node holds back its own
+/// broadcast digests for that channel.
+pub const FAST_ROUND_ACTIVE_MS: u64 = 1000;
+
+/// How long a stalled fast round waits before it asks a peer that is still
+/// ahead again: a lost request, a lost answer, or a refusal costs this, not an
+/// anti-entropy tick. The reclaim timer drives the check, so this matches it.
+pub const FAST_ROUND_RETRY_MS: u64 = 400;
+
+/// How many peers a node remembers as ahead of it, per channel.
+pub const FAST_ROUND_AHEAD_MAX: usize = 16;
+
+/// How long a peer stays remembered as ahead after its heads last showed it:
+/// a peer whose heads we can never hold must not hold a place for ever.
+pub const FAST_ROUND_AHEAD_TTL_SECS: u64 = 60;
+
 /// `HyParView` **active view** capacity — the number of direct gossip neighbors
 /// (open QUIC links) each member maintains per topic. A mesh at or below this
 /// size forms a **full mesh** with nothing to shuffle, so it has **zero

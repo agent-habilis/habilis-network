@@ -66,10 +66,10 @@ jobs:
       # run with default features — build neither. `native` is the str0m one,
       # and it owns the loopback test.
       - name: Check (webrtc, native backend)
-        run: cargo check -p fofoca-iroh-webrtc-transport --features native --all-targets
+        run: cargo check -p fofoca-iroh-webrtc-transport --features native,bench --all-targets
 
       - name: Clippy (webrtc, native backend)
-        run: cargo clippy -p fofoca-iroh-webrtc-transport --features native --all-targets -- -D warnings
+        run: cargo clippy -p fofoca-iroh-webrtc-transport --features native,bench --all-targets -- -D warnings
 
       # Six crates are reachable on wasm32 and nowhere else, and between them
       # that is a substantial amount of code no other job compiles:
@@ -92,7 +92,7 @@ jobs:
           # runtime, not at compile time), so checking with it on costs nothing
           # and keeps the feature from rotting.
           cargo check --target wasm32-unknown-unknown -p fofoca-chunks --all-targets --features wasm-simd
-          cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web
+          cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web,bench
           # The engine itself must reach the browser, not merely be avoidable
           # from it. `--no-default-features` is the portable half: no `host`,
           # so no IPC listener, no state file, no process helpers. Without this
@@ -114,15 +114,18 @@ jobs:
           cargo check --target wasm32-unknown-unknown -p fofoca-stream
           # The browser peer itself (packages/fofoca-wasm's Rust half).
           cargo check --target wasm32-unknown-unknown -p fofoca-wasm
+          # The browser side of `cargo task benchmark`.
+          cargo check --target wasm32-unknown-unknown -p fofoca-bench-wasm
 
       - name: Clippy (wasm32)
         run: |
           cargo clippy --target wasm32-unknown-unknown -p fofoca-chunks --all-targets --features wasm-simd -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web,bench -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-stream -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p fofoca-wasm -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p fofoca-bench-wasm -- -D warnings
 
       # Runs fofoca-stream's integration tests too, relay and WebRTC-only ones
       # included, on purpose: they are the only CI proof of the stream's
@@ -144,6 +147,12 @@ jobs:
       # a str0m data channel, offline via `IceConfig::host_only()`.
       - name: Test (webrtc, native backend)
         run: cargo test -p fofoca-iroh-webrtc-transport --features native
+
+      # Not covered by `--workspace` above: the runner's page helpers, and
+      # their tests, are behind the `mesh` and `bench` features, and `bench`
+      # is the lighter of the two.
+      - name: Test (tasks, bench)
+        run: cargo test -p tasks --features bench
 
       # `Test` above already runs the relay-policy proofs
       # (`tests/relay_lookup_only_*.rs`, `tests/mesh_transport_lists.rs`):

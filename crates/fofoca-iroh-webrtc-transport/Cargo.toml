@@ -61,6 +61,11 @@ web = [
     "dep:noq-udp",
     "dep:n0-watcher",
 ]
+# The bulk protocol the browser tests and `cargo task benchmark` drive over
+# either backend. No dependency of its own; a feature only so a consumer that
+# wants the transport does not link a protocol handler it never registers.
+bench = []
+
 # Tests only. A process-wide switch that stops the path selector from choosing
 # an IP path, so a test can take UDP away from a live connection: iroh has no
 # way to close one path.
@@ -161,7 +166,7 @@ required-features = ["native"]
 # being declared: `--all-targets` off wasm32 must not try to build it.
 [[test]]
 name = "browser_loopback"
-required-features = ["web"]
+required-features = ["web", "bench"]
 
 # The configuration sweep the fast suite above is deliberately not: same
 # harness, every traffic shape, minutes rather than seconds. Driven by
@@ -169,4 +174,4 @@ required-features = ["web"]
 # main-thread pressure level.
 [[test]]
 name = "browser_matrix"
-required-features = ["web"]
+required-features = ["web", "bench"]

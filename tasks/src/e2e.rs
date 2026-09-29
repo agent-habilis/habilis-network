@@ -14,7 +14,8 @@ use std::time::Duration;
 use clap::{Args as ClapArgs, ValueEnum};
 
 use crate::TaskOutcome;
-use crate::util::output;
+use crate::util::webdriver::{Driver, SAFARI_TP};
+use crate::util::{Skip, json_to_string, output};
 
 pub(crate) mod build;
 mod cdp;
@@ -23,6 +24,8 @@ mod chat;
 mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
+#[cfg(feature = "mesh")]
+mod page;
 mod server;
 #[cfg(feature = "mesh")]
 mod stream;
@@ -233,14 +236,11 @@ fn browsers() -> Vec<Browser> {
         Browser {
             name: "safari-tp",
             backend: Backend::WebDriver,
-            binary: "/Applications/Safari Technology Preview.app/Contents/MacOS/Safari Technology Preview".to_owned(),
+            binary: SAFARI_TP.to_owned(),
             pressures: &[0],
         },
     ]
 }
-
-/// A cell that could not run at all, with a reason a reader can act on.
-struct Skip(String);
 
 /// What a cell's page published.
 struct Harvest {
@@ -301,27 +301,7 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
 /// build; a plain `--workspace` build never sees `iroh-test-utils`.
 #[cfg(not(feature = "mesh"))]
 fn run_engine_suite(_: &Args) -> TaskOutcome {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    output::status("Rerunning", "with `--features mesh` (the engine suites)");
-    let status = std::process::Command::new(cargo)
-        .current_dir(crate::util::repo_root())
-        .args([
-            "run",
-            "--quiet",
-            "--package",
-            "tasks",
-            "--features",
-            "mesh",
-            "--",
-        ])
-        .args(std::env::args_os().skip(1))
-        .status()
-        .map_err(|error| format!("could not re-run cargo: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("the engine suite failed: {status}").into())
-    }
+    crate::util::reexec_with_feature("mesh", "the engine suites", false)
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
@@ -332,7 +312,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     let env = if args.list {
         BTreeMap::new()
     } else {
-        build::wasm_env()?
+        crate::util::wasm::wasm_env()?
     };
     if !args.list {
         build::check_tooling()?;
@@ -341,7 +321,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     // The fast suite reports per-test through the runner rather than through a
     // published table, so it takes its own path and returns here.
     if args.suite == Suite::Loopback {
-        let chrome = cdp::chrome_for_testing().map_err(|Skip(why)| why)?;
+        let chrome = crate::util::cdp::chrome_for_testing().map_err(|Skip(why)| why)?;
         return loopback::run(&chrome.to_string_lossy(), &env);
     }
 
@@ -367,7 +347,9 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             let missing = match browser.backend {
                 Backend::Cdp if args.list => None,
                 Backend::Cdp => chrome_for_testing
-                    .get_or_insert_with(|| cdp::chrome_for_testing().map_err(|Skip(why)| why))
+                    .get_or_insert_with(|| {
+                        crate::util::cdp::chrome_for_testing().map_err(|Skip(why)| why)
+                    })
                     .clone()
                     .err(),
                 Backend::WebDriver => (!PathBuf::from(&browser.binary).exists())
@@ -443,7 +425,7 @@ fn run_cell(browser: &Browser, wasm: &Path, pressure: u32) -> Result<Harvest, Sk
     match browser.backend {
         Backend::Cdp => cdp::run(pressure, CELL_TIMEOUT),
         Backend::WebDriver => {
-            let driver = webdriver::Driver::start(browser.name)?;
+            let driver = Driver::start(browser.name)?;
             webdriver::run(
                 &driver,
                 browser.name,
@@ -535,12 +517,4 @@ fn summarise(rows: &[Row], listing: bool) {
 /// `data-failed` as a number, or `None` when the page never published one.
 fn normalise_failed(raw: &str) -> Option<u32> {
     raw.trim().parse().ok()
-}
-
-/// `Runtime.evaluate` and `execute/sync` both hand back a JSON value; a string
-/// result should read as its contents, not as a quoted literal.
-fn json_to_string(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map_or_else(|| value.to_string(), str::to_owned)
 }

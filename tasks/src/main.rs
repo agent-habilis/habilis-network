@@ -19,6 +19,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use xshell::Shell;
 
+mod bench;
 mod dev;
 mod e2e;
 mod ffi;
@@ -92,6 +93,10 @@ enum Task {
     /// pressure and prints one summary table; `--suite loopback` runs the fast
     /// four-test regression suite against a single browser instead.
     E2e(e2e::Args),
+    /// Measure bulk throughput over the transports: fofoca over WebRTC
+    /// (browser↔browser, browser↔native, native↔native) against plain iroh
+    /// and a bare data channel.
+    Benchmark(bench::Args),
     /// Remove build artifacts.
     Clean,
 }
@@ -129,6 +134,7 @@ fn dispatch(sh: &Shell, task: Task) -> TaskOutcome {
         Task::Ffi => ffi::run(sh),
         Task::BuildWasm => wasm::build_peer(sh),
         Task::E2e(args) => e2e::run(&args),
+        Task::Benchmark(args) => bench::run(&args),
         Task::Clean => dev::clean(sh),
     }
 }

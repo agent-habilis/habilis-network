@@ -205,7 +205,7 @@ payload on every lane under every relay policy — is
 wasm glue built first (`cargo task build-wasm` — the mesh suite also builds
 it itself), bun, and a browser. The suites that drive one tab (`mesh`,
 `stream`, `chat`) open Safari Technology Preview by default; `--only` picks
-another (`safari`, `cft` for Chrome for Testing through `agent-browse`,
+another (`safari`, `cft` for Chrome for Testing over CDP,
 `chrome-ci` for Chrome through chromedriver). Each Safari needs
 `sudo <its safaridriver> --enable` once. The suite runs with the task runner's
 `mesh` feature, which it turns on by re-running itself through cargo, so the

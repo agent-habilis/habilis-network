@@ -22,12 +22,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::TaskOutcome;
+use crate::util::cdp;
+use crate::util::page::{rand_token, wait_ready};
+use crate::util::webdriver;
 use crate::util::{output, repo_root, wait_for};
 
 use fofoca::membership;
 use fofoca::protocol::{Lookup, Transport};
 
-use super::{Args, Skip, build, cdp, webdriver};
+use super::page::{Page, call_page, urlencode};
+use super::{Args, Skip, build};
 
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
@@ -275,56 +279,6 @@ impl Native {
     }
 }
 
-// ── the browser page ────────────────────────────────────────────────────
-
-/// One browser on the harness page, behind whichever driver reaches it.
-pub(super) enum Page {
-    Cdp(Box<cdp::Browser>),
-    WebDriver(webdriver::Session),
-}
-
-impl Page {
-    pub(super) fn navigate(&self, url: &str) {
-        match self {
-            Self::Cdp(browser) => browser.navigate(url),
-            Self::WebDriver(session) => session.navigate(url),
-        }
-    }
-
-    /// [`Page::navigate`], recording the console for `window` where the
-    /// driver can. `WebDriver` has no console stream, so it only navigates.
-    pub(super) fn navigate_watching_console(&self, url: &str, window: Duration) {
-        match self {
-            Self::Cdp(browser) => browser.navigate_watching_console(url, window),
-            Self::WebDriver(session) => session.navigate(url),
-        }
-    }
-
-    /// What [`Page::navigate_watching_console`] recorded; blocks until its
-    /// window is over.
-    pub(super) fn console(&self) -> String {
-        match self {
-            Self::Cdp(browser) => browser.console(),
-            Self::WebDriver(_) => String::new(),
-        }
-    }
-
-    /// Evaluate a JS expression (no `return`), reading its value as a string.
-    pub(super) fn evaluate(&self, expression: &str) -> String {
-        match self {
-            Self::Cdp(browser) => browser.evaluate(expression),
-            Self::WebDriver(session) => session.execute(&format!("return ({expression});")),
-        }
-    }
-
-    fn version(&self) -> String {
-        match self {
-            Self::Cdp(browser) => browser.version(),
-            Self::WebDriver(session) => session.version(),
-        }
-    }
-}
-
 /// Every payload lane, both directions: broadcast, directed, state merge.
 /// Send from the native side, retrying inside the payload window. The first
 /// directed frame to a fresh peer can race the very path it needs — a dial
@@ -415,36 +369,6 @@ async fn check_payload_lanes(page: &Page, native: &mut Native) -> Result<(), Cel
     }
 }
 
-/// A page object's promise-returning controls (`window.harness`,
-/// `window.chat`), awaited via a completion flag the driver polls — neither
-/// backend can await a JS promise directly.
-pub(super) fn call_page(page: &Page, object: &str, call: &str) -> Result<(), String> {
-    let token = format!("call{}", rand_token());
-    let expression = format!(
-        "window.{token}='pending',window.{object}.{call}.then(()=>window.{token}='ok',(e)=>window.{token}='error: '+e),'started'"
-    );
-    let started = page.evaluate(&expression);
-    if started != "started" {
-        return Err(format!("{object} call {call} did not start: {started:?}"));
-    }
-    let outcome = wait_for(PAYLOAD_TIMEOUT, Duration::from_millis(250), || {
-        let state = page.evaluate(&format!("window.{token}"));
-        (state != "pending").then_some(state)
-    })
-    .ok_or_else(|| format!("{object} call {call} never settled"))?;
-    if outcome == "ok" {
-        return Ok(());
-    }
-    Err(format!("{object} call {call} failed: {outcome}"))
-}
-
-pub(super) fn rand_token() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.subsec_nanos().into())
-        .unwrap_or_default()
-}
-
 // ── the served page ─────────────────────────────────────────────────────
 
 /// A Bun dev server (the harness page, the chat page), killed when it goes
@@ -479,7 +403,7 @@ impl BunServer {
             url: format!("http://127.0.0.1:{port}"),
         };
         let up = wait_for(Duration::from_secs(30), Duration::from_millis(250), || {
-            super::server::reachable(&server.url).then_some(())
+            crate::util::reachable(&server.url).then_some(())
         });
         if up.is_none() {
             return Err(Skip(format!("the {what} server never came up")));
@@ -488,7 +412,7 @@ impl BunServer {
     }
 }
 
-pub(super) use super::webdriver::free_port;
+pub(super) use crate::util::webdriver::free_port;
 
 // ── one cell ────────────────────────────────────────────────────────────
 
@@ -530,13 +454,6 @@ fn page_url(base: &str, cell: &Cell, relay_url: &str, selector: &str) -> String 
             .collect::<Vec<_>>()
             .join(","),
     )
-}
-
-pub(super) fn urlencode(raw: &str) -> String {
-    raw.replace('%', "%25")
-        .replace('&', "%26")
-        .replace('+', "%2B")
-        .replace('#', "%23")
 }
 
 /// The refusal cell: the tab must refuse a mesh it could carry no payload in,
@@ -632,15 +549,8 @@ async fn run_cell(
         page.navigate(&page_url(&harness.url, cell, relay_url, &selector));
     }
 
-    let ready = wait_for(Duration::from_secs(30), Duration::from_millis(500), || {
-        let failed = page.evaluate("(document.getElementById('failed')||{}).textContent||''");
-        if !failed.is_empty() {
-            return Some(Err(failed));
-        }
-        let ready = page.evaluate("document.getElementById('ready')?'1':'0'");
-        (ready == "1").then_some(Ok(()))
-    })
-    .ok_or_else(|| fail("the harness page never became ready".to_owned()))?;
+    let ready = wait_ready(page, Duration::from_secs(30), Duration::from_millis(500))
+        .ok_or_else(|| fail("the harness page never became ready".to_owned()))?;
     ready.map_err(|error| fail(format!("the harness page failed to open the mesh: {error}")))?;
 
     // ── link expectation ────────────────────────────────────────────

@@ -65,7 +65,7 @@ pub(super) fn run(binary: &str, env: &BTreeMap<String, String>) -> TaskOutcome {
             "-p",
             "fofoca-iroh-webrtc-transport",
             "--features",
-            "web",
+            "web,bench",
             "--test",
             "browser_loopback",
         ])

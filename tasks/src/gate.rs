@@ -107,7 +107,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::Lint,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
-        args: &["--features", "native", "--all-targets"],
+        args: &["--features", "native,bench", "--all-targets"],
     },
     // `--all-targets` is what the first row has and the `--all-features` check
     // row lacks, so without this one the `mesh` feature's e2e suites are
@@ -138,7 +138,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::Check,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
-        args: &["--features", "native", "--all-targets"],
+        args: &["--features", "native,bench", "--all-targets"],
     },
     // Six crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: `fofoca-chunks`'s
@@ -157,7 +157,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmCheck,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
-        args: &["--features", "web"],
+        args: &["--features", "web,bench"],
     },
     // The engine itself must reach the browser, not merely be avoidable from
     // it. `--no-default-features` is the portable half: no `host`, so no IPC
@@ -199,6 +199,12 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-wasm"),
         args: &[],
     },
+    // The browser side of `cargo task benchmark`, a cdylib like the peer.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("fofoca-bench-wasm"),
+        args: &[],
+    },
     // Clippy, not just check. The `web` backend had never been linted before
     // these rows existed and carried 18 findings on its first pass.
     Step {
@@ -209,7 +215,7 @@ pub(crate) const STEPS: &[Step] = &[
     Step {
         kind: Kind::WasmClippy,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
-        args: &["--features", "web"],
+        args: &["--features", "web,bench"],
     },
     Step {
         kind: Kind::WasmClippy,
@@ -232,6 +238,11 @@ pub(crate) const STEPS: &[Step] = &[
         args: &[],
     },
     Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("fofoca-bench-wasm"),
+        args: &[],
+    },
+    Step {
         kind: Kind::Test,
         scope: Scope::Workspace,
         args: &[],
@@ -251,6 +262,14 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::Test,
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native"],
+    },
+    // Not covered by the workspace row: the runner's page helpers, and their
+    // tests, are behind the `mesh` and `bench` features, and `bench` is the
+    // lighter of the two.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("tasks"),
+        args: &["--features", "bench"],
     },
     // The workspace row already runs the relay-policy proofs
     // (`tests/relay_lookup_only_*.rs`, `tests/mesh_transport_lists.rs`):

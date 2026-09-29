@@ -1,0 +1,39 @@
+# The browser half of `cargo task benchmark`: the WebRTC transport's bulk
+# protocol behind a handful of wasm-bindgen functions a page puts on
+# `window.bench`, so the runner can ferry a JSEP round between two tabs and
+# time a transfer without awaiting a promise it cannot see.
+#
+# A workspace member for the same reason `fofoca-wasm` is: nothing native
+# shares a feature graph with a wasm32 build of it, and membership keeps it in
+# the lint pass and the shared lockfile.
+[package]
+name = "fofoca-bench-wasm"
+description = "The browser side of the fofoca transport benchmark"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+# `cdylib` for wasm-bindgen; `rlib` so a host `cargo check` / clippy on this
+# crate works without going through wasm-bindgen at all.
+crate-type = ["cdylib", "rlib"]
+
+# Everything is browser-only and target-scoped rather than feature-gated, and
+# that is load-bearing: an unscoped `features = ["web"]` here would unify
+# `web` into the transport on a host `--workspace` build beside the engine's
+# `native`, and the crate is built for one backend at a time.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+fofoca-iroh-webrtc-transport = { path = "../fofoca-iroh-webrtc-transport", features = ["web", "bench"] }
+anyhow.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+# `performance.now()` behind `Instant`; `std::time::Instant` panics on wasm32.
+web-time.workspace = true
+# Turns a Rust panic into a readable JS stack trace instead of the
+# `unreachable executed` the runtime would otherwise report.
+console_error_panic_hook = "0.1"
+
+[lints]
+workspace = true

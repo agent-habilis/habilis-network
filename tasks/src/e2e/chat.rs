@@ -16,9 +16,11 @@ use std::time::Duration;
 
 use crate::TaskOutcome;
 use crate::util::output;
+use crate::util::page::rand_token;
 use crate::util::{repo_root, wait_for};
 
-use super::mesh::{BunServer, Page, call_page, launch_page, rand_token, urlencode};
+use super::mesh::{BunServer, launch_page};
+use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
 /// Beacon claim + JSEP + graft on a cold pair; generous like the mesh

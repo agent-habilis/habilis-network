@@ -147,6 +147,9 @@ pub(crate) fn should_log_drop(total: u64) -> bool {
     total == 1 || total.is_multiple_of(256)
 }
 
+#[cfg(all(feature = "bench", any(feature = "native", feature = "web")))]
+pub mod bench;
+
 #[cfg(feature = "native")]
 mod native;
 

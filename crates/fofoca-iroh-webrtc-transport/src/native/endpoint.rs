@@ -52,6 +52,14 @@ impl CustomEndpoint for WebRtcEndpoint {
         Arc::new(WebRtcSender::new(self.registry.clone()))
     }
 
+    /// No limit of our own: the sender splits any batch into one message per
+    /// datagram. iroh sends with the smallest limit of every registered
+    /// transport, so the default of 1 turned UDP GSO off for the whole
+    /// endpoint, halving its UDP throughput on Linux. noq caps batches at 10.
+    fn max_transmit_segments(&self) -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::MAX
+    }
+
     fn poll_recv(
         &mut self,
         cx: &mut Context<'_>,
@@ -93,5 +101,28 @@ impl CustomEndpoint for WebRtcEndpoint {
         }
 
         Poll::Ready(Ok(filled))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::SecretKey;
+    use iroh::endpoint::transports::CustomTransport as _;
+
+    use crate::WebRtcTransport;
+
+    /// Linux's cap on segments in one GSO send (`UDP_MAX_SEGMENTS`).
+    const LINUX_GSO_MAX: usize = 64;
+
+    #[test]
+    fn the_webrtc_endpoint_does_not_cap_udp_gso() {
+        let endpoint = WebRtcTransport::new(SecretKey::generate().public())
+            .bind()
+            .expect("a fresh transport binds");
+        assert!(
+            endpoint.max_transmit_segments().get() >= LINUX_GSO_MAX,
+            "iroh sends with the smallest limit of any registered transport, so {} turns UDP GSO off",
+            endpoint.max_transmit_segments()
+        );
     }
 }

@@ -376,7 +376,14 @@ async fn antientropy_arm(
         Duration::from_secs(antientropy_interval_secs()),
     );
     gossip::antientropy::broadcast_digest(state, ctx.sender, ctx.mesh, ctx.author).await;
-    gossip::antientropy::broadcast_state_digests(state, ctx.sender, ctx.mesh, ctx.author).await;
+    gossip::antientropy::broadcast_state_digests(
+        state,
+        ctx.sender,
+        ctx.mesh,
+        ctx.author,
+        gossip::antientropy::DigestTrigger::Tick,
+    )
+    .await;
 }
 
 /// Default per-link routing cost we advertise for our own neighbours until live
@@ -783,6 +790,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous) {
                     maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 }
+                gossip::antientropy::resume_fast_rounds(&mut state, &ctx).await;
             }
             _ = intervals.antientropy.tick() => {
                 state.idle.antientropy += 1;

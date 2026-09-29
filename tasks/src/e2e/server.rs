@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::util::wait_for;
+use crate::util::{reachable, wait_for};
 
 /// The port is the runner's choice, not ours, which is why cells run one at a
 /// time rather than in parallel.
@@ -58,17 +58,4 @@ impl Harness {
         }
         Ok(harness)
     }
-}
-
-/// Is something listening and answering here?
-///
-/// Any reply counts, including an error status: the question is whether the
-/// socket is live, not whether this particular path exists.
-pub(super) fn reachable(url: &str) -> bool {
-    ureq::get(url)
-        .config()
-        .timeout_global(Some(Duration::from_secs(1)))
-        .build()
-        .call()
-        .is_ok()
 }

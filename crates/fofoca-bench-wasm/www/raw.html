@@ -1,0 +1,104 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>raw data-channel benchmark</title>
+<!--
+  The same `window.bench` surface as index.html over a bare RTCDataChannel:
+  no wasm, no QUIC, no iroh. What the browser can move on its own, which is
+  the ceiling every fofoca web cell is read against.
+
+  The channel is ordered and reliable — the default, and what "vanilla
+  WebRTC throughput" means — where the transport's channel is unordered and
+  unreliable with QUIC doing the recovery. Download only: the server streams
+  `bytes` in messages of `chunk` bytes (64 KiB by default; the runner also
+  asks for 1200, one QUIC datagram's worth, to price the per-message cost),
+  paced on `bufferedamountlow` so it never overruns the SCTP send buffer.
+-->
+<pre id="ready" data-id="raw">raw</pre>
+<script>
+  const HIGH_WATER = 1 << 20
+  const LOW_WATER = 256 * 1024
+  const state = { pc: null, channel: null, open: null }
+
+  function gathered(pc) {
+    return new Promise((resolve) => {
+      if (pc.iceGatheringState === 'complete') return resolve()
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === 'complete') resolve()
+      }
+    })
+  }
+
+  function serveOn(channel) {
+    channel.binaryType = 'arraybuffer'
+    channel.onmessage = (event) => {
+      if (typeof event.data !== 'string') return
+      const [wanted, size] = event.data.split(':').map(Number)
+      const chunk = new Uint8Array(size)
+      let sent = 0
+      const pump = () => {
+        while (sent < wanted && channel.bufferedAmount < HIGH_WATER) {
+          const n = Math.min(size, wanted - sent)
+          channel.send(chunk.subarray(0, n))
+          sent += n
+        }
+        channel.onbufferedamountlow = sent < wanted ? pump : null
+      }
+      channel.bufferedAmountLowThreshold = LOW_WATER
+      pump()
+    }
+  }
+
+  window.bench = {
+    async init() { return 'raw' },
+    async offer() {
+      const pc = new RTCPeerConnection({ iceServers: [] })
+      state.pc = pc
+      const channel = pc.createDataChannel('bulk')
+      state.channel = channel
+      state.open = new Promise((resolve) => { channel.onopen = () => resolve() })
+      await pc.setLocalDescription(await pc.createOffer())
+      await gathered(pc)
+      return JSON.stringify(pc.localDescription)
+    },
+    async answer(offerJson) {
+      const pc = new RTCPeerConnection({ iceServers: [] })
+      state.pc = pc
+      state.open = new Promise((resolve) => {
+        pc.ondatachannel = (event) => {
+          state.channel = event.channel
+          event.channel.onopen = () => resolve()
+        }
+      })
+      await pc.setRemoteDescription(JSON.parse(offerJson))
+      await pc.setLocalDescription(await pc.createAnswer())
+      await gathered(pc)
+      return JSON.stringify(pc.localDescription)
+    },
+    async complete(answerJson) {
+      if (answerJson) await state.pc.setRemoteDescription(JSON.parse(answerJson))
+      await state.open
+      return 'ok'
+    },
+    serve() {
+      serveOn(state.channel)
+      return 'ok'
+    },
+    async download(_remote, bytes, direction, chunk = 64 * 1024) {
+      if (direction !== 'down') throw new Error(`raw page only supports down, not ${direction}`)
+      const channel = state.channel
+      channel.binaryType = 'arraybuffer'
+      let received = 0
+      const started = performance.now()
+      const done = new Promise((resolve) => {
+        channel.onmessage = (event) => {
+          received += event.data.byteLength
+          if (received >= bytes) resolve()
+        }
+      })
+      channel.send(`${bytes}:${chunk}`)
+      await done
+      const elapsed = performance.now() - started
+      return JSON.stringify({ bytes: received, elapsed_ms: elapsed, path: 'data-channel' })
+    },
+  }
+</script>

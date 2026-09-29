@@ -255,6 +255,86 @@ impl UnicastPool {
         true
     }
 
+    /// Send `frames` to `eid` in order, from one spawned task: one stream per
+    /// frame, in sequence. [`Self::dial_and_send_in_background`] takes one
+    /// frame, and while its dial is in flight every further call for the same
+    /// peer is refused, so a batch sent that way loses all but its first frame
+    /// to a cold peer. A warm connection takes a batch at once, even with
+    /// another batch to the same peer still going: a node sends its state and
+    /// meta digests back to back, so a holder answers it twice at once. A cold
+    /// peer is dialed first, and only one dial to it runs at a time. Returns
+    /// `false`, sending nothing, when the warm connection's path may not carry
+    /// payload, or `eid` is cold and on the dial-failure cooldown or already
+    /// being dialed. `true` means handed off, not delivered: a dial, path or
+    /// write failure after it is only logged, and a write can succeed into a
+    /// connection that died silently.
+    pub(crate) async fn send_batch_in_background(
+        &self,
+        eid: EndpointId,
+        frames: Vec<Bytes>,
+    ) -> bool {
+        if let Some(conn) = self.warm(eid).await {
+            if !payload_allowed_on(&conn, self.inner.relay_transport) {
+                return false;
+            }
+            let pool = self.clone();
+            n0_future::task::spawn(async move {
+                pool.send_batch(eid, &conn, &frames).await;
+            });
+            return true;
+        }
+        if self
+            .inner
+            .dial_failures
+            .lock()
+            .await
+            .on_cooldown(&eid, Instant::now())
+        {
+            return false;
+        }
+        if !self
+            .inner
+            .dialing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(eid)
+        {
+            return false;
+        }
+        let in_flight = InFlightDial {
+            pool: self.clone(),
+            eid,
+        };
+        n0_future::task::spawn(async move {
+            let pool = &in_flight.pool;
+            let conn = match pool.warm_or_dial(eid).await {
+                Ok(conn) => conn,
+                Err(error) => {
+                    tracing::debug!(target: LOG_TARGET, %eid, %error, "batch not delivered: no connection");
+                    return;
+                }
+            };
+            if !pool.inner.relay_transport && !wait_direct(&conn, PATH_SELECT_TIMEOUT).await {
+                tracing::debug!(target: LOG_TARGET, %eid, "batch not delivered: {RELAY_REFUSED}");
+                return;
+            }
+            pool.send_batch(eid, &conn, &frames).await;
+        });
+        true
+    }
+
+    /// Write `frames` to `conn` one stream at a time, in order, stopping and
+    /// dropping the connection at the first write error.
+    async fn send_batch(&self, eid: EndpointId, conn: &Connection, frames: &[Bytes]) {
+        for bytes in frames {
+            if let Err(error) = send_one(conn, bytes).await {
+                tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
+                self.inner.conns.lock().await.remove(&eid);
+                return;
+            }
+        }
+    }
+
     /// Put `eid` on the dial-failure cooldown, as a failed dial does.
     #[cfg(test)]
     pub(crate) async fn note_dial_failure(&self, eid: EndpointId) {

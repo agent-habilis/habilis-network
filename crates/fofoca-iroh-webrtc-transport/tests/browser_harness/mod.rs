@@ -16,7 +16,7 @@
 //! CHROMEDRIVER=/path/to/chromedriver \
 //! WASM_BINDGEN_TEST_WEBDRIVER_JSON=/path/to/webdriver.json \
 //!   cargo test --release --target wasm32-unknown-unknown \
-//!     -p fofoca-iroh-webrtc-transport --features web --test browser_loopback
+//!     -p fofoca-iroh-webrtc-transport --features web,bench --test browser_loopback
 //! ```
 //!
 //! `cargo task e2e` does all of that for you, over several browsers, and
@@ -61,24 +61,22 @@
 
 use std::time::Duration;
 
-use fofoca_iroh_webrtc_transport::iroh::endpoint::{Connection, presets};
-use fofoca_iroh_webrtc_transport::iroh::protocol::{AcceptError, ProtocolHandler, Router};
+use fofoca_iroh_webrtc_transport::iroh::protocol::Router;
 use fofoca_iroh_webrtc_transport::iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr,
+    Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr,
 };
 use fofoca_iroh_webrtc_transport::{
-    BrowserHubTransport, IceServers, WEBRTC_TRANSPORT_ID, WebRtcHandle, browser_answer,
-    browser_offer, custom_addr,
+    BrowserHubTransport, IceServers, WebRtcHandle, browser_answer, browser_offer, custom_addr,
 };
 use wasm_bindgen::JsCast as _;
 
-pub(crate) const BENCH_ALPN: &[u8] = b"fofoca-webrtc/test-bench/0";
-
-/// Bytes the plain bulk case asks for. Comfortably past one QUIC congestion
-/// window and past the transport's own 256-datagram outbound queue, which is
-/// the point: a burst that fits in the queue proves nothing about a burst that
-/// does not.
-pub(crate) const BULK_BYTES: usize = 1 << 20;
+#[allow(
+    unused_imports,
+    reason = "each test target takes a different subset of the shared protocol"
+)]
+pub(crate) use fofoca_iroh_webrtc_transport::bench::{
+    BENCH_ALPN, BULK_BYTES, Bench, Direction, browser_endpoint, exchange, on_webrtc,
+};
 
 /// How long a transfer may take before we call it stalled. Generous for one
 /// `MiB` over loopback ICE (the drills measured ~2 ms RTT); a stall is
@@ -88,124 +86,6 @@ pub(crate) const BULK_BYTES: usize = 1 << 20;
 /// throttle is slow, not stalled, and a deadline that cannot tell them apart
 /// would report the throttle as the bug.
 pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(20);
-
-/// Which way the bulk flows in one exchange.
-///
-/// The consumer's stall was on `OP_READ` — a small request, a bulk reply — so
-/// [`Self::Download`] is the shape that matters most and the one the regression
-/// suite uses. The other two exist because "the send pump drops under load" and
-/// "the receive path drops under load" are different claims, and an exchange
-/// that is bulk in both directions cannot distinguish them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Direction {
-    /// Small request, bulk reply — the `OP_READ` shape.
-    Download,
-    /// Bulk request, small reply — stresses the initiator's send pump.
-    Upload,
-    /// Bulk both ways at once.
-    Both,
-}
-
-impl Direction {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Download => "down",
-            Self::Upload => "up",
-            Self::Both => "both",
-        }
-    }
-
-    /// Bytes crossing the wire in one exchange of `size`, for the in-flight
-    /// budget the matrix enforces.
-    pub(crate) fn bytes_for(self, size: usize) -> usize {
-        match self {
-            Self::Download | Self::Upload => size,
-            Self::Both => size * 2,
-        }
-    }
-}
-
-/// One exchange's request header: the mode, then the byte count wanted back.
-///
-/// Five bytes rather than four so the server can be told which direction to
-/// play without a second stream or a second ALPN. `Upload` sets `wanted` to a
-/// token reply size; the bulk is what follows on the request stream.
-const HEADER_LEN: usize = 5;
-
-fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
-    let mut bytes = [0u8; HEADER_LEN];
-    bytes[0] = match direction {
-        Direction::Download => 0,
-        Direction::Upload => 1,
-        Direction::Both => 2,
-    };
-    bytes[1..].copy_from_slice(&wanted.to_le_bytes());
-    bytes
-}
-
-/// The bulk peer: reads a header, then plays whichever direction it names.
-#[derive(Debug, Clone)]
-pub(crate) struct Bench;
-
-impl ProtocolHandler for Bench {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let (mut send, mut recv) = connection.accept_bi().await?;
-
-        let mut head = [0u8; HEADER_LEN];
-        recv.read_exact(&mut head)
-            .await
-            .map_err(AcceptError::from_err)?;
-        let wanted = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
-
-        // Anything after the header on the request stream is the client's bulk
-        // upload. Drained and verified before replying, so a corrupted upload
-        // fails as an upload rather than as a mismatched reply.
-        if matches!(head[0], 1 | 2) {
-            let uploaded = recv
-                .read_to_end(MAX_TRANSFER_BYTES)
-                .await
-                .map_err(AcceptError::from_err)?;
-            if !is_payload(&uploaded) {
-                return Err(AcceptError::from_err(std::io::Error::other(
-                    "uploaded body did not match the expected pattern",
-                )));
-            }
-        }
-
-        // One write of the whole reply: handing QUIC the entire body at once is
-        // what produces the burst the outbound pump has to survive. Feeding it
-        // in small pieces would pace the sender for it and hide the defect.
-        send.write_all(&payload(wanted))
-            .await
-            .map_err(AcceptError::from_err)?;
-        send.finish().map_err(AcceptError::from_err)?;
-        connection.closed().await;
-        Ok(())
-    }
-}
-
-/// Ceiling on one transfer, so `read_to_end` has a bound that is not a memory
-/// policy in disguise. Above any cell the matrix runs.
-pub(crate) const MAX_TRANSFER_BYTES: usize = 64 << 20;
-
-/// A recognisable, position-dependent body, so a truncated or misordered
-/// transfer fails on content rather than only on length.
-pub(crate) fn payload(len: usize) -> Vec<u8> {
-    (0..len)
-        .map(|index| u8::try_from(index % 251).expect("bounded by 251"))
-        .collect()
-}
-
-/// Verify a body against [`payload`] **without building it**.
-///
-/// The matrix runs 8 `MiB` cells at concurrency 4; materialising an expected
-/// vector per check would double the tab's peak memory for no benefit, and an
-/// OOM-killed tab is not a transport finding.
-pub(crate) fn is_payload(body: &[u8]) -> bool {
-    body.iter()
-        .enumerate()
-        .all(|(index, byte)| usize::from(*byte) == index % 251)
-}
 
 /// A negotiated browser↔browser pair, both ends live in this tab.
 pub(crate) struct Pair {
@@ -287,11 +167,6 @@ impl Pair {
         bulk: usize,
         deadline: Duration,
     ) -> anyhow::Result<()> {
-        // A token reply, small enough that the `Upload` case is unambiguously
-        // measuring one direction. Not zero: a reply of nothing would let a
-        // completely dead return path pass.
-        const TOKEN: usize = 32;
-
         let connection = self
             .client
             .connect(self.server_addr.clone(), BENCH_ALPN)
@@ -299,45 +174,18 @@ impl Pair {
 
         // The only transport is WebRTC, but assert the selected path anyway so
         // a future regression can't silently reroute and call it a pass.
-        let paths = connection.paths();
-        let on_webrtc = paths.iter().any(|path| {
-            matches!(
-                path.remote_addr(),
-                TransportAddr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID
-            )
-        });
-        anyhow::ensure!(on_webrtc, "no WebRTC path on the connection: {paths:?}");
-
-        let reply = match direction {
-            Direction::Download | Direction::Both => bulk,
-            Direction::Upload => TOKEN,
-        };
-        let upload = match direction {
-            Direction::Upload | Direction::Both => bulk,
-            Direction::Download => 0,
-        };
-
-        let (mut send, mut recv) = connection.open_bi().await?;
+        anyhow::ensure!(
+            on_webrtc(&connection),
+            "no WebRTC path on the connection: {:?}",
+            connection.paths()
+        );
 
         // The whole exchange under one deadline, both legs inside it. A stall
         // is silent and indefinite — the harness would simply never finish — so
         // the failure has to be manufactured, and it has to cover the send leg
         // too: an upload that wedges in `write_all` is exactly the pump
         // starvation this is hunting.
-        let run = async {
-            send.write_all(&header(
-                direction,
-                u32::try_from(reply).expect("reply fits in u32"),
-            ))
-            .await?;
-            if upload > 0 {
-                send.write_all(&payload(upload)).await?;
-            }
-            send.finish()?;
-            let body = recv.read_to_end(reply + 64).await?;
-            anyhow::Ok(body)
-        };
-
+        let run = exchange(&connection, direction, bulk);
         let Ok(body) = n0_future::time::timeout(deadline, run).await else {
             let counters = self.client_hub.session_counters(&self.server_id);
             let (out_bytes, in_bytes) = self.channel_bytes().await;
@@ -348,14 +196,7 @@ impl Pair {
                 direction.label()
             );
         };
-        let body = body?;
-
-        anyhow::ensure!(
-            body.len() == reply,
-            "short reply: wanted {reply} bytes, got {}",
-            body.len()
-        );
-        anyhow::ensure!(is_payload(&body), "reply body did not match");
+        body?;
         connection.close(0u32.into(), b"done");
         Ok(())
     }
@@ -467,19 +308,6 @@ impl Pair {
 
 /// A browser peer: WebRTC is its only data path, and no relay, so a run that
 /// claims to be browser↔browser can be shown to be one.
-pub(crate) async fn browser_endpoint(
-    key: SecretKey,
-    hub: &WebRtcHandle,
-) -> anyhow::Result<Endpoint> {
-    Ok(Endpoint::builder(presets::Minimal)
-        .secret_key(key)
-        .relay_mode(RelayMode::Disabled)
-        .add_custom_transport(hub.transport())
-        .path_selector(hub.path_selector())
-        .bind()
-        .await?)
-}
-
 /// `JsValue` is not an `Error`, so it cannot cross `?` on its own.
 pub(crate) fn js_error(error: &wasm_bindgen::JsValue) -> anyhow::Error {
     anyhow::anyhow!("{error:?}")

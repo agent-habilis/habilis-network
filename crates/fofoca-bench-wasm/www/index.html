@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>fofoca transport benchmark</title>
+<!--
+  The wasm endpoint behind `window.bench`. The runner navigates here, waits
+  for `#ready`, then drives `bench.*` through CDP; nothing on this page is
+  for a human.
+-->
+<pre id="status">loading</pre>
+<script type="module">
+  import init, * as bench from './wasm/fofoca_bench_wasm.js'
+  try {
+    await init()
+    window.bench = bench
+    const id = await bench.init()
+    const status = document.getElementById('status')
+    status.id = 'ready'
+    status.dataset.id = id
+    status.textContent = id
+  } catch (error) {
+    const status = document.getElementById('status')
+    status.id = 'failed'
+    status.textContent = String(error)
+  }
+</script>

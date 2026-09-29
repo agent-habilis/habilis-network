@@ -181,8 +181,8 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
 
 /// More changes than one digest answer carries, so the backfill takes several
 /// rounds and the first one is visible on its own.
-async fn write_log(node: &Node<Store>) {
-    for index in 0..WRITES {
+async fn write_log(node: &Node<Store>, writes: usize) {
+    for index in 0..writes {
         let (done_tx, done_rx) = oneshot::channel();
         node.send(Request::Write(
             serde_json::json!({ format!("k{index}"): index }),
@@ -226,7 +226,7 @@ async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
     pin_antientropy_tick();
     let topic = format!("late-joiner-pair-{}", rand::random::<u64>());
     let (alice, _) = spawn(&topic, "alice").await;
-    write_log(&alice).await;
+    write_log(&alice, WRITES).await;
 
     let (bob, bob_saw) = spawn(&topic, "bob").await;
     assert!(
@@ -251,16 +251,25 @@ async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
 /// the log. Before the fix whether it passed turned on which frame each peer's
 /// first one happened to be, so it failed only some of the time; with the
 /// digest sent on any first frame the digest itself goes out every run. Under
-/// heavy load it can still miss: alice's first-link flush of the changes she
-/// queued while alone overflows the joiner's orphan buffer, and with the tick
-/// pinned nothing repairs it (follow-up: flush-outruns-its-deps).
+/// load it still missed when the joiner met both peers over the rendezvous
+/// before its first real-peer link: both answers re-sent frames the
+/// rendezvous had just carried in alice's flush, iroh-gossip dropped them as
+/// seen, and with the tick pinned nothing asked again. It also missed when the
+/// joiner had the lowest endpoint id and its first frame at a peer was not its
+/// `joined`: no `PeerInfo` re-flood reached it, and both peers deferred the
+/// first dial to it. The joiner now asks again on its first real-peer link,
+/// and a new peer's first frame of any kind floods our address. The test waits
+/// for the first answer only; it does not show that all 160 changes arrive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "fails ~1 run in 10 with the one-dialer fix: an unexplained join timeout, and the joiner holding none of the log (flush-outruns-its-deps); remove when both are fixed"]
 async fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
     pin_antientropy_tick();
     let topic = format!("late-joiner-trio-{}", rand::random::<u64>());
     let (alice, _) = spawn(&topic, "alice").await;
-    write_log(&alice).await;
+    write_log(&alice, WRITES).await;
     let (early, early_saw) = spawn(&topic, "early").await;
     assert!(
         early_saw
@@ -284,6 +293,58 @@ async fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
         held >= ONE_ANSWER,
         "late held {held} of alice's {WRITES} changes {BUDGET:?} after meeting the pair; \
          the first digest answer carries {ONE_ANSWER}"
+    );
+
+    alice.leave().await.expect("alice leaves");
+    early.leave().await.expect("early leaves");
+    late.leave().await.expect("late leaves");
+}
+
+/// A long history reaches a late joiner in rounds of one answer budget each.
+/// With the anti-entropy tick pinned far away, only the joiner's own fast
+/// rounds can pull more than the first answer: it asks again, point-to-point,
+/// each time it applied a full answer or still holds orphans.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
+    const LONG: usize = 300;
+    const FAST: Duration = Duration::from_secs(5);
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    pin_antientropy_tick();
+    let topic = format!("late-joiner-long-{}", rand::random::<u64>());
+    let (alice, _) = spawn(&topic, "alice").await;
+    write_log(&alice, LONG).await;
+    let (early, early_saw) = spawn(&topic, "early").await;
+    assert!(
+        early_saw
+            .wait_for(&nick("alice"), Duration::from_secs(45))
+            .await,
+        "early never saw alice join"
+    );
+    let (late, late_saw) = spawn(&topic, "late").await;
+    for peer in ["alice", "early"] {
+        assert!(
+            late_saw
+                .wait_for(&nick(peer), Duration::from_secs(45))
+                .await,
+            "late never saw {peer} join"
+        );
+    }
+
+    let started = tokio::time::Instant::now();
+    let mut held = 0;
+    while started.elapsed() < FAST {
+        held = key_count(&read(&late).await);
+        if held >= LONG {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        held, LONG,
+        "late held {held} of alice's {LONG} changes {FAST:?} after meeting the pair"
     );
 
     alice.leave().await.expect("alice leaves");

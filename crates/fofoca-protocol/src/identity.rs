@@ -143,6 +143,19 @@ pub(crate) fn decode_sig(hex: &str) -> Result<Signature> {
     Ok(Signature::from_bytes(&bytes))
 }
 
+/// Lowercase hex of `bytes`, the spelling the wire uses for keys and signatures.
+#[must_use]
+pub fn encode_hex(bytes: &[u8]) -> String {
+    to_hex(bytes)
+}
+
+/// The bytes of a hex string, either case; `None` for odd length or a non-hex
+/// digit.
+#[must_use]
+pub fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    from_hex(hex).ok()
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

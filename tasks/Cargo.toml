@@ -37,6 +37,11 @@ anstream = "0.6"
 fofoca = { path = "../crates/fofoca", features = ["iroh-test-utils"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"], optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+# The `bench` feature's deps: the native cells of `cargo task benchmark` stand
+# up real iroh endpoints over the WebRTC transport — the transport alone, not
+# the engine. iroh is reached through the transport's re-export, never named
+# here (the workspace rule: only `fofoca` names `iroh`).
+fofoca-iroh-webrtc-transport = { path = "../crates/fofoca-iroh-webrtc-transport", features = ["native", "bench"], optional = true }
 
 [features]
 # The mesh and chat e2e suites need the engine and its test relay. Off by
@@ -45,6 +50,9 @@ tracing-subscriber = { workspace = true, optional = true }
 # every selected package's features); `cargo task e2e --suite mesh|chat`
 # re-runs itself with this on.
 mesh = ["dep:fofoca", "dep:tokio", "dep:tracing-subscriber"]
+# The throughput benchmark's native halves. Same re-exec pattern; a lighter
+# closure than `mesh`, since it needs the transport and not the engine.
+bench = ["dep:fofoca-iroh-webrtc-transport", "dep:tokio"]
 
 [lints]
 workspace = true

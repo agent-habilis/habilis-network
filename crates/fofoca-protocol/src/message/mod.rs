@@ -300,7 +300,7 @@ pub enum MessageKind {
 
 /// Which shared-state channel an event/digest belongs to. The two channels share
 /// all machinery; this selects the wire kind, the log, and the surfaced name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Channel {
     State,
     Meta,
