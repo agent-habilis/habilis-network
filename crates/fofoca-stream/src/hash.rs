@@ -15,8 +15,8 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail};
 use fofoca::iroh::EndpointAddr;
 use fofoca::net::{endpoint_addr_from_json, endpoint_addr_to_json};
-use fofoca::protocol::LookupOpts;
 use fofoca::protocol::base58check::{self, take_array};
+use fofoca::protocol::{LookupOpts, TransportPolicy};
 
 /// Framing version. An unknown version is rejected on decode.
 const VERSION: u8 = 1;
@@ -27,6 +27,13 @@ const KIND: u8 = 4;
 /// The producer lets the relay carry the stream. Absent, both ends refuse a
 /// connection whose only path is the relay.
 const RELAY_TRANSPORT_BIT: u8 = 0b0000_0001;
+
+/// The producer's transport list leaves `udp` or `webrtc` out. Restrictive,
+/// like the mesh id's bits, so the default `udp,webrtc` sets neither.
+const NO_UDP_BIT: u8 = 0b0000_0010;
+const NO_WEBRTC_BIT: u8 = 0b0000_0100;
+
+const KNOWN_FLAGS: u8 = RELAY_TRANSPORT_BIT | NO_UDP_BIT | NO_WEBRTC_BIT;
 
 /// Length of the public id a producer files the stream under.
 pub const ID_LEN: usize = 16;
@@ -41,8 +48,9 @@ pub struct StreamHash {
     pub addr: EndpointAddr,
     /// How the producer is found, so a consumer binds a compatible endpoint.
     pub lookups: LookupOpts,
-    /// Whether the relay may carry the bytes.
-    pub relay_transport: bool,
+    /// The producer's transport list: which direct paths it runs, and whether
+    /// the relay may carry the bytes.
+    pub transport: TransportPolicy,
     /// Public: the key the producer looks the stream up by.
     pub id: [u8; ID_LEN],
     /// Private: compared in constant time once `id` has found the stream.
@@ -55,7 +63,7 @@ impl fmt::Debug for StreamHash {
             .debug_struct("StreamHash")
             .field("addr", &self.addr)
             .field("lookups", &self.lookups)
-            .field("relay_transport", &self.relay_transport)
+            .field("transport", &self.transport)
             .field("id", &self.id)
             .finish_non_exhaustive()
     }
@@ -69,11 +77,17 @@ impl StreamHash {
     #[must_use]
     pub fn encode(&self) -> String {
         let mut framed = vec![VERSION, KIND];
-        framed.push(if self.relay_transport {
-            RELAY_TRANSPORT_BIT
-        } else {
-            0
-        });
+        let mut flags = 0;
+        if self.transport.relay_transport {
+            flags |= RELAY_TRANSPORT_BIT;
+        }
+        if !self.transport.udp {
+            flags |= NO_UDP_BIT;
+        }
+        if !self.transport.webrtc {
+            flags |= NO_WEBRTC_BIT;
+        }
+        framed.push(flags);
         framed.extend_from_slice(&self.id);
         framed.extend_from_slice(&self.secret);
         self.lookups.encode_into(&mut framed);
@@ -100,6 +114,9 @@ impl StreamHash {
         }
         let payload = &framed[2..];
         let flags = *payload.first().context("stream hash missing flags")?;
+        if flags & !KNOWN_FLAGS != 0 {
+            bail!("unsupported stream hash flags {flags:#04x}: upgrade to a newer build");
+        }
         let mut pos = 1;
         let id = take_array::<ID_LEN>(payload, &mut pos).context("stream hash missing id")?;
         let secret =
@@ -112,7 +129,11 @@ impl StreamHash {
         Ok(Self {
             addr,
             lookups,
-            relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
+            transport: TransportPolicy {
+                udp: flags & NO_UDP_BIT == 0,
+                webrtc: flags & NO_WEBRTC_BIT == 0,
+                relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
+            },
             id,
             secret,
         })
@@ -139,7 +160,7 @@ mod tests {
 
     use super::*;
 
-    fn sample(relay_transport: bool) -> StreamHash {
+    fn sample(transport: TransportPolicy) -> StreamHash {
         let id = SecretKey::from_bytes(&[7; 32]).public();
         StreamHash {
             addr: EndpointAddr::from_parts(
@@ -149,16 +170,30 @@ mod tests {
                 )],
             ),
             lookups: LookupOpts::loopback(),
-            relay_transport,
+            transport,
             id: [1; ID_LEN],
             secret: [2; SECRET_LEN],
         }
     }
 
+    fn policy(udp: bool, webrtc: bool, relay_transport: bool) -> TransportPolicy {
+        TransportPolicy {
+            udp,
+            webrtc,
+            relay_transport,
+        }
+    }
+
     #[test]
-    fn a_hash_round_trips_with_either_relay_policy() {
-        for relay_transport in [false, true] {
-            let hash = sample(relay_transport);
+    fn a_hash_round_trips_every_transport_list() {
+        for transport in [
+            policy(true, true, false),
+            policy(true, true, true),
+            policy(true, false, false),
+            policy(false, true, false),
+            policy(false, true, true),
+        ] {
+            let hash = sample(transport);
             assert_eq!(StreamHash::decode(&hash.encode()).expect("decodes"), hash);
             assert_eq!(
                 hash.to_string().parse::<StreamHash>().expect("parses"),
@@ -168,8 +203,18 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_flag_is_refused() {
+        let mut framed =
+            base58check::decode(&sample(TransportPolicy::default()).encode(), "stream hash")
+                .expect("decodes");
+        framed[2] |= 0b1000_0000;
+        let error = StreamHash::decode(&base58check::encode(&framed)).expect_err("unknown flag");
+        assert!(error.to_string().contains("flag"), "{error}");
+    }
+
+    #[test]
     fn a_flipped_character_fails_the_checksum() {
-        let mut encoded = sample(false).encode().into_bytes();
+        let mut encoded = sample(TransportPolicy::default()).encode().into_bytes();
         let last = encoded.len() - 1;
         encoded[last] = if encoded[last] == b'2' { b'3' } else { b'2' };
         let encoded = String::from_utf8(encoded).expect("ascii");
@@ -180,7 +225,8 @@ mod tests {
     fn another_kind_or_version_is_refused() {
         let reframe = |version: u8, kind: u8| {
             let mut framed =
-                base58check::decode(&sample(false).encode(), "stream hash").expect("decodes");
+                base58check::decode(&sample(TransportPolicy::default()).encode(), "stream hash")
+                    .expect("decodes");
             framed[0] = version;
             framed[1] = kind;
             base58check::encode(&framed)
@@ -202,7 +248,7 @@ mod tests {
 
     #[test]
     fn debug_never_prints_the_secret() {
-        let shown = format!("{:?}", sample(false));
+        let shown = format!("{:?}", sample(TransportPolicy::default()));
         assert!(!shown.contains("secret"), "{shown}");
     }
 }

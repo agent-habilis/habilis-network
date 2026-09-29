@@ -33,8 +33,6 @@ fn create_opts(nick: &CStr) -> FofocaOpts {
         lookup: std::ptr::null(),
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
-        disable_ip: 0,
-        disable_webrtc: 0,
         max_peers: 0,
     }
 }
@@ -474,8 +472,6 @@ fn create_opts_for_join(id: &CStr, nick: &CStr) -> FofocaOpts {
         lookup: std::ptr::null(),
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
-        disable_ip: 0,
-        disable_webrtc: 0,
         max_peers: 0,
     }
 }
@@ -565,8 +561,6 @@ fn loopback_streams() -> *mut FofocaStreams {
         lookup: std::ptr::null(),
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
-        disable_ip: 0,
-        disable_webrtc: 0,
     };
     // SAFETY: a fully-initialized struct with NULL strings.
     let streams = unsafe { fofoca_streams_bind(&raw const opts) };

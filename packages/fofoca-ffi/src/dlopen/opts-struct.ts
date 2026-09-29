@@ -12,10 +12,8 @@
  *   const char *lookup;      // offset 32
  *   const char *transport;   // offset 40
  *   const char *relay_urls;  // offset 48
- *   int disable_ip;          // offset 56
- *   int disable_webrtc;      // offset 60
- *   size_t max_peers;        // offset 64
- * } fofoca_opts;             // 72 bytes
+ *   size_t max_peers;        // offset 56
+ * } fofoca_opts;             // 64 bytes
  * ```
  *
  * 64-bit little-endian only, the same scope `msg.ts` claims for the same
@@ -31,11 +29,9 @@ const NAME_OFFSET = 24
 const LOOKUP_OFFSET = 32
 const TRANSPORT_OFFSET = 40
 const RELAY_URLS_OFFSET = 48
-const DISABLE_IP_OFFSET = 56
-const DISABLE_WEBRTC_OFFSET = 60
-const MAX_PEERS_OFFSET = 64
+const MAX_PEERS_OFFSET = 56
 
-export const OPTS_BYTES = 72
+export const OPTS_BYTES = 64
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
@@ -97,8 +93,6 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   field(LOOKUP_OFFSET, opts.lookup)
   field(TRANSPORT_OFFSET, opts.transport)
   field(RELAY_URLS_OFFSET, opts.relayUrls)
-  view.setInt32(DISABLE_IP_OFFSET, opts.disableIp ? 1 : 0, LITTLE_ENDIAN)
-  view.setInt32(DISABLE_WEBRTC_OFFSET, opts.disableWebrtc ? 1 : 0, LITTLE_ENDIAN)
   view.setBigUint64(MAX_PEERS_OFFSET, BigInt(opts.maxPeers), LITTLE_ENDIAN)
 
   return { struct, keepAlive }
@@ -106,27 +100,23 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
 
 /**
  * `fofoca_stream_opts`, for `fofoca_streams_bind`, under the same rules as
- * `fofoca_opts`: the same comma lists, the same path switches.
+ * `fofoca_opts`: the same comma lists.
  *
  * ```c
  * typedef struct {
  *   const char *lookup;      // offset  0
  *   const char *transport;   // offset  8
  *   const char *relay_urls;  // offset 16
- *   int disable_ip;          // offset 24
- *   int disable_webrtc;      // offset 28
- * } fofoca_stream_opts;      // 32 bytes
+ * } fofoca_stream_opts;      // 24 bytes
  * ```
  */
 export interface WireStreamOpts {
   readonly lookup: string | null
   readonly transport: string | null
   readonly relayUrls: string | null
-  readonly disableIp: boolean
-  readonly disableWebrtc: boolean
 }
 
-export const STREAM_OPTS_BYTES = 32
+export const STREAM_OPTS_BYTES = 24
 
 export function encodeStreamOpts(
   opts: WireStreamOpts,
@@ -139,7 +129,5 @@ export function encodeStreamOpts(
   field(0, opts.lookup)
   field(8, opts.transport)
   field(16, opts.relayUrls)
-  view.setInt32(24, opts.disableIp ? 1 : 0, LITTLE_ENDIAN)
-  view.setInt32(28, opts.disableWebrtc ? 1 : 0, LITTLE_ENDIAN)
   return { struct, keepAlive }
 }

@@ -60,7 +60,6 @@ export async function create(opts: CreateOpts & WasmOpts): Promise<Mesh> {
       lookup: opts.lookup ?? [],
       transport: opts.transport ?? [],
       relayUrls: opts.relayUrls ?? [],
-      paths: opts.paths ?? {},
       maxPeers: opts.maxPeers ?? 0,
     },
     opts,

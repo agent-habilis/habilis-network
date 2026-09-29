@@ -93,6 +93,40 @@ async fn quic_echo_over_webrtc() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A detach must reach the far side at once. Aborting the driver sent
+/// nothing, so the far side held a dead session, and one of its direct-peer
+/// slots, until ICE consent timed out.
+#[tokio::test]
+async fn a_detach_ends_the_far_sides_session_too() -> anyhow::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+    let id_client = SecretKey::generate().public();
+    let id_server = SecretKey::generate().public();
+    let transport_client = WebRtcTransport::new(id_client);
+    let transport_server = WebRtcTransport::new(id_server);
+    let (pending_offer, offer_env) = offer_with(id_client, &IceConfig::host_only()).await?;
+    let (pending_answer, answer_env) =
+        answer_with(id_server, &offer_env, &IceConfig::host_only()).await?;
+    let (client_session, server_session) = tokio::join!(
+        pending_offer.complete(&answer_env, JSEP_DEADLINE),
+        pending_answer.complete(JSEP_DEADLINE),
+    );
+    transport_client.attach(id_server, client_session?)?;
+    transport_server.attach(id_client, server_session?)?;
+
+    assert!(transport_client.detach(&id_server));
+    let started = std::time::Instant::now();
+    while transport_server.has_session(&id_client) {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the far side still holds the session"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn detach_then_reattach() -> anyhow::Result<()> {
     let key_client = SecretKey::generate();

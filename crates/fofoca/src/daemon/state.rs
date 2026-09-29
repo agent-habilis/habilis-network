@@ -146,6 +146,17 @@ pub struct EventLoopState {
     /// the real loop installs its channel.
     pub(crate) direct_proven:
         tokio::sync::mpsc::UnboundedSender<crate::transport::probe::DirectOutcome>,
+    /// Where a path watcher reports a change of the selected path to a peer
+    /// the race covers (`transport::probe::on_path_change`).
+    pub(crate) path_changes:
+        tokio::sync::mpsc::UnboundedSender<crate::transport::probe::PathChange>,
+    /// The pooled connection each watched peer's watcher follows, by stable
+    /// id (`None` while its dial runs), so a replaced connection gets a fresh
+    /// watcher and a stale one's reports are dropped.
+    pub(crate) path_watchers: HashMap<EndpointId, Option<usize>>,
+    /// The last selected path kind each watcher reported, for the alive
+    /// tick's nudge of peers riding `WebRTC`.
+    pub(crate) path_kinds: HashMap<EndpointId, crate::transport::probe::PathKind>,
     /// Re-bridge memory: every peer `EndpointId` we've ever linked to,
     /// kept *across* `NeighborDown` (unlike `linked_endpoints`). When a
     /// node loses all links because the rendezvous/relay is unreachable,
@@ -272,7 +283,7 @@ pub struct EventLoopState {
     /// on wasm). The local half of every `WebRTC` lane decision — read from
     /// here, not from the endpoint address, which is empty whenever the relay
     /// link is down.
-    pub(crate) local_ip_transport: bool,
+    pub(crate) local_udp_transport: bool,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -605,6 +616,9 @@ impl EventLoopState {
             direct: HashMap::new(),
             relay_transport: false,
             direct_proven: tokio::sync::mpsc::unbounded_channel().0,
+            path_changes: tokio::sync::mpsc::unbounded_channel().0,
+            path_watchers: HashMap::new(),
+            path_kinds: HashMap::new(),
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo: Cooldown::new(RELINK_COOLDOWN),
@@ -627,7 +641,7 @@ impl EventLoopState {
             rendezvous_offer_fallback: false,
             rendezvous_probe_read_free: false,
             rendezvous_graft_needs_session: false,
-            local_ip_transport: true,
+            local_udp_transport: true,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
@@ -794,6 +808,8 @@ impl EventLoopState {
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let addr = self.peer_endpoints.remove(nick)?;
         self.direct.remove(&addr.id);
+        self.path_watchers.remove(&addr.id);
+        self.path_kinds.remove(&addr.id);
         Some(addr)
     }
 
@@ -1810,6 +1826,23 @@ mod tests {
         );
         assert!(state.direct.is_empty());
         assert!(state.forget_peer_endpoint("bob").is_none());
+    }
+
+    // A departed peer read as riding WebRTC was nudged on every alive tick.
+    #[test]
+    fn forgetting_a_peer_endpoint_drops_its_path_watch() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.path_watchers.insert(bob, Some(7));
+        state
+            .path_kinds
+            .insert(bob, crate::transport::probe::PathKind::WebRtc);
+        state.forget_peer_endpoint("bob");
+        assert!(state.path_watchers.is_empty());
+        assert!(state.path_kinds.is_empty());
     }
 
     // `arms_reclaim` fires on any peer loss while the mesh is beaconless, and

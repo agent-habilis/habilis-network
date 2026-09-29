@@ -25,17 +25,13 @@ use crate::TaskOutcome;
 use crate::util::{output, repo_root, wait_for};
 
 use fofoca::membership;
-use fofoca::net::PathFlags;
-use fofoca::protocol::Transport;
+use fofoca::protocol::{Lookup, Transport};
 
 use super::{Args, Skip, build, cdp, webdriver};
 
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
 const LINK_TIMEOUT: Duration = Duration::from_mins(4);
-/// The accept gate holds a relayed connection for 15 s; this outlasts the
-/// hold plus one heal-tick retry, so a link would have had every chance.
-const REFUSAL_WINDOW: Duration = Duration::from_secs(40);
 const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,11 +40,14 @@ enum Policy {
     RelayTransport,
 }
 
+/// The direct paths in the mesh's transport list. Mesh-wide, so the browser
+/// and the native side run the same ones.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum NativeTransports {
-    Default,
+enum Paths {
+    UdpAndWebRtc,
     WebRtcOnly,
-    RelayOnly,
+    /// No data channel: a browser has no path of its own.
+    UdpOnly,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,15 +62,27 @@ enum JoinMode {
 
 struct Cell {
     policy: Policy,
-    native: NativeTransports,
+    paths: Paths,
     join: JoinMode,
 }
 
 impl Cell {
-    /// The one cell that must not link: no direct path can exist and the
-    /// relay may not carry payload.
+    /// The one cell with no mesh to link in: the browser has no direct path
+    /// and the relay may not carry payload, so the tab refuses the mesh.
     fn expects_link(&self) -> bool {
-        !(self.policy == Policy::LookupOnly && self.native == NativeTransports::RelayOnly)
+        !(self.policy == Policy::LookupOnly && self.paths == Paths::UdpOnly)
+    }
+
+    fn transports(&self) -> Vec<Transport> {
+        let mut transports = match self.paths {
+            Paths::UdpAndWebRtc => vec![Transport::Udp, Transport::WebRtc],
+            Paths::WebRtcOnly => vec![Transport::WebRtc],
+            Paths::UdpOnly => vec![Transport::Udp],
+        };
+        if self.policy == Policy::RelayTransport {
+            transports.push(Transport::Relay);
+        }
+        transports
     }
 
     fn label(&self) -> String {
@@ -81,10 +92,10 @@ impl Cell {
                 Policy::LookupOnly => "lookup-only",
                 Policy::RelayTransport => "relay-transport",
             },
-            match self.native {
-                NativeTransports::Default => "native-all",
-                NativeTransports::WebRtcOnly => "native-webrtc",
-                NativeTransports::RelayOnly => "native-relay-only",
+            match self.paths {
+                Paths::UdpAndWebRtc => "udp+webrtc",
+                Paths::WebRtcOnly => "webrtc",
+                Paths::UdpOnly => "udp",
             },
             match self.join {
                 JoinMode::Topic => "topic",
@@ -98,11 +109,7 @@ impl Cell {
 fn cells(quick: bool) -> Vec<Cell> {
     let mut cells = Vec::new();
     for policy in [Policy::LookupOnly, Policy::RelayTransport] {
-        for native in [
-            NativeTransports::Default,
-            NativeTransports::WebRtcOnly,
-            NativeTransports::RelayOnly,
-        ] {
+        for paths in [Paths::UdpAndWebRtc, Paths::WebRtcOnly, Paths::UdpOnly] {
             for join in [
                 JoinMode::Topic,
                 JoinMode::IdFromNative,
@@ -110,7 +117,7 @@ fn cells(quick: bool) -> Vec<Cell> {
             ] {
                 cells.push(Cell {
                     policy,
-                    native,
+                    paths,
                     join,
                 });
             }
@@ -118,10 +125,10 @@ fn cells(quick: bool) -> Vec<Cell> {
     }
     if quick {
         // The four cells that cover every mechanism once: both policies on
-        // the default transports, the WebRTC-only lane, and the refusal.
+        // the default transports, the WebRTC-only mesh, and the refusal.
         cells.retain(|cell| {
             cell.join == JoinMode::Topic
-                && (cell.native == NativeTransports::Default || cell.policy == Policy::LookupOnly)
+                && (cell.paths == Paths::UdpAndWebRtc || cell.policy == Policy::LookupOnly)
         });
     }
     cells
@@ -272,7 +279,7 @@ impl Native {
 
 /// One browser on the harness page, behind whichever driver reaches it.
 pub(super) enum Page {
-    Cdp(cdp::Browser),
+    Cdp(Box<cdp::Browser>),
     WebDriver(webdriver::Session),
 }
 
@@ -497,28 +504,13 @@ fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> me
     let mut opts = membership::Opts::default();
     match selector {
         NativeSelector::Topic(topic) => opts.topic = Some(topic.to_owned()),
-        NativeSelector::Create => {}
+        // A topic always uses every lookup; a create names its own, and the
+        // relay ladder below needs `relay` among them.
+        NativeSelector::Create => opts.lookup = vec![Lookup::Relay],
     }
     opts.nick = Some("native".to_owned());
     opts.relay_urls = vec![relay_url.to_owned()];
-    opts.transport = match cell.policy {
-        Policy::RelayTransport => vec![Transport::P2p, Transport::Relay],
-        Policy::LookupOnly => vec![Transport::P2p],
-    };
-    opts.paths = match cell.native {
-        NativeTransports::Default => PathFlags {
-            ip: true,
-            webrtc: true,
-        },
-        NativeTransports::WebRtcOnly => PathFlags {
-            ip: false,
-            webrtc: true,
-        },
-        NativeTransports::RelayOnly => PathFlags {
-            ip: false,
-            webrtc: false,
-        },
-    };
+    opts.transport = cell.transports();
     opts
 }
 
@@ -532,10 +524,11 @@ fn page_url(base: &str, cell: &Cell, relay_url: &str, selector: &str) -> String 
     format!(
         "{base}/?{selector}&nick=browser&relay={}&transport={}&log=fofoca=debug,iroh_gossip=debug",
         urlencode(relay_url),
-        match cell.policy {
-            Policy::RelayTransport => "p2p,relay",
-            Policy::LookupOnly => "p2p",
-        },
+        cell.transports()
+            .into_iter()
+            .map(Transport::as_str)
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 
@@ -544,6 +537,34 @@ pub(super) fn urlencode(raw: &str) -> String {
         .replace('&', "%26")
         .replace('+', "%2B")
         .replace('#', "%23")
+}
+
+/// The refusal cell: the tab must refuse a mesh it could carry no payload in,
+/// and say why, rather than join and sit unlinked.
+fn refused_by_the_tab(
+    cell: &Cell,
+    relay_url: &str,
+    harness: &BunServer,
+    page: &Page,
+    topic: &str,
+) -> Result<String, CellFailure> {
+    page.navigate(&page_url(
+        &harness.url,
+        cell,
+        relay_url,
+        &format!("topic={topic}"),
+    ));
+    let failed = wait_for(Duration::from_secs(30), Duration::from_millis(500), || {
+        let failed = page.evaluate("(document.getElementById('failed')||{}).textContent||''");
+        (!failed.is_empty()).then_some(failed)
+    })
+    .ok_or_else(|| CellFailure("the tab opened a mesh it has no path in".to_owned()))?;
+    if !failed.contains(fofoca::runtime::BROWSER_HAS_NO_PATH) {
+        return Err(CellFailure(format!(
+            "the tab failed for another reason: {failed}"
+        )));
+    }
+    Ok("refused by the tab".to_owned())
 }
 
 async fn run_cell(
@@ -555,6 +576,10 @@ async fn run_cell(
     let fail = |message: String| CellFailure(message);
     let topic = format!("mesh-matrix-{}", rand_token());
     drain_logs();
+
+    if !cell.expects_link() {
+        return refused_by_the_tab(cell, relay_url, harness, page, &topic);
+    }
 
     // Stand the two sides up in the cell's order.
     let (native, selector) = match cell.join {
@@ -607,8 +632,6 @@ async fn run_cell(
         page.navigate(&page_url(&harness.url, cell, relay_url, &selector));
     }
 
-    // The page must open the mesh — even the refusal cell (the mesh opens;
-    // the *pair* never links).
     let ready = wait_for(Duration::from_secs(30), Duration::from_millis(500), || {
         let failed = page.evaluate("(document.getElementById('failed')||{}).textContent||''");
         if !failed.is_empty() {
@@ -625,36 +648,15 @@ async fn run_cell(
         page.evaluate("(document.getElementById('peers')||{}).textContent||''")
             .contains("\"native\"")
     };
-    if cell.expects_link() {
-        let linked = wait_for(LINK_TIMEOUT, Duration::from_secs(1), || {
-            (native.saw_event("joined", "browser") && browser_sees_native()).then_some(())
-        });
-        if linked.is_none() {
-            return Err(fail(format!(
-                "the pair never linked (native saw browser: {}, browser saw native: {})",
-                native.saw_event("joined", "browser"),
-                browser_sees_native(),
-            )));
-        }
-    } else {
-        tokio::time::sleep(REFUSAL_WINDOW).await;
-        if native.saw_event("joined", "browser") || browser_sees_native() {
-            return Err(fail(
-                "a relay-only pair linked although the relay is lookup only".to_owned(),
-            ));
-        }
-        // Whichever side holds the beacon does the refusing: native-first
-        // cells log it natively, browser-first cells log it in the tab.
-        let logs = drain_logs();
-        let browser_log = page.evaluate("(document.getElementById('log')||{}).textContent||''");
-        if !logs.contains("relay-only path refused")
-            && !browser_log.contains("relay-only path refused")
-        {
-            return Err(fail(
-                "the pair stayed unlinked but the engine never logged the refusal".to_owned(),
-            ));
-        }
-        return Ok("held apart, refusal logged".to_owned());
+    let linked = wait_for(LINK_TIMEOUT, Duration::from_secs(1), || {
+        (native.saw_event("joined", "browser") && browser_sees_native()).then_some(())
+    });
+    if linked.is_none() {
+        return Err(fail(format!(
+            "the pair never linked (native saw browser: {}, browser saw native: {})",
+            native.saw_event("joined", "browser"),
+            browser_sees_native(),
+        )));
     }
 
     // ── lanes: wait for the pair's own direct session ───────────────
@@ -825,7 +827,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
 
 pub(super) fn launch_page(only: &str) -> Result<Page, Skip> {
     if "cft".contains(only) || only.contains("cft") {
-        return Ok(Page::Cdp(cdp::Browser::launch()?));
+        return Ok(Page::Cdp(Box::new(cdp::Browser::launch()?)));
     }
     for browser in super::browsers() {
         if !browser.name.contains(only) {
@@ -841,7 +843,7 @@ pub(super) fn launch_page(only: &str) -> Result<Page, Skip> {
             return Err(Skip(format!("not installed: {}", browser.binary)));
         }
         return match browser.backend {
-            super::Backend::Cdp => Ok(Page::Cdp(cdp::Browser::launch()?)),
+            super::Backend::Cdp => Ok(Page::Cdp(Box::new(cdp::Browser::launch()?))),
             super::Backend::WebDriver => Ok(Page::WebDriver(webdriver::Session::open(
                 browser.name,
                 &browser.binary,

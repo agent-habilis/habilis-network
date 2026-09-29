@@ -445,7 +445,7 @@ An id minted before the policy existed keeps its bytes and topic and reads as lo
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport p2p,relay`, `transport: ['p2p', 'relay']`) says what payload may ride; `p2p` is always on.
+`transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `fofoca_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
@@ -462,9 +462,19 @@ One crate holds two mutually exclusive backends over one shared protocol half.
 The `native` backend drives sans-io str0m on tokio and gathers STUN candidates itself.
 The `web` backend uses the `RTCPeerConnection` of the browser.
 
-The engine opens a WebRTC session for a pair only when one end or both ends advertise no IP address, as a browser does (`transport::webrtc::needs_webrtc_lane`).
-Two native peers stay on iroh QUIC, because it is faster (section 11).
-The session must exist before the gossip graft, because iroh cannot move a live connection to a transport that attaches later.
+The mesh's transport list decides which paths exist (`udp`, `webrtc`, `relay`; section 9.1).
+A pair where one end or both ends have no UDP, as a browser has none, always negotiates a WebRTC session (`transport::webrtc::needs_webrtc_lane`).
+A pair with UDP on both ends races the two when the list has both.
+The lower id offers a WebRTC round while the UDP punch runs, and the pair keeps whichever path iroh selects.
+UDP is faster (section 11), so a session that attaches after UDP won is detached at once, and no round starts once UDP is selected.
+
+A path watcher on the offerer's pooled connection follows the selected path to each such peer (`transport::probe`):
+
+- UDP lost (relay or nothing selected for longer than 500 ms): the pair races again, and its frames park until a direct path is back.
+- UDP back while a session exists: the session is detached, and the far side drops its half at once (a DTLS close).
+- While a pair rides WebRTC, a nudge each alive tick (a connection that completes and closes at once) makes iroh try the UDP punch again and re-run path selection; iroh alone retries only every 60 s.
+
+A live connection gains a path only when another connection to the peer completes, which is why the graft follows the attach event and the watcher nudges.
 
 Signaling is vanilla ICE, with no trickle.
 Candidates ride inside the SDP, so gathering completes before an envelope goes out.
@@ -518,7 +528,7 @@ The reverse route derives from the forward route, so a reply needs no fresh look
 `fofoca-stream` carries bytes from one producer to one consumer.
 It uses no gossip: the bytes ride the `fofoca/stream/1` ALPN.
 By default they ride a direct path: QUIC over IP, or a WebRTC data channel when one end is a browser.
-A stream created with `transport: ['p2p', 'relay']` lets them fall back to the relay when no direct path exists; the node must then also name `relay` among its lookups, which a browser always does.
+A stream created with `transport: ['udp', 'webrtc', 'relay']` lets them fall back to the relay when no direct path exists; the node must then also name `relay` among its lookups, which a browser always does.
 
 A producer creates a stream and gets a hash.
 The hash holds a random 16-byte id, a 32-byte secret, the lookups, the relay policy, and the address of the producer.

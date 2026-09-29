@@ -752,6 +752,9 @@ async fn claim(
         // point, not somewhere an application is reachable.
         Vec::new(),
         params.relay_transport,
+        // The rendezvous keeps the hold: a joiner grafts it only once their
+        // session is attached, so a held dial here is not a second one.
+        false,
     );
 
     // Register the peer's address so the rendezvous can dial it
@@ -1194,6 +1197,7 @@ mod tests {
             None,
             Vec::new(),
             false,
+            false,
         );
         let (_sender, mut receiver) = gossip
             .subscribe(params.topic_id, Vec::new())
@@ -1247,6 +1251,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            false,
             false,
         );
         let (sender, mut receiver) = gossip

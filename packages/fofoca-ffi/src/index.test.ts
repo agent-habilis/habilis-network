@@ -181,8 +181,6 @@ describe('wire opts', () => {
       lookup: null,
       transport: null,
       relayUrls: null,
-      disableIp: false,
-      disableWebrtc: false,
       maxPeers: 0,
     })
     expect(createWire({ lookup: ['mdns', 'dht', 'relay'], name: 'salon' })).toMatchObject({
@@ -191,16 +189,12 @@ describe('wire opts', () => {
     })
   })
 
-  test('relay ladder, transport policy and path switches', () => {
-    expect(joinWire({ topic: 't', transport: ['p2p', 'relay'], relayUrls: ['http://a/', 'http://b/'] })).toMatchObject({
+  test('relay ladder and transport policy', () => {
+    expect(joinWire({ topic: 't', transport: ['webrtc', 'relay'], relayUrls: ['http://a/', 'http://b/'] })).toMatchObject({
       lookup: null,
-      transport: 'p2p,relay',
+      transport: 'webrtc,relay',
       relayUrls: 'http://a/,http://b/',
     })
     expect(createWire({ relayUrls: [], transport: [] })).toMatchObject({ relayUrls: null, transport: null })
-    expect(createWire({ paths: { webrtc: false } })).toMatchObject({
-      disableIp: false,
-      disableWebrtc: true,
-    })
   })
 })

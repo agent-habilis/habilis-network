@@ -58,13 +58,12 @@ typedef struct {
   const char *name;       /* mesh name on create; NULL falls back to "fofoca" */
   const char *lookup;     /* "mdns,dht,relay", any subset; NULL = none, a
                              loopback mesh reachable from this machine only */
-  const char *transport;  /* "p2p" or "p2p,relay"; NULL = "p2p", so every byte
-                             of data goes peer to peer. "relay" needs "relay" in
-                             `lookup` */
+  const char *transport;  /* "udp,webrtc,relay", any subset with "udp" or
+                             "webrtc"; NULL = "udp,webrtc", so every byte of
+                             data goes peer to peer. "relay", or a list without
+                             "udp", needs "relay" in `lookup` */
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
                              default. Needs "relay" in `lookup` */
-  int disable_ip;         /* nonzero: no direct UDP / hole-punched paths */
-  int disable_webrtc;     /* nonzero: no WebRTC lane */
   size_t max_peers;
 } fofoca_opts;
 
@@ -155,14 +154,12 @@ typedef struct fofoca_streams fofoca_streams;
 typedef struct fofoca_producer fofoca_producer;
 typedef struct fofoca_reader fofoca_reader;
 
-/* How a stream node reaches peers: the same lists and switches as fofoca_opts,
- * without the mesh selectors. Zero-initialize for a loopback node. */
+/* How a stream node reaches peers: the same lists as fofoca_opts, without the
+ * mesh selectors. Zero-initialize for a loopback node. */
 typedef struct {
   const char *lookup;     /* "mdns,dht,relay", any subset; NULL = loopback */
-  const char *transport;  /* "p2p" or "p2p,relay"; NULL = "p2p" */
+  const char *transport;  /* "udp,webrtc,relay", as fofoca_opts; NULL = "udp,webrtc" */
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = default */
-  int disable_ip;
-  int disable_webrtc;
 } fofoca_stream_opts;
 
 /* Stand up a stream node. NULL on failure. */

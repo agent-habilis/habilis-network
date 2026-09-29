@@ -44,15 +44,11 @@ pub struct FofocaOpts {
     /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
     /// (a loopback mesh on create).
     pub lookup: *const c_char,
-    /// Comma-separated transports, `p2p` or `p2p,relay`; NULL ⇒ `p2p`, so
-    /// all data stays peer to peer.
+    /// Comma-separated transports, any of `udp`, `webrtc`, `relay`; NULL ⇒
+    /// `udp,webrtc`, so all data stays peer to peer.
     pub transport: *const c_char,
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
     pub relay_urls: *const c_char,
-    /// Nonzero disables direct UDP / hole-punched paths.
-    pub disable_ip: c_int,
-    /// Nonzero disables the `WebRTC` lane.
-    pub disable_webrtc: c_int,
     pub max_peers: usize,
 }
 
@@ -69,7 +65,7 @@ pub struct FofocaOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<FofocaOpts>() == 72, "opts-struct.ts OPTS_BYTES");
+    assert!(size_of::<FofocaOpts>() == 64, "opts-struct.ts OPTS_BYTES");
     assert!(align_of::<FofocaOpts>() == 8);
     assert!(offset_of!(FofocaOpts, mesh) == 0);
     assert!(offset_of!(FofocaOpts, topic) == 8);
@@ -78,9 +74,7 @@ const _: () = {
     assert!(offset_of!(FofocaOpts, lookup) == 32);
     assert!(offset_of!(FofocaOpts, transport) == 40);
     assert!(offset_of!(FofocaOpts, relay_urls) == 48);
-    assert!(offset_of!(FofocaOpts, disable_ip) == 56);
-    assert!(offset_of!(FofocaOpts, disable_webrtc) == 60);
-    assert!(offset_of!(FofocaOpts, max_peers) == 64);
+    assert!(offset_of!(FofocaOpts, max_peers) == 56);
 };
 
 /// One received message's metadata, mirroring `fofoca_msg` in the header. The
@@ -328,10 +322,6 @@ pub unsafe extern "C" fn fofoca_mesh_open(opts: *const FofocaOpts) -> *mut Fofoc
             lookup,
             transport,
             relay_urls,
-            paths: fofoca::net::PathFlags {
-                ip: opts.disable_ip == 0,
-                webrtc: opts.disable_webrtc == 0,
-            },
             max_peers: opts.max_peers,
         };
         match Mesh::open(&parsed) {
@@ -591,16 +581,14 @@ pub unsafe extern "C" fn fofoca_mesh_close(handle: *mut FofocaMesh) -> c_int {
 }
 
 /// How a stream node reaches peers, mirroring `fofoca_stream_opts` in the
-/// header: the same three lists and two switches `fofoca_opts` carries, without
-/// the mesh selectors a stream has no use for.
+/// header: the same three lists `fofoca_opts` carries, without the mesh
+/// selectors a stream has no use for.
 #[repr(C)]
 #[derive(Debug)]
 pub struct FofocaStreamOpts {
     pub lookup: *const c_char,
     pub transport: *const c_char,
     pub relay_urls: *const c_char,
-    pub disable_ip: c_int,
-    pub disable_webrtc: c_int,
 }
 
 /// Pinned like `FofocaOpts`: a reordered field would silently misread a
@@ -608,13 +596,11 @@ pub struct FofocaStreamOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<FofocaStreamOpts>() == 32);
+    assert!(size_of::<FofocaStreamOpts>() == 24);
     assert!(align_of::<FofocaStreamOpts>() == 8);
     assert!(offset_of!(FofocaStreamOpts, lookup) == 0);
     assert!(offset_of!(FofocaStreamOpts, transport) == 8);
     assert!(offset_of!(FofocaStreamOpts, relay_urls) == 16);
-    assert!(offset_of!(FofocaStreamOpts, disable_ip) == 24);
-    assert!(offset_of!(FofocaStreamOpts, disable_webrtc) == 28);
 };
 
 /// The opaque handle behind `fofoca_streams *`.
@@ -685,10 +671,6 @@ pub unsafe extern "C" fn fofoca_streams_bind(opts: *const FofocaStreamOpts) -> *
             relay_urls: relay_urls
                 .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
                 .unwrap_or_default(),
-            paths: fofoca::net::PathFlags {
-                ip: opts.disable_ip == 0,
-                webrtc: opts.disable_webrtc == 0,
-            },
         };
         boxed(Streams::bind(&parsed).map(|streams| FofocaStreams { streams }))
     })

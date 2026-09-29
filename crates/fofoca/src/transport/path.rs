@@ -34,6 +34,15 @@ pub(crate) fn selected_is_direct(conn: &Connection) -> bool {
         .is_some_and(|path| !path.is_relay())
 }
 
+/// Whether iroh's selected path to the remote is a direct UDP path: the race
+/// against `WebRTC` is won. `false` while no path is selected yet.
+pub(crate) fn selected_is_ip(conn: &Connection) -> bool {
+    conn.paths()
+        .iter()
+        .find(iroh::endpoint::Path::is_selected)
+        .is_some_and(|path| path.is_ip())
+}
+
 /// Whether payload may go out on `conn` under the mesh's transport policy.
 /// With the relay allowed as a transport, anything goes — decided before the
 /// path snapshot, which locks and clones. With the relay lookup only, the
@@ -52,10 +61,24 @@ pub(crate) const RELAY_REFUSED: &str =
 /// Every path event is a reason to re-read the path list: the event's own
 /// address may be stale by the time it is handled.
 pub async fn wait_direct(conn: &Connection, deadline: Duration) -> bool {
+    wait_selected(conn, deadline, selected_is_direct).await
+}
+
+/// [`wait_direct`] for a UDP path alone: whether UDP won the race against a
+/// `WebRTC` session within `deadline`.
+pub(crate) async fn wait_ip(conn: &Connection, deadline: Duration) -> bool {
+    wait_selected(conn, deadline, selected_is_ip).await
+}
+
+async fn wait_selected(
+    conn: &Connection,
+    deadline: Duration,
+    selected: fn(&Connection) -> bool,
+) -> bool {
     let mut events = conn.path_events();
     let proven = async {
         loop {
-            if selected_is_direct(conn) {
+            if selected(conn) {
                 return true;
             }
             if events.next().await.is_none() {

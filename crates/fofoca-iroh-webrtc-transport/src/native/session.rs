@@ -24,11 +24,27 @@ pub(crate) fn note_dropped(remote: &EndpointId, total: u64, context: &str) {
 /// Aborts the session driver task when the handle leaves the registry, so
 /// a `detach` (or dropping the whole transport) reliably stops the str0m
 /// loop instead of detaching it.
+///
+/// Not at once: dropping the handle also closes the driver's outbound queue,
+/// and the driver answers that by closing the data channel, which is how the
+/// far side learns of the detach. [`CLOSE_GRACE`] lets that close go out; a
+/// driver still running after it is aborted.
 struct AbortOnDrop(JoinHandle<()>);
+
+const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
-        self.0.abort();
+        let abort = self.0.abort_handle();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    tokio::time::sleep(CLOSE_GRACE).await;
+                    abort.abort();
+                });
+            }
+            Err(_) => abort.abort(),
+        }
     }
 }
 

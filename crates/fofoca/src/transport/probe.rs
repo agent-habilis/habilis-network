@@ -11,7 +11,9 @@
 //! peer that never proves a direct path stays `RelayOnly`, retried on the
 //! alive tick, and is never grafted through the relay.
 
+use futures_util::StreamExt as _;
 use iroh::EndpointId;
+use iroh::endpoint::Connection;
 
 use super::path::{PROBE_DEADLINE, wait_direct};
 use super::webrtc::needs_webrtc_lane;
@@ -24,6 +26,265 @@ use crate::util::clock::Instant;
 pub(crate) struct DirectOutcome {
     pub(crate) peer: EndpointId,
     pub(crate) direct: bool,
+}
+
+/// Which kind of path iroh has selected to a peer, as the race sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathKind {
+    Ip,
+    WebRtc,
+    Relay,
+    None,
+}
+
+/// What a change of the selected path asks of the race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathAction {
+    /// A direct path is selected: the peer is proven direct again, which
+    /// frees frames parked while it was not.
+    Proven,
+    /// UDP is back: the session only holds a direct-peer slot now.
+    Detach,
+    /// The direct path is gone: race again.
+    Rerace,
+}
+
+/// How long "no path selected" must last before a watcher reports it. iroh
+/// can leave the selection empty between a path's `Abandoned` and the next
+/// `Established` (fork `remote_state.rs:650-651`, `:1516-1517`); seen in the
+/// e2e as a 2 ms blip, each of which started a whole new race.
+const NO_PATH_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A watcher's report: `kind` is now the selected path to `peer`, on the
+/// pooled connection `conn_id`. `None` for a watcher whose dial failed; it
+/// only clears the watch so the next alive tick tries again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PathChange {
+    pub(crate) peer: EndpointId,
+    pub(crate) kind: PathKind,
+    pub(crate) conn_id: Option<usize>,
+}
+
+fn path_list(conn: &Connection) -> Vec<String> {
+    conn.paths()
+        .iter()
+        .map(|path| {
+            format!(
+                "{:?}{}",
+                path.remote_addr(),
+                if path.is_selected() { " selected" } else { "" }
+            )
+        })
+        .collect()
+}
+
+fn selected_kind(conn: &Connection) -> PathKind {
+    conn.paths()
+        .iter()
+        .find(iroh::endpoint::Path::is_selected)
+        .map_or(PathKind::None, |path| {
+            if path.is_ip() {
+                PathKind::Ip
+            } else if path.is_relay() {
+                PathKind::Relay
+            } else {
+                PathKind::WebRtc
+            }
+        })
+}
+
+/// Start a path watcher for every raced peer not yet watched: a peer with UDP
+/// on both ends, on a node running `WebRTC`, where this node offers (the lower
+/// id). Only the offerer can race again, and its detach reaches the answerer
+/// as a close. Selection is per remote in iroh, so the pooled connection
+/// answers for the gossip link too; a peer with none gets one dialed, since a
+/// pair linked through gossip may never have sent unicast.
+pub(crate) fn ensure_watchers(
+    state: &mut EventLoopState,
+    local: EndpointId,
+    rendezvous: EndpointId,
+) {
+    if state.webrtc.is_none() || !state.local_udp_transport {
+        return;
+    }
+    let peers: Vec<EndpointId> = state
+        .peer_endpoints
+        .values()
+        // The rendezvous serves no unicast, so it has no pooled connection
+        // to watch; `retry_candidates` skips it for the same reason.
+        .filter(|addr| addr.id != rendezvous && !needs_webrtc_lane(addr) && local < addr.id)
+        .map(|addr| addr.id)
+        .collect();
+    for peer in peers {
+        let warm = state.unicast_pool.connection(peer);
+        let watched = state.path_watchers.get(&peer).copied();
+        match (&warm, watched) {
+            // Dialing, or already watching this connection.
+            (None, Some(None)) => continue,
+            (Some(conn), Some(Some(id))) if conn.stable_id() == id => continue,
+            _ => {}
+        }
+        state
+            .path_watchers
+            .insert(peer, warm.as_ref().map(Connection::stable_id));
+        tracing::debug!(target: super::LOG_TARGET, %peer, "watching the selected path");
+        let tx = state.path_changes.clone();
+        let pool = state.unicast_pool.clone();
+        n0_future::task::spawn(async move {
+            let dialed = match warm {
+                Some(conn) => Ok(conn),
+                None => pool.warm_or_dial(peer).await,
+            };
+            let Ok(conn) = dialed else {
+                let _ = tx.send(PathChange {
+                    peer,
+                    kind: PathKind::None,
+                    conn_id: None,
+                });
+                return;
+            };
+            // iroh punches UDP again only on the client side of a
+            // connection; a server-side one would never see UDP return.
+            debug_assert!(conn.side().is_client(), "a watched connection is ours");
+            let conn_id = Some(conn.stable_id());
+            // Subscribe first, then read: a path selected before the
+            // subscription is reported by the first read, not missed.
+            let mut events = conn.path_events();
+            let mut last = None;
+            tracing::debug!(target: super::LOG_TARGET, %peer, paths = ?path_list(&conn), "watcher started");
+            loop {
+                // A closed connection reads as no path; that is not a loss to
+                // race over, and a replacement gets a watcher of its own.
+                if conn.close_reason().is_some() {
+                    return;
+                }
+                let mut kind = selected_kind(&conn);
+                if kind == PathKind::None {
+                    // Between two path events the selection can read empty for
+                    // a moment; only a loss that lasts is one.
+                    n0_future::time::sleep(NO_PATH_GRACE).await;
+                    kind = selected_kind(&conn);
+                }
+                if last != Some(kind) {
+                    last = Some(kind);
+                    if tx
+                        .send(PathChange {
+                            peer,
+                            kind,
+                            conn_id,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                if events.next().await.is_none() {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// Record `peer` as proven direct again; whether frames parked while it was
+/// not now need a flush. The race's offer round restores `Direct` through
+/// [`graft_proven`], but UDP can come back before any round attaches.
+pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool {
+    let was = state.direct.insert(peer, DirectState::Direct);
+    was != Some(DirectState::Direct) && state.meshed && !state.pending_outbound.is_empty()
+}
+
+/// Once per alive tick, nudge every watched peer riding `WebRTC`. A nudge is
+/// a connect, and each one makes iroh try the UDP punch again and re-run path
+/// selection; without it iroh retries every 60 s. When UDP answers, the
+/// watcher sees it selected and the session is detached.
+pub(crate) fn nudge_webrtc_riders(state: &EventLoopState, ctx: &HandlerCtx<'_>) {
+    for (&peer, &kind) in &state.path_kinds {
+        if kind == PathKind::WebRtc {
+            let endpoint = ctx.endpoint.clone();
+            n0_future::task::spawn(async move {
+                super::webrtc::nudge(&endpoint, peer).await;
+            });
+        }
+    }
+}
+
+/// Apply a watcher's report (requirements 3 and 4): drop the session once UDP
+/// is selected again, and race again once the direct path is gone. A lost
+/// path moves a proven peer to `RelayOnly`, not `Pending`: frames park, and
+/// the alive tick keeps retrying it if this round fails.
+pub(crate) async fn on_path_change(
+    change: PathChange,
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+) {
+    let PathChange {
+        peer,
+        kind,
+        conn_id,
+    } = change;
+    match (state.path_watchers.get(&peer).copied(), conn_id) {
+        // The dial for this watch failed: let the next tick try again.
+        (Some(None), None) => {
+            state.path_watchers.remove(&peer);
+            return;
+        }
+        // The watch was dialing: this is its connection.
+        (Some(None), Some(id)) => {
+            state.path_watchers.insert(peer, Some(id));
+        }
+        (Some(Some(watched)), Some(id)) if watched == id => {}
+        // A replaced connection's watcher.
+        _ => return,
+    }
+    tracing::debug!(target: super::LOG_TARGET, %peer, ?kind, "selected path changed");
+    state.path_kinds.insert(peer, kind);
+    let Some(handle) = state.webrtc.clone() else {
+        return;
+    };
+    let has_session = handle.has_session(&peer);
+    let action = path_action(kind, has_session);
+    match action {
+        PathAction::Proven | PathAction::Detach => {
+            if action == PathAction::Detach {
+                let _ = handle.detach(&peer);
+                tracing::info!(target: super::LOG_TARGET, %peer, "udp selected again; webrtc session detached");
+            }
+            if mark_proven(state, peer) {
+                crate::gossip::flush_pending(state, ctx, "direct path back").await;
+            }
+        }
+        PathAction::Rerace => {
+            if state.direct.get(&peer) == Some(&DirectState::Direct) {
+                state.direct.insert(peer, DirectState::RelayOnly);
+            }
+            tracing::info!(target: super::LOG_TARGET, %peer, ?kind, "direct path lost; racing again");
+            if has_session {
+                // The session outlived the loss but this connection does not
+                // ride it yet: one connect moves it onto the session's path.
+                let endpoint = ctx.endpoint.clone();
+                n0_future::task::spawn(async move {
+                    super::webrtc::nudge(&endpoint, peer).await;
+                });
+            } else if let Some(addr) = state
+                .peer_endpoints
+                .values()
+                .find(|addr| addr.id == peer)
+                .cloned()
+            {
+                super::webrtc::negotiate_session(state, ctx, peer, addr);
+            }
+        }
+    }
+}
+
+/// Pure: the race's answer to `selected` becoming the selected path.
+pub(crate) fn path_action(selected: PathKind, has_session: bool) -> PathAction {
+    match selected {
+        PathKind::Ip if has_session => PathAction::Detach,
+        PathKind::Relay | PathKind::None => PathAction::Rerace,
+        PathKind::Ip | PathKind::WebRtc => PathAction::Proven,
+    }
 }
 
 /// Pure: may a peer be grafted, from what is known right now? A `WebRTC`
@@ -220,6 +481,58 @@ mod tests {
             expected,
             "the re-bridge re-dials the linked peer too"
         );
+    }
+
+    #[test]
+    fn a_path_change_detaches_on_udp_and_races_again_on_loss() {
+        use super::{PathAction, PathKind, path_action};
+        assert_eq!(path_action(PathKind::Ip, true), PathAction::Detach);
+        assert_eq!(path_action(PathKind::Ip, false), PathAction::Proven);
+        assert_eq!(path_action(PathKind::WebRtc, true), PathAction::Proven);
+        assert_eq!(path_action(PathKind::Relay, false), PathAction::Rerace);
+        assert_eq!(path_action(PathKind::Relay, true), PathAction::Rerace);
+        assert_eq!(path_action(PathKind::None, false), PathAction::Rerace);
+    }
+
+    // UDP can come back before a new session attaches, and nothing else
+    // writes `Direct` then: the peer's directed frames stayed parked.
+    #[test]
+    fn a_direct_path_proves_a_relay_only_peer_again() {
+        use crate::daemon::state::DirectState;
+        let mut state = fresh_state();
+        state.meshed = true;
+        let bob = endpoint_id(2);
+        state.direct.insert(bob, DirectState::RelayOnly);
+        assert!(!super::mark_proven(&mut state, bob), "nothing parked yet");
+        assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+    }
+
+    // The rendezvous serves no unicast: a watcher's dial to it always failed,
+    // and each alive tick tried again.
+    #[tokio::test]
+    async fn the_rendezvous_is_not_watched() {
+        use fofoca_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+        use iroh::TransportAddr;
+        let mut state = fresh_state();
+        // The watcher only follows higher ids: sort, so `local` is the lowest.
+        let mut ids = [endpoint_id(1), endpoint_id(2), endpoint_id(3)];
+        ids.sort_unstable();
+        let [local, rendezvous, bob] = ids;
+        state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(local)));
+        state.local_udp_transport = true;
+        let with_udp = |id| {
+            EndpointAddr::from_parts(
+                id,
+                [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
+            )
+        };
+        state
+            .peer_endpoints
+            .insert(nick("beacon"), with_udp(rendezvous));
+        state.peer_endpoints.insert(nick("bob"), with_udp(bob));
+        super::ensure_watchers(&mut state, local, rendezvous);
+        assert!(state.path_watchers.contains_key(&bob), "a peer is watched");
+        assert!(!state.path_watchers.contains_key(&rendezvous));
     }
 
     #[test]

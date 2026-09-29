@@ -25,7 +25,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, endpoint::presets, prot
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
-use crate::protocol::mesh::{LookupOpts, RelayChoice};
+use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
 use crate::util::clock::millis_saturating;
 
 /// A local relay server every side of a test can reach: plain HTTP, so the
@@ -137,15 +137,15 @@ impl TransportHandles {
     reason = "one independent on/off per transport; a bitflags type would read worse"
 )]
 pub struct TransportOpts {
-    /// Direct UDP and hole-punched paths, plus the address lookups that find
-    /// them. Cleared by a WebRTC-only instance.
-    pub ip: bool,
+    /// QUIC on direct and hole-punched UDP paths, plus the address lookups
+    /// that find them. Cleared by a WebRTC-only instance.
+    pub udp: bool,
     /// The relay. **Never cleared by `webrtc`-only**, because the relay is the
     /// rendezvous: it carries the bootstrap dial and the JSEP exchange. Clearing
     /// it would sever the very thing that lets a `WebRTC` session be negotiated.
     ///
     /// Not the mesh policy: this says whether *this node* registers a relay
-    /// transport at all, the way `ip` and `webrtc` do. Whether the relay may
+    /// transport at all, the way `udp` and `webrtc` do. Whether the relay may
     /// carry payload is mesh-wide and lives in the id, as
     /// `protocol::TransportPolicy::relay_transport`.
     pub relay: bool,
@@ -160,7 +160,7 @@ pub struct TransportOpts {
 impl Default for TransportOpts {
     fn default() -> Self {
         Self {
-            ip: true,
+            udp: true,
             relay: true,
             webrtc: true,
             multihop: false,
@@ -200,7 +200,7 @@ impl TransportOpts {
     #[must_use]
     pub fn webrtc_only() -> Self {
         Self {
-            ip: false,
+            udp: false,
             relay: true,
             webrtc: true,
             multihop: false,
@@ -208,36 +208,24 @@ impl TransportOpts {
     }
 }
 
-/// Per-node path switches a consumer hands over as plain data (a C struct, a
-/// browser's options object). Not the mesh's transport policy: that says what
-/// payload *may* ride and is in the id; this says what *this node* has. Only the
-/// two a consumer plausibly turns off are exposed: the relay stays (it is the
-/// rendezvous) and multihop stays an engine concern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct PathFlags {
-    /// Direct UDP and hole-punched paths.
-    pub ip: bool,
-    /// QUIC over a `WebRTC` data channel.
-    pub webrtc: bool,
-}
-
-impl Default for PathFlags {
-    fn default() -> Self {
+impl TransportOpts {
+    /// These paths, less any the mesh's transport list leaves out. Never
+    /// widens: a path this node lacks stays off whatever the mesh allows, and
+    /// a browser has no UDP at all.
+    #[must_use]
+    pub fn within(self, policy: &TransportPolicy) -> Self {
         Self {
-            ip: true,
-            webrtc: true,
+            udp: self.udp && policy.udp && !cfg!(target_arch = "wasm32"),
+            webrtc: self.webrtc && policy.webrtc,
+            ..self
         }
     }
-}
 
-impl From<PathFlags> for TransportOpts {
-    fn from(paths: PathFlags) -> Self {
-        Self {
-            ip: paths.ip,
-            webrtc: paths.webrtc,
-            ..Self::default()
-        }
+    /// Whether these paths carry payload on a node with no UDP, such as a
+    /// browser: only a data channel or relay payload can.
+    #[must_use]
+    pub fn carry_without_udp(self, policy: &TransportPolicy) -> bool {
+        self.webrtc || policy.relay_transport
     }
 }
 
@@ -345,7 +333,7 @@ pub async fn build_endpoint(
     // does not *exist* on a wasm build of iroh, because a browser has no IP
     // transports to clear. The flag is already satisfied there by construction.
     #[cfg(not(target_arch = "wasm32"))]
-    if !transports.opts.ip {
+    if !transports.opts.udp {
         // `clear_ip_transports` only — deliberately **not**
         // `clear_address_lookup`. That was the first attempt and it silently
         // broke everything: `add_peer_addr` registers a `MemoryLookup` on the
@@ -383,11 +371,11 @@ pub async fn build_endpoint(
     // that need the bound endpoint's id), so `clear_address_lookup` above does
     // not reach them — they have to be skipped here as well. Both exist to find
     // IP paths, so an instance with IP off has no use for either.
-    if lookups.mdns && transports.opts.ip {
+    if lookups.mdns && transports.opts.udp {
         #[cfg(all(feature = "host", feature = "mdns"))]
         mdns::wire(&endpoint)?;
     }
-    if lookups.dht && transports.opts.ip {
+    if lookups.dht && transports.opts.udp {
         #[cfg(all(feature = "host", feature = "dht"))]
         dht::wire(&endpoint)?;
     }
@@ -668,6 +656,9 @@ pub(crate) fn build_mesh(
     // The mesh's `transport.relay_transport`: with it off, every inbound gossip
     // connection is held until iroh selects a direct path on it.
     relay_transport: bool,
+    // This node has no UDP path, so its gossip gate needs a `WebRTC` session
+    // with the dialer (see `DirectOnlyGossip::accept`).
+    needs_session: bool,
 ) -> (Gossip, Router) {
     // `active_view_capacity` is the live direct-neighbor cap (`--max-peers`),
     // raised above iroh-gossip's default (5) so meshes up to it form a full mesh
@@ -686,14 +677,23 @@ pub(crate) fn build_mesh(
     // Cloned before the Router consumes the endpoint; the signal acceptor
     // registers webrtc transport addresses on attach.
     let endpoint_for_acceptor = endpoint.clone();
+    let session_gate = webrtc
+        .as_ref()
+        .filter(|_| needs_session)
+        .map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
     let mut builder = Router::builder(endpoint).accept(
         GOSSIP_ALPN,
-        crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport),
+        crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport, session_gate),
     );
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {
-        builder = builder.accept(crate::transport::UNICAST_ALPN, acceptor);
+        builder = builder
+            .accept(crate::transport::UNICAST_ALPN, acceptor)
+            .accept(
+                crate::transport::webrtc::NUDGE_ALPN,
+                crate::transport::webrtc::NudgeAcceptor,
+            );
     }
     // …and answers JSEP offers, so a peer that cannot reach us over IP can
     // still open a direct data channel. Answering is unconditional: the role
@@ -729,7 +729,30 @@ pub(crate) fn build_mesh(
 
 #[cfg(test)]
 mod tests {
-    use super::{LookupOpts, build_peer_endpoint};
+    use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+
+    #[test]
+    fn the_mesh_policy_turns_off_the_paths_it_leaves_out() {
+        let webrtc_only = TransportPolicy {
+            udp: false,
+            ..TransportPolicy::default()
+        };
+        let on_webrtc = TransportOpts::default().within(&webrtc_only);
+        assert!(!on_webrtc.udp && on_webrtc.webrtc && on_webrtc.relay);
+
+        let udp_only = TransportPolicy {
+            webrtc: false,
+            ..TransportPolicy::default()
+        };
+        let on_udp = TransportOpts::default().within(&udp_only);
+        assert!(on_udp.udp && !on_udp.webrtc && on_udp.relay);
+
+        let narrow_node = TransportOpts::webrtc_only().within(&TransportPolicy::default());
+        assert!(
+            !narrow_node.udp && narrow_node.webrtc,
+            "a mesh never turns on a path the node lacks"
+        );
+    }
 
     // Binds the `Minimal`-based reachable branch (the default relay
     // ladder, no lookup wired) and the loopback all-off branch. mDNS

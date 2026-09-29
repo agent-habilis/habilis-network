@@ -173,6 +173,11 @@ impl SignalAdmission {
         }
     }
 
+    /// Whether a round with `peer` holds a slot right now, in either role.
+    pub(crate) fn negotiating(&self, peer: EndpointId) -> bool {
+        self.lock().inflight.contains_key(&peer)
+    }
+
     fn release(&self, peer: EndpointId) {
         self.lock().inflight.remove(&peer);
     }

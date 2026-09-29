@@ -6,8 +6,11 @@
 /** One way a mesh's members find each other. */
 export type Lookup = 'mdns' | 'dht' | 'relay'
 
-/** One path a mesh's payload may ride. `p2p` is always on. */
-export type Transport = 'p2p' | 'relay'
+/**
+ * One path a mesh's payload may ride. A list needs `udp` or `webrtc`; a
+ * browser has no UDP, so it needs `webrtc` or `relay`.
+ */
+export type Transport = 'udp' | 'webrtc' | 'relay'
 
 export interface JoinOpts {
   /**
@@ -26,9 +29,10 @@ export interface JoinOpts {
   /** Defaults to a random `word-word` nickname. */
   nick?: string
   /**
-   * Topic only: what payload may ride, `['p2p']` (the default) or
-   * `['p2p', 'relay']`. Mixed into the derived id, so every member must pass
-   * the same list. Ignored when joining by id (the id carries it).
+   * Topic only: what payload may ride, `['udp', 'webrtc']` (the default) or
+   * any list with `udp` or `webrtc`. Mixed into the derived id, so every
+   * member must pass the same list. Ignored when joining by id (the id
+   * carries it).
    */
   transport?: Transport[]
   /**
@@ -51,10 +55,11 @@ export interface CreateOpts {
    */
   lookup?: Lookup[]
   /**
-   * What payload may ride: `['p2p']` (the default), so all data is peer to
-   * peer and the relay is a meeting point only, or `['p2p', 'relay']` to let
-   * payload fall back to the relay. `'relay'` needs `'relay'` in `lookup`.
-   * Baked into the mesh id, so joiners inherit it.
+   * What payload may ride: `['udp', 'webrtc']` (the default), so all data
+   * is peer to peer and the relay is a meeting point only. Leave out `udp`
+   * for a mesh on WebRTC alone, or add `'relay'` to let payload fall back to
+   * the relay. `'relay'`, or a list without `'udp'`, needs `'relay'` in
+   * `lookup`. Baked into the mesh id, so joiners inherit it.
    */
   transport?: Transport[]
   /**
@@ -62,11 +67,6 @@ export interface CreateOpts {
    * Needs `'relay'` in `lookup`, and is part of the mesh id.
    */
   relayUrls?: string[]
-  /**
-   * This node's own paths. Per node, not part of the id; everything the
-   * target has is on by default.
-   */
-  paths?: { ip?: boolean; webrtc?: boolean }
   maxPeers?: number
 }
 

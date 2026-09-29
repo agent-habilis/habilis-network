@@ -228,15 +228,28 @@ const FEATURE_INVITE_ONLY: u8 = 0b0010;
 /// Feature bit marking a mesh whose relay may carry **payload**
 /// ([`TransportPolicy::relay_transport`] is `true`). Absent — the default, and every id
 /// minted before the policy existed — the relay is lookup only: members carry
-/// payload (gossip, unicast, blobs) over a direct path alone, hole-punched IP
-/// or a `WebRTC` session, and the relay serves the bootstrap dial, JSEP
+/// payload (gossip, unicast, blobs) over a direct path alone, UDP or a
+/// `WebRTC` session, and the relay serves the bootstrap dial, JSEP
 /// signalling and NAT-traversal frames. No field follows the bit. In the mesh
 /// id rather than per node, because one relaying member would undo the saving
 /// for everyone it links. The bit spells the *permissive* case so that
 /// existing ids keep their bytes and topic and read as lookup only.
 const FEATURE_RELAY_TRANSPORT: u8 = 0b0100;
 
-const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY | FEATURE_RELAY_TRANSPORT;
+/// Feature bits marking a mesh that leaves `udp` or `webrtc` out of its
+/// transport list ([`TransportPolicy::udp`], [`TransportPolicy::webrtc`]). No
+/// field follows either. Each spells the *restrictive* case, the reverse of
+/// the relay bit, for the same reason: the default `udp,webrtc` sets neither,
+/// so every id minted before the list had these entries keeps its bytes and
+/// topic.
+const FEATURE_NO_UDP: u8 = 0b1000;
+const FEATURE_NO_WEBRTC: u8 = 0b1_0000;
+
+const KNOWN_FEATURES: u8 = FEATURE_PASSWORD
+    | FEATURE_INVITE_ONLY
+    | FEATURE_RELAY_TRANSPORT
+    | FEATURE_NO_UDP
+    | FEATURE_NO_WEBRTC;
 
 /// Byte length of the Ed25519 issuer public key an invite-only mesh carries.
 const ISSUER_PUBKEY_LEN: usize = 32;
@@ -290,19 +303,33 @@ impl MeshConfig {
     }
 
     /// Everything a minted config must satisfy before it becomes an id:
-    /// [`LookupOpts::validate`]'s wire ceilings, plus the one cross-field rule
-    /// — letting the relay carry payload needs a relay to exist as a lookup.
+    /// [`LookupOpts::validate`]'s wire ceilings, plus the transport rules: a
+    /// direct path must exist, and the relay must exist as a lookup both to
+    /// carry payload and to signal a mesh without `udp`.
     /// Checked on decode and at `setup_mesh`, the choke point every minted
     /// config passes before any network.
     ///
     /// # Errors
-    /// The lookups fail [`LookupOpts::validate`], or `transport.relay_transport`
-    /// is `true` while `lookups.relay_lookup` is `Disabled`.
+    /// The lookups fail [`LookupOpts::validate`], the transports name neither
+    /// `udp` nor `webrtc`, or `relay_transport` or a missing `udp` needs the
+    /// relay lookup while `lookups.relay_lookup` is `Disabled`.
     pub fn validate(&self) -> Result<()> {
         self.lookups.validate()?;
-        if self.transport.relay_transport && self.lookups.relay_lookup == RelayChoice::Disabled {
+        let transport = &self.transport;
+        if !transport.udp && !transport.webrtc {
+            bail!("a mesh needs a direct path: transport `udp`, `webrtc`, or both");
+        }
+        let no_relay = self.lookups.relay_lookup == RelayChoice::Disabled;
+        if transport.relay_transport && no_relay {
             bail!(
                 "transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload"
+            );
+        }
+        // A native member without UDP has no address a peer could reach, so the
+        // JSEP exchange that opens its data channel can only cross the relay.
+        if !transport.udp && no_relay {
+            bail!(
+                "a mesh without transport `udp` needs lookup `relay`: the relay is the only path its WebRTC offers can take"
             );
         }
         Ok(())
@@ -319,8 +346,8 @@ impl MeshConfig {
     ///
     /// # Errors
     /// `relay_urls` is given without [`Lookup::Relay`], `transports` leaves
-    /// [`Transport::P2p`] out, or `transports` names [`Transport::Relay`]
-    /// while no relay lookup is on.
+    /// neither [`Transport::Udp`] nor [`Transport::WebRtc`], or needs a relay
+    /// lookup (see [`MeshConfig::validate`]) while none is on.
     pub fn resolve(
         lookups: &[Lookup],
         relay_urls: Option<RelayLadder>,
@@ -355,6 +382,12 @@ impl MeshConfig {
         if self.transport.relay_transport {
             features |= FEATURE_RELAY_TRANSPORT;
         }
+        if !self.transport.udp {
+            features |= FEATURE_NO_UDP;
+        }
+        if !self.transport.webrtc {
+            features |= FEATURE_NO_WEBRTC;
+        }
         if features != 0 {
             buf.push(features);
             // Fixed field order so the encoding is canonical: password verifier
@@ -377,8 +410,8 @@ impl MeshConfig {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut pos = 0;
         let lookups = LookupOpts::decode_from(bytes, &mut pos)?;
-        let (password, issuer_pubkey, relay_transport) = if pos == bytes.len() {
-            (None, None, false)
+        let (password, issuer_pubkey, transport) = if pos == bytes.len() {
+            (None, None, TransportPolicy::default())
         } else {
             let features = bytes[pos];
             pos += 1;
@@ -415,11 +448,12 @@ impl MeshConfig {
             } else {
                 None
             };
-            (
-                password,
-                issuer_pubkey,
-                features & FEATURE_RELAY_TRANSPORT != 0,
-            )
+            let transport = TransportPolicy {
+                udp: features & FEATURE_NO_UDP == 0,
+                webrtc: features & FEATURE_NO_WEBRTC == 0,
+                relay_transport: features & FEATURE_RELAY_TRANSPORT != 0,
+            };
+            (password, issuer_pubkey, transport)
         };
         if pos != bytes.len() {
             bail!("trailing bytes in mesh config");
@@ -428,7 +462,7 @@ impl MeshConfig {
             lookups,
             password,
             issuer_pubkey,
-            transport: TransportPolicy { relay_transport },
+            transport,
         };
         config.validate()?;
         Ok(config)
@@ -759,8 +793,8 @@ impl fmt::Display for RelayLadder {
 #[cfg(test)]
 mod lookup_tests {
     use super::{
-        LookupOpts, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection,
-        TransportPolicy, resolve_lookups,
+        Lookup, LookupOpts, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection,
+        Transport, TransportPolicy, resolve_lookups,
     };
 
     fn lookups(mdns: bool, dht: bool, relay_lookup: RelaySelection) -> LookupSet {
@@ -910,7 +944,7 @@ mod lookup_tests {
     #[test]
     fn config_rejects_unknown_feature_flags() {
         let mut bytes = MeshConfig::public_preset().to_bytes();
-        bytes.push(0b1000); // an undefined feature bit (password=1, invite=2, relay-transport=4 are taken)
+        bytes.push(0b10_0000); // an undefined feature bit (1 to 16 are taken)
         bytes.extend_from_slice(&[0u8; 16]);
         let error = MeshConfig::from_bytes(&bytes).unwrap_err();
         assert!(
@@ -924,6 +958,7 @@ mod lookup_tests {
         let config = MeshConfig {
             transport: TransportPolicy {
                 relay_transport: true,
+                ..TransportPolicy::default()
             },
             ..MeshConfig::public_preset()
         };
@@ -953,6 +988,66 @@ mod lookup_tests {
     }
 
     #[test]
+    fn udp_and_webrtc_are_on_by_default_and_on_every_older_id() {
+        let default = TransportPolicy::default();
+        assert!(default.udp && default.webrtc && !default.relay_transport);
+        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111]);
+        let old = MeshConfig::from_bytes(&[0b0111]).unwrap().transport;
+        assert!(old.udp && old.webrtc && !old.relay_transport);
+        let old_relay = MeshConfig::from_bytes(&[0b0111, super::FEATURE_RELAY_TRANSPORT])
+            .unwrap()
+            .transport;
+        assert!(old_relay.udp && old_relay.webrtc && old_relay.relay_transport);
+    }
+
+    #[test]
+    fn a_transport_list_turns_on_exactly_the_paths_it_names() {
+        let policy = |list: &[Transport]| TransportPolicy::from_transports(list).unwrap();
+        assert_eq!(policy(&[]), TransportPolicy::default());
+        let udp = policy(&[Transport::Udp]);
+        assert!(udp.udp && !udp.webrtc && !udp.relay_transport);
+        let webrtc = policy(&[Transport::WebRtc]);
+        assert!(!webrtc.udp && webrtc.webrtc && !webrtc.relay_transport);
+        let all = policy(&[Transport::Udp, Transport::WebRtc, Transport::Relay]);
+        assert!(all.udp && all.webrtc && all.relay_transport);
+    }
+
+    #[test]
+    fn config_round_trips_every_transport_list() {
+        let lists: [&[Transport]; 5] = [
+            &[Transport::Udp],
+            &[Transport::WebRtc],
+            &[Transport::Udp, Transport::WebRtc],
+            &[Transport::WebRtc, Transport::Relay],
+            &[Transport::Udp, Transport::Relay],
+        ];
+        let mut seen = Vec::new();
+        for list in lists {
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, list).unwrap();
+            let bytes = config.to_bytes();
+            assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config, "{list:?}");
+            assert!(!seen.contains(&bytes), "{list:?} shares its bytes");
+            seen.push(bytes);
+        }
+    }
+
+    #[test]
+    fn a_mesh_without_udp_needs_the_relay_lookup() {
+        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::WebRtc])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("relay"), "{error}");
+        assert!(MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::WebRtc]).is_ok());
+        assert!(MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp]).is_ok());
+    }
+
+    #[test]
+    fn an_id_with_neither_udp_nor_webrtc_is_refused() {
+        let bytes = vec![0b0111, super::FEATURE_NO_UDP | super::FEATURE_NO_WEBRTC];
+        assert!(MeshConfig::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
     fn config_round_trips_relay_as_transport_with_password() {
         let config = MeshConfig {
             lookups: LookupOpts::public_preset(),
@@ -960,6 +1055,7 @@ mod lookup_tests {
             issuer_pubkey: None,
             transport: TransportPolicy {
                 relay_transport: true,
+                ..TransportPolicy::default()
             },
         };
         let decoded = MeshConfig::from_bytes(&config.to_bytes()).unwrap();
@@ -971,6 +1067,7 @@ mod lookup_tests {
         let config = MeshConfig {
             transport: TransportPolicy {
                 relay_transport: true,
+                ..TransportPolicy::default()
             },
             ..MeshConfig::loopback()
         };
@@ -1047,7 +1144,8 @@ mod choice_tests {
         assert_eq!("mdns".parse::<Lookup>().unwrap(), Lookup::Mdns);
         assert_eq!("dht".parse::<Lookup>().unwrap(), Lookup::Dht);
         assert_eq!("relay".parse::<Lookup>().unwrap(), Lookup::Relay);
-        assert_eq!("p2p".parse::<Transport>().unwrap(), Transport::P2p);
+        assert_eq!("udp".parse::<Transport>().unwrap(), Transport::Udp);
+        assert_eq!("webrtc".parse::<Transport>().unwrap(), Transport::WebRtc);
         assert_eq!("relay".parse::<Transport>().unwrap(), Transport::Relay);
         for (name, lookup) in [
             ("mdns", Lookup::Mdns),
@@ -1056,7 +1154,14 @@ mod choice_tests {
         ] {
             assert_eq!(lookup.to_string(), name);
         }
-        assert_eq!(Transport::P2p.to_string(), "p2p");
+        assert_eq!(Transport::Udp.to_string(), "udp");
+    }
+
+    #[test]
+    fn the_direct_transport_is_named_udp_not_p2p() {
+        let udp = "udp".parse::<Transport>().unwrap();
+        assert_eq!(udp.to_string(), "udp");
+        assert!("p2p".parse::<Transport>().is_err());
     }
 
     #[test]
@@ -1066,9 +1171,9 @@ mod choice_tests {
             error.contains("relai") && error.contains("mdns, dht, relay"),
             "{error}"
         );
-        let transport_error = "webrtc".parse::<Transport>().unwrap_err().to_string();
+        let transport_error = "tcp".parse::<Transport>().unwrap_err().to_string();
         assert!(
-            transport_error.contains("webrtc") && transport_error.contains("p2p, relay"),
+            transport_error.contains("tcp") && transport_error.contains("udp, webrtc, relay"),
             "{transport_error}"
         );
     }
@@ -1077,8 +1182,8 @@ mod choice_tests {
     fn the_lists_deserialize_from_json_names() {
         let lookups: Vec<Lookup> = serde_json::from_str(r#"["mdns","relay"]"#).unwrap();
         assert_eq!(lookups, vec![Lookup::Mdns, Lookup::Relay]);
-        let transports: Vec<Transport> = serde_json::from_str(r#"["p2p","relay"]"#).unwrap();
-        assert_eq!(transports, vec![Transport::P2p, Transport::Relay]);
+        let transports: Vec<Transport> = serde_json::from_str(r#"["udp","relay"]"#).unwrap();
+        assert_eq!(transports, vec![Transport::Udp, Transport::Relay]);
         assert!(serde_json::from_str::<Vec<Lookup>>(r#"["public"]"#).is_err());
     }
 
@@ -1111,35 +1216,35 @@ mod choice_tests {
     }
 
     #[test]
-    fn an_empty_transport_list_and_p2p_alone_keep_the_relay_off_payload() {
+    fn an_empty_transport_list_and_udp_alone_keep_the_relay_off_payload() {
         assert_eq!(
             TransportPolicy::from_transports(&[]).unwrap(),
             TransportPolicy::default()
         );
         assert!(
-            !TransportPolicy::from_transports(&[Transport::P2p])
+            !TransportPolicy::from_transports(&[Transport::Udp])
                 .unwrap()
                 .relay_transport
         );
         assert!(
-            TransportPolicy::from_transports(&[Transport::P2p, Transport::Relay])
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::Relay])
                 .unwrap()
                 .relay_transport
         );
     }
 
     #[test]
-    fn p2p_cannot_be_disabled() {
+    fn udp_cannot_be_disabled() {
         let error = TransportPolicy::from_transports(&[Transport::Relay])
             .unwrap_err()
             .to_string();
-        assert!(error.contains("p2p"), "{error}");
+        assert!(error.contains("udp"), "{error}");
     }
 
     #[test]
     fn a_config_resolves_from_the_three_choices() {
         let config =
-            MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::P2p, Transport::Relay])
+            MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::Udp, Transport::Relay])
                 .unwrap();
         assert!(config.transport.relay_transport);
         assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
@@ -1155,7 +1260,7 @@ mod choice_tests {
     /// and carries no payload. That is also what an empty `transport` means.
     #[test]
     fn relay_can_be_a_lookup_and_nothing_more() {
-        for transports in [&[][..], &[Transport::P2p][..]] {
+        for transports in [&[][..], &[Transport::Udp][..]] {
             let config = MeshConfig::resolve(&[Lookup::Relay], None, transports).unwrap();
             assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
             assert!(!config.transport.relay_transport, "{transports:?}");
@@ -1165,7 +1270,7 @@ mod choice_tests {
 
     #[test]
     fn relay_transport_needs_the_relay_lookup() {
-        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::P2p, Transport::Relay])
+        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp, Transport::Relay])
             .unwrap_err()
             .to_string();
         assert!(error.contains("relay"), "{error}");

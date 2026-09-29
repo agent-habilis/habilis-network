@@ -252,11 +252,12 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
         args: &["--features", "native"],
     },
-    // `iroh-test-utils` is off by default and no row above reaches a test target
-    // with it on, so the relay-policy proofs — `tests/relay_lookup_only_*.rs`
-    // and the webrtc graft tests — were never even compiled. `--no-run`: they
-    // want a network of their own, so compiling is the part that belongs in a
-    // gate.
+    // The workspace row already runs the relay-policy proofs
+    // (`tests/relay_lookup_only_*.rs`, `tests/mesh_transport_lists.rs`):
+    // fofoca-stream's dev-dependency on fofoca
+    // (`crates/fofoca-stream/Cargo.toml`) turns on `iroh-test-utils`, and cargo
+    // unifies features across the workspace. This row compiles them without
+    // that help, so they cannot rot if fofoca-stream drops the feature.
     Step {
         kind: Kind::Test,
         scope: Scope::Crate("fofoca"),

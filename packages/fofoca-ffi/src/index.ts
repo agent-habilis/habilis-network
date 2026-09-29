@@ -178,8 +178,6 @@ export function joinWire(opts: JoinOpts): WireOpts {
     lookup: null,
     transport: listWire(opts.transport),
     relayUrls: listWire(opts.relayUrls),
-    disableIp: false,
-    disableWebrtc: false,
     maxPeers: opts.maxPeers ?? 0,
   }
 }
@@ -193,8 +191,6 @@ export function createWire(opts: CreateOpts): WireOpts {
     lookup: listWire(opts.lookup),
     transport: listWire(opts.transport),
     relayUrls: listWire(opts.relayUrls),
-    disableIp: opts.paths?.ip === false,
-    disableWebrtc: opts.paths?.webrtc === false,
     maxPeers: opts.maxPeers ?? 0,
   }
 }

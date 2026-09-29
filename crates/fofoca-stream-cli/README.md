@@ -2,7 +2,7 @@
 
 Stdin to one reader, or a stream's bytes to stdout. The bytes go over a
 direct path by default (hole-punched UDP, or a WebRTC data channel when a
-browser reads or writes), over the relay only with `--transport p2p,relay`,
+browser reads or writes), over the relay only with `--transport udp,webrtc,relay`,
 and never through gossip.
 
 ```sh
@@ -23,7 +23,7 @@ to stderr, as prose or, with `--robot`, as one JSON object per line
 (`{"kind":"ready","hash","url"}` first).
 
 The producer's options: `--lookup mdns,dht,relay` (all three by default),
-`--transport p2p` or `p2p,relay`, and `--relay-url` for a custom relay
+`--transport` (`udp,webrtc` by default; add `relay` for a fallback), and `--relay-url` for a custom relay
 ladder. A reader takes all of these from the hash.
 
 The crate is a sibling of `fofoca-stream` rather than a `[[bin]]` in it: that

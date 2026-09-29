@@ -1215,6 +1215,7 @@ async fn handle_peer_info(
     let first_sighting = state.known_endpoints.insert(peer_id);
     if first_sighting {
         let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
+        state.unicast_pool.note_addr(&peer_addr);
     }
     // A buffered directed frame addressed to this author may just have become
     // deliverable — its endpoint binding and dial address are now registered.
@@ -1266,6 +1267,7 @@ async fn handle_peer_info(
     {
         state.note_relink(peer_id, now);
         let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
+        state.unicast_pool.note_addr(&peer_addr);
         // With the relay lookup only, the graft waits for a proven direct
         // path (`transport::probe`); the loop grafts on the probe's verdict.
         if crate::transport::probe::ensure_direct(state, ctx, peer_id, &peer_addr) {

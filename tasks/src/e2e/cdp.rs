@@ -1,184 +1,419 @@
-//! The CDP backend: `agent-browse`, which is **Chrome-for-Testing only**.
+//! The CDP backend: Chrome for Testing, launched and driven by this runner.
 //!
-//! Two things were tried first and do not work, recorded so nobody spends the
-//! afternoon again:
-//!
-//! - **Pointing `agent-browse launch` at another Chrome.** There is no such
-//!   option, and a `CHROME_PATH` in the environment is ignored — so a cell
-//!   labelled `chrome-canary` silently ran Chrome for Testing and reported
-//!   Canary. A matrix that mislabels which browser it tested is worse than one
-//!   that skips the cell, which is why [`Browser::version`] reads the answer
-//!   back out of the browser and the summary prints it beside every result.
-//! - **Launching another Chrome with `--remote-debugging-port` and driving it
-//!   with `agent-browse cdp --port`.** That refuses a bare port ("can't drive a
-//!   `WebSocket`-only Chrome"), and `agent-browse connect` auto-discovers *a*
-//!   Chrome rather than the one just launched.
-//!
-//! So Chrome for Testing gets CDP and every other browser takes the `WebDriver`
-//! backend. The pressure axis is created inside the page either way, so no
-//! browser is short-changed by which transport drives it.
+//! No helper tool sits between the runner and Chrome: [`Browser::launch`]
+//! starts Chrome with `--remote-debugging-port=0`, reads the port Chrome
+//! chose from `DevToolsActivePort` in its profile, and keeps one `WebSocket`
+//! to the page for the whole run. One session means console events are
+//! collected as they happen, and the Chrome flags are ours to choose. The
+//! binary is Chrome for Testing, downloaded into `target/` on first use
+//! ([`chrome_for_testing`]), or the one `CHROME_FOR_TESTING` names.
 
-#[cfg(feature = "mesh")]
-use std::cell::RefCell;
-use std::path::PathBuf;
-use std::process::Command;
-#[cfg(feature = "mesh")]
-use std::process::{Child, Stdio};
-use std::time::Duration;
+use std::cell::{Cell, RefCell};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{Message, WebSocket};
 
 use super::{Harvest, Skip, server};
 
-/// A launched headless window, quit when it goes out of scope.
+/// How long a single CDP call may take before the runner gives up on it.
+const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A launched headless Chrome, killed when it goes out of scope.
 #[derive(Debug)]
 pub(super) struct Browser {
-    folder: PathBuf,
-    /// The console watch [`Browser::navigate_watching_console`] started.
-    #[cfg(feature = "mesh")]
-    console: RefCell<Option<Child>>,
+    chrome: Child,
+    profile: PathBuf,
+    port: u16,
+    page: RefCell<WebSocket<MaybeTlsStream<TcpStream>>>,
+    next_id: Cell<u64>,
+    /// Console calls, exceptions and log entries, in arrival order. Between
+    /// calls they wait in the socket's receive buffer; a run that went minutes
+    /// without a call on a console-heavy page would stall Chrome's sends, not
+    /// lose events.
+    events: RefCell<Vec<serde_json::Value>>,
+    /// Why the page socket closed, once it has: a read that failed for any
+    /// reason but a timeout. A dead socket otherwise reads as a page that
+    /// never published.
+    dead: RefCell<Option<String>>,
 }
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        #[cfg(feature = "mesh")]
-        if let Some(mut watch) = self.console.get_mut().take() {
-            let _ = watch.kill();
-            let _ = watch.wait();
-        }
-        let _ = Command::new("agent-browse")
-            .arg("quit")
-            .arg(&self.folder)
-            .output();
-        let _ = std::fs::remove_dir_all(&self.folder);
+        let _ = self.page.get_mut().close(None);
+        let _ = self.chrome.kill();
+        let _ = self.chrome.wait();
+        let _ = std::fs::remove_dir_all(&self.profile);
     }
+}
+
+/// The Chrome for Testing binary: `CHROME_FOR_TESTING` if set, else the stable
+/// build of the day it was first needed, downloaded into
+/// `target/chrome-for-testing`. Delete that folder to take a newer one.
+///
+/// # Errors
+/// A [`Skip`] naming the step that failed: the version lookup, the download
+/// or the unpack.
+pub(super) fn chrome_for_testing() -> Result<PathBuf, Skip> {
+    if let Some(binary) = std::env::var_os("CHROME_FOR_TESTING") {
+        return Ok(PathBuf::from(binary));
+    }
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "mac-arm64",
+        ("macos", _) => "mac-x64",
+        ("linux", _) => "linux64",
+        (os, arch) => return Err(Skip(format!("no Chrome for Testing build for {os}/{arch}"))),
+    };
+    let root = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../target/chrome-for-testing"
+    ));
+    let binary = root.join(match platform {
+        "linux64" => "chrome-linux64/chrome".to_owned(),
+        mac => format!(
+            "chrome-{mac}/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+        ),
+    });
+    if binary.exists() {
+        return Ok(binary);
+    }
+    let index = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+        .ok_or_else(|| Skip("could not look up Chrome for Testing".to_owned()))?;
+    let url = index
+        .pointer("/channels/Stable/downloads/chrome")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|builds| {
+            builds.iter().find(|build| {
+                build.get("platform").and_then(serde_json::Value::as_str) == Some(platform)
+            })
+        })
+        .and_then(|build| build.get("url").and_then(serde_json::Value::as_str))
+        .ok_or_else(|| Skip(format!("no Chrome for Testing download for {platform}")))?;
+    std::fs::create_dir_all(&root)
+        .map_err(|error| Skip(format!("could not create {}: {error}", root.display())))?;
+    // Per-process names, then one rename into place: two runners on one
+    // checkout can download at once, and the loser of the rename finds the
+    // winner's copy.
+    let zip = root.join(format!("chrome.{}.zip", std::process::id()));
+    let unpack = root.join(format!(".unpack-{}", std::process::id()));
+    let fetched = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--output",
+        ])
+        .arg(&zip)
+        .arg(url)
+        .status()
+        .is_ok_and(|status| status.success());
+    let unpacked = fetched
+        && Command::new("unzip")
+            .args(["-q", "-o"])
+            .arg(&zip)
+            .arg("-d")
+            .arg(&unpack)
+            .status()
+            .is_ok_and(|status| status.success());
+    if unpacked {
+        let folder = format!("chrome-{platform}");
+        // A folder without the binary is stale, not a winner: a CI cache step
+        // that prunes `target/` restores the folder with the binary gone, and
+        // the rename below cannot replace a folder that is not empty.
+        if !binary.exists() {
+            let _ = std::fs::remove_dir_all(root.join(&folder));
+        }
+        let _ = std::fs::rename(unpack.join(&folder), root.join(&folder));
+    }
+    let _ = std::fs::remove_file(&zip);
+    let _ = std::fs::remove_dir_all(&unpack);
+    if !binary.exists() {
+        return Err(Skip(format!(
+            "could not download Chrome for Testing from {url}"
+        )));
+    }
+    if let Some(version) = index
+        .pointer("/channels/Stable/version")
+        .and_then(serde_json::Value::as_str)
+    {
+        let _ = std::fs::write(root.join("VERSION"), version);
+    }
+    Ok(binary)
 }
 
 impl Browser {
     pub(super) fn launch() -> Result<Self, Skip> {
-        let folder = std::env::temp_dir().join(format!(
-            "fofoca-matrix-{}-{:?}",
+        let binary = chrome_for_testing()?;
+        let profile = std::env::temp_dir().join(format!(
+            "fofoca-cdp-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|since| since.as_millis())
                 .unwrap_or_default()
         ));
-        // The folder has to exist first: `agent-browse` keys a session to a real
-        // directory and refuses a path it cannot resolve. Getting this wrong
-        // produced "could not launch Chrome" and sent its own author looking at
-        // Chrome, which is why the failure below carries the tool's own words.
-        std::fs::create_dir_all(&folder).map_err(|error| {
-            Skip(format!(
-                "could not create the browser session folder: {error}"
-            ))
-        })?;
-
-        let launched = Command::new("agent-browse")
-            .args(["launch", "--headless"])
-            .arg(&folder)
-            .output()
-            .map_err(|error| Skip(format!("could not run agent-browse: {error}")))?;
-
-        if !launched.status.success() {
-            let said = String::from_utf8_lossy(&launched.stderr);
-            let said = said.trim().lines().next_back().unwrap_or_default();
-            return Err(Skip(format!(
-                "agent-browse could not launch Chrome for Testing{}",
-                if said.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {said}")
-                }
-            )));
+        std::fs::create_dir_all(&profile)
+            .map_err(|error| Skip(format!("could not create the Chrome profile: {error}")))?;
+        let mut chrome = Command::new(&binary);
+        // A Linux CI runner cannot grant the user-namespace sandbox Chrome
+        // wants, as the `chrome-ci` driver's arguments note.
+        if cfg!(target_os = "linux") {
+            chrome.arg("--no-sandbox");
         }
-        Ok(Self {
-            folder,
-            #[cfg(feature = "mesh")]
-            console: RefCell::new(None),
-        })
+        let mut chrome = chrome
+            .args([
+                "--headless=new",
+                "--remote-debugging-port=0",
+                "--no-first-run",
+                "--no-default-browser-check",
+                // Never ask the OS keychain for Chrome's storage key: on macOS
+                // that is a password dialog in front of the user mid-run.
+                "--use-mock-keychain",
+                "--password-store=basic",
+                // Chrome hides its host IP behind a `.local` name that it
+                // resolves with its own multicast client, and multicast from an
+                // agent session fails here (`EHOSTUNREACH`). Two peer
+                // connections in one tab, such as a tab's member linking to
+                // the rendezvous the same tab hosts, then never connect.
+                "--disable-features=WebRtcHideLocalIpsWithMdns",
+            ])
+            .arg(format!("--user-data-dir={}", profile.display()))
+            .arg("about:blank")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| Skip(format!("could not start {}: {error}", binary.display())))?;
+        let connected = devtools_port(&profile, &mut chrome).and_then(|port| {
+            let (page, _) = tungstenite::connect(page_socket(port)?)
+                .map_err(|error| Skip(format!("could not open the page's CDP socket: {error}")))?;
+            if let MaybeTlsStream::Plain(stream) = page.get_ref() {
+                let _ = stream.set_read_timeout(Some(CALL_TIMEOUT));
+            }
+            Ok((port, page))
+        });
+        let (port, page) = match connected {
+            Ok(connected) => connected,
+            Err(skip) => {
+                let _ = chrome.kill();
+                let _ = chrome.wait();
+                let _ = std::fs::remove_dir_all(&profile);
+                return Err(skip);
+            }
+        };
+        let browser = Self {
+            chrome,
+            profile,
+            port,
+            page: RefCell::new(page),
+            next_id: Cell::new(1),
+            events: RefCell::new(Vec::new()),
+            dead: RefCell::new(None),
+        };
+        browser.call("Runtime.enable", &serde_json::json!({}));
+        browser.call("Log.enable", &serde_json::json!({}));
+        Ok(browser)
     }
 
     /// Open `url` in the launched window.
     #[cfg(feature = "mesh")]
     pub(super) fn navigate(&self, url: &str) {
-        self.cdp(
-            "Page.navigate",
-            &serde_json::json!({ "url": url }).to_string(),
-        );
+        self.call("Page.navigate", &serde_json::json!({ "url": url }));
     }
 
-    /// Open `url` and record the page's console for `window`. A CDP init
-    /// script would catch the first line too, but it dies with the call that
-    /// added it, and each `agent-browse cdp` is its own connection. `watch`
-    /// navigates on the connection it listens on, so nothing is missed.
+    /// Open `url`. The console is recorded from launch on, over the one
+    /// session, so `window` is unused here; both backends take the same call.
     #[cfg(feature = "mesh")]
-    pub(super) fn navigate_watching_console(&self, url: &str, window: Duration) {
-        let watch = Command::new("agent-browse")
-            .arg("watch")
-            .arg("--folder")
-            .arg(&self.folder)
-            .args(["--group", "console"])
-            .arg(window.as_millis().to_string())
-            .arg(url)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
-        match watch {
-            Ok(watch) => *self.console.borrow_mut() = Some(watch),
-            Err(_) => self.navigate(url),
+    pub(super) fn navigate_watching_console(&self, url: &str, _window: Duration) {
+        self.navigate(url);
+    }
+
+    /// The console lines recorded so far.
+    #[cfg(feature = "mesh")]
+    pub(super) fn console(&self) -> String {
+        self.drain();
+        let lines = console_lines(&serde_json::Value::Array(self.events.borrow().clone()));
+        match self.dead.borrow().as_deref() {
+            Some(why) => format!("{lines}\n(Chrome's CDP socket closed: {why})"),
+            None => lines,
         }
     }
 
-    /// The console lines the watch recorded. `watch` prints only when its
-    /// window closes, and an interrupt discards what it held, so this blocks
-    /// until the window is over.
-    #[cfg(feature = "mesh")]
-    pub(super) fn console(&self) -> String {
-        let Some(watch) = self.console.borrow_mut().take() else {
-            return String::new();
-        };
-        watch
-            .wait_with_output()
-            .ok()
-            .and_then(|output| serde_json::from_slice(&output.stdout).ok())
-            .map(|events| console_lines(&events))
-            .unwrap_or_default()
+    /// One CDP call on the page session. Events that arrive before its reply
+    /// are kept for [`Browser::console`].
+    fn call(&self, method: &str, params: &serde_json::Value) -> Option<serde_json::Value> {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        let request = serde_json::json!({ "id": id, "method": method, "params": params });
+        if self.dead.borrow().is_some() {
+            return None;
+        }
+        let mut page = self.page.borrow_mut();
+        if let Err(error) = page.send(Message::text(request.to_string())) {
+            self.note_dead(&error);
+            return None;
+        }
+        let deadline = Instant::now() + CALL_TIMEOUT;
+        while Instant::now() < deadline {
+            let message = match page.read() {
+                Ok(message) => message,
+                Err(error) => {
+                    self.note_dead(&error);
+                    return None;
+                }
+            };
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let Ok(reply) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            if reply.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+                return reply.get("result").cloned();
+            }
+            self.keep_event(reply);
+        }
+        None
     }
 
-    /// One raw CDP call, as JSON.
-    fn cdp(&self, method: &str, params: &str) -> Option<serde_json::Value> {
-        let output = Command::new("agent-browse")
-            .arg("cdp")
-            .arg("--folder")
-            .arg(&self.folder)
-            .args([method, params])
-            .output()
-            .ok()?;
-        output
-            .status
-            .success()
-            .then(|| serde_json::from_slice(&output.stdout).ok())
-            .flatten()
+    /// Read what is already waiting on the socket, keeping its events.
+    #[cfg(feature = "mesh")]
+    fn drain(&self) {
+        let mut page = self.page.borrow_mut();
+        if let MaybeTlsStream::Plain(stream) = page.get_ref() {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+        }
+        loop {
+            match page.read() {
+                Ok(Message::Text(text)) => {
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) {
+                        self.keep_event(event);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.note_dead(&error);
+                    break;
+                }
+            }
+        }
+        if let MaybeTlsStream::Plain(stream) = page.get_ref() {
+            let _ = stream.set_read_timeout(Some(CALL_TIMEOUT));
+        }
+    }
+
+    /// Record a read or write error unless it is a timeout.
+    fn note_dead(&self, error: &tungstenite::Error) {
+        let timed_out = matches!(
+            error,
+            tungstenite::Error::Io(io)
+                if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+        );
+        if !timed_out && self.dead.borrow().is_none() {
+            *self.dead.borrow_mut() = Some(error.to_string());
+        }
+    }
+
+    fn keep_event(&self, event: serde_json::Value) {
+        let kept = matches!(
+            event.get("method").and_then(serde_json::Value::as_str),
+            Some("Runtime.consoleAPICalled" | "Runtime.exceptionThrown" | "Log.entryAdded")
+        );
+        if kept {
+            self.events.borrow_mut().push(event);
+        }
     }
 
     /// `Runtime.evaluate`, flattened to the string the expression produced.
     pub(super) fn evaluate(&self, expression: &str) -> String {
         let params = serde_json::json!({ "expression": expression, "returnByValue": true });
-        self.cdp("Runtime.evaluate", &params.to_string())
+        self.call("Runtime.evaluate", &params)
             .and_then(|reply| reply.pointer("/result/value").map(super::json_to_string))
             .unwrap_or_default()
     }
 
     /// What actually answered, never the name we gave it.
     pub(super) fn version(&self) -> String {
-        self.cdp("Browser.getVersion", "{}")
-            .and_then(|reply| {
-                reply
-                    .get("product")
+        ureq::get(format!("http://127.0.0.1:{}/json/version", self.port))
+            .call()
+            .ok()
+            .and_then(|mut reply| reply.body_mut().read_json::<serde_json::Value>().ok())
+            .and_then(|version| {
+                version
+                    .get("Browser")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| "unknown".to_owned())
     }
+
+    /// Wait until `selector` matches, polling the page.
+    fn wait_for(&self, selector: &str, timeout: Duration) -> bool {
+        let expression = format!(
+            "!!document.querySelector({})",
+            serde_json::Value::from(selector)
+        );
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline && self.dead.borrow().is_none() {
+            if self.evaluate(&expression) == "true" {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        false
+    }
+}
+
+/// The port Chrome chose, from the first line of `DevToolsActivePort`.
+fn devtools_port(profile: &Path, chrome: &mut Child) -> Result<u16, Skip> {
+    // A cold first launch on a loaded machine can take a while.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while Instant::now() < deadline {
+        if let Ok(Some(status)) = chrome.try_wait() {
+            return Err(Skip(format!("Chrome exited at launch: {status}")));
+        }
+        if let Some(port) = std::fs::read_to_string(profile.join("DevToolsActivePort"))
+            .ok()
+            .and_then(|file| file.lines().next()?.trim().parse().ok())
+        {
+            return Ok(port);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(Skip("Chrome never opened its debugging port".to_owned()))
+}
+
+/// The page target's `WebSocket` URL.
+fn page_socket(port: u16) -> Result<String, Skip> {
+    let targets: serde_json::Value = ureq::get(format!("http://127.0.0.1:{port}/json/list"))
+        .call()
+        .and_then(|mut reply| reply.body_mut().read_json())
+        .map_err(|error| Skip(format!("could not list Chrome's targets: {error}")))?;
+    targets
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|target| target.get("type").and_then(serde_json::Value::as_str) == Some("page"))
+        .and_then(|target| {
+            target
+                .get("webSocketDebuggerUrl")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| Skip("Chrome has no page to drive".to_owned()))
 }
 
 /// One line per console call. A `%c` in the first argument styles the text
@@ -250,20 +485,8 @@ pub(super) fn run(pressure: u32, timeout: Duration) -> Result<Harvest, Skip> {
     // and its deadlines have to scale with it or a slow cell reads as a stalled
     // one.
     let url = format!("{}/?pressure={pressure}", server::URL);
-    browser.cdp(
-        "Page.navigate",
-        &serde_json::json!({ "url": url }).to_string(),
-    );
-
-    let published = Command::new("agent-browse")
-        .arg("wait")
-        .arg("--folder")
-        .arg(&browser.folder)
-        .args(["--selector", super::DONE_SELECTOR])
-        .arg("--timeout")
-        .arg(timeout.as_millis().to_string())
-        .output()
-        .is_ok_and(|waited| waited.status.success());
+    browser.call("Page.navigate", &serde_json::json!({ "url": url }));
+    let published = browser.wait_for(super::DONE_SELECTOR, timeout);
 
     Ok(Harvest {
         table: browser.evaluate(super::TABLE_EXPRESSION),

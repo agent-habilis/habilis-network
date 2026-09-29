@@ -70,8 +70,6 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
       lookup: 'const char *',
       transport: 'const char *',
       relay_urls: 'const char *',
-      disable_ip: 'int',
-      disable_webrtc: 'int',
       max_peers: 'size_t',
     })
     optsRegistered = true
@@ -133,8 +131,6 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
         lookup: opts.lookup,
         transport: opts.transport,
         relay_urls: opts.relayUrls,
-        disable_ip: opts.disableIp ? 1 : 0,
-        disable_webrtc: opts.disableWebrtc ? 1 : 0,
         max_peers: opts.maxPeers,
       }) as NativePointer,
     close: () => library.unload(),

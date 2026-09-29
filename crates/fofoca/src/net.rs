@@ -10,7 +10,7 @@ pub use crate::lookup::test_relay;
 #[cfg(feature = "host")]
 pub use crate::lookup::{NetworkCapability, capability_probe};
 pub use crate::lookup::{
-    PathFlags, TransportHandles, TransportOpts, add_peer_addr, build_endpoint, build_peer_endpoint,
+    TransportHandles, TransportOpts, add_peer_addr, build_endpoint, build_peer_endpoint,
     check_injected_identity, probe_connect, probe_ladder, relay_ladder,
 };
 pub use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
@@ -32,4 +32,7 @@ pub mod direct {
     };
     pub use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
     pub use fofoca_iroh_webrtc_transport::WebRtcHandle;
+    /// Tests only: take UDP away from every connection in the process.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub use fofoca_iroh_webrtc_transport::block_ip_paths;
 }

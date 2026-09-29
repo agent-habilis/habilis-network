@@ -94,7 +94,7 @@ pub async fn run<A: NodeDriver>(
         multihop,
         webrtc,
         webrtc_enabled,
-        local_ip_transport,
+        local_udp_transport,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -184,11 +184,14 @@ pub async fn run<A: NodeDriver>(
     state.live_count = live_count;
     state.relay_transport = relay_transport;
     state.rendezvous_graft_needs_session =
-        crate::transport::webrtc::node_graft_needs_session(relay_transport, local_ip_transport);
-    state.local_ip_transport = local_ip_transport;
+        crate::transport::webrtc::node_graft_needs_session(relay_transport, local_udp_transport);
+    state.local_udp_transport = local_udp_transport;
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();
     state.direct_proven = direct_tx;
+    // Path watchers report here; the loop re-races or detaches on it.
+    let (path_tx, path_rx) = mpsc::unbounded_channel();
+    state.path_changes = path_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     state.write_peer_count();
 
@@ -343,6 +346,7 @@ pub async fn run<A: NodeDriver>(
         http_rx,
         unicast_rx: Some(unicast_rx),
         direct_rx,
+        path_rx,
     }))
     .await
 }
@@ -499,6 +503,9 @@ struct EventLoop<A: NodeDriver> {
     /// Direct-path probe verdicts (`transport::probe`). Never closes: `state`
     /// holds a sender for the loop's lifetime.
     direct_rx: mpsc::UnboundedReceiver<crate::transport::probe::DirectOutcome>,
+    /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
+    /// like `direct_rx`.
+    path_rx: mpsc::UnboundedReceiver<crate::transport::probe::PathChange>,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI
@@ -552,6 +559,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut http_rx,
         mut unicast_rx,
         mut direct_rx,
+        mut path_rx,
     } = loop_state;
 
     log_daemon_start(&author);
@@ -643,6 +651,12 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::on_outcome(outcome, &mut state, &ctx).await;
+                crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
+            }
+            Some(change) = path_rx.recv() => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                crate::transport::probe::on_path_change(change, &mut state, &ctx).await;
             }
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
             frame = recv_opt(&mut unicast_rx) => match frame {
@@ -672,6 +686,8 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // holds grafts on: a peer whose punch missed the deadline, or
                 // whose session attached since, gets another look.
                 crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
+                crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
+                crate::transport::probe::nudge_webrtc_riders(&state, &ctx);
             }
             _ = intervals.sweep.tick() => {
                 state.idle.sweep += 1;

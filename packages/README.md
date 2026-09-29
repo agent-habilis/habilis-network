@@ -44,16 +44,17 @@ everywhere else. Name the lookups you want: `lookup: ['mdns', 'dht',
 **The relay carries no data unless you say so.** Three lists name three
 concepts. `lookup: ['relay']` uses the relay as a *lookup*: a meeting point
 where peers find each other. Payload then goes peer to peer, and a pair that
-cannot open a direct path stays unlinked for data. `transport: ['p2p',
-'relay']` lets payload fall back to the relay; it is part of the mesh id, so
-joiners inherit whatever the creator chose. `relayUrls` says *which* relay
+cannot open a direct path stays unlinked for data. `transport: ['udp',
+'webrtc', 'relay']` lets payload fall back to the relay, and `['webrtc']`
+keeps every member on WebRTC data channels. The list is part of the mesh id,
+so joiners inherit whatever the creator chose. `relayUrls` says *which* relay
 and nothing about its role.
 
 ## Byte streams
 
 A mesh carries short text messages. To move bytes from one peer to one other,
 use a stream: it never rides the gossip. By default it rides a direct path (a
-WebRTC data channel from a tab), and with `transport: ['p2p', 'relay']` it can
+WebRTC data channel from a tab), and with `transport: ['udp', 'webrtc', 'relay']` it can
 fall back to the relay (the node must also name `relay` among its lookups; a
 browser always does).
 
@@ -89,7 +90,7 @@ stream in its URL fragment, or produces one. The `fofoca-stream` binary
 (`bun run harness -- 3000`), and open
 
 ```
-http://127.0.0.1:3000/?topic=room&transport=p2p&log=fofoca=info
+http://127.0.0.1:3000/?topic=room&log=fofoca=info
 ```
 
 The page joins the mesh the query names and mirrors the roster, every message,

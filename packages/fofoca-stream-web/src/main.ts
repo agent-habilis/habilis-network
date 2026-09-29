@@ -8,7 +8,7 @@
  * sends to the server, so it stays out of access logs:
  * - `#<hash>` — read this stream. It carries the producer's own lookups.
  * - no fragment — produce a stream. `?relay=` sets a custom relay URL
- *   (repeatable) and `?transport=p2p,relay` lets the bytes fall back to the
+ *   (repeatable) and `?transport=udp,webrtc,relay` lets the bytes fall back to the
  *   relay; a tab always finds peers through the relay.
  * - `?log=` — an `EnvFilter` for the engine's tracing, to the console.
  *

@@ -126,9 +126,9 @@ jobs:
 
       # Runs fofoca-stream's integration tests too, relay and WebRTC-only ones
       # included, on purpose: they are the only CI proof of the stream's
-      # direct-path gate, and each stands up a local relay rather than the
-      # engine's multi-peer rounds that `Check (relay-policy tests compile)`
-      # keeps out of CI. It also runs the binaries-only end to end
+      # direct-path gate. fofoca-stream's dev-dependency turns on
+      # `iroh-test-utils`, so fofoca's relay-policy proofs run here as well.
+      # It also runs the binaries-only end to end
       # (fofoca-stream-cli/tests/binary.rs); the browser one is e2e.yml.
       - name: Test
         run: cargo test --workspace
@@ -145,17 +145,12 @@ jobs:
       - name: Test (webrtc, native backend)
         run: cargo test -p fofoca-iroh-webrtc-transport --features native
 
-      # `iroh-test-utils` is off by default, and no step above reaches a test
-      # target with it on: `--all-features` here has no `--all-targets`, and
-      # `--all-targets` elsewhere runs with default features. That left the
-      # relay-policy proofs — `tests/relay_lookup_only_{refusal,public_link}.rs`
-      # and the webrtc graft tests — never even compiled by CI, free to rot
-      # behind a green tick.
-      #
-      # `--no-run`, not a test run: they stand up real relays and JSEP rounds
-      # between several peers, too timing-sensitive for a shared runner.
-      # Compiling them is what catches the rot; the mesh e2e suite is what
-      # proves the behaviour.
+      # `Test` above already runs the relay-policy proofs
+      # (`tests/relay_lookup_only_*.rs`, `tests/mesh_transport_lists.rs`):
+      # fofoca-stream's dev-dependency on fofoca
+      # (`crates/fofoca-stream/Cargo.toml`) turns on `iroh-test-utils`, and cargo
+      # unifies features across the workspace. This step compiles them without
+      # that help, so they cannot rot if fofoca-stream drops the feature.
       - name: Check (relay-policy tests compile)
         run: cargo test -p fofoca --features iroh-test-utils --all-targets --no-run
 

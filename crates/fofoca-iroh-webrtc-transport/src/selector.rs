@@ -45,7 +45,9 @@ impl PathSelector for WebRtcPreferred {
         let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
         let tier = |want: Tier| best_of(paths.iter().filter(move |path| tier_of(path) == want));
         // First non-empty tier wins; within a tier, lowest RTT.
-        let chosen = tier(Tier::Ip)
+        let chosen = (!ip_blocked())
+            .then(|| tier(Tier::Ip))
+            .flatten()
             .or_else(|| tier(Tier::WebRtc))
             .or_else(|| tier(Tier::Relay))
             .or_else(|| tier(Tier::OtherCustom));
@@ -54,6 +56,28 @@ impl PathSelector for WebRtcPreferred {
             selection.set(path);
         }
         selection
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+static IP_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tests only: while set, no IP path is selected, in every endpoint of the
+/// process. iroh re-runs selection on its path-stat updates, so a live
+/// connection leaves UDP within a few seconds and returns once it is cleared.
+#[cfg(feature = "test-hooks")]
+pub fn block_ip_paths(blocked: bool) {
+    IP_BLOCKED.store(blocked, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn ip_blocked() -> bool {
+    #[cfg(feature = "test-hooks")]
+    {
+        IP_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    {
+        false
     }
 }
 

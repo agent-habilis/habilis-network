@@ -121,6 +121,15 @@ pub enum Request {
     PeerCount {
         reply: oneshot::Sender<usize>,
     },
+    /// Tests only, and the only request that is a test hook: take UDP away
+    /// from (or give it back to) every connection in the process, and nudge
+    /// this node's peers so path selection runs now: iroh re-selects only on
+    /// path events.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    BlockUdp {
+        blocked: bool,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// The engine seam. Every inbound `msg` is queued for the consumer instead of
@@ -252,6 +261,19 @@ impl NodeDriver for MembershipApp {
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
                 true
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::BlockUdp { blocked, reply } => {
+                fofoca_iroh_webrtc_transport::block_ip_paths(blocked);
+                for addr in state.peer_endpoints.values() {
+                    let endpoint = ctx.endpoint.clone();
+                    let peer = addr.id;
+                    n0_future::task::spawn(async move {
+                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
             }
             Request::StateJson { reply } => {
                 let _ = reply.send(state.doc(Channel::State).to_json().to_string());

@@ -16,15 +16,13 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
-use crate::net::PathFlags;
 
 /// How the caller selects a mesh — an id to join, a shared string to derive one
 /// from, or a create over the choices below.
 ///
 /// A create names three mesh-wide choices, kept apart because they are three
 /// concepts: `lookup` says how members find each other, `transport` says what
-/// payload may ride, `relay_urls` says which relay. `paths` is this node's own
-/// and not in the id.
+/// payload may ride, `relay_urls` says which relay.
 ///
 /// `Deserialize` so a browser tab can hand its constructor a plain object and
 /// have it land here, which is what stops the browser and the C caller growing
@@ -46,10 +44,11 @@ pub struct Opts {
     /// any uses only those; naming none is a loopback mesh. Ignored with a
     /// `topic` (always all three) or a `mesh` id (which carries its own).
     pub lookup: Vec<Lookup>,
-    /// What may carry payload: `p2p`, and `relay` if named. Empty ⇒ `p2p`
-    /// alone, so all data is peer to peer and the relay serves lookup only.
-    /// `relay` needs `relay` in `lookup`. Part of the mesh id, so a joiner
-    /// inherits it; ignored when joining by id.
+    /// What may carry payload: any of `udp`, `webrtc`, `relay`, with `udp` or
+    /// `webrtc` among them. Empty ⇒ `udp,webrtc`, so all data is peer to peer
+    /// and the relay serves lookup only. `relay`, or a list without `udp`,
+    /// needs `relay` in `lookup`. Part of the mesh id, so a joiner inherits
+    /// it; ignored when joining by id.
     pub transport: Vec<Transport>,
     /// Which relay: an ordered ladder (first preferred) replacing the
     /// default. Needs `relay` in `lookup`. Part of the mesh id — with
@@ -57,9 +56,6 @@ pub struct Opts {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
-    /// Which of this node's paths may carry data. Per node, not in the id;
-    /// the default is everything the target has.
-    pub paths: PathFlags,
     /// Active-view cap; `0` takes the engine default.
     pub max_peers: usize,
 }
@@ -148,10 +144,9 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
             // not.
             endpoint: None,
             protocols: Vec::new(),
-            // The caller's switches over everything this target has. In a
-            // browser the WebRTC lane is the only one that exists, and the
-            // engine attaches it per target.
-            transports: TransportOpts::from(opts.paths),
+            // Everything this target has; the mesh's transport list narrows
+            // it in `setup_mesh`.
+            transports: TransportOpts::default(),
             multihop: false,
             // An embedded member publishes no per-peer identity, so `meta`
             // stays free-form.
@@ -313,20 +308,20 @@ mod tests {
     }
 
     /// The JSON a browser tab hands over is this struct verbatim, so its
-    /// shape is a contract: the three lists, the ladder, the per-node paths.
-    /// A field from before the split is a typo now, not a silent no-op.
+    /// shape is a contract: the three lists and the ladder. A field from
+    /// before the split is a typo now, not a silent no-op.
     #[test]
-    fn the_json_shape_is_the_three_choices_and_the_paths() {
+    fn the_json_shape_is_the_three_choices() {
         let parsed: Opts = serde_json::from_str(
-            r#"{"lookup":["mdns","relay"],"transport":["p2p","relay"],
-                "relayUrls":["http://127.0.0.1:3340/"],"paths":{"webrtc":false}}"#,
+            r#"{"lookup":["mdns","relay"],"transport":["webrtc","relay"],
+                "relayUrls":["http://127.0.0.1:3340/"]}"#,
         )
         .expect("the documented shape parses");
         assert_eq!(parsed.lookup, vec![Lookup::Mdns, Lookup::Relay]);
-        assert_eq!(parsed.transport, vec![Transport::P2p, Transport::Relay]);
+        assert_eq!(parsed.transport, vec![Transport::WebRtc, Transport::Relay]);
         assert_eq!(parsed.relay_urls, vec!["http://127.0.0.1:3340/".to_owned()]);
-        assert!(parsed.paths.ip && !parsed.paths.webrtc);
         for stale in [
+            r#"{"paths":{"webrtc":false}}"#,
             r#"{"public":true}"#,
             r#"{"relayLookup":true}"#,
             r#"{"relayTransport":true}"#,
@@ -405,7 +400,7 @@ mod tests {
 
         let relayed = create_config(&Opts {
             lookup: vec![Lookup::Relay],
-            transport: vec![Transport::P2p, Transport::Relay],
+            transport: vec![Transport::Udp, Transport::Relay],
             ..opts()
         });
         assert!(relayed.transport.relay_transport);
@@ -413,7 +408,7 @@ mod tests {
         assert!(
             resolve_kind(
                 &Opts {
-                    transport: vec![Transport::P2p, Transport::Relay],
+                    transport: vec![Transport::Udp, Transport::Relay],
                     ..opts()
                 },
                 None,
@@ -430,7 +425,7 @@ mod tests {
     fn the_relay_can_serve_lookup_alone() {
         let create = create_config(&Opts {
             lookup: vec![Lookup::Relay],
-            transport: vec![Transport::P2p],
+            transport: vec![Transport::Udp],
             ..opts()
         });
         assert_eq!(create.lookups.relay_lookup, RelayChoice::Pinned);
@@ -439,7 +434,7 @@ mod tests {
         let (topic, _) = resolve_kind(
             &Opts {
                 topic: Some("standup".to_owned()),
-                transport: vec![Transport::P2p],
+                transport: vec![Transport::Udp],
                 relay_urls: vec!["http://127.0.0.1:3340/".to_owned()],
                 ..opts()
             },
@@ -454,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn p2p_cannot_be_left_out_of_the_transports() {
+    fn udp_cannot_be_left_out_of_the_transports() {
         let error = resolve_kind(
             &Opts {
                 lookup: vec![Lookup::Relay],
@@ -464,7 +459,7 @@ mod tests {
             None,
         )
         .expect_err("relay alone is not a mode the engine has");
-        assert!(format!("{error:#}").contains("p2p"), "{error:#}");
+        assert!(format!("{error:#}").contains("udp"), "{error:#}");
     }
 
     /// `relayUrls` swaps the default ladder for the caller's, on both the
@@ -582,7 +577,7 @@ mod tests {
         let (relayed, _) = resolve_kind(
             &Opts {
                 topic: Some("standup".to_owned()),
-                transport: vec![Transport::P2p, Transport::Relay],
+                transport: vec![Transport::Udp, Transport::Relay],
                 ..opts()
             },
             None,

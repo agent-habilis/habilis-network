@@ -3,13 +3,14 @@
 //! ```text
 //! cargo run -p fofoca --example mesh_peer              # create, print the id
 //! cargo run -p fofoca --example mesh_peer -- <id>    # join that mesh
-//! MESH_TRANSPORT=webrtc cargo run … --example mesh_peer -- <id>  # WebRTC-only data plane
+//! MESH_TRANSPORT=webrtc cargo run -p fofoca --example mesh_peer  # create a WebRTC-only mesh
 //! MESH_RELAY_TRANSPORT=on cargo run -p fofoca --example mesh_peer   # create: relay may carry payload (the `relay_transport` create option)
 //! ```
 //!
-//! `MESH_TRANSPORT=webrtc` clears IP transports, so any data path that is not
-//! the `WebRTC` one is a failure rather than a silent fallback. The relay stays —
-//! it is the rendezvous, and the JSEP exchange rides it.
+//! `MESH_TRANSPORT=webrtc` leaves `udp` out of the mesh's transport list, so
+//! any data path that is not the `WebRTC` one is a failure rather than a silent
+//! fallback. The relay stays — it is the rendezvous, and the JSEP exchange
+//! rides it. A joiner takes the list from the id and ignores the variable.
 //!
 //! Prints one line per second: the gossip roster count and the number of live
 //! `WebRTC` sessions. Those two numbers are the whole point — they are what a
@@ -77,12 +78,12 @@ async fn main() -> anyhow::Result<()> {
     // Env var rather than a flag: this example takes exactly one positional
     // argument and adding a parser for one knob is not worth it. The real CLI
     // surface is `--transport`, on `agent-share`.
-    let transports = match std::env::var("MESH_TRANSPORT").as_deref() {
-        Ok("webrtc") => TransportOpts::webrtc_only(),
+    let udp = match std::env::var("MESH_TRANSPORT").as_deref() {
+        Ok("webrtc") => false,
         Ok(other) if !other.is_empty() => {
             anyhow::bail!("unknown MESH_TRANSPORT {other:?}; expected `webrtc`")
         }
-        _ => TransportOpts::default(),
+        _ => true,
     };
 
     // A topic mesh, for pairing with a browser peer: the harness page joins
@@ -114,6 +115,8 @@ async fn main() -> anyhow::Result<()> {
                 transport: TransportPolicy {
                     relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
                         .is_some_and(|value| value == "on"),
+                    udp,
+                    ..TransportPolicy::default()
                 },
             },
         )?;
@@ -123,7 +126,6 @@ async fn main() -> anyhow::Result<()> {
                 topic_string: topic,
             },
             fofoca::protocol::Nickname::random(),
-            transports,
         )
         .await;
     }
@@ -151,6 +153,8 @@ async fn main() -> anyhow::Result<()> {
                 transport: TransportPolicy {
                     relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
                         .is_some_and(|value| value == "on"),
+                    udp,
+                    ..TransportPolicy::default()
                 },
             },
             advertise: DirectorySelection::Unset,
@@ -160,14 +164,13 @@ async fn main() -> anyhow::Result<()> {
         .resolve()?,
     };
 
-    run_peer(kind, author, transports).await
+    run_peer(kind, author).await
 }
 
 /// Stand the peer up and print its per-second status until ctrl-c.
 async fn run_peer(
     kind: fofoca::runtime::SetupKind,
     author: fofoca::protocol::Nickname,
-    transports: TransportOpts,
 ) -> anyhow::Result<()> {
     // The live peer count, mirrored out of the loop on every roster change and
     // on the periodic refresh. Lock-free, so reading it per second costs
@@ -180,7 +183,7 @@ async fn run_peer(
             max_peers: 16,
             endpoint: None,
             protocols: Vec::new(),
-            transports,
+            transports: TransportOpts::default(),
             // No files and no control socket: this is an embedded peer, not a
             // daemon something else drives.
             runtime_base: None,
@@ -196,10 +199,6 @@ async fn run_peer(
 
     println!("mesh    {}", config.mesh_id().as_str());
     println!("nick    {author}");
-    println!(
-        "transport {}",
-        if transports.ip { "all" } else { "webrtc-only" }
-    );
 
     // `handle_signals: false` — registering tokio's signal handlers suppresses
     // the OS default-terminate for the whole process, permanently. This example

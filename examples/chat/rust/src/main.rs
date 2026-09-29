@@ -4,7 +4,7 @@
 //! ```text
 //! cargo run -p chat -- --topic room
 //! cargo run -p chat -- --topic room --nick ana --relay-url http://127.0.0.1:3340/
-//! cargo run -p chat -- --topic room --transport p2p,relay
+//! cargo run -p chat -- --topic room --transport udp,webrtc,relay
 //! ```
 //!
 //! Type to broadcast; `/msg <nick> <text>` sends directed; `/peers` prints
@@ -46,7 +46,7 @@ fn parse_args() -> Result<Args> {
             "--robot" => robot = true,
             other => bail!(
                 "unknown argument {other}\nusage: chat --topic <t> | --mesh <id> \
-                 [--nick <n>] [--relay-url <url>]... [--transport p2p,relay] [--robot]"
+                 [--nick <n>] [--relay-url <url>]... [--transport udp,webrtc,relay] [--robot]"
             ),
         }
     }

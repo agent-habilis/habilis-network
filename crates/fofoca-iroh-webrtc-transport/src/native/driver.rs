@@ -327,7 +327,12 @@ pub(crate) async fn drive_session(
             }
             outbound = out_rx.recv() => {
                 let Some(datagram) = outbound else {
-                    break SessionEnd::Closed("transport dropped");
+                    // Detached. Close DTLS so the far side ends its session
+                    // now, not when ICE consent times out. (str0m's data
+                    // channel close is local only: it sends no reset.)
+                    let _ = rtc.close();
+                    flush_transmits(&mut rtc, &socket).await;
+                    break SessionEnd::Closed("detached");
                 };
                 if let Some(mut channel) = rtc.channel(channel_id) {
                     // One QUIC datagram = one binary SCTP message; boundaries
@@ -352,6 +357,9 @@ pub(crate) async fn drive_session(
         SessionEnd::Closed(reason) => {
             tracing::debug!(%remote, reason, "webrtc session closed");
         }
+        SessionEnd::Failed(error) if closed_by_peer(&error) => {
+            tracing::debug!(%remote, "webrtc session closed by the peer: {error:#}");
+        }
         SessionEnd::Failed(error) => {
             tracing::warn!(%remote, "webrtc session failed: {error:#}");
         }
@@ -361,6 +369,32 @@ pub(crate) async fn drive_session(
         tracing::info!(%remote, dropped_total, "webrtc session dropped datagrams over its lifetime");
     }
     registry.remove_if_generation(&remote, generation);
+}
+
+/// Whether a session "failure" is the far side closing DTLS, which is how a
+/// detach there reaches us. str0m surfaces it as an error from its DTLS crate
+/// (dimpl's `ConnectionClosed`, rendered "connection closed"), which is not a
+/// dependency of ours to match on, hence the text. A str0m or dimpl bump that
+/// changes the text only turns this debug line back into a warning.
+fn closed_by_peer(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("connection closed")
+}
+
+/// Send everything str0m has queued, ignoring events: after a local close the
+/// channel's own close event comes first, and [`pump_outputs`] would stop
+/// there, before the reset that tells the far side.
+async fn flush_transmits(rtc: &mut Rtc, socket: &UdpSocket) {
+    while let Ok(output) = rtc.poll_output() {
+        match output {
+            Output::Timeout(_) => return,
+            Output::Transmit(transmit) => {
+                let _ = socket
+                    .send_to(&transmit.contents, transmit.destination)
+                    .await;
+            }
+            Output::Event(_) => {}
+        }
+    }
 }
 
 async fn pump_outputs(

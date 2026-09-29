@@ -171,7 +171,10 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
             lookups,
             password: None,
             issuer_pubkey: None,
-            transport: TransportPolicy { relay_transport },
+            transport: TransportPolicy {
+                relay_transport,
+                ..TransportPolicy::default()
+            },
         },
     )?;
     let author = Nickname::new(nick)?;

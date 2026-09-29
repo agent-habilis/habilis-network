@@ -75,6 +75,8 @@ mod registry;
 mod liveness;
 #[cfg(any(feature = "native", feature = "web"))]
 mod selector;
+#[cfg(feature = "test-hooks")]
+pub use selector::block_ip_paths;
 mod signaling;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};

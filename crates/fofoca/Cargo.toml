@@ -49,7 +49,12 @@ dhat-heap = []
 # `net::test_relay::spawn_plain` — a plain-HTTP local relay that a browser can
 # reach too (a tab's WebSocket refuses a self-signed https cert with no
 # override, so the https `run_relay_server` is native-only).
-iroh-test-utils = ["iroh/test-utils", "dep:iroh-relay", "iroh-relay/server"]
+iroh-test-utils = [
+    "iroh/test-utils",
+    "dep:iroh-relay",
+    "iroh-relay/server",
+    "fofoca-iroh-webrtc-transport/test-hooks",
+]
 # Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
 # server, a ticket, and fetch/offload, for handing a peer a payload too large to
 # ride a gossip frame. `agent-gossip` enables it for A2A payload offload; the

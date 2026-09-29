@@ -25,6 +25,9 @@ serde_json = { workspace = true }
 # feature kept — it is `send_json`/`read_json`, and hand-rolling those against
 # `serde_json` was most of what made the original `curl | jq` runner painful.
 ureq = { version = "3", default-features = false, features = ["json"] }
+# The CDP backend's one `WebSocket` to the page. Plain `ws://` to 127.0.0.1
+# only, so no TLS stack.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # Cargo-style status output, so a long sweep reads like the cargo invocations
 # around it rather than like a shell script.
 anstyle = "1"

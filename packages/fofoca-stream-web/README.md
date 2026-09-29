@@ -3,7 +3,7 @@
 The stream's web app: one end of one byte stream in a tab. With a hash in the
 URL it reads that stream; without one it creates a stream, shows its hash, and
 writes what you type. The bytes ride a direct path by default (a WebRTC data
-channel from a tab), the relay only with `?transport=p2p,relay`, and never
+channel from a tab), the relay only with `?transport=udp,webrtc,relay`, and never
 gossip. The page exposes its runtime to whoever drives the tab:
 a person at the composer, a browser agent through WebMCP, or a script through
 `window.stream`.
@@ -40,7 +40,7 @@ Any static host serves it. Point the CLI at the host with `--web-url` or
 
 - `#<hash>` — read this stream. The hash carries the producer's lookups.
 - no fragment — produce a stream. `?relay=` sets a custom relay URL
-  (repeatable), and `?transport=p2p,relay` lets the bytes fall back to the
+  (repeatable), and `?transport=udp,webrtc,relay` lets the bytes fall back to the
   relay.
 - `?log=` — an `EnvFilter` for the engine's tracing, to the console.
 

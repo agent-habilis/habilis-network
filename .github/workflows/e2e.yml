@@ -21,8 +21,9 @@ jobs:
   # The stream end to end: the real `fofoca-stream` binary against the real
   # stream page in a real browser, over a local relay, both directions. It is
   # the only CI run of a browser and a native peer pairing. Chrome here is
-  # driven through chromedriver (`--only chrome-ci`): the default Chrome for
-  # Testing backend needs `agent-browse`, which a runner does not have.
+  # Chrome for Testing over CDP (`--only cft`), the same backend as a local
+  # run: the runner downloads it into target/ on first use. A launch or
+  # download failure fails the suite; it is not a skipped row.
   stream:
     name: e2e (stream)
     runs-on: ubuntu-latest
@@ -50,13 +51,5 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      - uses: browser-actions/setup-chrome@v1
-        id: chrome
-        with:
-          install-chromedriver: true
-
       - name: Stream suite
-        run: cargo task e2e --suite stream --only chrome-ci
-        env:
-          CHROME_BIN: ${{ steps.chrome.outputs.chrome-path }}
-          CHROMEDRIVER: ${{ steps.chrome.outputs.chromedriver-path }}
+        run: cargo task e2e --suite stream --only cft

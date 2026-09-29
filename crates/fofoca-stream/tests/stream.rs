@@ -5,7 +5,6 @@
 
 use std::time::{Duration, Instant};
 
-use fofoca::net::PathFlags;
 use fofoca::net::test_relay;
 use fofoca::protocol::{Lookup, Transport};
 use fofoca_stream::{Producer, Reader, Refused, StreamHash, StreamNode, StreamOpts};
@@ -279,31 +278,27 @@ async fn two_streams_on_one_node_stay_apart() {
     writers.1.await.expect("second writer");
 }
 
-/// A node on the local relay, with `transport` and `paths` as given.
-async fn on_relay(url: &str, transport: Vec<Transport>, paths: PathFlags) -> StreamNode {
+/// A node on the local relay, with `transport` as given.
+async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
     StreamNode::bind(&StreamOpts {
         lookup: vec![Lookup::Relay],
         transport,
         relay_urls: vec![url.to_owned()],
-        paths,
     })
     .await
     .expect("bind a relay node")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_relay_transport_stream_admits_a_relay_only_consumer() {
+async fn a_relay_transport_stream_admits_a_consumer_with_no_direct_path() {
     let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
     let url = url.to_string();
-    let both = vec![Transport::P2p, Transport::Relay];
-    let producer_node = on_relay(&url, both.clone(), PathFlags::default()).await;
-    let relay_only = PathFlags {
-        ip: false,
-        webrtc: false,
-    };
-    let consumer_node = on_relay(&url, both, relay_only).await;
+    // The producer has no data channel and the consumer has no UDP, so no
+    // direct path can exist between them.
+    let producer_node = on_relay(&url, vec![Transport::Udp, Transport::Relay]).await;
+    let consumer_node = on_relay(&url, vec![Transport::WebRtc, Transport::Relay]).await;
     let producer = producer_node.create().await;
-    assert!(producer.hash().relay_transport);
+    assert!(producer.hash().transport.relay_transport);
     let hash = producer.hash().clone();
     let writer = tokio::spawn(produce(producer, b"over the relay".to_vec(), 64));
     let mut reader = tokio::time::timeout(BUDGET, consumer_node.open(&hash))
@@ -323,14 +318,10 @@ async fn a_relay_transport_stream_admits_a_relay_only_consumer() {
 async fn a_webrtc_only_consumer_reads_over_the_data_channel() {
     let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
     let url = url.to_string();
-    let producer_node = on_relay(&url, vec![Transport::P2p], PathFlags::default()).await;
-    let webrtc_only = PathFlags {
-        ip: false,
-        webrtc: true,
-    };
-    let consumer_node = on_relay(&url, vec![Transport::P2p], webrtc_only).await;
+    let producer_node = on_relay(&url, vec![Transport::Udp, Transport::WebRtc]).await;
+    let consumer_node = on_relay(&url, vec![Transport::WebRtc]).await;
     let producer = producer_node.create().await;
-    assert!(!producer.hash().relay_transport);
+    assert!(!producer.hash().transport.relay_transport);
     let hash = producer.hash().clone();
     let sent = payload(1024 * 1024);
     let writer = tokio::spawn(produce(producer, sent.clone(), 16 * 1024));
@@ -353,20 +344,48 @@ async fn a_webrtc_only_consumer_reads_over_the_data_channel() {
 async fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
     let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
     let url = url.to_string();
-    let webrtc_only = PathFlags {
-        ip: false,
-        webrtc: true,
-    };
-    let producer_node = on_relay(&url, vec![Transport::P2p], webrtc_only).await;
-    let no_webrtc = PathFlags {
-        ip: true,
-        webrtc: false,
-    };
-    let consumer_node = on_relay(&url, vec![Transport::P2p], no_webrtc).await;
+    let producer_node = on_relay(&url, vec![Transport::WebRtc]).await;
+    let consumer_node = on_relay(&url, vec![Transport::Udp]).await;
     let producer = producer_node.create().await;
     let hash = producer.hash().clone();
     let started = Instant::now();
     let error = consumer_node.open(&hash).await.expect_err("no lane");
+    let elapsed = started.elapsed();
+    assert_eq!(refusal(&error), Some(Refused::RelayRefused), "{error:#}");
+    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+}
+
+/// The mirror case: the reader has only a data channel, and the producer
+/// runs none. The hash says so, so the open fails at once instead of offering
+/// a round the producer cannot answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_webrtc_only_consumer_of_a_producer_without_webrtc_fails_fast() {
+    let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
+    let url = url.to_string();
+    let producer_node = on_relay(&url, vec![Transport::Udp]).await;
+    let consumer_node = on_relay(&url, vec![Transport::WebRtc]).await;
+    let producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    let started = Instant::now();
+    let error = consumer_node.open(&hash).await.expect_err("no lane");
+    let elapsed = started.elapsed();
+    assert_eq!(refusal(&error), Some(Refused::RelayRefused), "{error:#}");
+    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+}
+
+/// The consumer's list refuses relay payload even when the producer's allows
+/// it. A producer with no UDP and a consumer with no data channel share only
+/// the relay, so the open fails at once instead of streaming over it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_consumer_without_relay_payload_refuses_a_relay_only_pair() {
+    let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
+    let url = url.to_string();
+    let producer_node = on_relay(&url, vec![Transport::WebRtc, Transport::Relay]).await;
+    let consumer_node = on_relay(&url, vec![Transport::Udp]).await;
+    let producer = producer_node.create().await;
+    let hash = producer.hash().clone();
+    let started = Instant::now();
+    let error = consumer_node.open(&hash).await.expect_err("relay only");
     let elapsed = started.elapsed();
     assert_eq!(refusal(&error), Some(Refused::RelayRefused), "{error:#}");
     assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
@@ -378,7 +397,7 @@ async fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
 async fn a_hash_minted_by_a_bind_for_node_carries_its_relay() {
     let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
     let url = url.to_string();
-    let first = on_relay(&url, vec![Transport::P2p], PathFlags::default()).await;
+    let first = on_relay(&url, vec![Transport::Udp]).await;
     let given = first.create().await.hash().clone();
     let node = StreamNode::bind_for(&given).await.expect("bind for");
     let minted = node.create().await.hash().clone();
