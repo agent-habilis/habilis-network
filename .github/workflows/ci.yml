@@ -93,6 +93,10 @@ jobs:
           # and keeps the feature from rotting.
           cargo check --target wasm32-unknown-unknown -p habilis-network-chunks --all-targets --features wasm-simd
           cargo check --target wasm32-unknown-unknown -p habilis-network-iroh-webrtc-transport --features web,bench
+          # The Nostr relay client and its browser socket (`ws_web.rs`). The
+          # engine's row below reaches it today as a path dependency; this row
+          # names it so it stays checked if the engine stops pulling it in.
+          cargo check --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-address-lookup
           # The engine itself must reach the browser, not merely be avoidable
           # from it. `--no-default-features` is the portable half: no `host`,
           # so no IPC listener, no state file, no process helpers. Without this
@@ -121,6 +125,7 @@ jobs:
         run: |
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-chunks --all-targets --features wasm-simd -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-webrtc-transport --features web,bench -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-nostr-address-lookup -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p habilis-network --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-netplay --no-default-features -- -D warnings
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-stream -- -D warnings
