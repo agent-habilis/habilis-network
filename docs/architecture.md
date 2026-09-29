@@ -99,7 +99,7 @@ graph TD
     engine --> logging["habilis-network-logging<br>tracing sink"]
     engine --> mh["habilis-network-iroh-multihop-transport"]
     engine --> webrtc["habilis-network-iroh-webrtc-transport"]
-    engine --> nostr["habilis-network-nostr<br>Nostr relay client"]
+    engine --> nostr["habilis-network-iroh-nostr-address-lookup<br>Nostr relay client"]
     doc --> proto["habilis-network-protocol<br>wire vocabulary"]
     logging --> proto
     proto --> util["habilis-network-util<br>host helpers, constants"]
@@ -124,7 +124,7 @@ The engine depends on `habilis-network-iroh-webrtc-transport` on both targets: t
 | `habilis-network-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `habilis-network-blobs`. |
 | `habilis-network-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
 | `habilis-network-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
-| `habilis-network-nostr` | A Nostr relay client: signed ephemeral events, one socket per relay per process. Knows nothing about meshes. Reaches wasm32. |
+| `habilis-network-iroh-nostr-address-lookup` | A Nostr relay client: signed ephemeral events, one socket per relay per process. Knows nothing about meshes. Reaches wasm32. |
 
 The measurement that drove the split was a consumer binary where the engine cost 39.4 MiB of 40.7 MiB.
 

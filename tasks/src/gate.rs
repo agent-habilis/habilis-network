@@ -162,7 +162,7 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("habilis-network-nostr"),
+        scope: Scope::Crate("habilis-network-iroh-nostr-address-lookup"),
         args: &[],
     },
     // The engine itself must reach the browser, not merely be avoidable from
@@ -225,7 +225,7 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("habilis-network-nostr"),
+        scope: Scope::Crate("habilis-network-iroh-nostr-address-lookup"),
         args: &[],
     },
     Step {

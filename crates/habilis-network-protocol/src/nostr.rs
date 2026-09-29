@@ -25,7 +25,7 @@ use crate::seal::{open_symmetric, seal_symmetric};
 use crate::topic::TopicId;
 
 /// Public relays that forwarded ephemeral events in the probe of 2026-09-24
-/// (`cargo run -p habilis-network-nostr --example probe`), fastest first. `relay.damus.io`
+/// (`cargo run -p habilis-network-iroh-nostr-address-lookup --example probe`), fastest first. `relay.damus.io`
 /// forwarded too but rate-limits bursts, so it is left out.
 pub const PINNED_RELAYS: &[&str] = &[
     "wss://relay-can.zombi.cloudrodion.com",

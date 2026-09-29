@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::protocol::nostr::{NostrKeys, Opener, Signal, SignalKind, seal};
 use anyhow::{Context as _, Result};
+use habilis_network_iroh_nostr_address_lookup::Pool;
 use habilis_network_iroh_webrtc_transport::{SignalEnvelope, WebRtcHandle};
-use habilis_network_nostr::Pool;
 use iroh::{Endpoint, EndpointId, SecretKey};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
@@ -645,7 +645,7 @@ fn now() -> u64 {
 /// waiting on them, offers to an answer, hellos to the caller.
 async fn dispatch(
     inner: std::sync::Weak<Inner>,
-    mut events: mpsc::UnboundedReceiver<habilis_network_nostr::Event>,
+    mut events: mpsc::UnboundedReceiver<habilis_network_iroh_nostr_address_lookup::Event>,
     mut opener: Opener,
     hellos: mpsc::Sender<Signal>,
 ) {
@@ -751,8 +751,8 @@ fn publish(inner: &Inner, signal: &Signal) {
 mod tests {
     use std::time::Duration;
 
+    use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
     use habilis_network_iroh_webrtc_transport::WebRtcTransport;
-    use habilis_network_nostr::test_relay::TestRelay;
     use iroh::endpoint::presets;
     use iroh::{EndpointAddr, RelayMode, TransportAddr};
 

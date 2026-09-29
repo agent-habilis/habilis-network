@@ -1,7 +1,11 @@
-# habilis-network-nostr
+# habilis-network-iroh-nostr-address-lookup
 
 A small Nostr relay client. habilis-network uses it to find peers and to carry the WebRTC
 offer and answer when the iroh relay is not available.
+
+The name is ahead of the contents. Today the crate is the relay client only.
+An iroh `AddressLookup` over Nostr, like `iroh-mdns-address-lookup`, is
+planned for this crate.
 
 - **Events.** Events are NIP-01 events with ephemeral kinds (20000–29999). Relays
   forward these kinds and store nothing. Each event carries one `x` tag. A
@@ -45,7 +49,7 @@ offer and answer when the iroh relay is not available.
 
 ## Probe
 
-`cargo run -p habilis-network-nostr --example probe` tests which public relays forward
+`cargo run -p habilis-network-iroh-nostr-address-lookup --example probe` tests which public relays forward
 an ephemeral event between two subscribers.
 
 On 2026-09-24:
@@ -56,7 +60,7 @@ On 2026-09-24:
 
 ## Tests
 
-`cargo test -p habilis-network-nostr` runs against `test_relay::TestRelay`, an
+`cargo test -p habilis-network-iroh-nostr-address-lookup` runs against `test_relay::TestRelay`, an
 in-process relay (feature `test-relay`). It checks ids and signatures, filters
 events like a real relay, and can refuse, swallow events, or drop connections.
 

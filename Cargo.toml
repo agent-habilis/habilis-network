@@ -84,7 +84,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "tracing-log"] }
 async-trait = "0.1.89"
 futures-util = "0.3"
-# Nostr relay URLs, parsed by the protocol and dialed by habilis-network-nostr.
+# Nostr relay URLs, parsed by the protocol and dialed by habilis-network-iroh-nostr-address-lookup.
 url = "2"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }

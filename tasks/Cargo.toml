@@ -36,7 +36,7 @@ anstream = "0.6"
 # in-process and a local relay, so the runner depends on the engine it drives.
 habilis-network = { path = "../crates/habilis-network", features = ["iroh-test-utils"], optional = true }
 # The in-process Nostr relay the Nostr-only cells meet on.
-habilis-network-nostr = { path = "../crates/habilis-network-nostr", features = ["test-relay"], optional = true }
+habilis-network-iroh-nostr-address-lookup = { path = "../crates/habilis-network-iroh-nostr-address-lookup", features = ["test-relay"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"], optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 # The `bench` feature's deps: the native cells of `cargo task benchmark` stand
@@ -51,7 +51,7 @@ habilis-network-iroh-webrtc-transport = { path = "../crates/habilis-network-iroh
 # into `habilis-network` (`tasks` is a workspace member, and cargo takes the union of
 # every selected package's features); `cargo task e2e --suite mesh|chat`
 # re-runs itself with this on.
-mesh = ["dep:habilis-network", "dep:habilis-network-nostr", "dep:tokio", "dep:tracing-subscriber"]
+mesh = ["dep:habilis-network", "dep:habilis-network-iroh-nostr-address-lookup", "dep:tokio", "dep:tracing-subscriber"]
 # The throughput benchmark's native halves. Same re-exec pattern; a lighter
 # closure than `mesh`, since it needs the transport and not the engine.
 bench = ["dep:habilis-network-iroh-webrtc-transport", "dep:tokio"]

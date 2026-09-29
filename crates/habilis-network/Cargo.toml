@@ -154,7 +154,7 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 futures-util.workspace = true
 # The Nostr lookup and JSEP carrier, on both targets: a browser's WebSocket
 # natively, tokio-websockets on a host.
-habilis-network-nostr = { path = "../habilis-network-nostr" }
+habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup" }
 url.workspace = true
 # End-to-end sealing of directed frames: a NaCl-style sealed box (ephemeral
 # X25519 ECDH → ChaCha20-Poly1305) so only the addressed recipient can read a
@@ -210,7 +210,7 @@ web-sys = { workspace = true, features = ["Document", "VisibilityState", "Window
 # so leaving these unscoped makes `cargo check --target wasm32-unknown-unknown`
 # fail before it reaches any code of ours.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-habilis-network-nostr = { path = "../habilis-network-nostr", features = ["test-relay"] }
+habilis-network-iroh-nostr-address-lookup = { path = "../habilis-network-iroh-nostr-address-lookup", features = ["test-relay"] }
 proptest.workspace = true
 insta.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

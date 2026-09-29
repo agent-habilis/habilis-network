@@ -864,7 +864,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         .block_on(habilis_network::net::test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let nostr_relay = runtime
-        .block_on(habilis_network_nostr::test_relay::TestRelay::spawn())
+        .block_on(habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay::spawn())
         .map_err(|error| format!("no local Nostr relay: {error:#}"))?;
     let urls = Urls {
         relay: relay_url.to_string(),

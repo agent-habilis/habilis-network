@@ -20,7 +20,7 @@ published to a registry; pin it with
 - The `nostr` lookup: members find each other over public Nostr relays and
   carry the WebRTC offer and answer over them, as Trystero does. It runs on
   native and in the browser, so a mesh whose only lookup is `nostr` forms
-  with no iroh relay. `habilis-network-nostr` is the relay client. A custom relay
+  with no iroh relay. `habilis-network-iroh-nostr-address-lookup` is the relay client. A custom relay
   list is `nostr_urls` / `nostrUrls` / `--nostr-url`; it is part of the id.
 - Native pairs race WebRTC against UDP on a `udp,webrtc` mesh. A session
   that attaches after UDP won is detached, and the far side drops its half

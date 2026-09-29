@@ -1,5 +1,5 @@
 [package]
-name = "habilis-network-nostr"
+name = "habilis-network-iroh-nostr-address-lookup"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,7 +18,7 @@ test-relay = ["tokio-websockets/server", "tokio/net"]
 workspace = true
 
 [lib]
-name = "habilis_network_nostr"
+name = "habilis_network_iroh_nostr_address_lookup"
 path = "src/lib.rs"
 
 # No iroh. The crate speaks NIP-01 and nothing about meshes; the engine seals
@@ -61,6 +61,6 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 # The integration tests drive the in-process relay.
-habilis-network-nostr = { path = ".", features = ["test-relay"] }
+habilis-network-iroh-nostr-address-lookup = { path = ".", features = ["test-relay"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 tracing-subscriber.workspace = true

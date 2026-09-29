@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use habilis_network_nostr::test_relay::TestRelay;
-use habilis_network_nostr::{Event, Pool};
+use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
+use habilis_network_iroh_nostr_address_lookup::{Event, Pool};
 use tokio::sync::mpsc::UnboundedReceiver;
 use url::Url;
 
@@ -323,7 +323,7 @@ async fn a_peer_whose_clock_is_behind_still_reaches_us() {
         .unwrap()
         .as_secs();
     let late = Event::sign(
-        &habilis_network_nostr::Keys::generate(),
+        &habilis_network_iroh_nostr_address_lookup::Keys::generate(),
         now - 5,
         &TAG,
         "late".to_owned(),

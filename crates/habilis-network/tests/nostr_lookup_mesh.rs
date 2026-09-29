@@ -18,7 +18,7 @@ use habilis_network::protocol::{
     LookupOpts, MeshConfig, Message, MessageKind, Nickname, PresenceSubtype, TransportPolicy,
 };
 use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
-use habilis_network_nostr::test_relay::TestRelay;
+use habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay;
 use tokio::sync::Notify;
 
 struct Probe;
