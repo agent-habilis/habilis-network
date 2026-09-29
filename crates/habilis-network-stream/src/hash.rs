@@ -57,6 +57,19 @@ pub struct StreamHash {
     pub secret: [u8; SECRET_LEN],
 }
 
+/// A stream's JSEP rides the signal ALPN only, over the relay or UDP. Nostr
+/// signals a mesh, not a stream, so a stream that names it could never be
+/// reached.
+///
+/// # Errors
+/// `lookups` names Nostr.
+pub(crate) fn refuse_nostr(lookups: &LookupOpts) -> Result<()> {
+    if lookups.nostr != habilis_network::protocol::mesh::NostrChoice::Disabled {
+        bail!("a stream does not signal over nostr: name `relay`, `mdns` or `dht` instead");
+    }
+    Ok(())
+}
+
 impl fmt::Debug for StreamHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -122,6 +135,7 @@ impl StreamHash {
         let secret =
             take_array::<SECRET_LEN>(payload, &mut pos).context("stream hash missing secret")?;
         let lookups = LookupOpts::decode_from(payload, &mut pos)?;
+        refuse_nostr(&lookups)?;
         let addr_json = payload.get(pos..).context("stream hash missing address")?;
         let value: serde_json::Value =
             serde_json::from_slice(addr_json).context("invalid stream hash address")?;
@@ -200,6 +214,21 @@ mod tests {
                 hash
             );
         }
+    }
+
+    // A stream signals over the relay or UDP only, so a hash naming Nostr
+    // points at a producer no reader could reach.
+    #[test]
+    fn a_hash_naming_nostr_is_refused() {
+        let hash = StreamHash {
+            lookups: LookupOpts {
+                nostr: habilis_network::protocol::mesh::NostrChoice::Pinned,
+                ..LookupOpts::loopback()
+            },
+            ..sample(TransportPolicy::default())
+        };
+        let error = StreamHash::decode(&hash.encode()).expect_err("nostr in a stream hash");
+        assert!(error.to_string().contains("nostr"), "{error}");
     }
 
     #[test]

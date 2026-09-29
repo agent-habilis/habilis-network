@@ -95,8 +95,9 @@ impl StreamNode {
         transport: TransportPolicy,
         transports: TransportOpts,
     ) -> Result<Self> {
+        crate::hash::refuse_nostr(&lookups)?;
         #[cfg(target_arch = "wasm32")]
-        refuse_in_browser(&lookups, transport, transports)?;
+        habilis_network::runtime::refuse_in_browser(&lookups, transport, transports)?;
         let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports).await?;
         let registry = Arc::new(Registry::default());
         let ice = IceProfile {
@@ -233,24 +234,10 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
         .map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-/// Whether a browser can run a stream with these lookups and paths: the
-/// mesh's rule, minus Nostr. A stream's JSEP rides the signal ALPN only, so a
-/// Nostr lookup gives a browser stream no path to signal on.
-#[cfg(any(target_arch = "wasm32", test))]
-fn refuse_in_browser(
-    lookups: &LookupOpts,
-    transport: TransportPolicy,
-    transports: TransportOpts,
-) -> Result<()> {
-    let without_nostr = LookupOpts {
-        nostr: habilis_network::protocol::mesh::NostrChoice::Disabled,
-        ..lookups.clone()
-    };
-    habilis_network::runtime::refuse_in_browser(&without_nostr, transport, transports)
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use habilis_network::runtime::refuse_in_browser;
+
     use super::*;
 
     // A browser has no UDP, so a list without `webrtc` leaves relay payload as
@@ -273,19 +260,6 @@ mod tests {
 
     // A data channel's handshake crosses the relay, and a browser has no
     // other way to reach a producer.
-    // Nostr signals a mesh, not a stream: the stream acceptor answers JSEP on
-    // the signal ALPN only, so a Nostr lookup leaves a browser stream with no
-    // path to signal on.
-    #[test]
-    fn nostr_does_not_signal_a_browser_stream() {
-        let config = MeshConfig::resolve(&[Lookup::Nostr], None, None, &[Transport::WebRtc])
-            .expect("valid for a mesh");
-        let transports = TransportOpts::default().within(&config.transport);
-        let error = refuse_in_browser(&config.lookups, config.transport, transports)
-            .expect_err("no path to signal a stream on");
-        assert_eq!(error.to_string(), habilis_network::runtime::BROWSER_CANNOT_SIGNAL);
-    }
-
     #[test]
     fn a_browser_refuses_a_stream_with_no_relay_lookup() {
         let config = MeshConfig::resolve(
@@ -299,6 +273,21 @@ mod tests {
         let error = refuse_in_browser(&config.lookups, config.transport, transports)
             .expect_err("no path to signal on");
         assert_eq!(error.to_string(), habilis_network::runtime::BROWSER_CANNOT_SIGNAL);
+    }
+
+    // A stream's JSEP rides the signal ALPN only, on every target, so a
+    // stream refuses the Nostr lookup rather than bind with no path to signal
+    // on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stream_refuses_the_nostr_lookup() {
+        let error = StreamNode::bind(&StreamOpts {
+            lookup: vec![Lookup::Nostr],
+            transport: vec![Transport::WebRtc],
+            ..StreamOpts::default()
+        })
+        .await
+        .expect_err("a stream cannot signal over nostr");
+        assert!(error.to_string().contains("nostr"), "{error}");
     }
 
     // A reader runs only the paths the producer runs: an offer to a producer

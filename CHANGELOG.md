@@ -139,7 +139,8 @@ published to a registry; pin it with
   `lookup`, and a relay transport on the node) or, for a mesh, `'nostr'` in
   `lookup`. A browser always has no UDP, so a tab now refuses a mesh with
   neither at join, and a stream node refuses a stream with no relay lookup at
-  bind: a stream does not signal over Nostr.
+  bind. A stream does not signal over Nostr, so a stream node, and a stream
+  hash, refuses the `'nostr'` lookup on every target.
   A native node meets this rule only when its own paths leave out UDP.
 
 ### Fixed
