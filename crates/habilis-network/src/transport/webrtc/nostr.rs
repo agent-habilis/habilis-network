@@ -515,7 +515,8 @@ pub(crate) mod discovery {
         let Ok(guard) = state.webrtc_admission.try_admit(peer, &handle) else {
             return;
         };
-        spawn_offer(state, peer, guard);
+        // A `Hello` offers only to a pair that needs the lane.
+        spawn_offer(state, peer, guard, super::super::Offer::Lane);
     }
 
     /// Run an admitted offer round over Nostr and report an attach as a proven
@@ -524,15 +525,21 @@ pub(crate) mod discovery {
         state: &mut EventLoopState,
         peer: EndpointId,
         guard: crate::transport::admission::AdmissionGuard,
+        offer: super::super::Offer,
     ) {
         let Some(nostr) = state.nostr.clone() else {
             return;
         };
         let admission = state.webrtc_admission.clone();
         let proven = state.direct_proven.clone();
+        let pool = state.unicast_pool.clone();
         let task = n0_future::task::spawn(async move {
             let _guard = guard;
-            if run_offer(&nostr, &admission, peer).await {
+            let inner = &nostr.inner;
+            if run_offer(&nostr, &admission, peer).await
+                && super::super::keeps_session(offer, &inner.endpoint, &pool, &inner.handle, peer)
+                    .await
+            {
                 let _ = proven.send(DirectOutcome { peer, direct: true });
             }
         });
@@ -800,6 +807,62 @@ mod tests {
 
     async fn node_with(relay: &TestRelay, topic: [u8; 32], cap: usize, answers: bool) -> Node {
         let (endpoint, handle) = webrtc_only().await;
+        node_on(endpoint, handle, relay, topic, cap, answers)
+    }
+
+    /// An endpoint with loopback UDP beside the `WebRTC` session, the shape of
+    /// a native pair that races the two. It accepts every connection and
+    /// holds it, so the unicast dial and the nudge land.
+    async fn udp_and_webrtc() -> (Endpoint, WebRtcHandle) {
+        let key = SecretKey::generate();
+        let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .add_custom_transport(handle.transport())
+            .path_selector(handle.path_selector())
+            .alpns(vec![
+                crate::transport::UNICAST_ALPN.to_vec(),
+                super::super::NUDGE_ALPN.to_vec(),
+            ])
+            .bind()
+            .await
+            .expect("bind a udp and webrtc endpoint");
+        let server = endpoint.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(incoming) = server.accept().await {
+                if let Ok(conn) = incoming.await {
+                    held.push(conn);
+                }
+            }
+        });
+        (endpoint, handle)
+    }
+
+    fn loopback_addr(endpoint: &Endpoint) -> EndpointAddr {
+        let addrs = endpoint
+            .bound_sockets()
+            .into_iter()
+            .filter(std::net::SocketAddr::is_ipv4)
+            .map(|socket| {
+                TransportAddr::Ip(std::net::SocketAddr::new(
+                    std::net::Ipv4Addr::LOCALHOST.into(),
+                    socket.port(),
+                ))
+            });
+        EndpointAddr::from_parts(endpoint.id(), addrs)
+    }
+
+    fn node_on(
+        endpoint: Endpoint,
+        handle: WebRtcHandle,
+        relay: &TestRelay,
+        topic: [u8; 32],
+        cap: usize,
+        answers: bool,
+    ) -> Node {
         let admission = SignalAdmission::new(cap);
         let (signal, _hellos) = NostrSignal::start_with(
             NostrSignalParts {
@@ -932,6 +995,78 @@ mod tests {
         }
         assert!(bob.handle.has_session(&alice.endpoint.id()));
         echo(&alice, &bob).await;
+    }
+
+    /// One Nostr offer round from `from` to `to` as the event loop runs it,
+    /// with UDP pooled beside it. Returns once the round has let go of its
+    /// admission slot: whether a session is left, and whether the round
+    /// reported a proven path.
+    async fn race_round(from: &Node, to: &Node, offer: super::super::Offer) -> (bool, bool) {
+        let peer = to.endpoint.id();
+        let mut state = crate::testing::fresh_state();
+        let pool = crate::transport::UnicastPool::new(from.endpoint.clone(), false);
+        pool.note_addr(&loopback_addr(&to.endpoint));
+        state.unicast_pool = pool;
+        state.nostr = Some(from.signal.clone());
+        state.webrtc = Some(from.handle.clone());
+        state.webrtc_admission = from.admission.clone();
+        let (proven_tx, mut proven_rx) = mpsc::unbounded_channel();
+        state.direct_proven = proven_tx;
+        let guard = from
+            .admission
+            .try_admit(peer, &from.handle)
+            .expect("admitted");
+        discovery::spawn_offer(&mut state, peer, guard, offer);
+        for _ in 0..400 {
+            if !from.admission.negotiating(peer) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!from.admission.negotiating(peer), "the round must end");
+        let proven = proven_rx
+            .try_recv()
+            .is_ok_and(|outcome| outcome.peer == peer);
+        (from.handle.has_session(&peer), proven)
+    }
+
+    /// A pair with UDP on both ends races the data channel against the punch,
+    /// over Nostr as over the signal ALPN. UDP is selected on loopback at
+    /// once, so the session the round attached must be detached, not kept
+    /// holding a direct-peer slot. A lane round on the same pair is the
+    /// control: it keeps its session, so the race round did attach one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_udp_race_over_nostr_detaches_the_session_once_udp_won() {
+        let relay = TestRelay::spawn().await.unwrap();
+        let (alice_endpoint, alice_handle) = udp_and_webrtc().await;
+        let alice = node_on(
+            alice_endpoint,
+            alice_handle,
+            &relay,
+            [9u8; 32],
+            MAX_DIRECT_PEERS,
+            true,
+        );
+        let (bob_endpoint, bob_handle) = udp_and_webrtc().await;
+        let bob = node_on(
+            bob_endpoint,
+            bob_handle,
+            &relay,
+            [9u8; 32],
+            MAX_DIRECT_PEERS,
+            true,
+        );
+        settled(&relay).await;
+
+        let (race_kept, race_proven) = race_round(&alice, &bob, super::super::Offer::UdpRace).await;
+        assert!(!race_kept, "udp won, so the data channel must be detached");
+        assert!(!race_proven, "a detached session proves no path");
+
+        let (lane_kept, lane_proven) = race_round(&alice, &bob, super::super::Offer::Lane).await;
+        assert!(
+            lane_kept && lane_proven,
+            "a lane round keeps its session (kept {lane_kept}, proven {lane_proven})"
+        );
     }
 
     /// Alice lost her half; her signed re-offer must replace Bob's stale half

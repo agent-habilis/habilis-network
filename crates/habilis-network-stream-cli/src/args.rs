@@ -33,8 +33,9 @@ pub(crate) struct Args {
 }
 
 impl Args {
-    /// The producing node's options. Every lookup when none is named: the
-    /// hash is useless to a reader that cannot find the producer.
+    /// The producing node's options. Every lookup a stream can use when none
+    /// is named (not `nostr`, which signals only a mesh): the hash is useless
+    /// to a reader that cannot find the producer.
     pub(crate) fn opts(&self) -> StreamOpts {
         let lookup = if self.lookup.is_empty() {
             vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]

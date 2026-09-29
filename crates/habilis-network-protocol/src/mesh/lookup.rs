@@ -78,9 +78,9 @@ impl LookupOpts {
 
     /// The all-on default for a mesh reachable across machines: both
     /// address-lookups, the pinned default relay ladder, and the pinned Nostr
-    /// relays. Every topic mesh derives through it (the daemon directly, the
-    /// pipe through the same lookup list), which is what lets a tab and a
-    /// terminal meet on one string.
+    /// relays. Every topic mesh derives through it (the daemon directly,
+    /// `habilis_network::membership` through the same lookup list), which is what lets
+    /// a tab and a terminal meet on one string.
     #[must_use]
     pub fn public_preset() -> Self {
         LookupOpts {

@@ -686,17 +686,17 @@ pub(crate) fn negotiate_session(
         }
     };
 
-    // With no rendezvous, or a peer heard over Nostr, the ALPN may have no
-    // path to ride; the offer goes over Nostr instead.
-    if nostr::discovery::prefer_nostr(state, peer) {
-        nostr::discovery::spawn_offer(state, peer, guard);
-        return;
-    }
     let offer = if needs_lane {
         Offer::Lane
     } else {
         Offer::UdpRace
     };
+    // With no rendezvous, or a peer heard over Nostr, the ALPN may have no
+    // path to ride; the offer goes over Nostr instead.
+    if nostr::discovery::prefer_nostr(state, peer) {
+        nostr::discovery::spawn_offer(state, peer, guard, offer);
+        return;
+    }
     spawn_offer_round(state, ctx, peer, addr, handle, guard, offer);
 }
 
@@ -733,9 +733,33 @@ pub(crate) async fn nudge(endpoint: &Endpoint, peer: EndpointId) {
     }
 }
 
+/// Whether the session a round just attached stays. A UDP-race round's
+/// session goes if UDP won while the round ran: it would sit unused and hold
+/// one of the direct-peer slots. Shared by the signal ALPN and Nostr offers.
+async fn keeps_session(
+    offer: Offer,
+    endpoint: &Endpoint,
+    pool: &super::UnicastPool,
+    handle: &WebRtcHandle,
+    peer: EndpointId,
+) -> bool {
+    if offer != Offer::UdpRace {
+        return true;
+    }
+    // A connection opened before the attach rides the session only after a
+    // connect; the race is judged on the connection after.
+    nudge(endpoint, peer).await;
+    if !pool.udp_won(peer).await {
+        return true;
+    }
+    let _ = handle.detach(&peer);
+    tracing::debug!(target: LOG_TARGET, %peer, "udp won the race; webrtc session detached");
+    false
+}
+
 /// What an offer is for, which decides what happens once its session attaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Offer {
+pub(crate) enum Offer {
     /// The rendezvous: graft at once, and say so.
     Rendezvous,
     /// A pair that needs the lane: graft at once.
@@ -778,17 +802,7 @@ fn spawn_offer_round(
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
-        } else if offer == Offer::UdpRace && {
-            // A connection opened before the attach rides the session only
-            // after a connect; the race is judged on the connection after.
-            nudge(&endpoint, peer).await;
-            pool.udp_won(peer).await
-        } {
-            // UDP won while the round ran: the session would sit unused and hold
-            // one of the direct-peer slots.
-            let _ = handle.detach(&peer);
-            tracing::debug!(target: LOG_TARGET, %peer, "udp won the race; webrtc session detached");
-        } else {
+        } else if keeps_session(offer, &endpoint, &pool, &handle, peer).await {
             if offer == Offer::Rendezvous {
                 tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached to the rendezvous");
             }

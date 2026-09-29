@@ -368,9 +368,9 @@ impl std::fmt::Debug for SetupParams {
     }
 }
 
-/// Why a browser refuses a mesh with no relay lookup: one string, so a test
+/// Why a browser refuses a mesh it cannot signal on: one string, so a test
 /// can match the refusal without copying its text.
-pub const BROWSER_NEEDS_RELAY_LOOKUP: &str = "a browser cannot reach a peer in this mesh: it has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or `nostr` in lookup";
+pub const BROWSER_CANNOT_SIGNAL: &str = "a browser cannot reach a peer in this mesh: it has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or `nostr` in lookup";
 
 /// Why a browser refuses a mesh whose list leaves it no payload path.
 pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this mesh: its transport list has neither `webrtc` nor `relay`";
@@ -424,7 +424,7 @@ pub fn refuse_in_browser(
     policy: crate::protocol::TransportPolicy,
     transports: crate::lookup::TransportOpts,
 ) -> Result<()> {
-    anyhow::ensure!(can_signal(lookups, transports), BROWSER_NEEDS_RELAY_LOOKUP);
+    anyhow::ensure!(can_signal(lookups, transports), BROWSER_CANNOT_SIGNAL);
     anyhow::ensure!(transports.carry_without_udp(&policy), BROWSER_HAS_NO_PATH);
     Ok(())
 }
@@ -977,7 +977,7 @@ mod tests {
         let transports = crate::lookup::TransportOpts::default().within(&policy);
         let error = super::refuse_in_browser(&dht_only, policy, transports)
             .expect_err("no path to signal on");
-        assert_eq!(error.to_string(), super::BROWSER_NEEDS_RELAY_LOOKUP);
+        assert_eq!(error.to_string(), super::BROWSER_CANNOT_SIGNAL);
 
         let relay = LookupOpts {
             relay_lookup: RelayChoice::Pinned,

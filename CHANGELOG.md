@@ -135,9 +135,11 @@ published to a registry; pin it with
   rungs it panicked, and between 17 and 255 it minted an id no member could
   decode.
 - The chat example lives in `examples/chat/rust` (package `chat`).
-- A node without UDP needs the relay: `'relay'` in `lookup`, and a relay
-  transport on the node. A browser always has no UDP, so a tab now refuses
-  a mesh with no relay lookup at join, and a stream node refuses it at bind.
+- A node without UDP needs a path to signal on: the relay (`'relay'` in
+  `lookup`, and a relay transport on the node) or, for a mesh, `'nostr'` in
+  `lookup`. A browser always has no UDP, so a tab now refuses a mesh with
+  neither at join, and a stream node refuses a stream with no relay lookup at
+  bind: a stream does not signal over Nostr.
   A native node meets this rule only when its own paths leave out UDP.
 
 ### Fixed

@@ -64,8 +64,9 @@ export interface CreateOpts {
    * What payload may ride: `['udp', 'webrtc']` (the default), so all data
    * is peer to peer and the relay is a meeting point only. Leave out `udp`
    * for a mesh on WebRTC alone, or add `'relay'` to let payload fall back to
-   * the relay. `'relay'`, or a list without `'udp'`, needs `'relay'` in
-   * `lookup`. Baked into the mesh id, so joiners inherit it.
+   * the relay. `'relay'` needs `'relay'` in `lookup`; a list without `'udp'`
+   * needs `'relay'` or `'nostr'` there. Baked into the mesh id, so joiners
+   * inherit it.
    */
   transport?: Transport[]
   /**
