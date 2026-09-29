@@ -5,19 +5,21 @@
 //! (`packages/habilis-network-wasm/harness`), driven cell by cell:
 //!
 //! - **policy** — the mesh's `relay_transport`, on or off;
-//! - **native transports** — everything / WebRTC only / relay only, to force
-//!   the punch, the data channel, and the refusal in turn;
+//! - **paths** — the mesh's transport list: UDP and WebRTC, WebRTC only, or
+//!   UDP only, to force the punch, the data channel, and the refusal in turn;
 //! - **join mode** — both derive from a topic, the browser joins the id the
 //!   native side minted, or the browser opens the topic first;
 //! - **discovery** — the relay, or Nostr as the only lookup: no iroh relay
 //!   at all, so discovery and JSEP ride an in-process Nostr relay. A topic
 //!   always uses every lookup, so these cells join by id, and one of them
-//!   pairs two tabs with no native member.
+//!   pairs two tabs with no native member. A relay cell's topic has the
+//!   Nostr lookup too; it points at the same in-process relay, never a
+//!   public one.
 //!
 //! Every linked cell must move payload **both ways** on every lane —
-//! broadcast, directed, state merge — and agree on the roster. The one
-//! non-linking cell (policy off × native relay-only) must *never* link, and
-//! must say why in the engine's own words (`relay-only path refused`).
+//! broadcast, directed, state merge — and agree on the roster. The three
+//! UDP-only lookup-only cells must not open at all: the tab refuses a mesh it
+//! has no path in, and says why (`BROWSER_HAS_NO_PATH`).
 
 use std::fmt;
 use std::path::PathBuf;
@@ -490,6 +492,11 @@ fn native_opts(cell: &Cell, urls: &Urls, selector: NativeSelector<'_>) -> member
         Discovery::Relay => opts.relay_urls = vec![urls.relay.clone()],
         Discovery::NostrOnly => opts.nostr_urls = vec![urls.nostr.clone()],
     }
+    // A topic always has the Nostr lookup: point it at the sweep's relay, not
+    // the public ones. The list is in the id, so the page passes it too.
+    if matches!(selector, NativeSelector::Topic(_)) {
+        opts.nostr_urls = vec![urls.nostr.clone()];
+    }
     opts.transport = cell.transports();
     opts
 }
@@ -505,10 +512,20 @@ enum NativeSelector<'a> {
 struct Urls {
     relay: String,
     nostr: String,
+    /// The Nostr relay itself, so a cell can check that it was used.
+    nostr_relay: habilis_network_iroh_nostr_address_lookup::test_relay::TestRelay,
 }
 
 fn page_url(base: &str, cell: &Cell, urls: &Urls, selector: &str, nick: &str) -> String {
     let meeting = match cell.discovery {
+        // A topic's id carries the Nostr relays too (see `native_opts`).
+        Discovery::Relay if matches!(cell.join, JoinMode::Topic | JoinMode::TopicBrowserFirst) => {
+            format!(
+                "relay={}&nostr={}",
+                urlencode(&urls.relay),
+                urlencode(&urls.nostr)
+            )
+        }
         Discovery::Relay => format!("relay={}", urlencode(&urls.relay)),
         Discovery::NostrOnly => format!("nostr={}", urlencode(&urls.nostr)),
     };
@@ -683,6 +700,7 @@ async fn run_cell(
         return refused_by_the_tab(cell, urls, harness, page, &topic);
     }
 
+    let nostr_before = urls.nostr_relay.accepted();
     let mut native = open_pair(cell, urls, harness, page, &topic).await?;
     wait_page_ready(page)?;
 
@@ -742,6 +760,17 @@ async fn run_cell(
     if left.is_none() {
         return Err(fail(
             "the browser left but the native side never surfaced it".to_owned(),
+        ));
+    }
+
+    // A topic id always carries the Nostr lookup. Its Nostr relays must be
+    // the sweep's own, or the cell signals over the public ones: it would
+    // then need the internet and pass for a reason the cell does not test.
+    if matches!(cell.join, JoinMode::Topic | JoinMode::TopicBrowserFirst)
+        && urls.nostr_relay.accepted() == nostr_before
+    {
+        return Err(fail(
+            "the topic's Nostr signalling never reached the local Nostr relay".to_owned(),
         ));
     }
 
@@ -869,6 +898,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     let urls = Urls {
         relay: relay_url.to_string(),
         nostr: nostr_relay.url().to_string(),
+        nostr_relay,
     };
     let harness = BunServer::serve(
         &repo_root().join("packages/habilis-network-wasm"),
