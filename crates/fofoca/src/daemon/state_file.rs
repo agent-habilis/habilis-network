@@ -7,7 +7,8 @@
 //! The daemon is the **sole writer**: the `/gossip-*` skills are
 //! read-only and never touch this file. The daemon owns every key —
 //! `gossip`, `name`, `nickname`, `topic` (topic gossips only), `pid`,
-//! `ready`, `peer_count`, `last_updated` — and writes a fresh,
+//! `owner_pid` (daemons with an owner only), `ready`, `peer_count`,
+//! `last_updated` — and writes a fresh,
 //! complete document on each update (no read-merge: there are no foreign
 //! keys to preserve).
 //!
@@ -62,6 +63,7 @@ pub struct StateFile {
     name: String,
     nickname: String,
     topic: Option<String>,
+    owner_pid: Option<u32>,
     /// Extra fields the application publishes for its local clients to discover
     /// (see [`Self::set_discovery`]). Opaque to the engine, and the reason every
     /// write is 0o600: an app may put a bearer token in here.
@@ -78,6 +80,7 @@ impl StateFile {
             name: name.as_str().to_string(),
             nickname: nickname.as_str().to_string(),
             topic: None,
+            owner_pid: None,
             discovery: std::sync::Mutex::new(serde_json::Map::new()),
             write_failing: std::sync::atomic::AtomicBool::new(false),
         }
@@ -97,6 +100,13 @@ impl StateFile {
     /// construction site unconditional.
     pub(crate) fn with_topic(mut self, topic: Option<&str>) -> Self {
         self.topic = topic.map(str::to_owned);
+        self
+    }
+
+    /// Attach the pid of the process the daemon lives for, so every write
+    /// publishes it as `owner_pid`. A no-op `None`, as for [`Self::with_topic`].
+    pub(crate) fn with_owner_pid(mut self, owner_pid: Option<u32>) -> Self {
+        self.owner_pid = owner_pid;
         self
     }
 
@@ -168,6 +178,9 @@ impl StateFile {
             obj.insert("topic".into(), topic.clone().into());
         }
         obj.insert("pid".into(), std::process::id().into());
+        if let Some(owner_pid) = self.owner_pid {
+            obj.insert("owner_pid".into(), owner_pid.into());
+        }
         obj.insert("ready".into(), ready.into());
         obj.insert("peer_count".into(), peer_count.into());
         for (key, value) in self
@@ -296,11 +309,15 @@ pub struct SessionEntry {
     /// The raw topic string; present only for a topic gossip.
     pub topic: Option<String>,
     pub pid: Option<u32>,
+    /// The process the daemon lives for; present only for a daemon started
+    /// with an owner (see `EventLoopConfig::with_owner_pid`).
+    pub owner_pid: Option<u32>,
 }
 
 /// Read a state file as a [`SessionEntry`]. Best-effort: `None` only when
 /// the file is unreadable or not a JSON object — a *degenerate* object still
 /// yields an entry (all-`None` fields) so callers can decide per-field.
+#[must_use]
 pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
     let parsed: serde_json::Value = std::fs::read_to_string(path)
         .ok()
@@ -312,15 +329,19 @@ pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     };
+    let pid_field = |key: &str| {
+        parsed
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+    };
     Some(SessionEntry {
         mesh: mesh_field(&parsed),
         name: text("name"),
         nickname: text("nickname"),
         topic: text("topic"),
-        pid: parsed
-            .get("pid")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok()),
+        pid: pid_field("pid"),
+        owner_pid: pid_field("owner_pid"),
     })
 }
 
@@ -436,6 +457,25 @@ mod tests {
         fn make_writer(&'writer self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    #[test]
+    fn owner_pid_round_trips_through_the_session_entry() {
+        let path = unique_path("owner");
+        let state_file = StateFile::new(
+            path.clone(),
+            &MeshId::from("abcd"),
+            &Nickname::from("treat-empire"),
+            &name("cool-team"),
+        );
+        state_file.write(1, true);
+        let unowned = super::read_session_entry(&path).expect("entry");
+        assert_eq!(unowned.owner_pid, None);
+        let state_file = state_file.with_owner_pid(Some(4242));
+        state_file.write(1, true);
+        let owned = super::read_session_entry(&path).expect("entry");
+        assert_eq!(owned.owner_pid, Some(4242));
+        assert_eq!(owned.pid, Some(std::process::id()));
     }
 
     #[test]

@@ -17,6 +17,8 @@ pub use crate::daemon::setup::{
     BROWSER_HAS_NO_PATH, BROWSER_NEEDS_RELAY_LOOKUP, InjectedEndpoint, SetupKind, SetupParams,
     refuse_in_browser, setup_mesh,
 };
+#[cfg(feature = "host")]
+pub use crate::daemon::validate_owner_pid;
 
 /// The session state file the daemon writes for external readers — its sole
 /// writer. Daemon-session state, not a generic filesystem helper.

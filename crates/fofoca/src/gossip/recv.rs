@@ -158,7 +158,7 @@ pub(crate) async fn handle_gossip_event(
                 // Re-offer now rather than on the next heal tick: every
                 // saved interval halves the relink cycle a beacon shed costs
                 // a webrtc-shaped peer.
-                crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
+                crate::transport::webrtc::offer_rendezvous_off_tick(state, ctx);
             } else {
                 state.unlink(node_id);
             }
@@ -1994,6 +1994,60 @@ mod first_contact_tests {
         assert!(
             change_first.peerinfo_flooded_at.is_none(),
             "a state frame does not mark its author present"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// A native node on a private mesh loses its rendezvous link when the
+    /// beacon dies. Its own punch is the way back, so the loss must not arm
+    /// the offer fallback: that fallback holds every timer graft, and a
+    /// private rendezvous has no answerer to end it. Observed as a survivor
+    /// that never linked its rendezvous again, so a new joiner's first
+    /// message reached nobody.
+    #[tokio::test]
+    async fn a_rendezvous_loss_keeps_a_native_node_grafting_on_its_timer() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
+        state.relay_transport = false;
+        state.local_udp_transport = true;
+        state.rendezvous_linked = true;
+
+        handle_gossip_event(
+            Some(Ok(Event::NeighborDown(ctx.rendezvous_id))),
+            &mut state,
+            &mut Inert,
+            &ctx,
+        )
+        .await;
+
+        assert!(
+            crate::transport::webrtc::rendezvous_graftable(&state),
+            "the rendezvous loss held the timer graft"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// A native node on a private mesh still unlinked at a heal tick must not
+    /// arm the offer fallback either: the fallback assumes an unreachable
+    /// beacon is a tab, but a private rendezvous never answers JSEP, so the
+    /// fallback would hold every timer graft with nothing to release it.
+    #[tokio::test]
+    async fn a_heal_tick_never_arms_the_offer_fallback_on_a_private_mesh() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
+        state.relay_transport = false;
+        state.local_udp_transport = true;
+        state.rendezvous_answers_jsep = false;
+
+        crate::transport::webrtc::negotiate_rendezvous_session(&mut state, &ctx);
+
+        assert!(
+            crate::transport::webrtc::rendezvous_graftable(&state),
+            "the heal tick held the timer graft on a private mesh"
         );
         node.endpoint.close().await;
     }

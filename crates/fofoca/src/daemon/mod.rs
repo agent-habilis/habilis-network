@@ -49,6 +49,8 @@ pub(crate) mod event_loop;
 mod heal;
 /// The graceful-exit path, split out of `event_loop`.
 mod shutdown;
+#[cfg(feature = "host")]
+pub use shutdown::validate_owner_pid;
 
 // Crate-internal shorthands. The public spelling of all of these is
 // `crate::runtime`, which is what a consumer imports.

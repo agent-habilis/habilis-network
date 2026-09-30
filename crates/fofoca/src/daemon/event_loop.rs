@@ -102,6 +102,8 @@ pub async fn run<A: NodeDriver>(
         relay_transport,
         driver,
         per_peer_gate,
+        #[cfg(feature = "host")]
+        owner,
     } = cfg;
 
     // Every driver-derived fact in one place. Only the CLI exits the
@@ -139,6 +141,7 @@ pub async fn run<A: NodeDriver>(
             StateFile::new(path, &mesh_str, &author, &mesh_name)
                 .with_base(runtime_base.clone())
                 .with_topic(topic_string.as_deref())
+                .with_owner_pid(owner.map(super::shutdown::Owner::pid))
         });
     #[cfg(not(feature = "host"))]
     drop(state_file);
@@ -193,6 +196,7 @@ pub async fn run<A: NodeDriver>(
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.path_changes = path_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
+    state.rendezvous_answers_jsep = rendezvous_params.answers_jsep();
     state.write_peer_count();
 
     // An eager member co-hosts from t=0 so a beacon exists before any
@@ -269,7 +273,7 @@ pub async fn run<A: NodeDriver>(
     // case: there are no process signals to listen for.
     #[cfg(feature = "host")]
     let quit_rx = if handle_signals {
-        spawn_quit_signal_tasks(exit_on_quit)
+        spawn_quit_signal_tasks(exit_on_quit, owner)
     } else {
         never_quit()
     };
@@ -609,7 +613,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     {
         let ctx = parts.ctx(&sender);
         app.on_startup(&mut state, &ctx).await;
-        crate::transport::webrtc::offer_rendezvous_at_start(&mut state, &ctx);
+        crate::transport::webrtc::offer_rendezvous_off_tick(&mut state, &ctx);
     }
 
     loop {

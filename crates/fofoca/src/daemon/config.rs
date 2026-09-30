@@ -212,9 +212,34 @@ pub struct EventLoopConfig {
     /// per-peer map there (see [`crate::doc::SelfWriteGate`]). `None` leaves the
     /// channel free-form.
     pub(crate) per_peer_gate: Option<crate::doc::SelfWriteGate>,
+    /// The process a CLI daemon lives for, set by
+    /// [`with_owner_pid`](Self::with_owner_pid). `None` keeps the parent watch.
+    #[cfg(feature = "host")]
+    pub(crate) owner: Option<super::shutdown::Owner>,
 }
 
 impl EventLoopConfig {
+    /// Live for `pid` instead of for the parent process: a CLI daemon quits
+    /// gracefully once that process exits, and the state file names it as
+    /// `owner_pid`. For a daemon started detached, whose parent is init. An
+    /// in-process driver has no process to exit and ignores it.
+    ///
+    /// # Errors
+    /// `pid` is 0 or 1, the daemon's own pid, or no live process has it. The
+    /// message is one line.
+    #[cfg(feature = "host")]
+    pub fn with_owner_pid(mut self, pid: u32) -> anyhow::Result<Self> {
+        self.owner = Some(super::shutdown::Owner::new(pid)?);
+        Ok(self)
+    }
+
+    /// The pid set by [`with_owner_pid`](Self::with_owner_pid).
+    #[cfg(feature = "host")]
+    #[must_use]
+    pub fn owner_pid(&self) -> Option<u32> {
+        self.owner.map(super::shutdown::Owner::pid)
+    }
+
     /// The resolved mesh id. Available before the loop starts, for a consumer
     /// that must name the mesh at setup time (a log attach, a directory ad).
     #[must_use]

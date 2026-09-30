@@ -282,6 +282,11 @@ pub struct EventLoopState {
     /// heal tick sets this instead of offering; the second offers. Cleared
     /// on the rendezvous `NeighborUp`, so a healthy mesh never offers.
     pub(crate) rendezvous_offer_fallback: bool,
+    /// Whether this mesh's rendezvous answers JSEP. Only a public beacon does
+    /// (`beacon::build_rendezvous_endpoint`); a private ladder rendezvous has
+    /// no `WebRTC` handle, so an offer to it can never attach, and the offer
+    /// fallback must never arm there.
+    pub(crate) rendezvous_answers_jsep: bool,
     /// Whether the previous rival probe read the public rendezvous as free.
     /// A claim needs two: a single free verdict may have landed inside a
     /// live beacon's rival-re-check release window, and claiming on it is
@@ -659,6 +664,7 @@ impl EventLoopState {
             rendezvous_linked: false,
             rendezvous_session_stale: false,
             rendezvous_offer_fallback: false,
+            rendezvous_answers_jsep: true,
             rendezvous_probe_read_free: false,
             rendezvous_graft_needs_session: false,
             local_udp_transport: true,

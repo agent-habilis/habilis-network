@@ -110,7 +110,10 @@ pub(super) async fn announce_and_maybe_exit<A: NodeDriver>(
 /// the default action terminated the daemon without cleanup, stranding a
 /// ghost pill on the statusline. Only SIGKILL stays uncatchable.
 #[cfg(feature = "host")]
-pub(super) fn spawn_quit_signal_tasks(exit_on_quit: bool) -> mpsc::Receiver<()> {
+pub(super) fn spawn_quit_signal_tasks(
+    exit_on_quit: bool,
+    owner: Option<Owner>,
+) -> mpsc::Receiver<()> {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
     let ctrl_c_tx = quit_tx.clone();
     tokio::spawn(async move {
@@ -136,9 +139,63 @@ pub(super) fn spawn_quit_signal_tasks(exit_on_quit: bool) -> mpsc::Receiver<()> 
     // on a host reparent.
     #[cfg(unix)]
     if exit_on_quit {
-        spawn_orphan_watch(quit_tx);
+        spawn_orphan_watch(quit_tx, owner);
     }
     quit_rx
+}
+/// Whether `pid` can own a daemon, with the checks and messages of
+/// `EventLoopConfig::with_owner_pid`. For a launcher that must refuse a bad
+/// pid in the foreground, before it re-spawns the daemon detached.
+///
+/// # Errors
+/// `pid` is 0 or 1, the calling process's own pid, or no live process has it
+/// (a zombie counts as dead). The message is one line.
+#[cfg(feature = "host")]
+pub fn validate_owner_pid(pid: u32) -> anyhow::Result<()> {
+    owner_start(pid).map(drop)
+}
+/// The start time of a valid owner, the one home of the owner checks.
+#[cfg(feature = "host")]
+fn owner_start(pid: u32) -> anyhow::Result<u64> {
+    anyhow::ensure!(
+        pid > 1,
+        "owner pid {pid} is init or invalid. Give a live process id greater than 1"
+    );
+    anyhow::ensure!(
+        pid != std::process::id(),
+        "owner pid {pid} is this process itself"
+    );
+    crate::util::process::live_start_time(pid)
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))
+}
+/// The process a detached daemon lives for, in place of its parent. The pid
+/// alone cannot tell the owner from a later process that reuses the pid, so
+/// the start time captured at startup is what identifies it.
+#[cfg(feature = "host")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Owner {
+    pid: u32,
+    start: u64,
+}
+
+#[cfg(feature = "host")]
+impl Owner {
+    /// # Errors
+    /// See [`validate_owner_pid`].
+    pub(crate) fn new(pid: u32) -> anyhow::Result<Self> {
+        Ok(Self {
+            pid,
+            start: owner_start(pid)?,
+        })
+    }
+
+    pub(crate) fn pid(self) -> u32 {
+        self.pid
+    }
+
+    fn lost(self) -> bool {
+        crate::util::process::live_start_time(self.pid) != Some(self.start)
+    }
 }
 /// Detect orphaning by the spawning agent and route it through the same quit
 /// channel as a signal. A hard-killed parent (`kill -9`, a reinstall, an IDE
@@ -154,12 +211,16 @@ pub(super) fn spawn_quit_signal_tasks(exit_on_quit: bool) -> mpsc::Receiver<()> 
     unsafe_code,
     reason = "libc::getppid FFI; no safe wrapper, always succeeds"
 )]
-fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>) {
+fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
+    let interval = Duration::from_millis(ppid_watch_interval_ms());
+    if let Some(owner) = owner {
+        tokio::spawn(watch_owner(owner, interval, quit_tx));
+        return;
+    }
     let original_ppid = unsafe { libc::getppid() };
     if !orphan_watch_warranted(original_ppid) {
         return;
     }
-    let interval = Duration::from_millis(ppid_watch_interval_ms());
     tokio::spawn(async move {
         loop {
             n0_future::time::sleep(interval).await;
@@ -170,6 +231,18 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>) {
             }
         }
     });
+}
+/// The orphan watch of a daemon with an [`Owner`]: its parent is init, so the
+/// owner's exit is the one event that ends it.
+#[cfg(all(unix, feature = "host"))]
+async fn watch_owner(owner: Owner, interval: Duration, quit_tx: mpsc::Sender<()>) {
+    loop {
+        n0_future::time::sleep(interval).await;
+        if owner.lost() {
+            let _ = quit_tx.send(()).await;
+            return;
+        }
+    }
 }
 /// Whether the orphan watch is worth running. Skip it when the daemon already
 /// has no agent to lose — a parent pid of 1 means it was launched detached
@@ -198,7 +271,109 @@ pub(super) fn never_quit() -> mpsc::Receiver<()> {
 #[cfg(all(unix, feature = "host"))]
 #[cfg(test)]
 mod tests {
-    use super::{orphan_watch_warranted, parent_lost};
+    use std::process::{Child, Command};
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+
+    use super::{Owner, orphan_watch_warranted, parent_lost, validate_owner_pid, watch_owner};
+
+    const TICK: Duration = Duration::from_millis(10);
+
+    fn spawn_owner() -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep")
+    }
+
+    /// Run the owner watch; `true` when it quit within `within`.
+    async fn watch_quits(owner: Owner, within: Duration) -> bool {
+        let (quit_tx, mut quit_rx) = mpsc::channel(1);
+        let watch = tokio::spawn(watch_owner(owner, TICK, quit_tx));
+        let quit = tokio::time::timeout(within, quit_rx.recv()).await.is_ok();
+        watch.abort();
+        quit
+    }
+
+    #[tokio::test]
+    async fn owner_watch_stays_while_the_owner_lives() {
+        let mut child = spawn_owner();
+        let owner = Owner::new(child.id()).expect("live owner accepted");
+        assert!(!watch_quits(owner, Duration::from_millis(300)).await);
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn owner_watch_quits_when_the_owner_exits() {
+        let mut child = spawn_owner();
+        let owner = Owner::new(child.id()).expect("live owner accepted");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(watch_quits(owner, Duration::from_secs(2)).await);
+    }
+
+    #[tokio::test]
+    async fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
+        let mut child = spawn_owner();
+        let owner = Owner::new(child.id()).expect("live owner accepted");
+        child.kill().unwrap();
+        assert!(watch_quits(owner, Duration::from_secs(2)).await);
+        child.wait().unwrap();
+    }
+
+    /// Simulates reuse with `start + 1`: that a real reissue changes the start
+    /// time is a property of the OS, not something this test can show.
+    #[tokio::test]
+    async fn owner_watch_quits_when_the_pid_is_reissued() {
+        let mut child = spawn_owner();
+        let owner = Owner::new(child.id()).expect("live owner accepted");
+        let reissued = Owner {
+            start: owner.start + 1,
+            ..owner
+        };
+        assert!(watch_quits(reissued, Duration::from_secs(2)).await);
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn validate_owner_pid_accepts_only_a_live_other_process() {
+        let mut child = spawn_owner();
+        let pid = child.id();
+        assert!(validate_owner_pid(pid).is_ok());
+        for refused in [0, 1, std::process::id()] {
+            let error = validate_owner_pid(refused)
+                .expect_err("refused")
+                .to_string();
+            assert!(!error.contains('\n'), "one error line: {error}");
+        }
+        child.kill().unwrap();
+        // SIGKILL lands asynchronously, so poll until the unreaped child is a
+        // zombie; it stays one until the `wait` below.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while validate_owner_pid(pid).is_ok() {
+            assert!(std::time::Instant::now() < deadline, "a zombie is refused");
+            std::thread::sleep(TICK);
+        }
+        child.wait().unwrap();
+        assert!(validate_owner_pid(pid).is_err(), "a dead pid is refused");
+    }
+
+    #[test]
+    fn owner_refuses_init_self_and_a_dead_pid() {
+        assert!(Owner::new(0).is_err());
+        assert!(Owner::new(std::process::id()).is_err(), "self is no owner");
+        let init = Owner::new(1).expect_err("init refused").to_string();
+        assert!(!init.contains('\n'), "one error line: {init}");
+        assert!(!init.contains("agent"), "engine vocabulary only: {init}");
+        let mut child = spawn_owner();
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(Owner::new(pid).is_err());
+    }
 
     #[test]
     fn orphan_watch_fires_only_on_a_parent_change() {

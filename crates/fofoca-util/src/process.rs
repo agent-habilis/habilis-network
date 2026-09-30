@@ -35,6 +35,17 @@ pub fn comm_of(pid: u32) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// The start time of a live process, in microseconds since the epoch. `None`
+/// for a pid with no process, or a zombie: an exited owner that its parent has
+/// not reaped yet is gone for every purpose but `kill(pid, 0)`.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn live_start_time(pid: u32) -> Option<u64> {
+    let info = bsdinfo_for(pid)?;
+    (info.pbi_status != libc::SZOMB)
+        .then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
@@ -45,6 +56,22 @@ pub fn parent_of(pid: u32) -> Option<u32> {
     let mut fields = after_comm.split_whitespace();
     let _run_state = fields.next()?;
     fields.next()?.parse().ok()
+}
+
+/// The start time of a live process, in clock ticks since boot (`stat` field
+/// 22). `None` for a pid with no process, or a zombie (see the macOS twin). The
+/// units differ from macOS, which is fine: a caller only compares two values
+/// from one host for equality.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn live_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    if fields.next()? == "Z" {
+        return None;
+    }
+    // Fields 4..=21 lie between the state (3) and the start time (22).
+    fields.nth(18)?.parse().ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -110,7 +137,7 @@ pub fn ancestry_contains(pid: u32, ancestor: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ancestry_contains, comm_of, is_alive, parent_of, terminate};
+    use super::{ancestry_contains, comm_of, is_alive, live_start_time, parent_of, terminate};
 
     fn self_pid() -> u32 {
         std::process::id()
@@ -144,6 +171,13 @@ mod tests {
     fn comm_of_self_names_the_test_binary() {
         let comm = comm_of(self_pid()).expect("self has a comm");
         assert!(!comm.is_empty());
+    }
+
+    #[test]
+    fn live_start_time_is_stable_for_self_and_absent_for_a_dead_pid() {
+        let start = live_start_time(self_pid()).expect("self is live");
+        assert_eq!(live_start_time(self_pid()), Some(start));
+        assert_eq!(live_start_time(u32::MAX - 1), None);
     }
 
     #[test]

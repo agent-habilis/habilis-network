@@ -645,6 +645,8 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         // Default to the CLI driver; the in-process sessions
         // overwrite `cfg.driver` before handing it to `daemon::run`.
         driver: DriverMode::Cli,
+        #[cfg(feature = "host")]
+        owner: None,
     })
 }
 

@@ -92,6 +92,14 @@ pub(crate) struct RendezvousParams {
     pub(crate) rung_tx: watch::Sender<Option<RelayUrl>>,
 }
 
+impl RendezvousParams {
+    /// Whether the beacon answers JSEP: only a public one carries a `WebRTC`
+    /// transport, and a private ladder rendezvous never does.
+    pub(crate) fn answers_jsep(&self) -> bool {
+        self.bind_ports.is_empty()
+    }
+}
+
 /// A live co-hosted rendezvous endpoint. Dropping it aborts both tasks,
 /// releasing the endpoint + router (and, private, freeing the
 /// deterministic port for the next member to claim).
@@ -531,7 +539,7 @@ async fn build_rendezvous_endpoint(
     params: &RendezvousParams,
 ) -> Option<(Endpoint, Option<fofoca_iroh_webrtc_transport::WebRtcHandle>)> {
     let lookups = beacon_lookups(params);
-    if params.bind_ports.is_empty() {
+    if params.answers_jsep() {
         // The public probe-before-claim that used to run here — the analog
         // of the private rung identity-probe below — now runs off the loop
         // (`spawn_rival_probe`), and `ensure` only reaches this point once
