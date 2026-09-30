@@ -15,8 +15,10 @@ export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
     --create            create a fresh mesh; reach it via the flags below
 
   create-only:
-    --lookup <list>     how members find each other: any of mdns,dht,relay;
-                        none = loopback only
+    --lookup <list>     how members find each other: any of
+                        mdns,dht,relay,pkarr; none = loopback only
+    --pkarr-url <url>   custom pkarr relay, repeatable (needs pkarr and relay
+                        in --lookup; part of the mesh id)
     --name <string>     the mesh name
 
   options:
@@ -51,6 +53,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
       lookup: { type: 'string' },
       transport: { type: 'string' },
       'relay-url': { type: 'string', multiple: true },
+      'pkarr-url': { type: 'string', multiple: true },
       name: { type: 'string' },
       nick: { type: 'string' },
       'max-peers': { type: 'string' },
@@ -63,8 +66,9 @@ export function parseChatArgs(argv: string[]): ChatArgs {
     throw new Error('pass exactly one of --topic, --id or --create')
   }
 
-  if (values.create !== true && (values.lookup !== undefined || values.name !== undefined)) {
-    throw new Error('--lookup/--name only apply to --create')
+  const pkarrUrls = values['pkarr-url']
+  if (values.create !== true && (values.lookup !== undefined || values.name !== undefined || pkarrUrls !== undefined)) {
+    throw new Error('--lookup/--name/--pkarr-url only apply to --create')
   }
 
   // The ladder and the transport policy are part of the mesh id: minted on
@@ -102,6 +106,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
         ...(lookup === undefined ? {} : { lookup }),
         ...(transport === undefined ? {} : { transport }),
         ...(relayUrls === undefined ? {} : { relayUrls }),
+        ...(pkarrUrls === undefined ? {} : { pkarrUrls }),
       },
     }
   } else if (values.topic !== undefined) {

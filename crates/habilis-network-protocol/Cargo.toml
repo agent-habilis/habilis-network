@@ -42,6 +42,8 @@ habilis-network-util = { path = "../habilis-network-util", default-features = fa
 iroh-base = { workspace = true, features = ["relay"] }
 serde.workspace = true
 serde_json.workspace = true
+# The pkarr relay list. Already in the graph through `iroh-base`.
+url = "2.5"
 anyhow.workspace = true
 bytes.workspace = true
 tracing.workspace = true

@@ -1,5 +1,6 @@
 //! The mesh-wide config carried in the mesh id — the lookup allowlist
-//! (`mdns`/`dht`/`relay`) and the relay ladder it may carry — plus its byte
+//! (`mdns`/`dht`/`relay`/`pkarr`) and the relay ladder and pkarr relay list it
+//! may carry — plus its byte
 //! codec and the `--advertise` directory selection. A mesh's network reach is
 //! fully described by its lookups: no lookups means loopback-only; any lookup
 //! means reachable across machines. The transport policy the id also carries
@@ -11,6 +12,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail};
 use iroh_base::RelayUrl;
 use serde::Deserialize;
+use url::Url;
 
 use super::transport::{Transport, TransportPolicy};
 use super::{ChoiceError, MeshName};
@@ -31,8 +33,19 @@ pub enum RelayChoice {
     Custom(Vec<RelayUrl>),
 }
 
-/// The lookup allowlist baked into the mesh id. `mdns`/`dht` are the
-/// enabled iroh address-lookups (both resolve the same seed-derived
+/// The pkarr relays a mesh publishes to and resolves from. `Pinned` ⇒ the
+/// lookup layer's default list; `Custom` ⇒ an operator-supplied list. Every
+/// member publishes to *every* URL, because the public relays form groups
+/// that do not share records with each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PkarrChoice {
+    Disabled,
+    Pinned,
+    Custom(Vec<Url>),
+}
+
+/// The lookup allowlist baked into the mesh id. `mdns`/`dht`/`pkarr` are the
+/// enabled iroh address-lookups (all resolve the same seed-derived
 /// `rendezvous_id`); `relay_lookup` is the connectivity relay (see
 /// [`RelayChoice`]). An all-off set is a loopback-only mesh.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +53,7 @@ pub struct LookupOpts {
     pub mdns: bool,
     pub dht: bool,
     pub relay_lookup: RelayChoice,
+    pub pkarr: PkarrChoice,
 }
 
 /// Wire ceiling on a custom relay ladder, so a forged id can't blow up
@@ -47,6 +61,19 @@ pub struct LookupOpts {
 pub(super) const MAX_RELAY_LADDER: usize = 16;
 /// Wire ceiling on a single relay URL's byte length.
 pub(super) const MAX_RELAY_URL_BYTES: usize = 512;
+/// Wire ceiling on a custom pkarr relay list.
+const MAX_PKARR_URLS: usize = 16;
+
+const FLAG_MDNS: u8 = 0b0001;
+const FLAG_DHT: u8 = 0b0010;
+const FLAG_RELAY: u8 = 0b0100;
+const FLAG_RELAY_CUSTOM: u8 = 0b1000;
+/// Pkarr is on; the pinned list unless [`FLAG_PKARR_CUSTOM`] is also set.
+/// `0x10`/`0x20` are left for the Nostr lookup.
+const FLAG_PKARR: u8 = 0b100_0000;
+const FLAG_PKARR_CUSTOM: u8 = 0b1000_0000;
+const KNOWN_LOOKUP_FLAGS: u8 =
+    FLAG_MDNS | FLAG_DHT | FLAG_RELAY | FLAG_RELAY_CUSTOM | FLAG_PKARR | FLAG_PKARR_CUSTOM;
 
 impl LookupOpts {
     /// Loopback-only: no address-lookups, no relay (the seed-derived
@@ -57,6 +84,7 @@ impl LookupOpts {
             mdns: false,
             dht: false,
             relay_lookup: RelayChoice::Disabled,
+            pkarr: PkarrChoice::Disabled,
         }
     }
 
@@ -68,13 +96,17 @@ impl LookupOpts {
             mdns: true,
             dht: true,
             relay_lookup: RelayChoice::Pinned,
+            pkarr: PkarrChoice::Disabled,
         }
     }
 
     /// True when nothing reaches off-machine — the mesh is loopback-only.
     #[must_use]
     pub fn is_loopback(&self) -> bool {
-        !self.mdns && !self.dht && self.relay_lookup == RelayChoice::Disabled
+        !self.mdns
+            && !self.dht
+            && self.relay_lookup == RelayChoice::Disabled
+            && self.pkarr == PkarrChoice::Disabled
     }
 
     /// Human/JSON label for the mesh's reach. Derived from the lookups —
@@ -95,9 +127,13 @@ impl LookupOpts {
     /// rejects, and past 255 the count no longer fits its `u8`.
     ///
     /// # Errors
-    /// The custom ladder is longer than [`MAX_RELAY_LADDER`], or one of its
-    /// URLs is longer than [`MAX_RELAY_URL_BYTES`].
+    /// The custom ladder is longer than [`MAX_RELAY_LADDER`], one of its
+    /// URLs is longer than [`MAX_RELAY_URL_BYTES`], or the pkarr list fails
+    /// [`validate_pkarr_urls`].
     pub fn validate(&self) -> Result<()> {
+        if let PkarrChoice::Custom(urls) = &self.pkarr {
+            validate_pkarr_urls(urls)?;
+        }
         let RelayChoice::Custom(ladder) = &self.relay_lookup else {
             return Ok(());
         };
@@ -117,51 +153,56 @@ impl LookupOpts {
     }
 
     /// Append the canonical wire encoding to `buf`:
-    /// `[flags u8][if custom: [count u8] ([len u16 LE] url)*]`.
+    /// `[flags u8][if custom relay: list][if custom pkarr: list]`, each list
+    /// `[count u8] ([len u16 LE] url)*`.
     ///
     /// # Panics
-    /// If a relay ladder longer than `MAX_RELAY_LADDER`, or a relay URL longer
-    /// than `MAX_RELAY_URL_BYTES`, reaches here — [`validate`](Self::validate)
-    /// rejects both, and every mint runs it, so this is a broken invariant
-    /// rather than bad input.
+    /// If a relay ladder longer than `MAX_RELAY_LADDER`, a pkarr list longer
+    /// than `MAX_PKARR_URLS`, or a URL longer than `MAX_RELAY_URL_BYTES`,
+    /// reaches here — [`validate`](Self::validate) rejects all three, and
+    /// every mint runs it, so this is a broken invariant rather than bad
+    /// input.
     pub fn encode_into(&self, buf: &mut Vec<u8>) {
         let mut flags: u8 = 0;
         if self.mdns {
-            flags |= 0b0001;
+            flags |= FLAG_MDNS;
         }
         if self.dht {
-            flags |= 0b0010;
+            flags |= FLAG_DHT;
         }
         match &self.relay_lookup {
             RelayChoice::Disabled => {}
-            RelayChoice::Pinned => flags |= 0b0100,
-            RelayChoice::Custom(_) => flags |= 0b0100 | 0b1000,
+            RelayChoice::Pinned => flags |= FLAG_RELAY,
+            RelayChoice::Custom(_) => flags |= FLAG_RELAY | FLAG_RELAY_CUSTOM,
+        }
+        match &self.pkarr {
+            PkarrChoice::Disabled => {}
+            PkarrChoice::Pinned => flags |= FLAG_PKARR,
+            PkarrChoice::Custom(_) => flags |= FLAG_PKARR | FLAG_PKARR_CUSTOM,
         }
         buf.push(flags);
         if let RelayChoice::Custom(ladder) = &self.relay_lookup {
-            // The ladder is created locally and bounded by the CLI / library API,
-            // so this cast and the lengths below always fit.
-            buf.push(u8::try_from(ladder.len()).expect("relay ladder bounded by MAX_RELAY_LADDER"));
-            for url in ladder {
-                let text = url.to_string();
-                let len =
-                    u16::try_from(text.len()).expect("relay URL bounded by MAX_RELAY_URL_BYTES");
-                buf.extend_from_slice(&len.to_le_bytes());
-                buf.extend_from_slice(text.as_bytes());
-            }
+            encode_urls(buf, ladder.iter().map(ToString::to_string));
+        }
+        if let PkarrChoice::Custom(urls) = &self.pkarr {
+            encode_urls(buf, urls.iter().map(|url| url.as_str().to_owned()));
         }
     }
 
     /// Decode from a cursor over the config region, advancing `pos`.
     /// # Errors
-    /// The buffer is truncated, or the encoded length exceeds what remains.
+    /// The buffer is truncated, the encoded length exceeds what remains, or a
+    /// lookup bit is unknown to this build.
     pub fn decode_from(bytes: &[u8], pos: &mut usize) -> Result<Self> {
         let flags = *bytes.get(*pos).context("truncated lookup flags")?;
         *pos += 1;
-        let mdns = flags & 0b0001 != 0;
-        let dht = flags & 0b0010 != 0;
-        let relay_enabled = flags & 0b0100 != 0;
-        let relay_custom = flags & 0b1000 != 0;
+        if flags & !KNOWN_LOOKUP_FLAGS != 0 {
+            bail!("unsupported lookup flags {flags:#04x}: upgrade to a newer build");
+        }
+        let mdns = flags & FLAG_MDNS != 0;
+        let dht = flags & FLAG_DHT != 0;
+        let relay_enabled = flags & FLAG_RELAY != 0;
+        let relay_custom = flags & FLAG_RELAY_CUSTOM != 0;
         if relay_custom && !relay_enabled {
             bail!("custom-relay bit set without relay-enabled bit");
         }
@@ -180,12 +221,131 @@ impl LookupOpts {
             }
             RelayChoice::Custom(decode_relay_ladder(bytes, pos, count)?)
         };
-        Ok(LookupOpts {
+        let pkarr = match (flags & FLAG_PKARR != 0, flags & FLAG_PKARR_CUSTOM != 0) {
+            (false, true) => bail!("custom-pkarr bit set without pkarr-enabled bit"),
+            (false, false) => PkarrChoice::Disabled,
+            (true, false) => PkarrChoice::Pinned,
+            (true, true) => PkarrChoice::Custom(decode_pkarr_urls(bytes, pos)?),
+        };
+        let opts = LookupOpts {
             mdns,
             dht,
             relay_lookup,
-        })
+            pkarr,
+        };
+        opts.validate()?;
+        Ok(opts)
     }
+}
+
+/// `[count u8] ([len u16 LE] url)*`. The lists are created locally and bounded
+/// by [`LookupOpts::validate`], which every mint runs, so the casts always fit.
+fn encode_urls(buf: &mut Vec<u8>, urls: impl ExactSizeIterator<Item = String>) {
+    buf.push(u8::try_from(urls.len()).expect("URL list bounded by validate"));
+    for text in urls {
+        let len = u16::try_from(text.len()).expect("URL bounded by MAX_RELAY_URL_BYTES");
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(text.as_bytes());
+    }
+}
+
+/// Decode a pkarr list. A URL must come back in the exact text it was
+/// encoded from: `Url` normalizes, and a normalized copy would re-encode to
+/// other config bytes and so to another topic.
+fn decode_pkarr_urls(bytes: &[u8], pos: &mut usize) -> Result<Vec<Url>> {
+    let count = *bytes.get(*pos).context("truncated pkarr list count")? as usize;
+    *pos += 1;
+    if count > MAX_PKARR_URLS {
+        bail!("pkarr list too long: {count}");
+    }
+    let mut urls = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = read_u16(bytes, pos).context("truncated pkarr URL length")? as usize;
+        if len > MAX_RELAY_URL_BYTES {
+            bail!("pkarr URL too long: {len}");
+        }
+        let end = pos.checked_add(len).context("pkarr URL length overflow")?;
+        let raw = bytes.get(*pos..end).context("truncated pkarr URL")?;
+        *pos = end;
+        let text = std::str::from_utf8(raw).context("pkarr URL is not UTF-8")?;
+        let url = Url::parse(text).context("invalid pkarr URL")?;
+        if url.as_str() != text {
+            bail!("non-canonical pkarr URL {text:?}");
+        }
+        urls.push(url);
+    }
+    Ok(urls)
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Parse the pkarr relay list a surface passes as strings (`pkarrUrls`, the
+/// `pkarr_urls` C field, `--pkarr-url`). Empty ⇒ `None`, the pinned default.
+///
+/// # Errors
+/// An entry is not a URL, or the list fails [`validate_pkarr_urls`].
+pub fn parse_pkarr_urls(texts: &[String]) -> Result<Option<Vec<Url>>> {
+    if texts.is_empty() {
+        return Ok(None);
+    }
+    let urls = texts
+        .iter()
+        .map(|text| Url::parse(text.trim()).with_context(|| format!("invalid pkarr URL {text:?}")))
+        .collect::<Result<Vec<_>>>()?;
+    validate_pkarr_urls(&urls)?;
+    Ok(Some(urls))
+}
+
+/// The rules a pkarr list must meet: not empty, at most [`MAX_PKARR_URLS`]
+/// entries, no entry twice, and each one a bare base iroh can append a key
+/// to: `https` (or `http` on a loopback host), no credentials, query or
+/// fragment, no trailing slash on a path, and at most
+/// [`MAX_RELAY_URL_BYTES`] long.
+///
+/// # Errors
+/// The list breaks one of the rules above.
+pub fn validate_pkarr_urls(urls: &[Url]) -> Result<()> {
+    if urls.is_empty() {
+        bail!("a pkarr list needs at least one URL");
+    }
+    if urls.len() > MAX_PKARR_URLS {
+        bail!(
+            "pkarr list too long: {} URLs, the wire ceiling is {MAX_PKARR_URLS}",
+            urls.len()
+        );
+    }
+    for (index, url) in urls.iter().enumerate() {
+        match url.scheme() {
+            "https" => {}
+            "http" if is_loopback(url) => {}
+            "http" => bail!("pkarr URL {url} is plain http off this machine: use https"),
+            _ => bail!("pkarr URL {url} is not https"),
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            bail!("pkarr URL {url} carries credentials, which every member would get");
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            bail!("pkarr URL {url} has a query or a fragment");
+        }
+        if url.path() != "/" && url.path().ends_with('/') {
+            bail!("pkarr URL {url} ends in a slash: the key would follow an empty segment");
+        }
+        if urls[..index].contains(url) {
+            bail!("pkarr URL {url} is in the list twice");
+        }
+        let len = url.as_str().len();
+        if len > MAX_RELAY_URL_BYTES {
+            bail!("pkarr URL too long: {len} bytes, the wire ceiling is {MAX_RELAY_URL_BYTES}");
+        }
+    }
+    Ok(())
 }
 
 /// Decode `count` length-prefixed relay URLs from the cursor, advancing `pos`.
@@ -214,9 +374,10 @@ pub(super) fn read_u16(bytes: &[u8], pos: &mut usize) -> Result<u16> {
 
 /// Feature byte appended after the lookups when a mesh carries a password
 /// and/or is invite-only. Appended — not a spare lookup-flags bit — because
-/// old binaries ignore unknown flag bits (they would silently decode a
-/// featured id and sit in an empty topic) but hard-error on trailing config
-/// bytes. One feature byte gates both features; their fields follow in a fixed
+/// binaries older than the pkarr lookup ignored unknown flag bits (they would
+/// silently decode a featured id and sit in an empty topic) but hard-error on
+/// trailing config bytes. Decode now rejects an unknown lookup bit too. One
+/// feature byte gates both features; their fields follow in a fixed
 /// order (password verifier, then issuer pubkey).
 const FEATURE_PASSWORD: u8 = 0b0001;
 
@@ -325,6 +486,13 @@ impl MeshConfig {
                 "transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload"
             );
         }
+        // The pkarr publisher keeps iroh's `relay_only` filter, so a record
+        // names the home relay and nothing else: without one it is empty.
+        if self.lookups.pkarr != PkarrChoice::Disabled && no_relay {
+            bail!(
+                "lookup `pkarr` needs lookup `relay`: a pkarr record names the home relay and nothing else"
+            );
+        }
         // A native member without UDP has no address a peer could reach, so the
         // JSEP exchange that opens its data channel can only cross the relay.
         if !transport.udp && no_relay {
@@ -345,16 +513,18 @@ impl MeshConfig {
     /// relay carry payload (through [`MeshConfig::validate`]).
     ///
     /// # Errors
-    /// `relay_urls` is given without [`Lookup::Relay`], `transports` leaves
-    /// neither [`Transport::Udp`] nor [`Transport::WebRtc`], or needs a relay
-    /// lookup (see [`MeshConfig::validate`]) while none is on.
+    /// `relay_urls` is given without [`Lookup::Relay`], `pkarr_urls` without
+    /// [`Lookup::Pkarr`], `transports` leaves neither [`Transport::Udp`] nor
+    /// [`Transport::WebRtc`], or needs a relay lookup (see
+    /// [`MeshConfig::validate`]) while none is on.
     pub fn resolve(
         lookups: &[Lookup],
         relay_urls: Option<RelayLadder>,
+        pkarr_urls: Option<Vec<Url>>,
         transports: &[Transport],
     ) -> Result<Self> {
         let config = MeshConfig {
-            lookups: resolve_lookups(LookupSet::from_lookups(lookups, relay_urls)?),
+            lookups: resolve_lookups(LookupSet::from_lookups(lookups, relay_urls, pkarr_urls)?),
             password: None,
             issuer_pubkey: None,
             transport: TransportPolicy::from_transports(transports)?,
@@ -609,10 +779,12 @@ pub enum Lookup {
     /// Rendezvous through a relay server. A lookup only: whether the relay
     /// may also carry payload is the transport policy's call.
     Relay,
+    /// Signed address records on HTTPS pkarr relays.
+    Pkarr,
 }
 
 impl Lookup {
-    const NAMES: &[&str] = &["mdns", "dht", "relay"];
+    const NAMES: &[&str] = &["mdns", "dht", "relay", "pkarr"];
 
     /// The name the list spells this lookup by.
     #[must_use]
@@ -621,6 +793,7 @@ impl Lookup {
             Self::Mdns => "mdns",
             Self::Dht => "dht",
             Self::Relay => "relay",
+            Self::Pkarr => "pkarr",
         }
     }
 }
@@ -633,6 +806,7 @@ impl FromStr for Lookup {
             "mdns" => Ok(Self::Mdns),
             "dht" => Ok(Self::Dht),
             "relay" => Ok(Self::Relay),
+            "pkarr" => Ok(Self::Pkarr),
             other => Err(ChoiceError::new("lookup", other, Self::NAMES)),
         }
     }
@@ -646,22 +820,31 @@ impl fmt::Display for Lookup {
 
 /// The lookups a create selected, before they become the [`LookupOpts`] in
 /// the id. `mdns`/`dht` are address-lookups; `relay_lookup` is the
-/// rendezvous through a relay, bare or with a custom ladder.
+/// rendezvous through a relay, bare or with a custom ladder; `pkarr` is the
+/// pkarr lookup, bare or with a custom relay list.
 #[derive(Debug, Clone, Default)]
 pub struct LookupSet {
     pub mdns: bool,
     pub dht: bool,
     pub relay_lookup: RelaySelection,
+    pub pkarr: OptFlag<Vec<Url>>,
 }
 
 impl LookupSet {
     /// The set a `lookup` list names, with `relay_urls` as the ladder the
-    /// relay lookup homes on (`None` ⇒ the pinned default).
+    /// relay lookup homes on and `pkarr_urls` as the pkarr relays (`None` ⇒
+    /// the pinned default for each).
     ///
     /// # Errors
-    /// `relay_urls` is given but `lookups` does not name [`Lookup::Relay`]:
-    /// a ladder says *which* relay, and only a relay lookup uses one.
-    pub fn from_lookups(lookups: &[Lookup], relay_urls: Option<RelayLadder>) -> Result<Self> {
+    /// `relay_urls` is given but `lookups` does not name [`Lookup::Relay`],
+    /// or `pkarr_urls` is given but `lookups` does not name
+    /// [`Lookup::Pkarr`]: a list says *which* server, and only its lookup
+    /// uses one.
+    pub fn from_lookups(
+        lookups: &[Lookup],
+        relay_urls: Option<RelayLadder>,
+        pkarr_urls: Option<Vec<Url>>,
+    ) -> Result<Self> {
         let relay = lookups.contains(&Lookup::Relay);
         if relay_urls.is_some() && !relay {
             bail!("a relay ladder needs lookup `relay`");
@@ -671,15 +854,25 @@ impl LookupSet {
         } else {
             RelaySelection::Unset
         };
+        let pkarr_on = lookups.contains(&Lookup::Pkarr);
+        if pkarr_urls.is_some() && !pkarr_on {
+            bail!("a pkarr relay list needs lookup `pkarr`");
+        }
+        let pkarr = if pkarr_on {
+            pkarr_urls.map_or(OptFlag::Default, OptFlag::Named)
+        } else {
+            OptFlag::Unset
+        };
         Ok(Self {
             mdns: lookups.contains(&Lookup::Mdns),
             dht: lookups.contains(&Lookup::Dht),
             relay_lookup,
+            pkarr,
         })
     }
 
     fn any(&self) -> bool {
-        self.mdns || self.dht || self.relay_lookup.is_set()
+        self.mdns || self.dht || self.relay_lookup.is_set() || self.pkarr.is_set()
     }
 }
 
@@ -697,10 +890,16 @@ pub fn resolve_lookups(lookups: LookupSet) -> LookupOpts {
         RelaySelection::Default => RelayChoice::Pinned,
         RelaySelection::Named(ladder) => RelayChoice::Custom(ladder.as_urls().to_vec()),
     };
+    let pkarr = match lookups.pkarr {
+        OptFlag::Unset => PkarrChoice::Disabled,
+        OptFlag::Default => PkarrChoice::Pinned,
+        OptFlag::Named(urls) => PkarrChoice::Custom(urls),
+    };
     LookupOpts {
         mdns: lookups.mdns,
         dht: lookups.dht,
         relay_lookup,
+        pkarr,
     }
 }
 
@@ -793,8 +992,8 @@ impl fmt::Display for RelayLadder {
 #[cfg(test)]
 mod lookup_tests {
     use super::{
-        Lookup, LookupOpts, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection,
-        Transport, TransportPolicy, resolve_lookups,
+        Lookup, LookupOpts, LookupSet, MeshConfig, PkarrChoice, RelayChoice, RelayLadder,
+        RelaySelection, Transport, TransportPolicy, resolve_lookups,
     };
 
     fn lookups(mdns: bool, dht: bool, relay_lookup: RelaySelection) -> LookupSet {
@@ -802,6 +1001,7 @@ mod lookup_tests {
             mdns,
             dht,
             relay_lookup,
+            ..LookupSet::default()
         }
     }
 
@@ -896,6 +1096,7 @@ mod lookup_tests {
                     "https://a.example".parse().unwrap(),
                     "https://b.example".parse().unwrap(),
                 ]),
+                pkarr: PkarrChoice::Disabled,
             },
             password: None,
             issuer_pubkey: None,
@@ -1023,7 +1224,7 @@ mod lookup_tests {
         ];
         let mut seen = Vec::new();
         for list in lists {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, list).unwrap();
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, None, list).unwrap();
             let bytes = config.to_bytes();
             assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config, "{list:?}");
             assert!(!seen.contains(&bytes), "{list:?} shares its bytes");
@@ -1033,12 +1234,12 @@ mod lookup_tests {
 
     #[test]
     fn a_mesh_without_udp_needs_the_relay_lookup() {
-        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::WebRtc])
+        let error = MeshConfig::resolve(&[Lookup::Mdns], None, None, &[Transport::WebRtc])
             .unwrap_err()
             .to_string();
         assert!(error.contains("relay"), "{error}");
-        assert!(MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::WebRtc]).is_ok());
-        assert!(MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp]).is_ok());
+        assert!(MeshConfig::resolve(&[Lookup::Relay], None, None, &[Transport::WebRtc]).is_ok());
+        assert!(MeshConfig::resolve(&[Lookup::Mdns], None, None, &[Transport::Udp]).is_ok());
     }
 
     #[test]
@@ -1135,9 +1336,10 @@ mod directory_selection_tests;
 #[cfg(test)]
 mod choice_tests {
     use super::{
-        Lookup, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection, Transport,
-        TransportPolicy, resolve_lookups,
+        Lookup, LookupSet, MeshConfig, PkarrChoice, RelayChoice, RelayLadder, RelaySelection,
+        Transport, TransportPolicy, resolve_lookups,
     };
+    use url::Url;
 
     #[test]
     fn a_lookup_and_a_transport_parse_from_their_names() {
@@ -1168,7 +1370,7 @@ mod choice_tests {
     fn an_unknown_name_is_an_error_that_lists_the_choices() {
         let error = "relai".parse::<Lookup>().unwrap_err().to_string();
         assert!(
-            error.contains("relai") && error.contains("mdns, dht, relay"),
+            error.contains("relai") && error.contains("mdns, dht, relay, pkarr"),
             "{error}"
         );
         let transport_error = "tcp".parse::<Transport>().unwrap_err().to_string();
@@ -1189,7 +1391,7 @@ mod choice_tests {
 
     #[test]
     fn a_lookup_list_becomes_the_set_of_exactly_those() {
-        let set = LookupSet::from_lookups(&[Lookup::Mdns], None).unwrap();
+        let set = LookupSet::from_lookups(&[Lookup::Mdns], None, None).unwrap();
         assert!(set.mdns && !set.dht);
         assert_eq!(set.relay_lookup, RelaySelection::Unset);
         let opts = resolve_lookups(set);
@@ -1199,17 +1401,17 @@ mod choice_tests {
 
     #[test]
     fn naming_relay_takes_the_default_ladder_unless_one_is_given() {
-        let bare = LookupSet::from_lookups(&[Lookup::Relay], None).unwrap();
+        let bare = LookupSet::from_lookups(&[Lookup::Relay], None, None).unwrap();
         assert_eq!(bare.relay_lookup, RelaySelection::Default);
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
-        let custom = LookupSet::from_lookups(&[Lookup::Relay], Some(ladder.clone())).unwrap();
+        let custom = LookupSet::from_lookups(&[Lookup::Relay], Some(ladder.clone()), None).unwrap();
         assert_eq!(custom.relay_lookup, RelaySelection::Named(ladder));
     }
 
     #[test]
     fn a_ladder_without_the_relay_lookup_is_an_error() {
         let ladder: RelayLadder = "https://a.example".parse().unwrap();
-        let error = LookupSet::from_lookups(&[Lookup::Mdns], Some(ladder))
+        let error = LookupSet::from_lookups(&[Lookup::Mdns], Some(ladder), None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("relay"), "{error}");
@@ -1243,14 +1445,18 @@ mod choice_tests {
 
     #[test]
     fn a_config_resolves_from_the_three_choices() {
-        let config =
-            MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::Udp, Transport::Relay])
-                .unwrap();
+        let config = MeshConfig::resolve(
+            &[Lookup::Relay],
+            None,
+            None,
+            &[Transport::Udp, Transport::Relay],
+        )
+        .unwrap();
         assert!(config.transport.relay_transport);
         assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
         assert!(config.password.is_none() && config.issuer_pubkey.is_none());
 
-        let bare = MeshConfig::resolve(&[], None, &[]).unwrap();
+        let bare = MeshConfig::resolve(&[], None, None, &[]).unwrap();
         assert!(bare.lookups.is_loopback());
         assert!(!bare.transport.relay_transport);
     }
@@ -1261,7 +1467,7 @@ mod choice_tests {
     #[test]
     fn relay_can_be_a_lookup_and_nothing_more() {
         for transports in [&[][..], &[Transport::Udp][..]] {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, transports).unwrap();
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, None, transports).unwrap();
             assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
             assert!(!config.transport.relay_transport, "{transports:?}");
             assert_eq!(config, MeshConfig::from_bytes(&config.to_bytes()).unwrap());
@@ -1270,9 +1476,14 @@ mod choice_tests {
 
     #[test]
     fn relay_transport_needs_the_relay_lookup() {
-        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp, Transport::Relay])
-            .unwrap_err()
-            .to_string();
+        let error = MeshConfig::resolve(
+            &[Lookup::Mdns],
+            None,
+            None,
+            &[Transport::Udp, Transport::Relay],
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("relay"), "{error}");
     }
 
@@ -1281,5 +1492,129 @@ mod choice_tests {
         let opts = resolve_lookups(LookupSet::default());
         assert!(opts.is_loopback());
         assert_eq!(opts.network_label(), "private");
+    }
+
+    fn pkarr_urls(texts: &[&str]) -> Vec<Url> {
+        texts.iter().map(|text| text.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn pkarr_parses_from_its_name() {
+        assert_eq!("pkarr".parse::<Lookup>().unwrap(), Lookup::Pkarr);
+        assert_eq!(Lookup::Pkarr.to_string(), "pkarr");
+        let lookups: Vec<Lookup> = serde_json::from_str(r#"["pkarr"]"#).unwrap();
+        assert_eq!(lookups, vec![Lookup::Pkarr]);
+    }
+
+    /// A pkarr mesh: pkarr with the relay it needs.
+    fn with_pkarr(urls: Option<Vec<Url>>) -> anyhow::Result<MeshConfig> {
+        MeshConfig::resolve(&[Lookup::Relay, Lookup::Pkarr], None, urls, &[])
+    }
+
+    #[test]
+    fn naming_pkarr_takes_the_default_list_unless_one_is_given() {
+        let bare = with_pkarr(None).unwrap();
+        assert_eq!(bare.lookups.pkarr, PkarrChoice::Pinned);
+
+        let urls = pkarr_urls(&["https://a.example/pkarr", "https://b.example/"]);
+        let custom = with_pkarr(Some(urls.clone())).unwrap();
+        assert_eq!(custom.lookups.pkarr, PkarrChoice::Custom(urls));
+    }
+
+    /// A record names the home relay and nothing else, so without a relay
+    /// it holds no address a peer could dial.
+    #[test]
+    fn pkarr_without_the_relay_lookup_is_an_error() {
+        for lookups in [
+            &[Lookup::Pkarr][..],
+            &[Lookup::Pkarr, Lookup::Mdns, Lookup::Dht][..],
+        ] {
+            let error = MeshConfig::resolve(lookups, None, None, &[])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("relay"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_pkarr_list_without_the_pkarr_lookup_is_an_error() {
+        let urls = pkarr_urls(&["https://a.example/pkarr"]);
+        let error = MeshConfig::resolve(&[Lookup::Mdns], None, Some(urls), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pkarr"), "{error}");
+    }
+
+    #[test]
+    fn a_pkarr_config_round_trips_and_its_list_is_in_the_bytes() {
+        let pinned = with_pkarr(None).unwrap();
+        let urls = pkarr_urls(&["https://a.example/pkarr", "https://b.example/"]);
+        let custom = MeshConfig::resolve(
+            &[Lookup::Relay, Lookup::Pkarr],
+            Some("https://relay.example".parse().unwrap()),
+            Some(urls),
+            &[],
+        )
+        .unwrap();
+        for config in [&pinned, &custom] {
+            assert_eq!(*config, MeshConfig::from_bytes(&config.to_bytes()).unwrap());
+        }
+        assert_ne!(pinned.to_bytes(), custom.to_bytes());
+    }
+
+    #[test]
+    fn an_unknown_lookup_bit_is_rejected() {
+        let error = MeshConfig::from_bytes(&[0b1_0000]).unwrap_err().to_string();
+        assert!(error.contains("lookup"), "{error}");
+    }
+
+    #[test]
+    fn a_pkarr_list_is_bounded_and_http_only() {
+        let too_many = (0..17)
+            .map(|index| format!("https://a{index}.example/").parse().unwrap())
+            .collect();
+        assert!(with_pkarr(Some(too_many)).is_err());
+        assert!(with_pkarr(Some(pkarr_urls(&["wss://a.example/"]))).is_err());
+        assert!(with_pkarr(Some(Vec::new())).is_err());
+    }
+
+    /// iroh appends the key as a path segment, so a URL must be a bare base:
+    /// a trailing slash on a path makes `/pkarr//KEY`, and credentials, a
+    /// query or a fragment would ride into every member's copy of the id.
+    #[test]
+    fn a_pkarr_url_is_a_bare_base() {
+        for good in ["https://a.example/", "https://a.example/pkarr"] {
+            assert!(with_pkarr(Some(pkarr_urls(&[good]))).is_ok(), "{good}");
+        }
+        for bad in [
+            "https://a.example/pkarr/",
+            "https://user:pass@a.example/pkarr",
+            "https://user@a.example/pkarr",
+            "https://a.example/pkarr?x=1",
+            "https://a.example/pkarr#top",
+        ] {
+            assert!(with_pkarr(Some(pkarr_urls(&[bad]))).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_pkarr_list_names_each_relay_once() {
+        let twice = pkarr_urls(&["https://a.example/pkarr", "https://a.example/pkarr"]);
+        let error = with_pkarr(Some(twice)).unwrap_err().to_string();
+        assert!(error.contains("twice"), "{error}");
+    }
+
+    /// A page served over HTTPS cannot fetch plain HTTP, so `http` is for a
+    /// relay on this machine only, which is what tests run.
+    #[test]
+    fn plain_http_is_for_a_loopback_relay_only() {
+        for good in [
+            "http://127.0.0.1:1/pkarr",
+            "http://localhost/pkarr",
+            "http://[::1]/pkarr",
+        ] {
+            assert!(with_pkarr(Some(pkarr_urls(&[good]))).is_ok(), "{good}");
+        }
+        assert!(with_pkarr(Some(pkarr_urls(&["http://a.example/pkarr"]))).is_err());
     }
 }

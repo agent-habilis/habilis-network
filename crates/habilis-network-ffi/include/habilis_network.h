@@ -43,10 +43,11 @@ typedef struct habilis_network_mesh habilis_network_mesh;
  *   - neither — create a fresh mesh; `lookup` says how far it reaches, and
  *               habilis_network_mesh_id() returns the minted id.
  *
- * Three comma-separated lists name the mesh-wide choices a create bakes into
+ * Four comma-separated lists name the mesh-wide choices a create bakes into
  * the id, one concept each: `lookup` is how members find each other,
- * `transport` is what payload may ride, `relay_urls` is which relay. A joiner
- * inherits all three from the id; a topic fixes `lookup` to all three lookups.
+ * `transport` is what payload may ride, `relay_urls` is which relay, and
+ * `pkarr_urls` is which pkarr relays. A joiner inherits all four from the id;
+ * a topic fixes `lookup` to "mdns,dht,relay".
  *
  * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
  * default active-view cap.
@@ -56,8 +57,8 @@ typedef struct {
   const char *topic;
   const char *nick;       /* NULL mints a random nickname */
   const char *name;       /* mesh name on create; NULL falls back to "habilis-network" */
-  const char *lookup;     /* "mdns,dht,relay", any subset; NULL = none, a
-                             loopback mesh reachable from this machine only */
+  const char *lookup;     /* "mdns,dht,relay,pkarr", any subset; NULL = none,
+                             a loopback mesh reachable from this machine only */
   const char *transport;  /* "udp,webrtc,relay", any subset with "udp" or
                              "webrtc"; NULL = "udp,webrtc", so every byte of
                              data goes peer to peer. "relay", or a list without
@@ -65,6 +66,9 @@ typedef struct {
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
                              default. Needs "relay" in `lookup` */
   size_t max_peers;
+  const char *pkarr_urls; /* comma-separated pkarr relays, each gets every
+                             record; NULL = the default. Needs "pkarr" in
+                             `lookup` */
 } habilis_network_opts;
 
 /*
@@ -157,9 +161,10 @@ typedef struct habilis_network_reader habilis_network_reader;
 /* How a stream node reaches peers: the same lists as habilis_network_opts, without the
  * mesh selectors. Zero-initialize for a loopback node. */
 typedef struct {
-  const char *lookup;     /* "mdns,dht,relay", any subset; NULL = loopback */
+  const char *lookup;     /* "mdns,dht,relay,pkarr", any subset; NULL = loopback */
   const char *transport;  /* "udp,webrtc,relay", as habilis_network_opts; NULL = "udp,webrtc" */
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = default */
+  const char *pkarr_urls; /* comma-separated pkarr relays; NULL = default */
 } habilis_network_stream_opts;
 
 /* Stand up a stream node. NULL on failure. */

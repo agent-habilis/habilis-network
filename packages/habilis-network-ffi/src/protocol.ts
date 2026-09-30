@@ -12,11 +12,12 @@ export interface WireOpts {
   readonly topic: string | null
   readonly nick: string | null
   readonly name: string | null
-  /** The three comma lists the C struct takes; `null` for an empty list. */
+  /** The comma lists the C struct takes; `null` for an empty list. */
   readonly lookup: string | null
   readonly transport: string | null
   readonly relayUrls: string | null
   readonly maxPeers: number
+  readonly pkarrUrls: string | null
 }
 
 export type Command =

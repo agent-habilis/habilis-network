@@ -51,6 +51,25 @@ published to a registry; pin it with
   streams as wasm-bindgen classes, and `packages/habilis-network-wasm` as its JS
   backend (`join` for a mesh, `bindStreams` / `bindStreamsFor` for streams).
   `cargo task build-wasm` builds it.
+- The `pkarr` lookup: each member publishes a signed record with its home
+  relay to a list of HTTPS pkarr relays and resolves peers from any of them,
+  so a node finds a peer from its endpoint id alone. It uses only `fetch`, so
+  it runs in a browser too. `pkarr_urls` / `pkarrUrls` / `--pkarr-url` name
+  the list, which is part of the mesh id; the default is n0's server and two
+  Pubky relays. `habilis_network_opts` grows to 72 bytes and `habilis_network_stream_opts` to
+  32, with `pkarr_urls` appended. A lookup bit this build does not know is
+  now an error, not a silent drop. `pkarr` needs `relay` among the lookups,
+  because a record names the home relay and nothing else. A pkarr URL must be
+  a bare base: `https` (plain `http` on a loopback host only), no
+  credentials, query, fragment or trailing slash on a path, and no URL twice.
+  The beacon publishes only while it holds a relay rung, and a rival probe
+  never publishes. In the C ABI an empty `relay_urls` or `pkarr_urls` string
+  now takes the default, the same as NULL. `--pkarr-url` on the bun-ffi chat
+  (`--create` only) and `?pkarr` on the stream page.
+- `cargo task e2e --suite pkarr`: the pkarr lookup across native-native,
+  native-web, web-native and web-web, over a local relay and a local pkarr
+  relay (`habilis_network::net::test_pkarr`). A cell passes only if the pair links,
+  a broadcast crosses both ways, and every member published its record.
 - A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) on every
   create surface. The ladder is mixed into a derived topic id, so every
   member must pass the same list.

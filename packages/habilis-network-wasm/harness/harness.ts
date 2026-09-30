@@ -5,7 +5,9 @@
  * expressions.
  *
  * Query parameters:
- * - `topic` or `mesh` — the mesh selector (exactly one).
+ * - `topic` or `mesh` — the mesh selector. With neither, the page creates a
+ *   mesh with the `lookup` list (for example `relay,pkarr`) and the `pkarr`
+ *   URLs (repeatable), and its id lands in `#ready[data-id]`.
  * - `nick` — this peer's nickname.
  * - `relay` — a custom relay URL (repeatable); with `topic` it is part of
  *   the derived id, so the native side must pass the same.
@@ -28,8 +30,8 @@
  *   UTC. `#log` keeps only the tail, and a failure needs the start.
  */
 
-import { join } from '../src/index.ts'
-import type { Mesh, Transport } from '../src/index.ts'
+import { create, join } from '../src/index.ts'
+import type { Lookup, Mesh, Transport } from '../src/index.ts'
 
 declare global {
   interface Window {
@@ -122,16 +124,28 @@ async function main(): Promise<void> {
   // error to raise, and it names the choices.
   const transport = params.get('transport')?.split(',') as Transport[] | undefined
 
+  const log = params.get('log') ?? 'info'
+
   let mesh: Mesh
   try {
-    mesh = await join({
-      ...(topic === null ? {} : { topic }),
-      ...(id === null ? {} : { id }),
-      ...(nick === null ? {} : { nick }),
-      ...(transport === undefined ? {} : { transport }),
-      relayUrls,
-      log: params.get('log') ?? 'info',
-    })
+    mesh =
+      topic === null && id === null
+        ? await create({
+            lookup: (params.get('lookup')?.split(',') ?? []) as Lookup[],
+            ...(nick === null ? {} : { nick }),
+            ...(transport === undefined ? {} : { transport }),
+            relayUrls,
+            pkarrUrls: params.getAll('pkarr'),
+            log,
+          })
+        : await join({
+            ...(topic === null ? {} : { topic }),
+            ...(id === null ? {} : { id }),
+            ...(nick === null ? {} : { nick }),
+            ...(transport === undefined ? {} : { transport }),
+            relayUrls,
+            log,
+          })
   } catch (error) {
     mark('failed', {}, String(error))
     return

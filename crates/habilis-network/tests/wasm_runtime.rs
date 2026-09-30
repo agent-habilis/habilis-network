@@ -122,3 +122,26 @@ fn a_tab_runs_no_udp_path() {
     assert!(!paths.udp, "a tab reads as having UDP: {paths:?}");
     assert!(paths.webrtc, "the data channel stays");
 }
+
+/// The pkarr lookup is the one lookup besides the relay that a tab can run,
+/// because it needs only `fetch`. Its builders run at bind, so a primitive
+/// that panics on wasm shows up here. The URL refuses every request.
+#[wasm_bindgen_test]
+async fn a_pkarr_endpoint_binds() {
+    use habilis_network::net::{TransportHandles, build_endpoint};
+    use habilis_network::protocol::{LookupOpts, PkarrChoice};
+    let lookups = LookupOpts {
+        pkarr: PkarrChoice::Custom(vec!["http://127.0.0.1:1/pkarr".parse().unwrap()]),
+        ..LookupOpts::loopback()
+    };
+    let endpoint = build_endpoint(
+        &lookups,
+        None,
+        None,
+        Vec::new(),
+        TransportHandles::default(),
+    )
+    .await
+    .expect("a pkarr endpoint binds in wasm");
+    endpoint.close().await;
+}

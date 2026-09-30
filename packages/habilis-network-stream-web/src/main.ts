@@ -9,7 +9,9 @@
  * - `#<hash>` — read this stream. It carries the producer's own lookups.
  * - no fragment — produce a stream. `?relay=` sets a custom relay URL
  *   (repeatable) and `?transport=udp,webrtc,relay` lets the bytes fall back to the
- *   relay; a tab always finds peers through the relay.
+ *   relay; a tab always finds peers through the relay. `?pkarr` also
+ *   publishes the producer to pkarr relays: bare for the default list, or a
+ *   URL each (repeatable) for a custom one.
  * - `?log=` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what the driver — or a person — reads):
@@ -130,10 +132,12 @@ async function open(log: string): Promise<StreamRuntime> {
   // Passed through as typed: a name that is not a transport is the engine's
   // error to raise, and it names the choices.
   const transport = params.get('transport')?.split(',') as Transport[] | undefined
+  const pkarrUrls = params.getAll('pkarr').filter((url) => url !== '')
   const streams = await bindStreams({
-    lookup: ['relay'],
+    lookup: params.has('pkarr') ? ['relay', 'pkarr'] : ['relay'],
     ...(transport === undefined ? {} : { transport }),
     relayUrls: params.getAll('relay'),
+    pkarrUrls,
     log,
   })
   return StreamRuntime.producing(await streams.create())

@@ -284,6 +284,7 @@ async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
         lookup: vec![Lookup::Relay],
         transport,
         relay_urls: vec![url.to_owned()],
+        pkarr_urls: Vec::new(),
     })
     .await
     .expect("bind a relay node")

@@ -109,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
                     mdns: true,
                     dht: true,
                     relay_lookup: ladder,
+                    pkarr: habilis_network::protocol::PkarrChoice::Disabled,
                 },
                 password: None,
                 issuer_pubkey: None,

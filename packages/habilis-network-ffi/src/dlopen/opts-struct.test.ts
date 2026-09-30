@@ -11,6 +11,7 @@ const BASE: WireOpts = {
   transport: null,
   relayUrls: null,
   maxPeers: 0,
+  pkarrUrls: null,
 }
 
 /** Hands out a distinct fake address per buffer and remembers which was which. */
@@ -30,15 +31,15 @@ describe('encodeOpts', () => {
   // is the layout assert on `HabilisNetworkOpts` in crates/habilis-network-ffi/src/ffi.rs; a
   // linked C consumer keeps passing the old struct when it moves, so both
   // sides must be edited together.
-  test('the struct is the 64 bytes the C header lays out', () => {
-    expect(OPTS_BYTES).toBe(64)
+  test('the struct is the 72 bytes the C header lays out', () => {
+    expect(OPTS_BYTES).toBe(72)
   })
 
   test('null selectors and empty lists encode as NULL pointers', () => {
     const { struct } = encodeOpts(BASE, fakePointers().pointerOf)
     expect(struct.byteLength).toBe(OPTS_BYTES)
     const view = new DataView(struct.buffer)
-    for (const offset of [0, 8, 16, 24, 32, 40, 48]) {
+    for (const offset of [0, 8, 16, 24, 32, 40, 48, 64]) {
       expect(view.getBigUint64(offset, true)).toBe(0n)
     }
   })
@@ -85,6 +86,15 @@ describe('encodeOpts', () => {
     ])
   })
 
+  test('pkarr_urls lands after max_peers', () => {
+    const pointers = fakePointers()
+    const { struct } = encodeOpts({ ...BASE, maxPeers: 3, pkarrUrls: 'https://p/' }, pointers.pointerOf)
+    const view = new DataView(struct.buffer)
+    expect(view.getBigUint64(56, true)).toBe(3n)
+    expect(view.getBigUint64(64, true)).toBe(0x1000n)
+    expect(Array.from(pointers.buffers[0] ?? [])).toEqual([...new TextEncoder().encode('https://p/'), 0])
+  })
+
   test('keepAlive roots every encoded string', () => {
     const { keepAlive } = encodeOpts({ ...BASE, nick: 'ana' }, fakePointers().pointerOf)
     expect(keepAlive.length).toBe(1)
@@ -93,16 +103,16 @@ describe('encodeOpts', () => {
 })
 
 describe('encodeStreamOpts', () => {
-  // The literal, for the reason the 64 above is one: the other side is the
+  // The literal, for the reason the 72 above is one: the other side is the
   // layout assert on `HabilisNetworkStreamOpts` in crates/habilis-network-ffi/src/ffi.rs.
-  test('the struct is the 24 bytes the C header lays out', () => {
-    expect(STREAM_OPTS_BYTES).toBe(24)
+  test('the struct is the 32 bytes the C header lays out', () => {
+    expect(STREAM_OPTS_BYTES).toBe(32)
   })
 
   test('the lists land at their offsets', () => {
     const pointers = fakePointers()
     const { struct, keepAlive } = encodeStreamOpts(
-      { lookup: 'relay', transport: null, relayUrls: 'http://a/' },
+      { lookup: 'relay', transport: null, relayUrls: 'http://a/', pkarrUrls: 'https://p/' },
       pointers.pointerOf,
     )
     expect(struct.byteLength).toBe(STREAM_OPTS_BYTES)
@@ -110,7 +120,8 @@ describe('encodeStreamOpts', () => {
     expect(view.getBigUint64(0, true)).toBe(0x1000n) // lookup
     expect(view.getBigUint64(8, true)).toBe(0n) // transport
     expect(view.getBigUint64(16, true)).toBe(0x1100n) // relay_urls
-    expect(keepAlive.length).toBe(2)
+    expect(view.getBigUint64(24, true)).toBe(0x1200n) // pkarr_urls
+    expect(keepAlive.length).toBe(3)
     expect(Array.from(pointers.buffers[0] ?? [])).toEqual([...new TextEncoder().encode('relay'), 0])
   })
 })

@@ -7,7 +7,7 @@ The style follows ASD-STE100 Simplified Technical English.
 ## Abstract
 
 habilis-network is a serverless gossip-network engine written in Rust.
-Peers find each other through mDNS, the mainline DHT, or a relay.
+Peers find each other through mDNS, the mainline DHT, pkarr relays, or a relay.
 They form a partial mesh over iroh QUIC links.
 Across this mesh they exchange signed messages and a shared CRDT document.
 No server holds the network together, and no member is special.
@@ -139,6 +139,7 @@ The default features of the engine are `host`, `mdns`, and `dht`.
 The `host` feature is the coarse "needs an OS" gate.
 It adds the control socket, the state file, process helpers, the log sink, and the multihop transport.
 The `mdns` and `dht` features each select one address-lookup mechanism, and each implies `host`.
+The `pkarr` lookup has no feature: it uses only HTTPS, so it also runs in a browser.
 The `blob` feature adds a side channel for oversize payloads (section 7.3).
 A build with `--no-default-features` leaves the portable engine that runs in a browser.
 
@@ -252,7 +253,7 @@ The split keeps bootstrap alive after the creator leaves: any member can take th
 | | Public mesh | Private (loopback) mesh |
 |---|---|---|
 | Port | Ephemeral | A deterministic port ladder from the seed |
-| Discovery | pkarr, by endpoint id, last-writer-wins | None. The ladder is the address. |
+| Discovery | The relay rung, and the `dht` and `pkarr` lookups by endpoint id (last-writer-wins) | None. The ladder is the address. |
 | Co-hosts | Every member, permanently | Exactly one beacon |
 
 Two members can claim the beacon role inside each other's probe window.
@@ -444,9 +445,16 @@ The policy is in the id so that every member enforces the same rule; one relayin
 An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
-`lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
+`lookup` (`--lookup mdns,dht,relay,pkarr` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
 `transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
+`pkarr_urls` (`--pkarr-url`, `pkarrUrls`) says which pkarr relays, and needs `pkarr` among the lookups.
+Each member publishes its record to every pkarr relay in the list and resolves from any of them.
+The list must have all of the relays, because the public relays form groups that do not share records: n0's server is one group, and the Pubky relays, which share through the mainline DHT, are another.
+The pkarr record holds the home relay of the member and no IP address, the same as the DHT record.
+Each pkarr request still shows the member's IP address and the ids it publishes and resolves to the operator of that relay.
+A mesh that must not show this to n0 or Pubky names its own relays in `pkarr_urls`.
+`pkarr` needs `relay` among the lookups, because a record without a home relay holds no address.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
 A config that breaks either is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).

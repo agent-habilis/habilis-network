@@ -27,8 +27,13 @@ fn payload(len: usize) -> Vec<u8> {
 
 /// A producer on `relay`, with `--robot` notes on stderr, sent line by line.
 fn producer(relay: &str) -> (Child, mpsc::Receiver<serde_json::Value>) {
+    producer_with(&["--lookup", "relay", "--relay-url", relay])
+}
+
+fn producer_with(args: &[&str]) -> (Child, mpsc::Receiver<serde_json::Value>) {
     let mut child = Command::new(BINARY)
-        .args(["--lookup", "relay", "--relay-url", relay, "--robot"])
+        .args(args)
+        .arg("--robot")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -168,4 +173,41 @@ async fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
     })
     .await
     .expect("the test body");
+}
+
+/// `--pkarr-url` reaches the engine: the producer publishes its record to the
+/// pkarr relay the flag names, and to no default one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_producer_publishes_to_the_pkarr_relay_it_is_given() {
+    let (relay, _relay) = habilis_network::net::test_relay::spawn_plain().await.expect("relay");
+    let (pkarr_url, pkarr) = habilis_network::net::test_pkarr::spawn_plain()
+        .await
+        .expect("pkarr relay");
+    let (relay, pkarr_url) = (relay.to_string(), pkarr_url.to_string());
+    let (mut producer, notes) = tokio::task::spawn_blocking(move || {
+        let (producer, notes) = producer_with(&[
+            "--lookup",
+            "relay,pkarr",
+            "--relay-url",
+            &relay,
+            "--pkarr-url",
+            &pkarr_url,
+        ]);
+        note(&notes, "ready", "");
+        (producer, notes)
+    })
+    .await
+    .expect("producer thread");
+
+    let deadline = Instant::now() + BUDGET;
+    while pkarr.records() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let _ = producer.kill();
+    let _ = producer.wait();
+    drop(notes);
+    assert!(
+        pkarr.records() > 0,
+        "the producer published nothing to its pkarr relay"
+    );
 }

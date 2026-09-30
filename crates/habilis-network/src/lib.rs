@@ -60,11 +60,11 @@ pub mod protocol {
         CorrId, DEFAULT_DIRECTORY, DirectorySelection, IdError, Identity, InviteTicket, JoinTarget,
         JoinTargetError, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError,
         MeshName, Message, MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError,
-        OptFlag, Password, PresenceSubtype, RelayChoice, RelayLadder, RelayLadderError,
-        RelaySelection, Shard, ShardGroup, TicketAuth, TopicId, Transport, TransportPolicy,
-        base58check, crypto, ct_eq, directory, encode_pubkey, identity, invite, iroh_base, mesh,
-        message, nickname, peer_addr, reassembly, resolve_lookups, resolver, seal, seal_to_body,
-        sole_addressee, validate_advertise,
+        OptFlag, Password, PkarrChoice, PresenceSubtype, RelayChoice, RelayLadder,
+        RelayLadderError, RelaySelection, Shard, ShardGroup, TicketAuth, TopicId, Transport,
+        TransportPolicy, Url, base58check, crypto, ct_eq, directory, encode_pubkey, identity,
+        invite, iroh_base, mesh, message, nickname, parse_pkarr_urls, peer_addr, reassembly,
+        resolve_lookups, resolver, seal, seal_to_body, sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
     pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};

@@ -31,7 +31,8 @@ pub struct StreamNode {
 #[wasm_bindgen]
 impl StreamNode {
     /// Stand up a node with `opts_json`, a JSON encoding of
-    /// `habilis_network_stream::StreamOpts` (`lookup`, `transport`, `relayUrls`).
+    /// `habilis_network_stream::StreamOpts` (`lookup`, `transport`, `relayUrls`,
+    /// `pkarrUrls`).
     /// A browser node needs a lookup (`relay`).
     ///
     /// # Errors

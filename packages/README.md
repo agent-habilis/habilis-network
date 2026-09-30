@@ -48,7 +48,9 @@ cannot open a direct path stays unlinked for data. `transport: ['udp',
 'webrtc', 'relay']` lets payload fall back to the relay, and `['webrtc']`
 keeps every member on WebRTC data channels. The list is part of the mesh id,
 so joiners inherit whatever the creator chose. `relayUrls` says *which* relay
-and nothing about its role.
+and nothing about its role. `lookup: ['pkarr', 'relay']` also lets a peer find
+another from its endpoint id alone, through public pkarr relays over HTTPS;
+`pkarrUrls` replaces the default list.
 
 ## Byte streams
 

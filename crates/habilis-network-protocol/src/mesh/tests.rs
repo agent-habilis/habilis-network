@@ -1,4 +1,6 @@
-use super::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy};
+use super::{
+    LookupOpts, Mesh, MeshConfig, MeshName, PkarrChoice, RelayChoice, SEED_LEN, TransportPolicy,
+};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
 
 fn dummy_seed() -> [u8; SEED_LEN] {
@@ -18,6 +20,7 @@ fn custom_config() -> MeshConfig {
                 "https://a.example".parse().unwrap(),
                 "https://b.example".parse().unwrap(),
             ]),
+            pkarr: PkarrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
@@ -71,6 +74,7 @@ fn ladder_config(count: usize) -> MeshConfig {
             mdns: false,
             dht: false,
             relay_lookup: RelayChoice::Custom(ladder),
+            pkarr: PkarrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
@@ -105,6 +109,7 @@ fn validate_rejects_a_relay_url_over_the_wire_ceiling() {
             relay_lookup: RelayChoice::Custom(vec![
                 format!("https://{host}.example").parse().unwrap(),
             ]),
+            pkarr: PkarrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
