@@ -1,10 +1,10 @@
 # Changelog
 
-All notable changes to the fofoca workspace. The format follows
+All notable changes to the habilis-network workspace. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); all member crates
 share one version and move together. A release is a git tag — nothing is
 published to a registry; pin it with
-`fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }`.
+`habilis-network = { git = "https://github.com/agent-habilis/habilis-network", tag = "v0.6.0" }`.
 
 ## [Unreleased]
 
@@ -22,7 +22,7 @@ published to a registry; pin it with
   at once. A path watcher races the pair again when UDP is lost, and detaches
   the session when UDP returns; while a pair rides WebRTC it nudges iroh each
   alive tick to try the UDP punch again.
-- `fofoca-stream`: 1-1 byte streams addressed by a hash. A producer creates a
+- `habilis-network-stream`: 1-1 byte streams addressed by a hash. A producer creates a
   stream and hands its hash to one consumer. The bytes ride a direct QUIC path
   or a WebRTC data channel by default, the relay only when the stream's
   `transport` allows it, never gossip, and the consumer paces the producer.
@@ -31,30 +31,30 @@ published to a registry; pin it with
   `close_or_abandon` ends the stream if a consumer has claimed it and
   abandons it otherwise. It builds for wasm32, so a tab can produce as well
   as read.
-- The `fofoca-stream` binary (`crates/fofoca-stream-cli`): stdin to one
+- The `habilis-network-stream` binary (`crates/habilis-network-stream-cli`): stdin to one
   reader, or a hash's stream to stdout. It prints the hash, and with
   `--web-url` the page URL with the hash in its fragment.
-- `packages/fofoca-stream-web`: the stream's web page, a static build. `#<hash>`
+- `packages/habilis-network-stream-web`: the stream's web page, a static build. `#<hash>`
   reads a stream; no fragment produces one. It registers `stream_write`,
   `stream_close`, `stream_read` and `stream_status` as WebMCP tools, with the
   same functions on `window.stream`.
-- Byte streams in the C ABI, ten calls: `fofoca_streams_bind`,
-  `fofoca_streams_bind_for`, `fofoca_streams_close`, `fofoca_stream_create`,
-  `fofoca_stream_hash`, `fofoca_stream_write`, `fofoca_stream_close`,
-  `fofoca_stream_open`, `fofoca_stream_read` and `fofoca_reader_close`, with a
-  32-byte `fofoca_stream_opts` (`encodeStreamOpts` in `packages/fofoca-ffi`).
-- `fofoca::membership`: the gossip mesh embedding, moved into the engine from
-  `fofoca-pipe`. `join` returns a `Membership` that sends and receives whole
+- Byte streams in the C ABI, ten calls: `habilis_network_streams_bind`,
+  `habilis_network_streams_bind_for`, `habilis_network_streams_close`, `habilis_network_stream_create`,
+  `habilis_network_stream_hash`, `habilis_network_stream_write`, `habilis_network_stream_close`,
+  `habilis_network_stream_open`, `habilis_network_stream_read` and `habilis_network_reader_close`, with a
+  32-byte `habilis_network_stream_opts` (`encodeStreamOpts` in `packages/habilis-network-ffi`).
+- `habilis_network::membership`: the gossip mesh embedding, moved into the engine from
+  `habilis-network-pipe`. `join` returns a `Membership` that sends and receives whole
   text messages (`msg`). `MAX_MSG` (1408 bytes) is the worst-case bound;
   `msg_fits` says whether a given text fits.
-- `fofoca-wasm`: the browser peer, with `fofoca::membership` and the byte
-  streams as wasm-bindgen classes, and `packages/fofoca-wasm` as its JS
+- `habilis-network-wasm`: the browser peer, with `habilis_network::membership` and the byte
+  streams as wasm-bindgen classes, and `packages/habilis-network-wasm` as its JS
   backend (`join` for a mesh, `bindStreams` / `bindStreamsFor` for streams).
   `cargo task build-wasm` builds it.
 - A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) on every
   create surface. The ladder is mixed into a derived topic id, so every
   member must pass the same list.
-- `fofoca_protocol::Lookup` and `Transport`, the entries of the `lookup` and
+- `habilis_network_protocol::Lookup` and `Transport`, the entries of the `lookup` and
   `transport` lists every create surface takes, with `LookupSet::from_lookups`,
   `TransportPolicy::from_transports` and `MeshConfig::resolve` behind them, so
   a consumer parses the two lists and applies the cross-rules with no code of
@@ -67,30 +67,39 @@ published to a registry; pin it with
 
 ### Changed
 
-- **Breaking (C ABI):** the mesh calls are `fofoca_mesh_*`, and a mesh sends
-  and receives whole text messages with `fofoca_msg_send` and
-  `fofoca_msg_recv` into an 80-byte `fofoca_msg`. A message too big for the
-  receive buffer stays queued, and the call returns -2. `fofoca_open`,
-  `fofoca_send`, `fofoca_send_eof`, `fofoca_recv`, `fofoca_frame` and
-  `fofoca_max_chunk` are gone (`fofoca_max_msg` replaces the last). mallorca
-  must rebuild against the new `include/fofoca.h`.
-- **Breaking:** the browser peer, `fofoca-api` and the chats send `msg`
-  messages over `fofoca::membership` instead of `fofoca-pipe`'s numbered
+- **Breaking:** the project is renamed from fofoca to habilis-network, and it
+  moves to `github.com/agent-habilis/habilis-network` (https://habilis.network).
+  Every crate, package, C symbol (`habilis_network_*`), C type
+  (`HabilisNetwork*`), header (`habilis_network.h`) and environment variable
+  (`HABILIS_NETWORK_*`) takes the new name.
+- **Breaking (wire):** the ALPNs (`habilis-network/stream/1`), the endpoint-proof
+  domain and the chunk-store root context take the new name. A habilis-network
+  peer does not interoperate with a fofoca peer, and chunk roots differ from
+  those of a fofoca store.
+- **Breaking (C ABI):** the mesh calls are `habilis_network_mesh_*`, and a mesh sends
+  and receives whole text messages with `habilis_network_msg_send` and
+  `habilis_network_msg_recv` into an 80-byte `habilis_network_msg`. A message too big for the
+  receive buffer stays queued, and the call returns -2. `habilis_network_open`,
+  `habilis_network_send`, `habilis_network_send_eof`, `habilis_network_recv`, `habilis_network_frame` and
+  `habilis_network_max_chunk` are gone (`habilis_network_max_msg` replaces the last). mallorca
+  must rebuild against the new `include/habilis_network.h`.
+- **Breaking:** the browser peer, `habilis-network-api` and the chats send `msg`
+  messages over `habilis_network::membership` instead of `habilis-network-pipe`'s numbered
   byte frames. A peer on the old wire cannot read them.
-- **Breaking (TS):** `fofoca-api`'s `Mesh` sends and receives whole text
+- **Breaking (TS):** `habilis-network-api`'s `Mesh` sends and receives whole text
   messages. `send` takes a `string` only (was `string | Uint8Array`),
   `sendEof` is gone, and `maxChunk` is `maxMsg`. A `Message` is
   `{ from, text, directed }`: `bytes` and `eof` are gone, and `text` is
   always set. The backend seam's `BackendFrame` is `BackendMsg`, and
   `BackendSink.frame` is `BackendSink.msg`.
-- **Breaking (C ABI):** `fofoca_opts` is now 64 bytes: the five discovery
+- **Breaking (C ABI):** `habilis_network_opts` is now 64 bytes: the five discovery
   ints (`is_public`, `mdns`, `dht`, `relay_lookup`, `relay_transport`) are
   replaced by two comma-list strings, `lookup` and `transport`, ahead of
   `relay_urls`. A consumer
   compiled against the old header keeps passing the old struct and the
   engine reads it wrong — there is no version field to catch that, so relink
-  against the new `include/fofoca.h`. The layout is pinned by a compile-time
-  assert in `fofoca-ffi` and by `packages/fofoca-ffi`'s encoder test.
+  against the new `include/habilis_network.h`. The layout is pinned by a compile-time
+  assert in `habilis-network-ffi` and by `packages/habilis-network-ffi`'s encoder test.
 - **Breaking:** every create surface names three mesh-wide choices apart,
   one concept each. `lookup` (`lookup: ['mdns', 'dht', 'relay']`, any
   subset) is how members find each other. `transport` (`['udp', 'webrtc',
@@ -106,7 +115,7 @@ published to a registry; pin it with
   mesh id decides every path: there are no per-node path switches, and a
   browser refuses a mesh whose list has neither `'webrtc'` nor `'relay'`.
   In the wasm JSON every old field is an error,
-  not a silent no-op. `fofoca_protocol::resolve_lookups` lost its `public`
+  not a silent no-op. `habilis_network_protocol::resolve_lookups` lost its `public`
   parameter. `TransportOpts.relay` keeps its name — it is per-node
   capability, not the mesh policy.
 - `MeshConfig::validate` now also rejects a custom relay ladder that would
@@ -158,13 +167,13 @@ published to a registry; pin it with
 
 ### Removed
 
-- **Breaking:** `fofoca-pipe`, the byte pipe over gossip. Byte streams are
-  `fofoca-stream`, over a direct path by default; the mesh embedding is
-  `fofoca::membership`. The v0.6.0 tag keeps the crate.
-- **Breaking:** the `fofoca-blobs` crate, and with it the workspace's only
-  OPFS store backend. `fofoca-chunks` is the store: chunks prove content,
+- **Breaking:** `habilis-network-pipe`, the byte pipe over gossip. Byte streams are
+  `habilis-network-stream`, over a direct path by default; the mesh embedding is
+  `habilis_network::membership`. The v0.6.0 tag keeps the crate.
+- **Breaking:** the `habilis-network-blobs` crate, and with it the workspace's only
+  OPFS store backend. `habilis-network-chunks` is the store: chunks prove content,
   where blobs' bao outboards proved placement. No known consumer imported
-  `fofoca_blobs` at removal time; the v0.6.0 tag keeps the crate.
+  `habilis_network_blobs` at removal time; the v0.6.0 tag keeps the crate.
 
 ## [0.6.0] - 2026-08-30
 
@@ -175,21 +184,21 @@ The first tagged release. Everything since the extraction from mallorca.
 - A WebRTC transport for iroh: QUIC datagrams over one unreliable data
   channel, with a native (str0m) and a browser (`RTCPeerConnection`)
   backend, signalled over the iroh relay with no signaling server
-  (`fofoca-iroh-webrtc-transport`).
+  (`habilis-network-iroh-webrtc-transport`).
 - A multihop transport: source-routed QUIC relaying through peers
-  (`fofoca-iroh-multihop-transport`).
+  (`habilis-network-iroh-multihop-transport`).
 - The engine runs in the browser: `--no-default-features` leaves a portable
   core for wasm32, guarded by CI.
-- `fofoca-blobs`: a BLAKE3/bao store of verification metadata for bytes the
+- `habilis-network-blobs`: a BLAKE3/bao store of verification metadata for bytes the
   caller already owns, with fs, memory, OPFS, and IndexedDB backends.
-- `fofoca-chunks`: the content-addressed chunk store, moved in from
-  agent-share. Chunks prove content; `fofoca-blobs` outboards prove
-  placement. It is meant to replace `fofoca-blobs` eventually.
+- `habilis-network-chunks`: the content-addressed chunk store, moved in from
+  agent-share. Chunks prove content; `habilis-network-blobs` outboards prove
+  placement. It is meant to replace `habilis-network-blobs` eventually.
 - The `blob` feature: a point-to-point side channel for oversize payloads,
   with bearer-secret tickets.
-- A C ABI (`fofoca-ffi`) and one JS API over it for Bun, Deno, and Node
-  (`packages/fofoca-api`, `fofoca-pipe`).
-- `fofoca-netplay`: GGPO-style rollback netcode for peer-to-peer games, and
+- A C ABI (`habilis-network-ffi`) and one JS API over it for Bun, Deno, and Node
+  (`packages/habilis-network-api`, `habilis-network-pipe`).
+- `habilis-network-netplay`: GGPO-style rollback netcode for peer-to-peer games, and
   the light-cycles example that proves it in CI.
 - The relay transport policy lives in the mesh id: a mesh can declare its
   relay lookup-only, and members prove a direct path before payload flows.
@@ -226,8 +235,8 @@ The first tagged release. Everything since the extraction from mallorca.
 ## [0.5.0] - 2026-07-31
 
 The state of the engine at its extraction from the mallorca repo, as
-`feat: extract fofoca from the mallorca repo` (86bd79d). Provenance and the
+`feat: extract habilis-network from the mallorca repo` (86bd79d). Provenance and the
 recorded fork changes live in [FORKED.md](FORKED.md).
 
-[0.6.0]: https://github.com/fofoca-network/fofoca/compare/86bd79d...v0.6.0
-[0.5.0]: https://github.com/fofoca-network/fofoca/commit/86bd79d
+[0.6.0]: https://github.com/agent-habilis/habilis-network/compare/86bd79d...v0.6.0
+[0.5.0]: https://github.com/agent-habilis/habilis-network/commit/86bd79d

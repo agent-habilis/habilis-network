@@ -10,15 +10,15 @@ use crate::util::output;
 
 const TARGET: &str = "wasm32-unknown-unknown";
 
-/// `cargo task build-wasm` — build fofoca-wasm and emit its JS glue.
+/// `cargo task build-wasm` — build habilis-network-wasm and emit its JS glue.
 ///
 /// The one wasm build that ships to a page rather than to a test harness:
-/// `packages/fofoca-wasm` (and the mesh e2e suite's harness) load the glue
-/// this drops under `packages/fofoca-wasm/wasm/`.
+/// `packages/habilis-network-wasm` (and the mesh e2e suite's harness) load the glue
+/// this drops under `packages/habilis-network-wasm/wasm/`.
 pub(crate) fn build_peer(sh: &Shell) -> TaskOutcome {
     ensure_target(sh)?;
     crate::e2e::build::build_browser_peer()?;
-    output::status("Built", "fofoca-wasm");
+    output::status("Built", "habilis-network-wasm");
     Ok(())
 }
 

@@ -1,8 +1,8 @@
 //! `cargo task e2e --suite mesh` — the native↔browser matrix.
 //!
 //! One local plain-HTTP relay both sides can reach, one in-process native
-//! peer (`fofoca::membership`), one real browser on the harness page
-//! (`packages/fofoca-wasm/harness`), driven cell by cell:
+//! peer (`habilis_network::membership`), one real browser on the harness page
+//! (`packages/habilis-network-wasm/harness`), driven cell by cell:
 //!
 //! - **policy** — the mesh's `relay_transport`, on or off;
 //! - **native transports** — everything / WebRTC only / relay only, to force
@@ -27,8 +27,8 @@ use crate::util::page::{rand_token, wait_ready};
 use crate::util::webdriver;
 use crate::util::{output, repo_root, wait_for};
 
-use fofoca::membership;
-use fofoca::protocol::{Lookup, Transport};
+use habilis_network::membership;
+use habilis_network::protocol::{Lookup, Transport};
 
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
@@ -175,7 +175,7 @@ fn init_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "fofoca=info,fofoca::lifecycle=debug".into()),
+                .unwrap_or_else(|_| "habilis_network=info,habilis_network::lifecycle=debug".into()),
         )
         .with_ansi(false)
         .with_writer(Make)
@@ -446,7 +446,7 @@ enum NativeSelector<'a> {
 
 fn page_url(base: &str, cell: &Cell, relay_url: &str, selector: &str) -> String {
     format!(
-        "{base}/?{selector}&nick=browser&relay={}&transport={}&log=fofoca=debug,iroh_gossip=debug",
+        "{base}/?{selector}&nick=browser&relay={}&transport={}&log=habilis_network=debug,iroh_gossip=debug",
         urlencode(relay_url),
         cell.transports()
             .into_iter()
@@ -476,7 +476,7 @@ fn refused_by_the_tab(
         (!failed.is_empty()).then_some(failed)
     })
     .ok_or_else(|| CellFailure("the tab opened a mesh it has no path in".to_owned()))?;
-    if !failed.contains(fofoca::runtime::BROWSER_HAS_NO_PATH) {
+    if !failed.contains(habilis_network::runtime::BROWSER_HAS_NO_PATH) {
         return Err(CellFailure(format!(
             "the tab failed for another reason: {failed}"
         )));
@@ -636,11 +636,11 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // the matrix measures the mesh's steady state, and same-id split repair
     // has the engine's own tests. In-process only — the browser side never
     // claims under the stagger, so its defaults stay untouched.
-    fofoca::util::tuning::init(fofoca::util::tuning::Tuning {
+    habilis_network::util::tuning::init(habilis_network::util::tuning::Tuning {
         rival_recheck_first_secs: 3600,
         rival_recheck_secs: 3600,
         rival_recheck_meshed_secs: 3600,
-        ..fofoca::util::tuning::Tuning::DEFAULTS
+        ..habilis_network::util::tuning::Tuning::DEFAULTS
     });
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -650,10 +650,10 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // One relay and one harness server for the whole sweep; topics are
     // random, so cells never meet each other.
     let (relay_url, _relay_server) = runtime
-        .block_on(fofoca::net::test_relay::spawn_plain())
+        .block_on(habilis_network::net::test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let harness = BunServer::serve(
-        &repo_root().join("packages/fofoca-wasm"),
+        &repo_root().join("packages/habilis-network-wasm"),
         "harness/serve.ts",
         "the harness",
     )

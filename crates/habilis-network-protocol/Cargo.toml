@@ -1,0 +1,76 @@
+[package]
+name = "habilis-network-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "wire vocabulary for habilis-network: messages, mesh ids, nicknames, seed-derived identity, sealing, invites"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[features]
+default = ["host"]
+# On by default. The parts that need an operating system. Turning it off leaves
+# the portable half, which is what a browser needs and all it can have:
+# `libc`, unix sockets, signals, processes and the filesystem have no wasm32
+# equivalent. A wasm consumer builds the whole graph `--no-default-features`.
+host = ["habilis-network-util/host"]
+# Exposes the `Message` builders and `From<&str>` conveniences that are
+# otherwise `#[cfg(test)]`, so other crates' test suites can construct wire
+# values. Enabled through dev-dependencies, never in a release build.
+test-fixtures = []
+# Crafted-message constructors the engine's adversarial suite injects with.
+adversarial = ["test-fixtures"]
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_protocol"
+path = "src/lib.rs"
+
+# No iroh, no iroh-gossip, no tokio. The key and address types come from
+# `iroh-base`, which is the dependency-light half of iroh (serde, postcard,
+# url — no QUIC, no TLS, no DNS). The gossip topic is a local 32-byte newtype
+# (`topic::TopicId`) precisely so this crate need not name iroh-gossip; the
+# engine converts at the gossip boundary.
+[dependencies]
+habilis-network-util = { path = "../habilis-network-util", default-features = false }
+# `relay` is an iroh-base default that the workspace entry turns off for the
+# transports' sake; the wire vocabulary needs it for `RelayUrl`.
+iroh-base = { workspace = true, features = ["relay"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+bs58.workspace = true
+sha2.workspace = true
+rand.workspace = true
+# Argon2id password stretching for `--password`. default-features off: no
+# `password-hash` string format — only the raw `hash_password_into` KDF.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+# Sealed-box for directed frames: ephemeral X25519 ECDH → ChaCha20-Poly1305.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+zeroize = "1"
+
+[dev-dependencies]
+proptest.workspace = true
+insta.workspace = true
+
+# The browser needs every generation of `getrandom` in the graph told which
+# backend to use — they arrive through `rand`, `uuid` and `iroh-base`, and each
+# major picks its backend differently. Scoped to wasm32 so a host build never
+# sees them.
+#
+# The feature alone is NOT enough for 0.3+; it also wants the
+# `getrandom_backend` rustflag, which lives in `.cargo/config.toml`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# `uuid`'s v4 generator needs its own randomness source named on wasm32.
+uuid = { version = "1", features = ["v4", "js"] }

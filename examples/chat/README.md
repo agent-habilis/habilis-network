@@ -6,9 +6,9 @@ program a person can run, and the same program the e2e suite drives.
 
 | | |
 |---|---|
-| [`rust/`](rust) | The native half: a terminal chat on `fofoca::membership`, the `chat` package. |
-| [`web/`](web) | The browser half: `fofoca-wasm` behind a chat page. |
-| [`bun-ffi/`](bun-ffi) | A terminal chat in TypeScript: Bun on `packages/fofoca-ffi`, which `dlopen`s the C ABI. |
+| [`rust/`](rust) | The native half: a terminal chat on `habilis_network::membership`, the `chat` package. |
+| [`web/`](web) | The browser half: `habilis-network-wasm` behind a chat page. |
+| [`bun-ffi/`](bun-ffi) | A terminal chat in TypeScript: Bun on `packages/habilis-network-ffi`, which `dlopen`s the C ABI. |
 
 There is no `bun-wasm/` variant: the wasm engine is the *web* implementation,
 and outside a browser its direct lane has no WebRTC to stand on.
@@ -26,7 +26,7 @@ cargo run -p chat -- --topic room --nick terminal
 A third peer from Bun, on the C ABI:
 
 ```sh
-cargo build --release -p fofoca-ffi                # once
+cargo build --release -p habilis-network-ffi                # once
 cd examples/chat/bun-ffi && bun run start --topic room --nick bun
 ```
 

@@ -1,15 +1,16 @@
 {
-  "name": "fofoca",
+  "name": "habilis-network",
   "version": "0.0.0",
   "private": true,
+  "homepage": "https://habilis.network",
   "type": "module",
   "workspaces": [
     "packages/*",
     "examples/chat/*"
   ],
   "scripts": {
-    "typecheck:node": "tsc --noEmit -p packages/fofoca-api && tsc --noEmit -p packages/fofoca-ffi && tsc --noEmit -p examples/chat/bun-ffi",
-    "typecheck:web": "tsc --noEmit -p packages/fofoca-wasm && tsc --noEmit -p packages/fofoca-stream-web && tsc --noEmit -p examples/chat/web",
+    "typecheck:node": "tsc --noEmit -p packages/habilis-network-api && tsc --noEmit -p packages/habilis-network-ffi && tsc --noEmit -p examples/chat/bun-ffi",
+    "typecheck:web": "tsc --noEmit -p packages/habilis-network-wasm && tsc --noEmit -p packages/habilis-network-stream-web && tsc --noEmit -p examples/chat/web",
     "typecheck": "bun run typecheck:node && bun run typecheck:web",
     "test": "bun test packages"
   },

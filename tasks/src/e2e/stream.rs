@@ -1,5 +1,5 @@
 //! `cargo task e2e --suite stream` — a stream end to end: the real
-//! `fofoca-stream` binary and the real stream web page, each as producer and
+//! `habilis-network-stream` binary and the real stream web page, each as producer and
 //! each as reader, over a local relay.
 //!
 //! The chat suite proves lines both ways; this proves *bytes in order*: a
@@ -82,7 +82,7 @@ impl Cli {
             .arg("--robot")
             .env(
                 "RUST_LOG",
-                std::env::var("RUST_LOG").unwrap_or_else(|_| "fofoca=info".to_owned()),
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "habilis_network=info".to_owned()),
             )
             .stdin(if matches!(input, Input::Nothing) {
                 Stdio::null()
@@ -92,30 +92,30 @@ impl Cli {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| Skip(format!("could not start fofoca-stream: {error}")))?;
+            .map_err(|error| Skip(format!("could not start habilis-network-stream: {error}")))?;
         let pipe = child.stdin.take();
         let stdin = match input {
             Input::Nothing => None,
             Input::Bytes(bytes) => {
-                let mut pipe =
-                    pipe.ok_or_else(|| Skip("fofoca-stream has no stdin pipe".to_owned()))?;
+                let mut pipe = pipe
+                    .ok_or_else(|| Skip("habilis-network-stream has no stdin pipe".to_owned()))?;
                 std::thread::spawn(move || {
                     let _ = pipe.write_all(&bytes);
                 });
                 None
             }
-            Input::Open => {
-                Some(pipe.ok_or_else(|| Skip("fofoca-stream has no stdin pipe".to_owned()))?)
-            }
+            Input::Open => Some(
+                pipe.ok_or_else(|| Skip("habilis-network-stream has no stdin pipe".to_owned()))?,
+            ),
         };
         let mut stdout = child
             .stdout
             .take()
-            .ok_or_else(|| Skip("fofoca-stream has no stdout pipe".to_owned()))?;
+            .ok_or_else(|| Skip("habilis-network-stream has no stdout pipe".to_owned()))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| Skip("fofoca-stream has no stderr pipe".to_owned()))?;
+            .ok_or_else(|| Skip("habilis-network-stream has no stderr pipe".to_owned()))?;
         let (bytes_tx, bytes) = mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = [0_u8; 4096];
@@ -150,7 +150,7 @@ impl Cli {
         stdin
             .write_all(bytes)
             .and_then(|()| stdin.flush())
-            .map_err(|error| format!("writing to fofoca-stream: {error}"))
+            .map_err(|error| format!("writing to habilis-network-stream: {error}"))
     }
 
     /// End an [`Input::Open`] stdin: the producer's EOF.
@@ -289,24 +289,24 @@ fn payload() -> String {
 pub(super) fn run(args: &Args) -> TaskOutcome {
     if args.list {
         output::detail(
-            "two scenarios: `fofoca-stream` \u{2192} the page, the page \u{2192} `fofoca-stream`",
+            "two scenarios: `habilis-network-stream` \u{2192} the page, the page \u{2192} `habilis-network-stream`",
         );
         return Ok(());
     }
     build::ensure_bun("the stream suite serves its page with bun")?;
     build::build_browser_peer()?;
-    output::status("Building", "fofoca-stream");
-    let cli_binary = build::build_binary("fofoca-stream-cli", "fofoca-stream")?;
+    output::status("Building", "habilis-network-stream");
+    let cli_binary = build::build_binary("habilis-network-stream-cli", "habilis-network-stream")?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
     let (relay_url, _relay_server) = runtime
-        .block_on(fofoca::net::test_relay::spawn_plain())
+        .block_on(habilis_network::net::test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let server = BunServer::serve(
-        &repo_root().join("packages/fofoca-stream-web"),
+        &repo_root().join("packages/habilis-network-stream-web"),
         "serve.ts",
         "the stream page",
     )
@@ -317,7 +317,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     );
     let web_url = format!("{}/", server.url);
 
-    output::status("Running", "fofoca-stream \u{2192} the stream page");
+    output::status("Running", "habilis-network-stream \u{2192} the stream page");
     cli_to_page(
         &cli_binary,
         relay_url.as_str(),
@@ -326,10 +326,10 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     )?;
     output::status(
         "ok",
-        "fofoca-stream \u{2192} the stream page  byte-exact, ended, exited clean",
+        "habilis-network-stream \u{2192} the stream page  byte-exact, ended, exited clean",
     );
 
-    output::status("Running", "the stream page \u{2192} fofoca-stream");
+    output::status("Running", "the stream page \u{2192} habilis-network-stream");
     page_to_cli(
         &cli_binary,
         relay_url.as_str(),
@@ -338,7 +338,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     )?;
     output::status(
         "ok",
-        "the stream page \u{2192} fofoca-stream  byte-exact, ended, exited clean",
+        "the stream page \u{2192} habilis-network-stream  byte-exact, ended, exited clean",
     );
 
     output::status("Running", "a growing input, as `tail -f` feeds it");
@@ -410,7 +410,7 @@ fn cli_to_page(
 
     // The fragment stays exactly as printed; the log filter rides the query.
     let page = match open_page(
-        &format!("{web_url}?log=fofoca=info#{hash}"),
+        &format!("{web_url}?log=habilis_network=info#{hash}"),
         "reader",
         browser,
     ) {
@@ -489,7 +489,10 @@ fn page_to_cli(
     browser: &str,
 ) -> Result<(), Failure> {
     let page = open_page(
-        &format!("{web_url}?relay={}&log=fofoca=info", urlencode(relay_url)),
+        &format!(
+            "{web_url}?relay={}&log=habilis_network=info",
+            urlencode(relay_url)
+        ),
         "producer",
         browser,
     )?;
@@ -582,7 +585,7 @@ fn tail_to_page(
         .unwrap_or_default()
         .to_owned();
     let page = match open_page(
-        &format!("{web_url}?log=fofoca=info#{hash}"),
+        &format!("{web_url}?log=habilis_network=info#{hash}"),
         "reader",
         browser,
     ) {
@@ -647,7 +650,10 @@ fn unread_close(
     browser: &str,
 ) -> Result<(), Failure> {
     let page = open_page(
-        &format!("{web_url}?relay={}&log=fofoca=info", urlencode(relay_url)),
+        &format!(
+            "{web_url}?relay={}&log=habilis_network=info",
+            urlencode(relay_url)
+        ),
         "producer",
         browser,
     )?;

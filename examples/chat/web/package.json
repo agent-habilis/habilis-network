@@ -1,14 +1,14 @@
 {
-  "name": "fofoca-chat-web",
+  "name": "habilis-network-chat-web",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "The chat example's browser half: fofoca-wasm behind a small chat page",
+  "description": "The chat example's browser half: habilis-network-wasm behind a small chat page",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "serve": "bun run serve.ts"
   },
   "dependencies": {
-    "fofoca-wasm": "workspace:*"
+    "habilis-network-wasm": "workspace:*"
   }
 }

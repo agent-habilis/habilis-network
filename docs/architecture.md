@@ -1,12 +1,12 @@
-# fofoca — Architecture
+# habilis-network — Architecture
 
-This document describes the architecture of the fofoca workspace at version 0.6.0.
+This document describes the architecture of the habilis-network workspace at version 0.6.0.
 The wire protocol described here is message version `12.0`.
 The style follows ASD-STE100 Simplified Technical English.
 
 ## Abstract
 
-fofoca is a serverless gossip-network engine written in Rust.
+habilis-network is a serverless gossip-network engine written in Rust.
 Peers find each other through mDNS, the mainline DHT, or a relay.
 They form a partial mesh over iroh QUIC links.
 Across this mesh they exchange signed messages and a shared CRDT document.
@@ -20,7 +20,7 @@ The same engine runs on a host and in a browser.
 
 Independent processes on different machines need a shared message channel.
 A central server is a cost, a point of failure, and an owner.
-fofoca removes the server.
+habilis-network removes the server.
 Each member keeps the network alive.
 The network survives the departure of its creator, machine sleep, network switches, and member churn.
 
@@ -34,20 +34,20 @@ Three unrelated consumers enforce this claim:
    The `gossip-*` skills of Claude Code are thin shells over this CLI.
    The CLI embeds the engine and drives it over an IPC socket.
 2. **agent-share** — file sharing over the same engine.
-3. **mallorca** — an Odin application that links `fofoca-ffi` as a static library.
+3. **mallorca** — an Odin application that links `habilis-network-ffi` as a static library.
 
 ```mermaid
 graph LR
     subgraph "Agent machine"
         SKILLS["Claude Code skills"] --> CLI["agent-gossip CLI"]
-        CLI -->|"IPC socket"| E1["fofoca engine"]
+        CLI -->|"IPC socket"| E1["habilis-network engine"]
     end
     subgraph "Desktop app"
-        APP["mallorca (Odin)"] --> FFI["fofoca-ffi (C ABI)"]
-        FFI --> E2["fofoca engine"]
+        APP["mallorca (Odin)"] --> FFI["habilis-network-ffi (C ABI)"]
+        FFI --> E2["habilis-network engine"]
     end
     subgraph "Browser tab"
-        WEBAPP["web app"] --> E3["fofoca engine (wasm)"]
+        WEBAPP["web app"] --> E3["habilis-network engine (wasm)"]
     end
     E1 <-->|"one mesh"| E2
     E2 <--> E3
@@ -77,7 +77,7 @@ The user-facing word in the CLI is **gossip**, and that word never reaches the w
    It is the same peer that a CLI runs, not a reduced stand-in.
 5. **One crate names iroh.** Fork pins ride dependency edges, and no `[patch.crates-io]` table exists.
    A consumer restates no pin.
-6. **No environment-variable configuration.** Every knob is a `const` in `fofoca-util`.
+6. **No environment-variable configuration.** Every knob is a `const` in `habilis-network-util`.
    Only `RUST_LOG` and `NO_COLOR` come from the environment.
 
 ## 3. Workspace structure
@@ -88,50 +88,50 @@ Dependencies point strictly downward.
 
 ```mermaid
 graph TD
-    ffi["fofoca-ffi<br>C ABI shim"] --> stream["fofoca-stream<br>1-1 byte streams"]
-    wasm["fofoca-wasm<br>browser peer"] --> stream
-    cli["fofoca-stream-cli<br>the binary"] --> stream
+    ffi["habilis-network-ffi<br>C ABI shim"] --> stream["habilis-network-stream<br>1-1 byte streams"]
+    wasm["habilis-network-wasm<br>browser peer"] --> stream
+    cli["habilis-network-stream-cli<br>the binary"] --> stream
     cli --> engine
     ffi --> engine
     wasm --> engine
     stream --> engine
-    engine["fofoca<br>the engine"] --> doc["fofoca-doc<br>CRDT channels"]
-    engine --> logging["fofoca-logging<br>tracing sink"]
-    engine --> mh["fofoca-iroh-multihop-transport"]
-    engine --> webrtc["fofoca-iroh-webrtc-transport"]
-    doc --> proto["fofoca-protocol<br>wire vocabulary"]
+    engine["habilis-network<br>the engine"] --> doc["habilis-network-doc<br>CRDT channels"]
+    engine --> logging["habilis-network-logging<br>tracing sink"]
+    engine --> mh["habilis-network-iroh-multihop-transport"]
+    engine --> webrtc["habilis-network-iroh-webrtc-transport"]
+    doc --> proto["habilis-network-protocol<br>wire vocabulary"]
     logging --> proto
-    proto --> util["fofoca-util<br>host helpers, constants"]
-    chunks["fofoca-chunks<br>content-addressed chunks"]
+    proto --> util["habilis-network-util<br>host helpers, constants"]
+    chunks["habilis-network-chunks<br>content-addressed chunks"]
 ```
 
 An arrow reads "depends on".
-`fofoca-chunks` stands alone.
-The engine depends on `fofoca-iroh-webrtc-transport` on both targets: the `native` backend on a host, the `web` backend in a browser.
+`habilis-network-chunks` stands alone.
+The engine depends on `habilis-network-iroh-webrtc-transport` on both targets: the `native` backend on a host, the `web` backend in a browser.
 
 | Crate | Role |
 |---|---|
-| `fofoca-util` | Host helpers: runtime directories, clock, tuning dials, bounded containers, every constant. |
-| `fofoca-protocol` | Wire vocabulary: messages, mesh ids, identity, sealing, invites, multipart reassembly, the directory ad codec. Depends on `iroh-base` only. |
-| `fofoca-doc` | The `state` and `meta` CRDT channels (automerge). |
-| `fofoca-logging` | Tracing sink and directive filter. |
-| `fofoca` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
-| `fofoca-ffi` | A C-ABI shim, so a non-Rust process joins a mesh or opens byte streams in-process. |
-| `fofoca-stream` | 1-1 byte streams addressed by a hash, over a direct path by default (the relay only when the stream allows it), never gossip (§9.4). Reaches wasm32. |
-| `fofoca-stream-cli` | The `fofoca-stream` binary: stdin to one reader, or a stream to stdout. |
-| `fofoca-wasm` | The browser peer: `fofoca::membership` and `fofoca-stream` as wasm-bindgen classes. Runs only on wasm32. |
-| `fofoca-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `fofoca-blobs`. |
-| `fofoca-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
-| `fofoca-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
+| `habilis-network-util` | Host helpers: runtime directories, clock, tuning dials, bounded containers, every constant. |
+| `habilis-network-protocol` | Wire vocabulary: messages, mesh ids, identity, sealing, invites, multipart reassembly, the directory ad codec. Depends on `iroh-base` only. |
+| `habilis-network-doc` | The `state` and `meta` CRDT channels (automerge). |
+| `habilis-network-logging` | Tracing sink and directive filter. |
+| `habilis-network` | The engine. The only crate that names `iroh` and `iroh-gossip`. |
+| `habilis-network-ffi` | A C-ABI shim, so a non-Rust process joins a mesh or opens byte streams in-process. |
+| `habilis-network-stream` | 1-1 byte streams addressed by a hash, over a direct path by default (the relay only when the stream allows it), never gossip (§9.4). Reaches wasm32. |
+| `habilis-network-stream-cli` | The `habilis-network-stream` binary: stdin to one reader, or a stream to stdout. |
+| `habilis-network-wasm` | The browser peer: `habilis_network::membership` and `habilis-network-stream` as wasm-bindgen classes. Runs only on wasm32. |
+| `habilis-network-chunks` | Content-addressed chunk store: BLAKE3 leaf rows over data the crate does not own. Replaced `habilis-network-blobs`. |
+| `habilis-network-iroh-webrtc-transport` | An iroh custom transport: QUIC datagrams over a WebRTC data channel. |
+| `habilis-network-iroh-multihop-transport` | An iroh custom transport: source-routed relaying through peers. |
 
 The measurement that drove the split was a consumer binary where the engine cost 39.4 MiB of 40.7 MiB.
 
 ### 3.1 The iroh quarantine
 
-Only the `fofoca` crate names `iroh`.
-`fofoca-protocol` depends on `iroh-base` alone, so the wire vocabulary carries no network stack, no tokio, and no TLS.
+Only the `habilis-network` crate names `iroh`.
+`habilis-network-protocol` depends on `iroh-base` alone, so the wire vocabulary carries no network stack, no tokio, and no TLS.
 The iroh family is pinned by git revision in the root `Cargo.toml`, and each fork carries a small recorded patch set.
-Consumers reach iroh through re-exports: `fofoca::iroh`, `fofoca_protocol::iroh_base`, and `fofoca_iroh_webrtc_transport::iroh`.
+Consumers reach iroh through re-exports: `habilis_network::iroh`, `habilis_network_protocol::iroh_base`, and `habilis_network_iroh_webrtc_transport::iroh`.
 
 ### 3.2 Feature flags
 
@@ -149,7 +149,7 @@ A build with `--no-default-features` leaves the portable engine that runs in a b
 | Key | Where it lives | What it authenticates |
 |---|---|---|
 | iroh `EndpointId` (Ed25519) | Minted per endpoint at build time | The connection (QUIC-TLS). |
-| Author `Identity` (Ed25519) | `fofoca-protocol/src/identity.rs` | Every message the member authors. In-process and ephemeral: a restart mints a new key. |
+| Author `Identity` (Ed25519) | `habilis-network-protocol/src/identity.rs` | Every message the member authors. In-process and ephemeral: a restart mints a new key. |
 | Rendezvous key | Derived from the mesh seed | The bootstrap anchor. Every member can derive it. |
 
 ### 4.2 Derivations
@@ -283,7 +283,7 @@ A browser node and an embedded node are always `InProcess`.
 
 ### 6.3 The event loop
 
-The engine is one `tokio::select!` loop in `crates/fofoca/src/daemon/event_loop.rs`.
+The engine is one `tokio::select!` loop in `crates/habilis-network/src/daemon/event_loop.rs`.
 The loop does three kinds of work: it reacts to external inputs, it runs time-driven maintenance, and it shuts down cleanly.
 
 ```mermaid
@@ -355,7 +355,7 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 
 `MAX_MESSAGE_SIZE` is 3840 bytes, under the iroh-gossip limit of 4096 minus its header.
 Gossip drops an oversize message silently, so the engine enforces the budget before send.
-A compile-time assertion in `crates/fofoca/src/gossip/mod.rs` ties the two constants together.
+A compile-time assertion in `crates/habilis-network/src/gossip/mod.rs` ties the two constants together.
 A logical body can reach 64 MiB through sharding (section 7.6).
 Bulk transfer is not the job of gossip, because gossip re-broadcasts and logs every frame.
 Oversize payloads go over the `blob` side channel, point to point, on their own ALPN.
@@ -447,7 +447,7 @@ Every create surface names three mesh-wide choices apart, because they are three
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
 `transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
-`fofoca_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
+`habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
 A config that breaks either is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
 Per-node capability is a different thing and stays out of the id: `TransportOpts` in the engine, `paths` on a create surface, says whether *this* node has IP, WebRTC or a relay transport at all.
@@ -455,7 +455,7 @@ The policy is validated end to end by `cargo task e2e --suite mesh`: a real nati
 
 ### 9.2 WebRTC transport
 
-`fofoca-iroh-webrtc-transport` carries QUIC datagrams over a WebRTC data channel.
+`habilis-network-iroh-webrtc-transport` carries QUIC datagrams over a WebRTC data channel.
 One data channel serves one remote peer, and one QUIC datagram rides one binary SCTP message, with no extra framing.
 The channel is negotiated unreliable and unordered, because QUIC above it owns loss recovery and congestion control.
 One crate holds two mutually exclusive backends over one shared protocol half.
@@ -504,7 +504,7 @@ Without the custom selector, the connection settles on the relay for its whole l
 
 ### 9.3 Multihop transport
 
-`fofoca-iroh-multihop-transport` reaches peers through relaying peers when no direct path exists.
+`habilis-network-iroh-multihop-transport` reaches peers through relaying peers when no direct path exists.
 Each node broadcasts a link vector, and every node folds the freshest vectors into one metric-weighted graph.
 Route computation is a local Dijkstra run.
 A route is a **source route**: the sender packs the full hop list into the address.
@@ -525,8 +525,8 @@ The reverse route derives from the forward route, so a reply needs no fresh look
 
 ### 9.4 Byte streams
 
-`fofoca-stream` carries bytes from one producer to one consumer.
-It uses no gossip: the bytes ride the `fofoca/stream/1` ALPN.
+`habilis-network-stream` carries bytes from one producer to one consumer.
+It uses no gossip: the bytes ride the `habilis-network/stream/1` ALPN.
 By default they ride a direct path: QUIC over IP, or a WebRTC data channel when one end is a browser.
 A stream created with `transport: ['udp', 'webrtc', 'relay']` lets them fall back to the relay when no direct path exists; the node must then also name `relay` among its lookups, which a browser always does.
 
@@ -550,7 +550,7 @@ Either end closes the connection with one of five codes. The reader sends `DONE`
 | 3 `RELAY_REFUSED` | The only path is the relay, and the policy refuses it. |
 | 4 `ABANDONED` | The producer dropped the stream before it closed it. |
 
-The same stream is reachable from Rust, from C (`fofoca_stream_*`), from the browser (`bindStreams` in `packages/fofoca-wasm`), from the `fofoca-stream` binary, and from the stream web page.
+The same stream is reachable from Rust, from C (`habilis_network_stream_*`), from the browser (`bindStreams` in `packages/habilis-network-wasm`), from the `habilis-network-stream` binary, and from the stream web page.
 
 ## 10. Embedding the engine
 
@@ -560,13 +560,13 @@ The public surface of the engine is grouped by consumer role, not by internal to
 
 | Module | Contents |
 |---|---|
-| `fofoca::protocol` | The value types (re-export of `fofoca-protocol`). |
-| `fofoca::embed` | The seams a consumer implements. |
-| `fofoca::runtime` | Start and stop: setup, node, parameters. |
-| `fofoca::ops` | What a hook can do: broadcast, send, merge state. |
-| `fofoca::net` | The quarantined iroh corner: endpoints, probes, transport handles, the direct-path gate. |
-| `fofoca::membership` | A mesh in a few calls: `join`, then whole text messages (`msg`) in and out. |
-| `fofoca::util` | Host helpers (re-export of `fofoca-util`). |
+| `habilis_network::protocol` | The value types (re-export of `habilis-network-protocol`). |
+| `habilis_network::embed` | The seams a consumer implements. |
+| `habilis_network::runtime` | Start and stop: setup, node, parameters. |
+| `habilis_network::ops` | What a hook can do: broadcast, send, merge state. |
+| `habilis_network::net` | The quarantined iroh corner: endpoints, probes, transport handles, the direct-path gate. |
+| `habilis_network::membership` | A mesh in a few calls: `join`, then whole text messages (`msg`) in and out. |
+| `habilis_network::util` | Host helpers (re-export of `habilis-network-util`). |
 
 ### 10.2 The seam traits
 
@@ -590,7 +590,7 @@ The app declares per-frame wire policy in `classify` and reacts in `on_app_frame
 `NodeDriver` extends `NodeApp` with the timers, session channels, and lifecycle hooks of the application.
 Everything except `classify` and `on_app_frame` has a default body.
 `NodeSink` is the outbound event surface, one `emit` call per node event.
-The example `crates/fofoca/examples/mesh_peer.rs` is the smallest embedding, near 40 lines of seam.
+The example `crates/habilis-network/examples/mesh_peer.rs` is the smallest embedding, near 40 lines of seam.
 
 ### 10.3 The IPC socket
 
@@ -602,9 +602,9 @@ The socket module compiles out on wasm32, and a browser binds nothing.
 
 ### 10.4 The C ABI
 
-`fofoca-ffi` exposes opaque handles and blocking calls, declared in `include/fofoca.h`.
-A mesh handle (`fofoca_mesh_*`) sends and receives whole text messages (`fofoca_msg_send`, `fofoca_msg_recv`) and reads the shared state as JSON.
-A stream node (`fofoca_streams_*`, `fofoca_stream_*`) creates and opens byte streams (§9.4).
+`habilis-network-ffi` exposes opaque handles and blocking calls, declared in `include/habilis_network.h`.
+A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages (`habilis_network_msg_send`, `habilis_network_msg_recv`) and reads the shared state as JSON.
+A stream node (`habilis_network_streams_*`, `habilis_network_stream_*`) creates and opens byte streams (§9.4).
 Panics stop at the boundary through `catch_unwind`.
 For this reason the release profile keeps unwinding and does not set `panic = "abort"`.
 
@@ -622,7 +622,7 @@ Measured numbers from the `chat-webrtc` example workspace:
 - Native-to-native over the WebRTC data channel moves about 6 times less throughput, at 36 times the latency, than the hole-punched iroh path.
 - Browser-to-native transfers measured 4 to 19 MB/s.
 
-Measured with the `fofoca-stream` binary on one machine (2026-09-27), 1 GiB from `head -c 1G /dev/zero` into the producer, 2 runs each:
+Measured with the `habilis-network-stream` binary on one machine (2026-09-27), 1 GiB from `head -c 1G /dev/zero` into the producer, 2 runs each:
 
 - Native to native, release build, over a direct path: 99 to 101 MB/s.
 - Native to the stream page in Chrome, over its WebRTC data channel: 10.6 to 11.0 MB/s once the page has opened (the open took 1.6 to 2.1 s). The producer was the e2e suite's debug build, so this is a floor.
@@ -646,9 +646,9 @@ What the engine is not:
 In this repository:
 
 - `README.md` — workspace overview, build and test commands.
-- `crates/fofoca/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
+- `crates/habilis-network/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
 - `FORKED.md` — fork provenance and the pin contract.
-- `crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
+- `crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
 - Per-crate READMEs under `crates/*/README.md`.
 
 Referenced from code but kept upstream: `AGENTS.md` (concept glossary), `docs/mesh-hash.md`, and `docs/history-integrity.md`.

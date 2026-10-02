@@ -34,25 +34,25 @@ anstyle = "1"
 anstream = "0.6"
 # The `mesh` feature's deps: the mesh and chat suites run a real native peer
 # in-process and a local relay, so the runner depends on the engine it drives.
-fofoca = { path = "../crates/fofoca", features = ["iroh-test-utils"], optional = true }
+habilis-network = { path = "../crates/habilis-network", features = ["iroh-test-utils"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"], optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 # The `bench` feature's deps: the native cells of `cargo task benchmark` stand
 # up real iroh endpoints over the WebRTC transport — the transport alone, not
 # the engine. iroh is reached through the transport's re-export, never named
-# here (the workspace rule: only `fofoca` names `iroh`).
-fofoca-iroh-webrtc-transport = { path = "../crates/fofoca-iroh-webrtc-transport", features = ["native", "bench"], optional = true }
+# here (the workspace rule: only `habilis-network` names `iroh`).
+habilis-network-iroh-webrtc-transport = { path = "../crates/habilis-network-iroh-webrtc-transport", features = ["native", "bench"], optional = true }
 
 [features]
 # The mesh and chat e2e suites need the engine and its test relay. Off by
 # default so a plain `--workspace` build does not unify `iroh-test-utils`
-# into `fofoca` (`tasks` is a workspace member, and cargo takes the union of
+# into `habilis-network` (`tasks` is a workspace member, and cargo takes the union of
 # every selected package's features); `cargo task e2e --suite mesh|chat`
 # re-runs itself with this on.
-mesh = ["dep:fofoca", "dep:tokio", "dep:tracing-subscriber"]
+mesh = ["dep:habilis-network", "dep:tokio", "dep:tracing-subscriber"]
 # The throughput benchmark's native halves. Same re-exec pattern; a lighter
 # closure than `mesh`, since it needs the transport and not the engine.
-bench = ["dep:fofoca-iroh-webrtc-transport", "dep:tokio"]
+bench = ["dep:habilis-network-iroh-webrtc-transport", "dep:tokio"]
 
 [lints]
 workspace = true

@@ -1,0 +1,43 @@
+[package]
+name = "habilis-network-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A C-ABI shim over the habilis-network engine — lets a non-Rust process join a gossip mesh in-process"
+readme = "README.md"
+publish = false
+
+[features]
+# Forwarded from the engine so an embedder can drop the discovery legs it does
+# not use. `default` matches the engine's, so a plain build is unchanged; a
+# relay-only embedder builds with --no-default-features and sheds
+# swarm-discovery/acto and n0-mainline/lru.
+default = ["mdns", "dht"]
+mdns = ["habilis-network/mdns"]
+dht = ["habilis-network/dht"]
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_ffi"
+path = "src/lib.rs"
+# `cdylib` is the artifact C links against (libhabilis_network_ffi.dylib /
+# .so); `rlib` is what `tests/ffi_smoke.rs` links, so the C ABI is exercised from
+# Rust on a host with no C compiler. `staticlib` is what mallorca links against
+# (a stable .a path, decoupled from the cdylib's dynamic-loader requirements).
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+# The ONLY mesh dependency — this crate never touches agent-gossip / a2a.
+habilis-network = { path = "../habilis-network", default-features = false }
+# The byte streams behind `habilis_network_stream_*`, shared with the browser peer.
+# Feature-less by design (see its manifest), so the `mdns` / `dht` forwards
+# above stay this crate's decision and cargo unifies them onto the one `habilis-network`
+# build.
+habilis-network-stream = { path = "../habilis-network-stream" }
+bytes.workspace = true
+n0-future.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  The test harness page: joins the mesh the query string names and mirrors
+  everything into the DOM, so any driver that can read an element — CDP,
+  WebDriver, a human — can assert on it. See harness.ts for the contract.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>habilis-network harness</title>
+    <style>
+      body { font: 13px/1.5 ui-monospace, monospace; margin: 1rem; }
+      pre { white-space: pre-wrap; word-break: break-all; background: #f4f4f4; padding: 0.5rem; }
+      section { margin-bottom: 1rem; }
+      h2 { font-size: 1em; margin: 0 0 0.25rem; }
+    </style>
+  </head>
+  <body>
+    <h1>habilis-network harness</h1>
+    <section><h2>status</h2><div id="status">opening…</div></section>
+    <section><h2>peers</h2><pre id="peers">[]</pre></section>
+    <section><h2>state</h2><pre id="state">{}</pre></section>
+    <section><h2>messages</h2><ul id="messages"></ul></section>
+    <section><h2>events</h2><ul id="events"></ul></section>
+    <script type="module" src="./harness.js"></script>
+  </body>
+</html>

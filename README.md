@@ -1,4 +1,6 @@
-# fofoca
+# habilis-network
+
+https://habilis.network
 
 A serverless gossip-network engine. Peers find each other over mDNS, the mainline
 DHT or a relay, form a mesh, and exchange messages and a shared CRDT document —
@@ -10,7 +12,7 @@ event loop runs on a tokio runtime inside the calling process, so joining a mesh
 costs a function call rather than a daemon.
 
 Its first non-Rust consumer is [mallorca](https://github.com/dviramontes/mallorca),
-an Odin application that links [`fofoca-ffi`](crates/fofoca-ffi) as a static
+an Odin application that links [`habilis-network-ffi`](crates/habilis-network-ffi) as a static
 library and joins a mesh from its own process.
 
 ## The crates
@@ -19,40 +21,40 @@ See [docs/architecture.md](docs/architecture.md) §3 for the full dependency
 graph and the role of each crate. In outline, dependencies point downward:
 
 ```
-fofoca-util          host helpers, no deps of consequence   (13 crates resolved)
-  └── fofoca-protocol    wire vocabulary, + iroh-base      (138 crates)
-        ├── fofoca-doc          shared-state CRDT channels
-        ├── fofoca-logging      tracing sink + filter
-        └── fofoca         the engine, + iroh, iroh-gossip (436 crates)
-              ├── fofoca-stream                 1-1 byte streams, tab and terminal
-              │     ├── fofoca-stream-cli       the `fofoca-stream` binary
-              │     ├── fofoca-ffi              the C ABI
-              │     └── fofoca-wasm             the browser peer (wasm32 only)
-              ├── fofoca-netplay                rollback netcode for p2p games
-              ├── fofoca-iroh-webrtc-transport  QUIC over a WebRTC data channel
-              └── fofoca-iroh-multihop-transport  QUIC relayed through peers
+habilis-network-util          host helpers, no deps of consequence   (13 crates resolved)
+  └── habilis-network-protocol    wire vocabulary, + iroh-base      (138 crates)
+        ├── habilis-network-doc          shared-state CRDT channels
+        ├── habilis-network-logging      tracing sink + filter
+        └── habilis-network         the engine, + iroh, iroh-gossip (436 crates)
+              ├── habilis-network-stream                 1-1 byte streams, tab and terminal
+              │     ├── habilis-network-stream-cli       the `habilis-network-stream` binary
+              │     ├── habilis-network-ffi              the C ABI
+              │     └── habilis-network-wasm             the browser peer (wasm32 only)
+              ├── habilis-network-netplay                rollback netcode for p2p games
+              ├── habilis-network-iroh-webrtc-transport  QUIC over a WebRTC data channel
+              └── habilis-network-iroh-multihop-transport  QUIC relayed through peers
 
-fofoca-chunks                     content-addressed chunk store, + blake3
+habilis-network-chunks                     content-addressed chunk store, + blake3
 ```
 
-`fofoca-chunks` is standalone: nothing here depends on it. The two transports
+`habilis-network-chunks` is standalone: nothing here depends on it. The two transports
 depend on nothing else here either, but the engine depends on *them* — on the
 multihop transport under `host`, and on the WebRTC transport per target.
 
 The load-bearing property: **the engine's dependents never name `iroh`
-themselves.** Four crates here do name it — `fofoca`, the two transports, and
-`fofoca-protocol` (which takes `iroh-base` alone, so the wire vocabulary pulls no
+themselves.** Four crates here do name it — `habilis-network`, the two transports, and
+`habilis-network-protocol` (which takes `iroh-base` alone, so the wire vocabulary pulls no
 tokio, QUIC, TLS or DNS; `-doc`, `-logging`, `-reassembly` and `-directory`
 inherit that). Everything else, in this workspace and downstream, reaches iroh
-through `fofoca::iroh` so the graph can never hold two copies.
+through `habilis_network::iroh` so the graph can never hold two copies.
 
-[`fofoca-chunks`](crates/fofoca-chunks) is a content-addressed chunk store:
+[`habilis-network-chunks`](crates/habilis-network-chunks) is a content-addressed chunk store:
 fixed 64 KiB chunks addressed by BLAKE3 of their own bytes, so a chunk proves
 itself and dedups across files, and the store never copies the caller's bytes.
-It replaced `fofoca-blobs`, whose bao outboards proved placement inside one
+It replaced `habilis-network-blobs`, whose bao outboards proved placement inside one
 file rather than content (removed after v0.6.0).
 
-[`fofoca-netplay`](crates/fofoca-netplay) is GGPO-style rollback netcode for
+[`habilis-network-netplay`](crates/habilis-network-netplay) is GGPO-style rollback netcode for
 peer-to-peer games on a mesh: peers agree a roster in a lobby, then each
 simulates immediately against *predicted* remote inputs and rolls back to
 re-simulate whenever a real input contradicts the guess. Only inputs cross the
@@ -61,7 +63,7 @@ authoritative. The price is strict determinism — integer arithmetic, no hashed
 iteration, no clocks in the simulation — which `SyncTestSession` checks locally
 rather than leaving to fail as a desync mid-match.
 
-[`fofoca-iroh-webrtc-transport`](crates/fofoca-iroh-webrtc-transport) carries
+[`habilis-network-iroh-webrtc-transport`](crates/habilis-network-iroh-webrtc-transport) carries
 QUIC datagrams over a WebRTC data channel as an iroh custom transport. It is how
 a browser reaches a peer at all: a tab has no UDP socket, so iroh's own paths do
 not exist there. One crate, two mutually exclusive backends behind features —
@@ -70,7 +72,7 @@ not exist there. One crate, two mutually exclusive backends behind features —
 disagree about the transport id or the envelope shape fail to connect with no
 useful error.
 
-[`fofoca-iroh-multihop-transport`](crates/fofoca-iroh-multihop-transport) is the
+[`habilis-network-iroh-multihop-transport`](crates/habilis-network-iroh-multihop-transport) is the
 other custom transport: source-routed relaying through intermediate peers, for
 when no direct path exists at all.
 
@@ -115,8 +117,8 @@ Every task takes `-p` to narrow it to one crate, which keeps the edit-check loop
 proportional to what you changed:
 
 ```bash
-cargo task ci   -p fofoca-chunks # the same gate, one crate
-cargo task test -p fofoca        # its default tests and its `blob` ones
+cargo task ci   -p habilis-network-chunks # the same gate, one crate
+cargo task test -p habilis-network        # its default tests and its `blob` ones
 ```
 
 The gate itself is a table in [`tasks/src/gate.rs`](tasks/src/gate.rs), one row
@@ -126,7 +128,7 @@ step keeps its own result; the table is the same list, runnable. If the two ever
 disagree, the table is the one that is wrong.
 
 The `mdns` and `dht` features (default on) gate iroh's discovery closure, and
-`async-io` on `fofoca-util` gates its only tokio use, so the off positions are
+`async-io` on `habilis-network-util` gates its only tokio use, so the off positions are
 worth checking too — `cargo task check` covers both, or by hand:
 
 ```bash
@@ -141,7 +143,7 @@ one release. Nothing is published to a registry; a release is an annotated
 tag plus a GitHub Release, and a consumer pins it:
 
 ```toml
-fofoca = { git = "https://github.com/fofoca-network/fofoca", tag = "v0.6.0" }
+habilis-network = { git = "https://github.com/agent-habilis/habilis-network", tag = "v0.6.0" }
 ```
 
 The pin is self-contained: this workspace carries no `[patch.crates-io]`
@@ -158,7 +160,7 @@ To cut a release:
 3. Run `cargo task ci` and make sure it is green.
 4. Commit as `chore: release vX.Y.Z`, then tag: `git tag -a vX.Y.Z`.
 5. Push with the tag, then publish the notes:
-   `gh release create vX.Y.Z --title "fofoca X.Y.Z"` with the CHANGELOG
+   `gh release create vX.Y.Z --title "habilis-network X.Y.Z"` with the CHANGELOG
    section as the body.
 
 ## The browser
@@ -170,18 +172,18 @@ a CLI runs, not a reduced stand-in. What it loses is the control socket, the
 session state file, the process helpers and the log sink, none of which have a
 wasm32 equivalent.
 
-Six crates reach that target — `fofoca-wasm` is the browser peer itself,
-behind `packages/fofoca-wasm` — each at its own feature position, and CI
+Six crates reach that target — `habilis-network-wasm` is the browser peer itself,
+behind `packages/habilis-network-wasm` — each at its own feature position, and CI
 checks and lints every one:
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo task wasm                              # all six
-cargo task wasm -p fofoca-chunks             # or one
+cargo task wasm -p habilis-network-chunks             # or one
 ```
 
 `cargo check` is not enough on its own, which is why
-[`crates/fofoca/tests/wasm_runtime.rs`](crates/fofoca/tests/wasm_runtime.rs)
+[`crates/habilis-network/tests/wasm_runtime.rs`](crates/habilis-network/tests/wasm_runtime.rs)
 exists: `std::time::Instant::now()`, `tokio::time` and `tokio::spawn` all
 compile for wasm32 and then panic at runtime. Running it needs a wasm-capable
 clang for `ring`'s C core, so it is a compile check in CI and a real run
@@ -189,11 +191,11 @@ locally:
 
 ```bash
 CC=$(brew --prefix llvm)/bin/clang CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang \
-  cargo test -p fofoca --no-default-features --target wasm32-unknown-unknown
+  cargo test -p habilis-network --no-default-features --target wasm32-unknown-unknown
 ```
 
-`fofoca-chunks`'s IndexedDB tests need a real browser and are not in CI:
-`wasm-pack test --headless --chrome crates/fofoca-chunks`.
+`habilis-network-chunks`'s IndexedDB tests need a real browser and are not in CI:
+`wasm-pack test --headless --chrome crates/habilis-network-chunks`.
 
 Neither is the WebRTC transport's browser suite, which drives real browsers over
 a build-profile and main-thread-pressure sweep: `cargo task e2e`, or
@@ -211,22 +213,22 @@ another (`safari`, `cft` for Chrome for Testing over CDP,
 `mesh` feature, which it turns on by re-running itself through cargo, so the
 first run builds the engine a second time with its test relay.
 
-[`chat-webrtc`](crates/fofoca-iroh-webrtc-transport/examples/chat-webrtc) is a
+[`chat-webrtc`](crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc) is a
 runnable demonstration of the browser leg on its own: a chat room a tab and a
 terminal both join, where the tab's connection is QUIC over a `WebRTC` data
 channel and there is no signalling server. It is a workspace of its own and
-depends on nothing here but `fofoca-iroh-webrtc-transport`, so it doubles as a
+depends on nothing here but `habilis-network-iroh-webrtc-transport`, so it doubles as a
 check that a consumer of that crate restates no iroh pin.
 
 To build the C ABI as a static library:
 
 ```bash
-cargo build --release -p fofoca-ffi   # -> target/release/libfofoca_ffi.a
+cargo build --release -p habilis-network-ffi   # -> target/release/libhabilis_network_ffi.a
 ```
 
-[`crates/fofoca-ffi/include/fofoca.h`](crates/fofoca-ffi/include/fofoca.h) is the
+[`crates/habilis-network-ffi/include/habilis_network.h`](crates/habilis-network-ffi/include/habilis_network.h) is the
 hand-written declaration a C caller compiles against, and the counterpart of
-`crates/fofoca-ffi/src/ffi.rs`. Change one, change the other; CI asserts the
+`crates/habilis-network-ffi/src/ffi.rs`. Change one, change the other; CI asserts the
 archive actually exports everything the header declares.
 
 ## Provenance

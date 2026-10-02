@@ -1,0 +1,42 @@
+[package]
+name = "habilis-network-iroh-multihop-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "A source-routed multi-hop iroh custom transport: reach peers through relaying peers when no direct path exists."
+license = "MIT"
+repository = "https://github.com/agent-habilis/habilis-network"
+readme = "README.md"
+keywords = ["iroh", "transport", "p2p", "routing", "multihop"]
+categories = ["network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_iroh_multihop_transport"
+path = "src/lib.rs"
+
+[dependencies]
+iroh.workspace = true
+habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util" }
+# `CustomAddr` is not re-exported through `iroh`; name it from iroh-base
+# directly. A consumer that patches `iroh` to a fork must patch `iroh-base` to
+# the same repo and rev, or the graph carries two `iroh_base` versions and the
+# `CustomAddr` here stops unifying with the one iroh hands back (E0308). Taking
+# both from the workspace is what keeps that impossible from the inside.
+iroh-base.workspace = true
+noq-udp.workspace = true
+n0-watcher.workspace = true
+n0-future = "0.3"
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+postcard = { version = "1", features = ["use-std"] }
+serde.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

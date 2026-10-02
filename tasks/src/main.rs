@@ -83,9 +83,9 @@ enum Task {
         #[command(flatten)]
         scope: Scope,
     },
-    /// Build the C ABI staticlib and diff its exports against `fofoca.h`.
+    /// Build the C ABI staticlib and diff its exports against `habilis_network.h`.
     Ffi,
-    /// Build fofoca-wasm and emit its JS glue into packages/fofoca-wasm/wasm.
+    /// Build habilis-network-wasm and emit its JS glue into packages/habilis-network-wasm/wasm.
     BuildWasm,
     /// Drive the WebRTC browser tests against real browsers.
     ///
@@ -93,7 +93,7 @@ enum Task {
     /// pressure and prints one summary table; `--suite loopback` runs the fast
     /// four-test regression suite against a single browser instead.
     E2e(e2e::Args),
-    /// Measure bulk throughput over the transports: fofoca over WebRTC
+    /// Measure bulk throughput over the transports: habilis-network over WebRTC
     /// (browser↔browser, browser↔native, native↔native) against plain iroh
     /// and a bare data channel.
     Benchmark(bench::Args),

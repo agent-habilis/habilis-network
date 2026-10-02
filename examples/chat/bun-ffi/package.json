@@ -3,13 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "terminal chat over the fofoca mesh: Bun on packages/fofoca-ffi",
+  "description": "terminal chat over the habilis-network mesh: Bun on packages/habilis-network-ffi",
   "scripts": {
     "start": "bun src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
   "dependencies": {
-    "fofoca-ffi": "workspace:*"
+    "habilis-network-ffi": "workspace:*"
   }
 }

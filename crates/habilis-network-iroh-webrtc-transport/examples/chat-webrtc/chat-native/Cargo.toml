@@ -1,0 +1,31 @@
+[package]
+name = "chat-native"
+description = "The chat room and a terminal client, over iroh and WebRTC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "chat-native"
+path = "src/main.rs"
+
+[dependencies]
+# The whole iroh surface arrives through here: `::iroh` for the endpoint and
+# `::iroh_base` (via chat-proto) for the wire vocabulary. Note the absence of an
+# `iroh` entry below — that absence is the point.
+habilis-network-iroh-webrtc-transport = { workspace = true, features = ["native"] }
+chat-proto.workspace = true
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+# The full set, unlike the parent workspace's portable floor: this crate is
+# host-only by construction and wants a real reactor, stdin, and timers.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

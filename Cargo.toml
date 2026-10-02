@@ -49,7 +49,7 @@ version = "0.6.0"
 # a rev pin to bump on every change. It takes `iroh`/`iroh-base` from the
 # workspace entries below like every other member, so it builds against the fork
 # without naming it.
-fofoca-iroh-multihop-transport = { path = "crates/fofoca-iroh-multihop-transport" }
+habilis-network-iroh-multihop-transport = { path = "crates/habilis-network-iroh-multihop-transport" }
 # The *floor*, not the union: `rt-multi-thread`, `fs`, `signal`, `net` and
 # `process` have no wasm32 equivalent, and `net` drags in `mio`, which refuses
 # to build there at all. The engine adds them back under its `host` feature;
@@ -62,9 +62,9 @@ serde = { version = "1", features = ["derive"] }
 # `--output json` stream.
 serde_json = { version = "1", features = ["raw_value"] }
 anyhow = "1"
-# Named by `tasks` and `fofoca-stream-cli`, so the version lives here.
+# Named by `tasks` and `habilis-network-stream-cli`, so the version lives here.
 clap = { version = "4", features = ["derive"] }
-# Named by `fofoca-chunks`, and kept in the workspace table so a second namer
+# Named by `habilis-network-chunks`, and kept in the workspace table so a second namer
 # cannot drift. The floor is the OFF position:
 # `default-features = false` keeps the wasm build honest, and `std` comes back
 # for `std::io` and threading on the host. A crate that needs more (SIMD) opts
@@ -88,8 +88,8 @@ uuid = { version = "1", features = ["v4"] }
 #
 # This block is the single source of truth for which iroh a consumer gets. A
 # consumer of this workspace declares **nothing** from the iroh family and
-# carries **no** `[patch.crates-io]`; it reaches iroh through `fofoca::iroh` and
-# `fofoca_protocol::iroh_base`. That is the property to preserve when editing
+# carries **no** `[patch.crates-io]`; it reaches iroh through `habilis_network::iroh` and
+# `habilis_network_protocol::iroh_base`. That is the property to preserve when editing
 # here — the moment a consumer has to restate a pin, it can drift, and a drifted
 # pin is not an error: cargo silently resolves unpatched crates.io alongside the
 # fork, and the two `iroh_base` crates surface as an E0308 nowhere near the
@@ -118,11 +118,11 @@ uuid = { version = "1", features = ["v4"] }
 # after a relay selection can carry a connection, which a browser needs.
 iroh = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 # The dependency-light half of iroh: keys, endpoint addresses, relay URLs — no
-# QUIC, TLS or DNS. `fofoca-protocol` depends on this rather than `iroh` so the
+# QUIC, TLS or DNS. `habilis-network-protocol` depends on this rather than `iroh` so the
 # wire vocabulary carries no network stack. Same repo and rev as `iroh` above,
 # necessarily: the forked `iroh` uses its workspace-local copy, and mixing
 # that with the published one is the two-`iroh_base` failure.
-# `relay` is a default `fofoca-protocol` adds back; the transports do not need it.
+# `relay` is a default `habilis-network-protocol` adds back; the transports do not need it.
 iroh-base = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c", default-features = false, features = ["key"] }
 # Only `iroh-mainline-address-lookup` names it, and only under `dht`. Pinned to
 # the same rev for the same reason as `iroh-base`.
@@ -141,7 +141,7 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/f
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
-# Branch fix/fofoca-iroh-pin: the connection-churn leak fix (upstream PR
+# Branch fix/habilis-network-iroh-pin: the connection-churn leak fix (upstream PR
 # n0-computer/iroh-gossip#147) plus its own iroh/iroh-base repoint, since this
 # crate is another that sat between us and iroh.
 iroh-gossip = { version = "=0.101.0", git = "https://github.com/fofoca-network/iroh-gossip", rev = "e66061b298a350141938046e3a84b29628ebb899", default-features = false, features = ["net"] }
@@ -161,7 +161,7 @@ web-time = "1.1"
 # thread. Off wasm32 it is a verbatim re-export of `tokio::{time, spawn}`.
 n0-future = "0.3"
 n0-watcher = "1.0"
-# Shared by `fofoca-chunks` and the WebRTC transport's browser backend. Pinned
+# Shared by `habilis-network-chunks` and the WebRTC transport's browser backend. Pinned
 # here so the two cannot drift: `wasm-bindgen` and its generated glue must be
 # one version across a module, or `wasm-bindgen` refuses to link them.
 wasm-bindgen = "0.2"
@@ -265,7 +265,7 @@ opt-level = 3
 # - `lto = "thin"` / `codegen-units = 16` instead of fat LTO + 1 codegen unit:
 #   upstream's fat LTO costs minutes per rebuild, which is too slow for the
 #   mallorca dev loop.
-# - NO `panic = "abort"`: fofoca-ffi's `ffi.rs` relies on
+# - NO `panic = "abort"`: habilis-network-ffi's `ffi.rs` relies on
 #   `catch_unwind` at the C ABI boundary so a Rust panic doesn't unwind past
 #   `extern "C"` into the Odin host. `panic = "abort"` would kill the whole
 #   mallorca process on any engine panic instead of returning an error code.
@@ -280,13 +280,13 @@ opt-level = 3
 
 # `strip` above makes the macOS **cdylib** impossible to `dlopen`: dyld refuses
 # it with `mis-aligned LINKEDIT string pool`, which names no cause and no cure.
-# Nothing noticed until `packages/fofoca-ffi` existed, because mallorca links the
+# Nothing noticed until `packages/habilis-network-ffi` existed, because mallorca links the
 # staticlib and CI only ever read the archive with `nm`.
 #
 # Scoped to this package rather than dropped workspace-wide, and it costs
 # nothing that matters: `strip` never applied to a `.a` in the first place, so
 # mallorca's artifact is byte-for-byte what it was. The cdylib grows ~1.7 MB.
-[profile.release.package.fofoca-ffi]
+[profile.release.package.habilis-network-ffi]
 strip = "none"
 
 # NOTE: there is deliberately **no `[patch.crates-io]` block** in this workspace,

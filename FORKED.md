@@ -25,47 +25,47 @@ optional required crate boundaries.
 Dependencies point strictly downward.
 
 ```
-fofoca-util          no deps of consequence          (13 crates resolved)
-  └── fofoca-protocol    + iroh-base                 (138 crates)
-        ├── fofoca-doc          + automerge
-        ├── fofoca-logging      + tracing-subscriber
-        ├── fofoca-reassembly
-        ├── fofoca-directory
-        └── fofoca         + iroh, iroh-gossip  (436 crates)
-              └── fofoca-ffi
+habilis-network-util          no deps of consequence          (13 crates resolved)
+  └── habilis-network-protocol    + iroh-base                 (138 crates)
+        ├── habilis-network-doc          + automerge
+        ├── habilis-network-logging      + tracing-subscriber
+        ├── habilis-network-reassembly
+        ├── habilis-network-directory
+        └── habilis-network         + iroh, iroh-gossip  (436 crates)
+              └── habilis-network-ffi
 
-fofoca-blobs                      + bao-tree, blake3   (standalone)
-fofoca-iroh-webrtc-transport      + iroh, str0m        (standalone)
-fofoca-iroh-multihop-transport    + iroh               (standalone)
+habilis-network-blobs                      + bao-tree, blake3   (standalone)
+habilis-network-iroh-webrtc-transport      + iroh, str0m        (standalone)
+habilis-network-iroh-multihop-transport    + iroh               (standalone)
 ```
 
 The bottom three are off the tree: none depends on anything in this workspace.
 The engine takes the multihop transport; the other two are a consumer's
 business. See carried changes 18, 19 and 20.
 
-The load-bearing property: **only `fofoca` names `iroh`**. `fofoca-protocol`
+The load-bearing property: **only `habilis-network` names `iroh`**. `habilis-network-protocol`
 builds on `iroh-base` alone and pulls no tokio, QUIC, TLS or DNS; `-doc` and
 `-logging` inherit that.
 
 ## Where things moved
 
 The left column is the path upstream still uses; the right is ours. The whole
-workspace was also renamed from `agent-habilis-mesh/` to `fofoca/`.
+workspace was also renamed from `agent-habilis-mesh/` to `habilis-network/`.
 
 | upstream path | now |
 |---|---|
-| `agent-habilis-mesh/src/util/` | `fofoca-util/src/` |
-| `agent-habilis-mesh/src/protocol/` | `fofoca-protocol/src/` |
-| `agent-habilis-mesh/src/{invite,resolver}/` | `fofoca-protocol/src/{invite,resolver}/` |
-| `agent-habilis-mesh/src/doc/` | `fofoca-doc/src/` |
-| `agent-habilis-mesh/src/logging/` | `fofoca-logging/src/` |
-| `agent-habilis-mesh/src/reassembly/` | `fofoca-reassembly/src/` |
-| `agent-habilis-mesh/src/directory/` | `fofoca-directory/src/` |
+| `agent-habilis-mesh/src/util/` | `habilis-network-util/src/` |
+| `agent-habilis-mesh/src/protocol/` | `habilis-network-protocol/src/` |
+| `agent-habilis-mesh/src/{invite,resolver}/` | `habilis-network-protocol/src/{invite,resolver}/` |
+| `agent-habilis-mesh/src/doc/` | `habilis-network-doc/src/` |
+| `agent-habilis-mesh/src/logging/` | `habilis-network-logging/src/` |
+| `agent-habilis-mesh/src/reassembly/` | `habilis-network-reassembly/src/` |
+| `agent-habilis-mesh/src/directory/` | `habilis-network-directory/src/` |
 | `agent-habilis-mesh/src/blob/` | deleted — see carried change 18 |
-| `agent-habilis-mesh-ffi` | `fofoca-ffi` |
-| everything else | unchanged in `fofoca` (was `agent-habilis-mesh`) |
+| `agent-habilis-mesh-ffi` | `habilis-network-ffi` |
+| everything else | unchanged in `habilis-network` (was `agent-habilis-mesh`) |
 
-`fofoca` re-exports `util`, `protocol`, `doc`, `logging`,
+`habilis-network` re-exports `util`, `protocol`, `doc`, `logging`,
 `reassembly` and `directory` under their old module paths, so engine-internal
 code and the `embed`/`net`/`ops`/`runtime` facades read as before.
 
@@ -93,14 +93,14 @@ Divergences from upstream, in the order they were made.
 6. The crate split above, with `pub(crate)` items promoted to `pub` where a
    crate boundary now sits between definition and use.
 7. `protocol` no longer depends on `iroh-gossip`. Its `TopicId` is a local
-   32-byte newtype (`fofoca-protocol/src/topic.rs`) with a hex `Debug`
+   32-byte newtype (`habilis-network-protocol/src/topic.rs`) with a hex `Debug`
    matching iroh-gossip's; `daemon::setup` converts at the two `gossip.subscribe`
    call sites. The `MAX_MESSAGE_SIZE` compile-time tripwire moved to
-   `fofoca/src/gossip/mod.rs`, which can still name
+   `habilis-network/src/gossip/mod.rs`, which can still name
    `DEFAULT_MAX_MESSAGE_SIZE`.
-8. New cargo features: `mdns` and `dht` on `fofoca` (default on,
-   forwarded by `fofoca-ffi`), and `async-io` on
-   `fofoca-util` gating `bounded_read`, which is the only tokio user
+8. New cargo features: `mdns` and `dht` on `habilis-network` (default on,
+   forwarded by `habilis-network-ffi`), and `async-io` on
+   `habilis-network-util` gating `bounded_read`, which is the only tokio user
    below the engine.
 9. Dropped the unused `anstyle` / `anstream` dependencies (zero references).
 10. `ops::blob` removed — the blob-transfer crate depended on the engine, so
@@ -111,15 +111,15 @@ Divergences from upstream, in the order they were made.
 
 **From the rename:**
 
-12. Everything named for the upstream org was renamed to **fofoca**: the
-    directory, all eight crates (`agent-habilis-mesh` → `fofoca`,
-    `agent-habilis-mesh-ffi` → `fofoca-ffi`, `agent-habilis-<x>` →
-    `fofoca-<x>`), their lib names, the 89 `tracing` targets and the matching
-    `log_filter` directives, the C ABI (`mesh_*` → `fofoca_*`, types
-    `mesh_{pipe,opts,frame}` → `fofoca_*`), the header (`include/mesh.h` →
-    `include/fofoca.h`, guard `FOFOCA_H`), the staticlib
-    (`libfofoca_ffi.a`), the blob ALPN (`habilis-mesh/blob/1` →
-    `fofoca/blob/1`) and the default mesh name (`"mesh-ffi"` → `"fofoca"`).
+12. Everything named for the upstream org was renamed to **habilis-network**: the
+    directory, all eight crates (`agent-habilis-mesh` → `habilis-network`,
+    `agent-habilis-mesh-ffi` → `habilis-network-ffi`, `agent-habilis-<x>` →
+    `habilis-network-<x>`), their lib names, the 89 `tracing` targets and the matching
+    `log_filter` directives, the C ABI (`mesh_*` → `habilis_network_*`, types
+    `mesh_{pipe,opts,frame}` → `habilis_network_*`), the header (`include/mesh.h` →
+    `include/habilis_network.h`, guard `HABILIS_NETWORK_H`), the staticlib
+    (`libhabilis_network_ffi.a`), the blob ALPN (`habilis-mesh/blob/1` →
+    `habilis-network/blob/1`) and the default mesh name (`"mesh-ffi"` → `"habilis-network"`).
     The `github.com/agent-habilis/*` URLs above are upstream repositories and
     are deliberately untouched.
 
@@ -127,7 +127,7 @@ Divergences from upstream, in the order they were made.
 
 13. `iroh-multihop-transport` left the workspace for
     [its own repo](https://github.com/fofoca-network/iroh-multihop-transport).
-    It has no fofoca dependency and its audience is any iroh user. It is now a
+    It has no habilis-network dependency and its audience is any iroh user. It is now a
     git dependency pinned by rev in `[workspace.dependencies]`. Note that
     `[patch.crates-io]` below still governs it — patch applies from the
     top-level workspace root across the whole graph, git dependencies included.
@@ -146,19 +146,19 @@ Divergences from upstream, in the order they were made.
     tool (`cargo public-api`) plus a CI diff, not a shell script.
 16. Added the things a standalone repo needs and the vendored copy lacked:
     `LICENSE` (every crate already declared MIT), a root `README.md`, and CI.
-    `crates/*/version` moved to `version.workspace = true` — `fofoca-ffi` had
+    `crates/*/version` moved to `version.workspace = true` — `habilis-network-ffi` had
     drifted to `0.0.0` while the rest sat at `0.5.0`.
 17. `docs/ffi-cost.md` and `scripts/measure-ffi-cost.sh` stayed behind in
     mallorca — they measure mallorca's binary, not this workspace.
 
-**From reclaiming the `fofoca-blobs` name:**
+**From reclaiming the `habilis-network-blobs` name:**
 
 18. The blob-transfer crate — upstream's `agent-habilis-mesh/src/blob/`, carved
     out by change 6 — was **deleted**, and the name reassigned to an unrelated
     crate brought in from `agent-habilis/agent-share`.
 
-    It was dead code here: no `use fofoca_blobs::` anywhere in the workspace, no
-    reverse edge in `Cargo.lock`, and `fofoca-ffi` — mallorca's only entry point
+    It was dead code here: no `use habilis_network_blobs::` anywhere in the workspace, no
+    reverse edge in `Cargo.lock`, and `habilis-network-ffi` — mallorca's only entry point
     — never depended on it. It is recoverable from history if a consumer ever
     wants it back; upstream `agent-gossip` still carries it under `src/blob/`.
 
@@ -168,16 +168,16 @@ Divergences from upstream, in the order they were made.
     no code, no wire format and no dependency with what it replaced — the two
     crates only ever shared a name.
 
-    Two invariants got stronger as a result. "Only `fofoca` and `-blobs` name
-    `iroh`" became **only `fofoca` names `iroh`**, and the dependency graph lost
+    Two invariants got stronger as a result. "Only `habilis-network` and `-blobs` name
+    `iroh`" became **only `habilis-network` names `iroh`**, and the dependency graph lost
     its one upward edge: the new crate depends on nothing in this workspace, so
     it sits beside the tree rather than above the engine. Its own
     `tests/isolation.rs` is what keeps that true.
 
-19. `fofoca-iroh-webrtc-transport` arrived from the same repo. It is an iroh
+19. `habilis-network-iroh-webrtc-transport` arrived from the same repo. It is an iroh
     custom transport carrying QUIC datagrams over a WebRTC data channel, and it
     is what lets a browser reach a peer at all — a tab has no UDP socket, so
-    iroh's own paths do not exist there. Like `fofoca-blobs` it depends on
+    iroh's own paths do not exist there. Like `habilis-network-blobs` it depends on
     nothing else here, so it sits beside the tree.
 
     Its two backends were renamed on the way in: `host` → **`native`** and
@@ -200,7 +200,7 @@ Divergences from upstream, in the order they were made.
     `agent-share`'s vendored copy of it was deleted in favour of this one. There
     were three copies of this crate in circulation; now there is one.
 
-    The reasoning in 13 still holds — it has no fofoca dependency and its
+    The reasoning in 13 still holds — it has no habilis-network dependency and its
     audience is any iroh user — but a separate repo bought nothing and cost a
     rev pin to bump on every change. What it was protecting is a property of the
     *manifest*, not of the repository: the crate still names only crates.io
@@ -233,8 +233,8 @@ Divergences from upstream, in the order they were made.
     cannot turn off default features that the workspace entry turns on, and the
     WebRTC transport's browser backend must have them off — iroh's defaults drag
     `tokio/net` → `mio`, which refuses to build for wasm32. So the off position
-    lives at the root and `fofoca` re-adds `metrics`, `portmapper` and
-    `fast-apple-datapath` by name, `fofoca-protocol` re-adds `relay`.
+    lives at the root and `habilis-network` re-adds `metrics`, `portmapper` and
+    `fast-apple-datapath` by name, `habilis-network-protocol` re-adds `relay`.
 
     `noq-udp`, `n0-watcher`, `wasm-bindgen`, `wasm-bindgen-futures`, `js-sys`
     and `web-sys` moved up at the same time, each having been named by two
@@ -258,8 +258,8 @@ Divergences from upstream, in the order they were made.
       identity types, address lookup, the whole node runtime. `interprocess`,
       `libc`, signals, processes and the filesystem have no wasm32 equivalent
       and are gone with it. It has to exist in six places because the split put
-      the host-only code in six crates, so `fofoca/host` forwards to each leaf.
-    - **A portable clock.** `fofoca-util::clock` is now `web-time`, which off
+      the host-only code in six crates, so `habilis-network/host` forwards to each leaf.
+    - **A portable clock.** `habilis-network-util::clock` is now `web-time`, which off
       wasm32 *is* `std::time` and pulls in nothing. Without it every
       `Instant::now()` in the portable core panics in a browser — and
       `unix_secs` stamps every `Message`, so a browser peer could not author a
@@ -289,7 +289,7 @@ Divergences from upstream, in the order they were made.
     disagree on every configurable lint even though their `[workspace.lints]`
     match. One deliberate divergence, documented in the file:
     `warn-on-all-wildcard-imports` cannot hold here, because the `protocol` and
-    `util` facades are `pub use fofoca_protocol::*` — the mechanism by which
+    `util` facades are `pub use habilis_network_protocol::*` — the mechanism by which
     the split crates keep their old module paths.
 
 24. **The upstream app's remaining engine delta, merged back in.** `agent-gossip`
@@ -317,19 +317,19 @@ Divergences from upstream, in the order they were made.
       had that this repo did not, and it is worth 2.01% → 0.06% of a core idle.
 
 25. **`ops::blob` restored, behind a default-off `blob` feature.** Change 5
-    deleted the blob crate wholesale on the grounds that `fofoca-blobs` replaced
-    it. It does not: `fofoca-blobs` is a verified-range *metadata store* that
+    deleted the blob crate wholesale on the grounds that `habilis-network-blobs` replaced
+    it. It does not: `habilis-network-blobs` is a verified-range *metadata store* that
     states in its own module docs that it has no transport, no ALPN and no
     framing, while `ops::blob` is the transport — a `habilis-mesh/blob/1` server,
     a ticket, and fetch/offload over QUIC. They are complements. agent-share is
-    the proof: it uses `fofoca-blobs` *and* hand-built ~6,850 LOC of `MOUNT_ALPN`
+    the proof: it uses `habilis-network-blobs` *and* hand-built ~6,850 LOC of `MOUNT_ALPN`
     transfer on top. agent-gossip needs the transport for A2A payload offload, so
-    `crates/fofoca/src/blob/` came back unchanged (same wire format, same ALPN)
+    `crates/habilis-network/src/blob/` came back unchanged (same wire format, same ALPN)
     behind a feature that implies `host`. Consumers that don't enable it —
     mallorca, agent-share — pay neither the code size nor the spool directory.
 
     The one test that could not come back as-is is the invite↔blob cross-parse
-    assertion: `invite` now lives in `fofoca-protocol`, which cannot see `blob`.
+    assertion: `invite` now lives in `habilis-network-protocol`, which cannot see `blob`.
     It moved to `blob/ticket.rs`, which can see both.
 
 26. **`SetupBuild::protocols` is a `Mutex`, not a `RefCell`.** `RefCell` is not
@@ -339,17 +339,17 @@ Divergences from upstream, in the order they were made.
     `api::Session`). Nothing is contended and no guard is held across an `.await`;
     the `Mutex` is bought purely for the `Sync`.
 
-27. **`iroh-multihop-transport` is now `fofoca-iroh-multihop-transport`.** It was
+27. **`iroh-multihop-transport` is now `habilis-network-iroh-multihop-transport`.** It was
     the last member without the namespace prefix, while its sibling custom
-    transport `fofoca-iroh-webrtc-transport` — equally iroh-generic, equally
+    transport `habilis-network-iroh-webrtc-transport` — equally iroh-generic, equally
     `publish = false` — has carried it since it arrived in change 19. The prefix
     marks who maintains a crate, not what it depends on, so it says nothing that
-    contradicts the invariant from change 20: the crate still has no fofoca
+    contradicts the invariant from change 20: the crate still has no habilis-network
     dependency, still names only crates.io `iroh`/`iroh-base`, and nothing here
     may leak into it.
 
     The `[lib]` target moved with the package, so the import path is
-    `fofoca_iroh_multihop_transport`. Keeping the old lib name would have left a
+    `habilis_network_iroh_multihop_transport`. Keeping the old lib name would have left a
     package and its import path disagreeing for no gain — and would have been the
     one asymmetry with the webrtc transport that the rename exists to remove.
 
@@ -377,7 +377,7 @@ patch.
 
 | fork | lives as | why |
 |---|---|---|
-| `iroh-gossip` | a **direct git dep** in this workspace's `[workspace.dependencies]` | `fofoca` is the only crate in the graph that names it, so consumers inherit it and restate nothing |
+| `iroh-gossip` | a **direct git dep** in this workspace's `[workspace.dependencies]` | `habilis-network` is the only crate in the graph that names it, so consumers inherit it and restate nothing |
 | `netwatch` + `portmapper` | **git deps inside the `iroh` fork's own `iroh/Cargo.toml`** | `iroh` and `portmapper` both name netwatch from crates.io, so no dep edge *here* could redirect them — but the fork's own edges can. They move as a pair: the fork's `portmapper` takes `netwatch` by path, so splitting them puts two netwatch crates in one graph and the types cross the boundary |
 | `iroh`, `iroh-base`, `iroh-dns` | `[patch.crates-io]`, **restated by every consumer** | `iroh-relay`, the mdns/mainline address-lookup crates, `iroh-gossip` and the consumers themselves all name these from crates.io. Nothing we declare can redirect a third party's edge |
 
@@ -405,5 +405,5 @@ cargo test --workspace             # 19 suites, 411 tests
 From a [mallorca](https://github.com/dviramontes/mallorca) checkout, `just check`
 and `just test` build the staticlib and the Odin app against it — the real check
 that the C ABI is unchanged. mallorca pins this repo by rev in its `Justfile`
-(`fofoca_rev`) and clones it under `fofoca/`, so the loop is: edit here, run
-`just check` there, then bump `fofoca_rev` once the change is pushed.
+(`habilis_network_rev`) and clones it under `habilis-network/`, so the loop is: edit here, run
+`just check` there, then bump `habilis_network_rev` once the change is pushed.

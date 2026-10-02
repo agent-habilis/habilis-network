@@ -7,7 +7,7 @@
 
 This directory vendors a subset of the `agent-habilis/agent-gossip` engine as
 a self-contained Cargo workspace, so mallorca can build a C static library
-(`fofoca-ffi`) and link it directly without depending on the
+(`habilis-network-ffi`) and link it directly without depending on the
 upstream repo's full workspace (the `agent-gossip` CLI app, its test
 fixtures, examples, etc.).
 
@@ -18,7 +18,7 @@ fixtures, examples, etc.).
 ## What was vendored
 
 Upstream names, as they were at the time of vendoring — everything has since
-been renamed to `fofoca-*` and split; see [FORKED.md](FORKED.md).
+been renamed to `habilis-network-*` and split; see [FORKED.md](FORKED.md).
 
 - `crates/agent-habilis-mesh` — the gossip-network engine (verbatim).
 - `crates/iroh-multihop-transport` — path dependency of the engine (verbatim).
@@ -43,7 +43,7 @@ staticlib.
   `panic = "abort"` is deliberately **not** carried over: the FFI crate's
   `catch_unwind` at the C ABI boundary depends on unwinding.
 - FFI extension: a `name` field (alongside the existing `nick`) and a
-  `mesh_name()` accessor were added to `fofoca-ffi` (`pipe.rs`,
+  `mesh_name()` accessor were added to `habilis-network-ffi` (`pipe.rs`,
   `ffi.rs`, `include/mesh.h`, `tests/ffi_smoke.rs`) plus a `staticlib`
   crate-type. These are local-only; not present upstream.
 

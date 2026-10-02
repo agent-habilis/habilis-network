@@ -1,14 +1,14 @@
 # chat · bun-ffi
 
-Terminal chat over the fofoca mesh: Bun on
-[`packages/fofoca-ffi`](../../../packages/fofoca-ffi), which loads the C ABI
-of `crates/fofoca-ffi`. One of the side-by-side chat clients under
+Terminal chat over the habilis-network mesh: Bun on
+[`packages/habilis-network-ffi`](../../../packages/habilis-network-ffi), which loads the C ABI
+of `crates/habilis-network-ffi`. One of the side-by-side chat clients under
 `examples/chat/` — they all meet in the same mesh.
 
 ## Run
 
 ```sh
-cargo build --release -p fofoca-ffi   # once
+cargo build --release -p habilis-network-ffi   # once
 bun install                           # once, at the repo root
 
 bun run start --topic star-lake --nick ana     # join a public topic mesh

@@ -10,9 +10,9 @@
 
 use std::time::{Duration, Instant};
 
-use fofoca_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench};
-use fofoca_iroh_webrtc_transport::iroh::protocol::Router;
-use fofoca_iroh_webrtc_transport::{IceConfig, SignalEnvelope, answer_with};
+use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench};
+use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
+use habilis_network_iroh_webrtc_transport::{IceConfig, SignalEnvelope, answer_with};
 
 use crate::util::page::{Evaluate, await_call, call_page_within, start_call, wait_ready};
 use crate::util::webdriver::{self, SAFARI_TP};
@@ -146,7 +146,7 @@ pub(crate) struct Browser<'a> {
 }
 
 impl Browser<'_> {
-    /// Browser↔browser, on `page` (`index.html` for fofoca, `raw.html` for
+    /// Browser↔browser, on `page` (`index.html` for habilis-network, `raw.html` for
     /// the bare channel, with `message` as its message size). The `server`
     /// tab serves, the `client` tab downloads.
     pub(crate) fn web_web(

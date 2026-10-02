@@ -4,7 +4,7 @@
  */
 
 import * as readline from 'node:readline'
-import type { Mesh } from 'fofoca-ffi'
+import type { Mesh } from 'habilis-network-ffi'
 
 export async function runHuman(mesh: Mesh): Promise<void> {
   console.log(`joined ${mesh.name} as ${mesh.nick}`)

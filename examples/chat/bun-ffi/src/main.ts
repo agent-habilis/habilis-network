@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Terminal chat over the fofoca mesh, on `packages/fofoca-ffi`.
+ * Terminal chat over the habilis-network mesh, on `packages/habilis-network-ffi`.
  *
  * Human mode is a readline loop; `--json` is the NDJSON automation contract.
- * Needs the native library: `cargo build --release -p fofoca-ffi`.
+ * Needs the native library: `cargo build --release -p habilis-network-ffi`.
  */
 
-import { create, join, type Mesh } from 'fofoca-ffi'
+import { create, join, type Mesh } from 'habilis-network-ffi'
 import { parseChatArgs, USAGE } from './args.ts'
 import { runHuman } from './human.ts'
 import { runJson } from './json.ts'

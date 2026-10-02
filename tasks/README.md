@@ -11,7 +11,7 @@ Three jobs:
 - `cargo task e2e`. The browser tests of the WebRTC crate need a long
   preamble, and each step fails without naming its cause. The runner does
   the preamble and names the causes.
-- `cargo task benchmark`. Bulk throughput over the transports: fofoca over
+- `cargo task benchmark`. Bulk throughput over the transports: habilis-network over
   WebRTC in every pairing (Chrome↔Chrome, Chrome↔native, Safari
   Technology Preview↔native, STP↔Chrome, native↔native) against plain iroh
   and a bare data channel. Results and their reading are

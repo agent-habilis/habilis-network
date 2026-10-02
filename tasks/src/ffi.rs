@@ -1,9 +1,9 @@
 //! `cargo task ffi` — build the C ABI as a static library and prove it exports
 //! what its header promises.
 //!
-//! The C ABI is the whole point of `fofoca-ffi` and its only non-Rust consumer
+//! The C ABI is the whole point of `habilis-network-ffi` and its only non-Rust consumer
 //! links the archive, so building it the way that consumer does is the only
-//! check that means anything. A name declared in `fofoca.h` but missing from
+//! check that means anything. A name declared in `habilis_network.h` but missing from
 //! the archive fails the consumer's link long after this went green.
 
 use std::collections::BTreeSet;
@@ -13,12 +13,12 @@ use xshell::{Shell, cmd};
 use crate::TaskOutcome;
 use crate::util::{output, repo_root};
 
-const ARCHIVE: &str = "target/release/libfofoca_ffi.a";
-const HEADER: &str = "crates/fofoca-ffi/include/fofoca.h";
+const ARCHIVE: &str = "target/release/libhabilis_network_ffi.a";
+const HEADER: &str = "crates/habilis-network-ffi/include/habilis_network.h";
 
 pub(crate) fn run(sh: &Shell) -> TaskOutcome {
-    output::status("Building", "fofoca-ffi (release staticlib)");
-    cmd!(sh, "cargo build --release -p fofoca-ffi")
+    output::status("Building", "habilis-network-ffi (release staticlib)");
+    cmd!(sh, "cargo build --release -p habilis-network-ffi")
         .quiet()
         .run()?;
 
@@ -41,7 +41,7 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
     );
     if exported.is_empty() {
         return Err(format!(
-            "{reader} read no fofoca symbols at all — it likely cannot parse the \
+            "{reader} read no habilis-network symbols at all — it likely cannot parse the \
              thin-LTO bitcode objects rustc emits. Install the toolchain's own \
              reader with `rustup component add llvm-tools`."
         )
@@ -113,14 +113,14 @@ fn host_triple(sh: &Shell) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Every `fofoca_*` name the header applies as a function, prose included —
+/// Every `habilis_network_*` name the header applies as a function, prose included —
 /// the doc comments name the same functions the declarations do, and a name in
 /// a comment that no longer exists is drift worth catching.
 fn declared(header: &str) -> BTreeSet<String> {
     let bytes = header.as_bytes();
     let mut names = BTreeSet::new();
 
-    for (start, _) in header.match_indices("fofoca_") {
+    for (start, _) in header.match_indices("habilis_network_") {
         let preceded_by_word = start
             .checked_sub(1)
             .is_some_and(|prev| bytes[prev] == b'_' || bytes[prev].is_ascii_alphanumeric());
@@ -137,7 +137,7 @@ fn declared(header: &str) -> BTreeSet<String> {
     names
 }
 
-/// Every `fofoca_*` symbol the archive defines.
+/// Every `habilis_network_*` symbol the archive defines.
 ///
 /// Mach-O prefixes an underscore and ELF does not, so the prefix is optional
 /// here and the runner works on both.
@@ -146,9 +146,9 @@ fn exported(nm: &str) -> BTreeSet<String> {
         .filter_map(|line| line.split_whitespace().next_back())
         .map(|symbol| symbol.strip_prefix('_').unwrap_or(symbol))
         // The shape of a C entry point. `nm` also prints archive member names
-        // (`fofoca_util-….rcgu.o:`) as headers, and those are not symbols.
+        // (`habilis_network_util-….rcgu.o:`) as headers, and those are not symbols.
         .filter(|symbol| {
-            symbol.starts_with("fofoca_")
+            symbol.starts_with("habilis_network_")
                 && symbol
                     .bytes()
                     .all(|byte| byte.is_ascii_lowercase() || byte == b'_')

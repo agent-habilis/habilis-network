@@ -1,0 +1,59 @@
+[package]
+name = "habilis-network-netplay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "GGPO-style rollback netcode for peer-to-peer games on a habilis-network mesh"
+license = "MIT"
+readme = "README.md"
+publish = false
+# `examples/light-cycles` has no manifest at its own root — only its `native/`
+# and `web/` halves do — so cargo's package walk descends into it and folds a
+# Bun frontend and three vendored TypeScript packages into this crate's file
+# list. That list is the rustdoc fingerprint: without this, editing a `.tsx`
+# re-runs rustdoc for `habilis-network-netplay`.
+exclude = ["examples/"]
+
+[features]
+# Forwarded straight through to `habilis-network`. On by default; turning it off leaves
+# the portable half — no `host`, no IPC listener, no state file — which is how
+# a browser peer builds the whole graph, and how the wasm32 CI job builds this.
+default = ["host"]
+host = ["habilis-network/host"]
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_netplay"
+path = "src/lib.rs"
+
+[dependencies]
+# The transport. This crate is rollback netcode *for a habilis-network mesh* — peers
+# find each other, connect and exchange frames through the engine's public
+# embedding surface (`ops::send_app`, `embed::{EventLoopState, HandlerCtx}`,
+# `protocol::{AppTag, MessageBody, Nickname}`). Like an app, it sits *above*
+# the engine rather than beside it, unlike the strictly-downward
+# `habilis-network-protocol` / `habilis-network-doc` / `habilis-network-util`.
+habilis-network = { path = "../habilis-network", default-features = false }
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+# The wire format. JSON rather than a binary codec because `MessageBody`
+# accepts only control-character-free UTF-8, which JSON satisfies by
+# construction — a binary encoding would need base64 over the top.
+serde_json.workspace = true
+# `sync` only: the outbound mailbox is a `Node::sender()` channel. No
+# runtime, no timers — wasm32 has no thread pool and needs neither.
+tokio = { workspace = true, default-features = false, features = ["sync"] }
+# The handshake drops packets silently by design — a foreign session's nonce,
+# a stale sync token, a peer we cannot address. When a session then sits in
+# `Synchronizing` forever the drop is the whole story, and without this there
+# is nothing to read. Off unless the consumer asks for it.
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The loopback integration test drives two real nodes, which needs a runtime.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -136,7 +136,7 @@ enum Suite {
     /// The chat example end to end: the native terminal chat in robot mode
     /// against the browser chat page, over a local relay.
     Chat,
-    /// A stream end to end: the `fofoca-stream` CLI against the stream web
+    /// A stream end to end: the `habilis-network-stream` CLI against the stream web
     /// page, over a local relay: bytes in on one side, the same bytes out on
     /// the other, each side as producer once.
     Stream,

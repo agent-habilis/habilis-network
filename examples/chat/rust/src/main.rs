@@ -1,4 +1,4 @@
-//! A terminal chat on a fofoca mesh — the chat example's native half
+//! A terminal chat on a habilis-network mesh — the chat example's native half
 //! (`examples/chat/` holds the browser half and the README).
 //!
 //! ```text
@@ -14,7 +14,7 @@
 //! reads. Tracing goes to stderr either way, so stdout *is* the chat.
 
 use anyhow::{Context as _, Result, bail};
-use fofoca::membership::{
+use habilis_network::membership::{
     Inbound, Membership, Opts, Request, depart, join, json_sink, msg_body, parse_to,
 };
 use tokio::sync::oneshot;
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "fofoca=warn".into()),
+                .unwrap_or_else(|_| "habilis_network=warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();

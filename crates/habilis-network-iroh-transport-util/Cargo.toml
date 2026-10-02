@@ -1,0 +1,23 @@
+[package]
+name = "habilis-network-iroh-transport-util"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "Path selection and GSO unbatching shared by the habilis-network iroh custom transports."
+license = "MIT"
+repository = "https://github.com/agent-habilis/habilis-network"
+readme = "README.md"
+keywords = ["iroh", "transport", "p2p", "quic", "gso"]
+categories = ["network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_iroh_transport_util"
+path = "src/lib.rs"
+
+[dependencies]
+iroh.workspace = true

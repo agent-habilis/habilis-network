@@ -1,7 +1,7 @@
 /**
  * Serve the chat page: bundle `src/chat.ts` once at startup with Bun's own
  * bundler and serve it beside `index.html` and the generated wasm under
- * `packages/fofoca-wasm/wasm/`. The same shape as the harness's server —
+ * `packages/habilis-network-wasm/wasm/`. The same shape as the harness's server —
  * no HMR, no watch.
  *
  *   bun run serve [port]          # from examples/chat/web
@@ -36,7 +36,7 @@ if (!bundle) {
 }
 const chatJs = await bundle.text()
 
-const wasmDir = join(root, '..', '..', '..', 'packages', 'fofoca-wasm', 'wasm')
+const wasmDir = join(root, '..', '..', '..', 'packages', 'habilis-network-wasm', 'wasm')
 
 function contentType(path: string): string {
   if (path.endsWith('.wasm')) return 'application/wasm'
@@ -59,7 +59,7 @@ const server = serveOnLadder(explicit, 3010, (port) =>
       if (path === '/chat.js') {
         return new Response(chatJs, { headers: { 'content-type': 'text/javascript' } })
       }
-      // The generated glue imports `fofoca_wasm_bg.wasm` relative to itself,
+      // The generated glue imports `habilis_network_wasm_bg.wasm` relative to itself,
       // and the bundle imports the glue by URL — both land here.
       if (path.startsWith('/wasm/')) {
         const file = Bun.file(join(wasmDir, path.slice('/wasm/'.length)))

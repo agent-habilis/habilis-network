@@ -3,7 +3,7 @@
 # wasm32 build of anything downstream of `rand`/`uuid`/`iroh-base` fails before
 # it reaches our code.
 #
-# A consumer building fofoca for wasm32 from its own workspace needs the same
+# A consumer building habilis-network for wasm32 from its own workspace needs the same
 # line in its own `.cargo/config.toml`: this file governs cargo invocations run
 # from inside this directory, not the crates themselves.
 [target.wasm32-unknown-unknown]

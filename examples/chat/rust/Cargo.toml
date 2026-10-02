@@ -3,15 +3,15 @@ name = "chat"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "The chat example's native half: a terminal chat on the fofoca mesh"
+description = "The chat example's native half: a terminal chat on the habilis-network mesh"
 publish = false
 
 # LAN and DHT lookups for a `--topic` chat, forwarded the way the stream CLI
-# forwards them: they gate engine dependencies, so they are named on `fofoca`.
+# forwards them: they gate engine dependencies, so they are named on `habilis-network`.
 [features]
 default = ["mdns", "dht"]
-mdns = ["fofoca/mdns"]
-dht = ["fofoca/dht"]
+mdns = ["habilis-network/mdns"]
+dht = ["habilis-network/dht"]
 
 [lints]
 workspace = true
@@ -23,7 +23,7 @@ path = "src/main.rs"
 [dependencies]
 # The engine without its defaults; the lookups come back through the features
 # above.
-fofoca = { path = "../../../crates/fofoca", default-features = false }
+habilis-network = { path = "../../../crates/habilis-network", default-features = false }
 anyhow.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

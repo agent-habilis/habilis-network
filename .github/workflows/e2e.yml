@@ -2,7 +2,7 @@ name: E2E
 
 # A real browser against the real binary: heavier than the checks in ci.yml
 # (a wasm build, Chrome, a browser pairing), so it runs as its own workflow.
-# The binaries-only end-to-end test (crates/fofoca-stream-cli/tests/binary.rs)
+# The binaries-only end-to-end test (crates/habilis-network-stream-cli/tests/binary.rs)
 # runs in ci.yml's `cargo test --workspace` on every change.
 
 on:
@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The stream end to end: the real `fofoca-stream` binary against the real
+  # The stream end to end: the real `habilis-network-stream` binary against the real
   # stream page in a real browser, over a local relay, both directions. It is
   # the only CI run of a browser and a native peer pairing. Chrome here is
   # Chrome for Testing over CDP (`--only cft`), the same backend as a local

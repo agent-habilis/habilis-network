@@ -1,0 +1,65 @@
+# A workspace of its own — an empty `[workspace]` table is what makes this a
+# root rather than a member of the one above. The parent excludes it for the
+# reasons written there: `web-sys` does not exist off wasm32, and feature
+# unification would otherwise hand the transport crate both backends at once.
+[workspace]
+
+[package]
+name = "chat-web"
+description = "The browser half of the chat: an iroh endpoint in a tab"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[lib]
+# `cdylib` for wasm-bindgen; `rlib` so anything host-side could link it. Both,
+# because dropping the rlib makes `cargo test` on this crate impossible.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The browser backend. Same crate the CLI uses, different feature — the JSEP
+# envelope, the transport id and the address convention are shared code, which
+# is why a tab and a terminal can negotiate with each other without either
+# knowing which it is talking to.
+habilis-network-iroh-webrtc-transport = { path = "../../..", features = ["web"] }
+chat-proto = { path = "../chat-proto" }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# `mpsc` for the outbox, and the `select` the writer loop parks on. Not tokio:
+# it has no reactor here and its timers panic.
+futures = "0.3"
+# Turns a Rust panic into a readable JS stack trace instead of the
+# `unreachable executed` the runtime would otherwise report.
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["console", "Window"] }
+
+# Three generations of `getrandom` are in this graph at once and each is
+# switched on differently: 0.2 by its `js` feature, 0.3 and 0.4 by `wasm_js`.
+# All three also need the `getrandom_backend="wasm_js"` rustflag from
+# `../.cargo/config.toml` — the features alone are not enough, and 0.3+ says so
+# in a `compile_error!`. Named here despite being unused directly, because a
+# transitive dependency cannot turn its own backend on.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+wildcard_enum_match_arm = "warn"
+module_name_repetitions = "allow"
+
+[profile.release]
+# `s` rather than `3`: this ships over the wire to a tab, and the bottleneck is
+# the download, not the arithmetic.
+opt-level = "s"
+lto = true

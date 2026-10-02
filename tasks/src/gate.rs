@@ -98,15 +98,15 @@ pub(crate) const STEPS: &[Step] = &[
     // `--all-features` check row below only *checks* it.
     Step {
         kind: Kind::Lint,
-        scope: Scope::Crate("fofoca"),
+        scope: Scope::Crate("habilis-network"),
         args: &["--features", "blob", "--all-targets"],
     },
-    // `fofoca-iroh-webrtc-transport` compiles one of two mutually exclusive
+    // `habilis-network-iroh-webrtc-transport` compiles one of two mutually exclusive
     // backends and neither is on by default, so every default-feature row above
     // builds neither. `native` is the str0m one, and it owns the loopback test.
     Step {
         kind: Kind::Lint,
-        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "native,bench", "--all-targets"],
     },
     // `--all-targets` is what the first row has and the `--all-features` check
@@ -123,7 +123,7 @@ pub(crate) const STEPS: &[Step] = &[
         args: &["--all-targets"],
     },
     // The `mdns` and `dht` features exist so a consumer can drop iroh's
-    // discovery closure, and `async-io` so `fofoca-util` can shed tokio.
+    // discovery closure, and `async-io` so `habilis-network-util` can shed tokio.
     // Nothing else proves those combinations still compile.
     Step {
         kind: Kind::Check,
@@ -137,26 +137,26 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         kind: Kind::Check,
-        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "native,bench", "--all-targets"],
     },
     // Six crates are reachable on wasm32 and between them that is a
-    // substantial amount of code nothing else compiles: `fofoca-chunks`'s
+    // substantial amount of code nothing else compiles: `habilis-network-chunks`'s
     // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
-    // portable half of the engine, `fofoca-netplay`'s simulation,
-    // `fofoca-stream`'s byte streams, and `fofoca-wasm`, the browser peer.
+    // portable half of the engine, `habilis-network-netplay`'s simulation,
+    // `habilis-network-stream`'s byte streams, and `habilis-network-wasm`, the browser peer.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
     // nothing and keeps the feature from rotting.
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-chunks"),
+        scope: Scope::Crate("habilis-network-chunks"),
         args: &["--all-targets", "--features", "wasm-simd"],
     },
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
     },
     // The engine itself must reach the browser, not merely be avoidable from
@@ -167,79 +167,79 @@ pub(crate) const STEPS: &[Step] = &[
     // host-only dev-deps. The one wasm test target is named on the next row.
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca"),
+        scope: Scope::Crate("habilis-network"),
         args: &["--no-default-features"],
     },
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca"),
+        scope: Scope::Crate("habilis-network"),
         args: &["--no-default-features", "--test", "wasm_runtime"],
     },
-    // `fofoca-netplay` sits above the engine (rollback netcode for peer-to-peer
+    // `habilis-network-netplay` sits above the engine (rollback netcode for peer-to-peer
     // games, not part of it) but must be just as portable: a browser peer is
     // exactly who needs it, and a match between a browser and a terminal only
     // works if both run a bit-identical simulation.
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-netplay"),
+        scope: Scope::Crate("habilis-network-netplay"),
         args: &["--no-default-features"],
     },
-    // `fofoca-stream` runs unchanged in a tab, where a producer's accept side
+    // `habilis-network-stream` runs unchanged in a tab, where a producer's accept side
     // and a consumer's dial both live; the browser package needs it to build.
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-stream"),
+        scope: Scope::Crate("habilis-network-stream"),
         args: &[],
     },
-    // The browser peer itself — `packages/fofoca-wasm`'s Rust half. wasm32 is
+    // The browser peer itself — `packages/habilis-network-wasm`'s Rust half. wasm32 is
     // the only target it has: the crate is a `cdylib` over wasm-bindgen, so
     // nothing else builds it as the browser will.
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-wasm"),
+        scope: Scope::Crate("habilis-network-wasm"),
         args: &[],
     },
     // The browser side of `cargo task benchmark`, a cdylib like the peer.
     Step {
         kind: Kind::WasmCheck,
-        scope: Scope::Crate("fofoca-bench-wasm"),
+        scope: Scope::Crate("habilis-network-bench-wasm"),
         args: &[],
     },
     // Clippy, not just check. The `web` backend had never been linted before
     // these rows existed and carried 18 findings on its first pass.
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-chunks"),
+        scope: Scope::Crate("habilis-network-chunks"),
         args: &["--all-targets", "--features", "wasm-simd"],
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca"),
+        scope: Scope::Crate("habilis-network"),
         args: &["--no-default-features"],
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-netplay"),
+        scope: Scope::Crate("habilis-network-netplay"),
         args: &["--no-default-features"],
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-stream"),
+        scope: Scope::Crate("habilis-network-stream"),
         args: &[],
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-wasm"),
+        scope: Scope::Crate("habilis-network-wasm"),
         args: &[],
     },
     Step {
         kind: Kind::WasmClippy,
-        scope: Scope::Crate("fofoca-bench-wasm"),
+        scope: Scope::Crate("habilis-network-bench-wasm"),
         args: &[],
     },
     Step {
@@ -251,7 +251,7 @@ pub(crate) const STEPS: &[Step] = &[
     // round-trips and the loopback offload→fetch test never run there.
     Step {
         kind: Kind::Test,
-        scope: Scope::Crate("fofoca"),
+        scope: Scope::Crate("habilis-network"),
         args: &["--features", "blob"],
     },
     // Not covered by the workspace row either: the loopback suite is behind
@@ -260,7 +260,7 @@ pub(crate) const STEPS: &[Step] = &[
     // `IceConfig::host_only()`.
     Step {
         kind: Kind::Test,
-        scope: Scope::Crate("fofoca-iroh-webrtc-transport"),
+        scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "native"],
     },
     // Not covered by the workspace row: the runner's page helpers, and their
@@ -273,13 +273,13 @@ pub(crate) const STEPS: &[Step] = &[
     },
     // The workspace row already runs the relay-policy proofs
     // (`tests/relay_lookup_only_*.rs`, `tests/mesh_transport_lists.rs`):
-    // fofoca-stream's dev-dependency on fofoca
-    // (`crates/fofoca-stream/Cargo.toml`) turns on `iroh-test-utils`, and cargo
+    // habilis-network-stream's dev-dependency on habilis-network
+    // (`crates/habilis-network-stream/Cargo.toml`) turns on `iroh-test-utils`, and cargo
     // unifies features across the workspace. This row compiles them without
-    // that help, so they cannot rot if fofoca-stream drops the feature.
+    // that help, so they cannot rot if habilis-network-stream drops the feature.
     Step {
         kind: Kind::Test,
-        scope: Scope::Crate("fofoca"),
+        scope: Scope::Crate("habilis-network"),
         args: &["--features", "iroh-test-utils", "--all-targets", "--no-run"],
     },
 ];

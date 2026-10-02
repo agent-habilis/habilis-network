@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v6
 
       # Reads rust-toolchain.toml — do not duplicate the version here.
-      # The extra target is for `fofoca-chunks`, whose IndexedDB backend
+      # The extra target is for `habilis-network-chunks`, whose IndexedDB backend
       # only exists on wasm32 and would otherwise compile nowhere.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -39,7 +39,7 @@ jobs:
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
       # server. `--all-features` below only *checks* it.
       - name: Clippy (blob)
-        run: cargo clippy -p fofoca --features blob --all-targets -- -D warnings
+        run: cargo clippy -p habilis-network --features blob --all-targets -- -D warnings
 
       # A doc link that does not resolve is the same drift as a stale comment,
       # and nothing else here would catch it: 25 had accumulated, including a
@@ -53,7 +53,7 @@ jobs:
         run: cargo check --workspace --all-targets
 
       # The `mdns` and `dht` features exist so a consumer can drop iroh's
-      # discovery closure, and `async-io` so `fofoca-util` can shed tokio.
+      # discovery closure, and `async-io` so `habilis-network-util` can shed tokio.
       # Nothing else proves those combinations still compile.
       - name: Check (no default features)
         run: cargo check --workspace --no-default-features
@@ -61,21 +61,21 @@ jobs:
       - name: Check (all features)
         run: cargo check --workspace --all-features
 
-      # `fofoca-iroh-webrtc-transport` compiles one of two mutually exclusive
+      # `habilis-network-iroh-webrtc-transport` compiles one of two mutually exclusive
       # backends and neither is on by default, so the steps above — which all
       # run with default features — build neither. `native` is the str0m one,
       # and it owns the loopback test.
       - name: Check (webrtc, native backend)
-        run: cargo check -p fofoca-iroh-webrtc-transport --features native,bench --all-targets
+        run: cargo check -p habilis-network-iroh-webrtc-transport --features native,bench --all-targets
 
       - name: Clippy (webrtc, native backend)
-        run: cargo clippy -p fofoca-iroh-webrtc-transport --features native,bench --all-targets -- -D warnings
+        run: cargo clippy -p habilis-network-iroh-webrtc-transport --features native,bench --all-targets -- -D warnings
 
       # Six crates are reachable on wasm32 and nowhere else, and between them
       # that is a substantial amount of code no other job compiles:
-      # `fofoca-chunks`'s IndexedDB backend, the whole `web` backend of the
-      # WebRTC transport, the portable half of the engine, `fofoca-netplay`'s
-      # simulation, `fofoca-stream`'s byte streams, and `fofoca-wasm`, the
+      # `habilis-network-chunks`'s IndexedDB backend, the whole `web` backend of the
+      # WebRTC transport, the portable half of the engine, `habilis-network-netplay`'s
+      # simulation, `habilis-network-stream`'s byte streams, and `habilis-network-wasm`, the
       # browser peer, which has no other target at all. Without these steps
       # that code rots silently, and the `#[expect(...)]` attributes inside it
       # are never lint-checked either.
@@ -91,8 +91,8 @@ jobs:
           # `wasm-simd` only changes blake3's codegen (it assumes +simd128 at
           # runtime, not at compile time), so checking with it on costs nothing
           # and keeps the feature from rotting.
-          cargo check --target wasm32-unknown-unknown -p fofoca-chunks --all-targets --features wasm-simd
-          cargo check --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web,bench
+          cargo check --target wasm32-unknown-unknown -p habilis-network-chunks --all-targets --features wasm-simd
+          cargo check --target wasm32-unknown-unknown -p habilis-network-iroh-webrtc-transport --features web,bench
           # The engine itself must reach the browser, not merely be avoidable
           # from it. `--no-default-features` is the portable half: no `host`,
           # so no IPC listener, no state file, no process helpers. Without this
@@ -101,52 +101,52 @@ jobs:
           #
           # Not `--all-targets`: the unit tests pull proptest and insta, which
           # are host-only dev-deps. The one wasm test target is named below.
-          cargo check --target wasm32-unknown-unknown -p fofoca --no-default-features
-          cargo check --target wasm32-unknown-unknown -p fofoca --no-default-features --test wasm_runtime
-          # fofoca-netplay sits above the engine (rollback netcode for
+          cargo check --target wasm32-unknown-unknown -p habilis-network --no-default-features
+          cargo check --target wasm32-unknown-unknown -p habilis-network --no-default-features --test wasm_runtime
+          # habilis-network-netplay sits above the engine (rollback netcode for
           # peer-to-peer games, not part of it), but must be just as
           # portable: a browser peer is exactly who needs it, and a match
           # between a browser and a terminal only works if both run a
           # bit-identical simulation.
-          cargo check --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features
-          # fofoca-stream runs unchanged in a tab: both the producer's accept
+          cargo check --target wasm32-unknown-unknown -p habilis-network-netplay --no-default-features
+          # habilis-network-stream runs unchanged in a tab: both the producer's accept
           # side and the consumer's dial.
-          cargo check --target wasm32-unknown-unknown -p fofoca-stream
-          # The browser peer itself (packages/fofoca-wasm's Rust half).
-          cargo check --target wasm32-unknown-unknown -p fofoca-wasm
+          cargo check --target wasm32-unknown-unknown -p habilis-network-stream
+          # The browser peer itself (packages/habilis-network-wasm's Rust half).
+          cargo check --target wasm32-unknown-unknown -p habilis-network-wasm
           # The browser side of `cargo task benchmark`.
-          cargo check --target wasm32-unknown-unknown -p fofoca-bench-wasm
+          cargo check --target wasm32-unknown-unknown -p habilis-network-bench-wasm
 
       - name: Clippy (wasm32)
         run: |
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-chunks --all-targets --features wasm-simd -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-iroh-webrtc-transport --features web,bench -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca --no-default-features -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-netplay --no-default-features -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-stream -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-wasm -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p fofoca-bench-wasm -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-chunks --all-targets --features wasm-simd -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-webrtc-transport --features web,bench -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network --no-default-features -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-netplay --no-default-features -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-stream -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-wasm -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-bench-wasm -- -D warnings
 
-      # Runs fofoca-stream's integration tests too, relay and WebRTC-only ones
+      # Runs habilis-network-stream's integration tests too, relay and WebRTC-only ones
       # included, on purpose: they are the only CI proof of the stream's
-      # direct-path gate. fofoca-stream's dev-dependency turns on
-      # `iroh-test-utils`, so fofoca's relay-policy proofs run here as well.
+      # direct-path gate. habilis-network-stream's dev-dependency turns on
+      # `iroh-test-utils`, so habilis-network's relay-policy proofs run here as well.
       # It also runs the binaries-only end to end
-      # (fofoca-stream-cli/tests/binary.rs); the browser one is e2e.yml.
+      # (habilis-network-stream-cli/tests/binary.rs); the browser one is e2e.yml.
       - name: Test
         run: cargo test --workspace
 
       # Not covered by `--workspace` above: `blob` is off by default, so its
       # ticket round-trips and the loopback offload→fetch test never run there.
       - name: Test (blob)
-        run: cargo test -p fofoca --features blob
+        run: cargo test -p habilis-network --features blob
 
       # Not covered by `--workspace` above: the loopback suite is behind
       # `required-features = ["native"]`, so a default-feature test run skips
       # it. It stands up two real endpoints and completes a QUIC handshake over
       # a str0m data channel, offline via `IceConfig::host_only()`.
       - name: Test (webrtc, native backend)
-        run: cargo test -p fofoca-iroh-webrtc-transport --features native
+        run: cargo test -p habilis-network-iroh-webrtc-transport --features native
 
       # Not covered by `--workspace` above: the runner's page helpers, and
       # their tests, are behind the `mesh` and `bench` features, and `bench`
@@ -156,12 +156,12 @@ jobs:
 
       # `Test` above already runs the relay-policy proofs
       # (`tests/relay_lookup_only_*.rs`, `tests/mesh_transport_lists.rs`):
-      # fofoca-stream's dev-dependency on fofoca
-      # (`crates/fofoca-stream/Cargo.toml`) turns on `iroh-test-utils`, and cargo
+      # habilis-network-stream's dev-dependency on habilis-network
+      # (`crates/habilis-network-stream/Cargo.toml`) turns on `iroh-test-utils`, and cargo
       # unifies features across the workspace. This step compiles them without
-      # that help, so they cannot rot if fofoca-stream drops the feature.
+      # that help, so they cannot rot if habilis-network-stream drops the feature.
       - name: Check (relay-policy tests compile)
-        run: cargo test -p fofoca --features iroh-test-utils --all-targets --no-run
+        run: cargo test -p habilis-network --features iroh-test-utils --all-targets --no-run
 
       # `--all-targets` is what the plain Clippy step above has and the
       # `--all-features` check step lacks, so the `mesh` feature's e2e suites
@@ -175,7 +175,7 @@ jobs:
   # the gap is on record — `typecheck:node` shipped pointing at a directory that
   # did not exist, and stayed broken because no job ever called it.
   #
-  # No wasm build: `packages/fofoca-wasm` loads the wasm-bindgen glue through a
+  # No wasm build: `packages/habilis-network-wasm` loads the wasm-bindgen glue through a
   # dynamic import with a hand-declared shape (`src/module.ts`), and its
   # tsconfig covers `src/` and `harness/` only, so both scripts pass on a clean
   # checkout. The glue's own build is covered by `Check (wasm32)`.
@@ -190,18 +190,18 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      # Six projects: fofoca-api, fofoca-ffi, chat/bun-ffi, fofoca-wasm,
-      # fofoca-stream-web, chat/web. tsconfig.base.json has no `references`,
+      # Six projects: habilis-network-api, habilis-network-ffi, chat/bun-ffi, habilis-network-wasm,
+      # habilis-network-stream-web, chat/web. tsconfig.base.json has no `references`,
       # so each is a standalone `tsc -p` and this is the complete set.
       - name: Typecheck
         run: bun run typecheck
 
-      # Includes the `fofoca_opts` layout test, the other side of the
-      # `size_of::<FofocaOpts>()` assert in crates/fofoca-ffi/src/ffi.rs.
+      # Includes the `habilis_network_opts` layout test, the other side of the
+      # `size_of::<HabilisNetworkOpts>()` assert in crates/habilis-network-ffi/src/ffi.rs.
       - name: Test
         run: bun run test
 
-  # The C ABI is the whole point of fofoca-ffi and its only non-Rust consumer
+  # The C ABI is the whole point of habilis-network-ffi and its only non-Rust consumer
   # links the staticlib. Build it the way that consumer does.
   staticlib:
     name: FFI staticlib
@@ -217,12 +217,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # Builds the staticlib the way that consumer links it, then checks both
-      # directions against include/fofoca.h: every declaration exported, and
-      # every exported `fofoca_*` symbol declared. The same check runs locally.
+      # directions against include/habilis_network.h: every declaration exported, and
+      # every exported `habilis_network_*` symbol declared. The same check runs locally.
       - name: Build the staticlib and check it against the header
         run: cargo task ffi
 
-  # `crates/fofoca-netplay/examples/light-cycles/native/` is its own cargo
+  # `crates/habilis-network-netplay/examples/light-cycles/native/` is its own cargo
   # workspace (a separate `rust-toolchain.toml` pins it to nightly —
   # `visage-rust-tui` uses native generators, a nightly-only feature — so it
   # can't join the root `check` job's stable toolchain). Not covered by anything
@@ -233,7 +233,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: crates/fofoca-netplay/examples/light-cycles/native
+        working-directory: crates/habilis-network-netplay/examples/light-cycles/native
 
     steps:
       - uses: actions/checkout@v6
@@ -247,7 +247,7 @@ jobs:
       # defaults to it), which is why there is no separate cache step here.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          rust-src-dir: crates/fofoca-netplay/examples/light-cycles/native
+          rust-src-dir: crates/habilis-network-netplay/examples/light-cycles/native
           components: clippy, rustfmt
 
       - name: Format
@@ -265,7 +265,7 @@ jobs:
       # deterministic; it wires both crates' tracing to `RUST_LOG`, so a
       # failure prints the captured timeline.
       #
-      # The engine stays at `info`: `fofoca=debug` turns on the per-peer
+      # The engine stays at `info`: `habilis_network=debug` turns on the per-peer
       # `conn_path` census, which is N actor round-trips per tick. The
       # netplay half is at `debug` because that is where a stuck match
       # actually shows — a session that never leaves `Synchronizing` looks
@@ -277,9 +277,9 @@ jobs:
       - name: Test
         run: cargo test --workspace
         env:
-          RUST_LOG: fofoca=info,fofoca_netplay=debug,light_cycles_native=debug
+          RUST_LOG: habilis_network=info,habilis_network_netplay=debug,light_cycles_native=debug
 
-  # `crates/fofoca-netplay/examples/light-cycles/web/wasm/` is its own cargo
+  # `crates/habilis-network-netplay/examples/light-cycles/web/wasm/` is its own cargo
   # workspace (an empty `[workspace]` table, same trick chat-web uses —
   # `web-sys` doesn't exist off wasm32). Root toolchain applies (no nightly
   # features here), unlike the native example above.
@@ -289,7 +289,7 @@ jobs:
     # The wasm crate, not `web/` — most steps below are cargo invocations.
     defaults:
       run:
-        working-directory: crates/fofoca-netplay/examples/light-cycles/web/wasm
+        working-directory: crates/habilis-network-netplay/examples/light-cycles/web/wasm
 
     steps:
       - uses: actions/checkout@v6
@@ -300,7 +300,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: wasm32-unknown-unknown
-          cache-workspaces: crates/fofoca-netplay/examples/light-cycles/web/wasm
+          cache-workspaces: crates/habilis-network-netplay/examples/light-cycles/web/wasm
 
       - name: Format
         run: cargo fmt --check
@@ -335,13 +335,13 @@ jobs:
           cargo install wasm-bindgen-cli --version "$version" --locked
 
       - name: Build wasm
-        working-directory: crates/fofoca-netplay/examples/light-cycles/web
+        working-directory: crates/habilis-network-netplay/examples/light-cycles/web
         run: ./build-wasm.sh
 
       - uses: oven-sh/setup-bun@v2
 
       - name: Install frontend dependencies
-        working-directory: crates/fofoca-netplay/examples/light-cycles/web
+        working-directory: crates/habilis-network-netplay/examples/light-cycles/web
         run: bun install --frozen-lockfile
 
       # Covers the app's own tsconfig.json plus every vendored package's
@@ -349,5 +349,5 @@ jobs:
       # `typecheck` script. Needs the real wasm build above: `wasm.ts`
       # imports the wasm-bindgen glue's generated types.
       - name: Typecheck
-        working-directory: crates/fofoca-netplay/examples/light-cycles/web
+        working-directory: crates/habilis-network-netplay/examples/light-cycles/web
         run: bun run typecheck

@@ -164,7 +164,7 @@ impl Browser {
         let binary = chrome_for_testing()?;
         let launch = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let profile = std::env::temp_dir().join(format!(
-            "fofoca-cdp-{}-{}-{launch}",
+            "habilis-network-cdp-{}-{}-{launch}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

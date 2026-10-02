@@ -68,7 +68,7 @@ impl Robot {
             ])
             .env(
                 "RUST_LOG",
-                std::env::var("RUST_LOG").unwrap_or_else(|_| "fofoca=info".to_owned()),
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "habilis_network=info".to_owned()),
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -200,7 +200,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
     let (relay_url, _relay_server) = runtime
-        .block_on(fofoca::net::test_relay::spawn_plain())
+        .block_on(habilis_network::net::test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let server = BunServer::serve(
         &repo_root().join("examples/chat/web"),
@@ -232,7 +232,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     let page = launch_page(args.page_browser()).map_err(|Skip(reason)| reason)?;
     page.navigate_watching_console(
         &format!(
-            "{}/?topic={topic}&nick=browser&relay={}&log=fofoca=info",
+            "{}/?topic={topic}&nick=browser&relay={}&log=habilis_network=info",
             server.url,
             urlencode(relay_url.as_str()),
         ),

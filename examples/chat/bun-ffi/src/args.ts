@@ -1,11 +1,11 @@
 /**
  * The command line. Exactly one way in — a topic, a mesh id, or a create —
- * because `fofoca_mesh_open` treats "neither selector" as create and a chat that
+ * because `habilis_network_mesh_open` treats "neither selector" as create and a chat that
  * silently creates a loopback mesh of one hears nobody, forever.
  */
 
 import { parseArgs } from 'node:util'
-import type { CreateOpts, JoinOpts, Lookup, Transport } from 'fofoca-ffi'
+import type { CreateOpts, JoinOpts, Lookup, Transport } from 'habilis-network-ffi'
 
 export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
 

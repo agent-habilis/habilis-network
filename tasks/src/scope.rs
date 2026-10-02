@@ -1,7 +1,7 @@
 //! `-p <crate>` — narrow a task to part of the workspace.
 //!
 //! One flag, shared by every task that has more than one crate to run against,
-//! so `cargo task lint -p fofoca-chunks` and `cargo task ci -p fofoca-chunks`
+//! so `cargo task lint -p habilis-network-chunks` and `cargo task ci -p habilis-network-chunks`
 //! mean the same thing by construction.
 
 use clap::Args;
@@ -14,8 +14,8 @@ pub(crate) struct Scope {
     /// Only this crate. Repeatable; omit for the whole workspace.
     ///
     /// The task keeps the steps that concern the named crates and drops the
-    /// rest, so `-p fofoca` still runs the `blob` feature pass and
-    /// `-p fofoca-util` runs neither that nor any wasm pass.
+    /// rest, so `-p habilis-network` still runs the `blob` feature pass and
+    /// `-p habilis-network-util` runs neither that nor any wasm pass.
     #[arg(short = 'p', long = "package", value_name = "CRATE")]
     packages: Vec<String>,
 }

@@ -7,7 +7,7 @@ with no QUIC in it. The question it was built to answer: is the
 iroh↔WebRTC integration the bottleneck, and is the double encryption (DTLS
 outside, QUIC TLS inside) the reason?
 
-The short answer: **no, and no**. Browser↔browser, fofoca reaches the data
+The short answer: **no, and no**. Browser↔browser, habilis-network reaches the data
 channel's own per-message ceiling. Native↔native over str0m, the driver's
 CPU goes to one UDP syscall per packet, and a long connection loses speed
 for a reason below the transport that is not yet found. The inner
@@ -34,8 +34,8 @@ does not set the throughput.
 - STP needs *Settings ▸ Developer ▸ Allow remote automation* and a one-time
   `sudo safaridriver --enable` (the STP copy of the binary). A running STP
   copy can hang the session handshake; quit it and run again.
-- Protocol and pages: `fofoca_iroh_webrtc_transport::bench`,
-  `crates/fofoca-bench-wasm`. Runner: `tasks/src/bench.rs`.
+- Protocol and pages: `habilis_network_iroh_webrtc_transport::bench`,
+  `crates/habilis-network-bench-wasm`. Runner: `tasks/src/bench.rs`.
 
 ```sh
 cargo task benchmark                         # the matrix, 8 MiB × 5 rounds
@@ -56,10 +56,10 @@ second, the median of the rounds; the range is min–max across both runs.
 
 | cell | path | Mbit/s run 1 | Mbit/s run 2 | range | JSEP ms |
 |---|---|---|---|---|---|
-| fofoca chrome-chrome | webrtc | 266 | 249 | 209–277 | ~970 |
-| fofoca chrome-native | webrtc | 166 | 164 | 121–171 | ~620 |
-| fofoca native-native | ip | 2215 | 2186 | 1788–2389 | 0 |
-| fofoca native-native (webrtc-only) | webrtc | 76 | 79 | 64–104 | 5 |
+| habilis-network chrome-chrome | webrtc | 266 | 249 | 209–277 | ~970 |
+| habilis-network chrome-native | webrtc | 166 | 164 | 121–171 | ~620 |
+| habilis-network native-native | ip | 2215 | 2186 | 1788–2389 | 0 |
+| habilis-network native-native (webrtc-only) | webrtc | 76 | 79 | 64–104 | 5 |
 | iroh native-native (baseline) | ip | 1862 | 2392 | 1018–2404 | 0 |
 | webrtc chrome-chrome (raw, 64 KiB msgs) | data-channel | 466 | 463 | 364–478 | ~690 |
 | webrtc chrome-chrome (raw, 1200 B msgs) | data-channel | 258 | 255 | 249–273 | ~710 |
@@ -71,8 +71,8 @@ so read it as a lower bound until a rerun:
 
 | cell | path | Mbit/s | JSEP ms |
 |---|---|---|---|
-| fofoca safari-native | webrtc | 102 | ~610 |
-| fofoca safari-chrome | webrtc | 102 | ~950 |
+| habilis-network safari-native | webrtc | 102 | ~610 |
+| habilis-network safari-chrome | webrtc | 102 | ~950 |
 
 Until this revision every round opened a new connection, so every timed
 round paid the handshake and slow start. That hid one cell: on a new
@@ -82,11 +82,11 @@ run-to-run spread.
 
 Notes on the cells:
 
-- `fofoca native-native` is the engine's wiring for two native peers: the
+- `habilis-network native-native` is the engine's wiring for two native peers: the
   WebRTC transport is registered beside UDP and the selector prefers direct
   IP. It equals the iroh baseline, so registering the transport costs
   nothing on the UDP path.
-- `fofoca native-native (webrtc-only)` is str0m at both ends. It is the
+- `habilis-network native-native (webrtc-only)` is str0m at both ends. It is the
   only native cell that goes through the data channel, and it has the
   widest spread.
 - The raw channel is ordered and reliable (the default). The transport's
@@ -97,7 +97,7 @@ Notes on the cells:
 
 ## Reading
 
-**Browser↔browser.** fofoca (209–277 Mbit/s) equals the raw channel at
+**Browser↔browser.** habilis-network (209–277 Mbit/s) equals the raw channel at
 1200-byte messages (249–273 Mbit/s). The integration adds nothing
 measurable on top of the channel's per-message cost.
 

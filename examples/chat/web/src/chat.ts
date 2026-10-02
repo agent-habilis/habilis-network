@@ -23,8 +23,8 @@
  * - `window.chat = { send, close }`, promise-returning.
  */
 
-import { join } from 'fofoca-wasm'
-import type { Mesh, Transport } from 'fofoca-wasm'
+import { join } from 'habilis-network-wasm'
+import type { Mesh, Transport } from 'habilis-network-wasm'
 
 declare global {
   interface Window {

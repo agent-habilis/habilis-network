@@ -632,7 +632,7 @@ name = "chat"
 version = "0.6.0"
 dependencies = [
  "anyhow",
- "fofoca",
+ "habilis-network",
  "serde_json",
  "tokio",
  "tracing-subscriber",
@@ -1469,271 +1469,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
-name = "fofoca"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "argon2",
- "async-trait",
- "bs58",
- "bytes",
- "chacha20poly1305",
- "divan",
- "fofoca-doc",
- "fofoca-iroh-multihop-transport",
- "fofoca-iroh-webrtc-transport",
- "fofoca-logging",
- "fofoca-protocol",
- "fofoca-util",
- "futures-util",
- "insta",
- "interprocess",
- "iroh",
- "iroh-gossip",
- "iroh-mainline-address-lookup",
- "iroh-mdns-address-lookup",
- "iroh-relay",
- "libc",
- "n0-future",
- "proptest",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wasm-bindgen-test",
- "web-time",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "fofoca-bench-wasm"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "console_error_panic_hook",
- "fofoca-iroh-webrtc-transport",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-time",
-]
-
-[[package]]
-name = "fofoca-chunks"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "blake3",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
- "web-sys",
-]
-
-[[package]]
-name = "fofoca-doc"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "automerge",
- "bs58",
- "chacha20poly1305",
- "fofoca-protocol",
- "fofoca-util",
- "insta",
- "proptest",
- "serde",
- "serde_json",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "fofoca-ffi"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "bytes",
- "fofoca",
- "fofoca-stream",
- "n0-future",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "fofoca-iroh-multihop-transport"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "bytes",
- "fofoca-iroh-transport-util",
- "iroh",
- "iroh-base",
- "n0-future",
- "n0-watcher",
- "noq-udp",
- "postcard",
- "serde",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "fofoca-iroh-transport-util"
-version = "0.6.0"
-dependencies = [
- "iroh",
-]
-
-[[package]]
-name = "fofoca-iroh-webrtc-transport"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "bytes",
- "fofoca-iroh-transport-util",
- "futures",
- "if-addrs",
- "iroh",
- "iroh-base",
- "js-sys",
- "n0-error",
- "n0-future",
- "n0-watcher",
- "noq-udp",
- "rand 0.9.4",
- "serde",
- "str0m",
- "str0m-aws-lc-rs",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
- "web-sys",
-]
-
-[[package]]
-name = "fofoca-logging"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "fofoca-protocol",
- "fofoca-util",
- "insta",
- "proptest",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "fofoca-netplay"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "fofoca",
- "proptest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "fofoca-protocol"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "argon2",
- "bs58",
- "bytes",
- "chacha20poly1305",
- "fofoca-util",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "getrandom 0.4.3",
- "insta",
- "iroh-base",
- "proptest",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tracing",
- "uuid",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "fofoca-stream"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "bytes",
- "fofoca",
- "n0-future",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "fofoca-stream-cli"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "clap",
- "fofoca",
- "fofoca-stream",
- "libc",
- "serde_json",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "fofoca-util"
-version = "0.6.0"
-dependencies = [
- "libc",
- "tokio",
- "tracing",
- "vergen-gitcl",
- "web-time",
-]
-
-[[package]]
-name = "fofoca-wasm"
-version = "0.6.0"
-dependencies = [
- "anyhow",
- "console_error_panic_hook",
- "fofoca",
- "fofoca-stream",
- "n0-future",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
 name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1986,6 +1721,271 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "habilis-network"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "divan",
+ "futures-util",
+ "habilis-network-doc",
+ "habilis-network-iroh-multihop-transport",
+ "habilis-network-iroh-webrtc-transport",
+ "habilis-network-logging",
+ "habilis-network-protocol",
+ "habilis-network-util",
+ "insta",
+ "interprocess",
+ "iroh",
+ "iroh-gossip",
+ "iroh-mainline-address-lookup",
+ "iroh-mdns-address-lookup",
+ "iroh-relay",
+ "libc",
+ "n0-future",
+ "proptest",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wasm-bindgen-test",
+ "web-time",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "habilis-network-bench-wasm"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "console_error_panic_hook",
+ "habilis-network-iroh-webrtc-transport",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
+name = "habilis-network-chunks"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
+name = "habilis-network-doc"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "bs58",
+ "chacha20poly1305",
+ "habilis-network-protocol",
+ "habilis-network-util",
+ "insta",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "habilis-network-ffi"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "habilis-network",
+ "habilis-network-stream",
+ "n0-future",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "habilis-network-iroh-multihop-transport"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "habilis-network-iroh-transport-util",
+ "iroh",
+ "iroh-base",
+ "n0-future",
+ "n0-watcher",
+ "noq-udp",
+ "postcard",
+ "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "habilis-network-iroh-transport-util"
+version = "0.6.0"
+dependencies = [
+ "iroh",
+]
+
+[[package]]
+name = "habilis-network-iroh-webrtc-transport"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "habilis-network-iroh-transport-util",
+ "if-addrs",
+ "iroh",
+ "iroh-base",
+ "js-sys",
+ "n0-error",
+ "n0-future",
+ "n0-watcher",
+ "noq-udp",
+ "rand 0.9.4",
+ "serde",
+ "str0m",
+ "str0m-aws-lc-rs",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
+name = "habilis-network-logging"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "habilis-network-protocol",
+ "habilis-network-util",
+ "insta",
+ "proptest",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "habilis-network-netplay"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "habilis-network",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "habilis-network-protocol"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "bs58",
+ "bytes",
+ "chacha20poly1305",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "habilis-network-util",
+ "insta",
+ "iroh-base",
+ "proptest",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "habilis-network-stream"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "habilis-network",
+ "n0-future",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "habilis-network-stream-cli"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "habilis-network",
+ "habilis-network-stream",
+ "libc",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "habilis-network-util"
+version = "0.6.0"
+dependencies = [
+ "libc",
+ "tokio",
+ "tracing",
+ "vergen-gitcl",
+ "web-time",
+]
+
+[[package]]
+name = "habilis-network-wasm"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "console_error_panic_hook",
+ "habilis-network",
+ "habilis-network-stream",
+ "n0-future",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -4840,8 +4840,8 @@ dependencies = [
  "anstream 0.6.21",
  "anstyle",
  "clap",
- "fofoca",
- "fofoca-iroh-webrtc-transport",
+ "habilis-network",
+ "habilis-network-iroh-webrtc-transport",
  "serde",
  "serde_json",
  "tokio",

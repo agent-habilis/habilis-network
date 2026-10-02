@@ -1,0 +1,20 @@
+{
+  "name": "habilis-network-wasm",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "habilis-network in the browser: the wasm-bindgen MeshPeer behind the habilis-network-api contract",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build-wasm": "cargo task build-wasm",
+    "harness": "bun run harness/serve.ts"
+  },
+  "dependencies": {
+    "habilis-network-api": "workspace:*"
+  }
+}

@@ -1,0 +1,59 @@
+# A workspace of its own — an empty `[workspace]` table is what makes this a
+# root rather than a member of anything above it, same trick as the
+# chat-webrtc example's `chat-web`: `web-sys` doesn't exist off wasm32, and
+# feature unification would otherwise hand `habilis-network`'s WebRTC transport both
+# backends (native + web) at once.
+[workspace]
+
+[package]
+name = "light-cycles-web"
+description = "the web light-cycles client's wasm half: game logic, the habilis-network + habilis-network-netplay embedding, and the wasm-bindgen JS API"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+publish = false
+
+[lib]
+# `cdylib` for wasm-bindgen; `rlib` so `cargo check`/`cargo test` on this crate
+# still work without going through wasm-bindgen at all.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# `--no-default-features`: the portable half only — no `host`, no IPC
+# listener, no state file, nothing a browser has no equivalent of. Feature
+# unification with `habilis-network-protocol`'s own `[target.wasm32]` block already
+# turns on every `getrandom`/`uuid` backend this needs, so nothing about that
+# has to be repeated here (contrast `chat-web`, which doesn't depend on
+# `habilis-network-protocol` and so must declare them itself).
+habilis-network = { path = "../../../../../habilis-network", default-features = false }
+habilis-network-netplay = { path = "../../../..", default-features = false }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Only for `Node::sender()`'s channel type — `sync` alone, no runtime/`rt`
+# feature: wasm32 has no thread pool, and `habilis-network` itself only ever uses this
+# for the plain `mpsc`/`broadcast`/`oneshot` data structures, never `tokio::spawn`.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# Turns a Rust panic into a readable JS stack trace instead of the
+# `unreachable executed` the runtime would otherwise report.
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["console"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+wildcard_enum_match_arm = "warn"
+module_name_repetitions = "allow"
+
+[profile.release]
+opt-level = "s"
+lto = true

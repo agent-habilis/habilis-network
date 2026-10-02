@@ -2,7 +2,7 @@
 //!
 //! Three shapes. Plain iroh on UDP is the ceiling. The engine-shaped endpoint
 //! registers the WebRTC transport beside UDP and lets the path selector pick,
-//! which is what two native fofoca peers do — and it picks UDP, so that cell
+//! which is what two native habilis-network peers do — and it picks UDP, so that cell
 //! is a check that registering the transport costs nothing, not a WebRTC
 //! number. The webrtc-only pair is str0m at both ends and the only native cell
 //! that goes through the data channel at all.
@@ -11,13 +11,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fofoca_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench, exchange, on_webrtc};
-use fofoca_iroh_webrtc_transport::iroh::endpoint::{Builder, presets};
-use fofoca_iroh_webrtc_transport::iroh::protocol::Router;
-use fofoca_iroh_webrtc_transport::iroh::{
+use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench, exchange, on_webrtc};
+use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Builder, presets};
+use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
+use habilis_network_iroh_webrtc_transport::iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr,
 };
-use fofoca_iroh_webrtc_transport::{
+use habilis_network_iroh_webrtc_transport::{
     IceConfig, WebRtcHandle, WebRtcTransport, answer_with, custom_addr, offer_with,
 };
 
@@ -52,7 +52,9 @@ impl WebRtcPeer {
     }
 }
 
-fn path_of(connection: &fofoca_iroh_webrtc_transport::iroh::endpoint::Connection) -> String {
+fn path_of(
+    connection: &habilis_network_iroh_webrtc_transport::iroh::endpoint::Connection,
+) -> String {
     if on_webrtc(connection) {
         return "webrtc".to_owned();
     }
@@ -120,7 +122,7 @@ fn loopback_builder() -> Result<Builder, String> {
 }
 
 /// str0m at both ends: JSEP in memory, then the data channel is the only path.
-pub(crate) async fn fofoca_native_native_webrtc(args: &Args) -> Outcome {
+pub(crate) async fn habilis_network_native_native_webrtc(args: &Args) -> Outcome {
     let run = async {
         let client = WebRtcPeer::bind().await?;
         let server = WebRtcPeer::bind().await?;
@@ -178,7 +180,7 @@ async fn engine_shaped() -> Result<Endpoint, String> {
         .map_err(|error| format!("bind failed: {error:#}"))
 }
 
-pub(crate) async fn fofoca_native_native(args: &Args) -> Outcome {
+pub(crate) async fn habilis_network_native_native(args: &Args) -> Outcome {
     ip_pair(args, engine_shaped).await
 }
 
@@ -214,7 +216,7 @@ async fn ip_pair<F: Future<Output = Result<Endpoint, String>>>(
 mod tests {
     use super::{Args, BENCH_ALPN, Bench, Router, ip_addr, rounds, vanilla};
     use crate::bench::Direction;
-    use fofoca_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
+    use habilis_network_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
 
     /// An upload's throughput is the bulk it sent, not the token it got back.
     #[tokio::test]

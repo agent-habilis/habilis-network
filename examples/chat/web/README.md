@@ -1,7 +1,7 @@
 # chat · web
 
-Browser chat over the fofoca mesh: a page on
-[`packages/fofoca-wasm`](../../../packages/fofoca-wasm), which runs the engine
+Browser chat over the habilis-network mesh: a page on
+[`packages/habilis-network-wasm`](../../../packages/habilis-network-wasm), which runs the engine
 as WebAssembly. One of the side-by-side chat clients under `examples/chat/` —
 they all meet in the same mesh, so a tab and a terminal chat to each other.
 
@@ -16,7 +16,7 @@ bun run serve 4000       # exactly 4000, or fail
 ```
 
 `serve.ts` bundles `src/chat.ts` on each request and serves the wasm glue from
-`packages/fofoca-wasm/wasm/`, so a page reload picks up an edit with no build
+`packages/habilis-network-wasm/wasm/`, so a page reload picks up an edit with no build
 step. Without `cargo task build-wasm` there is no glue to serve.
 
 ## Selectors

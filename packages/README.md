@@ -1,21 +1,21 @@
-# `packages/` — fofoca from JavaScript
+# `packages/` — habilis-network from JavaScript
 
 Three packages, so a JS or TS program can join a mesh, send messages, read the
 roster and merge the shared document without writing any Rust.
 
 | | |
 |---|---|
-| [`fofoca-api`](fofoca-api) | The contract, and the machinery both backends share. No runtime dependencies, and no way to join a mesh. |
-| [`fofoca-wasm`](fofoca-wasm) | A browser tab. Runs the engine as WebAssembly over the WebRTC transport. |
-| [`fofoca-ffi`](fofoca-ffi) | Bun, Deno and Node. `dlopen`s the C ABI in [`crates/fofoca-ffi`](../crates/fofoca-ffi) and gets mDNS, the mainline DHT and the relay ladder. |
+| [`habilis-network-api`](habilis-network-api) | The contract, and the machinery both backends share. No runtime dependencies, and no way to join a mesh. |
+| [`habilis-network-wasm`](habilis-network-wasm) | A browser tab. Runs the engine as WebAssembly over the WebRTC transport. |
+| [`habilis-network-ffi`](habilis-network-ffi) | Bun, Deno and Node. `dlopen`s the C ABI in [`crates/habilis-network-ffi`](../crates/habilis-network-ffi) and gets mDNS, the mainline DHT and the relay ladder. |
 
 Two backends because the two hosts reach the engine differently: a tab has no
 UDP socket, a terminal has real ones. They meet on the mesh because both speak
-`fofoca::membership` (in [`crates/fofoca`](../crates/fofoca)), which exists as
+`habilis_network::membership` (in [`crates/habilis-network`](../crates/habilis-network)), which exists as
 one module for exactly that reason.
 
 ```ts
-import { join } from 'fofoca-ffi' // or 'fofoca-wasm'
+import { join } from 'habilis-network-ffi' // or 'habilis-network-wasm'
 
 await using mesh = await join({ topic: 'star-lake', nick: 'caio' })
 await mesh.send('hello')
@@ -63,7 +63,7 @@ here, two tabs.
 
 ```ts
 // The producing tab.
-import { bindStreams } from 'fofoca-wasm'
+import { bindStreams } from 'habilis-network-wasm'
 
 const producer = await (await bindStreams({ lookup: ['relay'] })).create()
 share(producer.hash) // whoever holds the hash can read the stream, once
@@ -73,24 +73,24 @@ await producer.close()
 
 ```ts
 // The reading tab, given the hash.
-import { bindStreamsFor } from 'fofoca-wasm'
+import { bindStreamsFor } from 'habilis-network-wasm'
 
 const reader = await (await bindStreamsFor(hash)).open(hash)
 for await (const chunk of reader) { … }
 ```
 
-[`fofoca-stream-web`](fofoca-stream-web) is a page built on this: it reads the
-stream in its URL fragment, or produces one. The `fofoca-stream` binary
-(`crates/fofoca-stream-cli`) is the terminal end.
+[`habilis-network-stream-web`](habilis-network-stream-web) is a page built on this: it reads the
+stream in its URL fragment, or produces one. The `habilis-network-stream` binary
+(`crates/habilis-network-stream-cli`) is the terminal end.
 
 ## The harness page
 
-`fofoca-wasm` ships a driverless test page: build the wasm
+`habilis-network-wasm` ships a driverless test page: build the wasm
 (`cargo task build-wasm`), serve it
 (`bun run harness -- 3000`), and open
 
 ```
-http://127.0.0.1:3000/?topic=room&log=fofoca=info
+http://127.0.0.1:3000/?topic=room&log=habilis_network=info
 ```
 
 The page joins the mesh the query names and mirrors the roster, every message,
@@ -111,4 +111,4 @@ Every package is `private: true` and points its `exports` at `.ts` source rather
 than built output — the shape light-cycles' own `web/vendor/*` already uses.
 Publishing needs a build step, for a reason worth knowing: Node refuses to strip
 types from a file whose real path is inside `node_modules`, and only the Bun
-workspace symlink is what keeps `fofoca-ffi`'s worker loadable under Node today.
+workspace symlink is what keeps `habilis-network-ffi`'s worker loadable under Node today.

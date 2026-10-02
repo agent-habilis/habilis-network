@@ -1,0 +1,43 @@
+[package]
+name = "habilis-network-stream-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "`habilis-network-stream`: stdin to one reader over a direct path, or a stream's bytes to stdout"
+readme = "README.md"
+publish = false
+
+# A sibling of `habilis-network-stream` rather than a `[[bin]]` inside it: the wasm gate
+# builds that crate for wasm32, and a binary needs the tokio runtime that
+# cannot go there. Same shape as `habilis-network-ffi`, the other host-only consumer.
+
+[features]
+default = ["mdns", "dht"]
+mdns = ["habilis-network/mdns"]
+dht = ["habilis-network/dht"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "habilis-network-stream"
+path = "src/main.rs"
+
+[dependencies]
+habilis-network = { path = "../habilis-network", default-features = false }
+habilis-network-stream = { path = "../habilis-network-stream" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde_json.workspace = true
+tracing-subscriber.workspace = true
+
+# One `sigaction` read: whether SIGHUP was inherited as ignored (`nohup`).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# The binary end to end in `tests/`: an in-process relay for the two
+# processes to meet on, with no network of the machine's own. Only `cargo
+# test` builds with these features; a `cargo build` or `install` does not.
+[dev-dependencies]
+habilis-network = { path = "../habilis-network", default-features = false, features = ["host", "iroh-test-utils"] }

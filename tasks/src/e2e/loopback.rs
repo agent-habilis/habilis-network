@@ -63,7 +63,7 @@ pub(super) fn run(binary: &str, env: &BTreeMap<String, String>) -> TaskOutcome {
             "--target",
             "wasm32-unknown-unknown",
             "-p",
-            "fofoca-iroh-webrtc-transport",
+            "habilis-network-iroh-webrtc-transport",
             "--features",
             "web,bench",
             "--test",

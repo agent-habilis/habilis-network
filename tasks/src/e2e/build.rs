@@ -64,7 +64,7 @@ pub(super) fn build(
             "--target",
             "wasm32-unknown-unknown",
             "-p",
-            "fofoca-iroh-webrtc-transport",
+            "habilis-network-iroh-webrtc-transport",
             "--features",
             "web,bench",
             "--test",
@@ -107,13 +107,13 @@ pub(super) fn build(
     }
 }
 
-/// Build the browser peer (`fofoca-wasm`) and emit its ES-module glue into
-/// `packages/fofoca-wasm/wasm/`, returning the glue's path.
+/// Build the browser peer (`habilis-network-wasm`) and emit its ES-module glue into
+/// `packages/habilis-network-wasm/wasm/`, returning the glue's path.
 pub(crate) fn build_wasm_peer(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
     build_wasm_cdylib(
-        "fofoca-wasm",
+        "habilis-network-wasm",
         env,
-        &repo_root().join("packages/fofoca-wasm/wasm"),
+        &repo_root().join("packages/habilis-network-wasm/wasm"),
     )
 }
 
@@ -137,7 +137,7 @@ pub(crate) fn ensure_bun(why: &str) -> TaskOutcome {
 pub(crate) fn build_browser_peer() -> Result<PathBuf, String> {
     check_wasm_bindgen().map_err(|error| error.to_string())?;
     let env = wasm_env()?;
-    output::status("Building", "the browser peer (fofoca-wasm)");
+    output::status("Building", "the browser peer (habilis-network-wasm)");
     let glue = build_wasm_peer(&env)?;
     output::detail(&format!("             {}", glue.display()));
     Ok(glue)

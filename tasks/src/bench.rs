@@ -1,11 +1,11 @@
 //! `cargo task benchmark` — bulk throughput over the transports.
 //!
 //! One question: is the iroh↔WebRTC integration the bottleneck? So the cells
-//! are fofoca over WebRTC in every pairing that exists — browser↔browser,
+//! are habilis-network over WebRTC in every pairing that exists — browser↔browser,
 //! browser↔native, native↔native — read against two ceilings: plain iroh on
 //! UDP, and a bare data channel with no QUIC in it at all.
 //!
-//! Every cell moves the same bulk protocol (`fofoca_iroh_webrtc_transport::
+//! Every cell moves the same bulk protocol (`habilis_network_iroh_webrtc_transport::
 //! bench`) over one QUIC bi-stream, times it on the receiving side only, and
 //! asserts which path carried it — a cell that claims WebRTC and quietly ran
 //! on UDP is a wrong number, not a fast one. The JSEP round is timed
@@ -63,21 +63,21 @@ pub(crate) enum Direction {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Cell {
     /// Two separate Chrome processes, iroh QUIC over the data channel.
-    FofocaChromeChrome,
+    HabilisNetworkChromeChrome,
     /// A Chrome client, a str0m server in this process.
-    FofocaChromeNative,
+    HabilisNetworkChromeNative,
     /// A Safari Technology Preview client, a str0m server in this process.
-    FofocaSafariNative,
+    HabilisNetworkSafariNative,
     /// A Safari Technology Preview client, a Chrome server: the two WebRTC
     /// stacks against each other.
-    FofocaSafariChrome,
+    HabilisNetworkSafariChrome,
     /// Two native endpoints wired as the engine wires them: the WebRTC
     /// transport registered, direct UDP available and preferred. Expected on
     /// `ip`, so it reads as the engine-shaped twin of the iroh baseline.
-    FofocaNativeNative,
+    HabilisNetworkNativeNative,
     /// Two native endpoints with WebRTC as their only transport — str0m at
     /// both ends, the one cell that isolates the native double encryption.
-    FofocaNativeNativeWebRtc,
+    HabilisNetworkNativeNativeWebRtc,
     /// Plain iroh on loopback UDP, no custom transport: the native ceiling.
     IrohNativeNative,
     /// A bare `RTCDataChannel` between two Chrome processes, no wasm and no
@@ -86,17 +86,17 @@ pub(crate) enum Cell {
     /// The same channel in 1200-byte messages — one QUIC datagram's worth,
     /// which is how the transport uses it. The gap to [`Self::RawChromeChrome`]
     /// is the channel's own per-message cost; the gap from here to
-    /// [`Self::FofocaChromeChrome`] is the integration's.
+    /// [`Self::HabilisNetworkChromeChrome`] is the integration's.
     RawChromeChromeDatagram,
 }
 
 const CELLS: [Cell; 9] = [
-    Cell::FofocaChromeChrome,
-    Cell::FofocaChromeNative,
-    Cell::FofocaSafariNative,
-    Cell::FofocaSafariChrome,
-    Cell::FofocaNativeNative,
-    Cell::FofocaNativeNativeWebRtc,
+    Cell::HabilisNetworkChromeChrome,
+    Cell::HabilisNetworkChromeNative,
+    Cell::HabilisNetworkSafariNative,
+    Cell::HabilisNetworkSafariChrome,
+    Cell::HabilisNetworkNativeNative,
+    Cell::HabilisNetworkNativeNativeWebRtc,
     Cell::IrohNativeNative,
     Cell::RawChromeChrome,
     Cell::RawChromeChromeDatagram,
@@ -105,12 +105,12 @@ const CELLS: [Cell; 9] = [
 impl Cell {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::FofocaChromeChrome => "fofoca chrome-chrome",
-            Self::FofocaChromeNative => "fofoca chrome-native",
-            Self::FofocaSafariNative => "fofoca safari-native",
-            Self::FofocaSafariChrome => "fofoca safari-chrome",
-            Self::FofocaNativeNative => "fofoca native-native",
-            Self::FofocaNativeNativeWebRtc => "fofoca native-native (webrtc-only)",
+            Self::HabilisNetworkChromeChrome => "habilis-network chrome-chrome",
+            Self::HabilisNetworkChromeNative => "habilis-network chrome-native",
+            Self::HabilisNetworkSafariNative => "habilis-network safari-native",
+            Self::HabilisNetworkSafariChrome => "habilis-network safari-chrome",
+            Self::HabilisNetworkNativeNative => "habilis-network native-native",
+            Self::HabilisNetworkNativeNativeWebRtc => "habilis-network native-native (webrtc-only)",
             Self::IrohNativeNative => "iroh native-native",
             Self::RawChromeChrome => "webrtc chrome-chrome (raw, 64 KiB msgs)",
             Self::RawChromeChromeDatagram => "webrtc chrome-chrome (raw, 1200 B msgs)",

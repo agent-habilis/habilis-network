@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use fofoca_iroh_webrtc_transport::bench;
+use habilis_network_iroh_webrtc_transport::bench;
 
 use crate::TaskOutcome;
 use crate::util::wasm;
@@ -26,12 +26,12 @@ impl Direction {
 impl Cell {
     pub(crate) fn expected_path(self) -> &'static str {
         match self {
-            Self::FofocaChromeChrome
-            | Self::FofocaChromeNative
-            | Self::FofocaSafariNative
-            | Self::FofocaSafariChrome
-            | Self::FofocaNativeNativeWebRtc => "webrtc",
-            Self::FofocaNativeNative | Self::IrohNativeNative => "ip",
+            Self::HabilisNetworkChromeChrome
+            | Self::HabilisNetworkChromeNative
+            | Self::HabilisNetworkSafariNative
+            | Self::HabilisNetworkSafariChrome
+            | Self::HabilisNetworkNativeNativeWebRtc => "webrtc",
+            Self::HabilisNetworkNativeNative | Self::IrohNativeNative => "ip",
             Self::RawChromeChrome | Self::RawChromeChromeDatagram => "data-channel",
         }
     }
@@ -39,7 +39,9 @@ impl Cell {
     pub(crate) fn needs_browser(self) -> bool {
         !matches!(
             self,
-            Self::FofocaNativeNative | Self::FofocaNativeNativeWebRtc | Self::IrohNativeNative
+            Self::HabilisNetworkNativeNative
+                | Self::HabilisNetworkNativeNativeWebRtc
+                | Self::IrohNativeNative
         )
     }
 }
@@ -309,6 +311,19 @@ impl Row {
     }
 }
 
+fn serve_page() -> Result<serve::Static, Box<dyn std::error::Error>> {
+    wasm::check_wasm_bindgen()?;
+    let env = wasm::wasm_env()?;
+    output::status("Building", "the browser side (habilis-network-bench-wasm)");
+    let wasm_dir = repo_root().join("target/bench-wasm");
+    let glue = wasm::build_wasm_cdylib("habilis-network-bench-wasm", &env, &wasm_dir)?;
+    output::detail(&format!("             {}", glue.display()));
+    let www = repo_root().join("crates/habilis-network-bench-wasm/www");
+    let server = serve::Static::serve(www, wasm_dir)?;
+    output::status("Serving", &server.url);
+    Ok(server)
+}
+
 pub(crate) fn run(args: &Args) -> TaskOutcome {
     let cells = wanted(args);
     if args.bytes > bench::MAX_TRANSFER_BYTES {
@@ -323,16 +338,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     // The page is built and served once, and only when a browser cell is in
     // the run: `--only native` must not pay for a wasm build nobody loads.
     let server = if cells.iter().any(|cell| cell.needs_browser()) {
-        wasm::check_wasm_bindgen()?;
-        let env = wasm::wasm_env()?;
-        output::status("Building", "the browser side (fofoca-bench-wasm)");
-        let wasm_dir = repo_root().join("target/bench-wasm");
-        let glue = wasm::build_wasm_cdylib("fofoca-bench-wasm", &env, &wasm_dir)?;
-        output::detail(&format!("             {}", glue.display()));
-        let www = repo_root().join("crates/fofoca-bench-wasm/www");
-        let server = serve::Static::serve(www, wasm_dir)?;
-        output::status("Serving", &server.url);
-        Some(server)
+        Some(serve_page()?)
     } else {
         None
     };
@@ -366,8 +372,12 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             args,
         };
         let outcome = match cell {
-            Cell::FofocaChromeChrome => browser().web_web(Chrome, Chrome, "index.html", None),
-            Cell::FofocaSafariChrome => browser().web_web(Safari, Chrome, "index.html", None),
+            Cell::HabilisNetworkChromeChrome => {
+                browser().web_web(Chrome, Chrome, "index.html", None)
+            }
+            Cell::HabilisNetworkSafariChrome => {
+                browser().web_web(Safari, Chrome, "index.html", None)
+            }
             Cell::RawChromeChrome | Cell::RawChromeChromeDatagram
                 if args.direction != Direction::Down =>
             {
@@ -377,11 +387,13 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             Cell::RawChromeChromeDatagram => {
                 browser().web_web(Chrome, Chrome, "raw.html", Some(1200))
             }
-            Cell::FofocaChromeNative => runtime.block_on(browser().web_native(Chrome)),
-            Cell::FofocaSafariNative => runtime.block_on(browser().web_native(Safari)),
-            Cell::FofocaNativeNative => runtime.block_on(native::fofoca_native_native(args)),
-            Cell::FofocaNativeNativeWebRtc => {
-                runtime.block_on(native::fofoca_native_native_webrtc(args))
+            Cell::HabilisNetworkChromeNative => runtime.block_on(browser().web_native(Chrome)),
+            Cell::HabilisNetworkSafariNative => runtime.block_on(browser().web_native(Safari)),
+            Cell::HabilisNetworkNativeNative => {
+                runtime.block_on(native::habilis_network_native_native(args))
+            }
+            Cell::HabilisNetworkNativeNativeWebRtc => {
+                runtime.block_on(native::habilis_network_native_native_webrtc(args))
             }
             Cell::IrohNativeNative => runtime.block_on(native::iroh_native_native(args)),
         };

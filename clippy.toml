@@ -9,9 +9,9 @@
 # passes in one fails in the other.
 #
 # One deliberate divergence: agent-share also sets
-# `warn-on-all-wildcard-imports = true`. That cannot hold here. `fofoca`'s
-# `protocol` and `util` facades are `pub use fofoca_protocol::*` /
-# `pub use fofoca_util::*`, which is the whole mechanism by which the split
+# `warn-on-all-wildcard-imports = true`. That cannot hold here. `habilis-network`'s
+# `protocol` and `util` facades are `pub use habilis_network_protocol::*` /
+# `pub use habilis_network_util::*`, which is the whole mechanism by which the split
 # crates keep their old module paths; enumerating those names by hand would
 # drift on every new public item in a leaf crate.
 
