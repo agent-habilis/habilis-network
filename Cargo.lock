@@ -2599,7 +2599,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=db7455f35e05f5106ff3f831497485ab8eb0689b#db7455f35e05f5106ff3f831497485ab8eb0689b"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=2929bdb188a0369b481aea5e8f784b1732c6729e#2929bdb188a0369b481aea5e8f784b1732c6729e"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2616,7 +2616,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=db7455f35e05f5106ff3f831497485ab8eb0689b#db7455f35e05f5106ff3f831497485ab8eb0689b"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=2929bdb188a0369b481aea5e8f784b1732c6729e#2929bdb188a0369b481aea5e8f784b1732c6729e"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -4764,7 +4764,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "swarm-discovery"
 version = "0.6.3"
-source = "git+https://github.com/rkuhn/swarm-discovery?rev=b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce#b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce"
+source = "git+https://github.com/agent-habilis/swarm-discovery?rev=b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce#b41dbcc431f419ad0cd91f786d4d7c71ec6be9ce"
 dependencies = [
  "acto",
  "hickory-proto",
