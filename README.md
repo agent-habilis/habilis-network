@@ -90,8 +90,8 @@ separate cadences.
 
 ## Related repos
 
-- [`iroh`](https://github.com/fofoca-network/iroh) and
-  [`iroh-gossip`](https://github.com/fofoca-network/iroh-gossip) — forks carrying
+- [`iroh`](https://github.com/agent-habilis/iroh) and
+  [`iroh-gossip`](https://github.com/agent-habilis/iroh-gossip) — forks carrying
   two unreleased fixes, pinned by rev in `[patch.crates-io]`. See
   **Patch pins — do not drop** in [`FORKED.md`](FORKED.md).
 

@@ -116,17 +116,17 @@ uuid = { version = "1", features = ["v4"] }
 # net-tools fork so the RTM_MISS fix arrives transitively too. Fork main also
 # carries the Initial fan-out (fofoca-network/iroh#2): a WebRTC path learned
 # after a relay selection can carry a connection, which a browser needs.
-iroh = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+iroh = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 # The dependency-light half of iroh: keys, endpoint addresses, relay URLs — no
 # QUIC, TLS or DNS. `habilis-network-protocol` depends on this rather than `iroh` so the
 # wire vocabulary carries no network stack. Same repo and rev as `iroh` above,
 # necessarily: the forked `iroh` uses its workspace-local copy, and mixing
 # that with the published one is the two-`iroh_base` failure.
 # `relay` is a default `habilis-network-protocol` adds back; the transports do not need it.
-iroh-base = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c", default-features = false, features = ["key"] }
+iroh-base = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4", default-features = false, features = ["key"] }
 # Only `iroh-mainline-address-lookup` names it, and only under `dht`. Pinned to
 # the same rev for the same reason as `iroh-base`.
-iroh-dns = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh", rev = "66003af753b5d221edb6f5407a4fda6a7a4d213c" }
+iroh-dns = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4" }
 # The mDNS + mainline-DHT address-lookup providers, extracted from iroh core in
 # the 1.0 line. Forked for one reason only: they sat between this crate and iroh
 # and named iroh/iroh-base/iroh-dns from crates.io, which is what forced every
@@ -136,15 +136,15 @@ iroh-dns = { version = "=1.0.3", git = "https://github.com/fofoca-network/iroh",
 # (rkuhn/swarm-discovery#28). Neither change has an upstream path — n0 will
 # not point their crates at ours — so delete the fork the moment the iroh pins
 # become unnecessary and swarm-discovery 0.6.4+ ships.
-iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "556f5027c6a0abf228267305e5dd89d0c2a6f23d" }
-iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/fofoca-network/iroh-address-lookups", rev = "556f5027c6a0abf228267305e5dd89d0c2a6f23d" }
+iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "db7455f35e05f5106ff3f831497485ab8eb0689b" }
+iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "db7455f35e05f5106ff3f831497485ab8eb0689b" }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
-# Branch fix/habilis-network-iroh-pin: the connection-churn leak fix (upstream PR
+# Fork main: the connection-churn leak fix (upstream PR
 # n0-computer/iroh-gossip#147) plus its own iroh/iroh-base repoint, since this
 # crate is another that sat between us and iroh.
-iroh-gossip = { version = "=0.101.0", git = "https://github.com/fofoca-network/iroh-gossip", rev = "e66061b298a350141938046e3a84b29628ebb899", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.101.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "5d57f946eb9e3a1f5f6342c33a0dc7bc22550f49", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.

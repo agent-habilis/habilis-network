@@ -2481,7 +2481,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
+source = "git+https://github.com/agent-habilis/iroh?rev=c814688e6c0967b2764efe7159059d1d68c4b2f4#c814688e6c0967b2764efe7159059d1d68c4b2f4"
 dependencies = [
  "axum",
  "backon",
@@ -2532,7 +2532,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
+source = "git+https://github.com/agent-habilis/iroh?rev=c814688e6c0967b2764efe7159059d1d68c4b2f4#c814688e6c0967b2764efe7159059d1d68c4b2f4"
 dependencies = [
  "curve25519-dalek 5.0.0-rc.0",
  "data-encoding",
@@ -2550,7 +2550,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
+source = "git+https://github.com/agent-habilis/iroh?rev=c814688e6c0967b2764efe7159059d1d68c4b2f4#c814688e6c0967b2764efe7159059d1d68c4b2f4"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2573,7 +2573,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/fofoca-network/iroh-gossip?rev=e66061b298a350141938046e3a84b29628ebb899#e66061b298a350141938046e3a84b29628ebb899"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=5d57f946eb9e3a1f5f6342c33a0dc7bc22550f49#5d57f946eb9e3a1f5f6342c33a0dc7bc22550f49"
 dependencies = [
  "blake3",
  "bytes",
@@ -2599,7 +2599,7 @@ dependencies = [
 [[package]]
 name = "iroh-mainline-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=556f5027c6a0abf228267305e5dd89d0c2a6f23d#556f5027c6a0abf228267305e5dd89d0c2a6f23d"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=db7455f35e05f5106ff3f831497485ab8eb0689b#db7455f35e05f5106ff3f831497485ab8eb0689b"
 dependencies = [
  "derive_more",
  "iroh",
@@ -2616,7 +2616,7 @@ dependencies = [
 [[package]]
 name = "iroh-mdns-address-lookup"
 version = "0.4.0"
-source = "git+https://github.com/fofoca-network/iroh-address-lookups?rev=556f5027c6a0abf228267305e5dd89d0c2a6f23d#556f5027c6a0abf228267305e5dd89d0c2a6f23d"
+source = "git+https://github.com/agent-habilis/iroh-address-lookups?rev=db7455f35e05f5106ff3f831497485ab8eb0689b#db7455f35e05f5106ff3f831497485ab8eb0689b"
 dependencies = [
  "data-encoding",
  "derive_more",
@@ -2670,7 +2670,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/fofoca-network/iroh?rev=66003af753b5d221edb6f5407a4fda6a7a4d213c#66003af753b5d221edb6f5407a4fda6a7a4d213c"
+source = "git+https://github.com/agent-habilis/iroh?rev=c814688e6c0967b2764efe7159059d1d68c4b2f4#c814688e6c0967b2764efe7159059d1d68c4b2f4"
 dependencies = [
  "blake3",
  "bytes",
@@ -3212,7 +3212,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.1"
-source = "git+https://github.com/fofoca-network/net-tools?rev=e02960255ef2f5b2ba4aa3d4cf195e0b8673f370#e02960255ef2f5b2ba4aa3d4cf195e0b8673f370"
+source = "git+https://github.com/agent-habilis/net-tools?rev=e02960255ef2f5b2ba4aa3d4cf195e0b8673f370#e02960255ef2f5b2ba4aa3d4cf195e0b8673f370"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3735,7 +3735,7 @@ dependencies = [
 [[package]]
 name = "portmapper"
 version = "0.19.1"
-source = "git+https://github.com/fofoca-network/net-tools?rev=e02960255ef2f5b2ba4aa3d4cf195e0b8673f370#e02960255ef2f5b2ba4aa3d4cf195e0b8673f370"
+source = "git+https://github.com/agent-habilis/net-tools?rev=e02960255ef2f5b2ba4aa3d4cf195e0b8673f370#e02960255ef2f5b2ba4aa3d4cf195e0b8673f370"
 dependencies = [
  "base64",
  "bytes",

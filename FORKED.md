@@ -126,7 +126,7 @@ Divergences from upstream, in the order they were made.
 **From the extraction** (moving out of the mallorca repo into its own):
 
 13. `iroh-multihop-transport` left the workspace for
-    [its own repo](https://github.com/fofoca-network/iroh-multihop-transport).
+    [its own repo](https://github.com/agent-habilis/iroh-multihop-transport).
     It has no habilis-network dependency and its audience is any iroh user. It is now a
     git dependency pinned by rev in `[workspace.dependencies]`. Note that
     `[patch.crates-io]` below still governs it — patch applies from the
@@ -137,6 +137,10 @@ Divergences from upstream, in the order they were made.
     `fofoca-network` so this workspace owns its entire pin surface. The commits
     were pushed unchanged, so **the rev SHAs are identical** — only the URLs in
     `[patch.crates-io]` moved.
+
+    **Reversed on 2026-10-02**, with the rename to habilis-network: all five
+    forks moved back to `agent-habilis`. This time the revs changed, because
+    each fork's own pins had to name the `agent-habilis` URLs too.
 15. `public-surface.txt` was **deleted**. Nothing in the tree ever generated or
     checked it, so it silently rotted: by the time of the extraction it was
     ~530 entries behind and still listed `iroh-multihop-transport`, which no
@@ -215,7 +219,7 @@ Divergences from upstream, in the order they were made.
     separate repo had silently undone it, and consuming that version would have
     reintroduced the bug. `1.0.1` is satisfied by both forks.
 
-    The now-unused [standalone repo](https://github.com/fofoca-network/iroh-multihop-transport)
+    The now-unused [standalone repo](https://github.com/agent-habilis/iroh-multihop-transport)
     is superseded, not deleted.
 
 21. Every dependency named by more than one crate now lives in
@@ -355,12 +359,12 @@ Divergences from upstream, in the order they were made.
 
     Changes 13 and 20 are left as written. They record a repository that really
     was named `iroh-multihop-transport`, and the
-    [standalone repo](https://github.com/fofoca-network/iroh-multihop-transport)
+    [standalone repo](https://github.com/agent-habilis/iroh-multihop-transport)
     they point at still is.
 
 ## Fork pins — where each one lives, and why
 
-Three forks are in play: `fofoca-network/{iroh, iroh-gossip, net-tools}`. They do
+Three forks are in play: `agent-habilis/{iroh, iroh-gossip, net-tools}`. They do
 **not** all live in the same place, and the placement is a rule rather than an
 accident.
 
@@ -390,9 +394,9 @@ puts two `iroh_base` versions in the graph, which makes types from
 iroh-gossip and the address-lookup crates fail to unify (E0308).
 
 Current revs: `iroh`/`iroh-base`/`iroh-dns` →
-`fofoca-network/iroh` (mapped_addrs eviction + relay teardown, **plus** the
-netwatch/portmapper repoint); `iroh-gossip` →
-`c779c0661fc9429e86852570be9bdc00fb47fdd9`; `net-tools` →
+`agent-habilis/iroh` `c814688e6c0967b2764efe7159059d1d68c4b2f4` (mapped_addrs
+eviction + relay teardown, **plus** the netwatch/portmapper repoint);
+`iroh-gossip` → `5d57f946eb9e3a1f5f6342c33a0dc7bc22550f49`; `net-tools` →
 `e02960255ef2f5b2ba4aa3d4cf195e0b8673f370`.
 
 ## Verifying a change
