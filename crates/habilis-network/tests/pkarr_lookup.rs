@@ -208,6 +208,29 @@ mod strict_relay {
     }
 
     #[tokio::test]
+    async fn it_says_which_key_each_refusal_was_for() {
+        let (url, relay) = test_pkarr::spawn_plain().await.expect("relay");
+        let stale = SecretKey::from_bytes(&[7; 32]);
+        let stale_key = stale.public().to_z32();
+        let body = payload(&stale, 1111);
+        assert_eq!(http(&url, "PUT", &stale_key, "", &body).await.status, 204);
+        assert_eq!(http(&url, "PUT", &stale_key, "", &body).await.status, 409);
+
+        let forged = SecretKey::from_bytes(&[8; 32]);
+        let forged_key = forged.public().to_z32();
+        let mut bad = payload(&forged, 1111);
+        *bad.last_mut().expect("a body") ^= 1;
+        assert_eq!(http(&url, "PUT", &forged_key, "", &bad).await.status, 400);
+
+        assert_eq!(
+            relay.refusals(),
+            vec![(stale_key, 409), (forged_key, 400)],
+            "each refusal carries its key and status, in order"
+        );
+        assert_eq!(relay.rejected(), 2);
+    }
+
+    #[tokio::test]
     async fn it_answers_the_cors_preflight() {
         for (url, _relay) in relays().await {
             let key = SecretKey::from_bytes(&[5; 32]).public().to_z32();

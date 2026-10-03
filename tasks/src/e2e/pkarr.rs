@@ -270,8 +270,10 @@ async fn run_cell(
         .relay
         .parse()
         .map_err(|error| fail(format!("the relay url does not parse: {error}")))?;
-    for (who, key) in keys {
-        let key = key.ok_or_else(|| fail(format!("the {who} logged no pkarr endpoint")))?;
+    for (who, key) in &keys {
+        let key = key
+            .clone()
+            .ok_or_else(|| fail(format!("the {who} logged no pkarr endpoint")))?;
         let record = pkarr.info(&key).ok_or_else(|| {
             fail(format!(
                 "the pkarr relay holds no record for the {who} ({key})"
@@ -288,10 +290,24 @@ async fn run_cell(
             return Err(fail(format!("the record of the {who} leaks an address")));
         }
     }
-    if pkarr.rejected() > 0 {
+    // A 409 on the shared rendezvous key is normal: co-hosts of one mesh
+    // publish it, and the relay keeps only the newest write. A 409 on a peer
+    // key is a client that republished a record that was not newer, and every
+    // 400 is a record that did not verify, so those fail the cell.
+    let peer_keys: Vec<&String> = keys
+        .iter()
+        .filter(|(who, _)| *who != "rendezvous")
+        .filter_map(|(_, key)| key.as_ref())
+        .collect();
+    let refused: Vec<(String, u16)> = pkarr
+        .refusals()
+        .into_iter()
+        .filter(|(key, status)| *status == 400 || peer_keys.contains(&key))
+        .collect();
+    if !refused.is_empty() {
         return Err(fail(format!(
-            "the pkarr relay refused {} write(s)",
-            pkarr.rejected()
+            "the pkarr relay refused {} write(s) that it should not have: {refused:?}",
+            refused.len()
         )));
     }
     if pkarr.hits() == 0 {

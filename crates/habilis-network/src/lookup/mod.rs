@@ -104,7 +104,7 @@ pub mod test_pkarr {
     struct Store {
         records: Mutex<HashMap<String, SignedPacket>>,
         hits: AtomicUsize,
-        rejected: AtomicUsize,
+        refusals: Mutex<Vec<(String, u16)>>,
     }
 
     type Records = Arc<Store>;
@@ -179,11 +179,22 @@ pub mod test_pkarr {
             self.store.hits.load(Ordering::Relaxed)
         }
 
+        /// Each write the relay refused, as the key of its path and the
+        /// status: `400` for a bad signature, `409` for a record that was not
+        /// newer.
+        ///
+        /// # Panics
+        /// A relay handler panicked while it held the lock.
+        #[must_use]
+        pub fn refusals(&self) -> Vec<(String, u16)> {
+            self.store.refusals.lock().expect("refusals lock").clone()
+        }
+
         /// How many writes the relay refused: a bad signature, or a record
         /// that was not newer.
         #[must_use]
         pub fn rejected(&self) -> usize {
-            self.store.rejected.load(Ordering::Relaxed)
+            self.refusals().len()
         }
     }
 
@@ -228,8 +239,12 @@ pub mod test_pkarr {
         ))
     }
 
-    fn refuse(records: &Store, status: StatusCode) -> StatusCode {
-        records.rejected.fetch_add(1, Ordering::Relaxed);
+    fn refuse(records: &Store, key: &str, status: StatusCode) -> StatusCode {
+        records
+            .refusals
+            .lock()
+            .expect("refusals lock")
+            .push((key.to_owned(), status.as_u16()));
         status
     }
 
@@ -239,17 +254,17 @@ pub mod test_pkarr {
         body: Bytes,
     ) -> StatusCode {
         let Ok(public) = PublicKey::from_z32(&key) else {
-            return refuse(&records, StatusCode::BAD_REQUEST);
+            return refuse(&records, &key, StatusCode::BAD_REQUEST);
         };
         let Ok(packet) = SignedPacket::from_relay_payload(&public, &body) else {
-            return refuse(&records, StatusCode::BAD_REQUEST);
+            return refuse(&records, &key, StatusCode::BAD_REQUEST);
         };
         let mut stored = records.records.lock().expect("records lock");
         if let Some(current) = stored.get(&key)
             && !packet.more_recent_than(current)
         {
             drop(stored);
-            return refuse(&records, StatusCode::CONFLICT);
+            return refuse(&records, &key, StatusCode::CONFLICT);
         }
         stored.insert(key, packet);
         StatusCode::NO_CONTENT
