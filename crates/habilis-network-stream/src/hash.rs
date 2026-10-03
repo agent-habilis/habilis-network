@@ -229,16 +229,19 @@ mod tests {
             pkarr: PkarrChoice::Pinned,
             ..LookupOpts::loopback()
         });
-        let error = StreamHash::decode(&no_relay.encode()).expect_err("pkarr without relay");
-        assert!(error.to_string().contains("pkarr"), "{error}");
+        let pkarr_only = StreamHash::decode(&no_relay.encode()).expect_err("pkarr without relay");
+        assert!(pkarr_only.to_string().contains("pkarr"), "{pkarr_only}");
         // Plain http for pkarr is for a mesh whose relay is on this machine.
         let http = forged(LookupOpts {
             relay_lookup: RelayChoice::Pinned,
             pkarr: PkarrChoice::Custom(vec!["http://127.0.0.1:1/pkarr".parse().unwrap()]),
             ..LookupOpts::loopback()
         });
-        let error = StreamHash::decode(&http.encode()).expect_err("http pkarr, public relay");
-        assert!(error.to_string().contains("plain http"), "{error}");
+        let plain_http = StreamHash::decode(&http.encode()).expect_err("http pkarr, public relay");
+        assert!(
+            plain_http.to_string().contains("plain http"),
+            "{plain_http}"
+        );
         // A transport with no direct path, or a relay that carries payload
         // with no relay lookup to carry it.
         let no_path = sample(policy(false, false, true));
@@ -247,8 +250,8 @@ mod tests {
             lookups: LookupOpts::loopback(),
             ..sample(policy(true, true, true))
         };
-        let error = StreamHash::decode(&relay_payload.encode()).expect_err("no relay lookup");
-        assert!(error.to_string().contains("relay"), "{error}");
+        let no_lookup = StreamHash::decode(&relay_payload.encode()).expect_err("no relay lookup");
+        assert!(no_lookup.to_string().contains("relay"), "{no_lookup}");
         // The same hash, well formed, decodes.
         let ok = sample(TransportPolicy::default());
         assert_eq!(StreamHash::decode(&ok.encode()).expect("decodes"), ok);
