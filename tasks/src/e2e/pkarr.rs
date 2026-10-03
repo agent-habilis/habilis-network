@@ -16,7 +16,7 @@ use crate::TaskOutcome;
 use crate::util::page::wait_ready;
 use crate::util::{output, repo_root, wait_for};
 
-use habilis_network::iroh::EndpointId;
+use habilis_network::iroh::{EndpointId, RelayUrl};
 use habilis_network::membership;
 use habilis_network::net::test_pkarr::{self, TestPkarr};
 use habilis_network::protocol::{Lookup, Mesh};
@@ -265,13 +265,33 @@ async fn run_cell(
         ("joiner", published_peer(&joiner.log(joiner_log_start))),
         ("rendezvous", Some(rendezvous)),
     ];
+    let home: RelayUrl = urls
+        .relay
+        .parse()
+        .map_err(|error| fail(format!("the relay url does not parse: {error}")))?;
     for (who, key) in keys {
         let key = key.ok_or_else(|| fail(format!("the {who} logged no pkarr endpoint")))?;
-        if !pkarr.holds(&key) {
-            return Err(fail(format!(
+        let record = pkarr.info(&key).ok_or_else(|| {
+            fail(format!(
                 "the pkarr relay holds no record for the {who} ({key})"
+            ))
+        })?;
+        // A record without the home relay is one nobody can dial from.
+        if record.data.relay_urls().collect::<Vec<_>>() != [&home] {
+            return Err(fail(format!(
+                "the record of the {who} does not name the home relay {home}: {:?}",
+                record.data
             )));
         }
+        if record.data.ip_addrs().next().is_some() {
+            return Err(fail(format!("the record of the {who} leaks an address")));
+        }
+    }
+    if pkarr.rejected() > 0 {
+        return Err(fail(format!(
+            "the pkarr relay refused {} write(s)",
+            pkarr.rejected()
+        )));
     }
     if pkarr.hits() == 0 {
         return Err(fail("the pkarr relay answered no lookup".to_owned()));
