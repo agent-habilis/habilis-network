@@ -223,15 +223,25 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     // That split is the point: this pair is what proved the de-branding
     // reached the key-derivation transcript (topic moved) without leaking
     // into the id encoding (id held).
+    //
+    // The mesh is the default preset (seed `[7; 32]`, name `test`), which a
+    // topic, a directory and every bare default derive from. Its config byte
+    // is `0x47`: mdns, dht, relay and pkarr, all on their pinned lists. Both
+    // constants moved when pkarr joined the preset, on purpose and once: that
+    // is what moves every default mesh to the new topic.
     let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset());
+    assert_eq!(mesh.config_bytes(), vec![0x47]);
     assert_eq!(
         mesh.to_string(),
-        "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1"
+        "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2VwPdtmL"
     );
+    let decoded: Mesh = mesh.to_string().parse().unwrap();
+    assert_eq!(decoded.config, mesh.config);
+    assert_eq!(decoded.config.lookups.pkarr, PkarrChoice::Pinned);
     let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
     assert_eq!(
         format!("{topic:?}"),
-        "TopicId(05fe8948f1b086f29f24c6b1b2092f86209d290956e25f84451fadd688aef8c1)"
+        "TopicId(86d750248f420c9cd98f84bd698ac7fe563c46fd5f5dba0ec50684b4751b63c8)"
     );
 }
 
