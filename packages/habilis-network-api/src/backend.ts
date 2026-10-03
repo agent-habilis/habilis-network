@@ -92,7 +92,7 @@ export interface BackendOpen {
    * The C ABI has no callback at all, so its backend sets this `false` and
    * `openMesh` derives the same two events by diffing successive rosters. Same
    * events, worse latency. Do not fix that by changing the C ABI, which
-   * mallorca already links against.
+   * C consumers already link against.
    */
   readonly pushesPresence: boolean
 }

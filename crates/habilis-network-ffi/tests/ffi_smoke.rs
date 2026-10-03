@@ -504,7 +504,7 @@ fn four_peers_converge(public: bool) {
     let creator_nick = CString::new("p0").expect("no interior NUL");
     let mut opts = create_opts(&creator_nick);
     if public {
-        // Match mallorca's default create-room lookups.
+        // Match a typical consumer's default create-room lookups.
         opts.lookup = c"mdns,dht,relay".as_ptr();
     }
     let creator = open(&opts);

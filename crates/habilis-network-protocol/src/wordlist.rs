@@ -125,7 +125,7 @@ pub(super) fn random_pair() -> String {
 ///
 /// `packages/habilis-network-api` has a copy because neither of its backends can reach
 /// [`random_pair`]: the C ABI exports no nickname generator, and adding one is a
-/// wire-visible change to a header mallorca already links against. Two lists
+/// wire-visible change to a header consumers already link against. Two lists
 /// that must agree and cannot see each other would drift, so this is where they
 /// are made to see each other.
 #[cfg(test)]

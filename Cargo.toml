@@ -265,11 +265,11 @@ opt-level = 3
 # Two deliberate divergences from upstream here:
 # - `lto = "thin"` / `codegen-units = 16` instead of fat LTO + 1 codegen unit:
 #   upstream's fat LTO costs minutes per rebuild, which is too slow for the
-#   mallorca dev loop.
+#   dev loop.
 # - NO `panic = "abort"`: habilis-network-ffi's `ffi.rs` relies on
 #   `catch_unwind` at the C ABI boundary so a Rust panic doesn't unwind past
 #   `extern "C"` into the Odin host. `panic = "abort"` would kill the whole
-#   mallorca process on any engine panic instead of returning an error code.
+#   host process on any engine panic instead of returning an error code.
 [profile.release]
 opt-level = 3
 lto = "thin"
@@ -281,12 +281,12 @@ opt-level = 3
 
 # `strip` above makes the macOS **cdylib** impossible to `dlopen`: dyld refuses
 # it with `mis-aligned LINKEDIT string pool`, which names no cause and no cure.
-# Nothing noticed until `packages/habilis-network-ffi` existed, because mallorca links the
+# Nothing noticed until `packages/habilis-network-ffi` existed, because the C consumer links the
 # staticlib and CI only ever read the archive with `nm`.
 #
 # Scoped to this package rather than dropped workspace-wide, and it costs
 # nothing that matters: `strip` never applied to a `.a` in the first place, so
-# mallorca's artifact is byte-for-byte what it was. The cdylib grows ~1.7 MB.
+# the staticlib is byte-for-byte what it was. The cdylib grows ~1.7 MB.
 [profile.release.package.habilis-network-ffi]
 strip = "none"
 

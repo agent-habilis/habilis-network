@@ -81,7 +81,7 @@ published to a registry; pin it with
   `habilis_network_msg_recv` into an 80-byte `habilis_network_msg`. A message too big for the
   receive buffer stays queued, and the call returns -2. `habilis_network_open`,
   `habilis_network_send`, `habilis_network_send_eof`, `habilis_network_recv`, `habilis_network_frame` and
-  `habilis_network_max_chunk` are gone (`habilis_network_max_msg` replaces the last). mallorca
+  `habilis_network_max_chunk` are gone (`habilis_network_max_msg` replaces the last). C consumers
   must rebuild against the new `include/habilis_network.h`.
 - **Breaking:** the browser peer, `habilis-network-api` and the chats send `msg`
   messages over `habilis_network::membership` instead of `habilis-network-pipe`'s numbered
@@ -177,7 +177,7 @@ published to a registry; pin it with
 
 ## [0.6.0] - 2026-08-30
 
-The first tagged release. Everything since the extraction from mallorca.
+The first tagged release. Everything since the extraction of the engine into its own repo.
 
 ### Added
 
@@ -234,8 +234,7 @@ The first tagged release. Everything since the extraction from mallorca.
 
 ## [0.5.0] - 2026-07-31
 
-The state of the engine at its extraction from the mallorca repo, as
-`feat: extract habilis-network from the mallorca repo` (86bd79d). Provenance and the
+The state of the engine at its extraction into its own repo (86bd79d). Provenance and the
 recorded fork changes live in [FORKED.md](FORKED.md).
 
 [0.6.0]: https://github.com/agent-habilis/habilis-network/compare/86bd79d...v0.6.0

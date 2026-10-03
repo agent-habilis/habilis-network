@@ -34,7 +34,7 @@ Three unrelated consumers enforce this claim:
    The `gossip-*` skills of Claude Code are thin shells over this CLI.
    The CLI embeds the engine and drives it over an IPC socket.
 2. **agent-share** — file sharing over the same engine.
-3. **mallorca** — an Odin application that links `habilis-network-ffi` as a static library.
+3. **A C host application** — links `habilis-network-ffi` as a static library.
 
 ```mermaid
 graph LR
@@ -42,8 +42,8 @@ graph LR
         SKILLS["Claude Code skills"] --> CLI["agent-gossip CLI"]
         CLI -->|"IPC socket"| E1["habilis-network engine"]
     end
-    subgraph "Desktop app"
-        APP["mallorca (Odin)"] --> FFI["habilis-network-ffi (C ABI)"]
+    subgraph "C host"
+        APP["C host application"] --> FFI["habilis-network-ffi (C ABI)"]
         FFI --> E2["habilis-network engine"]
     end
     subgraph "Browser tab"
