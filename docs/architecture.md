@@ -442,7 +442,7 @@ A payload lane (gossip graft, unicast, blob) sends to a peer only after iroh sel
 A gossip graft waits for that proof (`transport::probe`), so a pair never dials a link through the relay.
 The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::path::refuse_unless_direct`).
 The rendezvous link is gated the same way on the beacon, so no gossip frame ever crosses the relay.
-The gate checks the path once, so the accepted gossip connection is watched afterwards: one whose selected path stays on the relay for a minute, longer than one race round, is closed with the same coded reason.
+The gate checks the path once, so the accepted gossip connection is watched afterwards: one whose selected path stays on the relay for `PROBE_DEADLINE`, the wait of the accept gate, is closed with the same coded reason.
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
 `transport.relay_transport = true` lets payload fall back to the relay, as before the policy existed.
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.

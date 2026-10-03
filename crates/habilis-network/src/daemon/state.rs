@@ -978,8 +978,15 @@ impl EventLoopState {
     /// probe's free reading describes a world that is gone. Pairing it with
     /// one fresh reading claims on what is effectively a single probe, which
     /// is the rival copy the two-verdict rule exists to stop.
+    ///
+    /// The same goes for a refusal of our offers: after a failover the
+    /// rendezvous keeps its id, and the old holder's "at my cap" is not the new
+    /// holder's.
     pub(crate) fn forget_rendezvous_verdict(&mut self) {
         self.rendezvous_probe_read_free = false;
+        if let Some(rendezvous) = self.rendezvous_id {
+            self.webrtc_admission.note_success(rendezvous);
+        }
     }
 
     /// A probe reported no direct path to `peer`. A peer that proved itself
@@ -2104,6 +2111,30 @@ mod tests {
         );
         assert!(state.direct.is_empty());
         assert!(state.forget_peer_endpoint("bob").is_none());
+    }
+
+    // After a failover the rendezvous keeps its id, but a refusal from the old
+    // holder says nothing about the new one: the wait starts over.
+    #[test]
+    fn a_new_rendezvous_verdict_starts_the_refusal_wait_over() {
+        use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+
+        let mut state = fresh_state();
+        let rendezvous = endpoint_id(7);
+        state.rendezvous_id = Some(rendezvous);
+        let hub = WebRtcHandle::new(WebRtcTransport::new(endpoint_id(0)));
+        state.webrtc_admission.note_refused(rendezvous);
+        assert!(
+            state.webrtc_admission.try_admit(rendezvous, &hub).is_err(),
+            "the refusal makes us wait"
+        );
+
+        state.forget_rendezvous_verdict();
+
+        assert!(
+            state.webrtc_admission.try_admit(rendezvous, &hub).is_ok(),
+            "a new verdict ends the wait"
+        );
     }
 
     // A departed peer read as riding WebRTC was nudged on every alive tick.

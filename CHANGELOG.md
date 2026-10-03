@@ -184,8 +184,12 @@ published to a registry; pin it with
   member in the beacon's view. A refusal at a peer's cap makes a node wait, per
   peer: 30 s, doubling with each refusal in a row up to five minutes, and
   starting over after a success.
+- The answerer of a `WebRTC` session round nudges iroh once after the attach.
+  iroh opens a new path only from the client side of a connection, so a
+  connection that the answerer had dialed over the relay stayed there while the
+  session was up, and the relay policy then closed it.
 - A gossip connection on a lookup-only mesh whose selected path stays on the
-  relay for a minute, longer than one race round, after the accept is closed
+  relay for `PROBE_DEADLINE` (15 s), the wait of the accept gate, after the accept is closed
   with the gossip relay-refused code. The accept gate checked the path only once, so a
   path lost later left a link up on the relay with nothing to say that no
   payload may ride it.

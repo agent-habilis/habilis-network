@@ -395,6 +395,12 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                     admission.note_success(remote);
                     register_session_addr(&endpoint, remote);
                     conn.close(0u32.into(), b"jsep done");
+                    // A connection that we dialed before the attach moves onto the
+                    // session only after a path event of our own endpoint, and the
+                    // offerer's nudge gives us none: iroh opens a new path only
+                    // from the client side of a connection.
+                    let nudging = endpoint.clone();
+                    n0_future::task::spawn(async move { nudge(&nudging, remote).await });
                     tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (answerer)");
                 }
                 // A failed negotiation is normal operation, not a fault: ICE
@@ -1988,6 +1994,113 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         client.close().await;
+    }
+
+    /// A pair with no UDP: the higher id (the answerer of the session round)
+    /// dials a connection over the relay, and the lower id offers a session
+    /// while that connection is still held. iroh opens a new path only from the
+    /// client side of a connection, and only on a path event of its own
+    /// endpoint. The offerer's nudge reaches the answerer's endpoint as an
+    /// inbound connect, which gives it no event for the connection it dialed, so
+    /// the answerer must nudge once after its attach. Without it the accepted
+    /// connection stays on the relay and the relay policy closes it.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_dialed_by_the_answerer_leaves_the_relay_when_the_session_attaches() {
+        use iroh::protocol::{AcceptError, ProtocolHandler};
+
+        const HOLD_ALPN: &[u8] = b"habilis-mesh/test-hold/0";
+
+        #[derive(Debug, Clone)]
+        struct Hold(tokio::sync::mpsc::Sender<bool>);
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                let direct = super::super::path::wait_direct(&conn, Duration::from_secs(12)).await;
+                let _ = self.0.send(direct).await;
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let bind = |key: SecretKey, handle: &WebRtcHandle| {
+            let relay_url = relay_url.clone();
+            let transport = handle.transport();
+            let selector = handle.path_selector();
+            async move {
+                Endpoint::builder(presets::Minimal)
+                    .secret_key(key)
+                    .relay_mode(RelayMode::custom([relay_url]))
+                    .add_custom_transport(transport)
+                    .path_selector(selector)
+                    .clear_ip_transports()
+                    .bind()
+                    .await
+                    .expect("bind endpoint with relay")
+            }
+        };
+        let (mut low_key, mut high_key) = (SecretKey::generate(), SecretKey::generate());
+        if low_key.public() > high_key.public() {
+            std::mem::swap(&mut low_key, &mut high_key);
+        }
+        let low_hub = WebRtcHandle::new(WebRtcTransport::new(low_key.public()));
+        let low = bind(low_key, &low_hub).await;
+        let high_hub = WebRtcHandle::new(WebRtcTransport::new(high_key.public()));
+        let high = bind(high_key, &high_hub).await;
+
+        let (held_tx, mut held_rx) = tokio::sync::mpsc::channel(1);
+        let low_router = Router::builder(low.clone())
+            .accept(HOLD_ALPN, Hold(held_tx))
+            .spawn();
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let high_router = Router::builder(high.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                WebRtcSignalAcceptor::new(
+                    high_hub.clone(),
+                    high.clone(),
+                    high.id(),
+                    admission,
+                    IceProfile { host_only: true },
+                ),
+            )
+            .spawn();
+
+        let low_on_relay = EndpointAddr::new(low.id()).with_relay_url(relay_url.clone());
+        let high_on_relay = EndpointAddr::new(high.id()).with_relay_url(relay_url.clone());
+        let held = high
+            .connect(low_on_relay, HOLD_ALPN)
+            .await
+            .expect("the answerer dials the offerer over the relay");
+
+        dial_signal_with(
+            &low,
+            high_on_relay,
+            &low_hub,
+            SignalDeadlines::DEFAULT,
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the offerer attaches a session");
+        register_session_addr(&low, high.id());
+        nudge(&low, high.id()).await;
+
+        let direct = tokio::time::timeout(Duration::from_secs(20), held_rx.recv())
+            .await
+            .expect("the held connection reports in time")
+            .expect("the channel is open");
+        assert!(
+            direct,
+            "the connection that the answerer dialed must leave the relay once the session is attached"
+        );
+
+        held.close(0u32.into(), b"done");
+        high_router.shutdown().await.expect("shutdown");
+        low_router.shutdown().await.expect("shutdown");
+        low.close().await;
+        high.close().await;
     }
 
     /// A relayed connection still open when the session attaches, which is

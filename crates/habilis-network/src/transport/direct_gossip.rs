@@ -14,20 +14,9 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_gossip::net::Gossip;
 use n0_future::time::Instant;
 
-use std::time::Duration;
-
 use super::path::{
     GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
 };
-
-/// How long an accepted gossip link may stay on the relay before it is closed.
-///
-/// Longer than one race round: a pair that loses its direct path races again
-/// onto a `WebRTC` session, and a signalling round may run up to
-/// `SIGNAL_ROUND_DEADLINE` (45 s). Closing the link before the round can end
-/// would cost a `NeighborDown`, an unlink and a graft for a path that was about
-/// to come back. The rule is for a path that does not.
-const RELAY_POLICY_DEADLINE: Duration = Duration::from_mins(1);
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectOnlyGossip {
@@ -108,7 +97,7 @@ impl ProtocolHandler for DirectOnlyGossip {
 }
 
 /// Keep the relay policy after the accept: a gossip connection whose selected
-/// path has been the relay for longer than [`RELAY_POLICY_DEADLINE`] is closed with
+/// path has been the relay for longer than [`PROBE_DEADLINE`], the wait of the accept gate, is closed with
 /// [`GOSSIP_RELAY_REFUSED_CODE`], on a mesh whose relay is lookup only.
 ///
 /// The accept gate checks the path once, at the start. A path that is lost
@@ -136,7 +125,7 @@ fn watch_relay_policy(accepted: &Connection) {
                 on_relay_since = None;
             } else {
                 let since = *on_relay_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= RELAY_POLICY_DEADLINE {
+                if since.elapsed() >= PROBE_DEADLINE {
                     tracing::info!(
                         target: super::LOG_TARGET,
                         remote = %conn.remote_id(),
@@ -146,8 +135,7 @@ fn watch_relay_policy(accepted: &Connection) {
                     return;
                 }
             }
-            let wait =
-                on_relay_since.map(|since| RELAY_POLICY_DEADLINE.saturating_sub(since.elapsed()));
+            let wait = on_relay_since.map(|since| PROBE_DEADLINE.saturating_sub(since.elapsed()));
             drop(conn);
             tokio::select! {
                 next = events.next() => {
