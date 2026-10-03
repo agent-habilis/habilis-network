@@ -28,18 +28,20 @@ for await (const message of mesh.messages()) {
 ## Two things that surprise people
 
 **`join({ topic })` is always public.** A topic mesh is reached over mDNS, the
-mainline DHT and the relay ladder, and that is not a default you can change.
+mainline DHT, the relay ladder and pkarr, and that is not a default you can
+change.
 The engine mixes the lookup set into the mesh id, so two peers reaching the
 same string over different lookups derive two different meshes and never
 meet. `JoinOpts` therefore carries no `lookup` — the two choices it does
 carry, `transport` and `relayUrls`, are exactly the two that are mixed into
-the id, and every member must pass the same values.
+the id, and every member must pass the same values. A topic always uses the
+default pkarr list, so it takes no `pkarrUrls`.
 
 **`create({})` is machine-local.** Naming no lookup is not "the default set"
 — it resolves to a loopback mesh nothing off this machine can reach. That is
 what makes the offline two-peer test possible, and it is surprising
 everywhere else. Name the lookups you want: `lookup: ['mdns', 'dht',
-'relay']` is the all-on set a topic uses.
+'relay', 'pkarr']` is the all-on set a topic uses.
 
 **The relay carries no data unless you say so.** Three lists name three
 concepts. `lookup: ['relay']` uses the relay as a *lookup*: a meeting point
@@ -50,7 +52,9 @@ keeps every member on WebRTC data channels. The list is part of the mesh id,
 so joiners inherit whatever the creator chose. `relayUrls` says *which* relay
 and nothing about its role. `lookup: ['pkarr', 'relay']` also lets a peer find
 another from its endpoint id alone, through public pkarr relays over HTTPS;
-`pkarrUrls` replaces the default list.
+it is part of the set a topic uses. `pkarrUrls` replaces the default list on
+a create, with at most 8 `https` URLs; a plain `http` URL is valid only on a
+loopback host and only beside a `relayUrls` ladder that is all loopback too.
 
 ## Byte streams
 

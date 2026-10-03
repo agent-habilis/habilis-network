@@ -22,8 +22,10 @@ Stdout is the stream and nothing else. Every word the binary has to say goes
 to stderr, as prose or, with `--robot`, as one JSON object per line
 (`{"kind":"ready","hash","url"}` first).
 
-The producer's options: `--lookup` (`mdns,dht,relay` by default; add `pkarr`
-for the pkarr relays, and `--pkarr-url` for a custom list of them),
+The producer's options: `--lookup` (`mdns,dht,relay,pkarr` by default, or any
+subset), `--pkarr-url` for a custom list of pkarr relays (at most 8 `https`
+URLs; a plain `http` URL is valid only on a loopback host and only beside a
+`--relay-url` ladder that is all loopback too),
 `--transport` (`udp,webrtc` by default; add `relay` for a fallback), and `--relay-url` for a custom relay
 ladder. A reader takes all of these from the hash.
 

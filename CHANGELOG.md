@@ -56,20 +56,45 @@ published to a registry; pin it with
   so a node finds a peer from its endpoint id alone. It uses only `fetch`, so
   it runs in a browser too. `pkarr_urls` / `pkarrUrls` / `--pkarr-url` name
   the list, which is part of the mesh id; the default is n0's server and two
-  Pubky relays. `habilis_network_opts` grows to 72 bytes and `habilis_network_stream_opts` to
+  Pubky relays. Pkarr is on in the default preset, so a topic, a directory
+  and a bare stream producer all use it; a topic always takes the default
+  list and refuses a custom one, which is a create-only choice.
+  `habilis_network_opts` grows to 72 bytes and `habilis_network_stream_opts` to
   32, with `pkarr_urls` appended. A lookup bit this build does not know is
   now an error, not a silent drop. `pkarr` needs `relay` among the lookups,
-  because a record names the home relay and nothing else. A pkarr URL must be
-  a bare base: `https` (plain `http` on a loopback host only), no
-  credentials, query, fragment or trailing slash on a path, and no URL twice.
-  The beacon publishes only while it holds a relay rung, and a rival probe
-  never publishes. In the C ABI an empty `relay_urls` or `pkarr_urls` string
+  because a record names the home relay and nothing else. A list holds at
+  most 8 URLs, and a URL must be a bare base: `https` (plain `http` on a
+  loopback host only, and only beside a relay ladder that is entirely on this
+  machine), no credentials, query, fragment or trailing slash on a path, and
+  no URL twice: a trailing dot on the host, a default port or a different
+  case does not make a new one. The beacon publishes only while it holds a
+  relay rung, and a rival probe never publishes. The lookup is the engine's
+  own, not iroh's publisher: it never publishes a record with no relay
+  address, so the last good record stays, every request has a 10 s deadline,
+  a failed publish backs off up to 60 s, and each relay has its own task, so
+  one relay never stalls another. In the C ABI an empty `relay_urls` or `pkarr_urls` string
   now takes the default, the same as NULL. `--pkarr-url` on the bun-ffi chat
-  (`--create` only) and `?pkarr` on the stream page.
+  (`--create` only) and `?pkarr` on the stream page. The terminal chat takes
+  `--lookup` and `--pkarr-url` for a mesh it creates, and the `mesh_peer`
+  example takes `MESH_PKARR_URLS`.
 - `cargo task e2e --suite pkarr`: the pkarr lookup across native-native,
   native-web, web-native and web-web, over a local relay and a local pkarr
   relay (`habilis_network::net::test_pkarr`). A cell passes only if the pair links,
-  a broadcast crosses both ways, and every member published its record.
+  a broadcast crosses both ways, and every member published its record, and
+  each stored record names the home relay and no direct address. The local
+  pkarr relay is as strict as the real ones: it verifies the signature,
+  answers 409 to a write that is not newer, answers the CORS preflight, and
+  serves under a path prefix. The suite runs in CI.
+- `cargo task e2e --suite pkarr-live`: a throwaway signed record put on each of
+  the three default public pkarr relays and resolved back, from a native
+  client and from a browser tab, whose success is also the CORS check. It
+  reaches the internet and is not run in CI.
+- `habilis_network_abi_version()` and the `HABILIS_NETWORK_ABI_VERSION` macro
+  of the header: the version of the C ABI, bumped on every change to a struct
+  or a signature, and held equal by a test. The TypeScript loader asks the
+  version first, with only that symbol bound, and throws `AbiMismatchError`
+  naming both versions when they differ or when the library predates the
+  check.
 - A custom relay ladder (`relay_urls` / `relayUrls` / `--relay-url`) on every
   create surface. The ladder is mixed into a derived topic id, so every
   member must pass the same list.
@@ -91,6 +116,10 @@ published to a registry; pin it with
   Every crate, package, C symbol (`habilis_network_*`), C type
   (`HabilisNetwork*`), header (`habilis_network.h`) and environment variable
   (`HABILIS_NETWORK_*`) takes the new name.
+- **Breaking:** the default lookup set is now `mdns,dht,relay,pkarr`, so a
+  topic mesh, a directory mesh and a bare stream producer include pkarr and
+  their mesh ids and topic ids change once. A peer on the old default does
+  not meet a peer on the new one.
 - **Breaking (wire):** the ALPNs (`habilis-network/stream/1`), the endpoint-proof
   domain and the chunk-store root context take the new name. A habilis-network
   peer does not interoperate with a fofoca peer, and chunk roots differ from

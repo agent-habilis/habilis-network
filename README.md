@@ -13,6 +13,8 @@ shared state, with no server in the middle. It is built on
 - **Portable** — runs on native, web, FFI, wasm and more.
 - **Mixed mesh** — UDP, relay server and WebRTC peers in the same mesh.
 - **Serverless** — no server to host, no account to create.
+- **Finds peers its own way** — through mDNS, the mainline DHT, pkarr relays
+  or a relay, and a peer's endpoint id alone is enough through pkarr.
 - **Encrypted** — every link is QUIC over TLS, and every message is signed
   with an [Ed25519](https://ed25519.cr.yp.to/) key and verified on receipt.
 - **Shared state** — a [CRDT](https://crdt.tech/) document every member

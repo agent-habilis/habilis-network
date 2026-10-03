@@ -182,6 +182,7 @@ For this reason the logs print the derived topic id and never the mesh id.
 ### 4.4 Topic meshes
 
 A topic mesh derives its seed from an arbitrary shared string: `SHA256(domain ‖ trimmed string)`.
+Its lookups are fixed to the default preset: `mdns`, `dht`, `relay`, and `pkarr` with the default list.
 The only normalization is a trim.
 Case-folding is platform-dependent and URL paths are case-sensitive, so any stronger normalization breaks convergence across machines.
 Two callers that pass the same string converge with zero coordination.
@@ -444,20 +445,27 @@ A pair that cannot hole-punch and has no WebRTC session stays unlinked for paylo
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
 An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
 
-Every create surface names three mesh-wide choices apart, because they are three concepts.
+Every create surface names four mesh-wide choices apart, because they are four concepts.
 `lookup` (`--lookup mdns,dht,relay,pkarr` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
 `transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `pkarr_urls` (`--pkarr-url`, `pkarrUrls`) says which pkarr relays, and needs `pkarr` among the lookups.
+The default lookup preset names `pkarr`, so a topic mesh, a directory mesh and a bare stream producer use it, with the default list.
+A topic refuses a custom list: that choice belongs to a create.
+A list holds at most 8 relays, and plain `http` is valid only on a loopback host, and only when every relay of the same id is on this machine too.
 Each member publishes its record to every pkarr relay in the list and resolves from any of them.
 The list must have all of the relays, because the public relays form groups that do not share records: n0's server is one group, and the Pubky relays, which share through the mainline DHT, are another.
 The pkarr record holds the home relay of the member and no IP address, the same as the DHT record.
 Each pkarr request still shows the member's IP address and the ids it publishes and resolves to the operator of that relay.
 A mesh that must not show this to n0 or Pubky names its own relays in `pkarr_urls`.
-`pkarr` needs `relay` among the lookups, because a record without a home relay holds no address.
-`habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
-The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
-A config that breaks either is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
+The pkarr lookup is the engine's own and not the iroh publisher, and it follows four rules.
+It never publishes a record with no home relay, so the last good record stays.
+Every request has a deadline of 10 seconds.
+A failed publish waits longer each time, up to 60 seconds.
+Each relay has its own task, so a slow relay never delays another.
+`habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all four.
+The rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, a pkarr list needs `pkarr` among the lookups, `pkarr` needs `relay` among the lookups, because a record without a home relay holds no address, and so does letting the relay carry payload.
+A config that breaks one of them is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
 Per-node capability is a different thing and stays out of the id: `TransportOpts` in the engine, `paths` on a create surface, says whether *this* node has IP, WebRTC or a relay transport at all.
 The policy is validated end to end by `cargo task e2e --suite mesh`: a real native peer and a real browser tab on a local relay, swept over the policy, the native transport set, and the join mode.
 
@@ -613,6 +621,10 @@ The socket module compiles out on wasm32, and a browser binds nothing.
 `habilis-network-ffi` exposes opaque handles and blocking calls, declared in `include/habilis_network.h`.
 A mesh handle (`habilis_network_mesh_*`) sends and receives whole text messages (`habilis_network_msg_send`, `habilis_network_msg_recv`) and reads the shared state as JSON.
 A stream node (`habilis_network_streams_*`, `habilis_network_stream_*`) creates and opens byte streams (§9.4).
+`habilis_network_abi_version()` returns the version of the C ABI, and the header carries the same number as `HABILIS_NETWORK_ABI_VERSION`.
+A caller compares the two before any other call, because a struct that gained a field is read at the wrong offsets with no error.
+The version changes with every change to a struct or a signature, and a test holds the header equal to the library.
+The TypeScript loader makes this check first, and it throws `AbiMismatchError` when the versions differ or the library does not answer.
 Panics stop at the boundary through `catch_unwind`.
 For this reason the release profile keeps unwinding and does not set `panic = "abort"`.
 
