@@ -61,7 +61,7 @@ iroh-test-utils = [
 # Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
 # server, a ticket, and fetch/offload, for handing a peer a payload too large to
 # ride a gossip frame. `agent-gossip` enables it for A2A payload offload; the
-# consumers that don't (mallorca, agent-share) pay neither the code size nor the
+# consumers that don't (agent-share) pay neither the code size nor the
 # spool directory.
 #
 # Implies `host`: it spools to disk and stands up its own iroh endpoint, and a

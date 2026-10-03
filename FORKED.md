@@ -14,8 +14,8 @@ their new homes.
 
 ## Why
 
-`docs/ffi-cost.md` in the mallorca repo measured the engine at **39.4 MiB of
-mallorca's 40.7 MiB release binary**, with the engine's own code accounting for
+A cost measurement in the original host repo (`docs/ffi-cost.md`) measured the engine at **39.4 MiB of
+a 40.7 MiB release binary**, with the engine's own code accounting for
 0.75 MiB of `__text` and the rest being its dependency closure. Cargo features
 cannot be selected per-consumer across a dependency edge, so making that closure
 optional required crate boundaries.
@@ -123,7 +123,7 @@ Divergences from upstream, in the order they were made.
     The `github.com/agent-habilis/*` URLs above are upstream repositories and
     are deliberately untouched.
 
-**From the extraction** (moving out of the mallorca repo into its own):
+**From the extraction** (moving out of the original host repo into its own):
 
 13. `iroh-multihop-transport` left the workspace for
     [its own repo](https://github.com/agent-habilis/iroh-multihop-transport).
@@ -153,7 +153,7 @@ Divergences from upstream, in the order they were made.
     `crates/*/version` moved to `version.workspace = true` — `habilis-network-ffi` had
     drifted to `0.0.0` while the rest sat at `0.5.0`.
 17. `docs/ffi-cost.md` and `scripts/measure-ffi-cost.sh` stayed behind in
-    mallorca — they measure mallorca's binary, not this workspace.
+    the host repo — they measure its binary, not this workspace.
 
 **From reclaiming the `habilis-network-blobs` name:**
 
@@ -162,7 +162,7 @@ Divergences from upstream, in the order they were made.
     crate brought in from `agent-habilis/agent-share`.
 
     It was dead code here: no `use habilis_network_blobs::` anywhere in the workspace, no
-    reverse edge in `Cargo.lock`, and `habilis-network-ffi` — mallorca's only entry point
+    reverse edge in `Cargo.lock`, and `habilis-network-ffi` — the host's only entry point
     — never depended on it. It is recoverable from history if a consumer ever
     wants it back; upstream `agent-gossip` still carries it under `src/blob/`.
 
@@ -330,7 +330,7 @@ Divergences from upstream, in the order they were made.
     transfer on top. agent-gossip needs the transport for A2A payload offload, so
     `crates/habilis-network/src/blob/` came back unchanged (same wire format, same ALPN)
     behind a feature that implies `host`. Consumers that don't enable it —
-    mallorca, agent-share — pay neither the code size nor the spool directory.
+    C hosts, agent-share — pay neither the code size nor the spool directory.
 
     The one test that could not come back as-is is the invite↔blob cross-parse
     assertion: `invite` now lives in `habilis-network-protocol`, which cannot see `blob`.
@@ -406,8 +406,7 @@ cargo check --workspace            # also: --no-default-features, --all-features
 cargo test --workspace             # 19 suites, 411 tests
 ```
 
-From a [mallorca](https://github.com/dviramontes/mallorca) checkout, `just check`
-and `just test` build the staticlib and the Odin app against it — the real check
-that the C ABI is unchanged. mallorca pins this repo by rev in its `Justfile`
-(`habilis_network_rev`) and clones it under `habilis-network/`, so the loop is: edit here, run
-`just check` there, then bump `habilis_network_rev` once the change is pushed.
+From a host application checkout that links the staticlib, build it against this
+repo — the real check that the C ABI is unchanged. The host pins this repo by rev,
+so the loop is: edit here, rebuild there, then bump the pinned rev once the change
+is pushed.

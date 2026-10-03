@@ -1,6 +1,6 @@
 //! The C ABI. `include/habilis_network.h` is the hand-written declaration of everything
 //! here — change one, change the other; `tests/ffi_smoke.rs` is what catches a
-//! mismatch from this side. The out-of-tree consumer is `mallorca`, which links
+//! mismatch from this side. An out-of-tree consumer links
 //! the `staticlib`, so no check in this workspace sees a break there.
 //!
 //! Conventions, uniform across the surface: a pointer-returning call yields NULL

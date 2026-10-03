@@ -6,7 +6,7 @@
 > the list of divergences that predate the split.
 
 This directory vendors a subset of the `agent-habilis/agent-gossip` engine as
-a self-contained Cargo workspace, so mallorca can build a C static library
+a self-contained Cargo workspace, so a host application can build a C static library
 (`habilis-network-ffi`) and link it directly without depending on the
 upstream repo's full workspace (the `agent-gossip` CLI app, its test
 fixtures, examples, etc.).
@@ -39,7 +39,7 @@ staticlib.
   three vendored crates actually reference — is carried over).
 - `[profile.release]` uses `lto = "thin"`, `codegen-units = 16`,
   `strip = "debuginfo"` instead of upstream's fat LTO / 1 codegen unit
-  (build-time tradeoff for the mallorca dev loop). Upstream's
+  (build-time tradeoff for the dev loop). Upstream's
   `panic = "abort"` is deliberately **not** carried over: the FFI crate's
   `catch_unwind` at the C ABI boundary depends on unwinding.
 - FFI extension: a `name` field (alongside the existing `nick`) and a
