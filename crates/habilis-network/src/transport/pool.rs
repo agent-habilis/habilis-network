@@ -17,6 +17,7 @@ use n0_future::time::Instant as PoolInstant;
 use tokio::sync::Mutex;
 
 use super::path::wait_direct;
+use super::webrtc::close_code::IDLE;
 use super::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
@@ -74,6 +75,10 @@ struct PoolInner {
     idle: Duration,
     /// Set once the sweeper is running, so that it starts at the first dial.
     sweeping: AtomicBool,
+    /// Peers whose pooled connection the sweeper closed for want of a send. A
+    /// watcher that would dial them again would keep the connection alive for
+    /// ever, so it asks here first. A dial that a send makes clears the mark.
+    idled: std::sync::Mutex<HashSet<EndpointId>>,
     /// When each endpoint's last dial failed, for the
     /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on a successful dial or
     /// a graceful `Left`; expired ones are pruned on the next `note`.
@@ -131,6 +136,7 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 idle,
                 sweeping: AtomicBool::new(false),
+                idled: std::sync::Mutex::new(HashSet::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashSet::new()),
@@ -151,6 +157,7 @@ impl UnicastPool {
                 conns: Mutex::new(HashMap::new()),
                 idle: Duration::from_secs(UNICAST_IDLE_SECS),
                 sweeping: AtomicBool::new(false),
+                idled: std::sync::Mutex::new(HashSet::new()),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashSet::new()),
@@ -233,6 +240,17 @@ impl UnicastPool {
         })
     }
 
+    /// Whether the sweeper closed `eid`'s pooled connection for want of a send,
+    /// and nothing has dialed it since. A caller that only watches the peer must
+    /// not dial it back: that would keep the connection up for nothing.
+    pub(crate) fn idled_out(&self, eid: EndpointId) -> bool {
+        self.inner
+            .idled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&eid)
+    }
+
     /// The pooled connection to `eid`, if one is open. Taking it counts as
     /// using it: every caller is about to send or probe on it.
     async fn warm(&self, eid: EndpointId) -> Option<Connection> {
@@ -264,7 +282,12 @@ impl UnicastPool {
                     let idle = now.saturating_duration_since(pooled.last_used) >= inner.idle;
                     if idle {
                         tracing::debug!(target: LOG_TARGET, %eid, "closing an idle pooled unicast connection");
-                        pooled.conn.close(0u32.into(), b"idle");
+                        pooled.conn.close(IDLE.into(), b"idle");
+                        inner
+                            .idled
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(*eid);
                     }
                     !idle
                 });
@@ -463,6 +486,11 @@ impl UnicastPool {
         match dial(&endpoint, addr).await {
             Ok(conn) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
+                self.inner
+                    .idled
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&eid);
                 self.inner.conns.lock().await.insert(
                     eid,
                     Pooled {
@@ -707,8 +735,14 @@ mod tests {
             "an unused connection leaves the pool"
         );
         assert!(closed_as_idle(&conn), "and is closed, not just dropped");
+        assert!(
+            pool.idled_out(server),
+            "and a watcher is told not to dial it back"
+        );
 
         tokio::time::resume();
+        pool.warm_or_dial(server).await.expect("a send dials again");
+        assert!(!pool.idled_out(server), "a dial clears the mark");
         router.shutdown().await.expect("shutdown");
         client.close().await;
     }

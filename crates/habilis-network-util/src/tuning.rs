@@ -747,6 +747,11 @@ pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 /// dialed again on the next send.
 pub const UNICAST_IDLE_SECS: u64 = 120;
 
+/// How long an accepted unicast connection may carry no new stream before the
+/// acceptor closes it. Twice [`UNICAST_IDLE_SECS`], so that the dialing pool is
+/// the one that normally closes; this is a backstop for a dialer that is gone.
+pub const UNICAST_ACCEPT_IDLE_SECS: u64 = 2 * UNICAST_IDLE_SECS;
+
 /// Max bytes a per-member log file grows before rotating to `<file>.1`
 /// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag
 /// overrides; `0` disables rotation. Resolved by [`crate::logs::log_max_bytes`].

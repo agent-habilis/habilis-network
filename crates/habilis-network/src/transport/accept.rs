@@ -12,11 +12,11 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::sync::mpsc;
 
 use crate::util::consts::MAX_MESSAGE_SIZE;
-use crate::util::tuning::UNICAST_IDLE_SECS;
+use crate::util::tuning::UNICAST_ACCEPT_IDLE_SECS;
 
 use super::LOG_TARGET;
 use super::path::{PROBE_DEADLINE, refuse_unless_direct};
-use super::webrtc::close_code::UNICAST_RELAY_REFUSED;
+use super::webrtc::close_code::{IDLE, UNICAST_RELAY_REFUSED};
 
 /// Per-frame read cap: one wire message plus gossip's envelope headroom (the
 /// same slack the size assertion reserves). Bounds allocation against a peer
@@ -28,14 +28,18 @@ pub(crate) struct UnicastAcceptor {
     tx: mpsc::Sender<Bytes>,
     relay_transport: bool,
     /// How long an accepted connection may carry no new stream before it is
-    /// closed. The dialing pool closes its own end after the same time, so
-    /// either side may be first.
+    /// closed. The dialing pool closes its own end after half this time, so the
+    /// acceptor's timeout is a backstop for a dialer that is gone.
     idle: Duration,
 }
 
 impl UnicastAcceptor {
     pub(crate) fn new(tx: mpsc::Sender<Bytes>, relay_transport: bool) -> Self {
-        Self::with_idle(tx, relay_transport, Duration::from_secs(UNICAST_IDLE_SECS))
+        Self::with_idle(
+            tx,
+            relay_transport,
+            Duration::from_secs(UNICAST_ACCEPT_IDLE_SECS),
+        )
     }
 
     /// [`Self::new`] with the idle timeout spelled out, for tests that must not
@@ -97,7 +101,7 @@ impl ProtocolHandler for UnicastAcceptor {
                 Ok(Err(_closed)) => break,
                 Err(_idle) => {
                     tracing::debug!(target: LOG_TARGET, "closing an idle accepted unicast connection");
-                    conn.close(0u32.into(), b"idle");
+                    conn.close(IDLE.into(), b"idle");
                     break;
                 }
             }
@@ -149,11 +153,27 @@ mod tests {
         }
     }
 
+    /// Wait in real time for the close to reach us. The server closes inside the
+    /// paused clock, but the close frame travels over real I/O, so a check right
+    /// after `advance_secs` races it.
+    async fn closed_soon(conn: &Connection) -> bool {
+        let started = std::time::Instant::now();
+        while conn.close_reason().is_none() {
+            if started.elapsed() > Duration::from_secs(5) {
+                return false;
+            }
+            tokio::task::yield_now().await;
+        }
+        true
+    }
+
     /// Closed by the server with its idle reason: not by us, not by QUIC.
     fn closed_by_the_acceptor(conn: &Connection) -> bool {
         matches!(
             conn.close_reason(),
-            Some(ConnectionError::ApplicationClosed(ref close)) if close.reason.as_ref() == b"idle"
+            Some(ConnectionError::ApplicationClosed(ref close))
+                if close.reason.as_ref() == b"idle"
+                    && close.error_code.into_inner() == u64::from(IDLE)
         )
     }
 
@@ -166,6 +186,7 @@ mod tests {
         assert!(conn.close_reason().is_none(), "inside the idle timeout");
 
         advance_secs(6).await;
+        assert!(closed_soon(&conn).await, "never closed");
         assert!(closed_by_the_acceptor(&conn), "{:?}", conn.close_reason());
 
         tokio::time::resume();
@@ -194,6 +215,7 @@ mod tests {
         );
 
         advance_secs(7).await;
+        assert!(closed_soon(&conn).await, "never closed");
         assert!(closed_by_the_acceptor(&conn), "{:?}", conn.close_reason());
 
         tokio::time::resume();

@@ -157,6 +157,11 @@ published to a registry; pin it with
   a newcomer or a rejoin across a beacon epoch is not unreachable forever.
 - A public rendezvous claim needs two consecutive free probes, so a probe
   inside a live beacon's release window no longer stands up a rival copy.
+- A unicast connection that nothing sends on is closed after two minutes, on the
+  dial side by the pool and, after four minutes, on the accept side. Before,
+  every peer that was ever sent to kept a QUIC connection for the life of the
+  process. The next send dials again. The close carries its own code, so the
+  other side can tell it from a refusal.
 - A fresh unicast dial waits up to five seconds for a direct path before its
   first frame, which the pool used to refuse as relayed.
 - A digest window is bounded by the extent of its slice rather than by its

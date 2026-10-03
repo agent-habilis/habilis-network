@@ -106,6 +106,9 @@ pub(crate) mod close_code {
     pub(crate) const EVICTED: u32 = 6;
     /// We let go of the rendezvous on purpose, having enough links to members.
     pub(crate) const RENDEZVOUS_RELEASED: u32 = 7;
+    /// A unicast connection nothing sent on for the idle timeout: closed by the
+    /// pool on the dial side, by the acceptor on the other.
+    pub(crate) const IDLE: u32 = 8;
 
     #[cfg(test)]
     mod tests {
@@ -121,6 +124,7 @@ pub(crate) mod close_code {
                 UNICAST_RELAY_REFUSED,
                 EVICTED,
                 RENDEZVOUS_RELEASED,
+                IDLE,
             ];
             let distinct: std::collections::HashSet<_> = all.into_iter().collect();
             assert_eq!(distinct.len(), all.len());

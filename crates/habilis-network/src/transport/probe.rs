@@ -117,6 +117,13 @@ pub(crate) fn ensure_watchers(
         .collect();
     for peer in peers {
         let warm = state.unicast_pool.connection(peer);
+        // The pool closed this connection because nothing sent on it. Dialing it
+        // back here would hold it up for ever, so the idle timeout would never
+        // close it. A send dials it again, and the next tick watches it.
+        if warm.is_none() && state.unicast_pool.idled_out(peer) {
+            state.path_watchers.remove(&peer);
+            continue;
+        }
         let watched = state.path_watchers.get(&peer).copied();
         match (&warm, watched) {
             // Dialing, or already watching this connection.
