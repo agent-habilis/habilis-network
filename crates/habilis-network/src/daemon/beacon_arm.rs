@@ -138,6 +138,7 @@ pub(super) async fn maybe_cohost(
             state.arm_reclaim(Instant::now());
         }
     }
+    state.hosts_rendezvous = current.is_some();
 }
 /// Fast event-driven failover: while the post-`NeighborDown` reclaim
 /// window is open, retry the rendezvous claim so a survivor takes the
@@ -164,6 +165,7 @@ pub(super) async fn maybe_reclaim(
     current: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
 ) {
+    state.hosts_rendezvous = current.is_some();
     if arm.policy != CoHostPolicy::Never
         && state
             .reclaim_until
@@ -177,11 +179,12 @@ pub(super) async fn maybe_reclaim(
             probe,
         )
         .await;
+        state.hosts_rendezvous = current.is_some();
         if claimed {
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
             return;
         }
-        if regrafts_rendezvous(state.rendezvous_linked)
+        if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
             && crate::transport::webrtc::rendezvous_graftable(state)
         {
             tracing::info!(
@@ -202,8 +205,11 @@ pub(super) async fn maybe_reclaim(
 /// (`beacon::claim`), so our side re-grafts it like any other. That is the
 /// condition [`super::heal::run_heal`] gates its own re-graft on; this one
 /// just gets there sooner.
-fn regrafts_rendezvous(rendezvous_linked: bool) -> bool {
-    !rendezvous_linked
+///
+/// And only a node that wants the rendezvous: one with enough links to others
+/// let it go on purpose, and a graft here would undo that.
+fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool {
+    !rendezvous_linked && rendezvous_wanted
 }
 /// Whether this session's beacon is subject to the periodic rival
 /// re-check shed: any **public** co-host that had to *probe* for the
@@ -385,6 +391,7 @@ pub(super) fn shed_rival_beacon_if_due(
     if let Some(held) = rendezvous.take() {
         held.shed();
     }
+    state.hosts_rendezvous = false;
     state.next_rival_recheck = None;
     state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);
     // Don't wait for that `NeighborDown` either — clear the link flag now
@@ -533,11 +540,15 @@ mod tests {
     #[test]
     fn a_reclaim_tick_regrafts_only_when_the_link_is_lost() {
         assert!(
-            regrafts_rendezvous(false),
+            regrafts_rendezvous(false, true),
             "link lost: the case that stalled, and the only way a beacon we hold gets linked"
         );
         assert!(
-            !regrafts_rendezvous(true),
+            !regrafts_rendezvous(false, false),
+            "a link let go of on purpose must stay let go of"
+        );
+        assert!(
+            !regrafts_rendezvous(true, true),
             "a live link must not be re-dialled — both heal legs dial GOSSIP_ALPN, and the \
              beacon adopting the new one flaps the healthy link once per tick"
         );

@@ -78,9 +78,9 @@ use crate::util::tuning;
 ///
 /// Without it the retry tick re-offers every 30s and every refused round still
 /// costs *us* a full candidate-gathering budget before the refusal arrives.
-/// Five minutes is short enough that a peer whose sessions churn is picked up
-/// on the next window, and long enough that the cost rounds to nothing.
-const CAP_REFUSAL_COOLDOWN: Duration = Duration::from_mins(5);
+/// The refusal now means no session was idle for a minute, so the window is
+/// short: see [`tuning::CAP_REFUSAL_COOLDOWN_SECS`].
+const CAP_REFUSAL_COOLDOWN: Duration = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_SECS);
 
 /// Why a negotiation was not admitted. Diagnostic — every arm means "not now".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,6 +475,31 @@ impl SignalAdmission {
                 abort.abort();
             }
         }
+    }
+
+    /// Close every QUIC connection the endpoint hook reported for `peer`, with
+    /// `code` and `reason`. Returns how many were open. This is how a node lets
+    /// go of a peer it did not dial itself: iroh-gossip owns its connections
+    /// and has no call to drop one neighbour, but the table holds a handle to
+    /// each.
+    pub(crate) fn close_peer(&self, peer: EndpointId, code: u32, reason: &[u8]) -> usize {
+        let handles: Vec<WeakConnectionHandle> = self
+            .lock()
+            .slots
+            .get(&peer)
+            .map(|slot| {
+                slot.conns
+                    .iter()
+                    .map(|tracked| tracked.handle.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        handles
+            .iter()
+            .filter_map(WeakConnectionHandle::upgrade)
+            .filter(|conn| conn.close_reason().is_none())
+            .map(|conn| conn.close(code.into(), reason))
+            .count()
     }
 
     /// Whether a round with `peer` holds a slot right now, in either role.

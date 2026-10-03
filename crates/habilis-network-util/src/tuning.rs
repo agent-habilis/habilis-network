@@ -711,6 +711,20 @@ pub const EVICTION_JITTER_SECS: u64 = 15;
 /// and forth, one session per round.
 pub const EVICTION_COOLDOWN_SECS: u64 = 300;
 
+/// How many gossip links to other members make a node let go of the
+/// rendezvous. The rendezvous is where a node enters the mesh and where split
+/// islands meet again; it is not a peer to hold for ever. A node below this
+/// many links keeps it (or comes back to it); at this many it releases it, so
+/// that the rendezvous has room for the next joiner (its direct-peer slots and
+/// its gossip view are finite).
+pub const RENDEZVOUS_RELEASE_LINKS: usize = 3;
+
+/// How long a node that a peer refused at its cap leaves that peer alone. A
+/// refusal now means that no session of the peer was idle for
+/// [`MIN_IDLE_FOR_EVICTION_SECS`], so a short wait finds the same answer
+/// cheaply and a long one only delays a retry that could succeed.
+pub const CAP_REFUSAL_COOLDOWN_SECS: u64 = 30;
+
 /// How long a unicast connection may carry no stream before it is closed, on
 /// the dial side (the pool) and on the accept side. A closed connection is
 /// dialed again on the next send.

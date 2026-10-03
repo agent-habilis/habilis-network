@@ -85,6 +85,10 @@ pub(crate) async fn handle_gossip_event(
                 // heal tick must not connect-probe the rendezvous (the
                 // probe would supersede this very link on the beacon).
                 state.rendezvous_linked = true;
+                // The link is back: nothing is owed any more, and the next
+                // `NeighborDown` is a loss again until we release it anew.
+                state.rendezvous_released = false;
+                state.rendezvous_comeback = false;
                 state.rendezvous_session_stale = false;
                 state.rendezvous_offer_fallback = false;
                 // This link settles the arbitration: someone holds the port
@@ -135,37 +139,23 @@ pub(crate) async fn handle_gossip_event(
                     // (the app's card dial hint); see `NodeApp::on_meshed`.
                     app.on_meshed(state, ctx).await;
                 }
+                if state.should_release_rendezvous() {
+                    release_rendezvous(state, ctx);
+                }
             }
         }
         Some(Ok(Event::NeighborDown(node_id))) => {
             let is_rendezvous = node_id == ctx.rendezvous_id;
             tracing::info!(target: "habilis_network::gossip", endpoint_id = %node_id, is_rendezvous, "gossip neighbor down");
             if is_rendezvous {
-                state.rendezvous_linked = false;
-                // The holder is gone, so the identity is up for arbitration
-                // again and any earlier reading of it is spent.
-                state.forget_rendezvous_verdict();
-                // A shed beacon takes its session table with it (the rival
-                // re-check releases and re-claims the rendezvous on a fresh
-                // endpoint), so a held session is stale the moment the link
-                // drops — and admission would refuse every re-offer with
-                // `HaveSession`. Drop it so the next heal tick offers anew.
-                if let Some(handle) = state.webrtc.as_ref()
-                    && handle.detach(&node_id)
-                {
-                    tracing::debug!(target: "habilis_network::gossip", "detached the stale rendezvous webrtc session");
-                }
-                // Re-offer now rather than on the next heal tick: every
-                // saved interval halves the relink cycle a beacon shed costs
-                // a webrtc-shaped peer.
-                crate::transport::webrtc::offer_rendezvous_off_tick(state, ctx);
+                rendezvous_neighbor_down(state, ctx, node_id);
             } else {
                 state.unlink(node_id);
             }
             if arms_reclaim(
-                is_rendezvous,
+                is_rendezvous && !state.rendezvous_released,
                 state.linked_endpoints.len(),
-                state.rendezvous_linked,
+                !state.rendezvous_linked && state.rendezvous_wanted(),
             ) {
                 state.arm_reclaim(Instant::now());
                 tracing::info!(target: "habilis_network::gossip",
@@ -214,6 +204,37 @@ pub(crate) async fn handle_gossip_event(
     }
 }
 
+/// The rendezvous neighbour went down. A link we let go of on purpose is no
+/// loss: there is nothing to detach, to offer again, or to re-graft, and the
+/// rule that released it also says when to come back.
+fn rendezvous_neighbor_down(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    node_id: iroh::EndpointId,
+) {
+    state.rendezvous_linked = false;
+    // The holder is gone, so the identity is up for arbitration
+    // again and any earlier reading of it is spent.
+    state.forget_rendezvous_verdict();
+    if state.rendezvous_released {
+        return;
+    }
+    // A shed beacon takes its session table with it (the rival
+    // re-check releases and re-claims the rendezvous on a fresh
+    // endpoint), so a held session is stale the moment the link
+    // drops — and admission would refuse every re-offer with
+    // `HaveSession`. Drop it so the next heal tick offers anew.
+    if let Some(handle) = state.webrtc.as_ref()
+        && handle.detach(&node_id)
+    {
+        tracing::debug!(target: "habilis_network::gossip", "detached the stale rendezvous webrtc session");
+    }
+    // Re-offer now rather than on the next heal tick: every
+    // saved interval halves the relink cycle a beacon shed costs
+    // a webrtc-shaped peer.
+    crate::transport::webrtc::offer_rendezvous_off_tick(state, ctx);
+}
+
 /// Whether a `NeighborDown` should arm the fast reclaim burst — the
 /// event-driven half of beacon failover, as opposed to waiting out a heal
 /// tick.
@@ -221,10 +242,13 @@ pub(crate) async fn handle_gossip_event(
 /// Three signals, all meaning "there may be no beacon and we could be the one
 /// to stand it up":
 ///
-/// - `is_rendezvous` — the link we lost *was* the beacon.
+/// - `rendezvous_lost` — the link we lost *was* the beacon, and we did not let
+///   it go on purpose.
 /// - `links_left == 0` — that was our last tracked peer; we are isolated.
-/// - `!rendezvous_linked` — we hold no live beacon link at all. This is the
-///   case the first two miss and the one the kill-the-producer drill lives in:
+/// - `!rendezvous_linked` — we hold no live beacon link at all, and want one
+///   (`rendezvous_wanted`: a node with enough links to others has let go of it
+///   on purpose). This is the case the first two miss and the one the
+///   kill-the-producer drill lives in:
 ///   two tabs plus an origin, the origin dies, and each tab is still linked to
 ///   the other. Not isolated, and the tab that meshed via the origin's *peer*
 ///   endpoint never had a rendezvous link to lose — so nothing armed, and
@@ -238,8 +262,43 @@ pub(crate) async fn handle_gossip_event(
 /// because it was dialing an id it had no way to resolve; see
 /// `beacon::spawn_rival_probe`. **This widening is only safe with that fix**:
 /// a convergence-time probe now finds the origin's beacon and nobody binds.
-fn arms_reclaim(is_rendezvous: bool, links_left: usize, rendezvous_linked: bool) -> bool {
-    is_rendezvous || links_left == 0 || !rendezvous_linked
+///
+/// Losing the rendezvous arms it even when this node has links enough to be
+/// done with the beacon: it may be dead, and failover needs someone to notice.
+/// Losing a link we released on purpose is no loss, and arms nothing.
+fn arms_reclaim(
+    rendezvous_lost: bool,
+    links_left: usize,
+    beacon_wanted_but_unlinked: bool,
+) -> bool {
+    rendezvous_lost || links_left == 0 || beacon_wanted_but_unlinked
+}
+
+/// Let go of the rendezvous: this node holds enough links to other members.
+///
+/// The rendezvous has finite room, in its direct-peer slots and in its gossip
+/// view, and a node that has found the mesh no longer needs it. Marked first, so
+/// that the `NeighborDown` this causes reads as a choice. The connections are
+/// closed through the table that the endpoint hook fills, because iroh-gossip
+/// owns them and cannot drop a single neighbour; the session goes with them.
+fn release_rendezvous(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    state.rendezvous_released = true;
+    let closed = state.webrtc_admission.close_peer(
+        ctx.rendezvous_id,
+        crate::transport::webrtc::close_code::RENDEZVOUS_RELEASED,
+        b"released",
+    );
+    let detached = state
+        .webrtc
+        .as_ref()
+        .is_some_and(|handle| handle.detach(&ctx.rendezvous_id));
+    tracing::info!(
+        target: "habilis_network::gossip",
+        links = state.linked_endpoints.len(),
+        closed,
+        detached,
+        "enough links to members: released the rendezvous"
+    );
 }
 
 /// Drain the message payloads a dead subscription buffered before its
@@ -1401,7 +1460,7 @@ mod arms_reclaim_tests {
         // dies, each tab still linked to the other. Not the rendezvous, not
         // isolation — and before this the tab armed nothing and waited out the
         // heal cadence.
-        assert!(arms_reclaim(false, 1, false));
+        assert!(arms_reclaim(false, 1, true));
     }
 
     #[test]
@@ -1409,8 +1468,33 @@ mod arms_reclaim_tests {
         // A peer flapping while the beacon link is live is HyParView doing its
         // job. Arming here is what would make initial convergence pay a bind
         // storm on every non-beacon node.
-        assert!(!arms_reclaim(false, 1, true));
-        assert!(!arms_reclaim(false, 64, true));
+        assert!(!arms_reclaim(false, 1, false));
+        assert!(!arms_reclaim(false, 64, false));
+    }
+
+    #[test]
+    fn a_rendezvous_released_on_purpose_arms_nothing() {
+        // Enough links to others, the beacon let go of by choice: the
+        // `NeighborDown` it causes is not a loss, and nothing may come back.
+        assert!(!arms_reclaim(false, 3, false));
+    }
+
+    #[test]
+    fn a_lost_rendezvous_arms_even_when_the_node_wants_none() {
+        // It may be dead, and failover needs someone to notice.
+        assert!(arms_reclaim(true, 5, false));
+    }
+
+    #[test]
+    fn a_node_with_enough_links_does_not_arm_for_a_beacon_it_does_not_hold() {
+        // Released earlier, and a plain neighbour drops: still no reason to
+        // go back to the rendezvous.
+        assert!(!arms_reclaim(false, 3, false));
+    }
+
+    #[test]
+    fn a_node_below_the_release_count_wants_the_beacon_back() {
+        assert!(arms_reclaim(false, 2, true));
     }
 }
 
@@ -1804,6 +1888,133 @@ mod first_contact_tests {
                 sink: &self.sink,
             }
         }
+    }
+
+    /// Feed one gossip event to the handler, as the loop does.
+    async fn feed(event: Event, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        handle_gossip_event(Some(Ok(event)), state, &mut Inert, ctx).await;
+    }
+
+    /// A node that reaches the release count lets go of the rendezvous: the
+    /// link it kept to enter the mesh. Below the count it keeps it.
+    #[tokio::test]
+    async fn reaching_the_release_count_releases_the_rendezvous() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 3;
+
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        assert!(state.rendezvous_linked);
+        for seed in 1..=2 {
+            feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
+            assert!(
+                !state.rendezvous_released,
+                "{seed} links is below the count"
+            );
+        }
+
+        feed(Event::NeighborUp(endpoint_id(3)), &mut state, &ctx).await;
+        assert!(state.rendezvous_released, "the third link is the count");
+        node.endpoint.close().await;
+    }
+
+    /// The `NeighborDown` that a release causes is a choice, not a loss: no
+    /// reclaim window opens, and nothing wants the rendezvous back.
+    #[tokio::test]
+    async fn the_neighbor_down_after_a_release_arms_nothing() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 2;
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        for seed in 1..=2 {
+            feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
+        }
+        assert!(state.rendezvous_released);
+
+        feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
+
+        assert!(!state.rendezvous_linked);
+        assert!(state.reclaim_until.is_none(), "no loss, no reclaim");
+        assert!(!state.rendezvous_wanted(), "no graft, no offer");
+        node.endpoint.close().await;
+    }
+
+    /// Losing a rendezvous we did not release still arms the reclaim: it may
+    /// be dead, and someone has to stand up the next one.
+    #[tokio::test]
+    async fn losing_a_rendezvous_that_was_not_released_still_arms_the_reclaim() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 3;
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        feed(Event::NeighborUp(endpoint_id(1)), &mut state, &ctx).await;
+
+        feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
+
+        assert!(state.reclaim_until.is_some());
+        assert!(state.rendezvous_wanted(), "below the count: come back");
+        node.endpoint.close().await;
+    }
+
+    /// A node below the count after a release wants the rendezvous again, and
+    /// the link coming back ends the release and the debt.
+    #[tokio::test]
+    async fn the_link_coming_back_clears_the_release_and_the_owed_return() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.rendezvous_released = true;
+        state.rendezvous_comeback = true;
+
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+
+        assert!(state.rendezvous_linked);
+        assert!(!state.rendezvous_released);
+        assert!(!state.rendezvous_comeback);
+        node.endpoint.close().await;
+    }
+
+    /// Two islands, each wide enough to have let go of the rendezvous, are
+    /// split by a block. Neither sees the other, so each sweeps its silent
+    /// neighbours, and that sweep is what sends the island back to the place
+    /// where the islands meet.
+    #[tokio::test]
+    async fn an_island_whose_peers_went_silent_comes_back_to_the_rendezvous() {
+        use crate::testing::nick;
+        use std::time::Duration;
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 3;
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        for seed in 1..=3 {
+            feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
+        }
+        feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
+        assert!(!state.rendezvous_wanted(), "an island of its own, content");
+        assert!(!crate::transport::webrtc::rendezvous_graftable(&state));
+
+        let silent = crate::util::clock::Instant::now()
+            .checked_sub(Duration::from_secs(
+                crate::util::tuning::alive_timeout_secs() + 10,
+            ))
+            .expect("a past instant");
+        state.last_seen.insert(nick("far-side"), silent);
+        state.peers.insert(nick("far-side"));
+        state.surfaced.insert(nick("far-side"));
+        crate::lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
+
+        assert!(state.rendezvous_wanted(), "the sweep owes one return");
+        assert!(
+            crate::transport::webrtc::rendezvous_graftable(&state),
+            "so the heal tick may graft it"
+        );
+        node.endpoint.close().await;
     }
 
     /// A `PeerInfo` binds its signer to its endpoint only with that endpoint's

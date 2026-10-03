@@ -72,8 +72,11 @@ pub(super) async fn run_heal(
         );
         state.note_degraded();
         // The frozen-era link view is stale by definition; clearing this
-        // re-arms the regular tick's probe until a fresh NeighborUp.
+        // re-arms the regular tick's probe until a fresh NeighborUp. Every link
+        // is stale too, so a node that had let go of the rendezvous is owed
+        // one return to it.
         state.rendezvous_linked = false;
+        state.rendezvous_comeback = true;
         // A free reading taken before the freeze is stale for the same
         // reason, across the widest gap any of these deadlines can span.
         state.forget_rendezvous_verdict();
@@ -103,6 +106,14 @@ pub(super) async fn run_heal(
         tracing::debug!(
             target: "habilis_network::gossip",
             "heal tick: rendezvous linked; idle"
+        );
+    } else if !state.rendezvous_wanted() {
+        // Enough links to others: the rendezvous was let go of on purpose, and
+        // grafting it now would undo that. A node that falls below the count
+        // comes back through the next tick.
+        tracing::debug!(
+            target: "habilis_network::gossip",
+            "heal tick: rendezvous released; idle"
         );
     } else if crate::transport::webrtc::rendezvous_graftable(state) {
         gossip::heal::tick_heal(params.id, ctx.sender).await;
@@ -293,6 +304,7 @@ pub(super) fn apply_rung_change(
         if let Some(old) = rendezvous.take() {
             old.shed();
         }
+        state.hosts_rendezvous = false;
         // A rehome starts a fresh arbitration epoch, so the re-check backoff
         // starts over with it. Without this the next claim reads the round
         // count the *previous* epoch reached and backs off as though it were

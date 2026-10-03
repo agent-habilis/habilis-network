@@ -7,12 +7,16 @@
 //! like any peer link. iroh-gossip's dialer has no handshake timeout, so the
 //! far side simply waits.
 
+use futures_util::StreamExt as _;
 use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_gossip::net::Gossip;
+use n0_future::time::Instant;
 
-use super::path::{GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct};
+use super::path::{
+    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectOnlyGossip {
@@ -76,6 +80,9 @@ impl ProtocolHandler for DirectOnlyGossip {
         {
             return Ok(());
         }
+        if !self.relay_transport {
+            watch_relay_policy(&conn);
+        }
         self.inner
             .handle_connection(conn)
             .await
@@ -87,6 +94,64 @@ impl ProtocolHandler for DirectOnlyGossip {
             tracing::warn!(target: super::LOG_TARGET, %error, "error while shutting down gossip");
         }
     }
+}
+
+/// Keep the relay policy after the accept: a gossip connection whose selected
+/// path has been the relay for longer than [`PROBE_DEADLINE`] is closed with
+/// [`GOSSIP_RELAY_REFUSED_CODE`], on a mesh whose relay is lookup only.
+///
+/// The accept gate checks the path once, at the start. A path that is lost
+/// later (a session detached, a NAT mapping gone) leaves a link that is still
+/// up on the relay, and nothing then says that no payload may ride it. The
+/// close gives both ends a `NeighborDown`, and the heal or the come-back rule
+/// of each end decides whether to link again. The wait restarts at every
+/// return to a direct path, so a path that flaps is left alone.
+///
+/// Holds the connection weakly: the watcher must not keep a link open that
+/// gossip has dropped.
+fn watch_relay_policy(accepted: &Connection) {
+    let weak = accepted.weak_handle();
+    let mut events = accepted.path_events();
+    n0_future::task::spawn(async move {
+        let mut on_relay_since: Option<Instant> = None;
+        loop {
+            let Some(conn) = weak.upgrade() else {
+                return;
+            };
+            if conn.close_reason().is_some() {
+                return;
+            }
+            if selected_is_direct(&conn) {
+                on_relay_since = None;
+            } else {
+                let since = *on_relay_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= PROBE_DEADLINE {
+                    tracing::info!(
+                        target: super::LOG_TARGET,
+                        remote = %conn.remote_id(),
+                        "gossip link on the relay path past the deadline: closing it"
+                    );
+                    conn.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"relay path refused");
+                    return;
+                }
+            }
+            let wait = on_relay_since.map(|since| PROBE_DEADLINE.saturating_sub(since.elapsed()));
+            drop(conn);
+            tokio::select! {
+                next = events.next() => {
+                    if next.is_none() {
+                        return;
+                    }
+                }
+                () = async {
+                    match wait {
+                        Some(wait) => n0_future::time::sleep(wait).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
+            }
+        }
+    });
 }
 
 /// Whether the gate refuses a gossip dial at once rather than holding it,

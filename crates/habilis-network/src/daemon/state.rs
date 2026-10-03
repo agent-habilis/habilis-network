@@ -271,6 +271,27 @@ pub struct EventLoopState {
     /// drops — one rendezvous-link flap per heal tick, forever (the
     /// 2026-05-30 soak's residual flap).
     pub(crate) rendezvous_linked: bool,
+    /// Whether we let go of the rendezvous link on purpose (see
+    /// [`Self::should_release_rendezvous`]). The `NeighborDown` that follows
+    /// is then no loss, so nothing re-grafts it or arms a reclaim for it.
+    /// Cleared when the link comes back.
+    pub(crate) rendezvous_released: bool,
+    /// One return to the rendezvous is owed although this node holds enough
+    /// links to others. Set when a silent roster peer is swept (a partition may
+    /// have split the mesh into islands, and the rendezvous is where they meet
+    /// again) and on a resume edge (every link is stale). Cleared when the
+    /// link comes back.
+    pub(crate) rendezvous_comeback: bool,
+    /// This process co-hosts the rendezvous. Its own link to it keeps the
+    /// beacon's gossip view non-empty, which is what lets a joiner be
+    /// introduced to the mesh: if the host let go as well, a joiner arriving
+    /// after the early members had released would find an empty view and the
+    /// mesh would split into islands (the 18-node test shows it). So this
+    /// node never releases the link.
+    pub(crate) hosts_rendezvous: bool,
+    /// How many links to other members make this node release the rendezvous.
+    /// A field, not a constant, so a test can set it.
+    pub(crate) rendezvous_release_links: usize,
     /// Whether the held rendezvous `WebRTC` session has already survived one
     /// heal tick without producing a link — the arming half of the stale
     /// detach in `negotiate_rendezvous_session`.
@@ -662,6 +683,10 @@ impl EventLoopState {
             joined_at: crate::util::clock::unix_secs(),
             gossip_open: true,
             rendezvous_linked: false,
+            rendezvous_released: false,
+            rendezvous_comeback: false,
+            hosts_rendezvous: false,
+            rendezvous_release_links: crate::util::tuning::RENDEZVOUS_RELEASE_LINKS,
             rendezvous_session_stale: false,
             rendezvous_offer_fallback: false,
             rendezvous_answers_jsep: true,
@@ -852,6 +877,24 @@ impl EventLoopState {
     /// [`Self::reclaim_until`].
     pub(crate) fn arm_reclaim(&mut self, now: Instant) {
         self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
+    }
+
+    /// Whether this node should hold, or come back to, the rendezvous link:
+    /// while it has fewer than [`Self::rendezvous_release_links`] links to
+    /// others, when a return is owed, and always on the node that hosts it.
+    /// Every graft and offer to the rendezvous is gated on this one answer.
+    pub(crate) fn rendezvous_wanted(&self) -> bool {
+        self.hosts_rendezvous
+            || self.rendezvous_comeback
+            || self.linked_endpoints.len() < self.rendezvous_release_links
+    }
+
+    /// Whether a link that just came up leaves this node with enough links to
+    /// others to let go of the rendezvous.
+    pub(crate) fn should_release_rendezvous(&self) -> bool {
+        self.rendezvous_linked
+            && !self.hosts_rendezvous
+            && self.linked_endpoints.len() >= self.rendezvous_release_links
     }
 
     /// The rendezvous arbitration was reopened or settled, so the previous
@@ -1309,6 +1352,77 @@ mod tests {
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::testing::{endpoint_id, fresh_state, nick};
+
+    /// The release rule's two answers, on a node that lets go at two links.
+    fn two_link_node() -> EventLoopState {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 2;
+        state
+    }
+
+    #[test]
+    fn a_node_below_the_release_count_wants_the_rendezvous() {
+        let mut state = two_link_node();
+        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(endpoint_id(1));
+        assert!(state.rendezvous_wanted());
+        assert!(!state.should_release_rendezvous(), "one link is not enough");
+    }
+
+    #[test]
+    fn a_node_at_the_release_count_lets_go_and_stops_wanting_it() {
+        let mut state = two_link_node();
+        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(state.should_release_rendezvous());
+
+        state.rendezvous_linked = false;
+        assert!(
+            !state.rendezvous_wanted(),
+            "enough links: no graft, no offer"
+        );
+        assert!(
+            !state.should_release_rendezvous(),
+            "nothing left to let go of"
+        );
+    }
+
+    #[test]
+    fn a_node_that_falls_below_the_count_comes_back() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(!state.rendezvous_wanted());
+
+        state.linked_endpoints.remove(&endpoint_id(2));
+
+        assert!(state.rendezvous_wanted());
+    }
+
+    #[test]
+    fn the_node_that_hosts_the_rendezvous_keeps_its_link() {
+        let mut state = two_link_node();
+        state.hosts_rendezvous = true;
+        state.rendezvous_linked = true;
+        for seed in 1..=5 {
+            state.linked_endpoints.insert(endpoint_id(seed));
+        }
+        assert!(
+            !state.should_release_rendezvous(),
+            "its link keeps the beacon's gossip view non-empty for a joiner"
+        );
+        assert!(state.rendezvous_wanted());
+    }
+
+    #[test]
+    fn an_owed_return_makes_a_node_with_enough_links_want_it() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.rendezvous_comeback = true;
+        assert!(state.rendezvous_wanted());
+    }
 
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).

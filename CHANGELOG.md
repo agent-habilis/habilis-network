@@ -164,6 +164,23 @@ published to a registry; pin it with
   nothing and a holder answered "nothing missing" for a gap.
 - On a lookup-only mesh the debug census no longer demotes a proven peer on
   a relayed `conn_path` reading, which stopped every payload lane to it.
+- A mesh larger than a node's 16 direct-peer slots no longer stalls at the
+  rendezvous. A WebRTC-only mesh formed only for its first 16 members: the
+  rendezvous pseudo-node held each joiner's session and its gossip link for
+  ever, filled its 16 slots, and every later joiner stayed alone with an empty
+  roster. A UDP mesh of about 65 hit the same wall at the beacon's 64-place
+  gossip view. A node that holds three links to other members now lets go of
+  the rendezvous (it closes the connections and detaches the session) and comes
+  back only while it has fewer than three links, or once after the sweep removed
+  a silent roster peer, which is how islands of a split mesh meet again. The
+  node that hosts the beacon keeps its own link, so that a joiner always
+  finds a member in the beacon's view. A refusal at the cap now waits 30 s
+  before the next offer, not five minutes.
+- A gossip connection on a lookup-only mesh whose selected path stays on the
+  relay for longer than `PROBE_DEADLINE` after the accept is closed with the
+  gossip relay-refused code. The accept gate checked the path only once, so a
+  path lost later left a link up on the relay with nothing to say that no
+  payload may ride it.
 
 ### Removed
 

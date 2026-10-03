@@ -104,6 +104,8 @@ pub(crate) mod close_code {
     /// We evicted this peer a short while ago, so its offer is not answered
     /// yet. The dialer backs off, as it does for [`CAP_REFUSED`].
     pub(crate) const EVICTED: u32 = 6;
+    /// We let go of the rendezvous on purpose, having enough links to members.
+    pub(crate) const RENDEZVOUS_RELEASED: u32 = 7;
 
     #[cfg(test)]
     mod tests {
@@ -118,6 +120,7 @@ pub(crate) mod close_code {
                 GOSSIP_RELAY_REFUSED,
                 UNICAST_RELAY_REFUSED,
                 EVICTED,
+                RENDEZVOUS_RELEASED,
             ];
             let distinct: std::collections::HashSet<_> = all.into_iter().collect();
             assert_eq!(distinct.len(), all.len());
@@ -838,7 +841,9 @@ fn spawn_offer_round(
 /// beacon it could not punch to in a whole heal interval is a tab, and a
 /// timer graft there is the same doomed dial.
 pub(crate) fn rendezvous_graftable(state: &crate::daemon::state::EventLoopState) -> bool {
-    !state.rendezvous_graft_needs_session && !state.rendezvous_offer_fallback
+    state.rendezvous_wanted()
+        && !state.rendezvous_graft_needs_session
+        && !state.rendezvous_offer_fallback
 }
 
 /// Offer a `WebRTC` session to the **rendezvous** itself.
@@ -861,7 +866,7 @@ pub(crate) fn negotiate_rendezvous_session(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
 ) {
-    if state.relay_transport || state.rendezvous_linked {
+    if state.relay_transport || state.rendezvous_linked || !state.rendezvous_wanted() {
         return;
     }
     let Some(handle) = state.webrtc.clone() else {
