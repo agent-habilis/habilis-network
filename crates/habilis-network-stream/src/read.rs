@@ -27,6 +27,10 @@ pub enum Refused {
     /// The producer dropped the stream before closing it, after this consumer
     /// was admitted (while it read, or during the hand-off).
     Abandoned,
+    /// The producer is at its direct-peer cap, and no peer it holds is idle
+    /// enough to make room; or it evicted this node a short while ago. Try
+    /// again later.
+    AtCap,
 }
 
 impl fmt::Display for Refused {
@@ -36,6 +40,7 @@ impl fmt::Display for Refused {
             Self::Taken => "another consumer already holds this stream",
             Self::RelayRefused => "the only path is the relay, and this stream refuses it",
             Self::Abandoned => "the producer abandoned the stream",
+            Self::AtCap => "the producer is at its direct-peer cap",
         })
     }
 }

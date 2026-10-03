@@ -80,17 +80,52 @@ const SIGNAL_EXCHANGE_DEADLINE: std::time::Duration = std::time::Duration::from_
 /// following tick rather than being skipped indefinitely.
 const SIGNAL_ROUND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// Application close code: we are at our direct-peer ceiling.
+/// The application close codes of the transport plane, in one list.
 ///
-/// Distinct from a failure so the dialer can tell "no room" from "ICE broke"
-/// and back off instead of re-offering every tick. Weakly wire-load-bearing:
-/// a peer too old to know the code just sees a closed connection and retries,
-/// which is the behaviour it had before.
-const CAP_REFUSED: u32 = 1;
-/// Application close code: the negotiation failed.
-const SIGNAL_FAILED: u32 = 2;
-/// Application close code: the negotiation ran out of time.
-const SIGNAL_ABORTED: u32 = 3;
+/// A code is wire-load-bearing only weakly: a peer too old to know it just sees
+/// a closed connection and retries, which is the behaviour it had before. But
+/// two meanings on one number would be a silent bug, so every code of the plane
+/// lives here and a test holds them apart. Each ALPN reads its own subset.
+pub(crate) mod close_code {
+    /// We are at our direct-peer ceiling and no peer is idle long enough to
+    /// make room.
+    ///
+    /// Distinct from a failure so the dialer can tell "no room" from "ICE broke"
+    /// and back off instead of re-offering every tick.
+    pub(crate) const CAP_REFUSED: u32 = 1;
+    /// The negotiation failed.
+    pub(crate) const SIGNAL_FAILED: u32 = 2;
+    /// The negotiation ran out of time, or the Router is shutting down.
+    pub(crate) const SIGNAL_ABORTED: u32 = 3;
+    /// A gossip connection whose path may not carry payload.
+    pub(crate) const GOSSIP_RELAY_REFUSED: u32 = 4;
+    /// A unicast connection whose path may not carry payload.
+    pub(crate) const UNICAST_RELAY_REFUSED: u32 = 5;
+    /// We evicted this peer a short while ago, so its offer is not answered
+    /// yet. The dialer backs off, as it does for [`CAP_REFUSED`].
+    pub(crate) const EVICTED: u32 = 6;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn no_two_codes_share_a_number() {
+            let all = [
+                CAP_REFUSED,
+                SIGNAL_FAILED,
+                SIGNAL_ABORTED,
+                GOSSIP_RELAY_REFUSED,
+                UNICAST_RELAY_REFUSED,
+                EVICTED,
+            ];
+            let distinct: std::collections::HashSet<_> = all.into_iter().collect();
+            assert_eq!(distinct.len(), all.len());
+        }
+    }
+}
+
+use close_code::{CAP_REFUSED, EVICTED, SIGNAL_ABORTED, SIGNAL_FAILED};
 
 /// Register `remote`'s `WebRTC` transport address after a session attach.
 ///
@@ -158,7 +193,8 @@ pub struct IceProfile {
     pub host_only: bool,
 }
 
-/// The peer refused us at its direct-peer ceiling.
+/// The peer refused us: it is at its direct-peer ceiling, or it evicted us
+/// recently. Either way we back off for a while.
 ///
 /// A distinct type rather than a message, because the caller has to tell a
 /// refusal from an ordinary failure and the two want opposite responses: a
@@ -176,8 +212,10 @@ impl std::fmt::Display for CapRefused {
 
 impl std::error::Error for CapRefused {}
 
-/// Whether a failed offer round was the peer refusing us at its ceiling.
-fn is_cap_refusal(error: &anyhow::Error) -> bool {
+/// Whether a failed offer round was the peer refusing us at its ceiling, or
+/// because it evicted us recently.
+#[must_use]
+pub fn is_cap_refusal(error: &anyhow::Error) -> bool {
     error.downcast_ref::<CapRefused>().is_some()
 }
 
@@ -209,12 +247,14 @@ async fn exchange_envelopes(
     }
 }
 
-/// Whether `error` is a peer telling us it is at its ceiling.
+/// Whether the peer closed `conn` to tell us to back off.
 fn refused_at_cap(conn: &Connection) -> bool {
     matches!(
         conn.close_reason(),
         Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
-            if close.error_code.into_inner() == u64::from(CAP_REFUSED)
+            if [CAP_REFUSED, EVICTED]
+                .into_iter()
+                .any(|code| close.error_code.into_inner() == u64::from(code))
     )
 }
 
@@ -305,6 +345,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             Err(reason) => {
                 let (code, why): (u32, &[u8]) = match reason {
                     Refusal::AtCap => (CAP_REFUSED, b"at the direct-peer cap"),
+                    Refusal::Evicted => (EVICTED, b"evicted recently"),
                     Refusal::ShuttingDown => (SIGNAL_ABORTED, b"shutting down"),
                     Refusal::InFlight | Refusal::HaveSession | Refusal::Cooling => {
                         (SIGNAL_FAILED, b"already negotiating")
@@ -1551,6 +1592,54 @@ mod tests {
         assert!(
             is_cap_refusal(&error),
             "the dialer must read this as an at-cap refusal, got: {error:#}"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+        server.close().await;
+    }
+
+    /// A peer the answerer evicted a short while ago is refused with its own
+    /// code, and the dialer reads it as a request to back off, like an at-cap
+    /// refusal. Without that, the evicted peer would offer again on its next
+    /// retry tick and take the slot back from the newcomer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_offer_from_an_evicted_peer_is_refused_with_the_evicted_code() {
+        let (server, server_hub) = endpoint().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, client_hub) = endpoint().await;
+        admission.note_evicted(client.id());
+
+        let conn = client
+            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+            .await
+            .expect("dial the signal ALPN");
+        let reason = tokio::time::timeout(Duration::from_secs(5), conn.closed())
+            .await
+            .expect("the refusal must be prompt");
+        assert!(
+            matches!(
+                reason,
+                iroh::endpoint::ConnectionError::ApplicationClosed(ref close)
+                    if close.error_code.into_inner() == u64::from(EVICTED)
+            ),
+            "expected the evicted close code, got {reason:?}"
+        );
+
+        let error = dial_signal_with(
+            &client,
+            server.addr(),
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect_err("an evicted peer must be refused");
+        assert!(
+            is_cap_refusal(&error),
+            "the dialer must back off from an evicted refusal, got: {error:#}"
         );
 
         router.shutdown().await.expect("shutdown");

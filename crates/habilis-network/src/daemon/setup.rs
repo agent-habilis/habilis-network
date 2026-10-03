@@ -211,7 +211,11 @@ async fn build_member_endpoint(
     Endpoint,
     Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    crate::transport::SignalAdmission,
 )> {
+    // Made before the endpoint, because the endpoint reports its connections
+    // to this table from the first handshake on.
+    let admission = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
     if let Some(injected) = build.injected.as_ref() {
         // Shared endpoint: no key to mint, nothing to bind. Multihop is not
         // available on this path — it pins the key for its own hop identity,
@@ -225,7 +229,12 @@ async fn build_member_endpoint(
             &injected.webrtc,
             build.lookups,
         )?;
-        return Ok((injected.endpoint.clone(), None, injected.webrtc.clone()));
+        return Ok((
+            injected.endpoint.clone(),
+            None,
+            injected.webrtc.clone(),
+            admission,
+        ));
     }
     if build.multihop {
         // Multihop pins the key for its own hop identity, so it cannot also be
@@ -233,11 +242,15 @@ async fn build_member_endpoint(
         // peer that wants both needs one key shared between them.
         let (endpoint, handle) = build_peer_multihop(build.lookups).await?;
         let webrtc = crate::lookup::detached_webrtc_handle(endpoint.id());
-        Ok((endpoint, Some(handle), webrtc))
+        Ok((endpoint, Some(handle), webrtc, admission))
     } else {
-        let (endpoint, webrtc) =
-            crate::lookup::build_peer_webrtc(build.lookups, build.transports).await?;
-        Ok((endpoint, None, webrtc))
+        let (endpoint, webrtc) = crate::lookup::build_peer_webrtc_with(
+            build.lookups,
+            build.transports,
+            Some(&admission),
+        )
+        .await?;
+        Ok((endpoint, None, webrtc, admission))
     }
 }
 
@@ -252,18 +265,26 @@ async fn build_member_endpoint(
     Endpoint,
     Option<()>,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    crate::transport::SignalAdmission,
 )> {
+    let admission = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
     if let Some(injected) = build.injected.as_ref() {
         crate::lookup::check_injected_identity(
             &injected.endpoint,
             &injected.webrtc,
             build.lookups,
         )?;
-        return Ok((injected.endpoint.clone(), None, injected.webrtc.clone()));
+        return Ok((
+            injected.endpoint.clone(),
+            None,
+            injected.webrtc.clone(),
+            admission,
+        ));
     }
     let (endpoint, webrtc) =
-        crate::lookup::build_peer_webrtc(build.lookups, build.transports).await?;
-    Ok((endpoint, None, webrtc))
+        crate::lookup::build_peer_webrtc_with(build.lookups, build.transports, Some(&admission))
+            .await?;
+    Ok((endpoint, None, webrtc, admission))
 }
 
 /// An endpoint the caller already built, shared with the mesh.
@@ -666,13 +687,13 @@ fn build_overlay(
     mesh: &Mesh,
     endpoint: &Endpoint,
     webrtc: &habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    admission: crate::transport::SignalAdmission,
 ) -> (
     iroh_gossip::net::Gossip,
     iroh::protocol::Router,
     crate::transport::SignalAdmission,
     crate::transport::IceProfile,
 ) {
-    let admission = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
     let ice = crate::transport::IceProfile {
         host_only: mesh.is_loopback(),
     };
@@ -727,7 +748,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
             reason = "no multihop handle off a host — see `build_member_endpoint`"
         )
     )]
-    let (endpoint, multihop, webrtc) = build_member_endpoint(build).await?;
+    let (endpoint, multihop, webrtc, admission) = build_member_endpoint(build).await?;
 
     let mut mesh = Mesh::new(seed, name.clone(), config);
     // Invite-only: mint the invite root + issuer keypair and bake the issuer
@@ -798,7 +819,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     );
 
     let (gossip, router, webrtc_admission, webrtc_ice) =
-        build_overlay(build, &mesh, &endpoint, &webrtc);
+        build_overlay(build, &mesh, &endpoint, &webrtc, admission);
     // Creator has no peers yet — bootstrap is empty.
     let topic = gossip.subscribe(topic_id, vec![]).await?;
 
@@ -861,7 +882,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
             reason = "no multihop handle off a host — see `build_member_endpoint`"
         )
     )]
-    let (endpoint, multihop, webrtc) = build_member_endpoint(build).await?;
+    let (endpoint, multihop, webrtc, admission) = build_member_endpoint(build).await?;
 
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     // Must precede the join: the peer resolves the rendezvous id via
@@ -870,7 +891,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     register_rendezvous(&endpoint, &rdv);
 
     let (gossip, router, webrtc_admission, webrtc_ice) =
-        build_overlay(build, &mesh, &endpoint, &webrtc);
+        build_overlay(build, &mesh, &endpoint, &webrtc, admission);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
     // until we are meshed, so we never register a duplicate `rendezvous_id` on

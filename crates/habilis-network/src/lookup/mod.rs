@@ -103,6 +103,11 @@ pub struct TransportHandles {
     /// QUIC over a `WebRTC` data channel. The browser's only way onto the
     /// mesh, and an opportunistic extra path for a native peer.
     pub webrtc: Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
+    /// The table that decides who holds a direct-peer slot. When set, the
+    /// endpoint reports every connection to it, so it can tell which peers
+    /// carry traffic. Without it the table cannot see activity and never
+    /// evicts.
+    pub admission: Option<crate::transport::SignalAdmission>,
     /// Which transports this instance may carry data on. Lives here rather than
     /// as another positional argument for the same reason the handles do.
     pub opts: TransportOpts,
@@ -323,6 +328,9 @@ pub async fn build_endpoint(
         // "tidy" this above the preset.
         builder = builder.path_selector(handle.path_selector());
     }
+    if let Some(admission) = &transports.admission {
+        builder = builder.hooks(admission.activity_hook());
+    }
     // Data-plane exclusivity: with IP cleared, a WebRTC-only peer cannot
     // silently fall back onto a hole-punched path, so a run that *claims* to be
     // WebRTC-only can be shown to be one. The relay is left alone on purpose —
@@ -480,6 +488,22 @@ pub async fn build_peer_webrtc(
     Endpoint,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
 )> {
+    build_peer_webrtc_with(lookups, opts, None).await
+}
+
+/// [`build_peer_webrtc`], reporting the endpoint's connections to `admission`
+/// so that it can evict an idle peer when a newcomer needs the slot.
+///
+/// # Errors
+/// Returns an error if the endpoint fails to bind.
+pub(crate) async fn build_peer_webrtc_with(
+    lookups: &LookupOpts,
+    opts: TransportOpts,
+    admission: Option<&crate::transport::SignalAdmission>,
+) -> Result<(
+    Endpoint,
+    habilis_network_iroh_webrtc_transport::WebRtcHandle,
+)> {
     let mut key_bytes = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
     let secret = SecretKey::from_bytes(&key_bytes);
@@ -493,6 +517,7 @@ pub async fn build_peer_webrtc(
             #[cfg(feature = "host")]
             multihop: None,
             webrtc: Some(handle.clone()),
+            admission: admission.cloned(),
             opts,
         },
     )
@@ -573,6 +598,7 @@ pub(crate) async fn build_peer_multihop(
         TransportHandles {
             multihop: Some(handle.clone()),
             webrtc: None,
+            admission: None,
             opts: TransportOpts::default(),
         },
     )

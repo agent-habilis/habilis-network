@@ -687,6 +687,35 @@ pub const FAST_ROUND_AHEAD_TTL_SECS: u64 = 60;
 /// reproduce the gossip-churn leak at any node count.
 pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 64;
 
+/// How often the direct-peer slot table reads each connection's frame
+/// counters to see which peers carried payload since the last reading. One
+/// timer per admission table, not one task per connection. A coarser period
+/// delays the first sign of activity; it cannot hide it, because the counters
+/// only grow.
+pub const ACTIVITY_SAMPLE_SECS: u64 = 5;
+
+/// A direct peer must have carried no payload for this long before a newcomer
+/// may take its slot at the cap. Payload is bytes on a stream or datagram, from
+/// any protocol, gossip included. QUIC keep-alives, ICE consent checks and STUN
+/// are not payload.
+pub const MIN_IDLE_FOR_EVICTION_SECS: u64 = 60;
+
+/// Random extra idle time, up to this many seconds, added per peer to
+/// [`MIN_IDLE_FOR_EVICTION_SECS`]. Two nodes that are both at their cap and
+/// both see the same idle pair do not then evict each other in the same
+/// instant.
+pub const EVICTION_JITTER_SECS: u64 = 15;
+
+/// How long an evicted peer is left alone, in both roles: not offered to, and
+/// not answered. Without it two capped nodes would trade the same slot back
+/// and forth, one session per round.
+pub const EVICTION_COOLDOWN_SECS: u64 = 300;
+
+/// How long a unicast connection may carry no stream before it is closed, on
+/// the dial side (the pool) and on the accept side. A closed connection is
+/// dialed again on the next send.
+pub const UNICAST_IDLE_SECS: u64 = 120;
+
 /// Max bytes a per-member log file grows before rotating to `<file>.1`
 /// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag
 /// overrides; `0` disables rotation. Resolved by [`crate::logs::log_max_bytes`].

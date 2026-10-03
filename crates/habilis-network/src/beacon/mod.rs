@@ -120,11 +120,14 @@ pub(crate) struct Rendezvous {
     /// rendezvous attaches to, and the admission its negotiations hold a
     /// slot in. The peer endpoint has its own pair, which says nothing about
     /// who depends on the beacon. `None` where the beacon carries no lane.
-    lane: Option<(
-        habilis_network_iroh_webrtc_transport::WebRtcHandle,
-        crate::transport::SignalAdmission,
-    )>,
+    lane: RendezvousLane,
 }
+
+/// A beacon's `WebRTC` answerer and the table that admits its sessions.
+type RendezvousLane = Option<(
+    habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    crate::transport::SignalAdmission,
+)>;
 
 impl Rendezvous {
     /// How many peers depend on this beacon's data channel: sessions attached
@@ -138,13 +141,7 @@ impl Rendezvous {
     /// A beacon holding `endpoint` whose answerer is `lane`, for a test that
     /// needs a held beacon without a claim.
     #[cfg(test)]
-    pub(crate) fn for_test(
-        endpoint: Endpoint,
-        lane: Option<(
-            habilis_network_iroh_webrtc_transport::WebRtcHandle,
-            crate::transport::SignalAdmission,
-        )>,
-    ) -> Self {
+    pub(crate) fn for_test(endpoint: Endpoint, lane: RendezvousLane) -> Self {
         Self {
             task: n0_future::task::spawn(std::future::pending()),
             monitor: None,
@@ -537,10 +534,7 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
 /// every rung foreign-squatted (≈0); the next tick retries.
 async fn build_rendezvous_endpoint(
     params: &RendezvousParams,
-) -> Option<(
-    Endpoint,
-    Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
-)> {
+) -> Option<(Endpoint, RendezvousLane)> {
     let lookups = beacon_lookups(params);
     if params.answers_jsep() {
         // The public probe-before-claim that used to run here — the analog
@@ -554,6 +548,9 @@ async fn build_rendezvous_endpoint(
         // whose relay is lookup only the data channel is the only path its
         // rendezvous link can ever be admitted on.
         let webrtc = crate::lookup::new_webrtc_handle(params.secret.public());
+        // Made before the endpoint: the endpoint reports its connections to it
+        // from the first handshake on.
+        let admission = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
         let endpoint = build_endpoint(
             &lookups,
             Some(params.secret.clone()),
@@ -561,6 +558,7 @@ async fn build_rendezvous_endpoint(
             Vec::new(),
             TransportHandles {
                 webrtc: Some(webrtc.clone()),
+                admission: Some(admission.clone()),
                 ..TransportHandles::default()
             },
         )
@@ -571,7 +569,7 @@ async fn build_rendezvous_endpoint(
         } else {
             tracing::debug!(target: "habilis_network::beacon", "public beacon endpoint build failed; next tick retries");
         }
-        return endpoint.map(|endpoint| (endpoint, Some(webrtc)));
+        return endpoint.map(|endpoint| (endpoint, Some((webrtc, admission))));
     }
     // Built on the first contended rung and reused for the rest of the
     // walk, then closed. A throwaway identity, for the reason
@@ -579,10 +577,7 @@ async fn build_rendezvous_endpoint(
     // make the beacon mistake the probe for this member's own gossip
     // connection and drop the real one when the probe closes.
     let mut prober: Option<Endpoint> = None;
-    let mut verdict: Option<(
-        Endpoint,
-        Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
-    )> = None;
+    let mut verdict: Option<(Endpoint, RendezvousLane)> = None;
     for &port in &params.bind_ports {
         if let Ok(endpoint) = build_endpoint(
             &lookups,
@@ -730,7 +725,7 @@ async fn claim(
     peer: &Endpoint,
     current: &mut Option<Rendezvous>,
 ) -> bool {
-    let Some((endpoint, webrtc)) = build_rendezvous_endpoint(params).await else {
+    let Some((endpoint, lane)) = build_rendezvous_endpoint(params).await else {
         // Public: endpoint build failed. Private: every ladder rung is
         // occupied — our mesh's beacon(s) already exist on the ladder
         // (joiners reach them by identity-checked dial). Either way,
@@ -745,12 +740,6 @@ async fn claim(
     // A *public* rendezvous answers JSEP (`build_rendezvous_endpoint` put
     // the transport on the endpoint): a browser-shaped peer has no other
     // way onto a mesh whose relay is lookup only.
-    let lane = webrtc.map(|handle| {
-        (
-            handle,
-            crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS),
-        )
-    });
     let (gossip, router) = build_mesh(
         endpoint.clone(),
         crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,

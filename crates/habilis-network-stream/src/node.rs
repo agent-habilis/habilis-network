@@ -10,8 +10,8 @@ use habilis_network::iroh::protocol::Router;
 use habilis_network::net::TransportOpts;
 use habilis_network::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, PROBE_DEADLINE, SignalAdmission,
-    WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc, dial_signal, pair_needs_lane,
-    wait_direct,
+    WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc, dial_signal, is_cap_refusal,
+    pair_needs_lane, wait_direct,
 };
 use habilis_network::protocol::{
     Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, Transport, TransportPolicy,
@@ -194,6 +194,9 @@ impl StreamNode {
                 dial_signal(&self.endpoint, hash.addr.clone(), &self.webrtc, self.ice).await
             && !relay_ok
         {
+            if is_cap_refusal(&error) {
+                bail!(Refused::AtCap);
+            }
             return Err(error.context("opening a WebRTC lane to the producer"));
         }
         let conn = self

@@ -28,7 +28,8 @@ pub mod direct {
     pub use crate::lookup::build_peer_webrtc;
     pub use crate::transport::path::{PROBE_DEADLINE, refuse_unless_direct, wait_direct};
     pub use crate::transport::webrtc::{
-        IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor, dial_signal, pair_needs_lane,
+        IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor, dial_signal, is_cap_refusal,
+        pair_needs_lane,
     };
     pub use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
     pub use habilis_network_iroh_webrtc_transport::WebRtcHandle;

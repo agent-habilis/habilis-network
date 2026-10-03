@@ -22,7 +22,7 @@ pub const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 /// Close code an inbound gossip connection gets when the relay is lookup
 /// only and no direct path was selected within the deadline. Distinct from
 /// the blob lane's code so a log reader can tell the two refusals apart.
-pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = 4;
+pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = super::webrtc::close_code::GOSSIP_RELAY_REFUSED;
 
 /// Whether iroh's selected path to the remote is not the relay: a direct UDP
 /// path, or a custom transport (`WebRTC`, multihop), which is peer to peer as
