@@ -66,10 +66,22 @@ pub mod test_relay {
 }
 
 /// A local pkarr relay every side of a test can reach, a browser included:
-/// plain HTTP, `PUT` and `GET` on `/pkarr/{key}`, and open CORS. It stores
-/// the last packet put for each key and checks no signature, which is enough
-/// to show that a record goes out and comes back. (iroh's own test relay
-/// serves `PUT` only, because iroh's tests resolve over DNS.)
+/// plain HTTP, `PUT` and `GET` on `{prefix}/{key}`, and open CORS.
+///
+/// It is as strict as the real relays, so a client that would be refused by
+/// them is refused here, in CI, and not only against the public servers:
+///
+/// - a `PUT` whose signature does not verify against the key in the path is
+///   `400`;
+/// - a `PUT` that is not newer than the stored record is `409`, the Pubky
+///   behaviour (n0's server only keeps the newer one, so a client that
+///   survives this survives both);
+/// - a `PUT` or a `GET` with a path that is not under the prefix is `404`;
+/// - the CORS preflight is answered, because a browser sends one before the
+///   `PUT`.
+///
+/// (iroh's own test relay serves `PUT` only, because iroh's tests resolve over
+/// DNS.)
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub mod test_pkarr {
     use std::collections::HashMap;
@@ -81,14 +93,18 @@ pub mod test_pkarr {
     use axum::extract::{Path, State};
     use axum::http::{HeaderValue, StatusCode, header};
     use axum::response::{IntoResponse, Response};
+    use iroh::PublicKey;
+    use iroh::endpoint_info::EndpointInfo;
+    use iroh_dns::pkarr::SignedPacket;
     use n0_future::task::AbortOnDropHandle;
 
     use crate::protocol::Url;
 
     #[derive(Default)]
     struct Store {
-        records: Mutex<HashMap<String, Bytes>>,
+        records: Mutex<HashMap<String, SignedPacket>>,
         hits: AtomicUsize,
+        rejected: AtomicUsize,
     }
 
     type Records = Arc<Store>;
@@ -130,22 +146,66 @@ pub mod test_pkarr {
                 .contains_key(key)
         }
 
+        /// The record `key` holds, decoded: the addresses a peer that
+        /// resolves it would learn.
+        ///
+        /// # Panics
+        /// A relay handler panicked while it held the lock.
+        #[must_use]
+        pub fn info(&self, key: &str) -> Option<EndpointInfo> {
+            let records = self.store.records.lock().expect("records lock");
+            let packet = records.get(key)?;
+            EndpointInfo::from_pkarr_signed_packet(packet).ok()
+        }
+
+        /// The keys that hold a record, z-base-32.
+        ///
+        /// # Panics
+        /// A relay handler panicked while it held the lock.
+        #[must_use]
+        pub fn keys(&self) -> Vec<String> {
+            self.store
+                .records
+                .lock()
+                .expect("records lock")
+                .keys()
+                .cloned()
+                .collect()
+        }
+
         /// How many lookups found a record.
         #[must_use]
         pub fn hits(&self) -> usize {
             self.store.hits.load(Ordering::Relaxed)
         }
+
+        /// How many writes the relay refused: a bad signature, or a record
+        /// that was not newer.
+        #[must_use]
+        pub fn rejected(&self) -> usize {
+            self.store.rejected.load(Ordering::Relaxed)
+        }
     }
 
-    /// Spawn the relay; the URL is `http://127.0.0.1:<port>/pkarr`.
+    /// Spawn the relay under `/pkarr`, like n0's: the URL is
+    /// `http://127.0.0.1:<port>/pkarr`.
     ///
     /// # Errors
     /// Binding the listener fails.
     pub async fn spawn_plain() -> anyhow::Result<(Url, TestPkarr)> {
+        spawn_at("/pkarr").await
+    }
+
+    /// Spawn the relay under `prefix`: `"/pkarr"` is n0's layout, `""` serves
+    /// at the root like the Pubky relays.
+    ///
+    /// # Errors
+    /// Binding the listener fails.
+    pub async fn spawn_at(prefix: &str) -> anyhow::Result<(Url, TestPkarr)> {
         let store = Records::default();
         let app = axum::Router::new()
             .route(
-                "/pkarr/{key}",
+                &format!("{prefix}/{{key}}"),
                 axum::routing::get(get).put(put).options(preflight),
             )
             .layer(axum::middleware::map_response(allow_any_origin))
@@ -153,7 +213,7 @@ pub mod test_pkarr {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .context("binding the local pkarr relay")?;
-        let url = format!("http://{}/pkarr", listener.local_addr()?)
+        let url = format!("http://{}{prefix}", listener.local_addr()?)
             .parse()
             .context("the local pkarr address is not a URL")?;
         let task = tokio::spawn(async move {
@@ -168,16 +228,30 @@ pub mod test_pkarr {
         ))
     }
 
+    fn refuse(records: &Store, status: StatusCode) -> StatusCode {
+        records.rejected.fetch_add(1, Ordering::Relaxed);
+        status
+    }
+
     async fn put(
         State(records): State<Records>,
         Path(key): Path<String>,
         body: Bytes,
     ) -> StatusCode {
-        records
-            .records
-            .lock()
-            .expect("records lock")
-            .insert(key, body);
+        let Ok(public) = PublicKey::from_z32(&key) else {
+            return refuse(&records, StatusCode::BAD_REQUEST);
+        };
+        let Ok(packet) = SignedPacket::from_relay_payload(&public, &body) else {
+            return refuse(&records, StatusCode::BAD_REQUEST);
+        };
+        let mut stored = records.records.lock().expect("records lock");
+        if let Some(current) = stored.get(&key)
+            && !packet.more_recent_than(current)
+        {
+            drop(stored);
+            return refuse(&records, StatusCode::CONFLICT);
+        }
+        stored.insert(key, packet);
         StatusCode::NO_CONTENT
     }
 
@@ -185,7 +259,7 @@ pub mod test_pkarr {
         match records.records.lock().expect("records lock").get(&key) {
             Some(packet) => {
                 records.hits.fetch_add(1, Ordering::Relaxed);
-                packet.clone().into_response()
+                packet.to_relay_payload().into_response()
             }
             None => StatusCode::NOT_FOUND.into_response(),
         }
@@ -194,7 +268,7 @@ pub mod test_pkarr {
     async fn preflight() -> Response {
         (
             [
-                (header::ACCESS_CONTROL_ALLOW_METHODS, "GET, PUT"),
+                (header::ACCESS_CONTROL_ALLOW_METHODS, "GET, PUT, OPTIONS"),
                 (header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type"),
             ],
             StatusCode::NO_CONTENT,

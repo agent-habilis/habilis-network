@@ -1745,6 +1745,7 @@ dependencies = [
  "insta",
  "interprocess",
  "iroh",
+ "iroh-dns",
  "iroh-gossip",
  "iroh-mainline-address-lookup",
  "iroh-mdns-address-lookup",
