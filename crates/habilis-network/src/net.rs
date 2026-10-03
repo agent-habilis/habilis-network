@@ -5,17 +5,16 @@
 //! needs an `Endpoint` reaches in here and accepts the coupling.
 
 pub use crate::gossip::conn_path;
-pub use crate::lookup::{DEFAULT_PKARR_URLS, ProbeRecord, probe_record};
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use crate::lookup::{
+    DEFAULT_PKARR_URLS, PkarrProbe, ProbeRecord, probe_pkarr, probe_record, test_pkarr, test_relay,
+};
 #[cfg(feature = "host")]
 pub use crate::lookup::{NetworkCapability, capability_probe};
-#[cfg(not(target_arch = "wasm32"))]
-pub use crate::lookup::{PkarrProbe, probe_pkarr};
 pub use crate::lookup::{
     TransportHandles, TransportOpts, add_peer_addr, build_endpoint, build_peer_endpoint,
     check_injected_identity, probe_connect, probe_ladder, relay_ladder,
 };
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub use crate::lookup::{test_pkarr, test_relay};
 pub use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 /// The direct-`WebRTC`-session ceiling this engine enforces, so a consumer
 /// renders the same denominator the engine checks. It used to be written out

@@ -287,9 +287,10 @@ pub mod test_pkarr {
 
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
-pub use pkarr::{DEFAULT_PKARR_URLS, ProbeRecord, probe_record};
-#[cfg(not(target_arch = "wasm32"))]
-pub use pkarr::{Probe as PkarrProbe, probe as probe_pkarr};
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use pkarr::probe::{
+    DEFAULT_PKARR_URLS, Probe as PkarrProbe, ProbeRecord, probe as probe_pkarr, probe_record,
+};
 pub(crate) use relay::RungRefresh;
 pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 pub(crate) use relay::{
@@ -587,7 +588,7 @@ pub async fn build_endpoint(
 
     // Pre-bind, unlike mDNS and DHT: iroh's pkarr builders take the endpoint
     // at bind. Not gated on `udp` either, because the record names the relay.
-    builder = pkarr::wire(builder, &lookups.pkarr);
+    builder = pkarr::wire(builder, &lookups.pkarr, &lookups.relay_lookup);
 
     // For the private rendezvous endpoint this returns `AddrInUse`
     // when another member already holds the deterministic port — the

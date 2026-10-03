@@ -7,8 +7,9 @@
 //!
 //! - iroh's publisher publishes whatever the endpoint reports, so a record
 //!   with no relay address (the endpoint is not home yet, or lost its relay)
-//!   would replace the last good one. For the shared rendezvous key that
-//!   locks every joiner out. This publisher skips such a record.
+//!   would replace the last good one. For the shared rendezvous key that can
+//!   leave a bare-id dial with no address to try. This publisher skips such a
+//!   record.
 //! - iroh puts no deadline on a request, so a relay that accepts the
 //!   connection and never answers stalls that publisher for good. Every
 //!   request here runs under a timeout, and each relay has its own task, so a
@@ -33,7 +34,7 @@ use n0_future::time::{self, Duration};
 use tokio::sync::watch;
 use tracing::{Instrument as _, debug, info_span, warn};
 
-use crate::protocol::{PkarrChoice, Url};
+use crate::protocol::{PkarrChoice, RelayChoice, Url};
 
 /// The pinned list. The public relays form two groups that do not share
 /// records: n0's server, and the Pubky relays, which share theirs through the
@@ -44,7 +45,7 @@ use crate::protocol::{PkarrChoice, Url};
 /// ladder. A change here splits the members of one pinned mesh between two
 /// lists until all of them upgrade, with no error, so keep an old entry until
 /// no live build uses it.
-pub const DEFAULT_PKARR_URLS: [&str; 3] = [
+const DEFAULT_PKARR_URLS: [&str; 3] = [
     "https://dns.iroh.link/pkarr",
     "https://pkarr.pubky.app/",
     "https://pkarr.pubky.org/",
@@ -173,7 +174,18 @@ impl AddressLookup for PkarrLookup {
             return;
         }
         let info = EndpointInfo::from_parts(self.endpoint_id, data.into_owned());
-        self.record.send_replace(Some(info));
+        // Wake the task only when the record differs. The endpoint reports
+        // every change of its direct addresses, and after the relay-only
+        // filter most of them leave the record as it was: a PUT for each
+        // would be a write to a public relay that says nothing new.
+        self.record.send_if_modified(|current| {
+            if current.as_ref() == Some(&info) {
+                false
+            } else {
+                *current = Some(info);
+                true
+            }
+        });
     }
 
     fn resolve(&self, endpoint_id: EndpointId) -> Option<BoxStream<Result<Item, LookupError>>> {
@@ -186,6 +198,29 @@ impl AddressLookup for PkarrLookup {
             Ok(Item::new(info, "pkarr", None))
         };
         Some(Box::pin(n0_future::stream::once_future(lookup)))
+    }
+}
+
+/// How a publish outcome is logged. A relay that stays down fails on every
+/// retry for as long as it is down, so only the first failure and the recovery
+/// are worth a warning; the failures between are debug.
+#[derive(Debug, PartialEq, Eq)]
+enum Report {
+    Warn,
+    Debug,
+    Recovered,
+    Quiet,
+}
+
+impl Report {
+    /// What to log, given whether the relay was already failing.
+    fn after(was_failing: bool, succeeded: bool) -> Self {
+        match (was_failing, succeeded) {
+            (false, false) => Self::Warn,
+            (true, false) => Self::Debug,
+            (true, true) => Self::Recovered,
+            (false, true) => Self::Quiet,
+        }
     }
 }
 
@@ -203,16 +238,24 @@ async fn publish_loop(
             None => timing.republish,
             Some(info) => match time::timeout(timing.request, relay.publish(&info)).await {
                 Ok(Ok(())) => {
+                    if Report::after(failed > 0, true) == Report::Recovered {
+                        warn!(failed, "pkarr publish recovered");
+                    }
                     failed = 0;
                     timing.republish
                 }
                 outcome => {
+                    let report = Report::after(failed > 0, false);
                     failed = failed.saturating_add(1);
                     let wait = timing.backoff(failed);
-                    if let Ok(Err(err)) = outcome {
-                        warn!(error = %format!("{err:#}"), ?wait, failed, "pkarr publish failed");
+                    let error = match outcome {
+                        Ok(Err(err)) => format!("{err:#}"),
+                        _ => "timed out".to_owned(),
+                    };
+                    if report == Report::Warn {
+                        warn!(%error, ?wait, "pkarr publish failed; retrying, and logging the retries at debug");
                     } else {
-                        warn!(?wait, failed, "pkarr publish timed out");
+                        debug!(%error, ?wait, failed, "pkarr publish failed again");
                     }
                     wait
                 }
@@ -261,116 +304,165 @@ impl AddressLookupBuilder for PkarrBuilder {
     }
 }
 
-/// Add a lookup for every URL of `choice`. A member publishes to all of them,
-/// so a peer that can reach any one resolves it.
-pub(super) fn wire(mut builder: Builder, choice: &PkarrChoice) -> Builder {
-    let urls: &[Url] = match choice {
-        PkarrChoice::Disabled => return builder,
-        PkarrChoice::Pinned => &DEFAULT_PKARR_URL_LIST,
+/// Whether `url` is on this machine. The same test as the protocol's rule for
+/// a plain-http pkarr URL.
+fn on_this_machine(url: &Url) -> bool {
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        None => false,
+    }
+}
+
+/// The pkarr relays a mesh publishes to and resolves from.
+///
+/// The pinned list is skipped when every relay rung is on this machine: such
+/// a mesh is local by construction (a test, a chat over a local relay), and
+/// its members would otherwise write to n0's server and the Pubky relays a
+/// record that names a relay no one else can reach, and a test run would
+/// depend on those servers. A custom list is what the mesh asked for, so it
+/// always applies.
+fn urls_for<'a>(choice: &'a PkarrChoice, relay: &RelayChoice) -> &'a [Url] {
+    match choice {
+        PkarrChoice::Disabled => &[],
+        PkarrChoice::Pinned => match relay {
+            RelayChoice::Custom(ladder)
+                if !ladder.is_empty() && ladder.iter().all(|rung| on_this_machine(rung)) =>
+            {
+                &[]
+            }
+            RelayChoice::Disabled | RelayChoice::Pinned | RelayChoice::Custom(_) => {
+                &DEFAULT_PKARR_URL_LIST
+            }
+        },
         PkarrChoice::Custom(urls) => urls,
-    };
-    for url in urls {
+    }
+}
+
+/// Add a lookup for every URL [`urls_for`] names. A member publishes to all of
+/// them, so a peer that can reach any one resolves it.
+pub(super) fn wire(mut builder: Builder, choice: &PkarrChoice, relay: &RelayChoice) -> Builder {
+    for url in urls_for(choice, relay) {
         builder = builder.address_lookup(PkarrBuilder { url: url.clone() });
     }
     builder
 }
 
-/// A throwaway record for probing a pkarr relay: a fresh key, so no relay holds
-/// an older record of it, and the signed payload a `PUT` carries.
-#[derive(Debug, Clone)]
-pub struct ProbeRecord {
-    /// The key as the relay path spells it (z-base-32).
-    pub key: String,
-    /// The signature, the timestamp and the DNS packet.
-    pub payload: Vec<u8>,
-}
+/// A live check of the public relays, for `cargo task e2e --suite pkarr-live`.
+/// Behind `iroh-test-utils` like [`test_pkarr`](super::test_pkarr), so none of
+/// it is in a shipped build.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(super) mod probe {
+    use super::{
+        DEFAULT_PKARR_TTL, Endpoint, EndpointData, EndpointId, EndpointInfo, HttpRelay,
+        PkarrRelayClient, Relay as _, SecretKey, Timing, Url, time,
+    };
 
-/// A fresh [`ProbeRecord`]. It names a relay that does not exist, so a peer
-/// that resolves it can reach nothing.
-#[must_use]
-pub fn probe_record() -> ProbeRecord {
-    let secret = SecretKey::from_bytes(&rand::random::<[u8; 32]>());
-    let info = probe_info(secret.public());
-    ProbeRecord {
-        key: secret.public().to_z32(),
-        payload: sign_probe(&info, &secret),
+    /// The pinned list of public pkarr relays, as text.
+    pub const DEFAULT_PKARR_URLS: [&str; 3] = super::DEFAULT_PKARR_URLS;
+
+    /// A throwaway record for probing a pkarr relay: a fresh key, so no relay holds
+    /// an older record of it, and the signed payload a `PUT` carries.
+    #[derive(Debug, Clone)]
+    pub struct ProbeRecord {
+        /// The key as the relay path spells it (z-base-32).
+        pub key: String,
+        /// The signature, the timestamp and the DNS packet.
+        pub payload: Vec<u8>,
     }
-}
 
-/// The probe record of `id`. A fixed record, so building it cannot fail.
-fn probe_info(id: EndpointId) -> EndpointInfo {
-    let relay = "https://pkarr-probe.invalid./"
-        .parse()
-        .expect("a fixed relay URL");
-    let data = EndpointData::new(vec![iroh::TransportAddr::Relay(relay)]);
-    EndpointInfo::from_parts(id, data)
-}
-
-fn sign_probe(info: &EndpointInfo, secret: &SecretKey) -> Vec<u8> {
-    info.to_pkarr_signed_packet(secret, DEFAULT_PKARR_TTL)
-        .expect("the probe record encodes")
-        .to_relay_payload()
-}
-
-/// What the lookup's own client did against one relay.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug)]
-pub struct Probe {
-    /// A signed record went out and the relay took it.
-    pub published: Result<(), String>,
-    /// The same record came back, signed by the same key.
-    pub resolved: Result<(), String>,
-}
-
-/// Publish a throwaway record to `url` and resolve it back, through the same
-/// client and the same deadline as the lookup. Meant for a live check of a
-/// public relay; it reaches the network.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn probe(url: &Url) -> Probe {
-    let endpoint = match Endpoint::builder(iroh::endpoint::presets::Minimal)
-        .relay_mode(iroh::RelayMode::Disabled)
-        .bind()
-        .await
-    {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            let failed = Err(format!("no endpoint to probe from: {error:#}"));
-            return Probe {
-                published: failed.clone(),
-                resolved: failed,
-            };
+    /// A fresh [`ProbeRecord`]. It names a relay that does not exist, so a peer
+    /// that resolves it can reach nothing.
+    #[must_use]
+    pub fn probe_record() -> ProbeRecord {
+        let secret = SecretKey::from_bytes(&rand::random::<[u8; 32]>());
+        let info = probe_info(secret.public());
+        ProbeRecord {
+            key: secret.public().to_z32(),
+            payload: sign_probe(&info, &secret),
         }
-    };
-    let relay = match endpoint.dns_resolver() {
-        Ok(dns) => HttpRelay {
-            client: PkarrRelayClient::new(url.clone(), endpoint.tls_config().clone(), dns.clone()),
-            secret_key: SecretKey::from_bytes(&rand::random::<[u8; 32]>()),
-        },
-        Err(error) => {
-            let failed = Err(format!("no resolver to probe with: {error:#}"));
-            return Probe {
-                published: failed.clone(),
-                resolved: failed,
-            };
+    }
+
+    /// The probe record of `id`. A fixed record, so building it cannot fail.
+    fn probe_info(id: EndpointId) -> EndpointInfo {
+        let relay = "https://pkarr-probe.invalid./"
+            .parse()
+            .expect("a fixed relay URL");
+        let data = EndpointData::new(vec![iroh::TransportAddr::Relay(relay)]);
+        EndpointInfo::from_parts(id, data)
+    }
+
+    fn sign_probe(info: &EndpointInfo, secret: &SecretKey) -> Vec<u8> {
+        info.to_pkarr_signed_packet(secret, DEFAULT_PKARR_TTL)
+            .expect("the probe record encodes")
+            .to_relay_payload()
+    }
+
+    /// What the lookup's own client did against one relay.
+    #[derive(Debug)]
+    pub struct Probe {
+        /// A signed record went out and the relay took it.
+        pub published: Result<(), String>,
+        /// The same record came back, signed by the same key.
+        pub resolved: Result<(), String>,
+    }
+
+    /// Publish a throwaway record to `url` and resolve it back, through the same
+    /// client and the same deadline as the lookup. Meant for a live check of a
+    /// public relay; it reaches the network.
+    pub async fn probe(url: &Url) -> Probe {
+        let endpoint = match Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+        {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                let failed = Err(format!("no endpoint to probe from: {error:#}"));
+                return Probe {
+                    published: failed.clone(),
+                    resolved: failed,
+                };
+            }
+        };
+        let relay = match endpoint.dns_resolver() {
+            Ok(dns) => HttpRelay {
+                client: PkarrRelayClient::new(
+                    url.clone(),
+                    endpoint.tls_config().clone(),
+                    dns.clone(),
+                ),
+                secret_key: SecretKey::from_bytes(&rand::random::<[u8; 32]>()),
+            },
+            Err(error) => {
+                let failed = Err(format!("no resolver to probe with: {error:#}"));
+                return Probe {
+                    published: failed.clone(),
+                    resolved: failed,
+                };
+            }
+        };
+        let id = relay.secret_key.public();
+        let info = probe_info(id);
+        let published = match time::timeout(Timing::DEFAULT.request, relay.publish(&info)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("{error:#}")),
+            Err(_) => Err("no answer before the deadline".to_owned()),
+        };
+        let resolved = match time::timeout(Timing::DEFAULT.request, relay.resolve(id)).await {
+            Ok(Ok(found)) if found.endpoint_id == id && found.data == info.data => Ok(()),
+            Ok(Ok(_)) => Err("the relay returned a different record".to_owned()),
+            Ok(Err(error)) => Err(format!("{error:#}")),
+            Err(_) => Err("no answer before the deadline".to_owned()),
+        };
+        endpoint.close().await;
+        Probe {
+            published,
+            resolved,
         }
-    };
-    let id = relay.secret_key.public();
-    let info = probe_info(id);
-    let published = match time::timeout(Timing::DEFAULT.request, relay.publish(&info)).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(format!("{error:#}")),
-        Err(_) => Err("no answer before the deadline".to_owned()),
-    };
-    let resolved = match time::timeout(Timing::DEFAULT.request, relay.resolve(id)).await {
-        Ok(Ok(found)) if found.endpoint_id == id && found.data == info.data => Ok(()),
-        Ok(Ok(_)) => Err("the relay returned a different record".to_owned()),
-        Ok(Err(error)) => Err(format!("{error:#}")),
-        Err(_) => Err("no answer before the deadline".to_owned()),
-    };
-    endpoint.close().await;
-    Probe {
-        published,
-        resolved,
     }
 }
 
@@ -552,5 +644,75 @@ mod tests {
         let item = stream.next().await.expect("one item");
         assert!(item.is_err());
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_direct_address_change_that_leaves_the_record_the_same_sends_no_put() {
+        let fake = Fake::new(Mode::Accept);
+        let lookup = lookup(&fake);
+        let mut first = with_relay(1);
+        first.add_ip_addrs(vec!["127.0.0.1:9".parse().unwrap()]);
+        lookup.publish(&first);
+        settle().await;
+        assert_eq!(fake.calls(), 1);
+
+        let mut moved = with_relay(1);
+        moved.add_ip_addrs(vec!["127.0.0.1:10".parse().unwrap()]);
+        lookup.publish(&moved);
+        lookup.publish(&with_relay(1));
+        settle().await;
+        assert_eq!(fake.calls(), 1, "the relay-only record did not change");
+
+        lookup.publish(&with_relay(2));
+        settle().await;
+        assert_eq!(fake.calls(), 2, "a new home relay is a new record");
+    }
+
+    fn rung(url: &str) -> iroh::RelayUrl {
+        url.parse().expect("a relay url")
+    }
+
+    #[test]
+    fn the_pinned_list_applies_beside_a_public_relay() {
+        let public = RelayChoice::Custom(vec![rung("https://relay.example/")]);
+        for relay in [RelayChoice::Pinned, RelayChoice::Disabled, public] {
+            assert_eq!(urls_for(&PkarrChoice::Pinned, &relay).len(), 3, "{relay:?}");
+        }
+    }
+
+    #[test]
+    fn the_pinned_list_is_skipped_when_every_relay_rung_is_local() {
+        for ladder in [
+            vec![rung("http://127.0.0.1:3340/")],
+            vec![rung("http://localhost:3340/"), rung("http://[::1]:3340/")],
+        ] {
+            assert!(urls_for(&PkarrChoice::Pinned, &RelayChoice::Custom(ladder)).is_empty());
+        }
+    }
+
+    #[test]
+    fn one_public_rung_among_local_ones_keeps_the_pinned_list() {
+        let ladder = vec![
+            rung("http://127.0.0.1:3340/"),
+            rung("https://relay.example/"),
+        ];
+        let urls = urls_for(&PkarrChoice::Pinned, &RelayChoice::Custom(ladder));
+        assert_eq!(urls.len(), 3);
+    }
+
+    #[test]
+    fn a_custom_list_applies_beside_a_local_relay() {
+        let custom = PkarrChoice::Custom(vec!["http://127.0.0.1:4000/pkarr".parse().unwrap()]);
+        let local = RelayChoice::Custom(vec![rung("http://127.0.0.1:3340/")]);
+        assert_eq!(urls_for(&custom, &local).len(), 1);
+        assert!(urls_for(&PkarrChoice::Disabled, &local).is_empty());
+    }
+
+    #[test]
+    fn only_the_first_failure_and_the_recovery_are_warnings() {
+        assert_eq!(Report::after(false, false), Report::Warn);
+        assert_eq!(Report::after(true, false), Report::Debug);
+        assert_eq!(Report::after(true, true), Report::Recovered);
+        assert_eq!(Report::after(false, true), Report::Quiet);
     }
 }
