@@ -52,9 +52,14 @@ keeps every member on WebRTC data channels. The list is part of the mesh id,
 so joiners inherit whatever the creator chose. `relayUrls` says *which* relay
 and nothing about its role. `lookup: ['pkarr', 'relay']` also lets a peer find
 another from its endpoint id alone, through public pkarr relays over HTTPS;
-it is part of the set a topic uses. `pkarrUrls` replaces the default list on
-a create, with at most 8 `https` URLs; a plain `http` URL is valid only on a
-loopback host and only beside a `relayUrls` ladder that is all loopback too.
+it is part of the set a topic uses. Pkarr is on by default, so every member
+of a topic or default public mesh sends its IP address, its endpoint id and
+the ids it resolves to n0's server and two Pubky relays; a topic has no
+opt-out, and a create can leave `'pkarr'` out of `lookup`. A mesh whose relay
+rungs are all on this machine does not use the public list. `pkarrUrls`
+replaces the default list on a create, with at most 8 `https` URLs; a plain
+`http` URL is valid only on a loopback host and only beside a `relayUrls`
+ladder that is all loopback too.
 
 ## Byte streams
 

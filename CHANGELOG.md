@@ -119,7 +119,13 @@ published to a registry; pin it with
 - **Breaking:** the default lookup set is now `mdns,dht,relay,pkarr`, so a
   topic mesh, a directory mesh and a bare stream producer include pkarr and
   their mesh ids and topic ids change once. A peer on the old default does
-  not meet a peer on the new one.
+  not meet a peer on the new one. This is also a privacy change: every member
+  of a topic or default public mesh now sends its IP address, its endpoint id
+  and the ids it resolves to n0's server and two Pubky relays. A topic has no
+  opt-out; a create can name its own relays with `pkarr_urls` or leave `pkarr`
+  out of `lookup`. A mesh whose relay rungs are all on this machine does not
+  use the pinned public list, so a mesh that stays local never writes to a
+  public server; a custom list still applies.
 - **Breaking (wire):** the ALPNs (`habilis-network/stream/1`), the endpoint-proof
   domain and the chunk-store root context take the new name. A habilis-network
   peer does not interoperate with a fofoca peer, and chunk roots differ from

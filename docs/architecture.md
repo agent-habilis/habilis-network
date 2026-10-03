@@ -457,7 +457,12 @@ Each member publishes its record to every pkarr relay in the list and resolves f
 The list must have all of the relays, because the public relays form groups that do not share records: n0's server is one group, and the Pubky relays, which share through the mainline DHT, are another.
 The pkarr record holds the home relay of the member and no IP address, the same as the DHT record.
 Each pkarr request still shows the member's IP address and the ids it publishes and resolves to the operator of that relay.
-A mesh that must not show this to n0 or Pubky names its own relays in `pkarr_urls`.
+Pkarr is on by default, so this is the default for every topic mesh and every default public mesh.
+Every member sends its IP address, its endpoint id and the ids it resolves to n0's server and to the two Pubky relays.
+A topic has no opt-out, because its lookups are fixed to the preset.
+A create can name its own relays in `pkarr_urls`, or leave `pkarr` out of `lookup`.
+A mesh whose relay rungs are all on this machine does not use the pinned public list, so a mesh that stays local never writes to a public server.
+A custom list still applies to such a mesh.
 The pkarr lookup is the engine's own and not the iroh publisher, and it follows four rules.
 It never publishes a record with no home relay, so the last good record stays.
 Every request has a deadline of 10 seconds.
