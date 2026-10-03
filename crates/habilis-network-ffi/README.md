@@ -17,13 +17,14 @@ the other.
   `habilis_network_close`.
 - Every entry point catches panics, so an engine panic returns an error
   code instead of unwinding across `extern "C"`.
-- `habilis_network_opts` takes three comma-separated lists, one concept each:
-  `lookup` (`"mdns,dht,relay"`, any subset) is how members find each other,
-  `transport` (`"udp,webrtc,relay"`, any subset with `udp` or `webrtc`) is
-  what payload may ride, and `relay_urls` is which relay (NULL for the
-  default ladder). `relay` in `transport`, or a list without `udp`, needs
-  `relay` in `lookup`: the relay carries the payload in the first case and
-  the WebRTC handshake in the second. Leave
+- `habilis_network_opts` takes four comma-separated lists, one concept each:
+  `lookup` (`"mdns,dht,relay,nostr"`, any subset) is how members find each
+  other, `transport` (`"udp,webrtc,relay"`, any subset with `udp` or
+  `webrtc`) is what payload may ride, `relay_urls` is which relay (NULL for
+  the default ladder), and `nostr_urls` is which Nostr relays (NULL for the
+  pinned list). `relay` in `transport` needs `relay` in `lookup`, because the
+  relay carries the payload. A list without `udp` needs `relay` or `nostr`
+  in `lookup`, because one of them carries the WebRTC handshake. Leave
   `transport` NULL and every byte of data goes peer to peer, over UDP or a
   WebRTC data channel.
 

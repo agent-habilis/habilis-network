@@ -1,5 +1,6 @@
 //! The mesh-wide config carried in the mesh id — the lookup allowlist
-//! (`mdns`/`dht`/`relay`) and the relay ladder it may carry — plus its byte
+//! (`mdns`/`dht`/`relay`/`nostr`), the relay ladder and the Nostr relay list it
+//! may carry — plus its byte
 //! codec and the `--advertise` directory selection. A mesh's network reach is
 //! fully described by its lookups: no lookups means loopback-only; any lookup
 //! means reachable across machines. The transport policy the id also carries
@@ -8,9 +9,10 @@
 use std::fmt;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use iroh_base::RelayUrl;
 use serde::Deserialize;
+use url::Url;
 
 use super::transport::{Transport, TransportPolicy};
 use super::{ChoiceError, MeshName};
@@ -31,15 +33,28 @@ pub enum RelayChoice {
     Custom(Vec<RelayUrl>),
 }
 
+/// The Nostr lookup. `Disabled` ⇒ no Nostr; `Pinned` ⇒ the built-in list of
+/// public relays; `Custom` ⇒ the relays the creator named. Every member reads
+/// the list from the id and ranks it the same way, so members only need their
+/// open relays to overlap, not to match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NostrChoice {
+    Disabled,
+    Pinned,
+    Custom(Vec<Url>),
+}
+
 /// The lookup allowlist baked into the mesh id. `mdns`/`dht` are the
 /// enabled iroh address-lookups (both resolve the same seed-derived
 /// `rendezvous_id`); `relay_lookup` is the connectivity relay (see
-/// [`RelayChoice`]). An all-off set is a loopback-only mesh.
+/// [`RelayChoice`]); `nostr` finds peers and carries JSEP over Nostr relays
+/// (see [`NostrChoice`]). An all-off set is a loopback-only mesh.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupOpts {
     pub mdns: bool,
     pub dht: bool,
     pub relay_lookup: RelayChoice,
+    pub nostr: NostrChoice,
 }
 
 /// Wire ceiling on a custom relay ladder, so a forged id can't blow up
@@ -57,24 +72,32 @@ impl LookupOpts {
             mdns: false,
             dht: false,
             relay_lookup: RelayChoice::Disabled,
+            nostr: NostrChoice::Disabled,
         }
     }
 
     /// The all-on default for a mesh reachable across machines: both
-    /// address-lookups plus the pinned default relay ladder.
+    /// address-lookups, the pinned default relay ladder, and the pinned Nostr
+    /// relays. Every topic mesh derives through it (the daemon directly, the
+    /// pipe through the same lookup list), which is what lets a tab and a
+    /// terminal meet on one string.
     #[must_use]
     pub fn public_preset() -> Self {
         LookupOpts {
             mdns: true,
             dht: true,
             relay_lookup: RelayChoice::Pinned,
+            nostr: NostrChoice::Pinned,
         }
     }
 
     /// True when nothing reaches off-machine — the mesh is loopback-only.
     #[must_use]
     pub fn is_loopback(&self) -> bool {
-        !self.mdns && !self.dht && self.relay_lookup == RelayChoice::Disabled
+        !self.mdns
+            && !self.dht
+            && self.relay_lookup == RelayChoice::Disabled
+            && self.nostr == NostrChoice::Disabled
     }
 
     /// Human/JSON label for the mesh's reach. Derived from the lookups —
@@ -95,9 +118,13 @@ impl LookupOpts {
     /// rejects, and past 255 the count no longer fits its `u8`.
     ///
     /// # Errors
-    /// The custom ladder is longer than [`MAX_RELAY_LADDER`], or one of its
-    /// URLs is longer than [`MAX_RELAY_URL_BYTES`].
+    /// The custom relay ladder or the custom Nostr list is longer than
+    /// [`MAX_RELAY_LADDER`], one of their URLs is longer than
+    /// [`MAX_RELAY_URL_BYTES`], or a Nostr URL is not `ws`/`wss`.
     pub fn validate(&self) -> Result<()> {
+        if let NostrChoice::Custom(urls) = &self.nostr {
+            validate_nostr_urls(urls)?;
+        }
         let RelayChoice::Custom(ladder) = &self.relay_lookup else {
             return Ok(());
         };
@@ -117,7 +144,8 @@ impl LookupOpts {
     }
 
     /// Append the canonical wire encoding to `buf`:
-    /// `[flags u8][if custom: [count u8] ([len u16 LE] url)*]`.
+    /// `[flags u8][if custom relay: [count u8] ([len u16 LE] url)*]`
+    /// `[if custom nostr: [count u8] ([len u16 LE] url)*]`.
     ///
     /// # Panics
     /// If a relay ladder longer than `MAX_RELAY_LADDER`, or a relay URL longer
@@ -137,18 +165,17 @@ impl LookupOpts {
             RelayChoice::Pinned => flags |= 0b0100,
             RelayChoice::Custom(_) => flags |= 0b0100 | 0b1000,
         }
+        match &self.nostr {
+            NostrChoice::Disabled => {}
+            NostrChoice::Pinned => flags |= FLAG_NOSTR,
+            NostrChoice::Custom(_) => flags |= FLAG_NOSTR | FLAG_NOSTR_CUSTOM,
+        }
         buf.push(flags);
         if let RelayChoice::Custom(ladder) = &self.relay_lookup {
-            // The ladder is created locally and bounded by the CLI / library API,
-            // so this cast and the lengths below always fit.
-            buf.push(u8::try_from(ladder.len()).expect("relay ladder bounded by MAX_RELAY_LADDER"));
-            for url in ladder {
-                let text = url.to_string();
-                let len =
-                    u16::try_from(text.len()).expect("relay URL bounded by MAX_RELAY_URL_BYTES");
-                buf.extend_from_slice(&len.to_le_bytes());
-                buf.extend_from_slice(text.as_bytes());
-            }
+            encode_urls(buf, ladder.iter().map(ToString::to_string));
+        }
+        if let NostrChoice::Custom(urls) = &self.nostr {
+            encode_urls(buf, urls.iter().map(|url| url.as_str().to_owned()));
         }
     }
 
@@ -158,6 +185,9 @@ impl LookupOpts {
     pub fn decode_from(bytes: &[u8], pos: &mut usize) -> Result<Self> {
         let flags = *bytes.get(*pos).context("truncated lookup flags")?;
         *pos += 1;
+        if flags & !KNOWN_LOOKUP_FLAGS != 0 {
+            bail!("unsupported lookup flags {flags:#04x} — upgrade to a newer build");
+        }
         let mdns = flags & 0b0001 != 0;
         let dht = flags & 0b0010 != 0;
         let relay_enabled = flags & 0b0100 != 0;
@@ -180,12 +210,120 @@ impl LookupOpts {
             }
             RelayChoice::Custom(decode_relay_ladder(bytes, pos, count)?)
         };
+        let nostr_enabled = flags & FLAG_NOSTR != 0;
+        let nostr_custom = flags & FLAG_NOSTR_CUSTOM != 0;
+        if nostr_custom && !nostr_enabled {
+            bail!("custom-nostr bit set without nostr-enabled bit");
+        }
+        let nostr = if !nostr_enabled {
+            NostrChoice::Disabled
+        } else if !nostr_custom {
+            NostrChoice::Pinned
+        } else {
+            let count = *bytes.get(*pos).context("truncated nostr relay count")? as usize;
+            *pos += 1;
+            let urls = decode_nostr_urls(bytes, pos, count)?;
+            validate_nostr_urls(&urls)?;
+            NostrChoice::Custom(urls)
+        };
         Ok(LookupOpts {
             mdns,
             dht,
             relay_lookup,
+            nostr,
         })
     }
+}
+
+/// Nostr is on; the pinned list unless [`FLAG_NOSTR_CUSTOM`] is also set.
+const FLAG_NOSTR: u8 = 0b1_0000;
+/// A custom Nostr relay list follows the relay ladder.
+const FLAG_NOSTR_CUSTOM: u8 = 0b10_0000;
+const KNOWN_LOOKUP_FLAGS: u8 = 0b1111 | FLAG_NOSTR | FLAG_NOSTR_CUSTOM;
+
+/// `[count u8] ([len u16 LE] url)*`. The lists are created locally and bounded
+/// by `validate`, which every mint runs, so the casts always fit.
+fn encode_urls(buf: &mut Vec<u8>, urls: impl ExactSizeIterator<Item = String>) {
+    buf.push(u8::try_from(urls.len()).expect("URL list bounded by MAX_RELAY_LADDER"));
+    for text in urls {
+        let len = u16::try_from(text.len()).expect("URL bounded by MAX_RELAY_URL_BYTES");
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(text.as_bytes());
+    }
+}
+
+fn decode_nostr_urls(bytes: &[u8], pos: &mut usize, count: usize) -> Result<Vec<Url>> {
+    if count > MAX_RELAY_LADDER {
+        bail!("nostr relay list too long: {count}");
+    }
+    let mut urls = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = read_u16(bytes, pos).context("truncated nostr relay URL length")? as usize;
+        if len > MAX_RELAY_URL_BYTES {
+            bail!("nostr relay URL too long: {len}");
+        }
+        let end = pos
+            .checked_add(len)
+            .context("nostr relay URL length overflow")?;
+        let raw = bytes.get(*pos..end).context("truncated nostr relay URL")?;
+        *pos = end;
+        let text = std::str::from_utf8(raw).context("nostr relay URL is not UTF-8")?;
+        let url = text.parse::<Url>().context("invalid nostr relay URL")?;
+        // `Url` normalizes (a trailing slash, a default port), so without this
+        // two byte strings would name one mesh under two id strings.
+        ensure!(
+            url.as_str() == text,
+            "nostr relay URL {text:?} is not in canonical form"
+        );
+        urls.push(url);
+    }
+    Ok(urls)
+}
+
+/// A custom Nostr list: 1 to [`MAX_RELAY_LADDER`] `ws://`/`wss://` URLs, each
+/// at most [`MAX_RELAY_URL_BYTES`] long.
+fn validate_nostr_urls(urls: &[Url]) -> Result<()> {
+    if urls.is_empty() {
+        bail!("custom nostr relay list is empty");
+    }
+    if urls.len() > MAX_RELAY_LADDER {
+        bail!(
+            "nostr relay list too long: {} relays, the wire ceiling is {MAX_RELAY_LADDER}",
+            urls.len()
+        );
+    }
+    for url in urls {
+        if !matches!(url.scheme(), "ws" | "wss") {
+            bail!("nostr relay URL must be ws:// or wss://, not {url}");
+        }
+        let len = url.as_str().len();
+        if len > MAX_RELAY_URL_BYTES {
+            bail!(
+                "nostr relay URL too long: {len} bytes, the wire ceiling is {MAX_RELAY_URL_BYTES}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Parse a comma-separated Nostr relay list (`wss://a,wss://b`), as the
+/// `nostr_urls` option spells it.
+///
+/// # Errors
+/// An entry is empty or not a URL. The scheme and the bounds are checked when
+/// the config is minted.
+pub fn parse_nostr_urls(raw: &str) -> Result<Vec<Url>> {
+    raw.split(',')
+        .map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                bail!("empty entry in nostr relay list {raw:?}");
+            }
+            trimmed
+                .parse::<Url>()
+                .with_context(|| format!("invalid nostr relay URL {trimmed:?}"))
+        })
+        .collect()
 }
 
 /// Decode `count` length-prefixed relay URLs from the cursor, advancing `pos`.
@@ -213,11 +351,11 @@ pub(super) fn read_u16(bytes: &[u8], pos: &mut usize) -> Result<u16> {
 }
 
 /// Feature byte appended after the lookups when a mesh carries a password
-/// and/or is invite-only. Appended — not a spare lookup-flags bit — because
-/// old binaries ignore unknown flag bits (they would silently decode a
-/// featured id and sit in an empty topic) but hard-error on trailing config
-/// bytes. One feature byte gates both features; their fields follow in a fixed
-/// order (password verifier, then issuer pubkey).
+/// and/or is invite-only. It began as a separate byte because old binaries
+/// ignored unknown lookup-flag bits. Both bytes now refuse unknown bits, so a
+/// new mesh-wide setting is safe in either; a lookup belongs in the lookup
+/// flags, anything else here. One feature byte gates every feature; their
+/// fields follow in a fixed order (password verifier, then issuer pubkey).
 const FEATURE_PASSWORD: u8 = 0b0001;
 
 /// Feature bit marking an invite-only mesh: joining needs a creator-minted
@@ -304,15 +442,17 @@ impl MeshConfig {
 
     /// Everything a minted config must satisfy before it becomes an id:
     /// [`LookupOpts::validate`]'s wire ceilings, plus the transport rules: a
-    /// direct path must exist, and the relay must exist as a lookup both to
-    /// carry payload and to signal a mesh without `udp`.
+    /// direct path must exist, the relay must exist as a lookup to carry
+    /// payload, and the relay or Nostr must exist to signal a mesh without
+    /// `udp`.
     /// Checked on decode and at `setup_mesh`, the choke point every minted
     /// config passes before any network.
     ///
     /// # Errors
     /// The lookups fail [`LookupOpts::validate`], the transports name neither
-    /// `udp` nor `webrtc`, or `relay_transport` or a missing `udp` needs the
-    /// relay lookup while `lookups.relay_lookup` is `Disabled`.
+    /// `udp` nor `webrtc`, `relay_transport` needs the relay lookup while
+    /// `lookups.relay_lookup` is `Disabled`, or a missing `udp` has neither
+    /// the relay nor Nostr to signal over.
     pub fn validate(&self) -> Result<()> {
         self.lookups.validate()?;
         let transport = &self.transport;
@@ -326,17 +466,18 @@ impl MeshConfig {
             );
         }
         // A native member without UDP has no address a peer could reach, so the
-        // JSEP exchange that opens its data channel can only cross the relay.
-        if !transport.udp && no_relay {
+        // JSEP exchange that opens its data channel can only cross the relay or
+        // Nostr.
+        if !transport.udp && no_relay && self.lookups.nostr == NostrChoice::Disabled {
             bail!(
-                "a mesh without transport `udp` needs lookup `relay`: the relay is the only path its WebRTC offers can take"
+                "a mesh without transport `udp` needs lookup `relay` or `nostr`: they are the only paths its WebRTC offers can take"
             );
         }
         Ok(())
     }
 
-    /// The config a create names, from its three independent choices: the
-    /// lookups, the relay ladder, and the transports. Password and invite
+    /// The config a create names, from its independent choices: the lookups,
+    /// the relay ladder, the Nostr relays, and the transports. Password and invite
     /// stay unset; a caller that wants them fills those fields in.
     ///
     /// This is the one place that knows all three, so the rules that need two
@@ -345,16 +486,18 @@ impl MeshConfig {
     /// relay carry payload (through [`MeshConfig::validate`]).
     ///
     /// # Errors
-    /// `relay_urls` is given without [`Lookup::Relay`], `transports` leaves
-    /// neither [`Transport::Udp`] nor [`Transport::WebRtc`], or needs a relay
-    /// lookup (see [`MeshConfig::validate`]) while none is on.
+    /// `relay_urls` is given without [`Lookup::Relay`], `nostr_urls` without
+    /// [`Lookup::Nostr`] or not `ws`/`wss`, `transports` leaves neither
+    /// [`Transport::Udp`] nor [`Transport::WebRtc`], or needs a relay lookup
+    /// (see [`MeshConfig::validate`]) while none is on.
     pub fn resolve(
         lookups: &[Lookup],
         relay_urls: Option<RelayLadder>,
+        nostr_urls: Option<Vec<Url>>,
         transports: &[Transport],
     ) -> Result<Self> {
         let config = MeshConfig {
-            lookups: resolve_lookups(LookupSet::from_lookups(lookups, relay_urls)?),
+            lookups: resolve_lookups(LookupSet::from_lookups(lookups, relay_urls, nostr_urls)?),
             password: None,
             issuer_pubkey: None,
             transport: TransportPolicy::from_transports(transports)?,
@@ -609,10 +752,13 @@ pub enum Lookup {
     /// Rendezvous through a relay server. A lookup only: whether the relay
     /// may also carry payload is the transport policy's call.
     Relay,
+    /// Public Nostr relays: they find peers and carry the `WebRTC` offer and
+    /// answer, so a mesh can form with no iroh relay at all.
+    Nostr,
 }
 
 impl Lookup {
-    const NAMES: &[&str] = &["mdns", "dht", "relay"];
+    const NAMES: &[&str] = &["mdns", "dht", "relay", "nostr"];
 
     /// The name the list spells this lookup by.
     #[must_use]
@@ -621,6 +767,7 @@ impl Lookup {
             Self::Mdns => "mdns",
             Self::Dht => "dht",
             Self::Relay => "relay",
+            Self::Nostr => "nostr",
         }
     }
 }
@@ -633,6 +780,7 @@ impl FromStr for Lookup {
             "mdns" => Ok(Self::Mdns),
             "dht" => Ok(Self::Dht),
             "relay" => Ok(Self::Relay),
+            "nostr" => Ok(Self::Nostr),
             other => Err(ChoiceError::new("lookup", other, Self::NAMES)),
         }
     }
@@ -646,40 +794,58 @@ impl fmt::Display for Lookup {
 
 /// The lookups a create selected, before they become the [`LookupOpts`] in
 /// the id. `mdns`/`dht` are address-lookups; `relay_lookup` is the
-/// rendezvous through a relay, bare or with a custom ladder.
+/// rendezvous through a relay, bare or with a custom ladder; `nostr` is the
+/// Nostr lookup, bare (the pinned relays) or with custom relays.
 #[derive(Debug, Clone, Default)]
 pub struct LookupSet {
     pub mdns: bool,
     pub dht: bool,
     pub relay_lookup: RelaySelection,
+    pub nostr: OptFlag<Vec<Url>>,
 }
 
 impl LookupSet {
     /// The set a `lookup` list names, with `relay_urls` as the ladder the
-    /// relay lookup homes on (`None` ⇒ the pinned default).
+    /// relay lookup homes on and `nostr_urls` as the Nostr relays (`None` ⇒
+    /// the pinned default for each).
     ///
     /// # Errors
-    /// `relay_urls` is given but `lookups` does not name [`Lookup::Relay`]:
-    /// a ladder says *which* relay, and only a relay lookup uses one.
-    pub fn from_lookups(lookups: &[Lookup], relay_urls: Option<RelayLadder>) -> Result<Self> {
+    /// `relay_urls` is given but `lookups` does not name [`Lookup::Relay`], or
+    /// `nostr_urls` is given but `lookups` does not name [`Lookup::Nostr`]: a
+    /// list says *which* relays, and only its lookup uses one.
+    pub fn from_lookups(
+        lookups: &[Lookup],
+        relay_urls: Option<RelayLadder>,
+        nostr_urls: Option<Vec<Url>>,
+    ) -> Result<Self> {
         let relay = lookups.contains(&Lookup::Relay);
         if relay_urls.is_some() && !relay {
             bail!("a relay ladder needs lookup `relay`");
+        }
+        let nostr = lookups.contains(&Lookup::Nostr);
+        if nostr_urls.is_some() && !nostr {
+            bail!("nostr relay URLs need lookup `nostr`");
         }
         let relay_lookup = if relay {
             relay_urls.map_or(RelaySelection::Default, RelaySelection::Named)
         } else {
             RelaySelection::Unset
         };
+        let nostr = if nostr {
+            nostr_urls.map_or(OptFlag::Default, OptFlag::Named)
+        } else {
+            OptFlag::Unset
+        };
         Ok(Self {
             mdns: lookups.contains(&Lookup::Mdns),
             dht: lookups.contains(&Lookup::Dht),
             relay_lookup,
+            nostr,
         })
     }
 
     fn any(&self) -> bool {
-        self.mdns || self.dht || self.relay_lookup.is_set()
+        self.mdns || self.dht || self.relay_lookup.is_set() || self.nostr.is_set()
     }
 }
 
@@ -697,10 +863,16 @@ pub fn resolve_lookups(lookups: LookupSet) -> LookupOpts {
         RelaySelection::Default => RelayChoice::Pinned,
         RelaySelection::Named(ladder) => RelayChoice::Custom(ladder.as_urls().to_vec()),
     };
+    let nostr = match lookups.nostr {
+        OptFlag::Unset => NostrChoice::Disabled,
+        OptFlag::Default => NostrChoice::Pinned,
+        OptFlag::Named(urls) => NostrChoice::Custom(urls),
+    };
     LookupOpts {
         mdns: lookups.mdns,
         dht: lookups.dht,
         relay_lookup,
+        nostr,
     }
 }
 
@@ -793,8 +965,8 @@ impl fmt::Display for RelayLadder {
 #[cfg(test)]
 mod lookup_tests {
     use super::{
-        Lookup, LookupOpts, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection,
-        Transport, TransportPolicy, resolve_lookups,
+        Lookup, LookupOpts, LookupSet, MeshConfig, NostrChoice, OptFlag, RelayChoice, RelayLadder,
+        RelaySelection, Transport, TransportPolicy, resolve_lookups,
     };
 
     fn lookups(mdns: bool, dht: bool, relay_lookup: RelaySelection) -> LookupSet {
@@ -802,6 +974,7 @@ mod lookup_tests {
             mdns,
             dht,
             relay_lookup,
+            nostr: OptFlag::Unset,
         }
     }
 
@@ -896,6 +1069,7 @@ mod lookup_tests {
                     "https://a.example".parse().unwrap(),
                     "https://b.example".parse().unwrap(),
                 ]),
+                nostr: NostrChoice::Disabled,
             },
             password: None,
             issuer_pubkey: None,
@@ -938,7 +1112,8 @@ mod lookup_tests {
         // Live meshes depend on this: a config without a password must not
         // grow a feature byte (it feeds the topic derivation).
         assert_eq!(MeshConfig::loopback().to_bytes(), vec![0b0000]);
-        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111]);
+        // mDNS, DHT, the pinned relay, and (since the Nostr lookup) pinned Nostr.
+        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b1_0111]);
     }
 
     #[test]
@@ -965,7 +1140,7 @@ mod lookup_tests {
         let bytes = config.to_bytes();
         // Lookups byte, then the feature byte with only this bit: the feature
         // carries no field of its own.
-        assert_eq!(bytes, vec![0b0111, super::FEATURE_RELAY_TRANSPORT]);
+        assert_eq!(bytes, vec![0b1_0111, super::FEATURE_RELAY_TRANSPORT]);
         assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config);
         assert_ne!(
             bytes,
@@ -991,7 +1166,8 @@ mod lookup_tests {
     fn udp_and_webrtc_are_on_by_default_and_on_every_older_id() {
         let default = TransportPolicy::default();
         assert!(default.udp && default.webrtc && !default.relay_transport);
-        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111]);
+        // No feature byte: the default paths cost an id nothing.
+        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b1_0111]);
         let old = MeshConfig::from_bytes(&[0b0111]).unwrap().transport;
         assert!(old.udp && old.webrtc && !old.relay_transport);
         let old_relay = MeshConfig::from_bytes(&[0b0111, super::FEATURE_RELAY_TRANSPORT])
@@ -1023,7 +1199,7 @@ mod lookup_tests {
         ];
         let mut seen = Vec::new();
         for list in lists {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, list).unwrap();
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, None, list).unwrap();
             let bytes = config.to_bytes();
             assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config, "{list:?}");
             assert!(!seen.contains(&bytes), "{list:?} shares its bytes");
@@ -1033,12 +1209,19 @@ mod lookup_tests {
 
     #[test]
     fn a_mesh_without_udp_needs_the_relay_lookup() {
-        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::WebRtc])
+        let error = MeshConfig::resolve(&[Lookup::Mdns], None, None, &[Transport::WebRtc])
             .unwrap_err()
             .to_string();
         assert!(error.contains("relay"), "{error}");
-        assert!(MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::WebRtc]).is_ok());
-        assert!(MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp]).is_ok());
+        assert!(MeshConfig::resolve(&[Lookup::Relay], None, None, &[Transport::WebRtc]).is_ok());
+        assert!(MeshConfig::resolve(&[Lookup::Mdns], None, None, &[Transport::Udp]).is_ok());
+    }
+
+    #[test]
+    fn a_mesh_without_udp_can_signal_over_nostr() {
+        let config = MeshConfig::resolve(&[Lookup::Nostr], None, None, &[Transport::WebRtc])
+            .expect("Nostr carries the JSEP");
+        assert_eq!(config, MeshConfig::from_bytes(&config.to_bytes()).unwrap());
     }
 
     #[test]
@@ -1135,8 +1318,8 @@ mod directory_selection_tests;
 #[cfg(test)]
 mod choice_tests {
     use super::{
-        Lookup, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection, Transport,
-        TransportPolicy, resolve_lookups,
+        Lookup, LookupSet, MeshConfig, NostrChoice, RelayChoice, RelayLadder, RelaySelection,
+        Transport, TransportPolicy, parse_nostr_urls, resolve_lookups,
     };
 
     #[test]
@@ -1189,7 +1372,7 @@ mod choice_tests {
 
     #[test]
     fn a_lookup_list_becomes_the_set_of_exactly_those() {
-        let set = LookupSet::from_lookups(&[Lookup::Mdns], None).unwrap();
+        let set = LookupSet::from_lookups(&[Lookup::Mdns], None, None).unwrap();
         assert!(set.mdns && !set.dht);
         assert_eq!(set.relay_lookup, RelaySelection::Unset);
         let opts = resolve_lookups(set);
@@ -1199,17 +1382,17 @@ mod choice_tests {
 
     #[test]
     fn naming_relay_takes_the_default_ladder_unless_one_is_given() {
-        let bare = LookupSet::from_lookups(&[Lookup::Relay], None).unwrap();
+        let bare = LookupSet::from_lookups(&[Lookup::Relay], None, None).unwrap();
         assert_eq!(bare.relay_lookup, RelaySelection::Default);
         let ladder: RelayLadder = "https://a.example,https://b.example".parse().unwrap();
-        let custom = LookupSet::from_lookups(&[Lookup::Relay], Some(ladder.clone())).unwrap();
+        let custom = LookupSet::from_lookups(&[Lookup::Relay], Some(ladder.clone()), None).unwrap();
         assert_eq!(custom.relay_lookup, RelaySelection::Named(ladder));
     }
 
     #[test]
     fn a_ladder_without_the_relay_lookup_is_an_error() {
         let ladder: RelayLadder = "https://a.example".parse().unwrap();
-        let error = LookupSet::from_lookups(&[Lookup::Mdns], Some(ladder))
+        let error = LookupSet::from_lookups(&[Lookup::Mdns], Some(ladder), None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("relay"), "{error}");
@@ -1243,14 +1426,18 @@ mod choice_tests {
 
     #[test]
     fn a_config_resolves_from_the_three_choices() {
-        let config =
-            MeshConfig::resolve(&[Lookup::Relay], None, &[Transport::Udp, Transport::Relay])
-                .unwrap();
+        let config = MeshConfig::resolve(
+            &[Lookup::Relay],
+            None,
+            None,
+            &[Transport::Udp, Transport::Relay],
+        )
+        .unwrap();
         assert!(config.transport.relay_transport);
         assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
         assert!(config.password.is_none() && config.issuer_pubkey.is_none());
 
-        let bare = MeshConfig::resolve(&[], None, &[]).unwrap();
+        let bare = MeshConfig::resolve(&[], None, None, &[]).unwrap();
         assert!(bare.lookups.is_loopback());
         assert!(!bare.transport.relay_transport);
     }
@@ -1261,7 +1448,7 @@ mod choice_tests {
     #[test]
     fn relay_can_be_a_lookup_and_nothing_more() {
         for transports in [&[][..], &[Transport::Udp][..]] {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, transports).unwrap();
+            let config = MeshConfig::resolve(&[Lookup::Relay], None, None, transports).unwrap();
             assert_eq!(config.lookups.relay_lookup, RelayChoice::Pinned);
             assert!(!config.transport.relay_transport, "{transports:?}");
             assert_eq!(config, MeshConfig::from_bytes(&config.to_bytes()).unwrap());
@@ -1270,9 +1457,14 @@ mod choice_tests {
 
     #[test]
     fn relay_transport_needs_the_relay_lookup() {
-        let error = MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp, Transport::Relay])
-            .unwrap_err()
-            .to_string();
+        let error = MeshConfig::resolve(
+            &[Lookup::Mdns],
+            None,
+            None,
+            &[Transport::Udp, Transport::Relay],
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("relay"), "{error}");
     }
 
@@ -1281,5 +1473,119 @@ mod choice_tests {
         let opts = resolve_lookups(LookupSet::default());
         assert!(opts.is_loopback());
         assert_eq!(opts.network_label(), "private");
+    }
+
+    /// An old decoder dropped a lookup bit it did not know, so a newer id read
+    /// as a different mesh with no error. Unknown bits are refused instead.
+    #[test]
+    fn config_rejects_unknown_lookup_flags() {
+        let error = MeshConfig::from_bytes(&[0b1000_0000])
+            .expect_err("an unknown lookup bit must be refused")
+            .to_string();
+        assert!(error.contains("lookup flags"), "{error}");
+    }
+
+    fn nostr_urls(raw: &str) -> Vec<url::Url> {
+        parse_nostr_urls(raw).unwrap()
+    }
+
+    #[test]
+    fn nostr_alone_is_reachable_and_nothing_else() {
+        let config = MeshConfig::resolve(&[Lookup::Nostr], None, None, &[]).unwrap();
+        assert!(!config.lookups.is_loopback());
+        assert_eq!(config.lookups.network_label(), "public");
+        assert_eq!(config.lookups.nostr, NostrChoice::Pinned);
+        assert_eq!(config.lookups.relay_lookup, RelayChoice::Disabled);
+        assert!(!config.lookups.mdns && !config.lookups.dht);
+    }
+
+    #[test]
+    fn nostr_round_trips_pinned_and_custom() {
+        let pinned = MeshConfig::resolve(&[Lookup::Nostr], None, None, &[]).unwrap();
+        assert_eq!(pinned.to_bytes(), vec![0b1_0000]);
+        assert_eq!(MeshConfig::from_bytes(&pinned.to_bytes()).unwrap(), pinned);
+
+        let urls = nostr_urls("wss://a.example, ws://127.0.0.1:7000");
+        let custom = MeshConfig::resolve(
+            &[Lookup::Relay, Lookup::Nostr],
+            Some("https://r.example".parse::<RelayLadder>().unwrap()),
+            Some(urls.clone()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(custom.lookups.nostr, NostrChoice::Custom(urls));
+        assert_eq!(MeshConfig::from_bytes(&custom.to_bytes()).unwrap(), custom);
+        assert_ne!(custom.to_bytes(), pinned.to_bytes());
+    }
+
+    #[test]
+    fn nostr_urls_without_the_nostr_lookup_are_an_error() {
+        let error = MeshConfig::resolve(
+            &[Lookup::Relay],
+            None,
+            Some(nostr_urls("wss://a.example")),
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("need lookup `nostr`"), "{error}");
+    }
+
+    #[test]
+    fn nostr_urls_must_be_websockets_and_bounded() {
+        for (raw, why) in [
+            ("https://a.example", "ws:// or wss://"),
+            ("http://a.example", "ws:// or wss://"),
+        ] {
+            let error = MeshConfig::resolve(&[Lookup::Nostr], None, Some(nostr_urls(raw)), &[])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(why), "{raw}: {error}");
+        }
+        let seventeen = (0..17)
+            .map(|index| format!("wss://r{index}.example"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let error = MeshConfig::resolve(&[Lookup::Nostr], None, Some(nostr_urls(&seventeen)), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("too long"), "{error}");
+        assert!(parse_nostr_urls("wss://a.example,,wss://b.example").is_err());
+    }
+
+    #[test]
+    fn a_decoded_nostr_list_is_checked_like_a_minted_one() {
+        // Nostr on + custom, a list of one canonical `https` URL: valid bytes,
+        // invalid list.
+        let url = b"https://a.example/";
+        let mut bytes = vec![0b11_0000, 1];
+        bytes.extend_from_slice(&u16::try_from(url.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(url);
+        let error = MeshConfig::from_bytes(&bytes).unwrap_err().to_string();
+        assert!(error.contains("ws:// or wss://"), "{error}");
+
+        // The custom bit without the enabled bit, and a truncated list.
+        assert!(MeshConfig::from_bytes(&[0b10_0000]).is_err());
+        assert!(MeshConfig::from_bytes(&[0b11_0000, 2, 3, 0, b'w']).is_err());
+    }
+
+    #[test]
+    fn nostr_parses_from_its_name() {
+        assert_eq!("nostr".parse::<Lookup>().unwrap(), Lookup::Nostr);
+        assert_eq!(Lookup::Nostr.to_string(), "nostr");
+        let error = "nost".parse::<Lookup>().unwrap_err().to_string();
+        assert!(error.contains("nostr"), "the choices list nostr: {error}");
+    }
+
+    /// `Url` normalizes, so a hand-made id could spell one relay two ways and
+    /// name one mesh with two id strings. Only the canonical spelling decodes.
+    #[test]
+    fn a_non_canonical_nostr_url_is_refused() {
+        let url = b"wss://a.example"; // canonical is "wss://a.example/"
+        let mut bytes = vec![0b11_0000, 1];
+        bytes.extend_from_slice(&u16::try_from(url.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(url);
+        let error = MeshConfig::from_bytes(&bytes).unwrap_err().to_string();
+        assert!(error.contains("canonical"), "{error}");
     }
 }

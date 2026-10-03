@@ -118,6 +118,7 @@ async function main(): Promise<void> {
   const id = params.get('mesh')
   const nick = params.get('nick')
   const relayUrls = params.getAll('relay')
+  const nostrUrls = params.getAll('nostr')
   // Passed through as typed: a name that is not a transport is the engine's
   // error to raise, and it names the choices.
   const transport = params.get('transport')?.split(',') as Transport[] | undefined
@@ -130,6 +131,7 @@ async function main(): Promise<void> {
       ...(nick === null ? {} : { nick }),
       ...(transport === undefined ? {} : { transport }),
       relayUrls,
+      nostrUrls,
       log: params.get('log') ?? 'info',
     })
   } catch (error) {

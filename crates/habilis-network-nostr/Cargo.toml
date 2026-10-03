@@ -1,0 +1,66 @@
+[package]
+name = "habilis-network-nostr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "A small Nostr relay client for habilis-network: ephemeral events on public relays, used as a lookup and a JSEP carrier."
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[features]
+# An in-process relay for tests: it checks signatures and filters like a real
+# one, and it can be told to refuse or to drop. Native only.
+test-relay = ["tokio-websockets/server", "tokio/net"]
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_nostr"
+path = "src/lib.rs"
+
+# No iroh. The crate speaks NIP-01 and nothing about meshes; the engine seals
+# its own payload into `content`.
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+hex = "0.4"
+# BIP-340 Schnorr only. `ecdsa` and `precomputed-tables` stay off: we sign about
+# one event a minute, and the tables cost size, not correctness.
+k256 = { version = "0.13", default-features = false, features = ["schnorr", "std"] }
+n0-future.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+# The same WebSocket client iroh's relay client already links, with the same
+# features, so native adds no crate. TLS is ours: iroh-relay builds its own
+# stream and so do we (`connect_on`).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["net"] }
+tokio-websockets = { version = "0.13", features = ["client", "getrandom", "rand", "sha1_smol"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "1"
+
+# The browser's own WebSocket, the copy iroh-relay already links for wasm.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ws_stream_wasm = { version = "0.7", default-features = false }
+# Every generation of `getrandom` in the graph told which backend to use, as
+# in `habilis-network-protocol` (see its manifest); the rustflag half is in
+# `.cargo/config.toml`.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+# The integration tests drive the in-process relay.
+habilis-network-nostr = { path = ".", features = ["test-relay"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+tracing-subscriber.workspace = true

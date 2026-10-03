@@ -29,6 +29,7 @@ Query parameters, the browser half of the flags the terminal client takes:
 | `?id=<base58>` | or join a mesh by id |
 | `?nick=<name>` | the nickname to request; the engine may assign another |
 | `?relay=<url>` | a custom relay ladder, repeatable. Part of the derived id, so every member must pass the same list |
+| `?nostr=<url>` | a custom Nostr relay (`ws://` or `wss://`), repeatable. Replaces the pinned public list; part of the id too |
 | `?transport=udp,webrtc,relay` | let payload fall back to the relay. Part of the id too |
 | `?log=<level>` | engine tracing level, `warn` by default |
 

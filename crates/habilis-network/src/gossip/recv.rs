@@ -1237,6 +1237,17 @@ async fn handle_peer_info(
     if peer_id == ctx.endpoint.id() {
         return;
     }
+    // Only the endpoint itself can say it needs a data channel: the gossip
+    // signature binds this body to a nickname, not to the id inside it.
+    match crate::protocol::peer_addr::peer_info_needs_lane(&parsed, ctx.mesh.as_str().as_bytes()) {
+        Some(true) => {
+            state.lane_peers.insert(peer_id);
+        }
+        Some(false) => {
+            state.lane_peers.remove(&peer_id);
+        }
+        None => {}
+    }
     // This `PeerInfo` is signed by `message.author` and carries that author's
     // own endpoint — the one binding from a nickname to a node id. Record it
     // for the roster's `direct`/`gossip` tag; last-writer-wins, so a restart's
@@ -1332,7 +1343,7 @@ async fn handle_peer_info(
         state.unicast_pool.note_addr(&peer_addr);
         // With the relay lookup only, the graft waits for a proven direct
         // path (`transport::probe`); the loop grafts on the probe's verdict.
-        if crate::transport::probe::ensure_direct(state, ctx, peer_id, &peer_addr) {
+        if crate::transport::probe::ensure_direct(state, peer_id, &peer_addr) {
             if let Err(error) = ctx.sender.join_peers(vec![peer_id]).await {
                 tracing::warn!(target: "habilis_network::gossip", endpoint_id = %peer_id, %error, "PeerInfo graft request failed");
             }

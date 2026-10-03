@@ -181,6 +181,7 @@ describe('wire opts', () => {
       lookup: null,
       transport: null,
       relayUrls: null,
+      nostrUrls: null,
       maxPeers: 0,
     })
     expect(createWire({ lookup: ['mdns', 'dht', 'relay'], name: 'salon' })).toMatchObject({
@@ -196,5 +197,11 @@ describe('wire opts', () => {
       relayUrls: 'http://a/,http://b/',
     })
     expect(createWire({ relayUrls: [], transport: [] })).toMatchObject({ relayUrls: null, transport: null })
+    expect(createWire({ lookup: ['nostr'], nostrUrls: ['wss://a/', 'wss://b/'] })).toMatchObject({
+      lookup: 'nostr',
+      nostrUrls: 'wss://a/,wss://b/',
+    })
+    expect(joinWire({ topic: 't', nostrUrls: ['wss://a/'] })).toMatchObject({ nostrUrls: 'wss://a/' })
+    expect(createWire({ nostrUrls: [] })).toMatchObject({ nostrUrls: null })
   })
 })

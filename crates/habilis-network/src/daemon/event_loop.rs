@@ -95,6 +95,7 @@ pub async fn run<A: NodeDriver>(
         webrtc,
         webrtc_enabled,
         local_udp_transport,
+        nostr,
         webrtc_admission,
         webrtc_ice,
         unicast_rx,
@@ -181,6 +182,24 @@ pub async fn run<A: NodeDriver>(
     }
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
+    state.has_rendezvous = rendezvous_params.has_rendezvous;
+    let nostr_rx = nostr.map(|params| {
+        let (signal, hellos) = crate::transport::webrtc::nostr::NostrSignal::start(
+            crate::transport::webrtc::nostr::NostrSignalParts {
+                endpoint: endpoint.clone(),
+                handle: webrtc.clone(),
+                admission: state.webrtc_admission.clone(),
+                ice: state.webrtc_ice,
+                keys: params.keys,
+                relays: params.relays,
+                answers: webrtc_enabled,
+            },
+        );
+        state.nostr = Some(signal);
+        state.nostr_width = crate::transport::webrtc::nostr::JOINING_WIDTH;
+        state.next_hello = Some(TokioInstant::now());
+        hellos
+    });
     state.webrtc = webrtc_enabled.then_some(webrtc);
     state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
     // Before the first write, so the initial advertisement carries a real count.
@@ -350,6 +369,7 @@ pub async fn run<A: NodeDriver>(
         http_rx,
         unicast_rx: Some(unicast_rx),
         direct_rx,
+        nostr_rx,
         path_rx,
     }))
     .await
@@ -514,6 +534,8 @@ struct EventLoop<A: NodeDriver> {
     /// Direct-path probe verdicts (`transport::probe`). Never closes: `state`
     /// holds a sender for the loop's lifetime.
     direct_rx: mpsc::UnboundedReceiver<crate::transport::probe::DirectOutcome>,
+    /// `Hello`s heard over Nostr; `None` without the Nostr lookup.
+    nostr_rx: Option<mpsc::Receiver<crate::protocol::nostr::Signal>>,
     /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<crate::transport::probe::PathChange>,
@@ -570,6 +592,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut http_rx,
         mut unicast_rx,
         mut direct_rx,
+        mut nostr_rx,
         mut path_rx,
     } = loop_state;
 
@@ -657,6 +680,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 gossip::handle_gossip_event(event, &mut state, &mut app, &ctx).await;
+                nostr_width(&mut state);
             }
             Some(outcome) = direct_rx.recv() => {
                 state.idle.external += 1;
@@ -668,6 +692,19 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::on_path_change(change, &mut state, &ctx).await;
+            }
+            hello = recv_opt(&mut nostr_rx) => match hello {
+                None => nostr_rx = None,
+                Some(hello) => {
+                    state.idle.external += 1;
+                    let ctx = parts.ctx(&sender);
+                    nostr_hello(&mut state, &ctx, &hello);
+                }
+            },
+            () = sleep_until_opt(state.next_hello) => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                nostr_announce(&mut state, &ctx);
             }
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
             frame = recv_opt(&mut unicast_rx) => match frame {
@@ -699,6 +736,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
                 crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
                 crate::transport::probe::nudge_webrtc_riders(&state, &ctx);
+                nostr_width(&mut state);
             }
             _ = intervals.sweep.tick() => {
                 state.idle.sweep += 1;
@@ -893,6 +931,23 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
 /// is active. Lets the event loop's `select!` carry a ping-finalize arm
 /// that only fires while a round is in flight, without borrowing
 /// `state` across the await (the deadline is copied out beforehand).
+/// The Nostr lane's loop hooks.
+fn nostr_hello(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    hello: &crate::protocol::nostr::Signal,
+) {
+    crate::transport::webrtc::nostr::discovery::on_hello(state, ctx, hello);
+}
+
+fn nostr_announce(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    crate::transport::webrtc::nostr::discovery::announce(state, ctx);
+}
+
+fn nostr_width(state: &mut EventLoopState) {
+    crate::transport::webrtc::nostr::discovery::update_width(state);
+}
+
 async fn sleep_until_opt(deadline: Option<TokioInstant>) {
     match deadline {
         Some(at) => n0_future::time::sleep_until(at).await,

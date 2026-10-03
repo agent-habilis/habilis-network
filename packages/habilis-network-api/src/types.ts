@@ -4,7 +4,7 @@
  */
 
 /** One way a mesh's members find each other. */
-export type Lookup = 'mdns' | 'dht' | 'relay'
+export type Lookup = 'mdns' | 'dht' | 'relay' | 'nostr'
 
 /**
  * One path a mesh's payload may ride. A list needs `udp` or `webrtc`; a
@@ -18,7 +18,7 @@ export interface JoinOpts {
    * lands in the same mesh.
    *
    * A topic mesh is always reached over the public preset — mDNS, the mainline
-   * DHT and the pinned relay ladder. That is not a default you can change: the
+   * DHT, the pinned relay ladder and the pinned Nostr relays. That is not a default you can change: the
    * derivation mixes the lookups into the mesh id, so two reaches over one
    * string are two different meshes that never meet. Hence no discovery flags
    * here.
@@ -40,6 +40,12 @@ export interface JoinOpts {
    * derived id like `transport`. Ignored when joining by id.
    */
   relayUrls?: string[]
+  /**
+   * Topic only: `ws://` or `wss://` Nostr relays replacing the pinned public
+   * list. Mixed into the derived id like `relayUrls`. Ignored when joining by
+   * id.
+   */
+  nostrUrls?: string[]
   /** Active-view cap. Omit for the engine default. */
   maxPeers?: number
 }
@@ -51,7 +57,7 @@ export interface CreateOpts {
    * How members find each other. Naming any uses only those; naming none
    * is not "the default set" — it is a loopback mesh, reachable only from
    * this machine, which is useful for tests and surprising everywhere else.
-   * `['mdns', 'dht', 'relay']` is the all-on set a topic uses.
+   * `['mdns', 'dht', 'relay', 'nostr']` is the all-on set a topic uses.
    */
   lookup?: Lookup[]
   /**
@@ -67,6 +73,11 @@ export interface CreateOpts {
    * Needs `'relay'` in `lookup`, and is part of the mesh id.
    */
   relayUrls?: string[]
+  /**
+   * Which Nostr relays: `ws://` or `wss://` URLs replacing the pinned public
+   * list. Needs `'nostr'` in `lookup`, and is part of the mesh id.
+   */
+  nostrUrls?: string[]
   maxPeers?: number
 }
 

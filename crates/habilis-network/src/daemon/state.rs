@@ -298,6 +298,26 @@ pub struct EventLoopState {
     /// session — true for a webrtc-shaped node on a lookup-only mesh; see
     /// `transport::webrtc::rendezvous_graftable`.
     pub(crate) rendezvous_graft_needs_session: bool,
+    /// Peers whose `PeerInfo` said they need a data channel. The shape of a
+    /// peer's address says the same only when it carries a relay.
+    pub(crate) lane_peers: HashSet<EndpointId>,
+    /// Whether anything can reach the rendezvous (`RendezvousParams`). Without
+    /// one, the signal ALPN has nothing to ride and offers go over Nostr.
+    pub(crate) has_rendezvous: bool,
+    /// The Nostr carrier, on a mesh with the Nostr lookup.
+    pub(crate) nostr: Option<crate::transport::webrtc::nostr::NostrSignal>,
+    /// When each peer was last heard over Nostr.
+    pub(crate) nostr_seen: HashMap<EndpointId, Instant>,
+    /// When each peer was last woken with a `Hello` on its own tag.
+    pub(crate) nostr_poked: HashMap<EndpointId, Instant>,
+    /// When the next `Hello` goes out; `None` without the carrier.
+    pub(crate) next_hello: Option<TokioInstant>,
+    pub(crate) hellos_sent: u32,
+    /// How many relays the carrier holds now.
+    pub(crate) nostr_width: usize,
+    /// Hold the wide relay set until then: the end of the last offer round,
+    /// plus a cooldown.
+    pub(crate) nostr_wide_until: Option<Instant>,
     /// Whether this node runs IP transports (`TransportOpts::ip`, and never
     /// on wasm). The local half of every `WebRTC` lane decision — read from
     /// here, not from the endpoint address, which is empty whenever the relay
@@ -667,6 +687,15 @@ impl EventLoopState {
             rendezvous_answers_jsep: true,
             rendezvous_probe_read_free: false,
             rendezvous_graft_needs_session: false,
+            lane_peers: HashSet::new(),
+            has_rendezvous: true,
+            nostr: None,
+            nostr_seen: HashMap::new(),
+            nostr_poked: HashMap::new(),
+            next_hello: None,
+            hellos_sent: 0,
+            nostr_width: 0,
+            nostr_wide_until: None,
             local_udp_transport: true,
             announced: false,
             meshed: false,
@@ -835,6 +864,9 @@ impl EventLoopState {
         let addr = self.peer_endpoints.remove(nick)?;
         self.proven_endpoints.forget_endpoint(addr.id);
         self.direct.remove(&addr.id);
+        self.lane_peers.remove(&addr.id);
+        self.nostr_seen.remove(&addr.id);
+        self.nostr_poked.remove(&addr.id);
         self.path_watchers.remove(&addr.id);
         self.path_kinds.remove(&addr.id);
         Some(addr)
@@ -2082,5 +2114,18 @@ mod tests {
         );
         assert!(state.meshed);
         assert!(!state.degraded);
+    }
+
+    /// A departed peer leaves every per-peer map, the lane flag included.
+    #[test]
+    fn forgetting_a_peer_forgets_its_lane_flag() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(9);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        state.lane_peers.insert(bob);
+        state.forget_peer_endpoint("bob");
+        assert!(!state.lane_peers.contains(&bob));
     }
 }

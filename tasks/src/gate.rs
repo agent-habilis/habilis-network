@@ -140,11 +140,12 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "native,bench", "--all-targets"],
     },
-    // Six crates are reachable on wasm32 and between them that is a
+    // Seven crates are reachable on wasm32 and between them that is a
     // substantial amount of code nothing else compiles: `habilis-network-chunks`'s
     // IndexedDB backend, the whole `web` backend of the WebRTC transport, the
-    // portable half of the engine, `habilis-network-netplay`'s simulation,
-    // `habilis-network-stream`'s byte streams, and `habilis-network-wasm`, the browser peer.
+    // browser socket of the Nostr client, the portable half of the engine,
+    // `habilis-network-netplay`'s simulation, `habilis-network-stream`'s byte streams, and
+    // `habilis-network-wasm`, the browser peer.
     // Without these rows that code rots silently, and the `#[expect(...)]`
     // attributes inside it are never lint-checked either.
     // `wasm-simd` only changes blake3's codegen, so checking with it on costs
@@ -158,6 +159,11 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmCheck,
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
+    },
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("habilis-network-nostr"),
+        args: &[],
     },
     // The engine itself must reach the browser, not merely be avoidable from
     // it. `--no-default-features` is the portable half: no `host`, so no IPC
@@ -216,6 +222,11 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmClippy,
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-nostr"),
+        args: &[],
     },
     Step {
         kind: Kind::WasmClippy,

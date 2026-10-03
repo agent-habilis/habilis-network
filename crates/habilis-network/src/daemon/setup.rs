@@ -13,12 +13,13 @@ use crate::lookup::{
     StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
 };
 use crate::protocol::crypto::Password;
-use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
+use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, NostrChoice, RelayChoice};
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
+use crate::transport::webrtc::nostr::NostrParams;
 
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
@@ -86,6 +87,9 @@ fn rendezvous_params(
     // via `rung_tx` if rung 0 turns out to be unreachable. Empty for
     // private / relay-disabled ⇒ `None`.
     let bootstrap_relay = relay_ladder(&lookups.relay_lookup).first().cloned();
+    let has_rendezvous = !bind_ports.is_empty()
+        || lookups.relay_lookup != RelayChoice::Disabled
+        || crate::beacon::bare_id_resolvable(lookups);
     RendezvousParams {
         topic_id,
         secret: mesh.rendezvous_secret(),
@@ -95,6 +99,22 @@ fn rendezvous_params(
         relay_transport: mesh.config.transport.relay_transport,
         bootstrap_relay,
         rung_tx,
+        has_rendezvous,
+    }
+}
+
+/// The co-host policy a member runs under: the caller's override, else the
+/// setup kind's default, and `Never` on a mesh with no rendezvous, where
+/// nothing could reach a beacon.
+fn effective_cohost(
+    has_rendezvous: bool,
+    cohost_override: Option<CoHostPolicy>,
+    default: CoHostPolicy,
+) -> CoHostPolicy {
+    if has_rendezvous {
+        cohost_override.unwrap_or(default)
+    } else {
+        CoHostPolicy::Never
     }
 }
 
@@ -350,7 +370,7 @@ impl std::fmt::Debug for SetupParams {
 
 /// Why a browser refuses a mesh with no relay lookup: one string, so a test
 /// can match the refusal without copying its text.
-pub const BROWSER_NEEDS_RELAY_LOOKUP: &str = "a browser cannot reach a peer in this mesh: it has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node)";
+pub const BROWSER_NEEDS_RELAY_LOOKUP: &str = "a browser cannot reach a peer in this mesh: it has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or `nostr` in lookup";
 
 /// Why a browser refuses a mesh whose list leaves it no payload path.
 pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this mesh: its transport list has neither `webrtc` nor `relay`";
@@ -359,8 +379,8 @@ pub const BROWSER_HAS_NO_PATH: &str = "a browser cannot carry payload in this me
 /// paths exist, and a node can only have fewer.
 ///
 /// # Errors
-/// A node that can never reach anyone: without UDP, one with no relay (see
-/// [`reaches_relay`]). On a browser, also a mesh [`refuse_in_browser`]
+/// A node that can never reach anyone: without UDP, one that
+/// [cannot signal](can_signal). On a browser, also a mesh [`refuse_in_browser`]
 /// refuses. Refused here rather than left as a member that links to nobody
 /// and says nothing. Whether a reachable node may carry payload in this mesh
 /// is the accept gate's call at runtime, not this one's.
@@ -373,8 +393,8 @@ fn member_transports(
     #[cfg(target_arch = "wasm32")]
     refuse_in_browser(lookups, policy, transports)?;
     anyhow::ensure!(
-        transports.udp || reaches_relay(lookups, transports),
-        "this node has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node)"
+        transports.udp || can_signal(lookups, transports),
+        "this node has no UDP, so it needs the relay (`relay` in lookup, and a relay transport on this node) or `nostr` in lookup"
     );
     Ok(transports)
 }
@@ -383,14 +403,20 @@ fn member_transports(
 /// registers a relay transport. A node without UDP reaches a peer only through
 /// the relay, and a data channel's handshake crosses the relay too.
 fn reaches_relay(lookups: &LookupOpts, transports: crate::lookup::TransportOpts) -> bool {
-    lookups.relay_lookup != crate::protocol::mesh::RelayChoice::Disabled && transports.relay
+    lookups.relay_lookup != RelayChoice::Disabled && transports.relay
+}
+
+/// Whether a node without UDP has a path for the JSEP that opens its data
+/// channels: the relay, or Nostr, which needs no relay transport.
+fn can_signal(lookups: &LookupOpts, transports: crate::lookup::TransportOpts) -> bool {
+    reaches_relay(lookups, transports) || lookups.nostr != NostrChoice::Disabled
 }
 
 /// Whether a browser, which has no UDP, can run with these lookups and paths
 /// (already narrowed to `policy`).
 ///
 /// # Errors
-/// A browser that cannot [reach the relay](reaches_relay). Or a list that
+/// A browser that [cannot signal](can_signal). Or a list that
 /// leaves both the data channel and relay payload out: nothing could carry
 /// its payload.
 pub fn refuse_in_browser(
@@ -398,10 +424,7 @@ pub fn refuse_in_browser(
     policy: crate::protocol::TransportPolicy,
     transports: crate::lookup::TransportOpts,
 ) -> Result<()> {
-    anyhow::ensure!(
-        reaches_relay(lookups, transports),
-        BROWSER_NEEDS_RELAY_LOOKUP
-    );
+    anyhow::ensure!(can_signal(lookups, transports), BROWSER_NEEDS_RELAY_LOOKUP);
     anyhow::ensure!(transports.carry_without_udp(&policy), BROWSER_HAS_NO_PATH);
     Ok(())
 }
@@ -626,10 +649,11 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         endpoint,
         router,
         max_peers,
+        nostr: NostrParams::for_mesh(&lookups, rdv.topic_id.as_bytes()),
+        cohost: effective_cohost(rdv.has_rendezvous, cohost_override, cohost),
         rendezvous_params: rdv,
         rung_rx,
         rung_probe,
-        cohost: cohost_override.unwrap_or(cohost),
         runtime_base,
         state_file,
         #[cfg(feature = "host")]
@@ -885,7 +909,12 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         build.relay_transport,
         build.transports.udp,
     );
-    let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
+    // A mesh with no rendezvous (Nostr only) has no bare id worth dialing.
+    let bootstrap = if needs_session || !rdv.has_rendezvous {
+        vec![]
+    } else {
+        vec![rdv.id]
+    };
     let topic = gossip.subscribe(topic_id, bootstrap).await?;
 
     // `ready` is emitted by `run`, once the IPC socket accepts — not here.
@@ -929,7 +958,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
 mod tests {
     use std::time::Duration;
 
-    use crate::protocol::mesh::{LookupOpts, RelayChoice, Transport, TransportPolicy};
+    use crate::protocol::mesh::{LookupOpts, NostrChoice, RelayChoice, Transport, TransportPolicy};
 
     // A browser has no UDP: it reaches a peer only through the relay, and a
     // data channel's handshake crosses the relay too. `validate` accepts
@@ -941,6 +970,7 @@ mod tests {
             mdns: false,
             dht: true,
             relay_lookup: RelayChoice::Disabled,
+            nostr: NostrChoice::Disabled,
         };
         let policy =
             TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
@@ -956,6 +986,26 @@ mod tests {
         super::refuse_in_browser(&relay, policy, transports).expect("the relay signals");
     }
 
+    // Nostr carries the JSEP as the relay does, so a Nostr-only mesh has a
+    // path to signal on even with no relay transport on this node.
+    #[test]
+    fn nostr_alone_signals_for_a_node_without_udp() {
+        let nostr_only = LookupOpts {
+            nostr: NostrChoice::Pinned,
+            ..LookupOpts::loopback()
+        };
+        let policy =
+            TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
+        let no_relay = crate::lookup::TransportOpts {
+            relay: false,
+            ..crate::lookup::TransportOpts::webrtc_only()
+        };
+        super::refuse_in_browser(&nostr_only, policy, no_relay.within(&policy))
+            .expect("a browser signals over Nostr");
+        super::member_transports(&nostr_only, no_relay, policy)
+            .expect("a native node without UDP signals over Nostr");
+    }
+
     // A native node without UDP signals its data channel over the relay, as a
     // browser does. `validate` checks the mesh's list, not this node's own
     // narrower paths.
@@ -965,6 +1015,7 @@ mod tests {
             mdns: false,
             dht: true,
             relay_lookup: RelayChoice::Disabled,
+            nostr: NostrChoice::Disabled,
         };
         let policy =
             TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
@@ -986,6 +1037,7 @@ mod tests {
             mdns: false,
             dht: false,
             relay_lookup: RelayChoice::Pinned,
+            nostr: NostrChoice::Disabled,
         };
         let no_relay = |policy: &TransportPolicy| crate::lookup::TransportOpts {
             relay: false,

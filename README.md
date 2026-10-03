@@ -3,7 +3,7 @@
 https://habilis.network
 
 A serverless gossip-network engine. Peers find each other over mDNS, the mainline
-DHT or a relay, form a mesh, and exchange messages and a shared CRDT document —
+DHT, a relay or public Nostr relays, form a mesh, and exchange messages and a shared CRDT document —
 with no server in the middle.
 
 It is built on [iroh](https://github.com/n0-computer/iroh) for transport and

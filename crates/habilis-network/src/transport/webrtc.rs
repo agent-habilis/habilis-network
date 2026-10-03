@@ -35,6 +35,8 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use super::LOG_TARGET;
 use super::admission::{Refusal, SignalAdmission};
 
+pub(crate) mod nostr;
+
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
 /// [`super::UNICAST_ALPN`] is: both ends must agree, so it moves only with a
 /// deliberate protocol break.
@@ -410,6 +412,7 @@ async fn answer_one(
     // negotiation. The offerer cannot finish ICE until it has our SDP, so
     // completing first deadlocks both sides into their full gathering budget
     // and then fails — which is exactly what it did.
+    // `nostr::answer` mirrors this tail for the Nostr carrier.
     let answer = build_answer(local, &offer, ice).await?;
     send.write_all(&serde_json::to_vec(answer.envelope())?)
         .await
@@ -604,6 +607,17 @@ pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: bool) -> 
     needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_udp_transport)
 }
 
+/// [`pair_needs_lane`], plus the peer's own word: a `PeerInfo` or a Nostr
+/// `Hello` that said it needs a data channel. With no relay and no IP, a
+/// peer's address is empty, which [`needs_webrtc_lane`] reads as unknown.
+pub(crate) fn peer_needs_lane(
+    state: &crate::daemon::state::EventLoopState,
+    peer: EndpointId,
+    addr: &EndpointAddr,
+) -> bool {
+    state.lane_peers.contains(&peer) || pair_needs_lane(addr, state.local_udp_transport)
+}
+
 /// Whether a pair runs a `WebRTC` round: a pair that needs the lane always
 /// does; a pair with UDP on both ends races the UDP punch, until UDP wins.
 /// A UDP pair already `proven` direct with no session has proved its UDP
@@ -640,7 +654,7 @@ pub(crate) fn negotiate_session(
     // browser is the lower id it is the browser that evaluates this. It would
     // see the native peer's IP, skip, and the native — waiting to be dialled —
     // would never offer. The pair would silently never get a channel.
-    let needs_lane = pair_needs_lane(&addr, state.local_udp_transport);
+    let needs_lane = peer_needs_lane(state, peer, &addr);
     if !wants_session(
         needs_lane,
         state.unicast_pool.selected_is_ip(peer),
@@ -672,6 +686,12 @@ pub(crate) fn negotiate_session(
         }
     };
 
+    // With no rendezvous, or a peer heard over Nostr, the ALPN may have no
+    // path to ride; the offer goes over Nostr instead.
+    if nostr::discovery::prefer_nostr(state, peer) {
+        nostr::discovery::spawn_offer(state, peer, guard);
+        return;
+    }
     let offer = if needs_lane {
         Offer::Lane
     } else {
@@ -1167,7 +1187,7 @@ pub(crate) fn retry_sessions(
         .filter(|addr| addr.id != ctx.rendezvous_id)
         .filter(|addr| {
             wants_session(
-                own_needs_lane || needs_webrtc_lane(addr),
+                own_needs_lane || needs_webrtc_lane(addr) || state.lane_peers.contains(&addr.id),
                 state.unicast_pool.selected_is_ip(addr.id),
                 state.direct.get(&addr.id) == Some(&crate::daemon::state::DirectState::Direct),
             )
@@ -1299,6 +1319,29 @@ mod tests {
         );
         // The real relay-only shape still must.
         assert!(needs_webrtc_lane(&browser_shaped(id)));
+    }
+
+    /// With no relay and no IP, a peer's address is empty, and the shape rule
+    /// reads it as unknown. Its own word in `PeerInfo` is what says "browser".
+    #[test]
+    fn a_peer_that_says_it_needs_the_lane_gets_it_with_an_empty_address() {
+        let peer = SecretKey::from_bytes(&[8u8; 32]).public();
+        let empty = EndpointAddr::new(peer);
+        let mut state = crate::testing::fresh_state();
+        assert!(
+            !peer_needs_lane(&state, peer, &empty),
+            "unknown stays unknown"
+        );
+
+        state.lane_peers.insert(peer);
+        assert!(peer_needs_lane(&state, peer, &empty), "its word decides");
+
+        state.lane_peers.clear();
+        state.local_udp_transport = false;
+        assert!(
+            peer_needs_lane(&state, peer, &empty),
+            "a node with no IP needs the lane with everyone"
+        );
     }
 
     #[test]

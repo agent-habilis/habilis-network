@@ -16,7 +16,7 @@ use iroh::EndpointId;
 use iroh::endpoint::Connection;
 
 use super::path::{PROBE_DEADLINE, wait_direct};
-use super::webrtc::needs_webrtc_lane;
+use super::webrtc::{needs_webrtc_lane, peer_needs_lane};
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
 use crate::util::clock::Instant;
@@ -302,14 +302,13 @@ pub(crate) fn may_graft(known_direct: bool, has_session: bool, needs_webrtc: boo
 /// the [`DirectOutcome`] that follows, or the alive tick retries.
 pub(crate) fn ensure_direct(
     state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
     peer: EndpointId,
     peer_addr: &iroh::EndpointAddr,
 ) -> bool {
     if state.relay_transport {
         return true;
     }
-    let needs_webrtc = needs_webrtc_lane(peer_addr) || needs_webrtc_lane(&ctx.endpoint.addr());
+    let needs_webrtc = peer_needs_lane(state, peer, peer_addr);
     let has_session = state
         .webrtc
         .as_ref()
@@ -371,10 +370,17 @@ pub(crate) async fn graft_proven(
     peer: EndpointId,
 ) {
     state.direct.insert(peer, DirectState::Direct);
-    if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < ctx.max_peers {
+    let linked = state.linked_endpoints.contains(&peer);
+    let full = state.linked_endpoints.len() >= ctx.max_peers;
+    if linked || full {
+        tracing::debug!(target: super::LOG_TARGET, %peer, linked, full, "graft skipped");
+    } else {
         state.note_relink(peer, Instant::now());
-        if let Err(error) = ctx.sender.join_peers(vec![peer]).await {
-            tracing::warn!(target: super::LOG_TARGET, %peer, %error, "graft request failed");
+        match ctx.sender.join_peers(vec![peer]).await {
+            Ok(()) => tracing::debug!(target: super::LOG_TARGET, %peer, "graft requested"),
+            Err(error) => {
+                tracing::warn!(target: super::LOG_TARGET, %peer, %error, "graft request failed");
+            }
         }
     }
     if state.meshed && !state.pending_outbound.is_empty() {
@@ -403,7 +409,7 @@ pub(crate) async fn retry_direct(
         if distrust_links {
             state.direct.remove(&addr.id);
         }
-        if ensure_direct(state, ctx, addr.id, &addr) {
+        if ensure_direct(state, addr.id, &addr) {
             graft_proven(state, ctx, addr.id).await;
         }
     }
@@ -423,7 +429,7 @@ fn retry_candidates(
         .filter(|addr| distrust_links || !state.linked_endpoints.contains(&addr.id))
         .filter(|addr| {
             state.direct.get(&addr.id) != Some(&DirectState::Pending)
-                || (needs_webrtc_lane(addr)
+                || ((state.lane_peers.contains(&addr.id) || needs_webrtc_lane(addr))
                     && state
                         .webrtc
                         .as_ref()

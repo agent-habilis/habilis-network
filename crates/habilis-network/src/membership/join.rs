@@ -7,6 +7,7 @@ use crate::embed::NodeSink;
 use crate::net::TransportOpts;
 use crate::protocol::JoinTarget;
 use crate::protocol::Nickname;
+use crate::protocol::mesh::parse_nostr_urls;
 use crate::protocol::{DirectorySelection, Lookup, MeshConfig, MeshName, RelayLadder, Transport};
 use crate::runtime::{CreateParams, JoinParams, Node, Resolved};
 use crate::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
@@ -14,6 +15,7 @@ use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use url::Url;
 
 use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 
@@ -22,7 +24,7 @@ use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 ///
 /// A create names three mesh-wide choices, kept apart because they are three
 /// concepts: `lookup` says how members find each other, `transport` says what
-/// payload may ride, `relay_urls` says which relay.
+/// payload may ride, `relay_urls` and `nostr_urls` say which relays.
 ///
 /// `Deserialize` so a browser tab can hand its constructor a plain object and
 /// have it land here, which is what stops the browser and the C caller growing
@@ -40,15 +42,16 @@ pub struct Opts {
     /// Mesh name to create with; `None` falls back to `"habilis-network"`. Ignored
     /// when joining (the name travels with the id/topic instead).
     pub name: Option<String>,
-    /// How members find each other: any of `mdns`, `dht`, `relay`. Naming
-    /// any uses only those; naming none is a loopback mesh. Ignored with a
-    /// `topic` (always all three) or a `mesh` id (which carries its own).
+    /// How members find each other: any of `mdns`, `dht`, `relay`, `nostr`.
+    /// Naming any uses only those; naming none is a loopback mesh. Ignored
+    /// with a `topic` (always all four) or a `mesh` id (which carries its
+    /// own).
     pub lookup: Vec<Lookup>,
     /// What may carry payload: any of `udp`, `webrtc`, `relay`, with `udp` or
     /// `webrtc` among them. Empty ⇒ `udp,webrtc`, so all data is peer to peer
-    /// and the relay serves lookup only. `relay`, or a list without `udp`,
-    /// needs `relay` in `lookup`. Part of the mesh id, so a joiner inherits
-    /// it; ignored when joining by id.
+    /// and the relay serves lookup only. `relay` needs `relay` in `lookup`,
+    /// and a list without `udp` needs `relay` or `nostr` in it. Part of the
+    /// mesh id, so a joiner inherits it; ignored when joining by id.
     pub transport: Vec<Transport>,
     /// Which relay: an ordered ladder (first preferred) replacing the
     /// default. Needs `relay` in `lookup`. Part of the mesh id — with
@@ -56,6 +59,10 @@ pub struct Opts {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
+    /// Which Nostr relays, replacing the pinned public list. Needs `nostr`
+    /// in `lookup` (a topic always has it). Part of the mesh id, like
+    /// `relay_urls`. Empty ⇒ the pinned list. Ignored when joining by id.
+    pub nostr_urls: Vec<String>,
     /// Active-view cap; `0` takes the engine default.
     pub max_peers: usize,
 }
@@ -70,6 +77,14 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
         .parse::<RelayLadder>()
         .map(Some)
         .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// The Nostr relays these options name, or `None` for the pinned list.
+fn nostr_list(urls: &[String]) -> Result<Option<Vec<Url>>> {
+    if urls.is_empty() {
+        return Ok(None);
+    }
+    parse_nostr_urls(&urls.join(",")).map(Some)
 }
 
 /// One live membership's moving parts.
@@ -123,7 +138,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
         };
         anyhow::ensure!(
             !loopback,
-            "a browser peer cannot reach a loopback mesh: name a lookup (`relay`), or a topic / mesh id"
+            "a browser peer cannot reach a loopback mesh: name a lookup (`relay` or `nostr`), or a topic / mesh id"
         );
     }
 
@@ -238,15 +253,16 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
         (None, Some(string)) => {
             // Note what this ignores: `lookup`. `TopicParams::resolve` always
             // derives through the all-on preset, so a topic mesh is always
-            // mDNS + DHT + the relay. That is what lets a tab and a terminal
+            // mDNS + DHT + the relay + Nostr (`LookupOpts::public_preset`). That is what lets a tab and a terminal
             // derive the same id from the same string — the lookups are mixed
             // into the derivation, so two reaches over one string are two
-            // different meshes. `relay_urls` and `transport` are the two
-            // choices that *do* change the id, and every member must pass the
+            // different meshes. `relay_urls`, `nostr_urls` and `transport` are
+            // the choices that *do* change the id, and every member must pass the
             // same values.
             let config = MeshConfig::resolve(
-                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
+                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Nostr],
                 relay_ladder(&opts.relay_urls)?,
+                nostr_list(&opts.nostr_urls)?,
                 &opts.transport,
             )?;
             let mesh =
@@ -263,6 +279,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             let config = MeshConfig::resolve(
                 &opts.lookup,
                 relay_ladder(&opts.relay_urls)?,
+                nostr_list(&opts.nostr_urls)?,
                 &opts.transport,
             )?;
             let name = MeshName::new(
@@ -288,6 +305,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::mesh::NostrChoice;
     use crate::protocol::{LookupOpts, RelayChoice};
     use crate::runtime::derive_topic_mesh_with;
 
@@ -298,7 +316,7 @@ mod tests {
     }
 
     fn all_lookups() -> Vec<Lookup> {
-        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Nostr]
     }
 
     fn create_config(opts: &Opts) -> MeshConfig {
@@ -450,6 +468,52 @@ mod tests {
         };
         assert!(!mesh.transport().relay_transport);
         assert!(!mesh.is_loopback(), "the relay lookup is on");
+    }
+
+    /// `nostrUrls` swaps the pinned Nostr relays for the caller's, on a
+    /// create and on a topic. Like `relayUrls` it needs its lookup: a topic
+    /// always has Nostr, a create must name it.
+    #[test]
+    fn nostr_urls_replace_the_pinned_relays() {
+        let parse = |json: &str| serde_json::from_str::<Opts>(json).expect("the shape parses");
+        let config = create_config(&parse(
+            r#"{"lookup":["nostr"],"nostrUrls":["wss://relay.example/"]}"#,
+        ));
+        let NostrChoice::Custom(urls) = &config.lookups.nostr else {
+            panic!("nostrUrls must resolve to a custom list")
+        };
+        assert_eq!(urls.len(), 1);
+        assert!(
+            resolve_kind(&parse(r#"{"nostrUrls":["wss://relay.example/"]}"#), None).is_err(),
+            "a Nostr list without the Nostr lookup is an error, not an implied lookup"
+        );
+        assert!(
+            resolve_kind(
+                &parse(r#"{"lookup":["nostr"],"nostrUrls":["https://relay.example/"]}"#),
+                None
+            )
+            .is_err(),
+            "a Nostr relay is a websocket"
+        );
+
+        let (topic, _) = resolve_kind(
+            &parse(r#"{"topic":"standup","nostrUrls":["wss://relay.example/"]}"#),
+            None,
+        )
+        .expect("a topic with its own Nostr relays resolves");
+        let SetupKind::Topic { mesh, .. } = topic else {
+            panic!("a topic selector must resolve to SetupKind::Topic")
+        };
+        let (plain, _) =
+            resolve_kind(&parse(r#"{"topic":"standup"}"#), None).expect("a plain topic resolves");
+        let SetupKind::Topic { mesh: plain, .. } = plain else {
+            panic!("a topic selector must resolve to SetupKind::Topic")
+        };
+        assert_ne!(
+            plain.to_string(),
+            mesh.to_string(),
+            "the Nostr list is mixed into the id"
+        );
     }
 
     #[test]

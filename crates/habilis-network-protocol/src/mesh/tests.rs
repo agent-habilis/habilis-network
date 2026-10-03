@@ -1,4 +1,6 @@
-use super::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy};
+use super::{
+    LookupOpts, Mesh, MeshConfig, MeshName, NostrChoice, RelayChoice, SEED_LEN, TransportPolicy,
+};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
 
 fn dummy_seed() -> [u8; SEED_LEN] {
@@ -18,6 +20,7 @@ fn custom_config() -> MeshConfig {
                 "https://a.example".parse().unwrap(),
                 "https://b.example".parse().unwrap(),
             ]),
+            nostr: NostrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
@@ -71,6 +74,7 @@ fn ladder_config(count: usize) -> MeshConfig {
             mdns: false,
             dht: false,
             relay_lookup: RelayChoice::Custom(ladder),
+            nostr: NostrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
@@ -105,6 +109,7 @@ fn validate_rejects_a_relay_url_over_the_wire_ceiling() {
             relay_lookup: RelayChoice::Custom(vec![
                 format!("https://{host}.example").parse().unwrap(),
             ]),
+            nostr: NostrChoice::Disabled,
         },
         password: None,
         issuer_pubkey: None,
@@ -218,15 +223,18 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     // That split is the point: this pair is what proved the de-branding
     // reached the key-derivation transcript (topic moved) without leaking
     // into the id encoding (id held).
+    //
+    // Both moved on purpose when the Nostr lookup joined the all-on preset:
+    // its lookup byte went from 0b0111 to 0b1_0111.
     let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset());
     assert_eq!(
         mesh.to_string(),
-        "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1"
+        "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2QVzfxJ7"
     );
     let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
     assert_eq!(
         format!("{topic:?}"),
-        "TopicId(05fe8948f1b086f29f24c6b1b2092f86209d290956e25f84451fadd688aef8c1)"
+        "TopicId(2e6719abdf70a750e6f3a08380a0dc0c983be6cb8c7d575886ef95ff48b3e632)"
     );
 }
 

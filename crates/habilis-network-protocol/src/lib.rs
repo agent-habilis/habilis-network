@@ -23,6 +23,7 @@ pub mod invite;
 pub mod mesh;
 pub mod message;
 pub mod nickname;
+pub mod nostr;
 pub mod peer_addr;
 pub mod reassembly;
 /// A join token: a literal mesh id, or a creator-minted invite ticket.

@@ -276,10 +276,15 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
             )
         })
         .clone();
-    let mut addr_json = crate::protocol::peer_addr::endpoint_addr_to_json(&our_addr);
+    let mut addr_json = crate::protocol::peer_addr::peer_info_to_json(
+        &our_addr,
+        !state.local_udp_transport,
+        ctx.endpoint.secret_key(),
+        ctx.mesh.as_str().as_bytes(),
+    );
     addr_json["proof"] = serde_json::Value::String(proof);
     let addr_data = serde_json::to_string(&addr_json)
-        .expect("endpoint_addr_to_json produces a Value that always serializes");
+        .expect("peer_info_to_json produces a Value that always serializes");
     let addr_body =
         MessageBody::new(addr_data).expect("endpoint address JSON has no control characters");
     broadcast_msg(

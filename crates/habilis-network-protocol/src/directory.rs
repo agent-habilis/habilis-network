@@ -319,6 +319,25 @@ mod tests {
         );
     }
 
+    /// A Nostr-only mesh can advertise (it is reachable), and it advertises
+    /// into its own directory: a discoverer meets it only by naming Nostr too.
+    #[test]
+    fn a_nostr_only_mesh_advertises_into_its_own_directory() {
+        use crate::mesh::{DirectorySelection, NostrChoice, validate_advertise};
+        let nostr_only = LookupOpts {
+            nostr: NostrChoice::Pinned,
+            ..LookupOpts::loopback()
+        };
+        assert!(validate_advertise(&DirectorySelection::Default, &nostr_only).is_ok());
+        let name = directory("global");
+        let advertiser = directory_mesh(&name, nostr_only.clone()).to_string();
+        assert_eq!(advertiser, directory_mesh(&name, nostr_only).to_string());
+        assert_ne!(
+            advertiser,
+            directory_mesh(&name, LookupOpts::public_preset()).to_string()
+        );
+    }
+
     #[test]
     fn ad_round_trips_through_body() {
         // Build a real advertised id so `observe` can decode it.

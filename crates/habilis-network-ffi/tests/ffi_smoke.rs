@@ -37,6 +37,7 @@ fn create_opts(nick: &CStr) -> HabilisNetworkOpts {
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
         max_peers: 0,
+        nostr_urls: std::ptr::null(),
     }
 }
 
@@ -110,6 +111,26 @@ fn a_bad_mesh_id_fails_with_a_reason() {
         !error.is_empty(),
         "the error slot holds an empty string rather than a reason"
     );
+}
+
+/// `nostr_urls` reaches the mesh config: a relay that is not a websocket is
+/// refused before anything binds.
+#[test]
+fn a_bad_nostr_relay_is_refused() {
+    let nick = CString::new("nostr").expect("no interior NUL");
+    let mut opts = create_opts(&nick);
+    opts.lookup = c"nostr".as_ptr();
+    opts.nostr_urls = c"https://relay.example/".as_ptr();
+    let handle = open(&opts);
+    if !handle.is_null() {
+        // SAFETY: the handle came from `habilis_network_mesh_open` and is not used after this.
+        unsafe {
+            habilis_network_mesh_close(handle);
+        }
+    }
+    assert!(handle.is_null(), "an https Nostr relay must be refused");
+    let reason = last_error().expect("a refusal sets the error slot");
+    assert!(reason.contains("ws"), "{reason}");
 }
 
 #[test]
@@ -495,6 +516,7 @@ fn create_opts_for_join(id: &CStr, nick: &CStr) -> HabilisNetworkOpts {
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
         max_peers: 0,
+        nostr_urls: std::ptr::null(),
     }
 }
 

@@ -73,6 +73,7 @@ impl StreamNode {
         let config = MeshConfig::resolve(
             &opts.lookup,
             relay_ladder(&opts.relay_urls)?,
+            None,
             &opts.transport,
         )?;
         let transports = TransportOpts::default().within(&config.transport);
@@ -243,7 +244,8 @@ mod tests {
     #[test]
     fn a_browser_refuses_a_list_with_no_path_it_can_run() {
         let refused = |transport: &[Transport]| {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, transport).expect("valid");
+            let config =
+                MeshConfig::resolve(&[Lookup::Relay], None, None, transport).expect("valid");
             let transports = TransportOpts::default().within(&config.transport);
             refuse_in_browser(&config.lookups, config.transport, transports).is_err()
         };
@@ -259,9 +261,13 @@ mod tests {
     // other way to reach a producer.
     #[test]
     fn a_browser_refuses_a_stream_with_no_relay_lookup() {
-        let config =
-            MeshConfig::resolve(&[Lookup::Dht], None, &[Transport::Udp, Transport::WebRtc])
-                .expect("valid");
+        let config = MeshConfig::resolve(
+            &[Lookup::Dht],
+            None,
+            None,
+            &[Transport::Udp, Transport::WebRtc],
+        )
+        .expect("valid");
         let transports = TransportOpts::default().within(&config.transport);
         let error = refuse_in_browser(&config.lookups, config.transport, transports)
             .expect_err("no path to signal on");

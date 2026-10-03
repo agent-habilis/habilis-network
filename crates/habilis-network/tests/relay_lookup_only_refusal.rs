@@ -116,6 +116,7 @@ async fn spawn(
                 mdns: false,
                 dht: false,
                 relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
+                nostr: habilis_network::protocol::mesh::NostrChoice::Disabled,
             },
             password: None,
             issuer_pubkey: None,

@@ -142,6 +142,9 @@ async fn wait_for_log(needle: &str, deadline: Duration) -> bool {
 
 fn dump_log_tail() {
     let logs = log_buffer().lock().expect("no poison").clone();
+    if let Ok(path) = std::env::var("HABILIS_NETWORK_TEST_LOG") {
+        let _ = std::fs::write(path, &logs);
+    }
     let tail: Vec<&str> = logs.lines().rev().take(60).collect();
     eprintln!("--- engine log tail ---");
     for line in tail.into_iter().rev() {
@@ -163,6 +166,7 @@ async fn spawn_with(
                 mdns: false,
                 dht: false,
                 relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
+                nostr: habilis_network::protocol::mesh::NostrChoice::Disabled,
             },
             password: None,
             issuer_pubkey: None,
@@ -290,5 +294,68 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
     assert!(
         alice_ok && bob_ok,
         "a webrtc-only peer must link through the beacon lane (alice saw bob: {alice_ok}, bob saw alice: {bob_ok})"
+    );
+}
+
+/// The same lane with the roles swapped: the peer with no IP transports
+/// starts first, so it hosts the beacon itself, and its own gossip link to
+/// that co-hosted beacon must ride the data channel. The e2e cell
+/// `lookup-only / native-webrtc / id` failed this way: the graft dialed
+/// while the signalling connection was still closing, reused its relay
+/// path, and the beacon's accept gate refused it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_webrtc_only_beacon_host_links_its_own_rendezvous() {
+    init_logging();
+    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+    let topic = format!("scratch-host-{}", rand::random::<u64>());
+    let alice_saw = Arc::new(Joined::default());
+    let bob_saw = Arc::new(Joined::default());
+    let alice = spawn_with(
+        &topic,
+        "alice",
+        &relay,
+        Arc::clone(&alice_saw),
+        TransportOpts {
+            udp: false,
+            relay: true,
+            webrtc: true,
+            multihop: false,
+        },
+    )
+    .await;
+    let linked_own_beacon = wait_for_log("is_rendezvous=true", Duration::from_secs(45)).await;
+    let bob = spawn_with(
+        &topic,
+        "bob",
+        &relay,
+        Arc::clone(&bob_saw),
+        TransportOpts {
+            udp: true,
+            relay: true,
+            webrtc: true,
+            multihop: false,
+        },
+    )
+    .await;
+
+    let deadline = Duration::from_secs(75);
+    let alice_nick = Nickname::new("alice").expect("valid");
+    let bob_nick = Nickname::new("bob").expect("valid");
+    let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
+    let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
+    let _ = alice.leave().await;
+    let _ = bob.leave().await;
+    if !(linked_own_beacon && alice_ok && bob_ok) {
+        dump_log_tail();
+    }
+    assert!(
+        linked_own_beacon,
+        "a webrtc-only peer must link to the beacon it hosts over the data channel"
+    );
+    assert!(
+        alice_ok && bob_ok,
+        "the pair must link (alice saw bob: {alice_ok}, bob saw alice: {bob_ok})"
     );
 }

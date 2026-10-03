@@ -17,6 +17,11 @@ published to a registry; pin it with
   the pid as `owner_pid`, read back as `SessionEntry::owner_pid`.
   `runtime::validate_owner_pid` runs the same checks, for a launcher that
   refuses a bad pid before it re-spawns the daemon.
+- The `nostr` lookup: members find each other over public Nostr relays and
+  carry the WebRTC offer and answer over them, as Trystero does. It runs on
+  native and in the browser, so a mesh whose only lookup is `nostr` forms
+  with no iroh relay. `habilis-network-nostr` is the relay client. A custom relay
+  list is `nostr_urls` / `nostrUrls` / `--nostr-url`; it is part of the id.
 - Native pairs race WebRTC against UDP on a `udp,webrtc` mesh. A session
   that attaches after UDP won is detached, and the far side drops its half
   at once. A path watcher races the pair again when UDP is lost, and detaches
@@ -76,6 +81,10 @@ published to a registry; pin it with
   domain and the chunk-store root context take the new name. A habilis-network
   peer does not interoperate with a fofoca peer, and chunk roots differ from
   those of a fofoca store.
+- **Breaking:** every topic id and directory id changed. A topic mesh now
+  uses Nostr too (`LookupOpts::public_preset`), and the lookups are mixed
+  into the id. The id format gains two lookup flag bits, and a decoder
+  refuses a lookup bit it does not know.
 - **Breaking (C ABI):** the mesh calls are `habilis_network_mesh_*`, and a mesh sends
   and receives whole text messages with `habilis_network_msg_send` and
   `habilis_network_msg_recv` into an 80-byte `habilis_network_msg`. A message too big for the
@@ -92,10 +101,11 @@ published to a registry; pin it with
   `{ from, text, directed }`: `bytes` and `eof` are gone, and `text` is
   always set. The backend seam's `BackendFrame` is `BackendMsg`, and
   `BackendSink.frame` is `BackendSink.msg`.
-- **Breaking (C ABI):** `habilis_network_opts` is now 64 bytes: the five discovery
+- **Breaking (C ABI):** `habilis_network_opts` is now 72 bytes: the five discovery
   ints (`is_public`, `mdns`, `dht`, `relay_lookup`, `relay_transport`) are
   replaced by two comma-list strings, `lookup` and `transport`, ahead of
-  `relay_urls`. A consumer
+  `relay_urls`. `nostr_urls` comes last, at offset 64, after `max_peers`.
+  A consumer
   compiled against the old header keeps passing the old struct and the
   engine reads it wrong — there is no version field to catch that, so relink
   against the new `include/habilis_network.h`. The layout is pinned by a compile-time
@@ -106,12 +116,13 @@ published to a registry; pin it with
   'relay']`, any subset with `udp` or `webrtc`; `['udp', 'webrtc']` when
   empty) is what payload may ride. `relay_urls` is which relay.
   The `public`, `mdns`, `dht`, `relay_lookup` and `relay_transport` booleans
-  are gone; `public: true` is spelled `lookup: ['mdns', 'dht', 'relay']`, and
+  are gone; `public: true` is spelled `lookup: ['mdns', 'dht', 'relay', 'nostr']`, and
   naming no lookup is a loopback mesh. A ladder no longer implies the relay
   lookup: both it and `'relay'` in `transport` need `'relay'` in `lookup`,
   and a config that breaks either rule is rejected before any network. A
-  list without `'udp'` (a WebRTC-only mesh) needs `'relay'` in `lookup` as
-  well, because the relay is the only path its WebRTC offers can take. The
+  list without `'udp'` (a WebRTC-only mesh) needs `'relay'` or `'nostr'` in
+  `lookup` as well, because they are the only paths its WebRTC offers can
+  take. The
   mesh id decides every path: there are no per-node path switches, and a
   browser refuses a mesh whose list has neither `'webrtc'` nor `'relay'`.
   In the wasm JSON every old field is an error,

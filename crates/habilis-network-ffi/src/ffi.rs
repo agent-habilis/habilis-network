@@ -41,7 +41,7 @@ pub struct HabilisNetworkOpts {
     pub topic: *const c_char,
     pub nick: *const c_char,
     pub name: *const c_char,
-    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
+    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`, `nostr`; NULL ⇒ none
     /// (a loopback mesh on create).
     pub lookup: *const c_char,
     /// Comma-separated transports, any of `udp`, `webrtc`, `relay`; NULL ⇒
@@ -50,6 +50,8 @@ pub struct HabilisNetworkOpts {
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
     pub relay_urls: *const c_char,
     pub max_peers: usize,
+    /// Comma-separated custom Nostr relays; NULL ⇒ the pinned public list.
+    pub nostr_urls: *const c_char,
 }
 
 /// The layout `packages/habilis-network-ffi/src/dlopen/opts-struct.ts` hand-encodes,
@@ -66,7 +68,7 @@ const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
     assert!(
-        size_of::<HabilisNetworkOpts>() == 64,
+        size_of::<HabilisNetworkOpts>() == 72,
         "opts-struct.ts OPTS_BYTES"
     );
     assert!(align_of::<HabilisNetworkOpts>() == 8);
@@ -78,6 +80,7 @@ const _: () = {
     assert!(offset_of!(HabilisNetworkOpts, transport) == 40);
     assert!(offset_of!(HabilisNetworkOpts, relay_urls) == 48);
     assert!(offset_of!(HabilisNetworkOpts, max_peers) == 56);
+    assert!(offset_of!(HabilisNetworkOpts, nostr_urls) == 64);
 };
 
 /// One received message's metadata, mirroring `habilis_network_msg` in the header. The
@@ -302,23 +305,25 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             return std::ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the header contract, for each
-        // of the three comma lists.
+        // of the four comma lists.
         let lists = unsafe {
             (
                 optional_str(opts.lookup),
                 optional_str(opts.transport),
                 optional_str(opts.relay_urls),
+                optional_str(opts.nostr_urls),
             )
         };
-        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+        let (Ok(lookup), Ok(transport), Ok(relay_urls), Ok(nostr_urls)) = lists else {
             return std::ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
-        let relay_urls: Vec<String> = relay_urls
-            .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-            .unwrap_or_default();
+        let url_list = |urls: Option<&str>| -> Vec<String> {
+            urls.map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
+                .unwrap_or_default()
+        };
         let parsed = Opts {
             mesh: mesh.map(str::to_owned),
             topic: topic.map(str::to_owned),
@@ -326,7 +331,8 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             name: name.map(str::to_owned),
             lookup,
             transport,
-            relay_urls,
+            relay_urls: url_list(relay_urls),
+            nostr_urls: url_list(nostr_urls),
             max_peers: opts.max_peers,
         };
         match Mesh::open(&parsed) {

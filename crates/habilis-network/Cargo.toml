@@ -151,7 +151,11 @@ iroh-mainline-address-lookup = { workspace = true, optional = true }
 # handshake tokens). default-features off: no `password-hash` string format —
 # we only need the raw `hash_password_into` KDF.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
-futures-util = "0.3"
+futures-util.workspace = true
+# The Nostr lookup and JSEP carrier, on both targets: a browser's WebSocket
+# natively, tokio-websockets on a host.
+habilis-network-nostr = { path = "../habilis-network-nostr" }
+url.workspace = true
 # End-to-end sealing of directed frames: a NaCl-style sealed box (ephemeral
 # X25519 ECDH → ChaCha20-Poly1305) so only the addressed recipient can read a
 # directed body. The AEAD key is derived from the ECDH secret via the in-tree
@@ -199,12 +203,14 @@ iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh"
 habilis-network-iroh-webrtc-transport = { path = "../habilis-network-iroh-webrtc-transport", features = ["web"] }
 iroh.workspace = true
 iroh-gossip.workspace = true
+web-sys = { workspace = true, features = ["Document", "VisibilityState", "Window"] }
 
 # Scoped to non-wasm on purpose. The workspace `tokio` dev-dep turns on `net`,
 # which drags in `mio` — and dev-dependencies are resolved for test targets too,
 # so leaving these unscoped makes `cargo check --target wasm32-unknown-unknown`
 # fail before it reaches any code of ours.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+habilis-network-nostr = { path = "../habilis-network-nostr", features = ["test-relay"] }
 proptest.workspace = true
 insta.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
