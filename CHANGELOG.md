@@ -72,16 +72,16 @@ published to a registry; pin it with
   own, not iroh's publisher: it never publishes a record with no relay
   address, so the last good record stays, every request has a 10 s deadline,
   a failed publish backs off up to 60 s, and each relay has its own task, so
-  one relay never stalls another. In the C ABI an empty `relay_urls` or `pkarr_urls` string
-  now takes the default, the same as NULL. `--pkarr-url` on the bun-ffi chat
-  (`--create` only) and `?pkarr` on the stream page. The terminal chat takes
-  `--lookup` and `--pkarr-url` for a mesh it creates, and the `mesh_peer`
-  example takes `MESH_PKARR_URLS`.
+  one relay never stalls another. In the C ABI an empty `relay_urls` or
+  `pkarr_urls` string now takes the default, the same as NULL. `--pkarr-url`
+  on the bun-ffi chat (`--create` only) and `?pkarr` on the stream page. The
+  terminal chat takes `--lookup` and `--pkarr-url` for a mesh it creates, and
+  the `mesh_peer` example takes `MESH_PKARR_URLS`.
 - `cargo task e2e --suite pkarr`: the pkarr lookup across native-native,
   native-web, web-native and web-web, over a local relay and a local pkarr
-  relay (`habilis_network::net::test_pkarr`). A cell passes only if the pair links,
-  a broadcast crosses both ways, and every member published its record, and
-  each stored record names the home relay and no direct address. The local
+  relay (`habilis_network::net::test_pkarr`). A cell passes only if the pair
+  links, a broadcast crosses both ways, every member published its record,
+  and each stored record names the home relay and no direct address. The local
   pkarr relay is as strict as the real ones: it verifies the signature,
   answers 409 to a write that is not newer, answers the CORS preflight, and
   serves under a path prefix. The suite runs in CI.
