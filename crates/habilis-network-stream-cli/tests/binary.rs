@@ -179,7 +179,9 @@ async fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
 /// pkarr relay the flag names, and to no default one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_producer_publishes_to_the_pkarr_relay_it_is_given() {
-    let (relay, _relay) = habilis_network::net::test_relay::spawn_plain().await.expect("relay");
+    let (relay, _relay) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("relay");
     let (pkarr_url, pkarr) = habilis_network::net::test_pkarr::spawn_plain()
         .await
         .expect("pkarr relay");

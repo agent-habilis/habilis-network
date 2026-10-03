@@ -263,7 +263,9 @@ mod tests {
         let config = opts.config().expect("valid");
         assert_eq!(
             config.lookups.pkarr,
-            habilis_network::protocol::PkarrChoice::Custom(vec!["https://pkarr.example/".parse().unwrap()])
+            habilis_network::protocol::PkarrChoice::Custom(vec![
+                "https://pkarr.example/".parse().unwrap()
+            ])
         );
     }
 
