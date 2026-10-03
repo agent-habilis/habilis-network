@@ -44,7 +44,7 @@ use crate::protocol::{PkarrChoice, Url};
 /// ladder. A change here splits the members of one pinned mesh between two
 /// lists until all of them upgrade, with no error, so keep an old entry until
 /// no live build uses it.
-const DEFAULT_PKARR_URLS: [&str; 3] = [
+pub const DEFAULT_PKARR_URLS: [&str; 3] = [
     "https://dns.iroh.link/pkarr",
     "https://pkarr.pubky.app/",
     "https://pkarr.pubky.org/",
@@ -78,7 +78,7 @@ impl Timing {
         request: Duration::from_secs(10),
         republish: DEFAULT_REPUBLISH_INTERVAL,
         retry_step: Duration::from_secs(1),
-        retry_cap: Duration::from_secs(60),
+        retry_cap: Duration::from_mins(1),
     };
 
     /// The wait before the next try, after `failed` failures in a row.
@@ -209,11 +209,10 @@ async fn publish_loop(
                 outcome => {
                     failed = failed.saturating_add(1);
                     let wait = timing.backoff(failed);
-                    match outcome {
-                        Ok(Err(err)) => {
-                            warn!(error = %format!("{err:#}"), ?wait, failed, "pkarr publish failed");
-                        }
-                        _ => warn!(?wait, failed, "pkarr publish timed out"),
+                    if let Ok(Err(err)) = outcome {
+                        warn!(error = %format!("{err:#}"), ?wait, failed, "pkarr publish failed");
+                    } else {
+                        warn!(?wait, failed, "pkarr publish timed out");
                     }
                     wait
                 }
@@ -276,6 +275,105 @@ pub(super) fn wire(mut builder: Builder, choice: &PkarrChoice) -> Builder {
     builder
 }
 
+/// A throwaway record for probing a pkarr relay: a fresh key, so no relay holds
+/// an older record of it, and the signed payload a `PUT` carries.
+#[derive(Debug, Clone)]
+pub struct ProbeRecord {
+    /// The key as the relay path spells it (z-base-32).
+    pub key: String,
+    /// The signature, the timestamp and the DNS packet.
+    pub payload: Vec<u8>,
+}
+
+/// A fresh [`ProbeRecord`]. It names a relay that does not exist, so a peer
+/// that resolves it can reach nothing.
+#[must_use]
+pub fn probe_record() -> ProbeRecord {
+    let secret = SecretKey::from_bytes(&rand::random::<[u8; 32]>());
+    let info = probe_info(secret.public());
+    ProbeRecord {
+        key: secret.public().to_z32(),
+        payload: sign_probe(&info, &secret),
+    }
+}
+
+/// The probe record of `id`. A fixed record, so building it cannot fail.
+fn probe_info(id: EndpointId) -> EndpointInfo {
+    let relay = "https://pkarr-probe.invalid./"
+        .parse()
+        .expect("a fixed relay URL");
+    let data = EndpointData::new(vec![iroh::TransportAddr::Relay(relay)]);
+    EndpointInfo::from_parts(id, data)
+}
+
+fn sign_probe(info: &EndpointInfo, secret: &SecretKey) -> Vec<u8> {
+    info.to_pkarr_signed_packet(secret, DEFAULT_PKARR_TTL)
+        .expect("the probe record encodes")
+        .to_relay_payload()
+}
+
+/// What the lookup's own client did against one relay.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct Probe {
+    /// A signed record went out and the relay took it.
+    pub published: Result<(), String>,
+    /// The same record came back, signed by the same key.
+    pub resolved: Result<(), String>,
+}
+
+/// Publish a throwaway record to `url` and resolve it back, through the same
+/// client and the same deadline as the lookup. Meant for a live check of a
+/// public relay; it reaches the network.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn probe(url: &Url) -> Probe {
+    let endpoint = match Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            let failed = Err(format!("no endpoint to probe from: {error:#}"));
+            return Probe {
+                published: failed.clone(),
+                resolved: failed,
+            };
+        }
+    };
+    let relay = match endpoint.dns_resolver() {
+        Ok(dns) => HttpRelay {
+            client: PkarrRelayClient::new(url.clone(), endpoint.tls_config().clone(), dns.clone()),
+            secret_key: SecretKey::from_bytes(&rand::random::<[u8; 32]>()),
+        },
+        Err(error) => {
+            let failed = Err(format!("no resolver to probe with: {error:#}"));
+            return Probe {
+                published: failed.clone(),
+                resolved: failed,
+            };
+        }
+    };
+    let id = relay.secret_key.public();
+    let info = probe_info(id);
+    let published = match time::timeout(Timing::DEFAULT.request, relay.publish(&info)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("{error:#}")),
+        Err(_) => Err("no answer before the deadline".to_owned()),
+    };
+    let resolved = match time::timeout(Timing::DEFAULT.request, relay.resolve(id)).await {
+        Ok(Ok(found)) if found.endpoint_id == id && found.data == info.data => Ok(()),
+        Ok(Ok(_)) => Err("the relay returned a different record".to_owned()),
+        Ok(Err(error)) => Err(format!("{error:#}")),
+        Err(_) => Err("no answer before the deadline".to_owned()),
+    };
+    endpoint.close().await;
+    Probe {
+        published,
+        resolved,
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::sync::Mutex;
@@ -331,7 +429,6 @@ mod tests {
         async fn publish(&self, info: &EndpointInfo) -> Result<(), LookupError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             match self.mode {
-                Mode::Accept => {}
                 Mode::Refuse => {
                     return Err(LookupError::from_err_any(
                         "test",
@@ -339,7 +436,7 @@ mod tests {
                     ));
                 }
                 Mode::HangFirst if call == 0 => std::future::pending().await,
-                Mode::HangFirst => {}
+                Mode::Accept | Mode::HangFirst => {}
             }
             self.stored.lock().unwrap().push(info.clone());
             Ok(())

@@ -287,6 +287,9 @@ pub mod test_pkarr {
 
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
+pub use pkarr::{DEFAULT_PKARR_URLS, ProbeRecord, probe_record};
+#[cfg(not(target_arch = "wasm32"))]
+pub use pkarr::{Probe as PkarrProbe, probe as probe_pkarr};
 pub(crate) use relay::RungRefresh;
 pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 pub(crate) use relay::{
