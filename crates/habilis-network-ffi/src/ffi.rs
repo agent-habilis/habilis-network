@@ -984,6 +984,24 @@ pub extern "C" fn habilis_network_last_error() -> *const c_char {
     })
 }
 
+/// The version of this library's C ABI: the layout of every struct it takes
+/// and the signature of every call. Bump it on any change that would make a
+/// caller built against the old header misbehave, which is a change to a
+/// struct field or to a function's arguments or return. A caller compares it
+/// with `HABILIS_NETWORK_ABI_VERSION` in the header it was built against, and
+/// refuses a library that disagrees: a struct that gained a field reads past
+/// the end of the old one, with no error. The header's macro and this number
+/// are held equal by a test.
+pub const ABI_VERSION: u32 = 1;
+
+/// The C ABI version of this library; see [`ABI_VERSION`]. A caller compares
+/// it with the `HABILIS_NETWORK_ABI_VERSION` macro of its header before any
+/// other call.
+#[unsafe(no_mangle)]
+pub extern "C" fn habilis_network_abi_version() -> u32 {
+    ABI_VERSION
+}
+
 /// The engine's build version stamp. Borrowed for the process's lifetime.
 #[unsafe(no_mangle)]
 pub extern "C" fn habilis_network_version() -> *const c_char {

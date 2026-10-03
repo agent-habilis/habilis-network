@@ -8,6 +8,12 @@ loop runs inside the caller's process. No daemon, no socket.
 the counterpart of [`src/ffi.rs`](src/ffi.rs). If you change one, change
 the other.
 
+- Check the ABI version first. `HABILIS_NETWORK_ABI_VERSION` in the header and
+  `habilis_network_abi_version()` in the library must be equal; refuse to go on if they
+  are not, because a struct that gained a field is read at the wrong offsets with no
+  error. It is bumped on every change to a struct or to a signature, and a test holds the
+  macro equal to the exported value. The Bun, Deno and Node loader in
+  `packages/habilis-network-ffi` makes this check right after it opens the library.
 - A failed call returns NULL or `-1`. `habilis_network_last_error()` says why. The
   error slot is thread-local.
 - Buffers are sized by asking: pass a NULL buffer to get the length, then

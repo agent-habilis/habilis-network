@@ -19,6 +19,8 @@ function ffiType(type: CType): FFIType {
       return FFIType.i64
     case 'usize':
       return FFIType.u64
+    case 'u32':
+      return FFIType.u32
     case 'ptr':
     case 'buf':
     case 'cstr':
@@ -33,6 +35,27 @@ function terminated(value: string): Uint8Array {
   const bytes = new Uint8Array(text.byteLength + 1)
   bytes.set(text, 0)
   return bytes
+}
+
+/**
+ * `habilis_network_abi_version()` of the library at `path`, opened with that
+ * one symbol and closed again, or the error that stopped it: the library has
+ * no such symbol (an older build), or is not a library at all.
+ */
+export function probeAbiVersionWithBun(path: string): number | Error {
+  let library: ReturnType<typeof dlopen>
+  try {
+    library = dlopen(path, {
+      habilis_network_abi_version: { args: [], returns: ffiType(ABI.habilis_network_abi_version.returns) },
+    })
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error))
+  }
+  try {
+    return Number((library.symbols['habilis_network_abi_version'] as () => unknown)())
+  } finally {
+    library.close()
+  }
 }
 
 export function loadWithBun(path: string): NativeLibrary {
@@ -58,6 +81,7 @@ export function loadWithBun(path: string): NativeLibrary {
       const type = signature.args[index] as CType | undefined
       switch (type) {
         case 'i32':
+        case 'u32':
           return arg as number
         case 'isize':
         case 'usize':
@@ -83,6 +107,7 @@ export function loadWithBun(path: string): NativeLibrary {
     holds.length = 0
     switch (signature.returns) {
       case 'i32':
+      case 'u32':
         return Number(result)
       case 'isize':
       case 'usize':
