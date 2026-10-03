@@ -13,13 +13,14 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::TaskOutcome;
-use crate::util::page::wait_ready;
+use crate::util::page::{call_page_within, wait_ready};
 use crate::util::{output, repo_root, wait_for};
 
 use habilis_network::iroh::{EndpointId, RelayUrl};
 use habilis_network::membership;
 use habilis_network::net::test_pkarr::{self, TestPkarr};
-use habilis_network::protocol::{Lookup, Mesh};
+use habilis_network::net::{DEFAULT_PKARR_URLS, probe_pkarr, probe_record};
+use habilis_network::protocol::{Lookup, Mesh, Url};
 
 use super::mesh::{
     BunServer, Native, drain_logs, init_logging, launch_page, logs_contain, logs_snapshot,
@@ -371,6 +372,117 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     }
     if failures > 0 {
         return Err(format!("{failures} pkarr cell(s) failed").into());
+    }
+    Ok(())
+}
+
+/// What one probe of a public relay found, per side.
+struct LiveRow {
+    url: String,
+    native: Result<(), String>,
+    web: Result<(), String>,
+}
+
+/// The verdict of the page's probe: `{put, get, same}` as JSON, where `put`
+/// and `get` are an HTTP status or an error, and `same` says the record read
+/// back is the one put. A browser reaches the relay only if the relay's CORS
+/// answers allow it, so a pass here is the CORS check too.
+fn judge_web(reply: &str) -> Result<(), String> {
+    let json: serde_json::Value = serde_json::from_str(reply)
+        .map_err(|error| format!("the page answered something else ({error}): {reply}"))?;
+    let step = |name: &str| json.get(name).and_then(serde_json::Value::as_str);
+    if let Some(error) = json.get("error").and_then(serde_json::Value::as_str) {
+        return Err(format!("{error} (a refused CORS preflight shows up here)"));
+    }
+    if step("put") != Some("204") && step("put") != Some("200") {
+        return Err(format!("PUT answered {}", step("put").unwrap_or("nothing")));
+    }
+    if step("get") != Some("200") {
+        return Err(format!("GET answered {}", step("get").unwrap_or("nothing")));
+    }
+    if json.get("same").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err("the relay returned a different record than the one put".to_owned());
+    }
+    Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
+/// `cargo task e2e --suite pkarr-live`: the three default public pkarr relays,
+/// from a native client and from a browser tab. Each side puts a throwaway
+/// signed record, resolves it back, and the tab's success proves the CORS
+/// answers too. It reaches the internet and so it is never run in CI: a public
+/// relay's outage must not turn a change red.
+pub(super) fn run_live(args: &Args) -> TaskOutcome {
+    let urls: Vec<String> = DEFAULT_PKARR_URLS
+        .iter()
+        .map(|url| (*url).to_owned())
+        .collect();
+    if args.list {
+        for url in &urls {
+            output::verbatim(&format!("{url}  would run (native, web)"));
+        }
+        return Ok(());
+    }
+    build::ensure_bun("the live pkarr suite serves its harness with bun")?;
+    build::build_browser_peer()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("no tokio runtime: {error}"))?;
+    let harness = BunServer::serve(
+        &repo_root().join("packages/habilis-network-wasm"),
+        "harness/serve.ts",
+        "the harness",
+    )
+    .map_err(|Skip(reason)| reason)?;
+    let page = launch_page(args.page_browser()).map_err(|Skip(reason)| reason)?;
+    page.navigate(&format!("{}/?probe=pkarr", harness.url));
+    match wait_ready(&page, Duration::from_secs(30), Duration::from_millis(500)) {
+        Some(Ok(())) => {}
+        Some(Err(error)) => return Err(format!("the probe page failed to open: {error}").into()),
+        None => return Err("the probe page never became ready".into()),
+    }
+
+    let mut rows = Vec::new();
+    for url in urls {
+        output::status("Probing", &url);
+        let parsed: Url = url
+            .parse()
+            .map_err(|error| format!("{url} is not a URL: {error}"))?;
+        let probe = runtime.block_on(probe_pkarr(&parsed));
+        let native = probe.published.and(probe.resolved);
+        let record = probe_record();
+        let call = format!(
+            "pkarr('{url}', '{}', '{}')",
+            record.key,
+            hex(&record.payload)
+        );
+        let web = call_page_within(&page, "harness", &call, Duration::from_secs(45))
+            .and_then(|reply| judge_web(&reply));
+        rows.push(LiveRow { url, native, web });
+    }
+
+    let mut failures = 0usize;
+    for row in &rows {
+        for (side, outcome) in [("native", &row.native), ("web", &row.web)] {
+            match outcome {
+                Ok(()) => output::status("ok", &format!("{side:<6} {}  PUT, resolve", row.url)),
+                Err(reason) => {
+                    failures += 1;
+                    output::failure("FAILED", &format!("{side:<6} {}  {reason}", row.url));
+                }
+            }
+        }
+    }
+    if failures > 0 {
+        return Err(format!("{failures} live pkarr check(s) failed").into());
     }
     Ok(())
 }

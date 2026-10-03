@@ -15,6 +15,8 @@
  *   `webrtc`, or either with `relay` (id-changing, same rule). A tab needs
  *   `webrtc` or `relay`.
  * - `log` — an `EnvFilter` for the engine's tracing, to the console.
+ * - `probe=pkarr` — no mesh: the page only exposes `window.harness.pkarr`, the
+ *   live check of a pkarr relay (`cargo task e2e --suite pkarr-live`).
  *
  * DOM contract (what a driver asserts on):
  * - `#ready` appears once the mesh is open, with `data-id`/`data-nick`/`data-name`.
@@ -39,6 +41,11 @@ declare global {
       send(to: string | null, text: string): Promise<void>
       stateMerge(json: string): Promise<void>
       close(): Promise<void>
+      /** Put a signed record on a pkarr relay and read it back, as the
+       * lookup's own `fetch` does. Resolves to JSON: `{put, get, same}` (an
+       * HTTP status each) or `{error}`. A relay whose CORS answers refuse
+       * this origin fails the `PUT` before any status exists. */
+      pkarr?(url: string, key: string, payloadHex: string): Promise<string>
     }
     harnessLog?: string[]
   }
@@ -113,9 +120,41 @@ function mirrorConsole(): void {
   }
 }
 
+function fromHex(hex: string): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16)
+  }
+  return bytes
+}
+
+async function probePkarr(url: string, key: string, payloadHex: string): Promise<string> {
+  const target = `${url.replace(/\/$/, '')}/${key}`
+  const payload = fromHex(payloadHex)
+  try {
+    const put = await fetch(target, { method: 'PUT', body: payload })
+    const get = await fetch(target)
+    const got = new Uint8Array(await get.arrayBuffer())
+    const same = got.length === payload.length && got.every((byte, index) => byte === payload[index])
+    return JSON.stringify({ put: String(put.status), get: String(get.status), same })
+  } catch (error) {
+    return JSON.stringify({ error: String(error) })
+  }
+}
+
 async function main(): Promise<void> {
   mirrorConsole()
   const params = new URLSearchParams(window.location.search)
+  if (params.get('probe') === 'pkarr') {
+    window.harness = {
+      send: () => Promise.reject(new Error('the pkarr probe page has no mesh')),
+      stateMerge: () => Promise.reject(new Error('the pkarr probe page has no mesh')),
+      close: () => Promise.resolve(),
+      pkarr: probePkarr,
+    }
+    mark('ready', {})
+    return
+  }
   const topic = params.get('topic')
   const id = params.get('mesh')
   const nick = params.get('nick')
