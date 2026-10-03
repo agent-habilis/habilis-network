@@ -72,11 +72,18 @@ published to a registry; pin it with
   own, not iroh's publisher: it never publishes a record with no relay
   address, so the last good record stays, every request has a 10 s deadline,
   a failed publish backs off up to 60 s, and each relay has its own task, so
-  one relay never stalls another. In the C ABI an empty `relay_urls` or
-  `pkarr_urls` string now takes the default, the same as NULL. `--pkarr-url`
+  one relay never stalls another. A change of direct address that leaves the
+  record the same sends no `PUT`, and a relay that stays down logs one warning
+  on the first failure and one on recovery, with the retries at debug. In the
+  C ABI an empty `relay_urls` or `pkarr_urls` string now takes the default,
+  the same as NULL. `--pkarr-url`
   on the bun-ffi chat (`--create` only) and `?pkarr` on the stream page. The
   terminal chat takes `--lookup` and `--pkarr-url` for a mesh it creates, and
-  the `mesh_peer` example takes `MESH_PKARR_URLS`.
+  the `mesh_peer` example takes `MESH_PKARR_URLS`. The stream page names
+  `relay,pkarr` as its lookups, because a tab runs no mDNS or DHT, and
+  `?pkarr=<url>` (repeatable) swaps the relays. The pkarr probe helpers
+  (`probe_pkarr`, `probe_record`, `DEFAULT_PKARR_URLS`) are not public API:
+  they are behind `iroh-test-utils` with the test relay.
 - `cargo task e2e --suite pkarr`: the pkarr lookup across native-native,
   native-web, web-native and web-web, over a local relay and a local pkarr
   relay (`habilis_network::net::test_pkarr`). A cell passes only if the pair
@@ -123,9 +130,10 @@ published to a registry; pin it with
   of a topic or default public mesh now sends its IP address, its endpoint id
   and the ids it resolves to n0's server and two Pubky relays. A topic has no
   opt-out; a create can name its own relays with `pkarr_urls` or leave `pkarr`
-  out of `lookup`. A mesh whose relay rungs are all on this machine does not
-  use the pinned public list, so a mesh that stays local never writes to a
-  public server; a custom list still applies.
+  out of `lookup`. The pinned public list is skipped when the relay choice is
+  a custom, non-empty ladder with every rung on this machine (`127.0.0.0/8`,
+  `::1` or `localhost`), so a mesh that stays local never writes to a public
+  server; a custom pkarr list always applies.
 - **Breaking (wire):** the ALPNs (`habilis-network/stream/1`), the endpoint-proof
   domain and the chunk-store root context take the new name. A habilis-network
   peer does not interoperate with a fofoca peer, and chunk roots differ from

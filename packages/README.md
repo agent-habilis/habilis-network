@@ -56,7 +56,8 @@ it is part of the set a topic uses. Pkarr is on by default, so every member
 of a topic or default public mesh sends its IP address, its endpoint id and
 the ids it resolves to n0's server and two Pubky relays; a topic has no
 opt-out, and a create can leave `'pkarr'` out of `lookup`. A mesh whose relay
-rungs are all on this machine does not use the public list. `pkarrUrls`
+rungs are all on this machine (a custom `relayUrls` ladder on `127.0.0.0/8`,
+`::1` or `localhost`) does not use the public list. `pkarrUrls`
 replaces the default list on a create, with at most 8 `https` URLs; a plain
 `http` URL is valid only on a loopback host and only beside a `relayUrls`
 ladder that is all loopback too.

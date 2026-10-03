@@ -461,13 +461,15 @@ Pkarr is on by default, so this is the default for every topic mesh and every de
 Every member sends its IP address, its endpoint id and the ids it resolves to n0's server and to the two Pubky relays.
 A topic has no opt-out, because its lookups are fixed to the preset.
 A create can name its own relays in `pkarr_urls`, or leave `pkarr` out of `lookup`.
-A mesh whose relay rungs are all on this machine does not use the pinned public list, so a mesh that stays local never writes to a public server.
-A custom list still applies to such a mesh.
-The pkarr lookup is the engine's own and not the iroh publisher, and it follows four rules.
+The pinned public list is skipped when the relay choice is a custom, non-empty ladder and every rung is on this machine (`127.0.0.0/8`, `::1`, or `localhost`), so a mesh that stays local never writes to a public server.
+The default ladder is never local, and a custom pkarr list always applies.
+The pkarr lookup is the engine's own and not the iroh publisher, and it follows these rules.
 It never publishes a record with no home relay, so the last good record stays.
 Every request has a deadline of 10 seconds.
 A failed publish waits longer each time, up to 60 seconds.
 Each relay has its own task, so a slow relay never delays another.
+A change of direct address that leaves the record the same sends no `PUT`.
+A relay that stays down logs one warning on the first failure and one on recovery, and the retries go to the debug log.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all four.
 The rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, a pkarr list needs `pkarr` among the lookups, `pkarr` needs `relay` among the lookups, because a record without a home relay holds no address, and so does letting the relay carry payload.
 A config that breaks one of them is rejected before any network, along with a custom ladder that would not survive the wire (`MeshConfig::validate`).
