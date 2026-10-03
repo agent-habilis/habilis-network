@@ -719,11 +719,28 @@ pub const EVICTION_COOLDOWN_SECS: u64 = 300;
 /// its gossip view are finite).
 pub const RENDEZVOUS_RELEASE_LINKS: usize = 3;
 
-/// How long a node that a peer refused at its cap leaves that peer alone. A
-/// refusal now means that no session of the peer was idle for
-/// [`MIN_IDLE_FOR_EVICTION_SECS`], so a short wait finds the same answer
-/// cheaply and a long one only delays a retry that could succeed.
+/// How long a node that a peer refused at its cap leaves that peer alone, the
+/// first time. Each further refusal in a row doubles it, up to
+/// [`CAP_REFUSAL_COOLDOWN_MAX_SECS`]; a success resets it. A refusal at the
+/// rendezvous frees up fast, so the first wait is short. A refusal at a member
+/// does not: its sessions are gossip links and stay busy, so the wait grows to
+/// the size that keeps the cost of a refused round (a full candidate gathering
+/// on our side) low.
 pub const CAP_REFUSAL_COOLDOWN_SECS: u64 = 30;
+
+/// The longest a node leaves a peer alone after repeated refusals at its cap.
+pub const CAP_REFUSAL_COOLDOWN_MAX_SECS: u64 = 300;
+
+/// How long a node that comes back to the rendezvous stays, at least, before
+/// it may let go again. The beacon introduces a visitor to the members in its
+/// gossip view, and the introduction takes a few round trips; a visit shorter
+/// than that would find no one.
+pub const RENDEZVOUS_DWELL_SECS: u64 = 30;
+
+/// How long an owed return to the rendezvous lasts. A node that is refused at
+/// the rendezvous, or finds it gone, offers again for this long and then stops:
+/// the owed return is a debt with an end, not a state.
+pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 
 /// How long a unicast connection may carry no stream before it is closed, on
 /// the dial side (the pool) and on the accept side. A closed connection is

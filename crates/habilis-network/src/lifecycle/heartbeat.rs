@@ -58,8 +58,12 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
             if state.surfaced.remove(nick.as_str()) {
                 // A peer we knew went silent: a partition may have split the
                 // mesh, and the rendezvous is where its islands meet again. A
-                // node that let go of the rendezvous owes it one return.
-                state.rendezvous_comeback = true;
+                // node that let go of the rendezvous owes it one return. A node
+                // that still holds the link owes nothing: it would be owed
+                // after the next release, and make the node grab it again.
+                if !state.rendezvous_linked {
+                    state.owe_rendezvous_return(now);
+                }
                 state.quiet.insert(nick.clone());
                 // Retain the last-heard instant so the roster can still
                 // report this evictee's recency (its `last_seen` is gone).
@@ -153,6 +157,28 @@ mod tests {
         tick_sweep(&mut state, &SilentSink);
 
         assert!(state.rendezvous_wanted(), "one return is owed");
+    }
+
+    /// A node that still holds the rendezvous owes no return: it would be owed
+    /// after the next release, and make the node grab the link again.
+    #[test]
+    fn a_node_still_linked_to_the_rendezvous_owes_no_return() {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state
+            .linked_endpoints
+            .insert(crate::testing::endpoint_id(1));
+        state.rendezvous_linked = true;
+        let expired_at = Instant::now()
+            .checked_sub(Duration::from_secs(alive_timeout_secs() + 10))
+            .unwrap();
+        state.last_seen.insert(nick("lost-heron"), expired_at);
+        state.peers.insert(nick("lost-heron"));
+        state.surfaced.insert(nick("lost-heron"));
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(state.rendezvous_comeback_until.is_none());
     }
 
     #[test]

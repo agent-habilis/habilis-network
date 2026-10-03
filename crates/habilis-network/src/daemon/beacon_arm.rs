@@ -138,7 +138,6 @@ pub(super) async fn maybe_cohost(
             state.arm_reclaim(Instant::now());
         }
     }
-    state.hosts_rendezvous = current.is_some();
 }
 /// Fast event-driven failover: while the post-`NeighborDown` reclaim
 /// window is open, retry the rendezvous claim so a survivor takes the
@@ -165,7 +164,6 @@ pub(super) async fn maybe_reclaim(
     current: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
 ) {
-    state.hosts_rendezvous = current.is_some();
     if arm.policy != CoHostPolicy::Never
         && state
             .reclaim_until
@@ -179,7 +177,6 @@ pub(super) async fn maybe_reclaim(
             probe,
         )
         .await;
-        state.hosts_rendezvous = current.is_some();
         if claimed {
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
             return;
@@ -391,7 +388,6 @@ pub(super) fn shed_rival_beacon_if_due(
     if let Some(held) = rendezvous.take() {
         held.shed();
     }
-    state.hosts_rendezvous = false;
     state.next_rival_recheck = None;
     state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);
     // Don't wait for that `NeighborDown` either — clear the link flag now

@@ -617,6 +617,10 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     }
 
     loop {
+        // Whether this process hosts the beacon is read here, once per turn,
+        // from the one place that owns it, so that no path that claims or sheds
+        // the beacon has to remember to say so.
+        state.hosts_rendezvous = rendezvous.is_some();
         tokio::select! {
             () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
                 state.idle.external += 1;

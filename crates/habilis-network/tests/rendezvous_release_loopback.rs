@@ -285,7 +285,7 @@ async fn the_beacon_holder_leaving_is_replaced_though_every_other_member_let_go_
 }
 
 /// The accept gate checks the path once. A link that is later left on the
-/// relay, with the relay lookup only, is closed after the probe deadline, and
+/// relay, with the relay lookup only, is closed after a minute, and
 /// the heal brings it back once the direct path returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
@@ -314,7 +314,8 @@ async fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
     );
 
     alice.block_udp(true).await;
-    let closed = eventually(Duration::from_mins(1), || {
+    // The relay policy waits a minute, longer than one race round, then closes.
+    let closed = eventually(Duration::from_mins(2), || {
         logs().contains("gossip link on the relay path past the deadline: closing it")
     })
     .await;

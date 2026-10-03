@@ -61,6 +61,9 @@ pub(super) async fn run_heal(
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
     crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
+    // A node that came back to a mesh whose links are all up gets no link
+    // event to release on, so the heal tick checks too.
+    state.release_rendezvous_if_due(ctx.rendezvous_id);
     let threshold = Duration::from_secs(heal_stall_threshold_secs());
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
     if hard_edge {
@@ -76,7 +79,7 @@ pub(super) async fn run_heal(
         // is stale too, so a node that had let go of the rendezvous is owed
         // one return to it.
         state.rendezvous_linked = false;
-        state.rendezvous_comeback = true;
+        state.owe_rendezvous_return(Instant::now());
         // A free reading taken before the freeze is stale for the same
         // reason, across the widest gap any of these deadlines can span.
         state.forget_rendezvous_verdict();
@@ -235,7 +238,7 @@ pub(super) async fn try_resubscribe(
     attempts: &mut u32,
 ) -> Resubscribe {
     let mut bootstrap = Vec::new();
-    if !state.rendezvous_graft_needs_session {
+    if !state.rendezvous_graft_needs_session && state.rendezvous_wanted() {
         bootstrap.push(env.params.id);
     }
     bootstrap.extend(state.known_endpoints.iter().copied());
@@ -304,7 +307,6 @@ pub(super) fn apply_rung_change(
         if let Some(old) = rendezvous.take() {
             old.shed();
         }
-        state.hosts_rendezvous = false;
         // A rehome starts a fresh arbitration epoch, so the re-check backoff
         // starts over with it. Without this the next claim reads the round
         // count the *previous* epoch reached and backs off as though it were

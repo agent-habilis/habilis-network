@@ -276,12 +276,16 @@ pub struct EventLoopState {
     /// is then no loss, so nothing re-grafts it or arms a reclaim for it.
     /// Cleared when the link comes back.
     pub(crate) rendezvous_released: bool,
-    /// One return to the rendezvous is owed although this node holds enough
-    /// links to others. Set when a silent roster peer is swept (a partition may
-    /// have split the mesh into islands, and the rendezvous is where they meet
-    /// again) and on a resume edge (every link is stale). Cleared when the
-    /// link comes back.
-    pub(crate) rendezvous_comeback: bool,
+    /// A return to the rendezvous is owed, until this instant, although this
+    /// node holds enough links to others. Set when a silent roster peer is
+    /// swept on a node that is not linked to it (a partition may have split the
+    /// mesh into islands, and the rendezvous is where they meet again) and on a
+    /// resume edge (every link is stale). It ends when the link comes back, or
+    /// at the deadline: an owed return is a debt with an end.
+    pub(crate) rendezvous_comeback_until: Option<Instant>,
+    /// A node that came back to the rendezvous does not let go before this
+    /// instant, so that the beacon can introduce it to the other island.
+    pub(crate) rendezvous_dwell_until: Option<Instant>,
     /// This process co-hosts the rendezvous. Its own link to it keeps the
     /// beacon's gossip view non-empty, which is what lets a joiner be
     /// introduced to the mesh: if the host let go as well, a joiner arriving
@@ -684,7 +688,8 @@ impl EventLoopState {
             gossip_open: true,
             rendezvous_linked: false,
             rendezvous_released: false,
-            rendezvous_comeback: false,
+            rendezvous_comeback_until: None,
+            rendezvous_dwell_until: None,
             hosts_rendezvous: false,
             rendezvous_release_links: crate::util::tuning::RENDEZVOUS_RELEASE_LINKS,
             rendezvous_session_stale: false,
@@ -881,20 +886,92 @@ impl EventLoopState {
 
     /// Whether this node should hold, or come back to, the rendezvous link:
     /// while it has fewer than [`Self::rendezvous_release_links`] links to
-    /// others, when a return is owed, and always on the node that hosts it.
+    /// others, while a return is owed, and always on the node that hosts it.
     /// Every graft and offer to the rendezvous is gated on this one answer.
     pub(crate) fn rendezvous_wanted(&self) -> bool {
         self.hosts_rendezvous
-            || self.rendezvous_comeback
+            || self
+                .rendezvous_comeback_until
+                .is_some_and(|until| Instant::now() < until)
             || self.linked_endpoints.len() < self.rendezvous_release_links
     }
 
-    /// Whether a link that just came up leaves this node with enough links to
-    /// others to let go of the rendezvous.
-    pub(crate) fn should_release_rendezvous(&self) -> bool {
+    /// A return to the rendezvous is owed from now, for
+    /// [`RENDEZVOUS_COMEBACK_SECS`](crate::util::tuning::RENDEZVOUS_COMEBACK_SECS).
+    pub(crate) fn owe_rendezvous_return(&mut self, now: Instant) {
+        self.rendezvous_comeback_until =
+            Some(now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS));
+    }
+
+    /// The rendezvous link came up. If a return was owed, it is paid, and the
+    /// visit lasts its dwell time at least.
+    pub(crate) fn note_rendezvous_link_up(&mut self, now: Instant) {
+        self.rendezvous_linked = true;
+        self.rendezvous_released = false;
+        self.rendezvous_dwell_until = self
+            .rendezvous_comeback_until
+            .take()
+            .map(|_| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
+    }
+
+    /// Whether this node holds the rendezvous link, is not its host, has links
+    /// enough to others, and has stayed as long as a visit lasts: it lets go.
+    /// Checked wherever a link comes up and on the heal tick, because a node
+    /// that came back to a mesh whose links are all up would otherwise wait for
+    /// a link event that never comes.
+    pub(crate) fn should_release_rendezvous(&self, now: Instant) -> bool {
         self.rendezvous_linked
             && !self.hosts_rendezvous
             && self.linked_endpoints.len() >= self.rendezvous_release_links
+            && self.rendezvous_dwell_until.is_none_or(|until| now >= until)
+    }
+
+    /// Let go of the rendezvous, if this node holds enough links to other
+    /// members and has stayed as long as a visit lasts
+    /// ([`Self::should_release_rendezvous`]).
+    ///
+    /// The rendezvous has finite room, in its direct-peer slots and in its
+    /// gossip view, and a node that has found the mesh no longer needs it.
+    /// Checked wherever a link comes up and on every heal tick, so that a node
+    /// that came back to a mesh whose links are all up does not wait for a link
+    /// event that never comes.
+    ///
+    /// The connections are closed through the table that the endpoint hook
+    /// fills, because iroh-gossip owns them and cannot drop a single neighbour;
+    /// the session goes with them. The release is marked only if something was
+    /// closed or detached: on an endpoint with no hook, and no session, nothing
+    /// is, the link stays up, and marking it released would make the node
+    /// ignore the beacon's death later. It is marked before the `NeighborDown`
+    /// that follows is read, so that one reads as a choice.
+    pub(crate) fn release_rendezvous_if_due(&mut self, rendezvous_id: EndpointId) {
+        if !self.should_release_rendezvous(Instant::now()) {
+            return;
+        }
+        let closed = self.webrtc_admission.close_peer(
+            rendezvous_id,
+            crate::transport::webrtc::close_code::RENDEZVOUS_RELEASED,
+            b"released",
+        );
+        let detached = self
+            .webrtc
+            .as_ref()
+            .is_some_and(|handle| handle.detach(&rendezvous_id));
+        if closed == 0 && !detached {
+            tracing::debug!(
+                target: "habilis_network::gossip",
+                links = self.linked_endpoints.len(),
+                "enough links to members, but nothing to close or detach: the rendezvous link stays"
+            );
+            return;
+        }
+        self.rendezvous_released = true;
+        tracing::info!(
+            target: "habilis_network::gossip",
+            links = self.linked_endpoints.len(),
+            closed,
+            detached,
+            "enough links to members: released the rendezvous"
+        );
     }
 
     /// The rendezvous arbitration was reopened or settled, so the previous
@@ -1366,7 +1443,10 @@ mod tests {
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
         assert!(state.rendezvous_wanted());
-        assert!(!state.should_release_rendezvous(), "one link is not enough");
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "one link is not enough"
+        );
     }
 
     #[test]
@@ -1375,7 +1455,7 @@ mod tests {
         state.rendezvous_linked = true;
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
-        assert!(state.should_release_rendezvous());
+        assert!(state.should_release_rendezvous(Instant::now()));
 
         state.rendezvous_linked = false;
         assert!(
@@ -1383,7 +1463,7 @@ mod tests {
             "enough links: no graft, no offer"
         );
         assert!(
-            !state.should_release_rendezvous(),
+            !state.should_release_rendezvous(Instant::now()),
             "nothing left to let go of"
         );
     }
@@ -1409,7 +1489,7 @@ mod tests {
             state.linked_endpoints.insert(endpoint_id(seed));
         }
         assert!(
-            !state.should_release_rendezvous(),
+            !state.should_release_rendezvous(Instant::now()),
             "its link keeps the beacon's gossip view non-empty for a joiner"
         );
         assert!(state.rendezvous_wanted());
@@ -1420,8 +1500,64 @@ mod tests {
         let mut state = two_link_node();
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
-        state.rendezvous_comeback = true;
+        state.owe_rendezvous_return(Instant::now());
         assert!(state.rendezvous_wanted());
+    }
+
+    /// A debt with an end: a node refused again and again at the rendezvous
+    /// stops offering when the return it owed expires.
+    #[test]
+    fn an_owed_return_ends_at_its_deadline() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(
+                crate::util::tuning::RENDEZVOUS_COMEBACK_SECS + 1,
+            ))
+            .expect("a past instant");
+        state.owe_rendezvous_return(long_ago);
+
+        assert!(!state.rendezvous_wanted());
+    }
+
+    /// A node that came back stays its dwell time before it lets go again, and
+    /// lets go on its own once the time has passed, with no link event to
+    /// trigger it.
+    #[test]
+    fn a_node_that_came_back_lets_go_again_after_its_dwell_time() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.owe_rendezvous_return(Instant::now());
+        let now = Instant::now();
+        state.note_rendezvous_link_up(now);
+        assert!(state.rendezvous_linked);
+        assert!(
+            !state.should_release_rendezvous(now),
+            "the visit has just begun"
+        );
+
+        let later = now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS + 1);
+
+        assert!(
+            state.should_release_rendezvous(later),
+            "the dwell time has passed and the links are enough"
+        );
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "the debt was paid by the visit"
+        );
+    }
+
+    /// A first visit has no dwell: a joiner lets go as soon as it has the links.
+    #[test]
+    fn a_first_visit_has_no_dwell_time() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.note_rendezvous_link_up(Instant::now());
+        assert!(state.should_release_rendezvous(Instant::now()));
     }
 
     /// An unsigned chat message carrying `id` — enough to exercise

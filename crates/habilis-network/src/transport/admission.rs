@@ -74,13 +74,60 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 use crate::util::tuning;
 
-/// How long to leave a peer alone after it answered "at my cap".
+/// How long to leave a peer alone after it answered "at my cap", and how that
+/// grows.
 ///
-/// Without it the retry tick re-offers every 30s and every refused round still
-/// costs *us* a full candidate-gathering budget before the refusal arrives.
-/// The refusal now means no session was idle for a minute, so the window is
-/// short: see [`tuning::CAP_REFUSAL_COOLDOWN_SECS`].
-const CAP_REFUSAL_COOLDOWN: Duration = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_SECS);
+/// Without a wait the retry tick re-offers every 30s and every refused round
+/// still costs *us* a full candidate-gathering budget before the refusal
+/// arrives. The wait is per peer: the first refusal waits
+/// [`tuning::CAP_REFUSAL_COOLDOWN_SECS`], each further one in a row doubles it up
+/// to [`tuning::CAP_REFUSAL_COOLDOWN_MAX_SECS`], and a success resets it. One
+/// rule serves both kinds of peer: the rendezvous frees a slot soon after, so
+/// the first short wait finds it, while a member whose sessions are all busy
+/// gossip links does not, and the wait grows to a size that makes the cost of a
+/// refused round small.
+#[derive(Debug, Default)]
+struct RefusalBackoff {
+    by_peer: HashMap<EndpointId, Backoff>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    until: Instant,
+    window: Duration,
+}
+
+impl RefusalBackoff {
+    fn note(&mut self, peer: EndpointId, now: Instant) {
+        let first = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_SECS);
+        let max = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_MAX_SECS);
+        // Entries whose wait ended more than a longest wait ago are forgotten, so
+        // that the map stays bounded by the peers refused lately.
+        self.by_peer
+            .retain(|_, backoff| now.saturating_duration_since(backoff.until) < max);
+        let window = self
+            .by_peer
+            .get(&peer)
+            .map_or(first, |previous| (previous.window * 2).min(max));
+        self.by_peer.insert(
+            peer,
+            Backoff {
+                until: now + window,
+                window,
+            },
+        );
+    }
+
+    fn on_cooldown(&self, peer: &EndpointId, now: Instant) -> bool {
+        self.by_peer
+            .get(peer)
+            .is_some_and(|backoff| now < backoff.until)
+    }
+
+    fn forget(&mut self, peer: &EndpointId) {
+        self.by_peer.remove(peer);
+    }
+}
 
 /// Why a negotiation was not admitted. Diagnostic — every arm means "not now".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,8 +260,8 @@ impl Slot {
 
 struct Inner {
     slots: HashMap<EndpointId, Slot>,
-    /// Peers that refused us at their cap; do not re-offer before this instant.
-    refused_until: Cooldown<EndpointId>,
+    /// Peers that refused us at their cap, each with its wait.
+    refused: RefusalBackoff,
     /// Peers we evicted; neither role takes them back before this instant.
     evicted_until: Cooldown<EndpointId>,
     /// The hub whose sessions the cap counts, learned at the first admission.
@@ -336,7 +383,7 @@ impl SignalAdmission {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 slots: HashMap::new(),
-                refused_until: Cooldown::new(CAP_REFUSAL_COOLDOWN),
+                refused: RefusalBackoff::default(),
                 evicted_until: Cooldown::new(policy.cooldown),
                 hub: None,
                 policy,
@@ -403,7 +450,7 @@ impl SignalAdmission {
         if handle.has_session(&peer) {
             return Err(Refusal::HaveSession);
         }
-        if inner.refused_until.on_cooldown(&peer, now) {
+        if inner.refused.on_cooldown(&peer, now) {
             return Err(Refusal::Cooling);
         }
         if inner.evicted_until.on_cooldown(&peer, now) {
@@ -452,11 +499,16 @@ impl SignalAdmission {
         self.lock().evicted_until.note(peer, Instant::now());
     }
 
-    /// Note that `peer` refused us at its cap; stop offering for a while.
+    /// Note that `peer` refused us at its cap; stop offering for a while, longer
+    /// each time in a row.
     pub(crate) fn note_refused(&self, peer: EndpointId) {
-        // `note` prunes expired entries first, so a long-lived node does not
-        // accumulate entries for peers it met once.
-        self.lock().refused_until.note(peer, Instant::now());
+        self.lock().refused.note(peer, Instant::now());
+    }
+
+    /// A round with `peer` ended in a session: it is no longer refusing us, so
+    /// its wait starts over.
+    pub(crate) fn note_success(&self, peer: EndpointId) {
+        self.lock().refused.forget(&peer);
     }
 
     /// Cancel every round in flight and refuse all later admissions.
@@ -856,6 +908,114 @@ mod tests {
         admission.lock().sample(start + Duration::from_secs(5));
 
         assert!(admission.lock().slots.is_empty());
+    }
+
+    /// The wait after a refusal doubles with each one in a row, stops at the
+    /// longest, and starts over once the peer has taken a round.
+    #[test]
+    fn the_wait_after_a_refusal_doubles_up_to_the_longest_and_a_success_resets_it() {
+        let mut backoff = RefusalBackoff::default();
+        let bob = peer(1);
+        let start = Instant::now();
+        let first = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_SECS);
+        let longest = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_MAX_SECS);
+
+        backoff.note(bob, start);
+        assert!(backoff.on_cooldown(
+            &bob,
+            start + Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_SECS - 1)
+        ));
+        assert!(!backoff.on_cooldown(&bob, start + first));
+
+        let mut now = start + first;
+        let mut window = first;
+        while window < longest {
+            backoff.note(bob, now);
+            window = (window * 2).min(longest);
+            assert!(
+                backoff.on_cooldown(&bob, now + window / 2),
+                "still waiting inside {window:?}"
+            );
+            assert!(
+                !backoff.on_cooldown(&bob, now + window),
+                "done after {window:?}"
+            );
+            now += window;
+        }
+        assert_eq!(window, longest);
+
+        backoff.note(bob, now);
+        assert!(
+            !backoff.on_cooldown(&bob, now + longest),
+            "the wait does not grow past the longest"
+        );
+
+        backoff.forget(&bob);
+        backoff.note(bob, now);
+        assert!(
+            !backoff.on_cooldown(&bob, now + first),
+            "a success started the wait over at the first"
+        );
+    }
+
+    /// One peer's refusals do not make another peer wait.
+    #[test]
+    fn a_refusal_makes_only_that_peer_wait() {
+        let mut backoff = RefusalBackoff::default();
+        let now = Instant::now();
+        backoff.note(peer(1), now);
+        assert!(backoff.on_cooldown(&peer(1), now));
+        assert!(!backoff.on_cooldown(&peer(2), now));
+    }
+
+    /// `close_peer` closes what the hook reported, and says how many.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_peer_closes_the_connections_the_hook_reported() {
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        const ALPN: &[u8] = b"habilis-mesh/test-close-peer/0";
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let bind = |hook: Option<ActivityHook>| {
+            let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled);
+            if let Some(hook) = hook {
+                builder = builder.hooks(hook);
+            }
+            async move { builder.bind().await.expect("bind a loopback endpoint") }
+        };
+        let admission = SignalAdmission::with_policy(2, policy());
+        let hook = admission.activity_hook();
+        let server = bind(None).await;
+        let router = Router::builder(server.clone()).accept(ALPN, Hold).spawn();
+        let client = bind(Some(hook)).await;
+        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        let conn = client.connect(server.id(), ALPN).await.expect("connect");
+
+        let closed = admission.close_peer(server.id(), 7, b"released");
+
+        assert_eq!(closed, 1, "the one connection the hook reported");
+        assert!(conn.close_reason().is_some(), "and it is closed");
+        assert_eq!(
+            admission.close_peer(server.id(), 7, b"released"),
+            0,
+            "nothing left to close"
+        );
+        assert_eq!(
+            admission.close_peer(peer(9), 7, b"released"),
+            0,
+            "a peer the hook never saw"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
     }
 
     /// The definition of activity, on counters built by hand: pings, acks and

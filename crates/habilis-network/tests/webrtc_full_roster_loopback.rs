@@ -12,6 +12,7 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
@@ -73,17 +74,21 @@ async fn roster_len(member: &Membership) -> usize {
         .unwrap_or_default();
     serde_json::from_str::<serde_json::Value>(&json)
         .ok()
-        .and_then(|roster| roster["peers"].as_array().map(Vec::len))
+        .and_then(|roster| {
+            // A swept peer stays in the roster as quiet, so count the live ones.
+            roster["peers"].as_array().map(|peers| {
+                peers
+                    .iter()
+                    .filter(|peer| peer["quiet"] != serde_json::Value::Bool(true))
+                    .count()
+            })
+        })
         .unwrap_or(0)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-
+/// A creator that hosts the rendezvous and `MEMBERS - 1` joiners on one
+/// `WebRTC`-only mesh over a local relay, as live members.
+async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
     let creator = open(
         "member-00",
         membership::Opts {
@@ -118,19 +123,35 @@ async fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roste
         );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    members
+}
 
+/// The roster size of every member, once all hold `peers` or the deadline ends.
+async fn rosters_until(members: &[Membership], peers: usize, deadline: Duration) -> Vec<usize> {
     let started = Instant::now();
     let mut rosters = Vec::new();
-    while started.elapsed() < FORMATION_DEADLINE {
+    while started.elapsed() < deadline {
         rosters.clear();
-        for member in &members {
+        for member in members {
             rosters.push(roster_len(member).await);
         }
-        if rosters.iter().all(|len| *len == MEMBERS - 1) {
+        if rosters.iter().all(|len| *len == peers) {
             break;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    rosters
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
+    init_logging();
+    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+    let members = start_group(&relay).await;
+
+    let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
 
     for member in members {
         let _ = member.node.leave().await;
@@ -150,4 +171,104 @@ async fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roste
         "every roster must hold {} peers; roster sizes by member: {rosters:?}\n{trace}",
         MEMBERS - 1
     );
+}
+
+/// A crash is the case that puts every member back on the rendezvous: the
+/// sweep removes the silent member, and each member that had let go of the
+/// rendezvous owes it one return. The rendezvous has 16 slots, so the return
+/// must end: the members that came back must let go again, or a joiner that
+/// arrives after the crash finds the rendezvous full and the mesh is closed to
+/// it, as it was before members let go at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_joiner_after_a_crash_still_gets_the_full_roster() {
+    init_logging();
+    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+    let mut members = start_group(&relay).await;
+    let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
+    assert!(
+        rosters.iter().all(|len| *len == MEMBERS - 1),
+        "the mesh never formed: {rosters:?}"
+    );
+    let released_before = logs().matches("released the rendezvous").count();
+    let visits_before = rendezvous_visits();
+
+    // A crash: the member vanishes with no `Left`, so only the sweep removes it.
+    drop(members.pop().expect("a member to crash"));
+    let swept = rosters_until(&members, MEMBERS - 2, Duration::from_mins(4)).await;
+    assert!(
+        swept.iter().all(|len| *len == MEMBERS - 2),
+        "the sweep never removed the crashed member: {swept:?}"
+    );
+
+    // The sweep sends the members that let go of the rendezvous back to it. A
+    // member at its own 16 sessions has no slot for the visit, so some come
+    // back and some do not. Every one that came back must let go again.
+    let started = Instant::now();
+    loop {
+        let visits = rendezvous_visits() - visits_before;
+        let releases = logs().matches("released the rendezvous").count() - released_before;
+        if visits >= 1 && releases >= visits {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_mins(3),
+            "{visits} members came back to the rendezvous after the crash and {releases} let go \
+             again\n{}",
+            come_back_trace()
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    let mesh = members[0].node.mesh_id().to_string();
+    members.push(
+        open(
+            "late-joiner",
+            membership::Opts {
+                mesh: Some(mesh),
+                ..membership::Opts::default()
+            },
+        )
+        .await,
+    );
+    let joined = rosters_until(&members, MEMBERS - 1, Duration::from_mins(2)).await;
+
+    let trace = come_back_trace();
+    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = std::fs::write(path, logs());
+    }
+    for member in members {
+        let _ = member.node.leave().await;
+    }
+    assert!(
+        joined.iter().all(|len| *len == MEMBERS - 1),
+        "a joiner after the crash must see everyone; roster sizes: {joined:?}\n{trace}"
+    );
+}
+
+/// How many times a member has linked to the rendezvous, in this run.
+fn rendezvous_visits() -> usize {
+    logs()
+        .lines()
+        .filter(|line| line.contains("gossip neighbor up") && line.contains("is_rendezvous=true"))
+        .count()
+}
+
+/// The lines that say how the rendezvous was released and visited again.
+fn come_back_trace() -> String {
+    logs()
+        .lines()
+        .filter(|line| {
+            [
+                "released the rendezvous",
+                "refused a signal offer",
+                "nothing to close",
+            ]
+            .iter()
+            .any(|needle| line.contains(needle))
+        })
+        .take(60)
+        .collect::<Vec<_>>()
+        .join("\n")
 }

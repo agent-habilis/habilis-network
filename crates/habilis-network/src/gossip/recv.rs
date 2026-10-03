@@ -84,11 +84,10 @@ pub(crate) async fn handle_gossip_event(
                 // Re-arms the healer's probe gate: while this is true the
                 // heal tick must not connect-probe the rendezvous (the
                 // probe would supersede this very link on the beacon).
-                state.rendezvous_linked = true;
-                // The link is back: nothing is owed any more, and the next
-                // `NeighborDown` is a loss again until we release it anew.
-                state.rendezvous_released = false;
-                state.rendezvous_comeback = false;
+                // The link is up: a return that was owed is paid (and the visit
+                // lasts its dwell time), and the next `NeighborDown` is a loss
+                // again until we release it anew.
+                state.note_rendezvous_link_up(Instant::now());
                 state.rendezvous_session_stale = false;
                 state.rendezvous_offer_fallback = false;
                 // This link settles the arbitration: someone holds the port
@@ -139,9 +138,7 @@ pub(crate) async fn handle_gossip_event(
                     // (the app's card dial hint); see `NodeApp::on_meshed`.
                     app.on_meshed(state, ctx).await;
                 }
-                if state.should_release_rendezvous() {
-                    release_rendezvous(state, ctx);
-                }
+                state.release_rendezvous_if_due(ctx.rendezvous_id);
             }
         }
         Some(Ok(Event::NeighborDown(node_id))) => {
@@ -207,6 +204,10 @@ pub(crate) async fn handle_gossip_event(
 /// The rendezvous neighbour went down. A link we let go of on purpose is no
 /// loss: there is nothing to detach, to offer again, or to re-graft, and the
 /// rule that released it also says when to come back.
+///
+/// A `NeighborDown` that the beacon's own HyParView caused (it drops a random
+/// member when its view is full) reads as a loss here and arms a reclaim on a
+/// node with links enough. That costs one probe, and is left as it is.
 fn rendezvous_neighbor_down(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
@@ -272,33 +273,6 @@ fn arms_reclaim(
     beacon_wanted_but_unlinked: bool,
 ) -> bool {
     rendezvous_lost || links_left == 0 || beacon_wanted_but_unlinked
-}
-
-/// Let go of the rendezvous: this node holds enough links to other members.
-///
-/// The rendezvous has finite room, in its direct-peer slots and in its gossip
-/// view, and a node that has found the mesh no longer needs it. Marked first, so
-/// that the `NeighborDown` this causes reads as a choice. The connections are
-/// closed through the table that the endpoint hook fills, because iroh-gossip
-/// owns them and cannot drop a single neighbour; the session goes with them.
-fn release_rendezvous(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    state.rendezvous_released = true;
-    let closed = state.webrtc_admission.close_peer(
-        ctx.rendezvous_id,
-        crate::transport::webrtc::close_code::RENDEZVOUS_RELEASED,
-        b"released",
-    );
-    let detached = state
-        .webrtc
-        .as_ref()
-        .is_some_and(|handle| handle.detach(&ctx.rendezvous_id));
-    tracing::info!(
-        target: "habilis_network::gossip",
-        links = state.linked_endpoints.len(),
-        closed,
-        detached,
-        "enough links to members: released the rendezvous"
-    );
 }
 
 /// Drain the message payloads a dead subscription buffered before its
@@ -1895,10 +1869,12 @@ mod first_contact_tests {
         handle_gossip_event(Some(Ok(event)), state, &mut Inert, ctx).await;
     }
 
-    /// A node that reaches the release count lets go of the rendezvous: the
-    /// link it kept to enter the mesh. Below the count it keeps it.
+    /// A node that reaches the release count tries to let go of the rendezvous,
+    /// but on a state with no hook and no session there is nothing to close or
+    /// detach. The link stays up, so it must not be marked released: a node that
+    /// thought it had let go would ignore the death of the beacon later.
     #[tokio::test]
-    async fn reaching_the_release_count_releases_the_rendezvous() {
+    async fn a_release_with_nothing_to_close_or_detach_is_not_marked() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
         let mut state = fresh_state();
@@ -1906,16 +1882,16 @@ mod first_contact_tests {
 
         feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
         assert!(state.rendezvous_linked);
-        for seed in 1..=2 {
+        for seed in 1..=3 {
             feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
-            assert!(
-                !state.rendezvous_released,
-                "{seed} links is below the count"
-            );
         }
 
-        feed(Event::NeighborUp(endpoint_id(3)), &mut state, &ctx).await;
-        assert!(state.rendezvous_released, "the third link is the count");
+        assert!(state.should_release_rendezvous(crate::util::clock::Instant::now()));
+        assert!(
+            !state.rendezvous_released,
+            "nothing was closed or detached, so nothing was released"
+        );
+        assert!(state.rendezvous_linked, "the link is still up");
         node.endpoint.close().await;
     }
 
@@ -1931,7 +1907,9 @@ mod first_contact_tests {
         for seed in 1..=2 {
             feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
         }
-        assert!(state.rendezvous_released);
+        // Released, as `release_rendezvous_if_due` marks it when it closes a
+        // connection or detaches the session.
+        state.rendezvous_released = true;
 
         feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
 
@@ -1968,13 +1946,20 @@ mod first_contact_tests {
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state.rendezvous_released = true;
-        state.rendezvous_comeback = true;
+        state.owe_rendezvous_return(crate::util::clock::Instant::now());
 
         feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
 
         assert!(state.rendezvous_linked);
         assert!(!state.rendezvous_released);
-        assert!(!state.rendezvous_comeback);
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "the debt is paid"
+        );
+        assert!(
+            state.rendezvous_dwell_until.is_some(),
+            "and the visit lasts its dwell time"
+        );
         node.endpoint.close().await;
     }
 

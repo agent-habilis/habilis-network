@@ -365,6 +365,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         let local = self.local;
         let deadlines = self.deadlines;
         let ice = self.ice;
+        let admission = self.admission.clone();
         // Negotiate off the accept future, for two independent reasons. It can
         // take seconds (candidate gathering, then DTLS/SCTP), and holding the
         // Router's accept task that long would serialize inbound offers. And in
@@ -387,6 +388,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             .await
             {
                 Ok(Ok(())) => {
+                    admission.note_success(remote);
                     register_session_addr(&endpoint, remote);
                     conn.close(0u32.into(), b"jsep done");
                     tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (answerer)");
@@ -802,7 +804,11 @@ fn spawn_offer_round(
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
-        } else if offer == Offer::UdpRace && {
+            return;
+        }
+        // The peer took the round: it is not refusing us, so its wait starts over.
+        admission.note_success(peer);
+        if offer == Offer::UdpRace && {
             // A connection opened before the attach rides the session only
             // after a connect; the race is judged on the connection after.
             nudge(&endpoint, peer).await;
@@ -866,7 +872,19 @@ pub(crate) fn negotiate_rendezvous_session(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
 ) {
-    if state.relay_transport || state.rendezvous_linked || !state.rendezvous_wanted() {
+    if !state.rendezvous_wanted() {
+        // A session the graft never used: a joiner whose links to members came
+        // up before its graft to the rendezvous landed. It would hold one of
+        // the beacon's slots for ever.
+        if !state.rendezvous_linked
+            && let Some(handle) = state.webrtc.as_ref()
+            && handle.detach(&ctx.rendezvous_id)
+        {
+            tracing::debug!(target: LOG_TARGET, "detached a rendezvous session that is no longer wanted");
+        }
+        return;
+    }
+    if state.relay_transport || state.rendezvous_linked {
         return;
     }
     let Some(handle) = state.webrtc.clone() else {

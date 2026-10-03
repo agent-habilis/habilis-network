@@ -170,15 +170,18 @@ published to a registry; pin it with
   ever, filled its 16 slots, and every later joiner stayed alone with an empty
   roster. A UDP mesh of about 65 hit the same wall at the beacon's 64-place
   gossip view. A node that holds three links to other members now lets go of
-  the rendezvous (it closes the connections and detaches the session) and comes
-  back only while it has fewer than three links, or once after the sweep removed
-  a silent roster peer, which is how islands of a split mesh meet again. The
-  node that hosts the beacon keeps its own link, so that a joiner always
-  finds a member in the beacon's view. A refusal at the cap now waits 30 s
-  before the next offer, not five minutes.
+  the rendezvous (it closes the connections and detaches the session). It
+  comes back only while it has fewer than three links, or once for two minutes
+  after the sweep removed a silent roster peer, which is how islands of a split
+  mesh meet again; a node that came back stays 30 s and lets go again, and a
+  node that does not want the rendezvous detaches a session to it. The node
+  that hosts the beacon keeps its own link, so that a joiner always finds a
+  member in the beacon's view. A refusal at a peer's cap makes a node wait, per
+  peer: 30 s, doubling with each refusal in a row up to five minutes, and
+  starting over after a success.
 - A gossip connection on a lookup-only mesh whose selected path stays on the
-  relay for longer than `PROBE_DEADLINE` after the accept is closed with the
-  gossip relay-refused code. The accept gate checked the path only once, so a
+  relay for a minute, longer than one race round, after the accept is closed
+  with the gossip relay-refused code. The accept gate checked the path only once, so a
   path lost later left a link up on the relay with nothing to say that no
   payload may ride it.
 

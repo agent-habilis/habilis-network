@@ -14,9 +14,20 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_gossip::net::Gossip;
 use n0_future::time::Instant;
 
+use std::time::Duration;
+
 use super::path::{
     GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
 };
+
+/// How long an accepted gossip link may stay on the relay before it is closed.
+///
+/// Longer than one race round: a pair that loses its direct path races again
+/// onto a `WebRTC` session, and a signalling round may run up to
+/// `SIGNAL_ROUND_DEADLINE` (45 s). Closing the link before the round can end
+/// would cost a `NeighborDown`, an unlink and a graft for a path that was about
+/// to come back. The rule is for a path that does not.
+const RELAY_POLICY_DEADLINE: Duration = Duration::from_mins(1);
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectOnlyGossip {
@@ -97,7 +108,7 @@ impl ProtocolHandler for DirectOnlyGossip {
 }
 
 /// Keep the relay policy after the accept: a gossip connection whose selected
-/// path has been the relay for longer than [`PROBE_DEADLINE`] is closed with
+/// path has been the relay for longer than [`RELAY_POLICY_DEADLINE`] is closed with
 /// [`GOSSIP_RELAY_REFUSED_CODE`], on a mesh whose relay is lookup only.
 ///
 /// The accept gate checks the path once, at the start. A path that is lost
@@ -125,7 +136,7 @@ fn watch_relay_policy(accepted: &Connection) {
                 on_relay_since = None;
             } else {
                 let since = *on_relay_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= PROBE_DEADLINE {
+                if since.elapsed() >= RELAY_POLICY_DEADLINE {
                     tracing::info!(
                         target: super::LOG_TARGET,
                         remote = %conn.remote_id(),
@@ -135,7 +146,8 @@ fn watch_relay_policy(accepted: &Connection) {
                     return;
                 }
             }
-            let wait = on_relay_since.map(|since| PROBE_DEADLINE.saturating_sub(since.elapsed()));
+            let wait =
+                on_relay_since.map(|since| RELAY_POLICY_DEADLINE.saturating_sub(since.elapsed()));
             drop(conn);
             tokio::select! {
                 next = events.next() => {
@@ -158,6 +170,57 @@ fn watch_relay_policy(accepted: &Connection) {
 /// from what this node knows about the dialer's `WebRTC` session.
 fn refuse_before_session(has_session: bool, negotiating: bool, we_offer: bool) -> bool {
     !has_session && (we_offer || !negotiating)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod watcher_tests {
+    use std::time::Duration;
+
+    use iroh::endpoint::Connection;
+    use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+    use super::watch_relay_policy;
+
+    /// The watcher must not keep a link open that gossip has dropped. A handler
+    /// that starts the watch and returns drops the last strong handle, so the
+    /// connection must close, and the dialer sees it close. A watcher that held
+    /// the connection, or a path stream that did, would leave it up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_relay_watcher_does_not_keep_a_connection_alive() {
+        const ALPN: &[u8] = b"habilis-mesh/test-watch/0";
+
+        #[derive(Debug, Clone)]
+        struct WatchAndDrop;
+        impl ProtocolHandler for WatchAndDrop {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                watch_relay_policy(&conn);
+                Ok(())
+            }
+        }
+        let bind = || async {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(ALPN, WatchAndDrop)
+            .spawn();
+        let client = bind().await;
+        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+
+        let conn = client.connect(server.id(), ALPN).await.expect("connect");
+        let closed = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await;
+
+        assert!(
+            closed.is_ok(),
+            "the connection stayed up after its handler dropped it: the watcher holds it"
+        );
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
 }
 
 #[cfg(test)]
