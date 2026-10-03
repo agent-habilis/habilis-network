@@ -51,7 +51,8 @@ pub use mesh::{
     AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, Lookup,
     LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError, OptFlag,
     PkarrChoice, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
-    TransportPolicy, parse_pkarr_urls, resolve_lookups, validate_advertise, validate_pkarr_urls,
+    TransportPolicy, is_loopback, parse_pkarr_urls, resolve_lookups, validate_advertise,
+    validate_pkarr_urls,
 };
 pub use message::{
     AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,

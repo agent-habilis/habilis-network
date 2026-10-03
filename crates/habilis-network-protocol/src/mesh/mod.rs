@@ -30,8 +30,8 @@ mod transport;
 pub use id::{MeshId, MeshIdError};
 pub use lookup::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, Lookup, LookupOpts,
-    MeshConfig, PkarrChoice, RelayChoice, parse_pkarr_urls, resolve_lookups, validate_advertise,
-    validate_pkarr_urls,
+    MeshConfig, PkarrChoice, RelayChoice, is_loopback, parse_pkarr_urls, resolve_lookups,
+    validate_advertise, validate_pkarr_urls,
 };
 pub use lookup::{LookupSet, OptFlag, RelayLadder, RelayLadderError, RelaySelection};
 pub use name::{MeshName, NameError};

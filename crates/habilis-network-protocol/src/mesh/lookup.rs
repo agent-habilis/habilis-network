@@ -294,7 +294,12 @@ fn decode_pkarr_urls(bytes: &[u8], pos: &mut usize) -> Result<Vec<Url>> {
     Ok(urls)
 }
 
-fn is_loopback(url: &Url) -> bool {
+/// Whether `url` names this machine: `localhost` or a loopback address. The
+/// test behind the plain-http pkarr rule, and behind the lookup layer's choice
+/// to leave the pinned public pkarr list out of a mesh whose relay rungs are
+/// all local.
+#[must_use]
+pub fn is_loopback(url: &Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(domain)) => domain == "localhost",
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),

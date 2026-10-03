@@ -32,7 +32,9 @@ use n0_future::boxed::BoxStream;
 use n0_future::task::AbortOnDropHandle;
 use n0_future::time::{self, Duration};
 use tokio::sync::watch;
-use tracing::{Instrument as _, debug, info_span, warn};
+use tracing::{Instrument as _, debug, info, info_span, warn};
+
+use habilis_network_protocol::is_loopback;
 
 use crate::protocol::{PkarrChoice, RelayChoice, Url};
 
@@ -239,7 +241,7 @@ async fn publish_loop(
             Some(info) => match time::timeout(timing.request, relay.publish(&info)).await {
                 Ok(Ok(())) => {
                     if Report::after(failed > 0, true) == Report::Recovered {
-                        warn!(failed, "pkarr publish recovered");
+                        info!(failed, "pkarr publish recovered");
                     }
                     failed = 0;
                     timing.republish
@@ -304,19 +306,6 @@ impl AddressLookupBuilder for PkarrBuilder {
     }
 }
 
-/// Whether `url` is on this machine. The same test as the protocol's rule for
-/// a plain-http pkarr URL.
-fn on_this_machine(url: &Url) -> bool {
-    match url.host_str() {
-        Some("localhost") => true,
-        Some(host) => host
-            .trim_matches(['[', ']'])
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback()),
-        None => false,
-    }
-}
-
 /// The pkarr relays a mesh publishes to and resolves from.
 ///
 /// The pinned list is skipped when every relay rung is on this machine: such
@@ -330,7 +319,7 @@ fn urls_for<'a>(choice: &'a PkarrChoice, relay: &RelayChoice) -> &'a [Url] {
         PkarrChoice::Disabled => &[],
         PkarrChoice::Pinned => match relay {
             RelayChoice::Custom(ladder)
-                if !ladder.is_empty() && ladder.iter().all(|rung| on_this_machine(rung)) =>
+                if !ladder.is_empty() && ladder.iter().all(|rung| is_loopback(rung)) =>
             {
                 &[]
             }
@@ -345,7 +334,11 @@ fn urls_for<'a>(choice: &'a PkarrChoice, relay: &RelayChoice) -> &'a [Url] {
 /// Add a lookup for every URL [`urls_for`] names. A member publishes to all of
 /// them, so a peer that can reach any one resolves it.
 pub(super) fn wire(mut builder: Builder, choice: &PkarrChoice, relay: &RelayChoice) -> Builder {
-    for url in urls_for(choice, relay) {
+    let urls = urls_for(choice, relay);
+    if urls.is_empty() && *choice == PkarrChoice::Pinned {
+        debug!("pinned pkarr list skipped: every relay rung is local");
+    }
+    for url in urls {
         builder = builder.address_lookup(PkarrBuilder { url: url.clone() });
     }
     builder
