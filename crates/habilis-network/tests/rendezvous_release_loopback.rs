@@ -174,6 +174,22 @@ impl Member {
             .expect("sent");
     }
 
+    /// The ports this member's endpoint is bound on.
+    fn ports(&self) -> Vec<u16> {
+        self.membership.node.bound_ports().to_vec()
+    }
+
+    /// Take UDP away from this member alone, to the nodes bound on `ports`.
+    async fn block_ip_to(&self, ports: Vec<u16>) {
+        self.membership
+            .request(|reply| Request::BlockIpTo {
+                remote_ports: ports,
+                reply,
+            })
+            .await
+            .expect("the loop answers");
+    }
+
     async fn block_udp(&self, blocked: bool) {
         self.membership
             .request(|reply| Request::BlockUdp { blocked, reply })
@@ -183,17 +199,22 @@ impl Member {
 }
 
 async fn all_rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> bool {
+    rosters_until(members, peers, deadline)
+        .await
+        .iter()
+        .all(|len| *len == peers)
+}
+
+/// The roster size of every member, once all hold `peers` or the deadline ends.
+async fn rosters_until(members: &[&Member], peers: usize, deadline: Duration) -> Vec<usize> {
     let started = Instant::now();
     loop {
-        let mut full = true;
+        let mut rosters = Vec::new();
         for member in members {
-            full &= member.roster_len().await == peers;
+            rosters.push(member.roster_len().await);
         }
-        if full {
-            return true;
-        }
-        if started.elapsed() >= deadline {
-            return false;
+        if rosters.iter().all(|len| *len == peers) || started.elapsed() >= deadline {
+            return rosters;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -342,4 +363,70 @@ async fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
 
 fn refs(members: &[Member]) -> Vec<&Member> {
     members.iter().collect()
+}
+
+/// The cut between two chosen nodes (`Request::BlockIpTo`): they lose UDP to
+/// each other and to no one else. Their link falls back to the relay, which
+/// carries no payload on this mesh, so it is closed after a minute; the heal
+/// brings it back once the cut is lifted. The process-wide block of the test
+/// above takes UDP from every node, so it cannot show that the other links of
+/// the two nodes are left alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
+    let _serial = serial().lock().await;
+    init_logging();
+    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+    let mut members = vec![Member::create("member-0", &relay).await];
+    assert!(
+        eventually(Duration::from_mins(1), || logs()
+            .contains("beacon role active"))
+        .await,
+        "the creator never claimed the beacon"
+    );
+    for index in 1..4 {
+        let member = Member::join(&format!("member-{index}"), &members[0]).await;
+        members.push(member);
+    }
+    assert!(
+        all_rosters_hold(&refs(&members), 3, Duration::from_mins(1)).await,
+        "the group never formed\n{}",
+        rendezvous_trace()
+    );
+
+    // Cut member-1 from member-2, and nobody else.
+    let (one, two) = (members[1].ports(), members[2].ports());
+    members[1].block_ip_to(two).await;
+    members[2].block_ip_to(one).await;
+    let closed = eventually(Duration::from_mins(2), || {
+        logs().contains("gossip link on the relay path past the deadline: closing it")
+    })
+    .await;
+    // The others still talk: member-0 reaches member-3 while the cut stands.
+    members[0].send("through the cut").await;
+    let others = eventually(Duration::from_secs(30), || {
+        members[3].saw_msg("through the cut")
+    })
+    .await;
+
+    members[1].block_ip_to(Vec::new()).await;
+    members[2].block_ip_to(Vec::new()).await;
+    members[1].send("after the cut").await;
+    let mut healed = false;
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_mins(2) {
+        members[1].send("after the cut").await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if members[2].saw_msg("after the cut") {
+            healed = true;
+            break;
+        }
+    }
+
+    let trace = rendezvous_trace();
+    leave_all(members).await;
+    assert!(closed, "the cut link was never closed\n{trace}");
+    assert!(others, "the cut reached nodes it did not name\n{trace}");
+    assert!(healed, "the link never came back after the cut\n{trace}");
 }

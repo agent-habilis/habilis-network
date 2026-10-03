@@ -38,12 +38,38 @@ use crate::WEBRTC_TRANSPORT_ID;
 /// is `cfg(not(wasm_browser))`, and ICE *is* the tab's hole punch — so the
 /// order collapses to `webrtc > relay` there without a separate policy.
 #[derive(Debug)]
-pub(crate) struct WebRtcPreferred;
+pub(crate) struct WebRtcPreferred {
+    /// The endpoint this selector serves, so that a test can take IP paths away
+    /// from one node to some others and not from the whole process.
+    local: iroh_base::EndpointId,
+}
+
+impl WebRtcPreferred {
+    pub(crate) fn new(local: iroh_base::EndpointId) -> Self {
+        Self { local }
+    }
+}
+
+/// Whether a test took this IP path away from the node `local`.
+#[cfg(feature = "test-hooks")]
+fn ip_path_blocked(local: iroh_base::EndpointId, path: &PathSelectionData<'_>) -> bool {
+    matches!(path.network_path().remote(), Addr::Ip(remote)
+        if ip_blocked_to(local, remote.port()))
+}
+
+#[cfg(not(feature = "test-hooks"))]
+fn ip_path_blocked(_local: iroh_base::EndpointId, _path: &PathSelectionData<'_>) -> bool {
+    false
+}
 
 impl PathSelector for WebRtcPreferred {
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
-        let tier = |want: Tier| best_of(paths.iter().filter(move |path| tier_of(path) == want));
+        let tier = |want: Tier| {
+            best_of(paths.iter().filter(move |path| {
+                tier_of(path) == want && !(want == Tier::Ip && ip_path_blocked(self.local, path))
+            }))
+        };
         // First non-empty tier wins; within a tier, lowest RTT.
         let chosen = (!ip_blocked())
             .then(|| tier(Tier::Ip))
@@ -68,6 +94,44 @@ static IP_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 #[cfg(feature = "test-hooks")]
 pub fn block_ip_paths(blocked: bool) {
     IP_BLOCKED.store(blocked, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(feature = "test-hooks")]
+static IP_BLOCKED_TO: std::sync::Mutex<
+    Option<std::collections::HashMap<iroh_base::EndpointId, std::collections::HashSet<u16>>>,
+> = std::sync::Mutex::new(None);
+
+/// Tests only: from now on the endpoint `local` selects no IP path whose remote
+/// port is one of `remote_ports`. It replaces the node's earlier set, and an
+/// empty set clears it. Another node of the process is not affected, which is
+/// what lets a test cut one group of nodes from another while each group keeps
+/// its own links. iroh tells a selector the remote *address* of a path, not the
+/// remote endpoint, so the key is the port: every address one endpoint binds
+/// shares it, and a test names the ports of the endpoints it means.
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the block table.
+#[cfg(feature = "test-hooks")]
+pub fn block_ip_to(local: iroh_base::EndpointId, remote_ports: impl IntoIterator<Item = u16>) {
+    let ports: std::collections::HashSet<u16> = remote_ports.into_iter().collect();
+    let mut blocks = IP_BLOCKED_TO.lock().expect("ip blocks");
+    let blocks = blocks.get_or_insert_with(std::collections::HashMap::new);
+    if ports.is_empty() {
+        blocks.remove(&local);
+    } else {
+        blocks.insert(local, ports);
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn ip_blocked_to(local: iroh_base::EndpointId, remote_port: u16) -> bool {
+    IP_BLOCKED_TO
+        .lock()
+        .expect("ip blocks")
+        .as_ref()
+        .and_then(|blocks| blocks.get(&local))
+        .is_some_and(|ports| ports.contains(&remote_port))
 }
 
 fn ip_blocked() -> bool {

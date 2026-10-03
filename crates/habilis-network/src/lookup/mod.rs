@@ -317,16 +317,22 @@ pub async fn build_endpoint(
     // rather than replacing them. Two native peers are better served by iroh's
     // own hole-punching; this is the browser's only path, and a fallback for
     // NATs that defeat hole-punching but not ICE.
-    if let Some(handle) = transports.webrtc
-        && transports.opts.webrtc
-    {
-        builder = builder.add_custom_transport(handle.transport());
-        // MUST come after `builder.preset(handle)` for multihop above: there is
-        // a single `path_selector` slot and the last call wins. Safe only
-        // because this selector's bottom tier ranks foreign custom transports
-        // below the relay, reproducing MultihopBackup's own policy. Do not
-        // "tidy" this above the preset.
-        builder = builder.path_selector(handle.path_selector());
+    if let Some(handle) = transports.webrtc {
+        if transports.opts.webrtc {
+            builder = builder.add_custom_transport(handle.transport());
+            // MUST come after `builder.preset(handle)` for multihop above: there
+            // is a single `path_selector` slot and the last call wins. Safe only
+            // because this selector's bottom tier ranks foreign custom
+            // transports below the relay, reproducing MultihopBackup's own
+            // policy. Do not "tidy" this above the preset.
+            builder = builder.path_selector(handle.path_selector());
+        } else if cfg!(feature = "iroh-test-utils") {
+            // Tests only: a mesh whose list leaves out `webrtc` still takes the
+            // selector, without the transport, so that a test can take IP paths
+            // away from one node to others (`Request::BlockIpTo`). Without it
+            // such a node uses iroh's own selector, which the hook cannot reach.
+            builder = builder.path_selector(handle.path_selector());
+        }
     }
     if let Some(admission) = &transports.admission {
         builder = builder.hooks(admission.activity_hook());

@@ -76,7 +76,7 @@ mod liveness;
 #[cfg(any(feature = "native", feature = "web"))]
 mod selector;
 #[cfg(feature = "test-hooks")]
-pub use selector::block_ip_paths;
+pub use selector::{block_ip_paths, block_ip_to};
 mod signaling;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
@@ -209,7 +209,7 @@ impl WebRtcHandle {
     /// alone is not enough.
     #[must_use]
     pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
-        std::sync::Arc::new(selector::WebRtcPreferred)
+        std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
     }
 
     /// Attach a negotiated session for `remote`.
@@ -269,7 +269,7 @@ impl WebRtcHandle {
     /// alone is not enough.
     #[must_use]
     pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
-        std::sync::Arc::new(selector::WebRtcPreferred)
+        std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
     }
 
     /// Attach a negotiated browser session for `remote`.

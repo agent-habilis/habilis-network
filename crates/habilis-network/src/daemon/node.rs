@@ -24,6 +24,10 @@ pub struct Node<A: NodeDriver> {
     req_tx: mpsc::Sender<A::Session>,
     quit_tx: mpsc::Sender<()>,
     task: Option<JoinHandle<anyhow::Result<()>>>,
+    /// The ports this node's endpoint is bound on, for a test that names which
+    /// nodes to cut from which. Read once at spawn: the ports do not change.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    bound_ports: Vec<u16>,
 }
 
 // `A::Session` need not be `Debug`, and the channels/handle aren't useful in a
@@ -69,6 +73,13 @@ impl<A: NodeDriver + 'static> Node<A> {
         let mesh_id = cfg.mesh.clone();
         let name = cfg.name.clone();
         let nickname = cfg.author.clone();
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        let bound_ports = cfg
+            .endpoint
+            .bound_sockets()
+            .iter()
+            .map(std::net::SocketAddr::port)
+            .collect();
         let task = n0_future::task::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));
         Self {
             mesh_id,
@@ -77,7 +88,18 @@ impl<A: NodeDriver + 'static> Node<A> {
             req_tx,
             quit_tx,
             task: Some(task),
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            bound_ports,
         }
+    }
+
+    /// Tests only: the ports this node's endpoint is bound on. A test that cuts
+    /// one group of nodes from another gives each node the other group's ports
+    /// (`Request::BlockIpTo`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn bound_ports(&self) -> &[u16] {
+        &self.bound_ports
     }
 
     /// The resolved mesh id.

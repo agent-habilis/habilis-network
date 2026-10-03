@@ -130,6 +130,16 @@ pub enum Request {
         blocked: bool,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: take UDP away from this node alone, to the nodes bound on
+    /// `remote_ports` (see `Node::bound_ports`). An empty list gives it back.
+    /// Unlike [`Request::BlockUdp`] it leaves every other node's paths alone,
+    /// so a test can cut one group of nodes from another while each group
+    /// keeps its own links.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    BlockIpTo {
+        remote_ports: Vec<u16>,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// The engine seam. Every inbound `msg` is queued for the consumer instead of
@@ -261,6 +271,24 @@ impl NodeDriver for MembershipApp {
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
                 true
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::BlockIpTo {
+                remote_ports,
+                reply,
+            } => {
+                habilis_network_iroh_webrtc_transport::block_ip_to(ctx.endpoint.id(), remote_ports);
+                // iroh re-selects only on path events: nudge every peer so the
+                // new set takes effect now.
+                for addr in state.peer_endpoints.values() {
+                    let endpoint = ctx.endpoint.clone();
+                    let peer = addr.id;
+                    n0_future::task::spawn(async move {
+                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::BlockUdp { blocked, reply } => {
