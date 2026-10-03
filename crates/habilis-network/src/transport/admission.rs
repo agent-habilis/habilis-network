@@ -22,6 +22,12 @@
 //! it is not evicted, and a rendezvous session that nothing uses any more is
 //! idle, so it is. If no peer qualifies, the newcomer is refused as before.
 //!
+//! The session is given up only once the newcomer's own session is attached
+//! ([`AdmissionGuard::attached`]), never at admit time: a round that the peer
+//! refuses, or that fails, must cost no working session. The admit only checks
+//! that enough idle sessions exist, counting each round in flight, so that two
+//! rounds never plan on the same one.
+//!
 //! **Activity is payload.** Bytes on a stream or datagram of any connection to
 //! the peer count, whatever the protocol. QUIC keep-alive and ack frames, ICE
 //! consent checks and STUN do not: they flow on an idle link, and counting them
@@ -327,33 +333,31 @@ impl Inner {
         });
     }
 
-    /// Take the slot of the peer idle longest past its floor, if there is one.
-    fn evict_idlest(&mut self, now: Instant) -> Option<EndpointId> {
+    /// The peers whose session a newcomer may take: held without a round in
+    /// flight, and idle past their floor. Each with how long it has been idle.
+    fn evictable(&self, now: Instant) -> Vec<(EndpointId, Duration)> {
         if !self.observing {
-            return None;
+            return Vec::new();
         }
-        let hub = self.hub.clone()?;
-        let held: Vec<_> = self
-            .slots
+        let Some(hub) = self.hub.as_ref() else {
+            return Vec::new();
+        };
+        self.slots
             .iter()
             .filter(|(peer, slot)| slot.round.is_none() && hub.has_session(peer))
             .map(|(peer, slot)| (*peer, slot.idle_for(now), slot.idle_floor))
-            .collect();
-        let Some((victim, idle)) = held
-            .iter()
             .filter(|(_, idle, floor)| idle >= floor)
-            .map(|(peer, idle, _)| (*peer, *idle))
-            .max_by_key(|(_, idle)| *idle)
-        else {
-            tracing::debug!(
-                target: LOG_TARGET,
-                sessions = held.len(),
-                least_idle = ?held.iter().map(|(_, idle, _)| *idle).min(),
-                most_idle = ?held.iter().map(|(_, idle, _)| *idle).max(),
-                "at the direct-peer cap: nobody idle long enough to make room"
-            );
-            return None;
-        };
+            .map(|(peer, idle, _)| (peer, idle))
+            .collect()
+    }
+
+    /// Take the session of the peer idle longest past its floor, if there is one.
+    fn evict_idlest(&mut self, now: Instant) -> Option<EndpointId> {
+        let (victim, idle) = self
+            .evictable(now)
+            .into_iter()
+            .max_by_key(|(_, idle)| *idle)?;
+        let hub = self.hub.clone()?;
         let _ = hub.detach(&victim);
         self.evicted_until.note(victim, now);
         tracing::info!(
@@ -462,9 +466,16 @@ impl SignalAdmission {
         // Reservations count. A peer can briefly appear in both this and
         // `session_count` — between attach and the guard's drop — which biases
         // toward refusing one dial we could have made. The next tick fixes it.
-        if handle.session_count() + inner.rounds_in_flight() >= self.cap {
+        // At the cap a newcomer needs an idle session to give up, but gives it up
+        // only once its own session is attached (see [`AdmissionGuard::attached`]):
+        // a round that the peer refuses, or that fails, must cost no session. Each
+        // round in flight counts as one that will need room, so that two rounds
+        // never plan on the same idle session.
+        let needed =
+            (handle.session_count() + inner.rounds_in_flight() + 1).saturating_sub(self.cap);
+        if needed > 0 {
             inner.sample(now);
-            if inner.evict_idlest(now).is_none() {
+            if inner.evictable(now).len() < needed {
                 return Err(Refusal::AtCap);
             }
         }
@@ -509,6 +520,32 @@ impl SignalAdmission {
     /// its wait starts over.
     pub(crate) fn note_success(&self, peer: EndpointId) {
         self.lock().refused.forget(&peer);
+    }
+
+    /// The round for `peer` has attached its session. If that put the node over
+    /// its cap, the idlest session takes the blame now, not at admit time: only
+    /// a session that arrived may cost one. Returns whether the new session stays.
+    /// With no idle session left to give up (it was busy again since the admit),
+    /// the new session is detached, so the cap holds.
+    fn make_room(&self, peer: EndpointId, now: Instant) -> bool {
+        let mut inner = self.lock();
+        let Some(hub) = inner.hub.clone() else {
+            return true;
+        };
+        if hub.session_count() <= self.cap {
+            return true;
+        }
+        inner.sample(now);
+        if inner.evict_idlest(now).is_some() {
+            return true;
+        }
+        let _ = hub.detach(&peer);
+        tracing::info!(
+            target: LOG_TARGET,
+            %peer,
+            "at the direct-peer cap with nobody idle: the new session was detached"
+        );
+        false
     }
 
     /// Cancel every round in flight and refuse all later admissions.
@@ -640,6 +677,19 @@ impl EndpointHooks for ActivityHook {
 pub(crate) struct AdmissionGuard {
     admission: SignalAdmission,
     peer: EndpointId,
+}
+
+impl AdmissionGuard {
+    /// Call once the round's session is attached. At the cap, this is the moment
+    /// that the idlest session is given up for it. Returns `false` if the new
+    /// session had to go instead.
+    pub(crate) fn attached(&self) -> bool {
+        self.attached_at(Instant::now())
+    }
+
+    fn attached_at(&self, now: Instant) -> bool {
+        self.admission.make_room(self.peer, now)
+    }
 }
 
 impl Drop for AdmissionGuard {
@@ -820,11 +870,18 @@ mod tests {
         let now = start + MIN_IDLE + Duration::from_secs(1);
         let guard = admission
             .try_admit_at(peer(3), &hub, now)
-            .expect("the idlest peer makes room");
+            .expect("an idle session can make room");
+        assert!(
+            hub.has_session(&peer(1)) && hub.has_session(&peer(2)),
+            "nothing is given up before the newcomer's session is attached"
+        );
+
+        hub.attach(peer(3));
+        assert!(guard.attached_at(now), "the newcomer stays");
 
         assert!(!hub.has_session(&peer(1)), "peer 1 was idle longest");
         assert!(hub.has_session(&peer(2)), "peer 2 was active more recently");
-        drop(guard);
+        assert!(hub.has_session(&peer(3)));
     }
 
     #[test]
@@ -857,27 +914,31 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_in_a_negotiation_is_not_evicted() {
-        let (admission, hub, start) = full_node();
+    fn a_peer_in_a_negotiation_is_not_a_candidate() {
+        let (admission, _hub, start) = full_node();
         let _round = admission
             .try_admit_at(peer(1), &FakeHub::default(), start)
             .expect("a round for peer 1 on an empty hub");
         let now = start + MIN_IDLE + Duration::from_secs(1);
 
-        let guard = admission
-            .try_admit_at(peer(3), &hub, now)
-            .expect("peer 2 makes room");
-        assert!(hub.has_session(&peer(1)), "a round in flight is never idle");
-        assert!(!hub.has_session(&peer(2)));
-        drop(guard);
+        let candidates: Vec<_> = admission
+            .lock()
+            .evictable(now)
+            .into_iter()
+            .map(|(candidate, _)| candidate)
+            .collect();
+
+        assert_eq!(candidates, vec![peer(2)], "a round in flight is never idle");
     }
 
     #[test]
     fn an_evicted_peer_is_refused_in_both_roles_until_the_cooldown_ends() {
         let (admission, hub, start) = full_node();
         let now = start + MIN_IDLE + Duration::from_secs(1);
-        drop(admission.try_admit_at(peer(3), &hub, now).expect("room"));
+        let guard = admission.try_admit_at(peer(3), &hub, now).expect("room");
         hub.attach(peer(3));
+        assert!(guard.attached_at(now));
+        drop(guard);
         // Peer 1 or 2 went; find which, then ask for it back.
         let evicted = [peer(1), peer(2)]
             .into_iter()
@@ -897,6 +958,80 @@ mod tests {
             Some(Refusal::Evicted),
             "the cooldown ends"
         );
+    }
+
+    /// A round that ends without a session must cost no working session: the
+    /// peer may refuse at its own cap, or ICE may fail, and a node that gave up
+    /// a session at admit time would lose it for nothing.
+    #[test]
+    fn a_refused_round_at_the_cap_leaves_every_session_in_place() {
+        let (admission, hub, start) = full_node();
+        let now = start + MIN_IDLE + Duration::from_secs(1);
+
+        let round = admission
+            .try_admit_at(peer(3), &hub, now)
+            .expect("an idle session can make room");
+        admission.note_refused(peer(3));
+        drop(round);
+
+        assert!(
+            hub.has_session(&peer(1)) && hub.has_session(&peer(2)),
+            "the peer refused, so nothing may have been given up"
+        );
+    }
+
+    #[test]
+    fn a_failed_round_at_the_cap_leaves_every_session_in_place() {
+        let (admission, hub, start) = full_node();
+        let now = start + MIN_IDLE + Duration::from_secs(1);
+
+        drop(
+            admission
+                .try_admit_at(peer(3), &hub, now)
+                .expect("an idle session can make room"),
+        );
+
+        assert!(
+            hub.has_session(&peer(1)) && hub.has_session(&peer(2)),
+            "the round failed, so nothing may have been given up"
+        );
+    }
+
+    /// Two rounds must not plan on the same idle session: with one idle peer
+    /// and a cap that is full, the first round is admitted and the second is not.
+    #[test]
+    fn two_rounds_at_the_cap_do_not_count_on_the_same_idle_session() {
+        let (admission, hub, start) = full_node();
+        mark_active(&admission, peer(2), start + MIN_IDLE);
+        let now = start + MIN_IDLE + Duration::from_secs(1);
+
+        let _first = admission
+            .try_admit_at(peer(3), &hub, now)
+            .expect("peer 1 is idle");
+        assert_eq!(
+            admission.try_admit_at(peer(4), &hub, now).unwrap_err(),
+            Refusal::AtCap
+        );
+    }
+
+    /// The idle session was busy again by the time the newcomer attached: the
+    /// newcomer's session goes, so the cap holds and no busy session is taken.
+    #[test]
+    fn a_newcomer_with_nobody_left_to_give_up_is_detached() {
+        let (admission, hub, start) = full_node();
+        let now = start + MIN_IDLE + Duration::from_secs(1);
+        let guard = admission
+            .try_admit_at(peer(3), &hub, now)
+            .expect("an idle session can make room");
+        let busy = Instant::now() + Duration::from_secs(1);
+        mark_active(&admission, peer(1), busy);
+        mark_active(&admission, peer(2), busy);
+        hub.attach(peer(3));
+
+        assert!(!guard.attached_at(busy), "nobody was idle any more");
+
+        assert!(hub.has_session(&peer(1)) && hub.has_session(&peer(2)));
+        assert!(!hub.has_session(&peer(3)), "the cap holds");
     }
 
     #[test]

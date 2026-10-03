@@ -382,7 +382,6 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         // lives. The guard and the round deadline below are what replace those
         // two guarantees.
         let task = n0_future::task::spawn(async move {
-            let _guard = guard;
             // Boxed: the answer future carries the whole sans-io str0m state,
             // large enough that clippy flags it on this task's stack.
             match n0_future::time::timeout(
@@ -392,6 +391,11 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             .await
             {
                 Ok(Ok(())) => {
+                    // At the cap the idlest session is given up now, for this one.
+                    if !guard.attached() {
+                        conn.close(CAP_REFUSED.into(), b"at the direct-peer cap");
+                        return;
+                    }
                     admission.note_success(remote);
                     register_session_addr(&endpoint, remote);
                     conn.close(0u32.into(), b"jsep done");
@@ -808,7 +812,6 @@ fn spawn_offer_round(
     let proven = state.direct_proven.clone();
     let pool = state.unicast_pool.clone();
     let task = n0_future::task::spawn(async move {
-        let _guard = guard;
         if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
             if is_cap_refusal(&error) {
                 admission.note_refused(peer);
@@ -818,6 +821,10 @@ fn spawn_offer_round(
         }
         // The peer took the round: it is not refusing us, so its wait starts over.
         admission.note_success(peer);
+        // At the cap the idlest session is given up now, for this one.
+        if !guard.attached() {
+            return;
+        }
         if offer == Offer::UdpRace && {
             // A connection opened before the attach rides the session only
             // after a connect; the race is judged on the connection after.
