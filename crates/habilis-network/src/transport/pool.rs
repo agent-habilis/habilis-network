@@ -77,7 +77,8 @@ struct PoolInner {
     sweeping: AtomicBool,
     /// Peers whose pooled connection the sweeper closed for want of a send. A
     /// watcher that would dial them again would keep the connection alive for
-    /// ever, so it asks here first. A dial that a send makes clears the mark.
+    /// ever, so it asks here first. Any successful dial through the pool clears
+    /// the mark: a send, but also the direct-path probe.
     idled: std::sync::Mutex<HashSet<EndpointId>>,
     /// When each endpoint's last dial failed, for the
     /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on a successful dial or
@@ -238,6 +239,16 @@ impl UnicastPool {
                 pooled.conn.close_reason().is_none() && super::path::selected_is_ip(&pooled.conn)
             })
         })
+    }
+
+    /// Mark `eid` as idled out, for a test that has no connection to close.
+    #[cfg(test)]
+    pub(crate) fn mark_idled_out(&self, eid: EndpointId) {
+        self.inner
+            .idled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(eid);
     }
 
     /// Whether the sweeper closed `eid`'s pooled connection for want of a send,
@@ -522,6 +533,11 @@ impl UnicastPool {
         if let Some(pooled) = self.inner.conns.lock().await.remove(&eid) {
             pooled.conn.close(0u32.into(), b"peer left");
         }
+        self.inner
+            .idled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&eid);
         self.inner.dial_failures.lock().await.forget(&eid);
         // A rejoin may come back at another address; its `PeerInfo` notes it.
         if let Ok(mut addrs) = self.inner.addrs.lock() {

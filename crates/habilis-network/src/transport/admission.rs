@@ -519,6 +519,12 @@ impl SignalAdmission {
     /// A round with `peer` ended in a session: it is no longer refusing us, so
     /// its wait starts over.
     pub(crate) fn note_success(&self, peer: EndpointId) {
+        self.forget_refusal(peer);
+    }
+
+    /// Drop the wait that `peer`'s refusals earned, because the peer at that
+    /// address is not the one that refused: a new holder of the rendezvous id.
+    pub(crate) fn forget_refusal(&self, peer: EndpointId) {
         self.lock().refused.forget(&peer);
     }
 

@@ -119,9 +119,12 @@ pub(crate) fn ensure_watchers(
         let warm = state.unicast_pool.connection(peer);
         // The pool closed this connection because nothing sent on it. Dialing it
         // back here would hold it up for ever, so the idle timeout would never
-        // close it. A send dials it again, and the next tick watches it.
+        // close it. A send dials it again, and the next tick watches it. Until
+        // then nobody watches the pair: a `WebRTC` session to a peer that has UDP
+        // too is not detached when UDP returns, and keeps its direct-peer slot.
         if warm.is_none() && state.unicast_pool.idled_out(peer) {
             state.path_watchers.remove(&peer);
+            state.path_kinds.remove(&peer);
             continue;
         }
         let watched = state.path_watchers.get(&peer).copied();
@@ -206,14 +209,23 @@ pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool 
 /// selection; without it iroh retries every 60 s. When UDP answers, the
 /// watcher sees it selected and the session is detached.
 pub(crate) fn nudge_webrtc_riders(state: &EventLoopState, ctx: &HandlerCtx<'_>) {
-    for (&peer, &kind) in &state.path_kinds {
-        if kind == PathKind::WebRtc {
-            let endpoint = ctx.endpoint.clone();
-            n0_future::task::spawn(async move {
-                super::webrtc::nudge(&endpoint, peer).await;
-            });
-        }
+    for peer in webrtc_riders(state) {
+        let endpoint = ctx.endpoint.clone();
+        n0_future::task::spawn(async move {
+            super::webrtc::nudge(&endpoint, peer).await;
+        });
     }
+}
+
+/// The peers that an alive tick nudges: those whose last reported path is a
+/// `WebRTC` session.
+fn webrtc_riders(state: &EventLoopState) -> Vec<EndpointId> {
+    state
+        .path_kinds
+        .iter()
+        .filter(|(_, kind)| **kind == PathKind::WebRtc)
+        .map(|(peer, _)| *peer)
+        .collect()
 }
 
 /// Apply a watcher's report (requirements 3 and 4): drop the session once UDP
@@ -447,8 +459,38 @@ fn retry_candidates(
 mod tests {
     use iroh::EndpointAddr;
 
-    use super::{may_graft, retry_candidates};
+    use super::{PathKind, ensure_watchers, may_graft, retry_candidates, webrtc_riders};
     use crate::testing::{endpoint_id, fresh_state, nick};
+
+    // The pool closes a connection that nothing sent on, and the watcher is
+    // dropped with it. The last path kind it reported must go too, or every
+    // alive tick connects to the peer again to nudge it.
+    #[test]
+    fn an_idled_out_webrtc_peer_is_no_longer_nudged() {
+        use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+
+        let mut state = fresh_state();
+        let (local, peer) = {
+            let (one, two) = (endpoint_id(1), endpoint_id(2));
+            if one < two { (one, two) } else { (two, one) }
+        };
+        let rendezvous = endpoint_id(3);
+        state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(local)));
+        state.local_udp_transport = true;
+        state
+            .peer_endpoints
+            .insert(nick("peer"), EndpointAddr::new(peer));
+        state.path_kinds.insert(peer, PathKind::WebRtc);
+        assert_eq!(webrtc_riders(&state), vec![peer], "it rides a session");
+
+        state.unicast_pool.mark_idled_out(peer);
+        ensure_watchers(&mut state, local, rendezvous);
+
+        assert!(
+            webrtc_riders(&state).is_empty(),
+            "an idled-out peer must not be nudged on every tick"
+        );
+    }
 
     // `linked_endpoints` is not cleared on the resume edge, so a re-bridge
     // that trusted it skipped exactly the peers it exists to re-dial.
@@ -537,7 +579,7 @@ mod tests {
             .peer_endpoints
             .insert(nick("beacon"), with_udp(rendezvous));
         state.peer_endpoints.insert(nick("bob"), with_udp(bob));
-        super::ensure_watchers(&mut state, local, rendezvous);
+        ensure_watchers(&mut state, local, rendezvous);
         assert!(state.path_watchers.contains_key(&bob), "a peer is watched");
         assert!(!state.path_watchers.contains_key(&rendezvous));
     }

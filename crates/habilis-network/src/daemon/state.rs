@@ -985,7 +985,7 @@ impl EventLoopState {
     pub(crate) fn forget_rendezvous_verdict(&mut self) {
         self.rendezvous_probe_read_free = false;
         if let Some(rendezvous) = self.rendezvous_id {
-            self.webrtc_admission.note_success(rendezvous);
+            self.webrtc_admission.forget_refusal(rendezvous);
         }
     }
 

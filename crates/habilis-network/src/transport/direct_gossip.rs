@@ -107,6 +107,13 @@ impl ProtocolHandler for DirectOnlyGossip {
 /// of each end decides whether to link again. The wait restarts at every
 /// return to a direct path, so a path that flaps is left alone.
 ///
+/// The links to the rendezvous are closed too, and each costs a `NeighborDown`:
+/// the rendezvous has no path watcher, and a session to it is offered only while
+/// the node is not linked to it (`negotiate_rendezvous_session`), so the session
+/// comes after this close, whatever the deadline. A wait of 60 s gave the same
+/// two downs, later. Only the host and a node with fewer than the release count
+/// of links hold that link, so the cost is one re-graft each.
+///
 /// Holds the connection weakly: the watcher must not keep a link open that
 /// gossip has dropped.
 fn watch_relay_policy(accepted: &Connection) {
