@@ -42,7 +42,7 @@ pub struct Opts {
     pub name: Option<String>,
     /// How members find each other: any of `mdns`, `dht`, `relay`, `pkarr`. Naming
     /// any uses only those; naming none is a loopback mesh. Ignored with a
-    /// `topic` (always all three) or a `mesh` id (which carries its own).
+    /// `topic` (always all four) or a `mesh` id (which carries its own).
     pub lookup: Vec<Lookup>,
     /// What may carry payload: any of `udp`, `webrtc`, `relay`, with `udp` or
     /// `webrtc` among them. Empty ⇒ `udp,webrtc`, so all data is peer to peer
@@ -57,9 +57,9 @@ pub struct Opts {
     /// by id.
     pub relay_urls: Vec<String>,
     /// Which pkarr relays: every member publishes to all of them. Needs
-    /// `pkarr` in `lookup`, so a topic, whose lookups have no pkarr, refuses
-    /// it. Part of the mesh id. Empty ⇒ the default list. Ignored when
-    /// joining by id.
+    /// `pkarr` in `lookup`. A create only: a topic always takes the default
+    /// list, so it refuses this. Part of the mesh id. Empty ⇒ the default
+    /// list. Ignored when joining by id.
     pub pkarr_urls: Vec<String>,
     /// Active-view cap; `0` takes the engine default.
     pub max_peers: usize,
@@ -243,17 +243,20 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
         (None, Some(string)) => {
             // Note what this ignores: `lookup`. `TopicParams::resolve` always
             // derives through the all-on preset, so a topic mesh is always
-            // mDNS + DHT + the relay. That is what lets a tab and a terminal
+            // mDNS + DHT + the relay + pkarr. That is what lets a tab and a terminal
             // derive the same id from the same string — the lookups are mixed
             // into the derivation, so two reaches over one string are two
             // different meshes. `relay_urls` and `transport` are the two
             // choices that *do* change the id, and every member must pass the
-            // same values.
+            // same values. The pkarr list is not a third: a topic is always on
+            // the default list, so it refuses one.
             if !opts.pkarr_urls.is_empty() {
-                anyhow::bail!("a topic has no pkarr lookup, so it takes no pkarr relay list");
+                anyhow::bail!(
+                    "a topic always uses the default pkarr list, so it takes no pkarr relay list"
+                );
             }
             let config = MeshConfig::resolve(
-                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
+                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr],
                 relay_ladder(&opts.relay_urls)?,
                 None,
                 &opts.transport,
@@ -308,7 +311,7 @@ mod tests {
     }
 
     fn all_lookups() -> Vec<Lookup> {
-        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr]
     }
 
     fn create_config(opts: &Opts) -> MeshConfig {
@@ -476,10 +479,10 @@ mod tests {
         assert!(format!("{error:#}").contains("udp"), "{error:#}");
     }
 
-    /// A topic's lookups are fixed and have no pkarr, so a pkarr list with a
-    /// topic says so, rather than asking for a lookup a topic cannot name.
+    /// A topic's lookups are fixed, and its pkarr list is always the default,
+    /// so a custom list with a topic is refused: the list is for a create.
     #[test]
-    fn pkarr_urls_with_a_topic_say_the_topic_has_no_pkarr() {
+    fn pkarr_urls_with_a_topic_are_refused() {
         let Err(error) = resolve_kind(
             &Opts {
                 topic: Some("standup".to_owned()),

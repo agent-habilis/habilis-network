@@ -12,7 +12,7 @@ pub(crate) struct Args {
     /// new stream's hash is printed.
     pub hash: Option<String>,
     /// How peers find the producer, any of `mdns,dht,relay,pkarr`.
-    /// `mdns,dht,relay` when none is named. Ignored when reading: the hash
+    /// `mdns,dht,relay,pkarr` when none is named. Ignored when reading: the hash
     /// carries its own.
     #[arg(long, value_delimiter = ',')]
     pub lookup: Vec<Lookup>,
@@ -42,7 +42,7 @@ impl Args {
     /// hash is useless to a reader that cannot find the producer.
     pub(crate) fn opts(&self) -> StreamOpts {
         let lookup = if self.lookup.is_empty() {
-            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr]
         } else {
             self.lookup.clone()
         };
@@ -74,7 +74,7 @@ mod tests {
     fn a_bare_producer_uses_every_lookup_and_a_named_one_replaces_them() {
         assert_eq!(
             parse(&[]).opts().lookup,
-            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr]
         );
         assert_eq!(
             parse(&["--lookup", "mdns,relay"]).opts().lookup,
