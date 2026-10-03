@@ -16,12 +16,15 @@ bun run start --create --lookup mdns --nick ana  # or create; share the printed 
 bun run start --id <base58> --nick bo          # and join it by id
 ```
 
-`--lookup mdns,dht,relay` (any subset, `--create` only) says how members find
-each other; none is a loopback mesh. `--relay-url <url>` (repeatable) swaps in
-a custom relay ladder on `--topic` and `--create`, and `--transport udp,webrtc,relay`
-lets payload fall back to the relay. Both are part of the mesh id, so every
-member must pass the same values; by default the relay stays a lookup and
-payload never rides it.
+`--lookup mdns,dht,relay,pkarr` (any subset, `--create` only) says how members find
+each other; naming none is a loopback mesh. A `--topic` mesh always uses all four, pkarr
+included, so a peer that knows only your endpoint id can resolve it. `--pkarr-url <url>`
+(repeatable, `--create` only, needs `pkarr` in `--lookup`) swaps in custom pkarr relays for
+the default list. `--relay-url <url>` (repeatable) swaps in a custom relay ladder on
+`--topic` and `--create`, and `--transport udp,webrtc,relay` lets payload fall back to the
+relay. The pkarr list, the relay ladder and the transport are part of the mesh id, so every
+member must pass the same values; by default the relay stays a lookup and payload never
+rides it.
 
 Human mode: type to chat, `/who`, `/state`, `/merge {json}`, `/quit`.
 

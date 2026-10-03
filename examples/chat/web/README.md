@@ -32,6 +32,10 @@ Query parameters, the browser half of the flags the terminal client takes:
 | `?transport=udp,webrtc,relay` | let payload fall back to the relay. Part of the id too |
 | `?log=<level>` | engine tracing level, `warn` by default |
 
+A topic always uses all four lookups, pkarr included, with the default pkarr list, so a tab
+and a terminal derive the same mesh from the same string. A custom pkarr list is a create-only
+choice, and this page has no create path, so it takes no `?pkarr`.
+
 The relay stays a lookup unless `transport` names it: a tab has no UDP
 socket, so payload waits for a WebRTC session rather than riding the relay.
 

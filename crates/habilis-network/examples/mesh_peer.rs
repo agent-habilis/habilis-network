@@ -58,6 +58,19 @@ impl NodeApp for Probe {
     }
 }
 
+/// The pkarr relays `MESH_PKARR_URLS` names (comma-separated), or the default
+/// list when it is unset or empty. Pkarr is on either way, like every public
+/// mesh; the variable only swaps the relays.
+fn pkarr_choice(urls: Option<&str>) -> anyhow::Result<habilis_network::protocol::PkarrChoice> {
+    use habilis_network::protocol::{PkarrChoice, parse_pkarr_urls};
+
+    let texts: Vec<String> = urls
+        .filter(|urls| !urls.is_empty())
+        .map(|urls| urls.split(',').map(str::to_owned).collect())
+        .unwrap_or_default();
+    Ok(parse_pkarr_urls(&texts)?.map_or(PkarrChoice::Pinned, PkarrChoice::Custom))
+}
+
 #[habilis_network::async_trait]
 impl NodeDriver for Probe {
     type Session = ();
@@ -109,7 +122,10 @@ async fn main() -> anyhow::Result<()> {
                     mdns: true,
                     dht: true,
                     relay_lookup: ladder,
-                    pkarr: habilis_network::protocol::PkarrChoice::Disabled,
+                    // The default list, never `MESH_PKARR_URLS`: the page that
+                    // joins this topic cannot name a list, so a custom one
+                    // would derive a different mesh.
+                    pkarr: habilis_network::protocol::PkarrChoice::Pinned,
                 },
                 password: None,
                 issuer_pubkey: None,
@@ -146,7 +162,10 @@ async fn main() -> anyhow::Result<()> {
             // rung is the part that matters here — it is the only leg a browser
             // peer has, and the rendezvous homes on it.
             config: MeshConfig {
-                lookups: LookupOpts::public_preset(),
+                lookups: LookupOpts {
+                    pkarr: pkarr_choice(std::env::var("MESH_PKARR_URLS").ok().as_deref())?,
+                    ..LookupOpts::public_preset()
+                },
                 password: None,
                 issuer_pubkey: None,
                 // Baked into the id, so a joiner inherits it: only the
@@ -218,4 +237,32 @@ async fn run_peer(
     }
     node.leave().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use habilis_network::protocol::PkarrChoice;
+
+    use super::pkarr_choice;
+
+    #[test]
+    fn unset_or_empty_takes_the_default_list() {
+        assert!(matches!(pkarr_choice(None), Ok(PkarrChoice::Pinned)));
+        assert!(matches!(pkarr_choice(Some("")), Ok(PkarrChoice::Pinned)));
+    }
+
+    #[test]
+    fn a_comma_separated_list_is_custom() {
+        let choice =
+            pkarr_choice(Some("https://a.example/pkarr,https://b.example/pkarr")).expect("parses");
+        let PkarrChoice::Custom(urls) = choice else {
+            panic!("expected a custom list");
+        };
+        assert_eq!(urls.len(), 2);
+    }
+
+    #[test]
+    fn a_bad_entry_is_an_error_not_a_shorter_list() {
+        assert!(pkarr_choice(Some("https://a.example/pkarr,not a url")).is_err());
+    }
 }
