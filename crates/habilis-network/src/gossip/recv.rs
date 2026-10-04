@@ -1355,6 +1355,8 @@ async fn handle_peer_info(
     // it. Blocking the graft on the session deadlocks mesh formation — see the
     // note on `negotiate_session`.
     crate::transport::webrtc::negotiate_session(state, ctx, peer_id, peer_addr.clone());
+    // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
+    // rendezvous here, which returned above.
     if !defer_first_dial
         && state.linked_endpoints.len() < ctx.max_peers
         && !state.linked_endpoints.contains(&peer_id)
