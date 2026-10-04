@@ -147,6 +147,13 @@ published to a registry; pin it with
   and `hi_key` next to `lo` and `hi`, and a digest without them is ignored.
   Members on the old build and on this build do not repair each other's
   gaps until all upgrade.
+- A member whose clock runs ahead no longer slows the repair of the newest
+  messages. A message carries the timestamp of its sender, and nothing bounds
+  how far ahead that is. The newest anti-entropy window took the 70 newest by
+  timestamp, so 70 messages stamped ahead held it on every node, and a lost
+  fresh message of another member waited for the sweep (13 rounds on a full
+  log, 1 round before). The newest window now takes the 70 newest up to the
+  local clock. Messages stamped ahead of the clock are reached by the sweep.
 - A stream rides the relay only if both lists allow it. A consumer whose own
   `transport` list left out `'relay'` still streamed over the relay when the
   producer's list allowed it.

@@ -171,7 +171,7 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
             window.lo = (state.joined_at, KEY_MIN);
         }
     };
-    if older_len == 0 {
+    if newest.from_start {
         floor(&mut newest);
     }
     let mut windows = vec![WireWindow::encode(&newest)];
@@ -181,7 +181,7 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     } else {
         let start = state.digest_cursor % older_len;
         if let Some(mut older) = state.message_log.older_window(recent, start, recent) {
-            if start == 0 {
+            if older.from_start {
                 floor(&mut older);
             }
             state.digest_cursor = (start + older.ids.len()) % older_len;
@@ -1480,6 +1480,7 @@ mod tests {
             lo: (1, crate::daemon::message_log::KEY_MIN),
             hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
             ids: ids.clone(),
+            from_start: false,
         };
         let wire = WireWindow::encode(&window);
         let decoded = wire.decode_ids().expect("valid window decodes");
@@ -1727,6 +1728,76 @@ mod tests {
             asked,
             "the message between the first two windows never came back"
         );
+    }
+
+    /// A message is stamped by its sender, and nothing bounds how far ahead. One
+    /// author with a fast clock then sorts above every honest message. The newest
+    /// window must still be the newest messages up to the local clock, or the
+    /// fresh messages of everyone else wait for the sweep, as many rounds as
+    /// the log holds windows. The messages of the fast author are not lost:
+    /// the sweep brings them back.
+    #[test]
+    fn an_author_with_a_fast_clock_does_not_slow_the_newest_messages() {
+        let budget = crate::util::tuning::antientropy_max_resend();
+        let base = crate::util::clock::unix_secs() - 3600;
+        let ahead = 80;
+        let mut all: Vec<Message> = Vec::new();
+        let (mut next_honest, mut next_fast) = (0usize, 0usize);
+        let mut honest_at = Vec::new();
+        let mut fast_at = Vec::new();
+        while all.len() < 1000 {
+            if all.len().is_multiple_of(12) && next_fast < ahead {
+                fast_at.push(all.len());
+                all.push(chat_at(&format!("f{next_fast}"), base + 100_000));
+                next_fast += 1;
+            } else {
+                honest_at.push(all.len());
+                let second = i64::try_from(next_honest / 20).expect("small");
+                all.push(chat_at(&format!("h{next_honest}"), base + second));
+                next_honest += 1;
+            }
+        }
+        let rounds_until_back = |lost_index: usize| {
+            let mut holder = MessageLog::new(1000);
+            let mut node = fresh_state();
+            node.joined_at = base - 1;
+            let lost = all[lost_index].dedup_key();
+            for (index, message) in all.iter().enumerate() {
+                holder.push(message.clone());
+                if index != lost_index {
+                    node.message_log.push(message.clone());
+                }
+            }
+            (1..=40).find(|_| {
+                answer_within_budget(&mut node, &holder, budget)
+                    .iter()
+                    .any(|message| message.dedup_key() == lost)
+            })
+        };
+        let newest_honest = honest_at.len() - 1;
+        for slot in [newest_honest, newest_honest - 30] {
+            let rounds = rounds_until_back(honest_at[slot]);
+            assert!(
+                rounds.is_some_and(|rounds| rounds <= 2),
+                "the honest message {} from the newest came back after {rounds:?} rounds",
+                newest_honest - slot
+            );
+        }
+        // The fast author's messages sort last. The one that sorts highest is
+        // above everything the node holds, so only an open end reaches it.
+        let mut by_bound = fast_at.clone();
+        by_bound.sort_by_key(|index| (all[*index].timestamp, all[*index].dedup_key()));
+        for index in [
+            by_bound[by_bound.len() - 1],
+            by_bound[by_bound.len() / 2],
+            by_bound[0],
+        ] {
+            let rounds = rounds_until_back(index);
+            assert!(
+                rounds.is_some_and(|rounds| rounds <= 20),
+                "a message of the fast author never came back: {rounds:?}"
+            );
+        }
     }
 
     /// A node gets back every message it missed after it joined, even one sent
