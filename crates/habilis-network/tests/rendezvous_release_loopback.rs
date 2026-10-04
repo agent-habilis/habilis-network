@@ -68,6 +68,15 @@ fn count(needle: &str) -> usize {
     logs().matches(needle).count()
 }
 
+/// How many members reported their link to the rendezvous down. The creator
+/// hosts the rendezvous and has no such link, so it never counts.
+fn rendezvous_links_down() -> usize {
+    logs()
+        .lines()
+        .filter(|line| line.contains("gossip neighbor down") && line.contains("is_rendezvous=true"))
+        .count()
+}
+
 /// The lines that say how the rendezvous was held, let go of and re-grafted.
 fn rendezvous_trace() -> String {
     logs()
@@ -247,6 +256,17 @@ async fn group_that_let_go(relay: &RelayUrl) -> Vec<Member> {
         .await,
         "not every joiner let go of the rendezvous: {} of {}\n{}",
         count("released the rendezvous"),
+        GROUP - 1,
+        rendezvous_trace()
+    );
+    // The release is a choice, and the link must end with it: the beacon keeps
+    // no claim on a joiner, and the joiner reports the rendezvous link down.
+    assert!(
+        eventually(Duration::from_mins(1), || rendezvous_links_down()
+            >= GROUP - 1)
+        .await,
+        "not every joiner reported the rendezvous link down: {} of {}\n{}",
+        rendezvous_links_down(),
         GROUP - 1,
         rendezvous_trace()
     );
