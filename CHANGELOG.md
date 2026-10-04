@@ -131,6 +131,17 @@ published to a registry; pin it with
 
 ### Fixed
 
+- The anti-entropy digest no longer reports a gap that does not exist. A
+  window was a slice of the log in arrival order, but its range ran from the
+  least to the greatest timestamp of that slice. A log of more than 140
+  messages (about 19 members) then lay inside the ranges without being listed,
+  and holders re-sent those messages at the full budget on every digest. A
+  window now covers a slice in `(timestamp, id)` order, bounded by that key,
+  and the windows tile the log. A one-second burst of more than 70 messages
+  no longer empties the digest. **Wire change:** each window carries `lo_key`
+  and `hi_key` next to `lo` and `hi`, and a digest without them is ignored.
+  Members on the old build and on this build do not repair each other's
+  gaps until all upgrade.
 - A stream rides the relay only if both lists allow it. A consumer whose own
   `transport` list left out `'relay'` still streamed over the relay when the
   producer's list allowed it.

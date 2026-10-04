@@ -25,7 +25,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
+use crate::daemon::message_log::{DigestWindow, KEY_MIN, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
 use crate::protocol::{Channel, MeshId, Message, Nickname};
 use crate::util::clock::Instant;
@@ -37,13 +37,25 @@ use crate::util::tuning::{
 
 use super::broadcast_msg;
 
-/// One window on the wire: its `[lo, hi]` ts bounds (`hi == i64::MAX` ⇒
-/// open-ended) plus its ids packed as raw 16-byte UUIDs, Base58-encoded.
+/// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
+/// open-ended), each a timestamp and the id key of the message at that edge, plus
+/// its ids packed as raw 16-byte UUIDs, Base58-encoded. The key is what lets an
+/// edge fall inside a second that holds more messages than a window lists.
 #[derive(Serialize, Deserialize)]
 struct WireWindow {
     lo: i64,
+    lo_key: String,
     hi: i64,
+    hi_key: String,
     ids: String,
+}
+
+fn encode_key(key: &[u8; 16]) -> String {
+    bs58::encode(key).into_string()
+}
+
+fn decode_key(text: &str) -> Option<[u8; 16]> {
+    bs58::decode(text).into_vec().ok()?.try_into().ok()
 }
 
 impl WireWindow {
@@ -53,10 +65,20 @@ impl WireWindow {
             packed.extend_from_slice(id);
         }
         WireWindow {
-            lo: window.lo,
-            hi: window.hi,
+            lo: window.lo.0,
+            lo_key: encode_key(&window.lo.1),
+            hi: window.hi.0,
+            hi_key: encode_key(&window.hi.1),
             ids: bs58::encode(packed).into_string(),
         }
+    }
+
+    /// The window's bounds, or `None` if a key is malformed.
+    fn range(&self) -> Option<WindowRange> {
+        Some(WindowRange {
+            lo: (self.lo, decode_key(&self.lo_key)?),
+            hi: (self.hi, decode_key(&self.hi_key)?),
+        })
     }
 
     /// Decode the packed ids into a set, or `None` if the Base58 / length
@@ -139,13 +161,18 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     let recent = ANTIENTROPY_DIGEST_WINDOW_IDS;
     let mut newest = state.message_log.recent_window(recent)?;
     let older_len = state.message_log.older_len(recent);
+    // The window that holds our oldest message reaches back to the moment we
+    // joined: a node alone at start logs nothing until a link forms, and
+    // without this floor what the mesh said before that was never asked for.
+    // Nothing older than `joined_at` is ever surfaced, so asking from there
+    // costs no budget on history.
+    let floor = |window: &mut DigestWindow| {
+        if state.joined_at < window.lo.0 {
+            window.lo = (state.joined_at, KEY_MIN);
+        }
+    };
     if older_len == 0 {
-        // The window is the whole log, so its `lo` is only our first entry: the
-        // moment we first spoke, not when we joined. A node alone at start logs
-        // nothing until a link forms, and without this floor what the mesh said
-        // before that was never asked for. Nothing older than `joined_at` is
-        // ever surfaced, so asking from there costs no budget on history.
-        newest.lo = newest.lo.min(state.joined_at);
+        floor(&mut newest);
     }
     let mut windows = vec![WireWindow::encode(&newest)];
 
@@ -153,7 +180,10 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
         state.digest_cursor = 0;
     } else {
         let start = state.digest_cursor % older_len;
-        if let Some(older) = state.message_log.older_window(recent, start, recent) {
+        if let Some(mut older) = state.message_log.older_window(recent, start, recent) {
+            if start == 0 {
+                floor(&mut older);
+            }
             state.digest_cursor = (start + older.ids.len()) % older_len;
             windows.push(WireWindow::encode(&older));
         }
@@ -213,11 +243,11 @@ pub(crate) async fn handle_digest(
         if budget == 0 {
             break;
         }
+        let Some(range) = window.range() else {
+            continue;
+        };
         for msg in state.message_log.missing_in_window(MissingQuery {
-            range: WindowRange {
-                lo: window.lo,
-                hi: window.hi,
-            },
+            range,
             have: &have,
             max: budget,
             requester: &message.author,
@@ -1232,9 +1262,9 @@ mod tests {
 
     use super::{
         ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, HeadsBody, WireWindow,
-        digest_windows, missing_frames, state_digest,
+        digest_windows, encode_key, missing_frames, state_digest,
     };
-    use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery, WindowRange};
+    use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
     use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
@@ -1447,8 +1477,8 @@ mod tests {
     fn wire_window_round_trips_ids() {
         let ids: Vec<[u8; 16]> = (0..5u8).map(|seed| [seed; 16]).collect();
         let window = DigestWindow {
-            lo: 1,
-            hi: i64::MAX,
+            lo: (1, crate::daemon::message_log::KEY_MIN),
+            hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
             ids: ids.clone(),
         };
         let wire = WireWindow::encode(&window);
@@ -1463,7 +1493,9 @@ mod tests {
         // Not valid Base58 (`0`, `O`, `I`, `l`, space are outside the alphabet).
         let bad_alphabet = WireWindow {
             lo: 0,
+            lo_key: String::new(),
             hi: 0,
+            hi_key: String::new(),
             ids: "0OIl not base58".to_string(),
         };
         assert!(bad_alphabet.decode_ids().is_none(), "bad Base58 ⇒ None");
@@ -1471,7 +1503,9 @@ mod tests {
         // Valid Base58 but not a whole number of 16-byte ids (5 bytes).
         let odd_length = WireWindow {
             lo: 0,
+            lo_key: String::new(),
             hi: 0,
+            hi_key: String::new(),
             ids: bs58::encode([1u8; 5]).into_string(),
         };
         assert!(odd_length.decode_ids().is_none(), "non-16-multiple ⇒ None");
@@ -1479,7 +1513,9 @@ mod tests {
         // Empty is well-formed: zero ids.
         let empty = WireWindow {
             lo: 0,
+            lo_key: String::new(),
             hi: 0,
+            hi_key: String::new(),
             ids: String::new(),
         };
         assert_eq!(empty.decode_ids().map(|set| set.len()), Some(0));
@@ -1543,10 +1579,7 @@ mod tests {
             .iter()
             .flat_map(|window| {
                 holder.missing_in_window(MissingQuery {
-                    range: WindowRange {
-                        lo: window.lo,
-                        hi: window.hi,
-                    },
+                    range: window.range().expect("our own encoding"),
                     have: &have,
                     max: 100,
                     requester: &nick("node"),
@@ -1554,6 +1587,146 @@ mod tests {
             })
             .map(|message| message.body.as_str().to_string())
             .collect()
+    }
+
+    /// 300 messages in a scrambled order, over `seconds` seconds.
+    fn scrambled_messages(seconds: usize) -> Vec<Message> {
+        (0..300usize)
+            .map(|index| {
+                let slot = (index * 7) % 300;
+                chat_at(
+                    &format!("m{slot}"),
+                    1_700_000_000 + i64::try_from(slot % seconds).expect("small"),
+                )
+            })
+            .collect()
+    }
+
+    /// A log of 300 messages in a scrambled arrival order over `seconds`
+    /// seconds, as two nodes that heard the same mesh would hold it.
+    fn same_log_on_two_nodes(seconds: usize) -> (EventLoopState, MessageLog) {
+        let mut node = fresh_state();
+        let mut holder = MessageLog::new(1000);
+        for message in scrambled_messages(seconds) {
+            node.message_log.push(message.clone());
+            holder.push(message);
+        }
+        (node, holder)
+    }
+
+    /// Two nodes that hold the same messages ask each other for nothing, however
+    /// many messages they hold and however few seconds those fall in. The log
+    /// is longer than the 140 ids a digest lists, so the older window sweeps
+    /// across rounds: every round must be clean.
+    #[test]
+    fn nodes_with_identical_logs_of_more_than_140_messages_ask_each_other_for_nothing() {
+        for seconds in [12, 1] {
+            let (mut node, holder) = same_log_on_two_nodes(seconds);
+            for round in 0..6 {
+                assert_eq!(
+                    answer(&mut node, &holder),
+                    HashSet::new(),
+                    "round {round}, {seconds} s"
+                );
+            }
+        }
+    }
+
+    /// What `holder` sends in answer to `node`'s digest, as `handle_digest`
+    /// sends it: the windows in order, one budget across them, and a message
+    /// that an earlier window already chose is not chosen again.
+    fn answer_within_budget(
+        node: &mut EventLoopState,
+        holder: &MessageLog,
+        mut budget: usize,
+    ) -> Vec<Message> {
+        let windows = digest_windows(node).expect("a non-empty log advertises");
+        let mut have: HashSet<[u8; 16]> = windows
+            .iter()
+            .flat_map(|window| window.decode_ids().expect("our own encoding"))
+            .collect();
+        let mut sent = Vec::new();
+        for window in &windows {
+            if budget == 0 {
+                break;
+            }
+            for message in holder.missing_in_window(MissingQuery {
+                range: window.range().expect("our own encoding"),
+                have: &have,
+                max: budget,
+                requester: &nick("node"),
+            }) {
+                have.insert(message.dedup_key());
+                sent.push(message);
+                budget -= 1;
+            }
+        }
+        sent
+    }
+
+    /// A node that lost a quarter of the messages gets exactly those back, round
+    /// by round under the resend budget, and is sent nothing it already holds.
+    /// One second, the join burst, is the hard case: the lost messages sit among
+    /// hundreds with the same timestamp.
+    #[test]
+    fn a_node_that_lost_messages_recovers_them_and_only_them() {
+        let budget = crate::util::tuning::antientropy_max_resend();
+        for seconds in [12, 1] {
+            let all = scrambled_messages(seconds);
+            let mut holder = MessageLog::new(1000);
+            let mut node = fresh_state();
+            node.joined_at = 1_699_999_999;
+            let mut lost = HashSet::new();
+            for (index, message) in all.iter().enumerate() {
+                holder.push(message.clone());
+                if index % 4 == 0 {
+                    lost.insert(message.dedup_key());
+                } else {
+                    node.message_log.push(message.clone());
+                }
+            }
+            let mut recovered = HashSet::new();
+            for round in 0..12 {
+                for message in answer_within_budget(&mut node, &holder, budget) {
+                    assert!(
+                        lost.contains(&message.dedup_key()),
+                        "round {round}, {seconds} s: sent a message the node already holds"
+                    );
+                    recovered.insert(message.dedup_key());
+                    node.message_log.push(message);
+                }
+            }
+            assert_eq!(recovered, lost, "{seconds} s: every lost message came back");
+        }
+    }
+
+    /// The windows of a digest tile the log. A message that sorts between two
+    /// windows, and that the node lacks, is asked for within a few rounds even
+    /// when nothing else changes and no window moves.
+    #[test]
+    fn a_message_between_two_windows_is_asked_for() {
+        let mut all = scrambled_messages(12);
+        all.sort_by_key(|message| (message.timestamp, message.dedup_key()));
+        let mut holder = MessageLog::new(1000);
+        let mut node = fresh_state();
+        node.joined_at = 1_699_999_999;
+        for (index, message) in all.iter().enumerate() {
+            holder.push(message.clone());
+            if index != ANTIENTROPY_DIGEST_WINDOW_IDS {
+                node.message_log.push(message.clone());
+            }
+        }
+        let lost = all[ANTIENTROPY_DIGEST_WINDOW_IDS].dedup_key();
+        let budget = crate::util::tuning::antientropy_max_resend();
+        let asked = (0..12).any(|_| {
+            answer_within_budget(&mut node, &holder, budget)
+                .iter()
+                .any(|message| message.dedup_key() == lost)
+        });
+        assert!(
+            asked,
+            "the message between the first two windows never came back"
+        );
     }
 
     /// A node gets back every message it missed after it joined, even one sent
@@ -1597,12 +1770,16 @@ mod tests {
             windows: vec![
                 WireWindow {
                     lo: 100,
+                    lo_key: encode_key(&[3; 16]),
                     hi: i64::MAX,
+                    hi_key: encode_key(&[u8::MAX; 16]),
                     ids: bs58::encode([7u8; 16]).into_string(),
                 },
                 WireWindow {
                     lo: 10,
+                    lo_key: encode_key(&[1; 16]),
                     hi: 50,
+                    hi_key: encode_key(&[2; 16]),
                     // Two *distinct* 16-byte ids (identical halves would
                     // dedup to one in the decoded set).
                     ids: {
