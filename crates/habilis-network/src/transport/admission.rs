@@ -399,17 +399,6 @@ impl SignalAdmission {
         }
     }
 
-    /// Whether every QUIC connection the hook reported for `peer` is closed.
-    pub(crate) fn connections_closed(&self, peer: EndpointId) -> bool {
-        self.lock().slots.get(&peer).is_none_or(|slot| {
-            slot.conns.iter().all(|handle| {
-                handle
-                    .upgrade()
-                    .is_none_or(|conn| conn.close_reason().is_some())
-            })
-        })
-    }
-
     /// Whether a round with `peer` holds a slot right now, in either role.
     pub(crate) fn negotiating(&self, peer: EndpointId) -> bool {
         self.lock()

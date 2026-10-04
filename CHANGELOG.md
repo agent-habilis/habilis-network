@@ -143,8 +143,9 @@ published to a registry; pin it with
   tells gossip to leave the rendezvous (`GossipSender::leave_peers`, from the
   iroh-gossip fork): the beacon learns that the member left on purpose and
   keeps no claim on it. The link is never closed from this side, because an
-  early close reaches the beacon as a lost connection. The node waits until
-  gossip has closed the link, then detaches the `WebRTC` session. A session to
+  early close reaches the beacon as a lost connection. Once gossip has closed
+  the link, the heal tick detaches the `WebRTC` session, as it does for any
+  node that does not want the rendezvous. A session to
   the rendezvous that attaches after the release no longer grafts it again. The
   same 10-minute run now shows 0 releases.
 - The anti-entropy digest no longer reports a gap that does not exist. A

@@ -262,7 +262,7 @@ It accepts no unicast, so a member cannot probe it for a direct path; its accept
 A member holds the rendezvous link only while it needs it.
 Once it has three links to other members it tells gossip to leave the rendezvous.
 The beacon then learns that the member left on purpose, keeps no claim on it and does not dial it back.
-Gossip closes the link itself, and the node detaches the `WebRTC` session once the link is closed. A close from the member's side would reach the beacon as a lost connection.
+Gossip closes the link itself. Once the link is closed and the rendezvous is not wanted, the heal tick detaches the `WebRTC` session. A close from the member's side would reach the beacon as a lost connection.
 This frees a direct-peer slot and a place in the beacon's gossip view for the next joiner.
 It comes back only while it has fewer than three links, or for two minutes after the sweep removed a silent roster peer, because a partition may have split the mesh and the rendezvous is where the islands meet again. A node that came back stays 30 s, then lets go again.
 The member that hosts the beacon keeps its link, so that the beacon's view is never empty: a joiner is introduced to the mesh through that view, and without it the mesh splits into islands that never meet.
