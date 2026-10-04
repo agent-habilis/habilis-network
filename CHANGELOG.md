@@ -184,6 +184,11 @@ published to a registry; pin it with
   member in the beacon's view. A refusal at a peer's cap makes a node wait, per
   peer: 30 s, doubling with each refusal in a row up to five minutes, and
   starting over after a success.
+- The relay watcher covers the gossip connections that a node dialed, not only
+  the ones it accepted. iroh-gossip keeps one connection per pair and drops the
+  other, so a pair could keep the dialed connection on the relay, with no
+  watcher on that end, after the accepted one was closed: the link stayed up
+  and no `NeighborDown` followed.
 - The answerer of a `WebRTC` session round nudges iroh once after the attach.
   iroh opens a new path only from the client side of a connection, so a
   connection that the answerer had dialed over the relay stayed there while the

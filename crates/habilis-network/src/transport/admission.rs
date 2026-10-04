@@ -64,6 +64,7 @@
 //! peer produce one task and N-1 immediate closes.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -375,6 +376,10 @@ impl Inner {
 pub struct SignalAdmission {
     inner: Arc<Mutex<Inner>>,
     cap: usize,
+    /// The mesh lets no payload ride the relay, so the hook keeps watch over the
+    /// gossip connections that this node dialed (see [`ActivityHook`]). Set once
+    /// the router, which knows the mesh policy, is built.
+    watch_dialed_gossip: Arc<AtomicBool>,
 }
 
 impl SignalAdmission {
@@ -396,7 +401,14 @@ impl SignalAdmission {
                 closed: false,
             })),
             cap,
+            watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the hook keeps the relay policy on the gossip connections that
+    /// this node dials: on when the mesh lets no payload ride the relay.
+    pub(crate) fn watch_dialed_gossip(&self, on: bool) {
+        self.watch_dialed_gossip.store(on, Ordering::Relaxed);
     }
 
     /// The endpoint hook that reports every connection to this table. Install
@@ -669,6 +681,15 @@ pub struct ActivityHook {
 impl EndpointHooks for ActivityHook {
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
         self.admission.note_connection(conn);
+        // The accept side watches the gossip connections it holds
+        // (`DirectOnlyGossip::accept`). iroh-gossip dials its own, so the
+        // watch for those starts here, with the same rule.
+        if conn.side().is_client()
+            && self.admission.watch_dialed_gossip.load(Ordering::Relaxed)
+            && conn.alpn() == iroh_gossip::net::GOSSIP_ALPN
+        {
+            super::direct_gossip::watch_relay_policy(conn);
+        }
         AfterHandshakeOutcome::accept()
     }
 }
@@ -1107,6 +1128,61 @@ mod tests {
         backoff.note(peer(1), now);
         assert!(backoff.on_cooldown(&peer(1), now));
         assert!(!backoff.on_cooldown(&peer(2), now));
+    }
+
+    /// The accept side watches every gossip connection it holds, so one that
+    /// stays on the relay is closed. A connection that this node dialed needs
+    /// the same watch, or a link can stay up on the relay for ever while its
+    /// other end believes the policy keeps it off.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gossip_connection_this_node_dialed_is_closed_when_it_stays_on_the_relay() {
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let bind = |hook: Option<ActivityHook>| {
+            let relay_url = relay_url.clone();
+            async move {
+                let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                    .relay_mode(iroh::RelayMode::custom([relay_url]))
+                    .clear_ip_transports();
+                if let Some(hook) = hook {
+                    builder = builder.hooks(hook);
+                }
+                builder.bind().await.expect("bind an endpoint on the relay")
+            }
+        };
+        let admission = SignalAdmission::new(2);
+        admission.watch_dialed_gossip(true);
+        let server = bind(None).await;
+        let router = Router::builder(server.clone())
+            .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
+            .spawn();
+        let client = bind(Some(admission.activity_hook())).await;
+        let relayed = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+        let conn = client
+            .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
+            .await
+            .expect("dial over the relay");
+
+        let closed = tokio::time::timeout(Duration::from_secs(25), conn.closed()).await;
+
+        assert!(
+            closed.is_ok(),
+            "a dialed gossip connection left on the relay must be closed after the deadline"
+        );
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
     }
 
     /// `close_peer` closes what the hook reported, and says how many.

@@ -716,6 +716,9 @@ pub(crate) fn build_mesh(
     // Cloned before the Router consumes the endpoint; the signal acceptor
     // registers webrtc transport addresses on attach.
     let endpoint_for_acceptor = endpoint.clone();
+    if let Some((_, admission, _)) = &webrtc {
+        admission.watch_dialed_gossip(!relay_transport);
+    }
     let session_gate = webrtc
         .as_ref()
         .filter(|_| needs_session)

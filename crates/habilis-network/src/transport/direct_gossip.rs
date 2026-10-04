@@ -96,7 +96,7 @@ impl ProtocolHandler for DirectOnlyGossip {
     }
 }
 
-/// Keep the relay policy after the accept: a gossip connection whose selected
+/// Keep the relay policy on a gossip connection, whichever end dialed it: one whose selected
 /// path has been the relay for longer than [`PROBE_DEADLINE`], the wait of the accept gate, is closed with
 /// [`GOSSIP_RELAY_REFUSED_CODE`], on a mesh whose relay is lookup only.
 ///
@@ -116,9 +116,9 @@ impl ProtocolHandler for DirectOnlyGossip {
 ///
 /// Holds the connection weakly: the watcher must not keep a link open that
 /// gossip has dropped.
-fn watch_relay_policy(accepted: &Connection) {
-    let weak = accepted.weak_handle();
-    let mut events = accepted.path_events();
+pub(super) fn watch_relay_policy(gossip_conn: &Connection) {
+    let weak = gossip_conn.weak_handle();
+    let mut events = gossip_conn.path_events();
     n0_future::task::spawn(async move {
         let mut on_relay_since: Option<Instant> = None;
         loop {
@@ -136,6 +136,7 @@ fn watch_relay_policy(accepted: &Connection) {
                     tracing::info!(
                         target: super::LOG_TARGET,
                         remote = %conn.remote_id(),
+                        dialed = conn.side().is_client(),
                         "gossip link on the relay path past the deadline: closing it"
                     );
                     conn.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"relay path refused");
