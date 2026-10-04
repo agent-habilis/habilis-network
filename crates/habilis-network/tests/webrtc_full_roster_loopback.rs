@@ -194,8 +194,12 @@ async fn a_joiner_after_a_crash_still_gets_the_full_roster() {
     let released_before = logs().matches("released the rendezvous").count();
     let visits_before = rendezvous_visits();
 
-    // A crash: the member vanishes with no `Left`, so only the sweep removes it.
-    drop(members.pop().expect("a member to crash"));
+    // A crash, as a dead process leaves things: no `Left`, and its sessions
+    // abort with no close, so the survivors drop them when ICE consent times
+    // out. Dropping the member instead leaves its sessions answering consent,
+    // and each survivor keeps one of its direct-peer slots for it.
+    tracing::info!(target: "habilis_network::test", "member crashed");
+    members.pop().expect("a member to crash").node.crash().await;
     let swept = rosters_until(&members, MEMBERS - 2, Duration::from_mins(4)).await;
     assert!(
         swept.iter().all(|len| *len == MEMBERS - 2),
@@ -211,6 +215,9 @@ async fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         let releases = logs().matches("released the rendezvous").count() - released_before;
         if visits >= 1 && releases >= visits {
             break;
+        }
+        if started.elapsed() >= Duration::from_mins(3) {
+            dump_logs();
         }
         assert!(
             started.elapsed() < Duration::from_mins(3),
@@ -235,9 +242,7 @@ async fn a_joiner_after_a_crash_still_gets_the_full_roster() {
     let joined = rosters_until(&members, MEMBERS - 1, Duration::from_mins(2)).await;
 
     let trace = come_back_trace();
-    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
-        let _ = std::fs::write(path, logs());
-    }
+    dump_logs();
     for member in members {
         let _ = member.node.leave().await;
     }
@@ -245,6 +250,13 @@ async fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         joined.iter().all(|len| *len == MEMBERS - 1),
         "a joiner after the crash must see everyone; roster sizes: {joined:?}\n{trace}"
     );
+}
+
+/// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
+fn dump_logs() {
+    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = std::fs::write(path, logs());
+    }
 }
 
 /// How many times a member has linked to the rendezvous, in this run.

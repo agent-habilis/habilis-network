@@ -241,6 +241,14 @@ impl WebRtcHandle {
     pub fn detach(&self, remote: &iroh_base::EndpointId) -> bool {
         self.inner.detach(remote)
     }
+
+    /// Tests only: abort every session without a close. See
+    /// `WebRtcTransport::abort_sessions`.
+    #[cfg(feature = "test-hooks")]
+    #[must_use]
+    pub fn abort_sessions(&self) -> usize {
+        self.inner.abort_sessions()
+    }
 }
 
 #[cfg(all(feature = "web", not(feature = "native")))]

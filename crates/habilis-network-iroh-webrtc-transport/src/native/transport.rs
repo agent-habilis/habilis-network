@@ -95,6 +95,15 @@ impl WebRtcTransport {
         self.registry.remove(remote)
     }
 
+    /// Tests only: drop every session at once, which aborts their driver tasks
+    /// without a close, as a process that died leaves them. The far ends find out
+    /// only when ICE consent times out.
+    #[cfg(feature = "test-hooks")]
+    #[must_use]
+    pub fn abort_sessions(&self) -> usize {
+        self.registry.clear()
+    }
+
     #[must_use]
     pub fn has_session(&self, remote: &EndpointId) -> bool {
         self.registry.is_live(remote)

@@ -28,6 +28,13 @@ pub struct Node<A: NodeDriver> {
     /// nodes to cut from which. Read once at spawn: the ports do not change.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     bound_ports: Vec<u16>,
+    /// What a test needs to make this node die as a process does: its sessions
+    /// and its endpoint.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    crash_handles: (
+        habilis_network_iroh_webrtc_transport::WebRtcHandle,
+        iroh::Endpoint,
+    ),
 }
 
 // `A::Session` need not be `Debug`, and the channels/handle aren't useful in a
@@ -80,6 +87,8 @@ impl<A: NodeDriver + 'static> Node<A> {
             .iter()
             .map(std::net::SocketAddr::port)
             .collect();
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        let crash_handles = (cfg.webrtc_handle(), cfg.endpoint.clone());
         let task = n0_future::task::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));
         Self {
             mesh_id,
@@ -90,7 +99,24 @@ impl<A: NodeDriver + 'static> Node<A> {
             task: Some(task),
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             bound_ports,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            crash_handles,
         }
+    }
+
+    /// Tests only: make this node die as a process does. The loop is aborted
+    /// with no `Left`, the `WebRTC` sessions are aborted with no close, so their
+    /// far ends find out when ICE consent times out (about 22 s), and the
+    /// endpoint is closed so nothing answers a later dial. Dropping the node
+    /// does only the first, and leaves its sessions answering ICE consent.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub async fn crash(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        let (webrtc, endpoint) = &self.crash_handles;
+        let _ = webrtc.abort_sessions();
+        endpoint.close().await;
     }
 
     /// Tests only: the ports this node's endpoint is bound on. A test that cuts
