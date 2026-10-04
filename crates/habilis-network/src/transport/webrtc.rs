@@ -87,8 +87,7 @@ const SIGNAL_ROUND_DEADLINE: std::time::Duration = std::time::Duration::from_sec
 /// two meanings on one number would be a silent bug, so every code of the plane
 /// lives here and a test holds them apart. Each ALPN reads its own subset.
 pub(crate) mod close_code {
-    /// We are at our direct-peer ceiling and no peer is idle long enough to
-    /// make room.
+    /// We are at our direct-peer ceiling.
     ///
     /// Distinct from a failure so the dialer can tell "no room" from "ICE broke"
     /// and back off instead of re-offering every tick.
@@ -101,9 +100,6 @@ pub(crate) mod close_code {
     pub(crate) const GOSSIP_RELAY_REFUSED: u32 = 4;
     /// A unicast connection whose path may not carry payload.
     pub(crate) const UNICAST_RELAY_REFUSED: u32 = 5;
-    /// We evicted this peer a short while ago, so its offer is not answered
-    /// yet. The dialer backs off, as it does for [`CAP_REFUSED`].
-    pub(crate) const EVICTED: u32 = 6;
     /// We let go of the rendezvous on purpose, having enough links to members.
     pub(crate) const RENDEZVOUS_RELEASED: u32 = 7;
     /// A unicast connection nothing sent on for the idle timeout: closed by the
@@ -122,7 +118,6 @@ pub(crate) mod close_code {
                 SIGNAL_ABORTED,
                 GOSSIP_RELAY_REFUSED,
                 UNICAST_RELAY_REFUSED,
-                EVICTED,
                 RENDEZVOUS_RELEASED,
                 IDLE,
             ];
@@ -132,7 +127,7 @@ pub(crate) mod close_code {
     }
 }
 
-use close_code::{CAP_REFUSED, EVICTED, SIGNAL_ABORTED, SIGNAL_FAILED};
+use close_code::{CAP_REFUSED, SIGNAL_ABORTED, SIGNAL_FAILED};
 
 /// Register `remote`'s `WebRTC` transport address after a session attach.
 ///
@@ -200,8 +195,8 @@ pub struct IceProfile {
     pub host_only: bool,
 }
 
-/// The peer refused us: it is at its direct-peer ceiling, or it evicted us
-/// recently. Either way we back off for a while.
+/// The peer refused us: it is at its direct-peer ceiling. We back off for a
+/// while.
 ///
 /// A distinct type rather than a message, because the caller has to tell a
 /// refusal from an ordinary failure and the two want opposite responses: a
@@ -219,8 +214,7 @@ impl std::fmt::Display for CapRefused {
 
 impl std::error::Error for CapRefused {}
 
-/// Whether a failed offer round was the peer refusing us at its ceiling, or
-/// because it evicted us recently.
+/// Whether a failed offer round was the peer refusing us at its ceiling.
 #[must_use]
 pub fn is_cap_refusal(error: &anyhow::Error) -> bool {
     error.downcast_ref::<CapRefused>().is_some()
@@ -259,9 +253,7 @@ fn refused_at_cap(conn: &Connection) -> bool {
     matches!(
         conn.close_reason(),
         Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
-            if [CAP_REFUSED, EVICTED]
-                .into_iter()
-                .any(|code| close.error_code.into_inner() == u64::from(code))
+            if close.error_code.into_inner() == u64::from(CAP_REFUSED)
     )
 }
 
@@ -352,7 +344,6 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             Err(reason) => {
                 let (code, why): (u32, &[u8]) = match reason {
                     Refusal::AtCap => (CAP_REFUSED, b"at the direct-peer cap"),
-                    Refusal::Evicted => (EVICTED, b"evicted recently"),
                     Refusal::ShuttingDown => (SIGNAL_ABORTED, b"shutting down"),
                     Refusal::InFlight | Refusal::HaveSession | Refusal::Cooling => {
                         (SIGNAL_FAILED, b"already negotiating")
@@ -382,6 +373,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         // lives. The guard and the round deadline below are what replace those
         // two guarantees.
         let task = n0_future::task::spawn(async move {
+            let _guard = guard;
             // Boxed: the answer future carries the whole sans-io str0m state,
             // large enough that clippy flags it on this task's stack.
             match n0_future::time::timeout(
@@ -391,11 +383,6 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             .await
             {
                 Ok(Ok(())) => {
-                    // At the cap the idlest session is given up now, for this one.
-                    if !guard.attached() {
-                        conn.close(CAP_REFUSED.into(), b"at the direct-peer cap");
-                        return;
-                    }
                     admission.note_success(remote);
                     register_session_addr(&endpoint, remote);
                     conn.close(0u32.into(), b"jsep done");
@@ -812,6 +799,7 @@ fn spawn_offer_round(
     let proven = state.direct_proven.clone();
     let pool = state.unicast_pool.clone();
     let task = n0_future::task::spawn(async move {
+        let _guard = guard;
         if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
             if is_cap_refusal(&error) {
                 admission.note_refused(peer);
@@ -821,10 +809,6 @@ fn spawn_offer_round(
         }
         // The peer took the round: it is not refusing us, so its wait starts over.
         admission.note_success(peer);
-        // At the cap the idlest session is given up now, for this one.
-        if !guard.attached() {
-            return;
-        }
         if offer == Offer::UdpRace && {
             // A connection opened before the attach rides the session only
             // after a connect; the race is judged on the connection after.
@@ -1632,54 +1616,6 @@ mod tests {
         assert!(
             is_cap_refusal(&error),
             "the dialer must read this as an at-cap refusal, got: {error:#}"
-        );
-
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
-        server.close().await;
-    }
-
-    /// A peer the answerer evicted a short while ago is refused with its own
-    /// code, and the dialer reads it as a request to back off, like an at-cap
-    /// refusal. Without that, the evicted peer would offer again on its next
-    /// retry tick and take the slot back from the newcomer.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_offer_from_an_evicted_peer_is_refused_with_the_evicted_code() {
-        let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
-        let router = serve(&server, &server_hub, &admission);
-
-        let (client, client_hub) = endpoint().await;
-        admission.note_evicted(client.id());
-
-        let conn = client
-            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
-            .await
-            .expect("dial the signal ALPN");
-        let reason = tokio::time::timeout(Duration::from_secs(5), conn.closed())
-            .await
-            .expect("the refusal must be prompt");
-        assert!(
-            matches!(
-                reason,
-                iroh::endpoint::ConnectionError::ApplicationClosed(ref close)
-                    if close.error_code.into_inner() == u64::from(EVICTED)
-            ),
-            "expected the evicted close code, got {reason:?}"
-        );
-
-        let error = dial_signal_with(
-            &client,
-            server.addr(),
-            &client_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect_err("an evicted peer must be refused");
-        assert!(
-            is_cap_refusal(&error),
-            "the dialer must back off from an evicted refusal, got: {error:#}"
         );
 
         router.shutdown().await.expect("shutdown");

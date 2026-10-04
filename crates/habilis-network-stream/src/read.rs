@@ -27,9 +27,7 @@ pub enum Refused {
     /// The producer dropped the stream before closing it, after this consumer
     /// was admitted (while it read, or during the hand-off).
     Abandoned,
-    /// The producer is at its direct-peer cap, and no peer it holds is idle
-    /// enough to make room; or it evicted this node a short while ago. Try
-    /// again later.
+    /// The producer is at its direct-peer cap. Try again later.
     AtCap,
 }
 
