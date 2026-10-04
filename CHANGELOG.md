@@ -147,6 +147,8 @@ published to a registry; pin it with
   and `hi_key` next to `lo` and `hi`, and a digest without them is ignored.
   Members on the old build and on this build do not repair each other's
   gaps until all upgrade.
+  A node logs a warning, once per author per 10 minutes, for a digest that it
+  cannot read.
 - A member whose clock runs ahead no longer slows the repair of the newest
   messages. A message carries the timestamp of its sender, and nothing bounds
   how far ahead that is. The newest anti-entropy window took the 70 newest by

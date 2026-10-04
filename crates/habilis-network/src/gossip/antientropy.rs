@@ -191,6 +191,20 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     Some(windows)
 }
 
+/// Say once per author that its digest could not be read. A build with another
+/// window format sends one every round, and the two builds never repair each
+/// other's gaps: without this line nothing tells the user why.
+fn report_unreadable_digest(message: &Message, state: &mut EventLoopState) {
+    if state.report_unreadable_digest(&message.pubkey, Instant::now()) {
+        tracing::warn!(
+            target: "habilis_network::gossip",
+            author = %message.author,
+            "digest from this peer could not be read: its window format differs, so \
+             it and this node do not repair each other's gaps"
+        );
+    }
+}
+
 /// Handle a received anti-entropy digest: for each advertised window, re-send
 /// our logged messages the sender lacks **within that window** (open-ended
 /// newest ⇒ everything newer; closed older ⇒ that slice only), newest-first, up
@@ -217,6 +231,7 @@ pub(crate) async fn handle_digest(
     ctx: &HandlerCtx<'_>,
 ) {
     let Ok(body) = serde_json::from_str::<DigestBody>(message.body.as_str()) else {
+        report_unreadable_digest(message, state);
         return;
     };
     // One serve per author per window. Answering costs up to
@@ -244,6 +259,7 @@ pub(crate) async fn handle_digest(
             break;
         }
         let Some(range) = window.range() else {
+            report_unreadable_digest(message, state);
             continue;
         };
         for msg in state.message_log.missing_in_window(MissingQuery {
@@ -1485,6 +1501,14 @@ mod tests {
         let wire = WireWindow::encode(&window);
         let decoded = wire.decode_ids().expect("valid window decodes");
         assert_eq!(decoded, ids.into_iter().collect::<HashSet<_>>());
+    }
+
+    /// The digest of the build before the window keys has no `lo_key` and
+    /// `hi_key`. It does not decode, and `handle_digest` reports its author once.
+    #[test]
+    fn a_digest_of_the_build_without_window_keys_does_not_decode() {
+        let old = r#"{"windows":[{"lo":1,"hi":2,"ids":""}]}"#;
+        assert!(serde_json::from_str::<DigestBody>(old).is_err());
     }
 
     /// A malformed digest body must decode to `None` (so `handle_digest`

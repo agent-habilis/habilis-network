@@ -29,6 +29,11 @@ use crate::util::tuning::{
 /// throttles (`relink`, `peerinfo`) use.
 const RELINK_COOLDOWN: Duration = Duration::from_secs(RELINK_COOLDOWN_SECS);
 
+/// How long an author whose digest we could not read stays unreported. A build
+/// that does not know the window format sends one every round, and one line per
+/// author per window says it without filling the log.
+const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
+
 /// How we currently reach a peer: `Direct` when we hold a live gossip
 /// link to its self-advertised endpoint, else `Gossip` (relayed). Derived
 /// from `linked_endpoints` without surfacing the node id — see
@@ -192,6 +197,8 @@ pub struct EventLoopState {
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
+    /// When we last reported an author whose digest we could not read.
+    digest_unreadable: Cooldown<String>,
     /// When each asker's state or meta digest was last served, per plane. A
     /// new node sends a digest pair for every peer it sees, all with the same
     /// heads, and every holder hears each one; the plane is in the key so the
@@ -674,6 +681,7 @@ impl EventLoopState {
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
+            digest_unreadable: Cooldown::new(UNREADABLE_DIGEST_LOG_WINDOW),
             state_digest_serves: crate::gossip::antientropy::ServeBudget::default(),
             fast_rounds: crate::gossip::antientropy::FastRounds::default(),
             peers: HashSet::new(),
@@ -1405,6 +1413,18 @@ impl EventLoopState {
         true
     }
 
+    /// Whether to report that this author's digest could not be read: once per
+    /// author per window. The author runs a build with another digest format, or
+    /// sends garbage; either way the two never repair each other's gaps.
+    pub fn report_unreadable_digest(&mut self, pubkey: &str, now: Instant) -> bool {
+        let author = pubkey.to_owned();
+        if self.digest_unreadable.on_cooldown(&author, now) {
+            return false;
+        }
+        self.digest_unreadable.note(author, now);
+        true
+    }
+
     /// Record a peer's endpoint address, learned from its published card.
     ///
     /// The whole address, not just the id: the retry pass has to know whether a
@@ -1918,6 +1938,31 @@ mod tests {
     /// broadcasts. With the budget counted per digest and nothing per peer, one
     /// small crafted frame bought 64 floods from every member that received it,
     /// so the cost grew with the mesh rather than with the attacker.
+    #[test]
+    fn an_unreadable_digest_is_reported_once_per_author_and_window() {
+        let mut state = fresh_state();
+        let now = Instant::now();
+        assert!(
+            state.report_unreadable_digest("aa", now),
+            "the first is reported"
+        );
+        assert!(
+            !state.report_unreadable_digest("aa", now + Duration::from_secs(10)),
+            "the same author every round is one line, not one line per round"
+        );
+        assert!(
+            state.report_unreadable_digest("bb", now),
+            "another author is reported on its own"
+        );
+        assert!(
+            state.report_unreadable_digest(
+                "aa",
+                now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
+            ),
+            "the author is reported again after the window"
+        );
+    }
+
     #[test]
     fn a_peer_is_served_one_digest_per_window() {
         let mut state = fresh_state();
