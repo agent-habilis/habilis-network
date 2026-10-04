@@ -10,6 +10,42 @@ use crate::daemon::state::EventLoopState;
 use crate::util::clock::Instant;
 use crate::util::tuning::HEAL_HARD_PROBE_SECS;
 
+/// Let go of the rendezvous if this node is due to
+/// ([`EventLoopState::should_release_rendezvous`]).
+///
+/// Gossip is told to leave it: the beacon then keeps no claim on this node and
+/// does not dial it back, and gossip closes the link once the beacon has the
+/// notice. The link is never closed from here: an early close would reach the
+/// beacon as a lost connection, not as a leave. The `WebRTC` session, which
+/// gossip does not own, is detached after the close, never before.
+pub(crate) async fn release_rendezvous_if_due(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    if !state.should_release_rendezvous(Instant::now()) {
+        return;
+    }
+    if let Err(error) = ctx.sender.leave_peers(vec![ctx.rendezvous_id]).await {
+        tracing::warn!(
+            target: "habilis_network::gossip",
+            %error,
+            "could not tell gossip to leave the rendezvous"
+        );
+        return;
+    }
+    state.mark_rendezvous_released();
+    if let Some(handle) = state.webrtc.clone() {
+        let admission = state.webrtc_admission.clone();
+        let rendezvous = ctx.rendezvous_id;
+        n0_future::task::spawn(async move {
+            let started = Instant::now();
+            while !admission.connections_closed(rendezvous)
+                && started.elapsed() < Duration::from_secs(10)
+            {
+                n0_future::time::sleep(Duration::from_millis(50)).await;
+            }
+            let _ = handle.detach(&rendezvous);
+        });
+    }
+}
+
 /// Re-graft the rendezvous. `join_peers` is a cheap enqueue.
 ///
 /// Not probed for a direct path first, unlike a member graft: the rendezvous

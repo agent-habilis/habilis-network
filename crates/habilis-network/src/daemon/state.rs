@@ -939,50 +939,15 @@ impl EventLoopState {
             && self.rendezvous_dwell_until.is_none_or(|until| now >= until)
     }
 
-    /// Let go of the rendezvous, if this node holds enough links to other
-    /// members and has stayed as long as a visit lasts
-    /// ([`Self::should_release_rendezvous`]).
-    ///
-    /// The rendezvous has finite room, in its direct-peer slots and in its
-    /// gossip view, and a node that has found the mesh no longer needs it.
-    /// Checked wherever a link comes up and on every heal tick, so that a node
-    /// that came back to a mesh whose links are all up does not wait for a link
-    /// event that never comes.
-    ///
-    /// The connections are closed through the table that the endpoint hook
-    /// fills, because iroh-gossip owns them and cannot drop a single neighbour;
-    /// the session goes with them. The release is marked only if something was
-    /// closed or detached: on an endpoint with no hook, and no session, nothing
-    /// is, the link stays up, and marking it released would make the node
-    /// ignore the beacon's death later. It is marked before the `NeighborDown`
-    /// that follows is read, so that one reads as a choice.
-    pub(crate) fn release_rendezvous_if_due(&mut self, rendezvous_id: EndpointId) {
-        if !self.should_release_rendezvous(Instant::now()) {
-            return;
-        }
-        let closed = self.webrtc_admission.close_peer(
-            rendezvous_id,
-            crate::transport::webrtc::close_code::RENDEZVOUS_RELEASED,
-            b"released",
-        );
-        let detached = self
-            .webrtc
-            .as_ref()
-            .is_some_and(|handle| handle.detach(&rendezvous_id));
-        if closed == 0 && !detached {
-            tracing::debug!(
-                target: "habilis_network::gossip",
-                links = self.linked_endpoints.len(),
-                "enough links to members, but nothing to close or detach: the rendezvous link stays"
-            );
-            return;
-        }
+    /// The release, once gossip has been told to leave the rendezvous
+    /// (`GossipSender::leave_peers`). The leave ends the link by itself, so this
+    /// does not wait for a close to be seen: it marks the release at once, before
+    /// the `NeighborDown` that follows is read, so that one reads as a choice.
+    pub(crate) fn mark_rendezvous_released(&mut self) {
         self.rendezvous_released = true;
         tracing::info!(
             target: "habilis_network::gossip",
             links = self.linked_endpoints.len(),
-            closed,
-            detached,
             "enough links to members: released the rendezvous"
         );
     }

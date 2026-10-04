@@ -399,24 +399,15 @@ impl SignalAdmission {
         }
     }
 
-    /// Close every QUIC connection the endpoint hook reported for `peer`, with
-    /// `code` and `reason`. Returns how many were open. This is how a node lets
-    /// go of a peer it did not dial itself: iroh-gossip owns its connections
-    /// and has no call to drop one neighbour, but the table holds a handle to
-    /// each.
-    pub(crate) fn close_peer(&self, peer: EndpointId, code: u32, reason: &[u8]) -> usize {
-        let handles: Vec<WeakConnectionHandle> = self
-            .lock()
-            .slots
-            .get(&peer)
-            .map(|slot| slot.conns.clone())
-            .unwrap_or_default();
-        handles
-            .iter()
-            .filter_map(WeakConnectionHandle::upgrade)
-            .filter(|conn| conn.close_reason().is_none())
-            .map(|conn| conn.close(code.into(), reason))
-            .count()
+    /// Whether every QUIC connection the hook reported for `peer` is closed.
+    pub(crate) fn connections_closed(&self, peer: EndpointId) -> bool {
+        self.lock().slots.get(&peer).is_none_or(|slot| {
+            slot.conns.iter().all(|handle| {
+                handle
+                    .upgrade()
+                    .is_none_or(|conn| conn.close_reason().is_some())
+            })
+        })
     }
 
     /// Whether a round with `peer` holds a slot right now, in either role.
@@ -777,56 +768,6 @@ mod tests {
             closed.is_ok(),
             "a dialed gossip connection left on the relay must be closed after the deadline"
         );
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
-    }
-
-    /// `close_peer` closes what the hook reported, and says how many.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn close_peer_closes_the_connections_the_hook_reported() {
-        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-
-        const ALPN: &[u8] = b"habilis-mesh/test-close-peer/0";
-
-        #[derive(Debug, Clone)]
-        struct Hold;
-        impl ProtocolHandler for Hold {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                conn.closed().await;
-                Ok(())
-            }
-        }
-        let bind = |hook: Option<ConnectionHook>| {
-            let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-                .relay_mode(iroh::RelayMode::Disabled);
-            if let Some(hook) = hook {
-                builder = builder.hooks(hook);
-            }
-            async move { builder.bind().await.expect("bind a loopback endpoint") }
-        };
-        let admission = SignalAdmission::new(2);
-        let hook = admission.connection_hook();
-        let server = bind(None).await;
-        let router = Router::builder(server.clone()).accept(ALPN, Hold).spawn();
-        let client = bind(Some(hook)).await;
-        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
-        let conn = client.connect(server.id(), ALPN).await.expect("connect");
-
-        let closed = admission.close_peer(server.id(), 7, b"released");
-
-        assert_eq!(closed, 1, "the one connection the hook reported");
-        assert!(conn.close_reason().is_some(), "and it is closed");
-        assert_eq!(
-            admission.close_peer(server.id(), 7, b"released"),
-            0,
-            "nothing left to close"
-        );
-        assert_eq!(
-            admission.close_peer(peer(9), 7, b"released"),
-            0,
-            "a peer the hook never saw"
-        );
-
         router.shutdown().await.expect("shutdown");
         client.close().await;
     }

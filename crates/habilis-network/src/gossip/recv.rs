@@ -138,7 +138,7 @@ pub(crate) async fn handle_gossip_event(
                     // (the app's card dial hint); see `NodeApp::on_meshed`.
                     app.on_meshed(state, ctx).await;
                 }
-                state.release_rendezvous_if_due(ctx.rendezvous_id);
+                super::heal::release_rendezvous_if_due(state, ctx).await;
             }
         }
         Some(Ok(Event::NeighborDown(node_id))) => {
@@ -1869,12 +1869,14 @@ mod first_contact_tests {
         handle_gossip_event(Some(Ok(event)), state, &mut Inert, ctx).await;
     }
 
-    /// A node that reaches the release count tries to let go of the rendezvous,
-    /// but on a state with no hook and no session there is nothing to close or
-    /// detach. The link stays up, so it must not be marked released: a node that
-    /// thought it had let go would ignore the death of the beacon later.
+    /// A node that reaches the release count tells gossip to leave the
+    /// rendezvous and marks the release at once. The leave ends the link by
+    /// itself, whatever the endpoint is, so the mark does not wait for a
+    /// connection to be closed from here: a node that left but was not marked
+    /// would read the `NeighborDown` that follows as a loss and arm a reclaim.
+    /// The link is still up when the mark is made; gossip ends it afterwards.
     #[tokio::test]
-    async fn a_release_with_nothing_to_close_or_detach_is_not_marked() {
+    async fn reaching_the_release_count_leaves_the_rendezvous_and_marks_it() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
         let mut state = fresh_state();
@@ -1882,16 +1884,22 @@ mod first_contact_tests {
 
         feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
         assert!(state.rendezvous_linked);
+        assert!(
+            !state.rendezvous_released,
+            "below the count: still a visitor"
+        );
         for seed in 1..=3 {
             feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
         }
 
-        assert!(state.should_release_rendezvous(crate::util::clock::Instant::now()));
         assert!(
-            !state.rendezvous_released,
-            "nothing was closed or detached, so nothing was released"
+            state.rendezvous_released,
+            "gossip was told to leave, so the release is marked"
         );
-        assert!(state.rendezvous_linked, "the link is still up");
+        assert!(
+            state.rendezvous_linked,
+            "gossip ends the link, and the NeighborDown clears this"
+        );
         node.endpoint.close().await;
     }
 
@@ -1907,8 +1915,8 @@ mod first_contact_tests {
         for seed in 1..=2 {
             feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
         }
-        // Released, as `release_rendezvous_if_due` marks it when it closes a
-        // connection or detaches the session.
+        // Released, as `mark_rendezvous_released` marks it when gossip is told
+        // to leave the rendezvous.
         state.rendezvous_released = true;
 
         feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;

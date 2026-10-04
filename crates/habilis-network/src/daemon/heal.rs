@@ -63,7 +63,7 @@ pub(super) async fn run_heal(
     crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
     // A node that came back to a mesh whose links are all up gets no link
     // event to release on, so the heal tick checks too.
-    state.release_rendezvous_if_due(ctx.rendezvous_id);
+    gossip::heal::release_rendezvous_if_due(state, ctx).await;
     let threshold = Duration::from_secs(heal_stall_threshold_secs());
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
     if hard_edge {

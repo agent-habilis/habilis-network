@@ -102,8 +102,8 @@ pub(crate) mod close_code {
     pub(crate) const UNICAST_RELAY_REFUSED: u32 = 5;
     // 6 was `EVICTED` on this branch (removed in 597dedf), and builds of the PR
     // sent it. Do not reuse it while those builds can still be in a mesh.
-    /// We let go of the rendezvous on purpose, having enough links to members.
-    pub(crate) const RENDEZVOUS_RELEASED: u32 = 7;
+    // 7 was `RENDEZVOUS_RELEASED`, sent by builds of the PR that closed the link
+    // to the rendezvous themselves; the same applies.
     /// A unicast connection nothing sent on for the idle timeout: closed by the
     /// pool on the dial side, by the acceptor on the other.
     pub(crate) const IDLE: u32 = 8;
@@ -120,7 +120,6 @@ pub(crate) mod close_code {
                 SIGNAL_ABORTED,
                 GOSSIP_RELAY_REFUSED,
                 UNICAST_RELAY_REFUSED,
-                RENDEZVOUS_RELEASED,
                 IDLE,
             ];
             let distinct: std::collections::HashSet<_> = all.into_iter().collect();

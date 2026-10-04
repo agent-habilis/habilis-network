@@ -136,6 +136,17 @@ published to a registry; pin it with
 
 ### Fixed
 
+- A member that let go of the rendezvous was dialed back by the beacon, which
+  kept it in its passive view and refilled its active view from there, so in a
+  steady 10-node UDP mesh members let go of the rendezvous 33 times in 10
+  minutes, each time after the beacon had dialed them again. The member now
+  tells gossip to leave the rendezvous (`GossipSender::leave_peers`, from the
+  iroh-gossip fork): the beacon learns that the member left on purpose and
+  keeps no claim on it. The link is never closed from this side, because an
+  early close reaches the beacon as a lost connection. The node waits until
+  gossip has closed the link, then detaches the `WebRTC` session. A session to
+  the rendezvous that attaches after the release no longer grafts it again. The
+  same 10-minute run now shows 0 releases.
 - The anti-entropy digest no longer reports a gap that does not exist. A
   window was a slice of the log in arrival order, but its range ran from the
   least to the greatest timestamp of that slice. A log of more than 140
@@ -200,7 +211,8 @@ published to a registry; pin it with
   ever, filled its 16 slots, and every later joiner stayed alone with an empty
   roster. A UDP mesh of about 65 hit the same wall at the beacon's 64-place
   gossip view. A node that holds three links to other members now lets go of
-  the rendezvous (it closes the connections and detaches the session). It
+  the rendezvous (it tells gossip to leave it, and detaches the session once
+  gossip has closed the link). It
   comes back only while it has fewer than three links, or once for two minutes
   after the sweep removed a silent roster peer, which is how islands of a split
   mesh meet again; a node that came back stays 30 s and lets go again, and a

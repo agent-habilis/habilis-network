@@ -28,6 +28,12 @@ impl MeshSender {
         self.gossip.join_peers(peers).await
     }
 
+    /// Leave `peers` on purpose: gossip tells each that we are not coming back,
+    /// so it does not dial us to refill its view, and closes the link itself.
+    pub(crate) async fn leave_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {
+        self.gossip.leave_peers(peers).await
+    }
+
     /// Swap the inner gossip sender after a topic resubscribe (`gossip::heal`).
     pub(crate) fn replace_gossip(&mut self, gossip: GossipSender) {
         self.gossip = gossip;

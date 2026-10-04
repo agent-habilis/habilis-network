@@ -396,7 +396,7 @@ iroh-gossip and the address-lookup crates fail to unify (E0308).
 Current revs: `iroh`/`iroh-base`/`iroh-dns` →
 `agent-habilis/iroh` `c814688e6c0967b2764efe7159059d1d68c4b2f4` (mapped_addrs
 eviction + relay teardown, **plus** the netwatch/portmapper repoint);
-`iroh-gossip` → `5d57f946eb9e3a1f5f6342c33a0dc7bc22550f49`; `net-tools` →
+`iroh-gossip` → `5f7fe84356163bfa6eebd6121b18428239a571e7` (branch `leave-peers`, PR #2 in the fork, not merged: `leave_peers`, a tombstone for a peer that left on purpose, and the TimeBoundCache expiry-heap fix on top of fork main `5d57f94`; the workspace uses `GossipSender::leave_peers` to let go of the rendezvous); `net-tools` →
 `e02960255ef2f5b2ba4aa3d4cf195e0b8673f370`.
 
 ## Verifying a change

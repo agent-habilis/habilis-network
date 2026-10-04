@@ -390,6 +390,12 @@ pub(crate) async fn graft_proven(
     peer: EndpointId,
 ) {
     state.direct.insert(peer, DirectState::Direct);
+    // A session to the rendezvous that attached after this node let go of it
+    // must not graft it again: every graft of the rendezvous waits for
+    // `rendezvous_wanted`.
+    if peer == ctx.rendezvous_id && !state.rendezvous_wanted() {
+        return;
+    }
     if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < ctx.max_peers {
         state.note_relink(peer, Instant::now());
         if let Err(error) = ctx.sender.join_peers(vec![peer]).await {
