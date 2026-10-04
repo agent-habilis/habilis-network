@@ -237,7 +237,7 @@ pub struct SignalAdmission {
     inner: Arc<Mutex<Inner>>,
     cap: usize,
     /// The mesh lets no payload ride the relay, so the hook keeps watch over the
-    /// gossip connections that this node dialed (see [`ActivityHook`]). Set once
+    /// gossip connections that this node dialed (see [`ConnectionHook`]). Set once
     /// the router, which knows the mesh policy, is built.
     watch_dialed_gossip: Arc<AtomicBool>,
 }
@@ -267,8 +267,8 @@ impl SignalAdmission {
     /// The endpoint hook that reports every connection to this table. Install
     /// it on the endpoint builder, before bind.
     #[must_use]
-    pub fn activity_hook(&self) -> ActivityHook {
-        ActivityHook {
+    pub fn connection_hook(&self) -> ConnectionHook {
+        ConnectionHook {
             admission: self.clone(),
         }
     }
@@ -479,13 +479,15 @@ fn spawn_sampler(table: Weak<Mutex<Inner>>, period: Duration) {
 }
 
 /// Reports every connection of the endpoint it is installed on, in or out and
-/// on any protocol, to its [`SignalAdmission`].
+/// on any protocol, to its [`SignalAdmission`], which keeps them under their
+/// peer so that it can close and prune them. It also watches the gossip
+/// connections this node dials for the relay policy.
 #[derive(Debug, Clone)]
-pub struct ActivityHook {
+pub struct ConnectionHook {
     admission: SignalAdmission,
 }
 
-impl EndpointHooks for ActivityHook {
+impl EndpointHooks for ConnectionHook {
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
         self.admission.note_connection(conn);
         // The accept side watches the gossip connections it holds
@@ -744,7 +746,7 @@ mod tests {
         let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
             .await
             .expect("local relay");
-        let bind = |hook: Option<ActivityHook>| {
+        let bind = |hook: Option<ConnectionHook>| {
             let relay_url = relay_url.clone();
             async move {
                 let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -762,7 +764,7 @@ mod tests {
         let router = Router::builder(server.clone())
             .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
             .spawn();
-        let client = bind(Some(admission.activity_hook())).await;
+        let client = bind(Some(admission.connection_hook())).await;
         let relayed = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
         let conn = client
             .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
@@ -794,7 +796,7 @@ mod tests {
                 Ok(())
             }
         }
-        let bind = |hook: Option<ActivityHook>| {
+        let bind = |hook: Option<ConnectionHook>| {
             let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled);
             if let Some(hook) = hook {
@@ -803,7 +805,7 @@ mod tests {
             async move { builder.bind().await.expect("bind a loopback endpoint") }
         };
         let admission = SignalAdmission::new(2);
-        let hook = admission.activity_hook();
+        let hook = admission.connection_hook();
         let server = bind(None).await;
         let router = Router::builder(server.clone()).accept(ALPN, Hold).spawn();
         let client = bind(Some(hook)).await;

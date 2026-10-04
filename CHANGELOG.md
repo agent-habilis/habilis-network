@@ -10,6 +10,11 @@ published to a registry; pin it with
 
 ### Added
 
+- `SignalAdmission::connection_hook` and the `ConnectionHook` it returns: an
+  endpoint hook that records every connection of the endpoint, on any protocol,
+  under its peer in the direct-peer slot table, so that the table can close and
+  prune them, and that watches the gossip connections the node dials for the
+  relay policy.
 - `EventLoopConfig::with_owner_pid`: a CLI daemon started detached lives for
   an explicit owner process instead of its parent, and quits gracefully once
   the owner exits. The start time captured at startup guards against pid

@@ -334,7 +334,7 @@ pub async fn build_endpoint(
         }
     }
     if let Some(admission) = &transports.admission {
-        builder = builder.hooks(admission.activity_hook());
+        builder = builder.hooks(admission.connection_hook());
     }
     // Data-plane exclusivity: with IP cleared, a WebRTC-only peer cannot
     // silently fall back onto a hole-punched path, so a run that *claims* to be

@@ -100,6 +100,8 @@ pub(crate) mod close_code {
     pub(crate) const GOSSIP_RELAY_REFUSED: u32 = 4;
     /// A unicast connection whose path may not carry payload.
     pub(crate) const UNICAST_RELAY_REFUSED: u32 = 5;
+    // 6 was `EVICTED` on this branch (removed in 597dedf), and builds of the PR
+    // sent it. Do not reuse it while those builds can still be in a mesh.
     /// We let go of the rendezvous on purpose, having enough links to members.
     pub(crate) const RENDEZVOUS_RELEASED: u32 = 7;
     /// A unicast connection nothing sent on for the idle timeout: closed by the
