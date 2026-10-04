@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { ABI } from './abi.ts'
+import { ABI, ABI_VERSION } from './abi.ts'
 
 /**
  * Every `habilis_network_*` token in the header that is immediately followed by `(` and
@@ -38,9 +38,28 @@ describe('the signature table and the header', () => {
   })
 })
 
+describe('the ABI version', () => {
+  test('is the header macro, so the package and the header cannot drift', async () => {
+    const header = await Bun.file(new URL(HEADER, import.meta.url)).text()
+    const macro = /^#define HABILIS_NETWORK_ABI_VERSION (\d+)$/m.exec(header)
+
+    expect(macro).not.toBeNull()
+    expect(ABI_VERSION).toBe(Number(macro?.[1]))
+  })
+
+  test('is asked through a call that takes nothing and returns a u32', () => {
+    expect(ABI.habilis_network_abi_version).toEqual({ args: [], returns: 'u32' })
+  })
+})
+
 describe('the shape of each signature', () => {
   test('every handle-taking call takes the handle first', () => {
-    const standalone = new Set(['habilis_network_last_error', 'habilis_network_version', 'habilis_network_max_msg'])
+    const standalone = new Set([
+      'habilis_network_abi_version',
+      'habilis_network_last_error',
+      'habilis_network_version',
+      'habilis_network_max_msg',
+    ])
     // Opens a node from a hash alone: there is no handle yet to pass.
     const fromHash = new Set(['habilis_network_streams_bind_for'])
     for (const [name, signature] of Object.entries(ABI)) {

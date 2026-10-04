@@ -14,9 +14,9 @@
 //! - a well-known **rendezvous endpoint** keypair: every joiner can
 //!   compute [`rendezvous_id`] locally and bootstrap from it without
 //!   ever contacting the creator,
-//! - (private meshes only) a deterministic loopback port ladder, since
-//!   `presets::Minimal` has no pkarr/DNS lookup to resolve
-//!   `rendezvous_id` into an address.
+//! - (private meshes only) a deterministic loopback port ladder, since a
+//!   loopback mesh has no lookup to resolve `rendezvous_id` into an
+//!   address.
 //!
 //! All derivations are domain-separated SHA-256 so the topic seed, the
 //! rendezvous secret key, and the port can never collide for one

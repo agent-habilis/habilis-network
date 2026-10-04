@@ -9,7 +9,9 @@
  * - `#<hash>` — read this stream. It carries the producer's own lookups.
  * - no fragment — produce a stream. `?relay=` sets a custom relay URL
  *   (repeatable) and `?transport=udp,webrtc,relay` lets the bytes fall back to the
- *   relay; a tab always finds peers through the relay.
+ *   relay; a tab always finds peers through the relay. The producer is also
+ *   published to pkarr relays, as the stream CLI does by default: `?pkarr=<url>`
+ *   (repeatable) swaps the default list for custom ones.
  * - `?log=` — an `EnvFilter` for the engine's tracing, to the console.
  *
  * DOM contract (what the driver — or a person — reads):
@@ -26,11 +28,11 @@
  * - `window.stream` — the runtime's methods, promise-returning where they are.
  */
 
-import type { Transport } from 'habilis-network-wasm'
 import { bindStreams, bindStreamsFor } from 'habilis-network-wasm'
 
 import type { Pending, ViewKey } from './render.ts'
 import { Batcher, MAX_VIEW_CHARS, fit } from './render.ts'
+import { producerParams } from './params.ts'
 import { StreamRuntime } from './runtime.ts'
 import { registerStreamTools } from './webmcp.ts'
 
@@ -126,14 +128,8 @@ async function open(log: string): Promise<StreamRuntime> {
     const streams = await bindStreamsFor(hash, { log })
     return StreamRuntime.reading(await streams.open(hash), { hash })
   }
-  const params = new URLSearchParams(window.location.search)
-  // Passed through as typed: a name that is not a transport is the engine's
-  // error to raise, and it names the choices.
-  const transport = params.get('transport')?.split(',') as Transport[] | undefined
   const streams = await bindStreams({
-    lookup: ['relay'],
-    ...(transport === undefined ? {} : { transport }),
-    relayUrls: params.getAll('relay'),
+    ...producerParams(new URLSearchParams(window.location.search)),
     log,
   })
   return StreamRuntime.producing(await streams.create())

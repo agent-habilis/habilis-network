@@ -179,6 +179,7 @@ export function joinWire(opts: JoinOpts): WireOpts {
     transport: listWire(opts.transport),
     relayUrls: listWire(opts.relayUrls),
     maxPeers: opts.maxPeers ?? 0,
+    pkarrUrls: null,
   }
 }
 
@@ -192,6 +193,7 @@ export function createWire(opts: CreateOpts): WireOpts {
     transport: listWire(opts.transport),
     relayUrls: listWire(opts.relayUrls),
     maxPeers: opts.maxPeers ?? 0,
+    pkarrUrls: listWire(opts.pkarrUrls),
   }
 }
 

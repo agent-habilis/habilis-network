@@ -41,7 +41,7 @@ pub struct HabilisNetworkOpts {
     pub topic: *const c_char,
     pub nick: *const c_char,
     pub name: *const c_char,
-    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
+    /// Comma-separated lookups, any of `mdns`, `dht`, `relay`, `pkarr`; NULL ⇒ none
     /// (a loopback mesh on create).
     pub lookup: *const c_char,
     /// Comma-separated transports, any of `udp`, `webrtc`, `relay`; NULL ⇒
@@ -50,6 +50,8 @@ pub struct HabilisNetworkOpts {
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
     pub relay_urls: *const c_char,
     pub max_peers: usize,
+    /// Comma-separated pkarr relays; NULL ⇒ the default list.
+    pub pkarr_urls: *const c_char,
 }
 
 /// The layout `packages/habilis-network-ffi/src/dlopen/opts-struct.ts` hand-encodes,
@@ -66,7 +68,7 @@ const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
     assert!(
-        size_of::<HabilisNetworkOpts>() == 64,
+        size_of::<HabilisNetworkOpts>() == 72,
         "opts-struct.ts OPTS_BYTES"
     );
     assert!(align_of::<HabilisNetworkOpts>() == 8);
@@ -78,6 +80,7 @@ const _: () = {
     assert!(offset_of!(HabilisNetworkOpts, transport) == 40);
     assert!(offset_of!(HabilisNetworkOpts, relay_urls) == 48);
     assert!(offset_of!(HabilisNetworkOpts, max_peers) == 56);
+    assert!(offset_of!(HabilisNetworkOpts, pkarr_urls) == 64);
 };
 
 /// One received message's metadata, mirroring `habilis_network_msg` in the header. The
@@ -217,6 +220,17 @@ unsafe fn optional_str(ptr: *const c_char) -> Result<Option<&'static str>, ()> {
     }
 }
 
+/// Split a comma-separated URL list, left unparsed for the engine to check.
+/// NULL and the empty string are the empty list, which takes the default, as
+/// in [`comma_list`]; an empty entry between commas stays, so the engine
+/// rejects it rather than shrinking the list.
+fn url_list(text: Option<&str>) -> Vec<String> {
+    match text.map(str::trim) {
+        None | Some("") => Vec::new(),
+        Some(urls) => urls.split(',').map(|url| url.trim().to_owned()).collect(),
+    }
+}
+
 /// Split a comma-separated C list into its parsed entries. NULL and the empty
 /// string are the empty list; a name that is not one of the type's choices
 /// puts that type's own message (`unknown lookup ...`) in the error slot.
@@ -302,23 +316,21 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             return std::ptr::null_mut();
         };
         // SAFETY: NUL-terminated or NULL, per the header contract, for each
-        // of the three comma lists.
+        // of the four comma lists.
         let lists = unsafe {
             (
                 optional_str(opts.lookup),
                 optional_str(opts.transport),
                 optional_str(opts.relay_urls),
+                optional_str(opts.pkarr_urls),
             )
         };
-        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+        let (Ok(lookup), Ok(transport), Ok(relay_urls), Ok(pkarr_urls)) = lists else {
             return std::ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
-        let relay_urls: Vec<String> = relay_urls
-            .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-            .unwrap_or_default();
         let parsed = Opts {
             mesh: mesh.map(str::to_owned),
             topic: topic.map(str::to_owned),
@@ -326,7 +338,8 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             name: name.map(str::to_owned),
             lookup,
             transport,
-            relay_urls,
+            relay_urls: url_list(relay_urls),
+            pkarr_urls: url_list(pkarr_urls),
             max_peers: opts.max_peers,
         };
         match Mesh::open(&parsed) {
@@ -618,6 +631,7 @@ pub struct HabilisNetworkStreamOpts {
     pub lookup: *const c_char,
     pub transport: *const c_char,
     pub relay_urls: *const c_char,
+    pub pkarr_urls: *const c_char,
 }
 
 /// Pinned like `HabilisNetworkOpts`: a reordered field would silently misread a
@@ -625,11 +639,12 @@ pub struct HabilisNetworkStreamOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<HabilisNetworkStreamOpts>() == 24);
+    assert!(size_of::<HabilisNetworkStreamOpts>() == 32);
     assert!(align_of::<HabilisNetworkStreamOpts>() == 8);
     assert!(offset_of!(HabilisNetworkStreamOpts, lookup) == 0);
     assert!(offset_of!(HabilisNetworkStreamOpts, transport) == 8);
     assert!(offset_of!(HabilisNetworkStreamOpts, relay_urls) == 16);
+    assert!(offset_of!(HabilisNetworkStreamOpts, pkarr_urls) == 24);
 };
 
 /// The opaque handle behind `habilis_network_streams *`.
@@ -688,9 +703,10 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
                 optional_str(opts.lookup),
                 optional_str(opts.transport),
                 optional_str(opts.relay_urls),
+                optional_str(opts.pkarr_urls),
             )
         };
-        let (Ok(lookup), Ok(transport), Ok(relay_urls)) = lists else {
+        let (Ok(lookup), Ok(transport), Ok(relay_urls), Ok(pkarr_urls)) = lists else {
             return std::ptr::null_mut();
         };
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
@@ -699,9 +715,8 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
         let parsed = habilis_network_stream::StreamOpts {
             lookup,
             transport,
-            relay_urls: relay_urls
-                .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-                .unwrap_or_default(),
+            relay_urls: url_list(relay_urls),
+            pkarr_urls: url_list(pkarr_urls),
         };
         boxed(Streams::bind(&parsed).map(|streams| HabilisNetworkStreams { streams }))
     })
@@ -967,6 +982,24 @@ pub extern "C" fn habilis_network_last_error() -> *const c_char {
             None => std::ptr::null(),
         })
     })
+}
+
+/// The version of this library's C ABI: the layout of every struct it takes
+/// and the signature of every call. Bump it on any change that would make a
+/// caller built against the old header misbehave, which is a change to a
+/// struct field or to a function's arguments or return. A caller compares it
+/// with `HABILIS_NETWORK_ABI_VERSION` in the header it was built against, and
+/// refuses a library that disagrees: a struct that gained a field reads past
+/// the end of the old one, with no error. The header's macro and this number
+/// are held equal by a test.
+pub const ABI_VERSION: u32 = 1;
+
+/// The C ABI version of this library; see [`ABI_VERSION`]. A caller compares
+/// it with the `HABILIS_NETWORK_ABI_VERSION` macro of its header before any
+/// other call.
+#[unsafe(no_mangle)]
+pub extern "C" fn habilis_network_abi_version() -> u32 {
+    ABI_VERSION
 }
 
 /// The engine's build version stamp. Borrowed for the process's lifetime.

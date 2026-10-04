@@ -7,7 +7,7 @@
  * exactly one loader rather than smeared through the loop.
  */
 
-import type { SymbolName } from '../abi.ts'
+import { ABI_VERSION, type SymbolName } from '../abi.ts'
 import type { WireOpts } from '../protocol.ts'
 
 /**
@@ -47,23 +47,62 @@ export interface NativeLibrary {
   close(): void
 }
 
+/** The library and this package disagree about the C ABI, or the library cannot say. */
+export class AbiMismatchError extends Error {
+  override name = 'AbiMismatchError'
+}
+
+/**
+ * Refuse a library whose `habilis_network_abi_version()` is not the one this
+ * package speaks. `found` is what the probe returned: the version, or the
+ * error that stopped it, which means the library has no such symbol, so it
+ * predates the check.
+ *
+ * Both failures are the same hazard. A struct that gained a field is read at
+ * the wrong size and offsets, and nothing downstream notices, so the loader
+ * stops here, naming both versions and the way out.
+ */
+export function checkAbiVersion(path: string, found: number | Error, expected: number = ABI_VERSION): void {
+  const rebuild = 'Rebuild the library from the same checkout as this package: cargo build --release -p habilis-network-ffi'
+  if (found instanceof Error) {
+    throw new AbiMismatchError(
+      `${path} does not answer habilis_network_abi_version(), so it is older than the ABI check or is not a ` +
+        `habilis-network library. This package speaks ABI version ${expected}. ${rebuild} (${found.message})`,
+    )
+  }
+  if (found !== expected) {
+    throw new AbiMismatchError(
+      `${path} speaks ABI version ${found}, and this package speaks ABI version ${expected}. ` +
+        `A library and a package built from different checkouts read each other's structs at the wrong ` +
+        `offsets. ${rebuild}, or install the package release that matches the library.`,
+    )
+  }
+}
+
 /**
  * Load the library with whichever FFI this runtime has.
  *
  * The loaders are imported dynamically so that a runtime never even parses the
  * module written for another one — `bun:ffi` does not exist off Bun, and koffi
  * is an optional dependency that Bun and Deno users never install.
+ *
+ * The ABI version is asked first, with only that symbol bound, and a mismatch
+ * or a missing symbol throws [`AbiMismatchError`] before anything else is
+ * loaded.
  */
 export async function loadNative(path: string): Promise<NativeLibrary> {
   const globals = globalThis as { Bun?: unknown; Deno?: unknown }
   if (globals.Bun !== undefined) {
-    const { loadWithBun } = await import('./bun.ts')
+    const { loadWithBun, probeAbiVersionWithBun } = await import('./bun.ts')
+    checkAbiVersion(path, probeAbiVersionWithBun(path))
     return loadWithBun(path)
   }
   if (globals.Deno !== undefined) {
-    const { loadWithDeno } = await import('./deno.ts')
+    const { loadWithDeno, probeAbiVersionWithDeno } = await import('./deno.ts')
+    checkAbiVersion(path, probeAbiVersionWithDeno(path))
     return loadWithDeno(path)
   }
-  const { loadWithKoffi } = await import('./node.ts')
+  const { loadWithKoffi, probeAbiVersionWithKoffi } = await import('./node.ts')
+  checkAbiVersion(path, await probeAbiVersionWithKoffi(path))
   return loadWithKoffi(path)
 }

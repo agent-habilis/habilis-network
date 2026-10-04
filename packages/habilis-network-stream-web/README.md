@@ -39,9 +39,11 @@ Any static host serves it. Point the CLI at the host with `--web-url` or
 ## URL
 
 - `#<hash>` — read this stream. The hash carries the producer's lookups.
-- no fragment — produce a stream. `?relay=` sets a custom relay URL
-  (repeatable), and `?transport=udp,webrtc,relay` lets the bytes fall back to the
-  relay.
+- no fragment — produce a stream. Its lookups are `relay,pkarr`: a tab runs
+  no mDNS or DHT, so the hash does not name them. `?relay=` sets a custom
+  relay URL (repeatable), `?pkarr=<url>` sets custom pkarr relays instead of
+  the default list (repeatable), and `?transport=udp,webrtc,relay` lets the
+  bytes fall back to the relay.
 - `?log=` — an `EnvFilter` for the engine's tracing, to the console.
 
 ## WebMCP

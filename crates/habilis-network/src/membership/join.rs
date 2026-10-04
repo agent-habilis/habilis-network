@@ -40,9 +40,9 @@ pub struct Opts {
     /// Mesh name to create with; `None` falls back to `"habilis-network"`. Ignored
     /// when joining (the name travels with the id/topic instead).
     pub name: Option<String>,
-    /// How members find each other: any of `mdns`, `dht`, `relay`. Naming
+    /// How members find each other: any of `mdns`, `dht`, `relay`, `pkarr`. Naming
     /// any uses only those; naming none is a loopback mesh. Ignored with a
-    /// `topic` (always all three) or a `mesh` id (which carries its own).
+    /// `topic` (always all four) or a `mesh` id (which carries its own).
     pub lookup: Vec<Lookup>,
     /// What may carry payload: any of `udp`, `webrtc`, `relay`, with `udp` or
     /// `webrtc` among them. Empty ⇒ `udp,webrtc`, so all data is peer to peer
@@ -56,6 +56,11 @@ pub struct Opts {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
+    /// Which pkarr relays: every member publishes to all of them. Needs
+    /// `pkarr` in `lookup`. A create only: a topic always takes the default
+    /// list, so it refuses this. Part of the mesh id. Empty ⇒ the default
+    /// list. Ignored when joining by id.
+    pub pkarr_urls: Vec<String>,
     /// Active-view cap; `0` takes the engine default.
     pub max_peers: usize,
 }
@@ -238,15 +243,22 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
         (None, Some(string)) => {
             // Note what this ignores: `lookup`. `TopicParams::resolve` always
             // derives through the all-on preset, so a topic mesh is always
-            // mDNS + DHT + the relay. That is what lets a tab and a terminal
+            // mDNS + DHT + the relay + pkarr. That is what lets a tab and a terminal
             // derive the same id from the same string — the lookups are mixed
             // into the derivation, so two reaches over one string are two
             // different meshes. `relay_urls` and `transport` are the two
             // choices that *do* change the id, and every member must pass the
-            // same values.
+            // same values. The pkarr list is not a third: a topic is always on
+            // the default list, so it refuses one.
+            if !opts.pkarr_urls.is_empty() {
+                anyhow::bail!(
+                    "a topic always uses the default pkarr list, so it takes no pkarr relay list"
+                );
+            }
             let config = MeshConfig::resolve(
-                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
+                &[Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr],
                 relay_ladder(&opts.relay_urls)?,
+                None,
                 &opts.transport,
             )?;
             let mesh =
@@ -263,6 +275,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             let config = MeshConfig::resolve(
                 &opts.lookup,
                 relay_ladder(&opts.relay_urls)?,
+                crate::protocol::parse_pkarr_urls(&opts.pkarr_urls)?,
                 &opts.transport,
             )?;
             let name = MeshName::new(
@@ -288,7 +301,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::{LookupOpts, RelayChoice};
+    use crate::protocol::{LookupOpts, PkarrChoice, RelayChoice};
     use crate::runtime::derive_topic_mesh_with;
 
     use super::*;
@@ -298,7 +311,7 @@ mod tests {
     }
 
     fn all_lookups() -> Vec<Lookup> {
-        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+        vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr]
     }
 
     fn create_config(opts: &Opts) -> MeshConfig {
@@ -464,6 +477,49 @@ mod tests {
         )
         .expect_err("relay alone is not a mode the engine has");
         assert!(format!("{error:#}").contains("udp"), "{error:#}");
+    }
+
+    /// A topic's lookups are fixed, and its pkarr list is always the default,
+    /// so a custom list with a topic is refused: the list is for a create.
+    #[test]
+    fn pkarr_urls_with_a_topic_are_refused() {
+        let Err(error) = resolve_kind(
+            &Opts {
+                topic: Some("standup".to_owned()),
+                pkarr_urls: vec!["https://pkarr.example/".to_owned()],
+                ..opts()
+            },
+            None,
+        ) else {
+            panic!("a topic with a pkarr list must fail")
+        };
+        assert!(error.to_string().contains("topic"), "{error}");
+    }
+
+    /// `pkarrUrls` names the pkarr relays, and like a ladder it needs its
+    /// lookup rather than implying it.
+    #[test]
+    fn pkarr_urls_become_the_pkarr_list() {
+        let parsed: Opts = serde_json::from_str(
+            r#"{"lookup":["pkarr","relay"],"pkarrUrls":["https://pkarr.example/"]}"#,
+        )
+        .expect("pkarrUrls parses");
+        let config = create_config(&parsed);
+        assert_eq!(
+            config.lookups.pkarr,
+            PkarrChoice::Custom(vec!["https://pkarr.example/".parse().unwrap()])
+        );
+        assert!(
+            resolve_kind(
+                &Opts {
+                    pkarr_urls: vec!["https://pkarr.example/".to_owned()],
+                    ..opts()
+                },
+                None,
+            )
+            .is_err(),
+            "a pkarr list without the pkarr lookup is an error"
+        );
     }
 
     /// `relayUrls` swaps the default ladder for the caller's, on both the

@@ -5,6 +5,7 @@
 //! cargo run -p chat -- --topic room
 //! cargo run -p chat -- --topic room --nick ana --relay-url http://127.0.0.1:3340/
 //! cargo run -p chat -- --topic room --transport udp,webrtc,relay
+//! cargo run -p chat -- --lookup relay,pkarr --pkarr-url https://pkarr.example/pkarr   # create; share the printed id
 //! ```
 //!
 //! Type to broadcast; `/msg <nick> <text>` sends directed; `/peers` prints
@@ -25,9 +26,13 @@ struct Args {
 }
 
 fn parse_args() -> Result<Args> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args> {
     let mut opts = Opts::default();
     let mut robot = false;
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().with_context(|| format!("{name} needs a value"));
         match arg.as_str() {
@@ -37,6 +42,20 @@ fn parse_args() -> Result<Args> {
             // `--relay-url`, not `--relay`: which relay, nothing about its
             // role. Spelled as the bun-ffi client spells it.
             "--relay-url" => opts.relay_urls.push(value("--relay-url")?),
+            // Which pkarr relays, instead of the default list. Repeatable.
+            // A create-only choice, like the browser and bun-ffi surfaces: a
+            // topic always uses the default list, so a tab and a terminal
+            // derive the same mesh from the same string.
+            "--pkarr-url" => opts.pkarr_urls.push(value("--pkarr-url")?),
+            // How a created mesh's members find each other; a topic always
+            // uses all four and an id carries its own.
+            "--lookup" => {
+                opts.lookup = value("--lookup")?
+                    .split(',')
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.parse().map_err(|error| anyhow::anyhow!("{error}")))
+                    .collect::<Result<_>>()?;
+            }
             "--transport" => {
                 opts.transport = value("--transport")?
                     .split(',')
@@ -46,9 +65,19 @@ fn parse_args() -> Result<Args> {
             "--robot" => robot = true,
             other => bail!(
                 "unknown argument {other}\nusage: chat --topic <t> | --mesh <id> \
-                 [--nick <n>] [--relay-url <url>]... [--transport udp,webrtc,relay] [--robot]"
+                 [--nick <n>] [--relay-url <url>]... [--pkarr-url <url>]... \
+                 [--lookup mdns,dht,relay,pkarr] [--transport udp,webrtc,relay] [--robot]"
             ),
         }
+    }
+    let creating = opts.topic.is_none() && opts.mesh.is_none();
+    if !creating && !opts.lookup.is_empty() {
+        bail!("--lookup only applies when creating, with neither --topic nor --mesh");
+    }
+    if !creating && !opts.pkarr_urls.is_empty() {
+        bail!(
+            "--pkarr-url only applies when creating: a topic uses the default pkarr list and an id carries its own"
+        );
     }
     Ok(Args { opts, robot })
 }
@@ -196,5 +225,59 @@ fn report_error(robot: bool, message: &str) {
         );
     } else {
         println!("! {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use habilis_network::protocol::Lookup;
+
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args> {
+        parse_args_from(args.iter().map(|arg| (*arg).to_owned()))
+    }
+
+    #[test]
+    fn a_create_takes_a_pkarr_list() {
+        let args = parse(&[
+            "--lookup",
+            "relay,pkarr",
+            "--pkarr-url",
+            "https://a.example/pkarr",
+            "--pkarr-url",
+            "https://b.example/pkarr",
+        ])
+        .expect("parses");
+        assert_eq!(
+            args.opts.pkarr_urls,
+            ["https://a.example/pkarr", "https://b.example/pkarr"]
+        );
+    }
+
+    #[test]
+    fn a_create_takes_a_lookup_list() {
+        let args = parse(&["--lookup", "relay,pkarr"]).expect("parses");
+        assert_eq!(args.opts.lookup, [Lookup::Relay, Lookup::Pkarr]);
+    }
+
+    #[test]
+    fn an_unknown_lookup_names_the_choices() {
+        let error = parse(&["--lookup", "carrier-pigeon"])
+            .err()
+            .expect("refused");
+        assert!(format!("{error:#}").contains("pkarr"), "{error:#}");
+    }
+
+    #[test]
+    fn a_topic_or_an_id_refuses_a_lookup_list() {
+        assert!(parse(&["--topic", "room", "--lookup", "relay"]).is_err());
+        assert!(parse(&["--mesh", "abc", "--lookup", "relay"]).is_err());
+    }
+
+    #[test]
+    fn a_topic_or_an_id_refuses_a_pkarr_list() {
+        assert!(parse(&["--topic", "room", "--pkarr-url", "https://a.example/pkarr"]).is_err());
+        assert!(parse(&["--mesh", "abc", "--pkarr-url", "https://a.example/pkarr"]).is_err());
     }
 }

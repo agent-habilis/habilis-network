@@ -26,6 +26,8 @@ mod loopback;
 mod mesh;
 #[cfg(feature = "mesh")]
 mod page;
+#[cfg(feature = "mesh")]
+mod pkarr;
 mod server;
 #[cfg(feature = "mesh")]
 mod stream;
@@ -140,6 +142,13 @@ enum Suite {
     /// page, over a local relay: bytes in on one side, the same bytes out on
     /// the other, each side as producer once.
     Stream,
+    /// The pkarr lookup across every pair: native-native, native-web,
+    /// web-native, web-web, each over a local relay and a local pkarr relay.
+    Pkarr,
+    /// The three default public pkarr relays, from a native client and from a
+    /// tab: put a throwaway record, resolve it back, and CORS. It reaches the
+    /// internet, so it is never run in CI.
+    PkarrLive,
 }
 
 /// Which wasm build a cell runs.
@@ -292,6 +301,8 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
     match args.suite {
         Suite::Mesh => mesh::run(args),
         Suite::Stream => stream::run(args),
+        Suite::Pkarr => pkarr::run(args),
+        Suite::PkarrLive => pkarr::run_live(args),
         Suite::Chat | Suite::Matrix | Suite::Loopback => chat::run(args),
     }
 }
@@ -305,7 +316,10 @@ fn run_engine_suite(_: &Args) -> TaskOutcome {
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
-    if matches!(args.suite, Suite::Mesh | Suite::Chat | Suite::Stream) {
+    if matches!(
+        args.suite,
+        Suite::Mesh | Suite::Chat | Suite::Stream | Suite::Pkarr | Suite::PkarrLive
+    ) {
         return run_engine_suite(args);
     }
 

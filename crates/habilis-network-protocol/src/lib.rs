@@ -50,8 +50,9 @@ pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
     AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, Lookup,
     LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError, OptFlag,
-    RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport, TransportPolicy,
-    resolve_lookups, validate_advertise,
+    PkarrChoice, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
+    TransportPolicy, is_loopback, parse_pkarr_urls, resolve_lookups, validate_advertise,
+    validate_pkarr_urls,
 };
 pub use message::{
     AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,
@@ -60,6 +61,9 @@ pub use message::{
 pub use nickname::{Nickname, NicknameError};
 pub use seal::seal_to_body;
 pub use topic::TopicId;
+/// The pkarr relay URL type, re-exported so a caller of [`MeshConfig::resolve`]
+/// names the same `url` version.
+pub use url::Url;
 
 /// The invite token itself. Minting lives in
 /// `habilis_network::ops::invite`; decoding is part of the join vocabulary.

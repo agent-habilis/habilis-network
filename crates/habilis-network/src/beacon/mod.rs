@@ -11,9 +11,10 @@
 //! process's own peer endpoint, so a cold joiner that dials the
 //! seed-derived `rendezvous_id` is shuffled into the full mesh.
 //!
-//! - **Public:** ephemeral port, discoverable by node id via N0 pkarr.
-//!   Every member co-hosts permanently; pkarr is last-writer-wins, so
-//!   the record always resolves to a recently-live member. Two
+//! - **Public:** ephemeral port, discoverable by node id through the
+//!   relay rung, and through the `dht` and `pkarr` lookups when the mesh
+//!   names them. Every member co-hosts permanently; those records are
+//!   last-writer-wins, so they resolve to a recently-live member. Two
 //!   `EagerProbed` members can still claim inside each other's probe
 //!   window and bind duplicate same-id copies (each capturing its own
 //!   bootstrap dial); the event loop's periodic rival re-check shed
@@ -41,7 +42,7 @@ use n0_future::task::JoinHandle;
 use tokio::sync::{oneshot, watch};
 
 use crate::lookup::{TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect};
-use crate::protocol::mesh::{LookupOpts, RelayChoice};
+use crate::protocol::mesh::{LookupOpts, PkarrChoice, RelayChoice};
 use crate::util::tuning::{
     HEAL_PROBE_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_ATTEMPTS, RENDEZVOUS_PROBE_RETRY_MS,
     RENDEZVOUS_PROBE_SECS, heal_interval_secs,
@@ -360,10 +361,11 @@ fn verdict_of(result: Result<bool, oneshot::error::RecvError>) -> bool {
 ///
 /// Which is exactly why it must be handed [`rendezvous_addr`] rather than a
 /// bare id. A throwaway endpoint has no address book, and nothing else will
-/// fill the gap: endpoints are built on `presets::Minimal`, which wires **no
-/// N0 pkarr/DNS** on purpose (see `lookup::build_endpoint`), and mDNS/DHT are
-/// `host`-only. So a bare `EndpointAddr::new(id)` is unresolvable in a browser
-/// and in any relay-only mesh — the dial times out, the verdict reads "free",
+/// fill the gap: endpoints are built on `presets::Minimal`, which wires no
+/// N0 DNS (see `lookup::build_endpoint`), mDNS/DHT are `host`-only, and a
+/// pkarr record names a relay the prober has none of here. So a bare
+/// `EndpointAddr::new(id)` is unresolvable in a browser and in any
+/// relay-only mesh — the dial times out, the verdict reads "free",
 /// and every surviving member claims a duplicate same-id beacon that captures
 /// its own bootstrap dial. Probe-before-claim was a no-op exactly where it
 /// mattered most; naming the address is what makes it answer its question.
@@ -399,7 +401,7 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
             });
         }
     };
-    let lookups = beacon_lookups(params);
+    let lookups = probe_lookups(params);
     let prober = match build_endpoint(
         &lookups,
         None,
@@ -444,7 +446,9 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
 /// Whether this build can resolve a bare endpoint id under `lookups` — the
 /// only condition a probe may dial one. mDNS and DHT are compile-time
 /// features and `host`-only, so a browser or a feature-trimmed build
-/// resolves nothing regardless of what the mesh id asks for.
+/// resolves nothing through them regardless of what the mesh id asks for.
+/// Pkarr does not count: its record names a relay, and this branch runs only
+/// when the prober has no relay rung to dial it through.
 fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
     (cfg!(all(feature = "host", feature = "mdns")) && lookups.mdns)
         || (cfg!(all(feature = "host", feature = "dht")) && lookups.dht)
@@ -526,6 +530,23 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
             .map_or(RelayChoice::Disabled, |rung| {
                 RelayChoice::Custom(vec![rung])
             }),
+        // Only with a rung: a record with no relay is empty, and pkarr is
+        // last-writer-wins, so it would replace a live beacon's record.
+        pkarr: if params.bootstrap_relay.is_some() {
+            params.lookups.pkarr.clone()
+        } else {
+            PkarrChoice::Disabled
+        },
+    }
+}
+
+/// The beacon's lookups without pkarr. The prober resolves nothing through
+/// pkarr (see [`bare_id_resolvable`]), and its throwaway key must not reach
+/// the public relays on every heal tick.
+fn probe_lookups(params: &RendezvousParams) -> LookupOpts {
+    LookupOpts {
+        pkarr: PkarrChoice::Disabled,
+        ..beacon_lookups(params)
     }
 }
 
@@ -836,8 +857,9 @@ async fn claim(
 #[cfg(test)]
 mod tests {
     use super::{
-        Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, ensure,
-        oneshot, probe_verdict, releasable, rendezvous_addr, spawn_rival_probe, verdict_of, watch,
+        Endpoint, LookupOpts, PkarrChoice, Rendezvous, RendezvousParams, RivalProbe, SecretKey,
+        TopicId, bare_id_resolvable, beacon_lookups, ensure, oneshot, probe_lookups, probe_verdict,
+        releasable, rendezvous_addr, spawn_rival_probe, verdict_of, watch,
     };
 
     /// A real endpoint that touches nothing: `LookupOpts::loopback` binds
@@ -1056,6 +1078,24 @@ mod tests {
         assert!(params.bootstrap_relay.is_none() && params.bind_ports.is_empty());
 
         assert!(rendezvous_addr(&params).is_none());
+    }
+
+    /// A pkarr record names only a relay. A prober with no rung has no relay
+    /// to dial it through, so pkarr cannot answer its probe; and a beacon with
+    /// no rung must not publish, or its empty record replaces a live beacon's
+    /// (last writer wins). The prober never publishes: its key is thrown away.
+    #[test]
+    fn pkarr_follows_the_relay_rung() {
+        let mut params = public_params();
+        params.lookups.pkarr = PkarrChoice::Pinned;
+
+        assert!(!bare_id_resolvable(&params.lookups));
+        assert_eq!(beacon_lookups(&params).pkarr, PkarrChoice::Disabled);
+        assert_eq!(probe_lookups(&params).pkarr, PkarrChoice::Disabled);
+
+        params.bootstrap_relay = Some("https://relay.example/".parse().unwrap());
+        assert_eq!(beacon_lookups(&params).pkarr, PkarrChoice::Pinned);
+        assert_eq!(probe_lookups(&params).pkarr, PkarrChoice::Disabled);
     }
 
     #[test]

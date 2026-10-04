@@ -4,7 +4,7 @@
  */
 
 /** One way a mesh's members find each other. */
-export type Lookup = 'mdns' | 'dht' | 'relay'
+export type Lookup = 'mdns' | 'dht' | 'relay' | 'pkarr'
 
 /**
  * One path a mesh's payload may ride. A list needs `udp` or `webrtc`; a
@@ -67,6 +67,12 @@ export interface CreateOpts {
    * Needs `'relay'` in `lookup`, and is part of the mesh id.
    */
   relayUrls?: string[]
+  /**
+   * Which pkarr relays: every member publishes its record to all of them.
+   * Needs `'pkarr'` in `lookup`, and is part of the mesh id. Omit for the
+   * default list.
+   */
+  pkarrUrls?: string[]
   maxPeers?: number
 }
 

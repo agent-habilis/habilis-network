@@ -163,6 +163,7 @@ async fn spawn_with(
                 mdns: false,
                 dht: false,
                 relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
+                pkarr: habilis_network::protocol::PkarrChoice::Disabled,
             },
             password: None,
             issuer_pubkey: None,

@@ -48,6 +48,8 @@ function ffiType(type: CType): string {
       return 'i64'
     case 'usize':
       return 'u64'
+    case 'u32':
+      return 'u32'
     case 'ptr':
       return 'pointer'
     // A `buf` and a `cstr` both cross as Deno's 'buffer': a Uint8Array whose
@@ -65,6 +67,24 @@ function terminated(value: string): Uint8Array {
   const bytes = new Uint8Array(text.byteLength + 1)
   bytes.set(text, 0)
   return bytes
+}
+
+/** See `probeAbiVersionWithBun`. */
+export function probeAbiVersionWithDeno(path: string): number | Error {
+  const deno = denoNamespace()
+  let library: ReturnType<DenoNamespace['dlopen']>
+  try {
+    library = deno.dlopen(path, {
+      habilis_network_abi_version: { parameters: [], result: ffiType(ABI.habilis_network_abi_version.returns) },
+    })
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error))
+  }
+  try {
+    return Number(library.symbols['habilis_network_abi_version']?.())
+  } finally {
+    library.close()
+  }
 }
 
 export function loadWithDeno(path: string): NativeLibrary {
@@ -97,6 +117,7 @@ export function loadWithDeno(path: string): NativeLibrary {
       const type = signature.args[index] as CType | undefined
       switch (type) {
         case 'i32':
+        case 'u32':
           return arg as number
         case 'isize':
         case 'usize':
@@ -118,6 +139,7 @@ export function loadWithDeno(path: string): NativeLibrary {
     const result = symbol(...lowered)
     switch (signature.returns) {
       case 'i32':
+      case 'u32':
         return Number(result)
       case 'isize':
       case 'usize':

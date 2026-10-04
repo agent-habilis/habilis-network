@@ -26,6 +26,8 @@ function koffiType(type: CType): string {
       return 'long'
     case 'usize':
       return 'size_t'
+    case 'u32':
+      return 'uint32_t'
     case 'ptr':
       return 'void *'
     // In and out both: `habilis_network_msg_recv` writes the text and the message struct
@@ -40,13 +42,12 @@ function koffiType(type: CType): string {
 /** koffi registers struct names globally; a second registration throws. */
 let optsRegistered = false
 
-export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
-  let koffi: Koffi
+async function importKoffi(): Promise<Koffi> {
   try {
     // Imported through a variable so the typechecker (which runs without the
     // optional dependency installed) does not resolve the module literally.
     const specifier = 'koffi'
-    koffi = ((await import(specifier)) as { default: unknown }).default as Koffi
+    return ((await import(specifier)) as { default: unknown }).default as Koffi
   } catch {
     throw new Error(
       [
@@ -58,6 +59,30 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
       ].join('\n'),
     )
   }
+}
+
+/** See `probeAbiVersionWithBun`. */
+export async function probeAbiVersionWithKoffi(path: string): Promise<number | Error> {
+  const koffi = await importKoffi()
+  try {
+    const library = koffi.load(path)
+    try {
+      const abiVersion = library.func(
+        'habilis_network_abi_version',
+        koffiType(ABI.habilis_network_abi_version.returns),
+        [],
+      )
+      return Number(abiVersion())
+    } finally {
+      library.unload()
+    }
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error))
+  }
+}
+
+export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
+  const koffi = await importKoffi()
 
   const library = koffi.load(path)
 
@@ -71,6 +96,7 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
       transport: 'const char *',
       relay_urls: 'const char *',
       max_peers: 'size_t',
+      pkarr_urls: 'const char *',
     })
     optsRegistered = true
   }
@@ -109,6 +135,7 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
     const result = symbol(...lowered)
     switch (signature.returns) {
       case 'i32':
+      case 'u32':
         return Number(result)
       case 'isize':
       case 'usize':
@@ -132,6 +159,7 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
         transport: opts.transport,
         relay_urls: opts.relayUrls,
         max_peers: opts.maxPeers,
+        pkarr_urls: opts.pkarrUrls,
       }) as NativePointer,
     close: () => library.unload(),
   }

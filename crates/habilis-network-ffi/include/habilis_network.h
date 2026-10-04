@@ -27,6 +27,26 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * The version of this header's ABI: the layout of each struct and the
+ * signature of each call. It is bumped on any change that would make a caller
+ * built against an older header misbehave, such as a new struct field.
+ *
+ * Compare it with habilis_network_abi_version() before any other call, and
+ * refuse to go on if they differ. A library that is newer or older than the
+ * header reads a struct with a different size and offsets and fails with no
+ * error:
+ *
+ *     if (habilis_network_abi_version() != HABILIS_NETWORK_ABI_VERSION) {
+ *         fprintf(stderr, "libhabilis_network_ffi does not match its header\n");
+ *         return 1;
+ *     }
+ *
+ * Keep this a plain integer on one line: the TypeScript loader and the tests
+ * read it as one.
+ */
+#define HABILIS_NETWORK_ABI_VERSION 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -43,10 +63,11 @@ typedef struct habilis_network_mesh habilis_network_mesh;
  *   - neither — create a fresh mesh; `lookup` says how far it reaches, and
  *               habilis_network_mesh_id() returns the minted id.
  *
- * Three comma-separated lists name the mesh-wide choices a create bakes into
+ * Four comma-separated lists name the mesh-wide choices a create bakes into
  * the id, one concept each: `lookup` is how members find each other,
- * `transport` is what payload may ride, `relay_urls` is which relay. A joiner
- * inherits all three from the id; a topic fixes `lookup` to all three lookups.
+ * `transport` is what payload may ride, `relay_urls` is which relay, and
+ * `pkarr_urls` is which pkarr relays. A joiner inherits all four from the id;
+ * a topic fixes `lookup` to "mdns,dht,relay,pkarr".
  *
  * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
  * default active-view cap.
@@ -56,8 +77,8 @@ typedef struct {
   const char *topic;
   const char *nick;       /* NULL mints a random nickname */
   const char *name;       /* mesh name on create; NULL falls back to "habilis-network" */
-  const char *lookup;     /* "mdns,dht,relay", any subset; NULL = none, a
-                             loopback mesh reachable from this machine only */
+  const char *lookup;     /* "mdns,dht,relay,pkarr", any subset; NULL = none,
+                             a loopback mesh reachable from this machine only */
   const char *transport;  /* "udp,webrtc,relay", any subset with "udp" or
                              "webrtc"; NULL = "udp,webrtc", so every byte of
                              data goes peer to peer. "relay", or a list without
@@ -65,6 +86,9 @@ typedef struct {
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
                              default. Needs "relay" in `lookup` */
   size_t max_peers;
+  const char *pkarr_urls; /* comma-separated pkarr relays, each gets every
+                             record; NULL = the default. Needs "pkarr" in
+                             `lookup` */
 } habilis_network_opts;
 
 /*
@@ -157,9 +181,10 @@ typedef struct habilis_network_reader habilis_network_reader;
 /* How a stream node reaches peers: the same lists as habilis_network_opts, without the
  * mesh selectors. Zero-initialize for a loopback node. */
 typedef struct {
-  const char *lookup;     /* "mdns,dht,relay", any subset; NULL = loopback */
+  const char *lookup;     /* "mdns,dht,relay,pkarr", any subset; NULL = loopback */
   const char *transport;  /* "udp,webrtc,relay", as habilis_network_opts; NULL = "udp,webrtc" */
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = default */
+  const char *pkarr_urls; /* comma-separated pkarr relays; NULL = default */
 } habilis_network_stream_opts;
 
 /* Stand up a stream node. NULL on failure. */
@@ -216,6 +241,12 @@ int habilis_network_reader_close(habilis_network_reader *reader);
  * Borrowed until this thread's next habilis_network_* call, so copy it to keep it.
  */
 const char *habilis_network_last_error(void);
+
+/*
+ * The ABI version of the library, to compare with HABILIS_NETWORK_ABI_VERSION
+ * before any other call. See the macro.
+ */
+uint32_t habilis_network_abi_version(void);
 
 /* The engine's build version stamp. Borrowed for the process's lifetime. */
 const char *habilis_network_version(void);

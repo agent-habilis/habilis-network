@@ -53,3 +53,35 @@ jobs:
 
       - name: Stream suite
         run: cargo task e2e --suite stream --only cft
+
+  # The pkarr lookup across every pair of native and browser peers, over a
+  # local relay and a local pkarr relay that is as strict as the real ones
+  # (it verifies the signature, refuses a write that is not newer, answers the
+  # CORS preflight). Hermetic: no public server is touched. The run against
+  # the public relays is `cargo task e2e --suite pkarr-live`, and it is never
+  # run here, because a public relay's outage must not turn a change red.
+  pkarr:
+    name: e2e (pkarr)
+    runs-on: ubuntu-latest
+    # Four cells, each bounds its own waits; a hang ends as a red check.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-bindgen-cli
+        run: |
+          version=$(cargo pkgid wasm-bindgen | sed 's/.*[@#]//')
+          echo "wasm-bindgen resolved to $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Pkarr suite
+        run: cargo task e2e --suite pkarr --only cft

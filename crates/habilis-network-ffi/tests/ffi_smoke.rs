@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 
 use habilis_network_ffi::ffi::{
     HabilisNetworkMesh, HabilisNetworkMsg, HabilisNetworkOpts, HabilisNetworkProducer,
-    HabilisNetworkStreamOpts, HabilisNetworkStreams, habilis_network_last_error,
-    habilis_network_max_msg, habilis_network_mesh_close, habilis_network_mesh_id,
-    habilis_network_mesh_name, habilis_network_mesh_nickname, habilis_network_mesh_open,
-    habilis_network_mesh_peer_count, habilis_network_mesh_peers_json,
+    HabilisNetworkStreamOpts, HabilisNetworkStreams, habilis_network_abi_version,
+    habilis_network_last_error, habilis_network_max_msg, habilis_network_mesh_close,
+    habilis_network_mesh_id, habilis_network_mesh_name, habilis_network_mesh_nickname,
+    habilis_network_mesh_open, habilis_network_mesh_peer_count, habilis_network_mesh_peers_json,
     habilis_network_mesh_state_json, habilis_network_mesh_state_merge, habilis_network_msg_recv,
     habilis_network_msg_send, habilis_network_reader_close, habilis_network_stream_close,
     habilis_network_stream_create, habilis_network_stream_hash, habilis_network_stream_open,
@@ -37,6 +37,7 @@ fn create_opts(nick: &CStr) -> HabilisNetworkOpts {
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
         max_peers: 0,
+        pkarr_urls: std::ptr::null(),
     }
 }
 
@@ -96,6 +97,28 @@ fn version_and_max_msg_are_reported() {
     );
 }
 
+/// The header and the library must say the same ABI version, or a C consumer
+/// that checks the macro against the call at start would refuse a library that
+/// is fine, or accept one that is not.
+#[test]
+fn the_header_macro_equals_the_exported_abi_version() {
+    let header = include_str!("../include/habilis_network.h");
+    let declared: u32 = header
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("#define HABILIS_NETWORK_ABI_VERSION ")
+                .map(str::trim)
+        })
+        .expect("the header defines HABILIS_NETWORK_ABI_VERSION")
+        .parse()
+        .expect("the macro is a plain integer, so the loader can read it");
+    assert_eq!(declared, habilis_network_abi_version());
+    assert!(
+        declared >= 1,
+        "versions start at 1; 0 is never a real library"
+    );
+}
+
 #[test]
 fn a_bad_mesh_id_fails_with_a_reason() {
     let nick = CString::new("solo").expect("no interior NUL");
@@ -110,6 +133,38 @@ fn a_bad_mesh_id_fails_with_a_reason() {
         !error.is_empty(),
         "the error slot holds an empty string rather than a reason"
     );
+}
+
+/// An empty URL list is the default, the same as NULL, as it is for the
+/// lookup and transport lists: not one empty URL.
+#[test]
+fn an_empty_url_list_is_the_default() {
+    let nick = CString::new("solo").expect("no interior NUL");
+    let empty = CString::new("").expect("no interior NUL");
+    let mut opts = create_opts(&nick);
+    opts.relay_urls = empty.as_ptr();
+    opts.pkarr_urls = empty.as_ptr();
+
+    let handle = open(&opts);
+    assert!(!handle.is_null(), "open failed: {:?}", last_error());
+    // SAFETY: a live handle from `habilis_network_mesh_open`, closed once.
+    assert_eq!(unsafe { habilis_network_mesh_close(handle) }, 0);
+}
+
+/// `pkarr_urls` is read: a bad entry fails the open with a pkarr reason.
+#[test]
+fn a_bad_pkarr_url_fails_with_a_reason() {
+    let nick = CString::new("solo").expect("no interior NUL");
+    let lookup = CString::new("pkarr").expect("no interior NUL");
+    let bogus = CString::new("not a url").expect("no interior NUL");
+    let mut opts = create_opts(&nick);
+    opts.lookup = lookup.as_ptr();
+    opts.pkarr_urls = bogus.as_ptr();
+
+    let handle = open(&opts);
+    assert!(handle.is_null(), "a bad pkarr URL must not open a handle");
+    let error = last_error().expect("a failure must leave a reason in the error slot");
+    assert!(error.contains("pkarr"), "{error}");
 }
 
 #[test]
@@ -495,6 +550,7 @@ fn create_opts_for_join(id: &CStr, nick: &CStr) -> HabilisNetworkOpts {
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
         max_peers: 0,
+        pkarr_urls: std::ptr::null(),
     }
 }
 
@@ -583,6 +639,7 @@ fn loopback_streams() -> *mut HabilisNetworkStreams {
         lookup: std::ptr::null(),
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
+        pkarr_urls: std::ptr::null(),
     };
     // SAFETY: a fully-initialized struct with NULL strings.
     let streams = unsafe { habilis_network_streams_bind(&raw const opts) };

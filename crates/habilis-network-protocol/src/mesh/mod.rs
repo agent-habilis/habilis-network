@@ -30,7 +30,8 @@ mod transport;
 pub use id::{MeshId, MeshIdError};
 pub use lookup::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, Lookup, LookupOpts,
-    MeshConfig, RelayChoice, resolve_lookups, validate_advertise,
+    MeshConfig, PkarrChoice, RelayChoice, is_loopback, parse_pkarr_urls, resolve_lookups,
+    validate_advertise, validate_pkarr_urls,
 };
 pub use lookup::{LookupSet, OptFlag, RelayLadder, RelayLadderError, RelaySelection};
 pub use name::{MeshName, NameError};
@@ -396,7 +397,7 @@ impl Mesh {
     }
 
     /// Deterministic loopback port *ladder* for loopback-only meshes (no
-    /// pkarr/DNS to resolve `rendezvous_id`). Preference order; a beacon
+    /// lookup to resolve `rendezvous_id`). Preference order; a beacon
     /// binds the first free rung, joiners try all rungs.
     #[must_use]
     pub fn rendezvous_ports(&self) -> [u16; crypto::RENDEZVOUS_LADDER] {
