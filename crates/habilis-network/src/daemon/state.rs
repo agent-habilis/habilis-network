@@ -465,6 +465,11 @@ pub struct EventLoopState {
     /// `ANTIENTROPY_DIGEST_MAX_IDS`), then advances/wraps so a log larger
     /// than one digest is swept over several rounds. (State/meta reconcile by
     /// automerge heads and need no cursor.)
+    ///
+    /// A position in the log in bound order, and the log changes between rounds:
+    /// an insert before the cursor moves every later position by one, so a sweep
+    /// can skip a slice or list one twice. Each window is still right by
+    /// itself, and the next sweep covers a skipped slice, so it only delays.
     pub(crate) digest_cursor: usize,
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.

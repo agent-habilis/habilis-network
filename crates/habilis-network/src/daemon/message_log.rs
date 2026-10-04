@@ -10,9 +10,12 @@ use crate::util::clock;
 /// message is on; the key breaks every tie.
 pub(crate) type Bound = (i64, [u8; 16]);
 
-/// The lowest and the highest id key: a bound that takes in every message of its
-/// second.
+/// The lowest id key. With [`KEY_MAX`] it makes a bound that takes in every
+/// message of its second.
 pub(crate) const KEY_MIN: [u8; 16] = [0; 16];
+/// The highest id key.
+pub(crate) const KEY_MAX: [u8; 16] = [u8::MAX; 16];
+
 /// The smallest bound that sorts after `bound`.
 fn bound_after((timestamp, key): Bound) -> Bound {
     match u128::from_be_bytes(key).checked_add(1) {
@@ -20,8 +23,6 @@ fn bound_after((timestamp, key): Bound) -> Bound {
         None => (timestamp.saturating_add(1), KEY_MIN),
     }
 }
-
-pub(crate) const KEY_MAX: [u8; 16] = [u8::MAX; 16];
 
 /// One anti-entropy digest window: the inclusive `[lo, hi]` range of
 /// [`Bound`]s it covers and the compact (raw 16-byte UUID) ids the sender holds
@@ -205,6 +206,10 @@ impl MessageLog {
     /// The keys of the log in bound order: the order windows are cut in. The log
     /// itself is in arrival order, which is not the same on every node, so a
     /// window cut from it would cover a different set on each.
+    ///
+    /// This sorts the whole log, and one digest calls it up to three times. At
+    /// `MESSAGE_LOG_SIZE` entries every `ANTIENTROPY_INTERVAL_SECS` that costs
+    /// nothing that matters. Look at it before a log a hundred times larger.
     fn bounds(&self) -> Vec<Bound> {
         let mut bounds: Vec<Bound> = self
             .messages

@@ -1711,16 +1711,23 @@ mod tests {
                 }
             }
             let mut recovered = HashSet::new();
+            let mut last_round = 0;
             for round in 0..12 {
                 for message in answer_within_budget(&mut node, &holder, budget) {
                     assert!(
                         lost.contains(&message.dedup_key()),
                         "round {round}, {seconds} s: sent a message the node already holds"
                     );
-                    recovered.insert(message.dedup_key());
+                    if recovered.insert(message.dedup_key()) {
+                        last_round = round;
+                    }
                     node.message_log.push(message);
                 }
             }
+            assert!(
+                last_round <= 2,
+                "{seconds} s: the last lost message came back in round {last_round}"
+            );
             assert_eq!(recovered, lost, "{seconds} s: every lost message came back");
         }
     }
@@ -1822,6 +1829,53 @@ mod tests {
                 "a message of the fast author never came back: {rounds:?}"
             );
         }
+    }
+
+    /// Two nodes whose logs are over their capacity keep the newest messages
+    /// they saw. The one that joined earlier saw more, so their retained sets
+    /// differ at the old edge. Neither may keep asking the other for what it
+    /// evicted, or the other keeps sending it and it evicts it again.
+    #[test]
+    fn two_full_logs_with_different_history_ask_each_other_for_nothing() {
+        let budget = crate::util::tuning::antientropy_max_resend();
+        let base = 1_700_000_000;
+        let common: Vec<Message> = (0..300)
+            .map(|index| chat_at(&format!("c{index}"), base + i64::from(index / 3)))
+            .collect();
+        let earlier: Vec<Message> = (0..150)
+            .map(|index| chat_at(&format!("e{index}"), base + i64::from(index * 2 / 3)))
+            .collect();
+        let mut older = fresh_state();
+        older.joined_at = base - 1;
+        older.message_log = MessageLog::new(100);
+        let mut newer = fresh_state();
+        newer.joined_at = base + 1;
+        newer.message_log = MessageLog::new(100);
+        for message in earlier.iter().chain(&common) {
+            older.message_log.push(message.clone());
+        }
+        for message in &common {
+            newer.message_log.push(message.clone());
+        }
+
+        let mut sent_per_round = Vec::new();
+        for _ in 0..8 {
+            let mut sent = 0;
+            let to_newer = answer_within_budget(&mut newer, &older.message_log, budget);
+            let to_older = answer_within_budget(&mut older, &newer.message_log, budget);
+            sent += to_newer.len() + to_older.len();
+            for message in to_newer {
+                newer.message_log.push(message);
+            }
+            for message in to_older {
+                older.message_log.push(message);
+            }
+            sent_per_round.push(sent);
+        }
+        assert!(
+            sent_per_round[2..].iter().all(|sent| *sent == 0),
+            "messages sent per round between two full logs: {sent_per_round:?}"
+        );
     }
 
     /// A node gets back every message it missed after it joined, even one sent
