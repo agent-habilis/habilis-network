@@ -46,6 +46,7 @@ pub(crate) async fn handle_gossip_event(
         Some(Ok(Event::NeighborUp(node_id))) => {
             let (conn, relay) = conn_path(ctx.endpoint, node_id).await;
             tracing::info!(target: "habilis_network::gossip",
+                local = %ctx.endpoint.id().fmt_short(),
                 endpoint_id = %node_id,
                 is_rendezvous = node_id == ctx.rendezvous_id,
                 conn = conn.label(),
@@ -143,7 +144,7 @@ pub(crate) async fn handle_gossip_event(
         }
         Some(Ok(Event::NeighborDown(node_id))) => {
             let is_rendezvous = node_id == ctx.rendezvous_id;
-            tracing::info!(target: "habilis_network::gossip", endpoint_id = %node_id, is_rendezvous, "gossip neighbor down");
+            tracing::info!(target: "habilis_network::gossip", local = %ctx.endpoint.id().fmt_short(), endpoint_id = %node_id, is_rendezvous, "gossip neighbor down");
             if is_rendezvous {
                 rendezvous_neighbor_down(state, ctx, node_id);
             } else {

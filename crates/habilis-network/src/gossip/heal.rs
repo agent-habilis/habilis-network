@@ -33,7 +33,7 @@ pub(crate) async fn release_rendezvous_if_due(state: &mut EventLoopState, ctx: &
         );
         return;
     }
-    state.mark_rendezvous_released();
+    state.mark_rendezvous_released(ctx.endpoint.id());
 }
 
 /// Re-graft the rendezvous. `join_peers` is a cheap enqueue.

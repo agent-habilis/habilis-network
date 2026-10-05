@@ -945,10 +945,11 @@ impl EventLoopState {
     /// (`GossipSender::leave_peers`). The leave ends the link by itself, so this
     /// does not wait for a close to be seen: it marks the release at once, before
     /// the `NeighborDown` that follows is read, so that one reads as a choice.
-    pub(crate) fn mark_rendezvous_released(&mut self) {
+    pub(crate) fn mark_rendezvous_released(&mut self, local: EndpointId) {
         self.rendezvous_released = true;
         tracing::info!(
             target: "habilis_network::gossip",
+            local = %local.fmt_short(),
             links = self.linked_endpoints.len(),
             "enough links to members: released the rendezvous"
         );
@@ -1478,7 +1479,7 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(2));
         assert!(state.should_release_rendezvous(Instant::now()));
 
-        state.mark_rendezvous_released();
+        state.mark_rendezvous_released(endpoint_id(9));
 
         assert!(!state.should_release_rendezvous(Instant::now()));
     }
