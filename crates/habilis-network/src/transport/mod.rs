@@ -25,6 +25,7 @@ mod direct_gossip;
 pub(crate) mod endpoint_proof;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
+pub(crate) mod outbox;
 pub(crate) mod path;
 mod pool;
 pub(crate) mod probe;
@@ -49,6 +50,7 @@ pub(crate) mod sender;
 pub(crate) use accept::UnicastAcceptor;
 pub use admission::SignalAdmission;
 pub(crate) use direct_gossip::DirectOnlyGossip;
+pub(crate) use outbox::{Resend, ResendOutbox};
 #[cfg(feature = "blob")]
 pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};
 pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
@@ -57,7 +59,7 @@ pub(crate) use send::HeldForDirect;
 pub use send::Lane;
 pub(crate) use send::lane_for;
 pub use send::{deliver, deliver_in_background};
-pub(crate) use send::{send_best_effort, unicast_answer_target};
+pub(crate) use send::{resolve, send_best_effort, unicast_answer_target};
 pub use sender::MeshSender;
 pub use webrtc::MAX_DIRECT_PEERS;
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};

@@ -12,7 +12,10 @@
 //! A chat resend rides the same plane the original send chose: broadcast
 //! content goes back on gossip, and a directed frame goes point-to-point to
 //! its addressee — never to the peer that merely asked. Both follow from
-//! routing every chat resend through [`crate::transport::deliver`]. A state
+//! routing every chat resend through [`crate::transport::resolve`], the
+//! decision of [`crate::transport::deliver`]. Only a few members answer a
+//! digest ([`answers_digest`]), and the event loop only queues the answer: a
+//! task sends it (see `transport::outbox`). A state
 //! or meta answer is the exception: it goes point-to-point to the linked
 //! neighbor that asked, see [`handle_state_digest`].
 
@@ -30,9 +33,10 @@ use crate::daemon::state::EventLoopState;
 use crate::protocol::{Channel, MeshId, Message, Nickname};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
-    ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN_SECS, ANTIENTROPY_SERVES_PER_WINDOW,
-    FAST_ROUND_ACTIVE_MS, FAST_ROUND_AHEAD_MAX, FAST_ROUND_AHEAD_TTL_SECS,
-    FAST_ROUND_MIN_INTERVAL_MS, FAST_ROUND_RETRY_MS, antientropy_max_resend,
+    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN_SECS,
+    ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE_MS, FAST_ROUND_AHEAD_MAX,
+    FAST_ROUND_AHEAD_TTL_SECS, FAST_ROUND_MIN_INTERVAL_MS, FAST_ROUND_RETRY_MS,
+    antientropy_max_resend,
 };
 
 use super::broadcast_msg;
@@ -212,8 +216,8 @@ fn report_unreadable_digest(message: &Message, state: &mut EventLoopState) {
 /// the repeat (dedup); the sender (and anyone else who missed them) recovers.
 /// Never logged.
 ///
-/// Each resend goes through [`crate::transport::deliver`] rather than straight
-/// onto gossip, so it takes the plane its addressing dictates — the same
+/// Each resend is routed by [`crate::transport::resolve`] rather than sent
+/// straight onto gossip, so it takes the plane its addressing dictates — the same
 /// decision the original send made. Paired with `missing_in_window`'s own
 /// addressee gate, a directed frame is re-sent point-to-point to its addressee
 /// and to nobody else, so backfill can't put on the gossip flood what the send
@@ -225,15 +229,16 @@ fn report_unreadable_digest(message: &Message, state: &mut EventLoopState) {
 /// so a per-window `have` would re-send a message the sender holds but listed
 /// under the *other* window — wasting the shared resend budget on messages the
 /// peer already has and starving the genuinely-missing tail.
-pub(crate) async fn handle_digest(
-    message: &Message,
-    state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
-) {
+pub(crate) fn handle_digest(message: &Message, state: &mut EventLoopState, me: &Nickname) {
     let Ok(body) = serde_json::from_str::<DigestBody>(message.body.as_str()) else {
         report_unreadable_digest(message, state);
         return;
     };
+    // Only a few members answer one digest (see `answers_digest`).
+    let members = state.peers.iter().chain(std::iter::once(me));
+    if !answers_digest(me, &message.author, message.id.as_str(), members) {
+        return;
+    }
     // One serve per author per window. Answering costs up to
     // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
     // small frame into that much flooding from every member that hears it —
@@ -268,7 +273,7 @@ pub(crate) async fn handle_digest(
             max: budget,
             requester: &message.author,
         }) {
-            if !resend_one(&msg, state, ctx).await {
+            if !resend_one(&msg, state) {
                 continue;
             }
             // Mark it sent so the next (overlapping) window doesn't re-send it
@@ -285,18 +290,71 @@ pub(crate) async fn handle_digest(
     }
 }
 
-/// Re-send one message on the plane its addressing dictates. Returns whether it
-/// was attempted at all — `false` only for the unserializable frame we somehow
-/// hold, which must not be charged to the round's budget.
-async fn resend_one(msg: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) -> bool {
+/// Queue one message on the plane its addressing dictates, for the task that
+/// drains the outbox. Never waits. Returns whether it was attempted at all —
+/// `false` only for the unserializable frame we somehow hold, which must not be
+/// charged to the round's budget.
+fn resend_one(msg: &Message, state: &mut EventLoopState) -> bool {
     let Ok(bytes) = msg.serialize() else {
         return false;
     };
-    if let Err(error) = crate::transport::deliver(msg, Bytes::from(bytes), state, ctx.sender).await
-    {
-        tracing::debug!(target: "habilis_network::gossip", %error, "anti-entropy resend failed");
+    match crate::transport::resolve(msg, Bytes::from(bytes), state) {
+        Ok(resend) => {
+            if state.resend_outbox.offer(resend) {
+                state.idle.resent += 1;
+            } else {
+                state.idle.resend_dropped += 1;
+            }
+        }
+        Err(error) => {
+            tracing::debug!(target: "habilis_network::gossip", %error, "anti-entropy resend failed");
+        }
     }
     true
+}
+
+/// A member's place in the line for one digest: lower answers first.
+///
+/// A hash of the digest id and the member, so it is the same on every member
+/// that knows both, with no message to agree on it, and it changes with each
+/// digest. SHA-256 and not `DefaultHasher`, whose output may differ between
+/// builds: members on different builds would then pick different answerers.
+fn answer_rank(digest_id: &str, member: &Nickname) -> (u64, String) {
+    use sha2::{Digest as _, Sha256};
+
+    let hash = Sha256::new()
+        .chain_update(digest_id.as_bytes())
+        .chain_update([0])
+        .chain_update(member.as_str().as_bytes())
+        .finalize();
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&hash[..8]);
+    // The name breaks a tie, so the order is total.
+    (u64::from_be_bytes(head), member.as_str().to_owned())
+}
+
+/// Whether `me` is one of the [`ANTIENTROPY_ANSWERERS`] members that answer this
+/// digest: the first of the members in the order of [`answer_rank`], the asker
+/// left out.
+///
+/// Every member that holds what the asker lacks used to answer, and all but the
+/// first copy of each message were waste. A uniform rule that needs no talk
+/// between members: each one hashes the digest id with every member name and
+/// answers when it is among the lowest. Members that know slightly different
+/// rosters can pick slightly different sets, and that costs a duplicate or a
+/// missing answer, which the next digest repairs: a new digest id picks again.
+pub(crate) fn answers_digest<'a>(
+    me: &Nickname,
+    asker: &Nickname,
+    digest_id: &str,
+    members: impl Iterator<Item = &'a Nickname>,
+) -> bool {
+    let mine = answer_rank(digest_id, me);
+    let ahead = members
+        .filter(|member| *member != asker && *member != me)
+        .filter(|member| answer_rank(digest_id, member) < mine)
+        .count();
+    ahead < ANTIENTROPY_ANSWERERS
 }
 
 /// Sweep both shared-state channels' anti-entropy digests (one tick).
@@ -1285,6 +1343,99 @@ mod tests {
     use crate::doc::Ingested;
     use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
     use crate::testing::{fresh_state, nick};
+
+    fn members(count: usize) -> Vec<Nickname> {
+        (0..count)
+            .map(|index| nick(&format!("member-{index:02}")))
+            .collect()
+    }
+
+    /// One digest is answered by `ANTIENTROPY_ANSWERERS` members, not by every
+    /// member that holds what the asker lacks.
+    #[test]
+    fn one_digest_is_answered_by_k_members_not_by_all() {
+        let members = members(48);
+        let asker = &members[0];
+        let answering = members
+            .iter()
+            .filter(|me| *me != asker)
+            .filter(|me| super::answers_digest(me, asker, "digest-1", members.iter()))
+            .count();
+        assert_eq!(answering, crate::util::tuning::ANTIENTROPY_ANSWERERS);
+    }
+
+    /// The answerers change with the digest, so a message that only one member
+    /// holds comes back once that member has had a turn.
+    #[test]
+    fn every_member_gets_a_turn_to_answer() {
+        let members = members(48);
+        let asker = &members[0];
+        let mut had_a_turn = HashSet::new();
+        for round in 0..200 {
+            let id = format!("digest-{round}");
+            for me in members.iter().filter(|me| *me != asker) {
+                if super::answers_digest(me, asker, &id, members.iter()) {
+                    had_a_turn.insert(me.clone());
+                }
+            }
+        }
+        assert_eq!(had_a_turn.len(), 47, "all but the asker answered once");
+    }
+
+    /// A mesh no larger than the answerers has nobody to hold back.
+    #[test]
+    fn a_small_mesh_is_answered_by_every_member() {
+        let members = members(3);
+        let asker = &members[0];
+        for me in members.iter().filter(|me| *me != asker) {
+            assert!(super::answers_digest(me, asker, "digest-1", members.iter()));
+        }
+    }
+
+    /// The digest of a node that holds nothing: one open-ended window with no
+    /// ids, so every message of the holder is a gap.
+    fn digest_of_an_empty_log(asker: &Nickname) -> Message {
+        let window = DigestWindow {
+            lo: (0, crate::daemon::message_log::KEY_MIN),
+            hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
+            ids: Vec::new(),
+            from_start: true,
+        };
+        let body = crate::gossip::json_body(&DigestBody {
+            windows: vec![WireWindow::encode(&window)],
+        })
+        .expect("a digest serializes");
+        Message::new_digest(&MeshId::from("test"), asker, body)
+    }
+
+    /// The event loop answers a digest without waiting on anything: the resends
+    /// go to a bounded outbox, and what does not fit is dropped and counted. The
+    /// next digest asks again. An answer used to broadcast up to 64 messages from
+    /// inside the loop, and a command queue that the gossip actor did not drain
+    /// held the loop there for minutes.
+    #[test]
+    fn a_digest_answer_does_not_wait_for_a_full_outbox() {
+        let (me, asker) = (nick("holder"), nick("asker"));
+        let mut state = fresh_state();
+        state.peers.insert(asker.clone());
+        for index in 0..100 {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        // Nobody drains this outbox.
+        let (outbox, _undrained) = crate::transport::ResendOutbox::new(4);
+        state.resend_outbox = outbox;
+
+        super::handle_digest(&digest_of_an_empty_log(&asker), &mut state, &me);
+
+        assert_eq!(state.resend_outbox.queued(), 4, "the outbox is full");
+        assert_eq!(
+            state.resend_outbox.dropped(),
+            crate::util::tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
+            "the rest of the answer is dropped, and counted"
+        );
+    }
 
     /// A node whose only gossip neighbor is the rendezvous relay: linked to it,
     /// never to a real peer.

@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use iroh::EndpointId;
 
+use super::outbox::Resend;
 use super::pool::WarmSend;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::message::sole_addressee;
@@ -30,9 +31,22 @@ pub async fn deliver(
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> Result<()> {
+    match resolve(msg, bytes, state)? {
+        Resend::Broadcast(bytes) => broadcast(sender, bytes).await,
+        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, state).await,
+    }
+}
+
+/// The routing decision of [`deliver`], without the send: which plane carries
+/// `msg`, so that a caller that must not wait can queue it for another task.
+///
+/// # Errors
+/// The same as [`deliver`] for a message that has no path now: held for a
+/// direct path, or its addressee has no known endpoint.
+pub(crate) fn resolve(msg: &Message, bytes: Bytes, state: &EventLoopState) -> Result<Resend> {
     match route(msg, state) {
-        Route::Broadcast => broadcast(sender, bytes).await,
-        Route::Unicast(eid) => send_unicast(eid, bytes, state).await,
+        Route::Broadcast => Ok(Resend::Broadcast(bytes)),
+        Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
         Route::Held(eid) => Err(HeldForDirect { eid }.into()),
         Route::Undeliverable => {
             let addressee = sole_addressee(&msg.kind);

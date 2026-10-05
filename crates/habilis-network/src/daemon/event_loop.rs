@@ -243,6 +243,15 @@ pub async fn run<A: NodeDriver>(
     let (gossip_sender, receiver) = topic.split();
 
     let sender = MeshSender::new(gossip_sender);
+    // The task that sends the digest answers, so that the loop never waits for
+    // the gossip actor to take them.
+    if let Some(resends) = state.resend_receiver.take() {
+        n0_future::task::spawn(crate::transport::outbox::drain(
+            resends,
+            sender.clone(),
+            state.unicast_pool.clone(),
+        ));
+    }
 
     #[cfg(feature = "host")]
     let ipc_rx = spawn_ipc_rx::<A::Ipc>(

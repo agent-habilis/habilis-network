@@ -199,6 +199,10 @@ pub struct EventLoopState {
     digest_serves: Cooldown<String>,
     /// When we last reported an author whose digest we could not read.
     digest_unreadable: Cooldown<String>,
+    /// Where a digest answer goes, so that the loop never waits to send it. The
+    /// task that drains it takes `resend_receiver` when the loop starts.
+    pub(crate) resend_outbox: crate::transport::ResendOutbox,
+    pub(crate) resend_receiver: Option<tokio::sync::mpsc::Receiver<crate::transport::Resend>>,
     /// When each asker's state or meta digest was last served, per plane. A
     /// new node sends a digest pair for every peer it sees, all with the same
     /// heads, and every holder hears each one; the plane is in the key so the
@@ -572,6 +576,11 @@ pub(crate) struct IdleCounters {
     /// driver behind `user` CPU: each one is an Ed25519 signature plus a
     /// serialization.
     pub broadcasts: u64,
+    /// Messages a digest answer put in the resend outbox.
+    pub resent: u64,
+    /// Messages a digest answer could not put there because it was full: the
+    /// next digest asks for them again.
+    pub resend_dropped: u64,
 }
 
 impl IdleCounters {
@@ -648,6 +657,8 @@ impl EventLoopState {
             password: mesh_password,
             key: mesh_key,
         } = secrets;
+        let (resend_outbox, resend_receiver) =
+            crate::transport::ResendOutbox::new(crate::util::tuning::RESEND_OUTBOX_CAP);
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
@@ -680,6 +691,8 @@ impl EventLoopState {
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
             digest_unreadable: Cooldown::new(UNREADABLE_DIGEST_LOG_WINDOW),
+            resend_outbox,
+            resend_receiver: Some(resend_receiver),
             state_digest_serves: crate::gossip::antientropy::ServeBudget::default(),
             fast_rounds: crate::gossip::antientropy::FastRounds::default(),
             peers: HashSet::new(),

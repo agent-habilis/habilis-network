@@ -659,6 +659,22 @@ pub const RIVAL_RECHECK_OFFSET_SPAN_SECS: u64 = 8;
 /// [`ANTIENTROPY_INTERVAL_SECS`], so the honest cadence is never refused.
 pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = 5;
 
+/// How many members answer one chat digest.
+///
+/// Every member that holds a message the asker lacks used to answer, so one
+/// digest bought up to `ANTIENTROPY_MAX_RESEND` broadcasts from each of the N - 1
+/// others, and each broadcast reaches N - 1 links: about N^3 deliveries per
+/// digest round. Of those, all but the first copy of a message are wasted. A
+/// few answerers cover a lost answer and a holder that lacks the message, and
+/// the answerers change with every digest (see `answers_digest`), so a message
+/// that only one member holds still comes back within a few rounds.
+pub const ANTIENTROPY_ANSWERERS: usize = 3;
+
+/// How many resends the outbox of the event loop holds. A digest answer is at
+/// most `ANTIENTROPY_MAX_RESEND` messages, so this is a few answers. When it is
+/// full the resend is dropped and counted: the next digest asks again.
+pub const RESEND_OUTBOX_CAP: usize = 256;
+
 /// How many state digest answers one asker may get per channel on the unicast
 /// plane in one [`ANTIENTROPY_SERVE_COOLDOWN_SECS`] window; the same heads get
 /// an answer again only after [`FAST_ROUND_MIN_INTERVAL_MS`]. A backfilling

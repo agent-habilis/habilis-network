@@ -141,6 +141,8 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         idle_linkstate = idle.linkstate,
         idle_external = idle.external,
         idle_broadcasts = idle.broadcasts,
+        idle_resent = idle.resent,
+        idle_resend_dropped = idle.resend_dropped,
         "mesh census"
     );
 

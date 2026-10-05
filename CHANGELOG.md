@@ -132,6 +132,19 @@ published to a registry; pin it with
      and `TransportOpts::multihop`.
   5. Every saved mesh id, gossip hash and invite ticket stops working (see the
      entries above): create the mesh again.
+- A chat digest is answered by three members, not by all of them, and the event
+  loop no longer waits to send the answer. Each member that held a message the
+  asker lacked used to broadcast up to 64 messages, and every broadcast reaches
+  every link: about N^3 deliveries per round, which filled the queues of the
+  gossip actor at about 40 members. A digest id and the member names now pick
+  the answerers (`ANTIENTROPY_ANSWERERS`, 3), and they change with each digest,
+  so a message that only one member holds still comes back within a few rounds.
+  The answer goes into a bounded outbox (`RESEND_OUTBOX_CAP`, 256) that its own
+  task drains; what does not fit is dropped, and the next digest asks again. The
+  `mesh census` line gains `idle_resent` and `idle_resend_dropped`. A mesh of
+  four or fewer is answered by every member, as before. A late joiner in a large
+  mesh can need several digest rounds (10 s each) to get the full history,
+  where one round was enough.
 - **Breaking:** the project is renamed from fofoca to habilis-network, and it
   moves to `github.com/agent-habilis/habilis-network` (https://habilis.network).
   Every crate, package, C symbol (`habilis_network_*`), C type
