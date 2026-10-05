@@ -104,8 +104,8 @@ pub struct TransportHandles {
     /// mesh, and an opportunistic extra path for a native peer.
     pub webrtc: Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
     /// The table that decides who holds a direct-peer slot. When set, the
-    /// endpoint reports every connection to it, so that it can close the
-    /// connections of one peer and drop the ones that are gone.
+    /// endpoint reports every connection to it, so that it can drop the ones
+    /// that are gone.
     pub admission: Option<crate::transport::SignalAdmission>,
     /// Which transports this instance may carry data on. Lives here rather than
     /// as another positional argument for the same reason the handles do.
@@ -497,7 +497,7 @@ pub async fn build_peer_webrtc(
 }
 
 /// [`build_peer_webrtc`], reporting the endpoint's connections to `admission`,
-/// which keeps one entry per peer and can close the connections of one peer.
+/// which keeps one entry per peer and drops the connections that are gone.
 ///
 /// # Errors
 /// Returns an error if the endpoint fails to bind.

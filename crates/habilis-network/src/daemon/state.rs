@@ -927,13 +927,15 @@ impl EventLoopState {
             .map(|_| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
     }
 
-    /// Whether this node holds the rendezvous link, is not its host, has links
-    /// enough to others, and has stayed as long as a visit lasts: it lets go.
+    /// Whether this node holds the rendezvous link, has not let go of it yet, is
+    /// not its host, has links enough to others, and has stayed as long as a
+    /// visit lasts: it lets go.
     /// Checked wherever a link comes up and on the heal tick, because a node
     /// that came back to a mesh whose links are all up would otherwise wait for
     /// a link event that never comes.
     pub(crate) fn should_release_rendezvous(&self, now: Instant) -> bool {
         self.rendezvous_linked
+            && !self.rendezvous_released
             && !self.hosts_rendezvous
             && self.linked_endpoints.len() >= self.rendezvous_release_links
             && self.rendezvous_dwell_until.is_none_or(|until| now >= until)
@@ -1463,6 +1465,22 @@ mod tests {
             !state.should_release_rendezvous(Instant::now()),
             "nothing left to let go of"
         );
+    }
+
+    /// Gossip ends the link some time after the release, and the heal tick and
+    /// every link event ask again meanwhile. A node already released must not be
+    /// due again, or it tells gossip to leave a second time and logs it twice.
+    #[test]
+    fn a_node_that_has_released_is_not_due_again_while_the_link_is_still_up() {
+        let mut state = two_link_node();
+        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(state.should_release_rendezvous(Instant::now()));
+
+        state.mark_rendezvous_released();
+
+        assert!(!state.should_release_rendezvous(Instant::now()));
     }
 
     #[test]
