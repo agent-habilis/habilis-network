@@ -80,14 +80,15 @@ fn rendezvous_links_down() -> usize {
 }
 
 /// The lines that say how the rendezvous was held, let go of and re-grafted: the
-/// last 80, because the lines that explain a failure come after the group forms.
+/// last 120, because the lines that explain a failure come after the group forms.
 fn rendezvous_trace() -> String {
     logs()
         .lines()
         .filter(|line| {
             [
                 "released the rendezvous",
-                "is_rendezvous=true",
+                "gossip neighbor",
+                "relay-only path refused",
                 "re-graft the rendezvous",
                 "rendezvous released",
                 "beacon role active",
@@ -99,7 +100,7 @@ fn rendezvous_trace() -> String {
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .take(80)
+        .take(120)
         .rev()
         .collect::<Vec<_>>()
         .join("\n")
@@ -170,6 +171,25 @@ impl Member {
     fn saw_msg(&mut self, text: &str) -> bool {
         self.pump();
         self.seen_msgs.iter().any(|msg| msg.text == text)
+    }
+
+    /// Whether this member holds a live link to the member `nick`.
+    async fn linked_to(&self, nick: &str) -> bool {
+        let json = self
+            .membership
+            .request(|reply| Request::Peers { reply })
+            .await
+            .unwrap_or_default();
+        serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|roster| {
+                roster["peers"].as_array().map(|peers| {
+                    peers
+                        .iter()
+                        .any(|peer| peer["nickname"] == nick && peer["reach"] == "direct")
+                })
+            })
+            .unwrap_or(false)
     }
 
     async fn roster_len(&self) -> usize {
@@ -428,6 +448,18 @@ async fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
         "the group never formed\n{}",
         rendezvous_trace()
     );
+
+    // The roster fills through any link, so it does not show that these two hold
+    // a link to each other. A cut that lands before they do has nothing to close.
+    let linking_since = Instant::now();
+    while !(members[1].linked_to("member-2").await && members[2].linked_to("member-1").await) {
+        assert!(
+            linking_since.elapsed() < Duration::from_mins(1),
+            "member-1 and member-2 never linked to each other before the cut\n{}",
+            rendezvous_trace()
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
     // Cut member-1 from member-2, and nobody else.
     let (one, two) = (members[1].ports(), members[2].ports());
