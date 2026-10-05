@@ -276,11 +276,16 @@ fn come_back_trace() -> String {
                 "released the rendezvous",
                 "refused a signal offer",
                 "nothing to close",
+                "is_rendezvous=true",
             ]
             .iter()
             .any(|needle| line.contains(needle))
         })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
         .take(60)
+        .rev()
         .collect::<Vec<_>>()
         .join("\n")
 }

@@ -68,8 +68,10 @@ fn count(needle: &str) -> usize {
     logs().matches(needle).count()
 }
 
-/// How many members reported their link to the rendezvous down. The creator
-/// hosts the rendezvous and has no such link, so it never counts.
+/// How many times a member reported its link to the rendezvous down. It counts
+/// events, not members: the line does not name the member, and a member that
+/// comes back and leaves again counts twice. The creator hosts the rendezvous
+/// and has no such link, so it never counts.
 fn rendezvous_links_down() -> usize {
     logs()
         .lines()
@@ -77,7 +79,8 @@ fn rendezvous_links_down() -> usize {
         .count()
 }
 
-/// The lines that say how the rendezvous was held, let go of and re-grafted.
+/// The lines that say how the rendezvous was held, let go of and re-grafted: the
+/// last 80, because the lines that explain a failure come after the group forms.
 fn rendezvous_trace() -> String {
     logs()
         .lines()
@@ -93,9 +96,20 @@ fn rendezvous_trace() -> String {
             .iter()
             .any(|needle| line.contains(needle))
         })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
         .take(80)
+        .rev()
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
+fn dump_logs() {
+    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = std::fs::write(path, logs());
+    }
 }
 
 async fn eventually(deadline: Duration, mut done: impl FnMut() -> bool) -> bool {
@@ -445,6 +459,9 @@ async fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
     }
 
     let trace = rendezvous_trace();
+    if !(closed && others && healed) {
+        dump_logs();
+    }
     leave_all(members).await;
     assert!(closed, "the cut link was never closed\n{trace}");
     assert!(others, "the cut reached nodes it did not name\n{trace}");
