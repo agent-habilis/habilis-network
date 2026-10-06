@@ -245,8 +245,11 @@ async fn a_node_steps_down_the_ladder_and_climbs_back() {
 /// The test forces the order instead of waiting for it: it attaches the session
 /// at once with `Request::OfferSession`, then blocks `WebRTC`, all within the
 /// first seconds. It needs the mesh to be young. Right before the block it asks
-/// whether alice has a route to bob. If she has, the order was not forced, and
-/// the test skips: it logs the reason and returns, and a pass would show nothing.
+/// whether alice has a route to bob, and again after the loss is observed, since
+/// a route can appear in between. If she has one, the order was not forced, and
+/// the test skips: it logs the reason and returns. A skip prints only under
+/// `--nocapture` and reads as a pass in `cargo test --workspace`, so only the
+/// manual loop (count the passes and the skips) proves the fix.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     init_logging();
@@ -284,6 +287,22 @@ async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
         return;
     }
     alice.block_rung(Rung::WebRtc, true).await;
+    let lost_at = Instant::now();
+    while !matches!(alice.rung_to("bob").await, Some("relay" | "multihop")) {
+        assert!(
+            lost_at.elapsed() < STEP_DEADLINE,
+            "the pair never left WebRTC after the block"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    if alice.has_route("bob").await {
+        eprintln!(
+            "SKIPPED: alice has a route to bob after the loss, so the order was not \
+             forced and a pass would not show the fix. Run it again on a quieter host."
+        );
+        return;
+    }
     alice
         .expect_rung("bob", "multihop", "WebRTC lost before any route")
         .await;

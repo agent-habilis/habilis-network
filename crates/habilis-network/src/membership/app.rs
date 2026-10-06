@@ -170,7 +170,11 @@ pub enum Request {
     },
     /// Tests only: whether the multihop topology of this node has a route to the
     /// member `peer` now. A route exists from the first link-state on.
-    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
     HasRoute {
         peer: String,
         reply: oneshot::Sender<bool>,
@@ -381,7 +385,11 @@ impl NodeDriver for MembershipApp {
                 });
                 false
             }
-            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
             Request::HasRoute { peer, reply } => {
                 let has_route = state.peer_endpoints.get(peer.as_str()).is_some_and(|addr| {
                     state
