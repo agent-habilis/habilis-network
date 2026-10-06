@@ -163,7 +163,7 @@ pub struct EventLoopConfig {
     pub(crate) runtime_base: Option<PathBuf>,
     /// When set, the daemon writes peer count changes to this file.
     pub(crate) state_file: Option<PathBuf>,
-    /// The multi-hop transport handle when `--multihop` registered it on the
+    /// The multi-hop transport handle when the mesh policy registered it on the
     /// peer endpoint; `run()` moves it into `EventLoopState::multihop`.
     /// `None` when multihop is off. Built in `setup_mesh`.
     ///

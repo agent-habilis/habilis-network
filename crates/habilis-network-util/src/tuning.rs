@@ -66,6 +66,24 @@ pub fn antientropy_interval_secs() -> u64 {
 /// is not yet wired, so this cadence bounds convergence time.
 pub const LINKSTATE_INTERVAL_SECS: u64 = 15;
 
+/// How long a peer's link-vector stays in the routing graph without a newer one,
+/// and how old a vector may be when it arrives. Three missed advertisements: a
+/// peer that crashed, or left without a word, then leaves no edge behind.
+///
+/// The trade: a node that is degraded, or whose loop missed ticks under load, is
+/// dropped by every peer and its routes go until its next vector (it comes back
+/// with that vector). That costs a backup path for up to one interval. A longer
+/// age keeps a crashed peer's routes longer instead. A peer's clock more than
+/// this behind ours has its vectors refused, because a vector's `seq` is the
+/// sender's wall-clock time in milliseconds.
+pub const LINKSTATE_MAX_AGE_SECS: u64 = LINKSTATE_INTERVAL_SECS * 3;
+
+/// How long a next hop's underlay may stay on the relay, refused by the relay
+/// gate, before the hop stops being advertised as a link. A connection starts on
+/// the relay until a direct path opens, so the deadline must outlast a normal
+/// hole punch.
+pub const MULTIHOP_RELAY_STUCK_SECS: u64 = 20;
+
 /// Max ids advertised per digest **window**. A digest carries up to two
 /// windows: an **open-ended newest** one (`[lo, i64::MAX]`, which drives
 /// reconnect recovery — holders re-send every *newer* message the sender

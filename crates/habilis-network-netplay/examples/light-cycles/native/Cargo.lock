@@ -1602,6 +1602,7 @@ name = "habilis-network-iroh-multihop-transport"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "bytes",
  "habilis-network-iroh-transport-util",
  "iroh",

@@ -72,7 +72,7 @@ impl std::error::Error for ChoiceError {}
 
 /// Id format version. A single byte reserved so the encoding can evolve;
 /// an unknown version is rejected.
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const SEED_LEN: usize = 32;
 /// Wire bound for the encoded name in bytes. `MeshName::new` caps the
 /// name at `ident::MAX_CHARS` scalar values; each is at most 4 UTF-8
@@ -424,7 +424,10 @@ impl Mesh {
         let version = *bytes.get(pos).context("Mesh identifier too short")?;
         pos += 1;
         if version != VERSION {
-            bail!("Unsupported mesh id version: {version}");
+            bail!(
+                "unsupported mesh id version {version}, this build reads version {VERSION}: \
+                 upgrade every member, then create the mesh again"
+            );
         }
 
         let seed_slice = bytes

@@ -156,6 +156,12 @@ pub(crate) async fn handle_presence(
         // rejoin re-dials cold.
         if let Some(endpoint_id) = state.forget_peer_endpoint(message.author.as_str()) {
             state.unicast_pool.forget(endpoint_id.id).await;
+            // Its advertised links go too, or routes keep running through a peer
+            // that said goodbye until its vector ages out.
+            #[cfg(feature = "host")]
+            if let Some(handle) = state.multihop.as_ref() {
+                handle.remove_origin(endpoint_id.id);
+            }
         }
         state.quiet.remove(message.author.as_str());
         // Only announce a departure for a peer whose arrival we

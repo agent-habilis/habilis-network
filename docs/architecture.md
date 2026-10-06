@@ -449,11 +449,11 @@ The gate checks the path once, so every gossip connection is watched afterwards,
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
 `transport.relay_transport = true` lets payload fall back to the relay, as before the policy existed.
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
-An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
+An id of version 1, minted before the policy had its own byte, is refused with a request to upgrade: the mesh is created again.
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
+`transport` (`--transport udp,webrtc,multihop,relay`, `transport: ['udp', 'webrtc', 'multihop', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` needs `udp`, and `udp,webrtc,multihop` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.

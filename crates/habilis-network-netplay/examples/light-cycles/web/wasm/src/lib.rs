@@ -187,7 +187,6 @@ impl LightCyclesPeer {
                 runtime_base: None,
                 state_file: None,
                 sink: Arc::new(SilentSink),
-                multihop: false,
                 per_peer_gate: None,
                 cohost: None,
                 live_count: None,

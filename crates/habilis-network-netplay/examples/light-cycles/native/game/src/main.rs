@@ -196,7 +196,6 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
             runtime_base: None,
             state_file: None,
             sink: Arc::new(SilentSink),
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,

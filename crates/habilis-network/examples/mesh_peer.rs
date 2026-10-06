@@ -189,7 +189,6 @@ async fn run_peer(
             runtime_base: None,
             state_file: None,
             sink: Arc::new(SilentSink),
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: Some(Arc::clone(&live)),

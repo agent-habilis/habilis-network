@@ -22,7 +22,7 @@ use crate::seal;
 use habilis_network_util::clock;
 
 /// Framing version. Bumped only on a breaking framing change.
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 /// Ticket-kind discriminant. Distinct from the application's bridge ticket (`2`) and the
 /// blob ticket (`1`) so a wrong-kind token is rejected on decode.
@@ -146,7 +146,10 @@ impl InviteTicket {
         let framed = base58check::decode(token.trim(), "invite ticket")?;
         let version = *framed.first().context("ticket too short")?;
         if version != VERSION {
-            bail!("unsupported invite ticket version: {version}");
+            bail!(
+                "unsupported invite ticket version {version}, this build reads version {VERSION}: \
+                 upgrade, then ask for a new invite (a ticket names a mesh id, and mesh ids changed)"
+            );
         }
         let kind = *framed.get(1).context("ticket too short")?;
         if kind != KIND {
@@ -238,6 +241,20 @@ mod tests {
 
     fn pw(text: &str) -> Password {
         Password::new(text.to_owned())
+    }
+
+    // A ticket names a mesh id, and mesh ids changed with version 2 of the id: an
+    // old ticket must tell the member to upgrade, not fail as a malformed token.
+    #[test]
+    fn a_ticket_of_version_1_fails_with_the_upgrade_text() {
+        let mesh = creator();
+        let mut framed =
+            crate::base58check::decode(&minted(&mesh, None, None).encode(), "invite ticket")
+                .expect("a minted ticket decodes");
+        framed[0] = 1;
+        let old = crate::base58check::encode(&framed);
+        let error = InviteTicket::decode(&old).expect_err("a version 1 ticket is refused");
+        assert!(error.to_string().contains("upgrade"), "{error}");
     }
 
     /// A fresh invite-only mesh on the creator (holds the issuer key + root).

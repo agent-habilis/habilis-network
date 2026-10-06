@@ -127,7 +127,7 @@ web-time.workspace = true
 n0-future.workspace = true
 # The multi-hop iroh custom transport: reach a peer with no direct path by
 # relaying its QUIC packets through intermediate peers. Registered on the
-# peer endpoint (the `--multihop` flag).
+# peer endpoint (the mesh policy's `multihop`).
 habilis-network-iroh-multihop-transport = { workspace = true, optional = true }
 # Leaf crate: runtime dirs, clock, tuning dials, bounded containers, build stamp.
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["async-io"] }

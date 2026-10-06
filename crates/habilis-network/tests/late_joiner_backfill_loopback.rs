@@ -170,7 +170,6 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
             runtime_base: None,
             state_file: None,
             sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,

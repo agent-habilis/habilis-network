@@ -177,7 +177,7 @@ pub async fn run<A: NodeDriver>(
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
     #[cfg(feature = "host")]
     {
-        state.multihop = multihop; // `--multihop`: the registered transport's handle
+        state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
     }
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
@@ -412,19 +412,23 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
 }
 
 #[cfg(feature = "host")]
-async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    // Before the early return, and before our own vector goes in: a peer that has
+    // stopped advertising must not keep its edges in the graph, and a node that is
+    // not meshed yet keeps hearing vectors it will route over once it is.
+    if let Some(handle) = state.multihop.as_ref() {
+        handle.expire_stale();
+    }
     if !state.meshed || state.multihop.is_none() {
         return;
     }
-    state.link_state_seq += 1;
-    let seq = state.link_state_seq;
     let links: Vec<_> = state
         .linked_endpoints
         .iter()
         .map(|eid| (*eid, MULTIHOP_LINK_COST))
         .collect();
     let handle = state.multihop.as_ref().expect("checked above");
-    let vector = handle.link_vector(seq, links);
+    let vector = handle.link_vector(links);
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
     // source a route (`route_to(self, …)` would always be empty).
@@ -433,14 +437,12 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         return;
     };
     state.idle.broadcasts += 1;
-    // Retained locally for the same reason the vector is fed into our own
-    // routing table above: gossip never loops a broadcast back. Every tick
-    // mints a fresh `seq`, so an unretained vector is one more message our
-    // peers re-send to us on every anti-entropy round for as long as the log
-    // holds it (see `gossip::recv::retain_own_broadcast`).
+    // Not retained in the log, unlike a chat message: the next tick's vector
+    // replaces this one, and peers never log what they receive (see
+    // `is_loggable`), so a retained copy would be one that nobody else holds and
+    // that every digest asks us for again.
     let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity);
     gossip::broadcast_msg(ctx.sender, &vector_msg).await;
-    gossip::retain_own_broadcast(state, &vector_msg);
 }
 
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own

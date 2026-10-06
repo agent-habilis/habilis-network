@@ -355,7 +355,7 @@ pub struct EventLoopState {
     /// Independent of `linked_endpoints` by design (unicast can reach a
     /// non-neighbor). See [`crate::transport`].
     pub(crate) unicast_pool: crate::transport::UnicastPool,
-    /// The multi-hop transport handle, when the `--multihop` flag registered it
+    /// The multi-hop transport handle, when the mesh policy registered it
     /// on the peer endpoint. Owns the routing table (fed from received
     /// `LinkState` frames) and the underlay endpoint. `None` when multihop is off
     /// or on a non-peer (beacon/rendezvous) endpoint. See
@@ -381,13 +381,6 @@ pub struct EventLoopState {
     /// loopback mesh, which promises to make no external network call —
     /// `IceConfig::default()` would query two public STUN servers.
     pub(crate) webrtc_ice: crate::transport::IceProfile,
-    /// Monotonic sequence for *our own* emitted link-state vectors, so peers keep
-    /// the freshest and drop reorders.
-    ///
-    /// `host`-only with the multihop transport that consumes the vectors: a
-    /// browser peer emits none, so it has no sequence to keep.
-    #[cfg(feature = "host")]
-    pub(crate) link_state_seq: u64,
     /// When `Some(deadline)` and not yet elapsed, the event loop runs
     /// a fast `beacon::ensure` burst (event-driven failover). Armed by
     /// `arm_reclaim`, mostly on `NeighborDown` — the beacon may have just
@@ -719,8 +712,6 @@ impl EventLoopState {
             webrtc: None,
             webrtc_admission,
             webrtc_ice,
-            #[cfg(feature = "host")]
-            link_state_seq: 0,
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
@@ -1304,7 +1295,7 @@ impl EventLoopState {
         self.gossip_open
     }
 
-    /// The multi-hop transport handle, when `--multihop` registered one.
+    /// The multi-hop transport handle, when the mesh policy registered one.
     #[cfg(feature = "host")]
     #[must_use]
     pub fn multihop(&self) -> Option<&habilis_network_iroh_multihop_transport::MultihopHandle> {

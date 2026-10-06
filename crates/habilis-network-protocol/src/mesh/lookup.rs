@@ -225,31 +225,21 @@ const FEATURE_PASSWORD: u8 = 0b0001;
 /// password verifier when both bits are set.
 const FEATURE_INVITE_ONLY: u8 = 0b0010;
 
-/// Feature bit marking a mesh whose relay may carry **payload**
-/// ([`TransportPolicy::relay_transport`] is `true`). Absent — the default, and every id
-/// minted before the policy existed — the relay is lookup only: members carry
-/// payload (gossip, unicast, blobs) over a direct path alone, UDP or a
-/// `WebRTC` session, and the relay serves the bootstrap dial, JSEP
-/// signalling and NAT-traversal frames. No field follows the bit. In the mesh
-/// id rather than per node, because one relaying member would undo the saving
-/// for everyone it links. The bit spells the *permissive* case so that
-/// existing ids keep their bytes and topic and read as lookup only.
-const FEATURE_RELAY_TRANSPORT: u8 = 0b0100;
+/// The transport policy is always written, as one byte right after the
+/// lookups, so no id leaves a path to an implicit default. Each bit spells a
+/// path that is **on**.
+pub(super) const TRANSPORT_UDP: u8 = 0b0001;
+pub(super) const TRANSPORT_WEBRTC: u8 = 0b0010;
+pub(super) const TRANSPORT_MULTIHOP: u8 = 0b0100;
+/// The relay may carry payload ([`TransportPolicy::relay_transport`]). Off, the
+/// relay serves the bootstrap dial, JSEP signalling and NAT-traversal frames
+/// only. In the mesh id rather than per node, because one relaying member
+/// would undo the saving for everyone it links.
+pub(super) const TRANSPORT_RELAY: u8 = 0b1000;
+pub(super) const KNOWN_TRANSPORT_BITS: u8 =
+    TRANSPORT_UDP | TRANSPORT_WEBRTC | TRANSPORT_MULTIHOP | TRANSPORT_RELAY;
 
-/// Feature bits marking a mesh that leaves `udp` or `webrtc` out of its
-/// transport list ([`TransportPolicy::udp`], [`TransportPolicy::webrtc`]). No
-/// field follows either. Each spells the *restrictive* case, the reverse of
-/// the relay bit, for the same reason: the default `udp,webrtc` sets neither,
-/// so every id minted before the list had these entries keeps its bytes and
-/// topic.
-const FEATURE_NO_UDP: u8 = 0b1000;
-const FEATURE_NO_WEBRTC: u8 = 0b1_0000;
-
-const KNOWN_FEATURES: u8 = FEATURE_PASSWORD
-    | FEATURE_INVITE_ONLY
-    | FEATURE_RELAY_TRANSPORT
-    | FEATURE_NO_UDP
-    | FEATURE_NO_WEBRTC;
+const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY;
 
 /// Byte length of the Ed25519 issuer public key an invite-only mesh carries.
 const ISSUER_PUBKEY_LEN: usize = 32;
@@ -325,6 +315,9 @@ impl MeshConfig {
                 "transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload"
             );
         }
+        if transport.multihop && !transport.udp {
+            bail!("transport `multihop` needs `udp`: its underlay is a UDP endpoint");
+        }
         // A native member without UDP has no address a peer could reach, so the
         // JSEP exchange that opens its data channel can only cross the relay.
         if !transport.udp && no_relay {
@@ -372,21 +365,13 @@ impl MeshConfig {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(2);
         self.lookups.encode_into(&mut buf);
+        buf.push(self.transport.to_byte());
         let mut features = 0u8;
         if self.password.is_some() {
             features |= FEATURE_PASSWORD;
         }
         if self.issuer_pubkey.is_some() {
             features |= FEATURE_INVITE_ONLY;
-        }
-        if self.transport.relay_transport {
-            features |= FEATURE_RELAY_TRANSPORT;
-        }
-        if !self.transport.udp {
-            features |= FEATURE_NO_UDP;
-        }
-        if !self.transport.webrtc {
-            features |= FEATURE_NO_WEBRTC;
         }
         if features != 0 {
             buf.push(features);
@@ -410,8 +395,13 @@ impl MeshConfig {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut pos = 0;
         let lookups = LookupOpts::decode_from(bytes, &mut pos)?;
-        let (password, issuer_pubkey, transport) = if pos == bytes.len() {
-            (None, None, TransportPolicy::default())
+        let transport_byte = *bytes.get(pos).context(
+            "missing transport policy byte: upgrade, this mesh id is from an older build",
+        )?;
+        pos += 1;
+        let transport = TransportPolicy::from_byte(transport_byte)?;
+        let (password, issuer_pubkey) = if pos == bytes.len() {
+            (None, None)
         } else {
             let features = bytes[pos];
             pos += 1;
@@ -448,12 +438,7 @@ impl MeshConfig {
             } else {
                 None
             };
-            let transport = TransportPolicy {
-                udp: features & FEATURE_NO_UDP == 0,
-                webrtc: features & FEATURE_NO_WEBRTC == 0,
-                relay_transport: features & FEATURE_RELAY_TRANSPORT != 0,
-            };
-            (password, issuer_pubkey, transport)
+            (password, issuer_pubkey)
         };
         if pos != bytes.len() {
             bail!("trailing bytes in mesh config");
@@ -934,11 +919,11 @@ mod lookup_tests {
     }
 
     #[test]
-    fn passwordless_encoding_is_byte_identical_to_pre_feature_format() {
-        // Live meshes depend on this: a config without a password must not
-        // grow a feature byte (it feeds the topic derivation).
-        assert_eq!(MeshConfig::loopback().to_bytes(), vec![0b0000]);
-        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111]);
+    fn a_passwordless_config_has_no_feature_byte() {
+        // The lookups byte, the policy byte, and nothing else: the feature
+        // byte only exists for a password or an invite.
+        assert_eq!(MeshConfig::loopback().to_bytes(), vec![0b0000, 0b0111]);
+        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111, 0b0111]);
     }
 
     #[test]
@@ -963,9 +948,9 @@ mod lookup_tests {
             ..MeshConfig::public_preset()
         };
         let bytes = config.to_bytes();
-        // Lookups byte, then the feature byte with only this bit: the feature
-        // carries no field of its own.
-        assert_eq!(bytes, vec![0b0111, super::FEATURE_RELAY_TRANSPORT]);
+        // Lookups byte, then the policy byte with every path on, the relay
+        // included. No feature byte: no password and no invite.
+        assert_eq!(bytes, vec![0b0111, 0b1111]);
         assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config);
         assert_ne!(
             bytes,
@@ -975,12 +960,10 @@ mod lookup_tests {
     }
 
     #[test]
-    fn relay_is_lookup_only_by_default_and_on_every_pre_policy_id() {
-        // An id minted before the policy existed has no feature byte; it now
-        // reads as lookup only, the default, with its bytes and topic intact.
+    fn relay_is_lookup_only_by_default() {
         assert!(!MeshConfig::public_preset().transport.relay_transport);
         assert!(
-            !MeshConfig::from_bytes(&[0b0111])
+            !MeshConfig::from_bytes(&[0b0111, 0b0111])
                 .unwrap()
                 .transport
                 .relay_transport
@@ -988,16 +971,27 @@ mod lookup_tests {
     }
 
     #[test]
-    fn udp_and_webrtc_are_on_by_default_and_on_every_older_id() {
+    fn udp_webrtc_and_multihop_are_on_by_default() {
         let default = TransportPolicy::default();
-        assert!(default.udp && default.webrtc && !default.relay_transport);
-        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111]);
-        let old = MeshConfig::from_bytes(&[0b0111]).unwrap().transport;
-        assert!(old.udp && old.webrtc && !old.relay_transport);
-        let old_relay = MeshConfig::from_bytes(&[0b0111, super::FEATURE_RELAY_TRANSPORT])
-            .unwrap()
-            .transport;
-        assert!(old_relay.udp && old_relay.webrtc && old_relay.relay_transport);
+        assert!(default.udp && default.webrtc && default.multihop && !default.relay_transport);
+        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111, 0b0111]);
+        let decoded = MeshConfig::from_bytes(&[0b0111, 0b0111]).unwrap().transport;
+        assert_eq!(decoded, default);
+        let with_relay = MeshConfig::from_bytes(&[0b0111, 0b1111]).unwrap().transport;
+        assert!(
+            with_relay.udp
+                && with_relay.webrtc
+                && with_relay.multihop
+                && with_relay.relay_transport
+        );
+    }
+
+    #[test]
+    fn the_transport_policy_is_always_one_explicit_byte() {
+        // Lookups byte, then the policy byte. Nothing is left implicit: a
+        // config without the policy byte is not a version 2 config.
+        assert_eq!(MeshConfig::public_preset().to_bytes().len(), 2);
+        assert!(MeshConfig::from_bytes(&[0b0111]).is_err());
     }
 
     #[test]
@@ -1005,21 +999,31 @@ mod lookup_tests {
         let policy = |list: &[Transport]| TransportPolicy::from_transports(list).unwrap();
         assert_eq!(policy(&[]), TransportPolicy::default());
         let udp = policy(&[Transport::Udp]);
-        assert!(udp.udp && !udp.webrtc && !udp.relay_transport);
+        assert!(udp.udp && !udp.webrtc && !udp.multihop && !udp.relay_transport);
         let webrtc = policy(&[Transport::WebRtc]);
-        assert!(!webrtc.udp && webrtc.webrtc && !webrtc.relay_transport);
-        let all = policy(&[Transport::Udp, Transport::WebRtc, Transport::Relay]);
-        assert!(all.udp && all.webrtc && all.relay_transport);
+        assert!(!webrtc.udp && webrtc.webrtc && !webrtc.multihop && !webrtc.relay_transport);
+        let multihop = policy(&[Transport::Udp, Transport::Multihop]);
+        assert!(multihop.udp && !multihop.webrtc && multihop.multihop && !multihop.relay_transport);
+        let all = policy(&[
+            Transport::Udp,
+            Transport::WebRtc,
+            Transport::Multihop,
+            Transport::Relay,
+        ]);
+        assert!(all.udp && all.webrtc && all.multihop && all.relay_transport);
     }
 
     #[test]
     fn config_round_trips_every_transport_list() {
-        let lists: [&[Transport]; 5] = [
+        let lists: [&[Transport]; 8] = [
             &[Transport::Udp],
             &[Transport::WebRtc],
             &[Transport::Udp, Transport::WebRtc],
             &[Transport::WebRtc, Transport::Relay],
             &[Transport::Udp, Transport::Relay],
+            &[Transport::Udp, Transport::Multihop],
+            &[Transport::Udp, Transport::WebRtc, Transport::Multihop],
+            &[Transport::Udp, Transport::Multihop, Transport::Relay],
         ];
         let mut seen = Vec::new();
         for list in lists {
@@ -1042,9 +1046,38 @@ mod lookup_tests {
     }
 
     #[test]
-    fn an_id_with_neither_udp_nor_webrtc_is_refused() {
-        let bytes = vec![0b0111, super::FEATURE_NO_UDP | super::FEATURE_NO_WEBRTC];
+    fn multihop_needs_udp() {
+        let error = MeshConfig::resolve(
+            &[Lookup::Relay],
+            None,
+            &[Transport::WebRtc, Transport::Multihop],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("multihop") && error.contains("udp"),
+            "{error}"
+        );
+        let bytes = vec![0b0111, super::TRANSPORT_WEBRTC | super::TRANSPORT_MULTIHOP];
         assert!(MeshConfig::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_policy_byte_with_an_unknown_bit_asks_for_an_upgrade() {
+        let error = MeshConfig::from_bytes(&[0b0111, 0b1_0111])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("upgrade"), "{error}");
+    }
+
+    #[test]
+    fn an_id_with_neither_udp_nor_webrtc_is_refused() {
+        for byte in [0b0000, super::TRANSPORT_MULTIHOP, super::TRANSPORT_RELAY] {
+            assert!(
+                MeshConfig::from_bytes(&[0b0111, byte]).is_err(),
+                "{byte:#06b}"
+            );
+        }
     }
 
     #[test]
@@ -1073,7 +1106,7 @@ mod lookup_tests {
         };
         assert!(config.validate().is_err(), "no relay to carry payload");
         // The same shape on the wire is refused on decode too.
-        let bytes = vec![0b0000, super::FEATURE_RELAY_TRANSPORT];
+        let bytes = vec![0b0000, super::TRANSPORT_UDP | super::TRANSPORT_RELAY];
         assert!(MeshConfig::from_bytes(&bytes).is_err());
     }
 
@@ -1147,6 +1180,10 @@ mod choice_tests {
         assert_eq!("udp".parse::<Transport>().unwrap(), Transport::Udp);
         assert_eq!("webrtc".parse::<Transport>().unwrap(), Transport::WebRtc);
         assert_eq!("relay".parse::<Transport>().unwrap(), Transport::Relay);
+        assert_eq!(
+            "multihop".parse::<Transport>().unwrap(),
+            Transport::Multihop
+        );
         for (name, lookup) in [
             ("mdns", Lookup::Mdns),
             ("dht", Lookup::Dht),
@@ -1173,7 +1210,8 @@ mod choice_tests {
         );
         let transport_error = "tcp".parse::<Transport>().unwrap_err().to_string();
         assert!(
-            transport_error.contains("tcp") && transport_error.contains("udp, webrtc, relay"),
+            transport_error.contains("tcp")
+                && transport_error.contains("udp, webrtc, multihop, relay"),
             "{transport_error}"
         );
     }

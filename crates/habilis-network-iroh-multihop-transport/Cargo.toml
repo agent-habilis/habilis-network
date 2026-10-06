@@ -35,8 +35,13 @@ tokio.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+blake3.workspace = true
 postcard = { version = "1", features = ["use-std"] }
 serde.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+# A local relay server, for the tests that put a connection on the relay.
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4", default-features = false, features = ["server"] }
+# For the e2e that puts both custom transports on one endpoint.
+habilis-network-iroh-webrtc-transport = { path = "../habilis-network-iroh-webrtc-transport", features = ["native"] }

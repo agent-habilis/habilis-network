@@ -40,7 +40,8 @@ pub struct StreamOpts {
     /// loopback node.
     pub lookup: Vec<Lookup>,
     /// What may carry bytes: any of `udp`, `webrtc`, `relay`, with `udp` or
-    /// `webrtc` among them. Empty ⇒ `udp,webrtc`.
+    /// `webrtc` among them. Empty ⇒ `udp,webrtc`. `multihop` is refused: a
+    /// stream is one direct lane.
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Empty is the default ladder.
     pub relay_urls: Vec<String>,
@@ -70,11 +71,17 @@ impl StreamNode {
     /// Conflicting or invalid options, a loopback node in a browser, or an
     /// endpoint that fails to bind.
     pub async fn bind(opts: &StreamOpts) -> Result<Self> {
-        let config = MeshConfig::resolve(
-            &opts.lookup,
-            relay_ladder(&opts.relay_urls)?,
-            &opts.transport,
-        )?;
+        anyhow::ensure!(
+            !opts.transport.contains(&Transport::Multihop),
+            "a stream has no multihop: it is one direct lane"
+        );
+        // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
+        let list = if opts.transport.is_empty() {
+            &[Transport::Udp, Transport::WebRtc][..]
+        } else {
+            &opts.transport
+        };
+        let config = MeshConfig::resolve(&opts.lookup, relay_ladder(&opts.relay_urls)?, list)?;
         let transports = TransportOpts::default().within(&config.transport);
         Self::bind_with(config.lookups, config.transport, transports).await
     }
@@ -240,6 +247,35 @@ mod tests {
     use habilis_network::runtime::refuse_in_browser;
 
     use super::*;
+
+    // A stream is one direct lane: a list that names `multihop` is refused
+    // before anything binds.
+    #[tokio::test]
+    async fn a_stream_node_refuses_multihop() {
+        let opts = StreamOpts {
+            transport: vec![Transport::Udp, Transport::Multihop],
+            ..StreamOpts::default()
+        };
+        let refused = StreamNode::bind(&opts)
+            .await
+            .expect_err("multihop is refused");
+        assert!(
+            refused.to_string().contains("no multihop"),
+            "the error names the reason: {refused}"
+        );
+    }
+
+    // The mesh default has `multihop`. An empty list for a stream must not take it.
+    #[tokio::test]
+    async fn an_empty_list_is_udp_and_webrtc_for_a_stream() {
+        let node = StreamNode::bind(&StreamOpts::default())
+            .await
+            .expect("bind a loopback node");
+        let policy = node.transport;
+        assert!(policy.udp && policy.webrtc, "udp and webrtc are on");
+        assert!(!policy.multihop, "multihop is off");
+        node.endpoint.close().await;
+    }
 
     // A browser has no UDP, so a list without `webrtc` leaves relay payload as
     // its only path: without `relay` in the list, nothing carries its bytes.

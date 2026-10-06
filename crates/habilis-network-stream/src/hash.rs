@@ -132,6 +132,8 @@ impl StreamHash {
             transport: TransportPolicy {
                 udp: flags & NO_UDP_BIT == 0,
                 webrtc: flags & NO_WEBRTC_BIT == 0,
+                // A stream is one direct lane: its node has no multi-hop.
+                multihop: false,
                 relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
             },
             id,
@@ -180,6 +182,7 @@ mod tests {
         TransportPolicy {
             udp,
             webrtc,
+            multihop: false,
             relay_transport,
         }
     }

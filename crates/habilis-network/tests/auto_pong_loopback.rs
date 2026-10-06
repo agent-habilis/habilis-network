@@ -177,7 +177,6 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Pinger> {
             runtime_base: None,
             state_file: None,
             sink,
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,

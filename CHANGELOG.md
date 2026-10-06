@@ -12,9 +12,36 @@ published to a registry; pin it with
 
 - `SignalAdmission::connection_hook` and the `ConnectionHook` it returns: an
   endpoint hook that records every connection of the endpoint, on any protocol,
-  under its peer in the direct-peer slot table, so that the table can close and
-  prune them, and that watches the gossip connections the node dials for the
-  relay policy.
+  under its peer in the direct-peer slot table, so that the table can prune the
+  slots of closed connections, and that watches the gossip connections the node
+  dials for the relay policy.
+- `multihop` is an entry of the `transport` list, and the default list is
+  `udp,webrtc,multihop`. A peer with no direct path is reached through other
+  members. It needs `udp` (its underlay is a UDP endpoint) and is native only; a
+  browser ignores it, as it ignores `udp`. Multi-hop and `WebRTC` now share one
+  endpoint and one key. A link-vector is signed by the peer that advertises it,
+  so a node cannot claim another peer's underlay, and only the endpoint that the
+  roster binds to the message's author is heard. Its `seq` is the sender's
+  wall-clock time in milliseconds: a restart does not lose to the vectors it sent
+  before, and a vector older than the max age is refused. A vector that stops
+  arriving ages out after three advertisement intervals, `Left` drops a peer's
+  vector at once, and a removed peer's highest `seq` is remembered for one max
+  age so its last vector cannot return. Link-state is no longer retained in the
+  message log: no peer holds it, so a retained copy was asked for again on every
+  digest. The underlay endpoint keeps a key of its own, derived from the peer's
+  (`underlay_secret`): a relay hands an id's packets to one endpoint only. With
+  the relay for lookup alone, the underlay drops a cell unless the connection's
+  selected path is not the relay, and a hop that stays on the relay past a
+  deadline is not advertised as a link.
+- `net::install_transports`: the one wiring of multi-hop, `WebRTC` and the
+  connection hook onto an endpoint builder. `InjectedEndpoint` carries the
+  `MultihopHandle` and the `SignalAdmission` its endpoint was built with.
+  `check_injected_identity` checks the hop identity, refuses a handle that lets
+  the relay carry cells on a mesh whose list has no `relay`, and refuses an
+  admission table that no hook reports to (`SignalAdmission::is_observed`). A
+  handle on a mesh whose list has no `multihop`, or on a node with no UDP, is
+  dropped. `net::multihop_handle_config` gives an embedder the engine's handle
+  settings.
 - `EventLoopConfig::with_owner_pid`: a CLI daemon started detached lives for
   an explicit owner process instead of its parent, and quits gracefully once
   the owner exits. The start time captured at startup guards against pid
@@ -72,6 +99,39 @@ published to a registry; pin it with
 
 ### Changed
 
+- **Breaking:** the mesh id is version 2. The transport policy is always one
+  explicit byte after the lookups: `udp`, `webrtc`, `multihop`, `relay`, one bit
+  each. An id of version 1 is refused with a request to upgrade. Every mesh id
+  and every golden id changes; create the mesh again.
+- **Breaking:** `MultihopHandle::new` takes the peer's `SecretKey` (it signs the
+  link-vectors), an underlay bound to `underlay_secret(secret)`, and a
+  `HandleConfig` (relay rule, vector max age, relay deadline). `LinkVector::new`
+  is `LinkVector::signed`, and `MultihopHandle::link_vector` makes the `seq`.
+- **Breaking:** an invite ticket is version 2, because it names a mesh id. A
+  version 1 ticket is refused with a request to upgrade.
+- **Breaking, steps for the tools that embed the engine** (agent-share,
+  agent-gossip). Both must move in the same release as the engine: a member of
+  version 1 and a member of version 2 never share a mesh.
+  1. An injected endpoint (agent-share) must give the engine its admission table.
+     Make a `SignalAdmission`. Build the endpoint with `net::install_transports`
+     and handles that carry this table. Pass the table in
+     `InjectedEndpoint { endpoint, webrtc, multihop, admission }`: on a host,
+     `multihop` is the handle that the endpoint was built with, or `None`. The
+     `admission` field is required on every target, so every
+     `InjectedEndpoint { .. }` literal must change.
+  2. `net::check_injected_identity` has new arguments: the multihop identity, the
+     admission table, and whether the mesh list has `relay`. It refuses a table
+     that `connection_hook` was never called on.
+  3. `TransportHandles` has a new public field, `underlay`. A struct literal must
+     name it, or end with `..TransportHandles::default()`.
+  4. agent-gossip: multihop is now ON by default. Every native node of a default
+     mesh binds a second endpoint (the underlay) with its own relay registration,
+     and sends one signed link-state through every member every 15 s, browsers
+     included. A mesh that wants the old behaviour is created with
+     `transport: udp,webrtc`. Drop the `--multihop` flag, `SetupParams::multihop`
+     and `TransportOpts::multihop`.
+  5. Every saved mesh id, gossip hash and invite ticket stops working (see the
+     entries above): create the mesh again.
 - **Breaking:** the project is renamed from fofoca to habilis-network, and it
   moves to `github.com/agent-habilis/habilis-network` (https://habilis.network).
   Every crate, package, C symbol (`habilis_network_*`), C type
@@ -239,6 +299,8 @@ published to a registry; pin it with
 
 ### Removed
 
+- **Breaking:** the `--multihop` flag, `SetupParams::multihop` and
+  `TransportOpts::multihop`. Multi-hop follows the mesh's transport policy.
 - **Breaking:** `habilis-network-pipe`, the byte pipe over gossip. Byte streams are
   `habilis-network-stream`, over a direct path by default; the mesh embedding is
   `habilis_network::membership`. The v0.6.0 tag keeps the crate.

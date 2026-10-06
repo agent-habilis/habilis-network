@@ -46,7 +46,6 @@ async fn spawn_bot(topic: &str, nick: &str) -> Bot {
             runtime_base: None,
             state_file: None,
             sink: std::sync::Arc::new(SilentSink),
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,

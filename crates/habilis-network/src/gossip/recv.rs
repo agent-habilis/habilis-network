@@ -652,6 +652,23 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
             message.body.as_str(),
         ) {
             Ok(vector) => {
+                // A signature proves who made the vector, not that the origin is
+                // a member: anyone holding the mesh id can mint keys. So the
+                // origin must be the endpoint the roster binds to the message's
+                // author, the same binding that routes a directed message. A
+                // peer whose address we have not learned yet is waited for: its
+                // next vector, one interval on, finds the binding.
+                let bound = state
+                    .peer_endpoints
+                    .get(&message.author)
+                    .map(|addr| addr.id);
+                if bound != Some(vector.origin()) {
+                    tracing::debug!(target: "habilis_network::gossip",
+                        author = %message.author,
+                        "dropping multihop link-state: its origin is not the endpoint bound to its author"
+                    );
+                    return;
+                }
                 let updated = handle.feed_topology(vector);
                 tracing::debug!(target: "habilis_network::gossip",
                     author = %message.author,
@@ -1402,6 +1419,10 @@ fn is_loggable(kind: &MessageKind) -> bool {
             subtype: PresenceSubtype::Alive
         } | MessageKind::PeerInfo
             | MessageKind::Digest | MessageKind::StateDigest | MessageKind::MetaDigest
+            // A newer vector replaces this one, and a peer never logs it (its
+            // handler ends before retention), so a copy kept here is one no peer
+            // holds and every digest asks this node for again.
+            | MessageKind::LinkState
             | MessageKind::Ping
             | MessageKind::Pong { .. }
             // Durable state lives in its own un-pruned log, never the chat
@@ -2257,5 +2278,304 @@ mod first_contact_tests {
             "the heal tick held the timer graft on a private mesh"
         );
         node.endpoint.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "host"))]
+mod link_state_tests {
+    use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+
+    use super::handle_link_state;
+    use crate::protocol::{MeshId, Message};
+    use crate::testing::{fresh_state, nick};
+
+    /// A handle over a loopback underlay on the key derived from `secret`.
+    async fn handle_for(secret: &SecretKey) -> MultihopHandle {
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(secret))
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay");
+        MultihopHandle::new(
+            secret,
+            underlay,
+            crate::lookup::multihop_handle_config(false),
+        )
+        .expect("underlay on the derived key")
+    }
+
+    // A link-state vector is replaced by the next one and is never logged by the
+    // peers that receive it. A node that kept its own would hold messages that no
+    // peer holds, and every digest would ask it for them again: measured at
+    // N = 33, 38% of the vectors a node received were repeats.
+    #[tokio::test]
+    async fn a_link_vector_this_node_broadcast_is_not_retained_in_its_log() {
+        let secret = SecretKey::from_bytes(&[53; 32]);
+        let handle = handle_for(&secret).await;
+        let mut state = fresh_state();
+        let body = crate::gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
+        let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body);
+        super::retain_own_broadcast(&mut state, &message);
+        assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
+    }
+
+    // A signature proves who made a vector, not that the maker is a member, and
+    // the roster binding is what ties an origin to an author.
+    #[tokio::test]
+    async fn a_link_vector_is_taken_in_only_from_the_peer_the_roster_binds_to_its_origin() {
+        let (alice, bob) = (
+            SecretKey::from_bytes(&[51; 32]),
+            SecretKey::from_bytes(&[52; 32]),
+        );
+        let ours = handle_for(&SecretKey::from_bytes(&[50; 32])).await;
+        let theirs = handle_for(&alice).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+
+        let body = crate::gossip::json_body(&theirs.link_vector(vec![(bob.public(), 10)]))
+            .expect("a vector serializes");
+        let message_from = |author: &str| {
+            Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
+        };
+
+        handle_link_state(&message_from("alice-aa"), &mut state);
+        assert!(
+            ours.topology_view().edges.is_empty(),
+            "no address learned for the author yet"
+        );
+
+        state
+            .peer_endpoints
+            .insert(nick("mallory-mm"), EndpointAddr::new(bob.public()));
+        handle_link_state(&message_from("mallory-mm"), &mut state);
+        assert!(
+            ours.topology_view().edges.is_empty(),
+            "an author bound to another endpoint cannot speak for this origin"
+        );
+
+        state
+            .peer_endpoints
+            .insert(nick("alice-aa"), EndpointAddr::new(alice.public()));
+        handle_link_state(&message_from("alice-aa"), &mut state);
+        assert_eq!(
+            ours.topology_view().edges.len(),
+            1,
+            "the bound peer is heard"
+        );
+    }
+}
+
+/// A peer that says goodbye takes the links it advertised with it. Without
+/// that, routes keep running through a peer that left until its vector ages out.
+#[cfg(all(test, feature = "host"))]
+mod left_tests {
+    use iroh::EndpointAddr;
+    use iroh_gossip::net::Gossip;
+
+    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::lifecycle::membership::MembershipUpdate;
+    use crate::lifecycle::{PresenceEvent, handle_presence};
+    use crate::lookup::{TransportOpts, build_peer_multihop};
+    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::{MeshId, Message, PresenceSubtype};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    /// A `Left` never reaches the app's frame hook, so it only has to exist.
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Message) -> AppClass {
+            AppClass {
+                loggable: false,
+                beat: true,
+                valid: true,
+                chained: false,
+                sealed: false,
+            }
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_left_takes_its_advertised_links_with_it() {
+        let lookups = LookupOpts::loopback();
+        let (endpoint, handle, _webrtc) =
+            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
+                .await
+                .expect("a multihop peer binds");
+        let (leaver_endpoint, leaver_handle, _leaver_webrtc) =
+            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
+                .await
+                .expect("a second multihop peer binds");
+        let leaver_id = leaver_handle.app_id().to_string();
+        let advertises = |held_by: &habilis_network_iroh_multihop_transport::MultihopHandle| {
+            held_by
+                .topology_view()
+                .edges
+                .iter()
+                .any(|edge| edge.from == leaver_id)
+        };
+
+        // We hear the leaver's links, and the roster binds it to its endpoint.
+        let vector = leaver_handle.link_vector(vec![(handle.app_id(), 1)]);
+        assert!(handle.feed_topology(vector), "the vector is new to us");
+        assert!(advertises(&handle), "its links are in our routing table");
+        let mut state = fresh_state();
+        state.multihop = Some(handle.clone());
+        let leaver = nick("leaver");
+        state.note_peer_endpoint(leaver.clone(), EndpointAddr::new(leaver_handle.app_id()));
+
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([5u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = MeshSender::new(gossip_sender);
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let mesh = MeshId::from("test");
+        let us = nick("us");
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &us,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let message = Message::new_left(&mesh, &leaver);
+        let update = MembershipUpdate {
+            returned: false,
+            joined_new: false,
+        };
+        let mut app = Inert;
+        handle_presence(
+            PresenceEvent {
+                message: &message,
+                subtype: PresenceSubtype::Left,
+                update: &update,
+                surfaceable: false,
+            },
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+
+        assert!(
+            !advertises(&handle),
+            "the leaver's links are still in our routing table after its goodbye"
+        );
+        endpoint.close().await;
+        leaver_endpoint.close().await;
+    }
+
+    /// A node that is not meshed yet still drops the links of a peer that stopped
+    /// advertising: the tick expires first, then returns early.
+    #[tokio::test]
+    async fn a_node_that_is_not_meshed_still_expires_stale_links() {
+        use std::time::Duration;
+
+        use habilis_network_iroh_multihop_transport::{
+            HandleConfig, MultihopHandle, underlay_secret,
+        };
+
+        use crate::daemon::event_loop::linkstate_arm;
+
+        let lookups = LookupOpts::loopback();
+        let (endpoint, _handle, _webrtc) =
+            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
+                .await
+                .expect("a multihop peer binds");
+        // Our own handle, with a short max age so that a test can wait it out.
+        let secret = iroh::SecretKey::generate();
+        let underlay = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(underlay_secret(&secret))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay");
+        let config = HandleConfig {
+            vector_max_age: Duration::from_millis(400),
+            ..HandleConfig::default()
+        };
+        let handle = MultihopHandle::new(&secret, underlay, config).expect("a handle");
+        let (leaver_endpoint, leaver_handle, _leaver_webrtc) =
+            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
+                .await
+                .expect("a second multihop peer binds");
+        let leaver_id = leaver_handle.app_id().to_string();
+        let advertises = |held_by: &MultihopHandle| {
+            held_by
+                .topology_view()
+                .edges
+                .iter()
+                .any(|edge| edge.from == leaver_id)
+        };
+        let vector = leaver_handle.link_vector(vec![(handle.app_id(), 1)]);
+        assert!(handle.feed_topology(vector), "the vector is new to us");
+        assert!(advertises(&handle), "its links are in our routing table");
+
+        let mut state = fresh_state();
+        state.multihop = Some(handle.clone());
+        assert!(!state.meshed, "the node is not meshed");
+
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([6u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = MeshSender::new(gossip_sender);
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let mesh = MeshId::from("test");
+        let us = nick("us");
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &us,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+
+        // The leaver says nothing more: wait out the max age, then tick.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        linkstate_arm(&mut state, &ctx).await;
+        assert!(
+            !advertises(&handle),
+            "the stale links are still in the routing table of a node that is not meshed"
+        );
+        endpoint.close().await;
+        leaver_endpoint.close().await;
     }
 }

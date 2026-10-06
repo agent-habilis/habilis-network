@@ -138,7 +138,7 @@ fn test_ext_round_trip() {
 /// A valid UUID for the hand-written wire-JSON fixtures below (the
 /// validating `MessageId` deserialize rejects non-UUID ids).
 const FIXTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
-const FIXTURE_MESH: &str = "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1";
+const FIXTURE_MESH: &str = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqay2YxkRe";
 
 #[test]
 fn test_unknown_ext_fields_ignored() {
