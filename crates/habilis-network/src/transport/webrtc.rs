@@ -392,7 +392,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                     // offerer's nudge gives us none: iroh opens a new path only
                     // from the client side of a connection.
                     let nudging = endpoint.clone();
-                    n0_future::task::spawn(async move { nudge(&nudging, remote).await });
+                    n0_future::task::spawn(async move { nudge_session(&nudging, remote).await });
                     tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (answerer)");
                 }
                 // A failed negotiation is normal operation, not a fault: ICE
@@ -657,7 +657,17 @@ pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: bool) -> 
 /// A UDP pair already `proven` direct with no session has proved its UDP
 /// path, so a cold or idled-out pool (which reads as "UDP not selected")
 /// does not start the race again on every alive tick.
-pub(crate) fn wants_session(pair_needs_lane: bool, udp_selected: bool, proven: bool) -> bool {
+///
+/// `kind` is the selected path of the pair, if known. A pair on multihop is proven
+/// off the relay, but it has no lane of its own: a session ranks above multihop,
+/// so `proven` does not count while the pair rides it.
+pub(crate) fn wants_session(
+    pair_needs_lane: bool,
+    kind: Option<super::probe::PathKind>,
+    proven: bool,
+) -> bool {
+    let udp_selected = kind == Some(super::probe::PathKind::Ip);
+    let proven = proven && kind != Some(super::probe::PathKind::Multihop);
     pair_needs_lane || !(udp_selected || proven)
 }
 
@@ -691,7 +701,7 @@ pub(crate) fn negotiate_session(
     let needs_lane = pair_needs_lane(&addr, state.local_udp_transport);
     if !wants_session(
         needs_lane,
-        state.unicast_pool.selected_is_ip(peer),
+        state.pair_path_kind(peer),
         state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct),
     ) {
         tracing::debug!(
@@ -751,13 +761,64 @@ impl ProtocolHandler for NudgeAcceptor {
 /// Make iroh re-run path selection to `peer` now. Bounded, and every outcome
 /// is ignored.
 pub(crate) async fn nudge(endpoint: &Endpoint, peer: EndpointId) {
+    nudge_addr(endpoint, EndpointAddr::new(peer)).await;
+}
+
+/// [`nudge`] for a peer whose `WebRTC` session has just attached. The dial names
+/// the session's custom address, so that iroh puts it in the path book of the
+/// remote and opens that path on a connection that it already holds. A bare-id
+/// dial finds the address only through the address lookup, and iroh does not ask
+/// the lookup again for a remote it already knows.
+pub(crate) async fn nudge_session(endpoint: &Endpoint, peer: EndpointId) {
+    let session = super::probe::NudgeAddrs {
+        session: true,
+        route: None,
+    };
+    nudge_with(endpoint, peer, &session).await;
+}
+
+/// [`nudge`] with the addresses that `addrs` names, in one dial: the session's
+/// custom address, the multihop route, or both. The one nudge path, so that what
+/// teaches iroh a `WebRTC` address teaches it a multihop route the same way.
+pub(crate) async fn nudge_with(
+    endpoint: &Endpoint,
+    peer: EndpointId,
+    addrs: &super::probe::NudgeAddrs,
+) {
+    let mut known = Vec::new();
+    if addrs.session {
+        known.push(iroh::TransportAddr::Custom(
+            habilis_network_iroh_webrtc_transport::custom_addr(peer),
+        ));
+    }
+    known.extend(addrs.route.clone());
+    nudge_addr(endpoint, EndpointAddr::from_parts(peer, known)).await;
+}
+
+async fn nudge_addr(endpoint: &Endpoint, addr: EndpointAddr) {
+    let peer = addr.id;
     if let Ok(Ok(conn)) = n0_future::time::timeout(
         super::pool::DIAL_TIMEOUT,
-        endpoint.connect(EndpointAddr::new(peer), NUDGE_ALPN),
+        endpoint.connect(addr, NUDGE_ALPN),
     )
     .await
     {
         conn.close(0u32.into(), b"nudge");
+    }
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE)
+        && let Some(info) = endpoint.remote_info(peer).await
+    {
+        let kinds: Vec<String> = info
+            .addrs()
+            .map(|known| {
+                if let iroh::TransportAddr::Custom(custom) = known.addr() {
+                    format!("custom:{}", custom.id())
+                } else {
+                    format!("{:?}", known.addr())
+                }
+            })
+            .collect();
+        tracing::trace!(target: LOG_TARGET, %peer, ?kinds, "nudged; the remote knows these addresses");
     }
 }
 
@@ -813,7 +874,7 @@ fn spawn_offer_round(
         if offer == Offer::UdpRace && {
             // A connection opened before the attach rides the session only
             // after a connect; the race is judged on the connection after.
-            nudge(&endpoint, peer).await;
+            nudge_session(&endpoint, peer).await;
             pool.udp_won(peer).await
         } {
             // UDP won while the round ran: the session would sit unused and hold
@@ -1236,7 +1297,7 @@ pub(crate) fn retry_sessions(
         .filter(|addr| {
             wants_session(
                 own_needs_lane || needs_webrtc_lane(addr),
-                state.unicast_pool.selected_is_ip(addr.id),
+                state.pair_path_kind(addr.id),
                 state.direct.get(&addr.id) == Some(&crate::daemon::state::DirectState::Direct),
             )
         })
@@ -1275,6 +1336,7 @@ mod tests {
     use iroh::{RelayMode, SecretKey, endpoint::presets};
 
     use super::*;
+    use crate::transport::probe::PathKind;
 
     fn relay_addr() -> iroh::TransportAddr {
         iroh::TransportAddr::Relay("https://relay.example".parse().unwrap())
@@ -1305,16 +1367,19 @@ mod tests {
     #[test]
     fn a_udp_pair_races_until_udp_is_selected() {
         assert!(
-            wants_session(false, false, false),
+            wants_session(false, None, false),
             "a udp pair races the punch"
         );
-        assert!(!wants_session(false, true, false), "udp won; no round");
         assert!(
-            wants_session(true, false, false),
+            !wants_session(false, Some(PathKind::Ip), false),
+            "udp won; no round"
+        );
+        assert!(
+            wants_session(true, None, false),
             "a lane pair always negotiates"
         );
         assert!(
-            wants_session(true, true, true),
+            wants_session(true, Some(PathKind::Ip), true),
             "a lane pair's session is its only direct path"
         );
     }
@@ -1324,8 +1389,31 @@ mod tests {
     #[test]
     fn a_proven_udp_pair_is_not_raced_again() {
         assert!(
-            !wants_session(false, false, true),
-            "proven direct, no pooled connection"
+            !wants_session(false, None, true),
+            "proven direct, no live connection to read"
+        );
+        assert!(
+            !wants_session(false, Some(PathKind::WebRtc), true),
+            "proven direct, riding a session"
+        );
+    }
+
+    // A pair that multihop carries is off the relay, so it is proven direct, but a
+    // session ranks above multihop. The pair offers whether or not a pooled
+    // connection exists: the kind comes from the watcher, or from the admission
+    // table when the pool has closed an idle connection.
+    #[test]
+    fn a_pair_on_multihop_is_offered_a_session_even_when_proven_direct() {
+        assert!(wants_session(false, Some(PathKind::Multihop), true));
+        let watched_after_the_pool_idled_out = None;
+        let read_from_the_admission_table = Some(PathKind::Multihop);
+        let kind = crate::transport::probe::pair_kind(
+            watched_after_the_pool_idled_out,
+            read_from_the_admission_table,
+        );
+        assert!(
+            wants_session(false, kind, true),
+            "an idle pair on multihop still offers"
         );
     }
 

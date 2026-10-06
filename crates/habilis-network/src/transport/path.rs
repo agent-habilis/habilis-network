@@ -43,6 +43,22 @@ pub(crate) fn selected_is_ip(conn: &Connection) -> bool {
         .is_some_and(|path| path.is_ip())
 }
 
+/// The rung of iroh's selected path on `conn`, for a test that shows a node
+/// stepping down the ladder: `ip`, `webrtc`, `multihop` or `relay`. `None`
+/// while no path is selected yet.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn selected_rung(conn: &Connection) -> Option<&'static str> {
+    use super::probe::{PathKind, selected_kind};
+
+    match selected_kind(conn) {
+        PathKind::Ip => Some("ip"),
+        PathKind::WebRtc => Some("webrtc"),
+        PathKind::Multihop => Some("multihop"),
+        PathKind::Relay => Some("relay"),
+        PathKind::None => None,
+    }
+}
+
 /// Whether payload may go out on `conn` under the mesh's transport policy.
 /// With the relay allowed as a transport, anything goes — decided before the
 /// path snapshot, which locks and clones. With the relay lookup only, the

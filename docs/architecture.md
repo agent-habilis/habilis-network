@@ -506,7 +506,7 @@ sequenceDiagram
 Over the authenticated relay stream the receiver ignores the claimed endpoint id and trusts the TLS-proven remote id.
 The lower endpoint id offers, and one shared admission table caps in-flight sessions for both roles.
 TURN is refused by policy: the project relays through its own iroh relay instead.
-A custom path selector ranks direct IP first, then WebRTC, then relay.
+A custom path selector ranks direct IP first, then WebRTC, then multihop, then relay: one ladder (`Rung` in `habilis-network-iroh-transport-util`) that both selectors take, so the order does not depend on the transport list.
 The default iroh selector skips paths with no RTT sample, and a fresh WebRTC path always is one.
 Without the custom selector, the connection settles on the relay for its whole life.
 

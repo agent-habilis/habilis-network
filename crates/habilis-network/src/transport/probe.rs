@@ -33,6 +33,10 @@ pub(crate) struct DirectOutcome {
 pub(crate) enum PathKind {
     Ip,
     WebRtc,
+    /// A multihop route through other members. It is not on the relay, but a
+    /// pair on it has no lane of its own: an IP path or a `WebRTC` session ranks
+    /// above it.
+    Multihop,
     Relay,
     None,
 }
@@ -78,7 +82,7 @@ fn path_list(conn: &Connection) -> Vec<String> {
         .collect()
 }
 
-fn selected_kind(conn: &Connection) -> PathKind {
+pub(crate) fn selected_kind(conn: &Connection) -> PathKind {
     conn.paths()
         .iter()
         .find(iroh::endpoint::Path::is_selected)
@@ -87,8 +91,12 @@ fn selected_kind(conn: &Connection) -> PathKind {
                 PathKind::Ip
             } else if path.is_relay() {
                 PathKind::Relay
-            } else {
+            } else if matches!(path.remote_addr(), iroh::TransportAddr::Custom(addr)
+                if addr.id() == habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID)
+            {
                 PathKind::WebRtc
+            } else {
+                PathKind::Multihop
             }
         })
 }
@@ -215,6 +223,49 @@ pub(crate) fn nudge_webrtc_riders(state: &EventLoopState, ctx: &HandlerCtx<'_>) 
             super::webrtc::nudge(&endpoint, peer).await;
         });
     }
+    // A pair on the relay that the topology can now route: dial with the route.
+    // The watcher does this when the path is lost, but a route learned later
+    // (link-state comes every 15 s) is then missing, and nothing else runs a
+    // lookup for a pair that already has a session or no offer to make.
+    for addr in state
+        .peer_endpoints
+        .values()
+        .filter(|addr| addr.id != ctx.rendezvous_id)
+    {
+        let kind = pair_kind(
+            state.path_kinds.get(&addr.id).copied(),
+            state.webrtc_admission.selected_kind(addr.id),
+        );
+        if kind != Some(PathKind::Relay) {
+            continue;
+        }
+        let has_session = state
+            .webrtc
+            .as_ref()
+            .is_some_and(|handle| handle.has_session(&addr.id));
+        if let Some(addrs) = step(PathKind::Relay, has_session, route_to(state, addr.id)).nudge {
+            let (endpoint, peer) = (ctx.endpoint.clone(), addr.id);
+            n0_future::task::spawn(async move {
+                super::webrtc::nudge_with(&endpoint, peer, &addrs).await;
+            });
+        }
+    }
+}
+
+/// The multihop route to `peer` that the topology has now, as a dialable
+/// address. `None` off a host, or without a route.
+#[cfg(feature = "host")]
+fn route_to(state: &EventLoopState, peer: EndpointId) -> Option<iroh::TransportAddr> {
+    state
+        .multihop
+        .as_ref()
+        .and_then(|handle| handle.route_addr(peer))
+        .map(iroh::TransportAddr::Custom)
+}
+
+#[cfg(not(feature = "host"))]
+fn route_to(_state: &EventLoopState, _peer: EndpointId) -> Option<iroh::TransportAddr> {
+    None
 }
 
 /// The peers that an alive tick nudges: those whose last reported path is a
@@ -262,7 +313,8 @@ pub(crate) async fn on_path_change(
         return;
     };
     let has_session = handle.has_session(&peer);
-    let action = path_action(kind, has_session);
+    let ladder = step(kind, has_session, route_to(state, peer));
+    let action = ladder.action;
     match action {
         PathAction::Proven | PathAction::Detach => {
             if action == PathAction::Detach {
@@ -274,22 +326,34 @@ pub(crate) async fn on_path_change(
             }
         }
         PathAction::Rerace => {
-            if state.direct.get(&peer) == Some(&DirectState::Direct) {
-                state.direct.insert(peer, DirectState::RelayOnly);
+            if kind == PathKind::Multihop {
+                // Off the relay, so frames may flow; but the pair has no lane yet.
+                if mark_proven(state, peer) {
+                    crate::gossip::flush_pending(state, ctx, "multihop path").await;
+                }
+                tracing::info!(target: super::LOG_TARGET, %peer, "pair is on multihop; racing for a lane");
+            } else {
+                if state.direct.get(&peer) == Some(&DirectState::Direct) {
+                    state.direct.insert(peer, DirectState::RelayOnly);
+                }
+                tracing::info!(target: super::LOG_TARGET, %peer, ?kind, "direct path lost; racing again");
             }
-            tracing::info!(target: super::LOG_TARGET, %peer, ?kind, "direct path lost; racing again");
-            if has_session {
-                // The session outlived the loss but this connection does not
-                // ride it yet: one connect moves it onto the session's path.
+            if let Some(addrs) = ladder.nudge {
+                // One dial carries what iroh may not know yet: the session's
+                // address moves a connection onto the session's path, and the
+                // multihop route is learned by no lookup while another path is
+                // selected.
                 let endpoint = ctx.endpoint.clone();
                 n0_future::task::spawn(async move {
-                    super::webrtc::nudge(&endpoint, peer).await;
+                    super::webrtc::nudge_with(&endpoint, peer, &addrs).await;
                 });
-            } else if let Some(addr) = state
-                .peer_endpoints
-                .values()
-                .find(|addr| addr.id == peer)
-                .cloned()
+            }
+            if !has_session
+                && let Some(addr) = state
+                    .peer_endpoints
+                    .values()
+                    .find(|addr| addr.id == peer)
+                    .cloned()
             {
                 super::webrtc::negotiate_session(state, ctx, peer, addr);
             }
@@ -301,9 +365,59 @@ pub(crate) async fn on_path_change(
 pub(crate) fn path_action(selected: PathKind, has_session: bool) -> PathAction {
     match selected {
         PathKind::Ip if has_session => PathAction::Detach,
-        PathKind::Relay | PathKind::None => PathAction::Rerace,
+        // A pair on multihop is off the relay but has no lane: race for one.
+        PathKind::Relay | PathKind::None | PathKind::Multihop => PathAction::Rerace,
         PathKind::Ip | PathKind::WebRtc => PathAction::Proven,
     }
+}
+
+/// What a nudge dials besides the bare id, so that iroh learns the addresses of
+/// the paths that a pair can still climb to. One dial can carry both.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct NudgeAddrs {
+    /// The pair's `WebRTC` session address.
+    pub(crate) session: bool,
+    /// The multihop route to the peer, from the topology.
+    pub(crate) route: Option<iroh::TransportAddr>,
+}
+
+/// The answer to a pair whose selected path is `kind`: the race action and what
+/// to dial to help iroh climb the ladder. Pure; the one place that decides both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Step {
+    pub(crate) action: PathAction,
+    pub(crate) nudge: Option<NudgeAddrs>,
+}
+
+/// Pure: [`Step`] for a pair on `kind`, with `has_session` and the multihop
+/// `route` that the topology has now (`None` if it has none).
+///
+/// A pair on the relay needs the route in a dial: iroh runs the address lookup
+/// only while no path or the relay is selected, and the lookup answers only if
+/// the topology has a route at that moment, so an address that the lookup missed
+/// is never learned later without one. A pair with a session needs the session
+/// address in a dial to move its connection onto the session's path. A pair
+/// already on multihop needs no route.
+pub(crate) fn step(kind: PathKind, has_session: bool, route: Option<iroh::TransportAddr>) -> Step {
+    let action = path_action(kind, has_session);
+    let route = match kind {
+        PathKind::Relay | PathKind::None => route,
+        PathKind::Ip | PathKind::WebRtc | PathKind::Multihop => None,
+    };
+    let climbing = matches!(kind, PathKind::Relay | PathKind::None | PathKind::Multihop);
+    let nudge = (climbing && (has_session || route.is_some())).then_some(NudgeAddrs {
+        session: has_session,
+        route,
+    });
+    Step { action, nudge }
+}
+
+/// Pure: the kind of a pair's selected path, from the watcher's last report if it
+/// has one, else from any live connection of the admission table. A pair that only
+/// gossips has no pooled connection and so no watcher, but its gossip connection
+/// is in the table.
+pub(crate) fn pair_kind(watched: Option<PathKind>, admitted: Option<PathKind>) -> Option<PathKind> {
+    watched.filter(|kind| *kind != PathKind::None).or(admitted)
 }
 
 /// Pure: may a peer be grafted, from what is known right now? A `WebRTC`
@@ -547,6 +661,109 @@ mod tests {
         assert_eq!(path_action(PathKind::Relay, false), PathAction::Rerace);
         assert_eq!(path_action(PathKind::Relay, true), PathAction::Rerace);
         assert_eq!(path_action(PathKind::None, false), PathAction::Rerace);
+    }
+
+    fn a_route() -> iroh::TransportAddr {
+        let peer = endpoint_id(7);
+        iroh::TransportAddr::Custom(habilis_network_iroh_webrtc_transport::custom_addr(peer))
+    }
+
+    // A pair on multihop is off the relay but has no lane: it races for one, and
+    // it needs no route in a dial because it already rides one.
+    #[test]
+    fn a_pair_on_multihop_races_for_a_lane_without_a_route_in_the_dial() {
+        use super::{NudgeAddrs, PathAction, step};
+        assert_eq!(
+            super::path_action(PathKind::Multihop, false),
+            PathAction::Rerace
+        );
+        let without_session = step(PathKind::Multihop, false, Some(a_route()));
+        assert_eq!(without_session.action, PathAction::Rerace);
+        assert_eq!(without_session.nudge, None, "the offer's attach nudges");
+        let with_session = step(PathKind::Multihop, true, Some(a_route()));
+        assert_eq!(
+            with_session.nudge,
+            Some(NudgeAddrs {
+                session: true,
+                route: None
+            }),
+            "the session's address moves the connection onto the session"
+        );
+    }
+
+    // A pair on the relay learns a multihop route only from a dial that carries
+    // it: iroh runs the lookup only while no path or the relay is selected, and the
+    // lookup answers only if the topology has the route at that moment.
+    #[test]
+    fn a_pair_on_the_relay_is_nudged_with_the_route_the_topology_has() {
+        use super::{NudgeAddrs, PathAction, step};
+        let nothing = step(PathKind::Relay, false, None);
+        assert_eq!(nothing.action, PathAction::Rerace);
+        assert_eq!(
+            nothing.nudge, None,
+            "no route and no session: nothing to teach"
+        );
+        let route_only = step(PathKind::Relay, false, Some(a_route()));
+        assert_eq!(
+            route_only.nudge,
+            Some(NudgeAddrs {
+                session: false,
+                route: Some(a_route())
+            })
+        );
+        let both = step(PathKind::Relay, true, Some(a_route()));
+        assert_eq!(
+            both.nudge,
+            Some(NudgeAddrs {
+                session: true,
+                route: Some(a_route())
+            }),
+            "one dial carries both addresses"
+        );
+        let session_only = step(PathKind::Relay, true, None);
+        assert_eq!(
+            session_only.nudge,
+            Some(NudgeAddrs {
+                session: true,
+                route: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_pair_on_a_lane_is_nudged_with_nothing() {
+        use super::{PathAction, step};
+        for (kind, has_session, action) in [
+            (PathKind::Ip, false, PathAction::Proven),
+            (PathKind::Ip, true, PathAction::Detach),
+            (PathKind::WebRtc, true, PathAction::Proven),
+        ] {
+            let decided = step(kind, has_session, Some(a_route()));
+            assert_eq!(decided.action, action);
+            assert_eq!(decided.nudge, None, "{kind:?} needs no dial");
+        }
+    }
+
+    // The watcher is dropped when the pool idles a connection out, but the gossip
+    // connection stays in the admission table and still knows the path.
+    #[test]
+    fn the_admission_table_answers_for_a_pair_the_watcher_no_longer_reports() {
+        use super::pair_kind;
+        assert_eq!(
+            pair_kind(None, Some(PathKind::Multihop)),
+            Some(PathKind::Multihop)
+        );
+        assert_eq!(
+            pair_kind(Some(PathKind::None), Some(PathKind::Relay)),
+            Some(PathKind::Relay),
+            "a watcher that reads no path does not hide the table"
+        );
+        assert_eq!(
+            pair_kind(Some(PathKind::WebRtc), Some(PathKind::Relay)),
+            Some(PathKind::WebRtc),
+            "the watcher's report comes first"
+        );
+        assert_eq!(pair_kind(None, None), None);
     }
 
     // UDP can come back before a new session attaches, and nothing else

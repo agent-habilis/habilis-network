@@ -230,9 +230,10 @@ impl UnicastPool {
         })
     }
 
-    /// Whether the pooled connection to `eid` is on a selected UDP path.
-    /// Synchronous for the event loop's offer decisions: a contended lock, or
-    /// no pooled connection, reads as `false`, so the node offers.
+    /// Whether the pooled connection to `eid` is on a selected UDP path. The
+    /// offer decisions read the admission table instead, which sees every
+    /// connection of the peer and not only the pooled one.
+    #[cfg(test)]
     pub(crate) fn selected_is_ip(&self, eid: EndpointId) -> bool {
         self.inner.conns.try_lock().is_ok_and(|conns| {
             conns.get(&eid).is_some_and(|pooled| {

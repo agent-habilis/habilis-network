@@ -99,6 +99,30 @@ published to a registry; pin it with
 
 ### Changed
 
+- A node picks its path by one ladder: a direct IP path, then `WebRTC`, then
+  multihop, then the relay, and the lowest RTT inside a rung. Multihop used to
+  rank below the relay on a mesh with `WebRTC`, and the order changed with the
+  transport list. Both path selectors now take the rank from `Rung` in
+  `habilis-network-iroh-transport-util`. A pair that multihop carries is no
+  longer "proven direct" for the decision to offer a `WebRTC` session, so it
+  still offers one, and the session ranks above multihop. Test hooks:
+  `block_rung`, `Request::BlockRung` and `Request::SelectedRung` take a node down
+  the ladder one rung at a time. The multihop path stays open as a backup under
+  an IP or `WebRTC` path too, so its cost grows with the number of open paths,
+  not with the number of pairs on `WebRTC`. Measured on three idle members on one
+  host, with one multihop path per pair: 99 cells in 60 s over the whole mesh,
+  that is 0.55 cells/s and 42 bytes/s per open path, both directions together
+  (0.28 cells/s per direction). 95 of the 99 cells were 30 bytes and 4 were 1200
+  bytes. No hop forwarded a cell, because the shortest route was the direct link
+  between two underlays. A path routed through a member costs that figure once
+  per hop; that is not measured. Gaps: no test routes the multihop rung through
+  a member (a hook that cuts the direct underlay link would close it), and when a
+  hop of a route leaves, the path does not re-route (a multihop address is one
+  fixed route): its cells are dropped at the missing hop, QUIC abandons the path
+  at its idle timeout, and the pair falls to the next rung. The order also
+  applies when the relay may carry payload: multihop then beats the relay with no
+  look at RTT, so a pair that two or three members carry can be slower than it
+  was on the relay.
 - **Breaking:** the mesh id is version 2. The transport policy is always one
   explicit byte after the lookups: `udp`, `webrtc`, `multihop`, `relay`, one bit
   each. An id of version 1 is refused with a request to upgrade. Every mesh id

@@ -268,9 +268,9 @@ pub fn install_transports(
             builder = builder.add_custom_transport(handle.transport());
             // MUST come after `builder.preset(handle)` for multihop above: there
             // is a single `path_selector` slot and the last call wins. Safe only
-            // because this selector's bottom tier ranks foreign custom
-            // transports below the relay, reproducing MultihopBackup's own
-            // policy. Do not "tidy" this above the preset.
+            // because both selectors rank by the same ladder (IP, WebRTC,
+            // multihop, relay), whichever one is installed. Do not "tidy" this
+            // above the preset.
             builder = builder.path_selector(handle.path_selector());
         } else if cfg!(feature = "iroh-test-utils") {
             // Tests only: a mesh whose list leaves out `webrtc` still takes the

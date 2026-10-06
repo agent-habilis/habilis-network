@@ -140,7 +140,39 @@ pub enum Request {
         remote_ports: Vec<u16>,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: take one rung of the path ladder away from this node alone
+    /// (or give it back), to every remote. With [`Request::BlockIpTo`] it takes
+    /// the node down the ladder one rung at a time.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    BlockRung {
+        rung: Rung,
+        blocked: bool,
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only: forget that the member `peer` is proven direct, and offer it a
+    /// `WebRTC` session now, as the path watcher does when a direct path is lost.
+    /// A test uses it to attach a session at a chosen moment instead of at the
+    /// next alive tick.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    OfferSession {
+        peer: String,
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only: the rung of the selected path on this node's pooled
+    /// connection to the member `peer`: `ip`, `webrtc`, `multihop` or `relay`.
+    /// It opens the connection first if there is none. This is the connection
+    /// the answer is about: the gossip link is not, because the relay policy
+    /// closes a gossip link that stays on the relay.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    SelectedRung {
+        peer: String,
+        reply: oneshot::Sender<Option<&'static str>>,
+    },
 }
+
+/// A rung of the path ladder, for [`Request::BlockRung`].
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use habilis_network_iroh_webrtc_transport::Rung;
 
 /// The engine seam. Every inbound `msg` is queued for the consumer instead of
 /// being written anywhere: a browser's `js_sys::Function` is neither `Send`
@@ -233,6 +265,10 @@ impl NodeDriver for MembershipApp {
     type Http = ();
     type Ipc = ();
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test-only requests share this one match, and the lint counts the lines that a cfg removes"
+    )]
     async fn handle_session(
         &mut self,
         req: Request,
@@ -288,6 +324,61 @@ impl NodeDriver for MembershipApp {
                     });
                 }
                 let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::BlockRung {
+                rung,
+                blocked,
+                reply,
+            } => {
+                habilis_network_iroh_webrtc_transport::block_rung(ctx.endpoint.id(), rung, blocked);
+                // iroh re-selects only on path events: nudge every peer so the
+                // change takes effect now.
+                for addr in state.peer_endpoints.values() {
+                    let endpoint = ctx.endpoint.clone();
+                    let peer = addr.id;
+                    n0_future::task::spawn(async move {
+                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::OfferSession { peer, reply } => {
+                if let Some(addr) = state
+                    .peer_endpoints
+                    .get(&Nickname::from(peer.as_str()))
+                    .cloned()
+                {
+                    state
+                        .direct
+                        .insert(addr.id, crate::daemon::state::DirectState::RelayOnly);
+                    crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::SelectedRung { peer, reply } => {
+                let id = state
+                    .peer_endpoints
+                    .get(&Nickname::from(peer.as_str()))
+                    .map(|addr| addr.id);
+                let pool = state.unicast_pool.clone();
+                // Off the event loop: a dial can take seconds.
+                n0_future::task::spawn(async move {
+                    let rung = match id {
+                        Some(id) => pool
+                            .warm_or_dial(id)
+                            .await
+                            .ok()
+                            .and_then(|conn| crate::transport::path::selected_rung(&conn)),
+                        None => None,
+                    };
+                    let _ = reply.send(rung);
+                });
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

@@ -1,6 +1,6 @@
 //! Path selection that makes the relay a **rendezvous**, not a transport:
-//! prefer a direct IP path, then `WebRTC`, and fall to the relay only when
-//! neither is available.
+//! prefer a direct IP path, then `WebRTC`, then multihop, and fall to the relay
+//! only when none of them is available.
 //!
 //! # Why a selector at all
 //!
@@ -25,21 +25,28 @@
 //! demoted relay path is what lets a connection survive a dead data channel —
 //! so the relay stays open and unused rather than being torn down.
 
-use habilis_network_iroh_transport_util::best_of;
+use habilis_network_iroh_transport_util::{Rung, climb, rung_of};
 use iroh::endpoint::transports::{
-    Addr, PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
+    PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
 
 use crate::WEBRTC_TRANSPORT_ID;
 
-/// Prefers, in order: direct IP, `WebRTC`, relay, any other custom transport.
+/// Prefers, in order: direct IP, `WebRTC`, multihop, relay.
 ///
-/// On a browser target the first tier is always empty — iroh's whole IP stack
-/// is `cfg(not(wasm_browser))`, and ICE *is* the tab's hole punch — so the
-/// order collapses to `webrtc > relay` there without a separate policy.
+/// On a browser target the first rung is always empty — iroh's whole IP stack
+/// is `cfg(not(wasm_browser))`, and ICE *is* the tab's hole punch. A browser has
+/// no multihop either, so the order collapses to `webrtc > relay` there without a
+/// separate policy.
+///
+/// An endpoint has a single `Builder::path_selector` slot, so this selector and
+/// `MultihopLadder` cannot both be installed. They rank by the same ladder
+/// ([`Rung`]), which is what makes the last-call-wins wiring safe. This one does
+/// not know multihop's transport id: any custom transport that is not `WebRTC`
+/// stands on the multihop rung, as the only other one does.
 #[derive(Debug)]
 pub(crate) struct WebRtcPreferred {
-    /// The endpoint this selector serves, so that a test can take IP paths away
+    /// The endpoint this selector serves, so that a test can take paths away
     /// from one node to some others and not from the whole process.
     local: iroh_base::EndpointId,
 }
@@ -50,33 +57,69 @@ impl WebRtcPreferred {
     }
 }
 
-/// Whether a test took this IP path away from the node `local`.
+/// Whether a test took this path away from the node `local`.
 #[cfg(feature = "test-hooks")]
-fn ip_path_blocked(local: iroh_base::EndpointId, path: &PathSelectionData<'_>) -> bool {
-    matches!(path.network_path().remote(), Addr::Ip(remote)
-        if ip_blocked_to(local, remote.port()))
+fn blocked(local: iroh_base::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
+    if rung_blocked(local, rung) {
+        return true;
+    }
+    rung == Rung::Ip
+        && (ip_blocked()
+            || matches!(path.network_path().remote(), iroh::endpoint::transports::Addr::Ip(remote)
+                if ip_blocked_to(local, remote.port())))
 }
 
 #[cfg(not(feature = "test-hooks"))]
-fn ip_path_blocked(_local: iroh_base::EndpointId, _path: &PathSelectionData<'_>) -> bool {
+fn blocked(_local: iroh_base::EndpointId, _rung: Rung, _path: &PathSelectionData<'_>) -> bool {
     false
+}
+
+/// The rung of a custom transport that this crate does not name. This selector
+/// knows only its own transport id, so any other custom transport stands on the
+/// multihop rung. `MultihopLadder` does the opposite for a foreign id and ranks it
+/// below the relay. The two agree because they are never installed together
+/// where both kinds of path exist: a `WebRTC` path cannot reach `MultihopLadder`,
+/// which an endpoint gets only when its list has no `WebRTC`, and multihop is the
+/// only other custom transport. A third one needs both ids passed to `rung_of`.
+fn custom_rung(id: u64) -> Rung {
+    if id == WEBRTC_TRANSPORT_ID {
+        Rung::WebRtc
+    } else {
+        Rung::Multihop
+    }
 }
 
 impl PathSelector for WebRtcPreferred {
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
-        let tier = |want: Tier| {
-            best_of(paths.iter().filter(move |path| {
-                tier_of(path) == want && !(want == Tier::Ip && ip_path_blocked(self.local, path))
-            }))
-        };
-        // First non-empty tier wins; within a tier, lowest RTT.
-        let chosen = (!ip_blocked())
-            .then(|| tier(Tier::Ip))
-            .flatten()
-            .or_else(|| tier(Tier::WebRtc))
-            .or_else(|| tier(Tier::Relay))
-            .or_else(|| tier(Tier::OtherCustom));
+        // The first rung with a usable path wins; within a rung, lowest RTT.
+        let chosen = climb(&paths, custom_rung, |rung, path| {
+            !blocked(self.local, rung, path)
+        });
+        // Trace level, off by default: every call, with what it saw and chose, so
+        // that a path that stays unselected can be told from a selector that never
+        // ran.
+        if tracing::enabled!(target: "habilis_ladder", tracing::Level::TRACE) {
+            let seen: Vec<String> = paths
+                .iter()
+                .map(|path| {
+                    format!(
+                        "{:?} {:?} rtt={:?}",
+                        rung_of(path, custom_rung),
+                        path.network_path().remote(),
+                        path.stats().map(|stats| stats.rtt)
+                    )
+                })
+                .collect();
+            tracing::trace!(
+                target: "habilis_ladder",
+                local = %self.local.fmt_short(),
+                current = ?ctx.current().map(iroh::endpoint::transports::FourTuple::remote),
+                ?seen,
+                chosen = ?chosen.map(|path| path.network_path().remote()),
+                "path selection"
+            );
+        }
         let mut selection = PathSelection::none();
         if let Some(path) = chosen {
             selection.set(path);
@@ -134,38 +177,41 @@ fn ip_blocked_to(local: iroh_base::EndpointId, remote_port: u16) -> bool {
         .is_some_and(|ports| ports.contains(&remote_port))
 }
 
+#[cfg(feature = "test-hooks")]
+static RUNGS_BLOCKED: std::sync::Mutex<
+    Option<std::collections::HashSet<(iroh_base::EndpointId, Rung)>>,
+> = std::sync::Mutex::new(None);
+
+/// Tests only: while `blocked`, the endpoint `local` selects no path of `rung`,
+/// whoever the remote is. With `block_ip_to` it takes a node down the ladder one
+/// rung at a time, so a test can show each step. A path of a custom transport
+/// carries no remote id that this crate can read for multihop, so a rung is
+/// blocked whole, and another node of the process is not affected.
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the block table.
+#[cfg(feature = "test-hooks")]
+pub fn block_rung(local: iroh_base::EndpointId, rung: Rung, blocked: bool) {
+    let mut blocks = RUNGS_BLOCKED.lock().expect("rung blocks");
+    let blocks = blocks.get_or_insert_with(std::collections::HashSet::new);
+    if blocked {
+        blocks.insert((local, rung));
+    } else {
+        blocks.remove(&(local, rung));
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+fn rung_blocked(local: iroh_base::EndpointId, rung: Rung) -> bool {
+    RUNGS_BLOCKED
+        .lock()
+        .expect("rung blocks")
+        .as_ref()
+        .is_some_and(|blocks| blocks.contains(&(local, rung)))
+}
+
+#[cfg(feature = "test-hooks")]
 fn ip_blocked() -> bool {
-    #[cfg(feature = "test-hooks")]
-    {
-        IP_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
-    }
-    #[cfg(not(feature = "test-hooks"))]
-    {
-        false
-    }
-}
-
-/// Preference tiers, best first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tier {
-    Ip,
-    WebRtc,
-    Relay,
-    /// Any custom transport that is not ours — today, multihop.
-    ///
-    /// Deliberately ranked last rather than left unhandled. An endpoint has a
-    /// single `Builder::path_selector` slot, so this selector and
-    /// `MultihopBackup` cannot both be installed; ranking foreign custom
-    /// transports below the relay reproduces multihop's own "backup" policy,
-    /// which is what makes the last-call-wins wiring safe.
-    OtherCustom,
-}
-
-fn tier_of(path: &PathSelectionData<'_>) -> Tier {
-    match path.network_path().remote() {
-        Addr::Ip(_) => Tier::Ip,
-        Addr::Relay(..) => Tier::Relay,
-        Addr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => Tier::WebRtc,
-        Addr::Custom(_) => Tier::OtherCustom,
-    }
+    IP_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
 }

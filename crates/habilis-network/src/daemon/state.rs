@@ -1392,6 +1392,19 @@ impl EventLoopState {
         true
     }
 
+    /// The selected path of a pair: the path watcher's last report if it has one,
+    /// else any live connection of the admission table (see
+    /// [`crate::transport::probe::pair_kind`]).
+    pub(crate) fn pair_path_kind(
+        &self,
+        peer: EndpointId,
+    ) -> Option<crate::transport::probe::PathKind> {
+        crate::transport::probe::pair_kind(
+            self.path_kinds.get(&peer).copied(),
+            self.webrtc_admission.selected_kind(peer),
+        )
+    }
+
     /// Whether to report that this author's digest could not be read: once per
     /// author per window. The author runs a build with another digest format, or
     /// sends garbage; either way the two never repair each other's gaps.

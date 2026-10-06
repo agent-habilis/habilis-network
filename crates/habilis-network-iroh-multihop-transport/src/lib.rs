@@ -29,7 +29,7 @@
 //!     .bind()
 //!     .await?;
 //! let handle = MultihopHandle::new(&app_secret, underlay, HandleConfig::default())?;
-//! // Wire the transport, its address lookup, and the backup path selector.
+//! // Wire the transport, its address lookup, and the path selector.
 //! let app = Endpoint::builder(presets::N0)
 //!     .secret_key(app_secret)
 //!     .preset(handle.clone())
@@ -66,7 +66,7 @@ pub use topology::{LinkVector, Topology, TopologyEdge, TopologyView};
 
 use crate::addr::Route as RouteInner;
 use crate::lookup::MultihopLookup;
-use crate::selector::MultihopBackup;
+use crate::selector::MultihopLadder;
 use crate::transport::{MultihopTransport, Shared};
 use crate::underlay::{ForwardAcceptor, Forwarder};
 
@@ -232,6 +232,26 @@ impl MultihopHandle {
             .ingest(vector)
     }
 
+    /// The custom address of the best route from this node to `dst`, if the
+    /// topology has one: what the address lookup would answer now. A dial can
+    /// carry it, to teach iroh the route when iroh runs no lookup, which it does
+    /// not while a non-relay path is selected. The address is one fixed route:
+    /// see the note on `MultihopLookup`.
+    ///
+    /// # Panics
+    /// If the routing-table lock is poisoned by a panic in another thread.
+    #[must_use]
+    pub fn route_addr(&self, dst: EndpointId) -> Option<iroh_base::CustomAddr> {
+        self.inner
+            .topology
+            .read()
+            .expect("topology lock poisoned")
+            .route_to(self.inner.self_id, dst, 1)
+            .into_iter()
+            .next()
+            .map(|route| route.encode())
+    }
+
     /// Drop an origin's advertised links (e.g. a peer that left the mesh).
     ///
     /// # Panics
@@ -346,11 +366,11 @@ impl MultihopHandle {
         MultihopLookup::new(self.inner.self_id, Arc::clone(&self.inner.topology))
     }
 
-    /// The backup path selector (multihop loses to any direct/relay path), for
+    /// The path selector: a direct path, then multihop, then the relay. For
     /// `Builder::path_selector`.
     #[must_use]
     pub fn path_selector(&self) -> Arc<dyn PathSelector> {
-        Arc::new(MultihopBackup)
+        Arc::new(MultihopLadder)
     }
 }
 

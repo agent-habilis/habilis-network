@@ -267,6 +267,21 @@ impl SignalAdmission {
         self.watch_dialed_gossip.store(on, Ordering::Relaxed);
     }
 
+    /// The selected path of `peer`, read from any live connection that the hook
+    /// recorded for it: the gossip link, the pooled unicast connection, or an
+    /// inbound one. iroh selects one path per remote, so any of them answers. A pair
+    /// that only gossips has no pooled connection, and this is how the engine sees
+    /// it. `None` if the peer has no live connection with a selected path.
+    pub(crate) fn selected_kind(&self, peer: EndpointId) -> Option<super::probe::PathKind> {
+        let handles: Vec<WeakConnectionHandle> = self.lock().slots.get(&peer)?.conns.clone();
+        handles
+            .iter()
+            .filter_map(WeakConnectionHandle::upgrade)
+            .filter(|conn| conn.close_reason().is_none())
+            .map(|conn| super::probe::selected_kind(&conn))
+            .find(|kind| *kind != super::probe::PathKind::None)
+    }
+
     /// Whether [`connection_hook`](Self::connection_hook) was called on this
     /// table. Without a hook the table sees none of the endpoint's connections:
     /// the relay policy is not kept on the gossip connections that the node
