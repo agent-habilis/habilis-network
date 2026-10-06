@@ -17,6 +17,7 @@ Each node is one process. A throw-away driver, `mesh_peer_load`, is not committe
 - The driver uses the public `membership` API: `resolve_kind`, `setup_mesh` and `MembershipApp`. It does not copy `mesh_peer.rs`. The reason is that `send_app` is private to the crate.
 - The first process creates the mesh. It also starts a local plain-HTTP relay with `net::test_relay::spawn_plain`. No run uses a public relay, the DHT or mDNS.
 - The lookup list holds only `relay`. The transport list holds only `udp`, or only `webrtc`.
+- STUN: the `WebRTC` runs were not on a loopback mesh. By the code, a node on such a mesh asks two public STUN servers for its public address (`stun1.l.google.com:19302` and `stun.cloudflare.com:3478`, `DEFAULT_STUN_HOSTS`). Those servers only learn the public ip:port of the node, and no payload goes through them. I did not capture packets to confirm that the runs did this. The UDP runs do not use `WebRTC`, so they make no STUN request. The sentence above that no run uses a public relay, the DHT or mDNS is true. It does not cover STUN.
 - `max_peers` is 64, the default gossip active view. One run uses 8 (`MESH_MAX_PEERS`).
 - Once per second, each node reads its roster with `Request::Peers`. With traffic on, it sends one directed `msg` to each roster peer with `Request::Send`.
 - With traffic off, the node sends no directed message. This is the gossip-only run.
@@ -145,6 +146,52 @@ Result, UDP, gossip only:
 - N = 66: 3 isolated nodes. The other rosters range from 2 to 61 peers, and no node sees all 65. The logs hold 284 `re-graft` lines.
 
 Verdict: not confirmed, and not refuted. N = 66 is worse than N = 60, which agrees with a limit near 64. But the earlier N = 65 runs had 9 and 18 isolated nodes, which is worse than N = 66. N = 60 is also far from complete. The load average was 20 to 32 during these runs. A clean answer needs a quiet host or a longer wait.
+
+## Rerun at N = 66 after the release fix
+
+Question: does N = 66 on UDP form a full mesh once a member lets go of the rendezvous with `leave_peers` (commit `932013a`, fork `5f7fe84`)?
+
+Answer: no. In three runs, 0 to 2 of 66 nodes held all 65 peers, and 0 to 5 nodes were isolated. The cause is not found. The numbers below are not a verdict on membership, because of the first condition in the next list.
+
+Conditions, which differ from the runs above:
+
+- **Debug build.** The three runs use `target/debug` (`cargo build -p habilis-network --features iroh-test-utils --example mesh_peer_load`), not the release build in the method section. Memory and timing are not comparable with the rows above.
+- **Throttled timers.** Nodes logged `maintenance timer stalled ... suspected="throttle"`. Run 1 has 11 lines on 4 nodes, run 2 has 12 lines on 4 nodes, and run 3 has 267 lines on 57 nodes. The largest gap is 168 s. In run 3, 57 of 66 nodes had a timer gap of minutes while the mesh formed. A census taken then shows nodes that recover from a stall. It is not evidence of a membership fault.
+- **Wait of 240 s** after the last node starts, not 120 s.
+- **Shared host.** Other jobs ran on the host. The 1-minute load is the value of `uptime` just before the run. The 66 processes drive the load to 83 to 97 during the run.
+- **One commit.** Commit `6c3635a`. Traffic on, multihop on, `max_peers` 64. The wait for a quiet host used the 15-minute column of `uptime` by mistake, so runs 2 and 3 started with a 5-minute load of 11.4 and 6.4.
+
+| Run | Load before (1 / 5 / 15 min) | Nodes with a census line | Full roster (65) | Isolated | Roster median (min) | Mean links (direct) | Peak MB median (max) | Peak MB per direct link | `re-graft` lines | Release lines |
+| -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| 1 | 4.5 / 4.3 / 4.1 | 63 | 2 | 0 | 47 (2) | 25.8 (40.0) | 90 (156) | 2.25 | 293 | 65 |
+| 2 | 2.6 / 11.4 / 9.9 | 65 | 0 | 1 | 48 (0) | 23.8 (35.8) | 87 (158) | 2.43 | 231 | 65 |
+| 3 | 1.4 / 6.4 / 9.9 | 66 | 0 | 5 | 47.5 (0) | 23.5 (28.4) | 94 (246) | 3.31 | 371 | 65 |
+
+Peak MB per direct link is the median peak divided by the mean direct links. It is a rough figure.
+
+One earlier run on `6794bc6`, same build and conditions: 66 nodes with a census line, 2 with the full roster, 0 isolated, roster median 54 (min 34), mean links 20.3 (direct 36.5), peak 94 MB (max 153), 2.6 MB per direct link, 340 `re-graft` lines, and 141 release lines. That run is before the fix that makes a node release once (`6c3635a`). After the fix the release lines are 65 in every run, one per joiner.
+
+What the numbers allow:
+
+- The peak memory per link is about the same in all runs (2.2 to 3.3 MB). A higher peak at a higher link count can be the links. I have not shown that it is not a leak.
+- The memory rise against the older run at `435031d` (peak median 73 MB, max 102 MB, mean 25.1 links) is not explained. The older run has no direct-link count, so its per-link value cannot be computed. It is also not known if that run was a debug build.
+- The spread between runs is large. Run 3 is the worst on every row, and it is the run with the most stalls.
+- No run is a clean answer. A clean answer needs a release build, a quiet host and no timer stalls.
+
+### Rendezvous NeighborDown counts
+
+The message of commit `932013a` says "Rendezvous NeighborDown over the run: 90 and 18", for N = 10 on UDP over 10 minutes, before and after the change. I measured it again at `d671e88`, which only adds the node id to the log lines. Host load 10 to 32, because other jobs shared the host.
+
+| Run | Rendezvous NeighborDown | Rendezvous neighbor-up | Release lines |
+| -- | -- | -- | -- |
+| N = 10, 5 minutes | 9 | 10 | 9 |
+| N = 10, 10 minutes | 9 | 10 | 9 |
+
+Each of the 9 joiners has one neighbor-up of the rendezvous, one release and one NeighborDown of the rendezvous. The creator hosts the rendezvous and has a neighbor-up and no NeighborDown. So a NeighborDown of the rendezvous in this run is the release, and I could not find a second one per joiner. I do not reproduce the 18 of the earlier run, and I do not know what the other 9 were. Two guesses, neither shown: each joiner came back to the rendezvous once in the earlier run, or the count of that run included lines of the creator.
+
+### Crash test under load
+
+The crash test (`a_joiner_after_a_crash_still_gets_the_full_roster`, 18 nodes, `WebRTC` only) failed once in three full gates at a host load of up to 19, with the message "2 members came back and 1 let go again". It has failed on CI since the pin. It has failed locally 1 time in about 78 runs after the pin, and 0 times in 30 runs before it. A race between the release waiter and a new visit may explain the first failure. That is a guess, and it is not shown. The waiter is removed in `c31e97d`, and the test still fails on CI after that commit.
 
 ## Decision
 
