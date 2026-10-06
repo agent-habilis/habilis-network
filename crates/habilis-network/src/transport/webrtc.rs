@@ -875,9 +875,11 @@ pub(crate) fn negotiate_rendezvous_session(
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
 ) {
     if !state.rendezvous_wanted() {
-        // A session the graft never used: a joiner whose links to members came
-        // up before its graft to the rendezvous landed. It would hold one of
-        // the beacon's slots for ever.
+        // A session to the rendezvous that this node does not want. The main
+        // case is the release: gossip closes the link, and this detaches the
+        // session once the link is down. The other is a joiner whose links to
+        // members came up before its graft to the rendezvous landed. Either
+        // would hold one of the beacon's slots for ever.
         if !state.rendezvous_linked
             && let Some(handle) = state.webrtc.as_ref()
             && handle.detach(&ctx.rendezvous_id)

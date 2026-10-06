@@ -933,9 +933,11 @@ impl EventLoopState {
     }
 
     /// The release, once gossip has been told to leave the rendezvous
-    /// (`GossipSender::leave_peers`). The leave ends the link by itself, so this
-    /// does not wait for a close to be seen: it marks the release at once, before
-    /// the `NeighborDown` that follows is read, so that one reads as a choice.
+    /// (`GossipSender::leave_peers`). The leave ends the link by itself, if
+    /// gossip held one: `Ok` from `leave_peers` only says that the command
+    /// reached the gossip actor. So this does not wait for a close to be seen:
+    /// it marks the release at once, before the `NeighborDown` that follows is
+    /// read, so that one reads as a choice.
     pub(crate) fn mark_rendezvous_released(&mut self, local: EndpointId) {
         self.rendezvous_released = true;
         tracing::info!(
