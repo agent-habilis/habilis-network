@@ -116,17 +116,17 @@ uuid = { version = "1", features = ["v4"] }
 # net-tools fork so the RTM_MISS fix arrives transitively too. Fork main also
 # carries the Initial fan-out (fofoca-network/iroh#2): a WebRTC path learned
 # after a relay selection can carry a connection, which a browser needs.
-iroh = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
+iroh = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c2e81ee200e434adeb3a1c0067db47e6f0898998", default-features = false, features = ["tls-ring", "unstable-custom-transports"] }
 # The dependency-light half of iroh: keys, endpoint addresses, relay URLs — no
 # QUIC, TLS or DNS. `habilis-network-protocol` depends on this rather than `iroh` so the
 # wire vocabulary carries no network stack. Same repo and rev as `iroh` above,
 # necessarily: the forked `iroh` uses its workspace-local copy, and mixing
 # that with the published one is the two-`iroh_base` failure.
 # `relay` is a default `habilis-network-protocol` adds back; the transports do not need it.
-iroh-base = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4", default-features = false, features = ["key"] }
+iroh-base = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c2e81ee200e434adeb3a1c0067db47e6f0898998", default-features = false, features = ["key"] }
 # Only `iroh-mainline-address-lookup` names it, and only under `dht`. Pinned to
 # the same rev for the same reason as `iroh-base`.
-iroh-dns = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4" }
+iroh-dns = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c2e81ee200e434adeb3a1c0067db47e6f0898998" }
 # The mDNS + mainline-DHT address-lookup providers, extracted from iroh core in
 # the 1.0 line. Forked for one reason only: they sat between this crate and iroh
 # and named iroh/iroh-base/iroh-dns from crates.io, which is what forced every
@@ -137,8 +137,8 @@ iroh-dns = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", 
 # (rkuhn/swarm-discovery#28). Neither change has an upstream path — n0 will
 # not point their crates at ours — so delete the fork the moment the iroh pins
 # become unnecessary and swarm-discovery 0.6.4+ ships.
-iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "2929bdb188a0369b481aea5e8f784b1732c6729e" }
-iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "2929bdb188a0369b481aea5e8f784b1732c6729e" }
+iroh-mdns-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "69c810224b59558f8e9de6a8240c921189c7c79e" }
+iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/agent-habilis/iroh-address-lookups", rev = "69c810224b59558f8e9de6a8240c921189c7c79e" }
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
@@ -146,8 +146,9 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/a
 # main (the connection-churn leak fix, upstream PR n0-computer/iroh-gossip#147,
 # plus its own iroh/iroh-base repoint, since this crate is another that sat
 # between us and iroh), then `GossipSender::leave_peers` and a tombstone for a
-# peer that left on purpose, then the TimeBoundCache expiry-heap fix.
-iroh-gossip = { version = "=0.101.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "5f7fe84356163bfa6eebd6121b18428239a571e7", default-features = false, features = ["net"] }
+# peer that left on purpose, then the TimeBoundCache expiry-heap fix, then the
+# repoint of its own iroh and iroh-base to the rev that this file names for them.
+iroh-gossip = { version = "=0.101.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "eca06e42aead42788312ae7e80bc44f26e5fe19a", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.

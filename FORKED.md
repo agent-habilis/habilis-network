@@ -394,9 +394,14 @@ puts two `iroh_base` versions in the graph, which makes types from
 iroh-gossip and the address-lookup crates fail to unify (E0308).
 
 Current revs: `iroh`/`iroh-base`/`iroh-dns` →
-`agent-habilis/iroh` `c814688e6c0967b2764efe7159059d1d68c4b2f4` (mapped_addrs
-eviction + relay teardown, **plus** the netwatch/portmapper repoint);
-`iroh-gossip` → `5f7fe84356163bfa6eebd6121b18428239a571e7` (branch `leave-peers`, PR #2 in the fork, not merged: `leave_peers`, a tombstone for a peer that left on purpose, and the TimeBoundCache expiry-heap fix on top of fork main `5d57f94`; the workspace uses `GossipSender::leave_peers` to let go of the rendezvous); `net-tools` →
+`agent-habilis/iroh` `c2e81ee200e434adeb3a1c0067db47e6f0898998` (mapped_addrs
+eviction + relay teardown, **plus** the netwatch/portmapper repoint, **plus**
+PR #1: a custom-transport path that is learned while another custom path is
+selected is opened too, and only a pair selected on IP skips it, so a `WebRTC`
+session that comes up after multihop was selected can be selected over it);
+`iroh-gossip` → `eca06e42aead42788312ae7e80bc44f26e5fe19a` (branch `leave-peers`, PR #2 in the fork, not merged, with its own `iroh` and `iroh-base` at the rev above: `leave_peers`, a tombstone for a peer that left on purpose, and the TimeBoundCache expiry-heap fix on top of fork main `5d57f94`; the workspace uses `GossipSender::leave_peers` to let go of the rendezvous; two fixes in the gossip actor: it never waits for a full connection queue (`e12580e`), and it splits the overflow rule by message kind, so data is dropped and counted while any other message disconnects the peer (`eca06e4`)); `iroh-mdns-address-lookup` and `iroh-mainline-address-lookup` →
+`agent-habilis/iroh-address-lookups` `69c810224b59558f8e9de6a8240c921189c7c79e` (PR #3 in the fork, not
+merged: its `iroh`, `iroh-base` and `iroh-dns` at the rev above); `net-tools` →
 `e02960255ef2f5b2ba4aa3d4cf195e0b8673f370`.
 
 ## Verifying a change

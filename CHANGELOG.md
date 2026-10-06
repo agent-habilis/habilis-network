@@ -233,6 +233,14 @@ published to a registry; pin it with
 
 ### Fixed
 
+- The `iroh` fork moves to `c2e81ee` (agent-habilis/iroh PR #1). iroh opens a
+  custom-transport path that it learns while another custom path is already
+  selected. Before, a pair that multihop carried never opened a `WebRTC` path
+  that came up later, so it could not climb back to `WebRTC` (4 of 14 runs of the
+  ladder test). The `iroh-gossip` fork moves to `eca06e4`, which names the same
+  `iroh`. It also fixes the gossip actor in two ways: it never waits for a full
+  connection queue, and on overflow it drops and counts data but disconnects the
+  peer for any other message.
 - A member that let go of the rendezvous was dialed back by the beacon, which
   kept it in its passive view and refilled its active view from there, so in a
   steady 10-node UDP mesh members let go of the rendezvous 33 times in 10
