@@ -233,11 +233,15 @@ async fn a_node_steps_down_the_ladder_and_climbs_back() {
 ///
 /// The test forces the order instead of waiting for it: it attaches the session
 /// at once with `Request::OfferSession`, then blocks `WebRTC`, all within the
-/// first seconds. It needs the mesh to be young; on a host too loaded to form it
-/// in about ten seconds the route may exist already and the test passes without
-/// the fix.
+/// first seconds. It needs the mesh to be young. It measures the time from the
+/// last join to the offer and fails when that is more than `FORCED_ORDER_WINDOW`:
+/// a route may exist by then, and a pass would not show that the order was forced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
+    /// The first link-state comes 15 s after a member starts, so a route can
+    /// exist from then on. The offer must come well before that.
+    const FORCED_ORDER_WINDOW: Duration = Duration::from_secs(12);
+
     init_logging();
     let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
         .await
@@ -245,6 +249,7 @@ async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     let alice = Member::create("alice", &relay).await;
     let bob = Member::join("bob", &alice).await;
     let carol = Member::join("carol", &alice).await;
+    let last_join = Instant::now();
     assert!(
         rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
         "the three members never formed a mesh"
@@ -258,6 +263,13 @@ async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     alice
         .expect_rung("bob", "relay", "IP blocked, before the offer")
         .await;
+    let until_the_offer = last_join.elapsed();
+    assert!(
+        until_the_offer <= FORCED_ORDER_WINDOW,
+        "the offer came {until_the_offer:?} after the last join, more than \
+         {FORCED_ORDER_WINDOW:?}: a route may exist by now, so a pass would not \
+         show that the order was forced. Run the test again on a quieter host."
+    );
     // Only the lower id offers; each side asks, so the right one does.
     alice.offer_session("bob").await;
     bob.offer_session("alice").await;

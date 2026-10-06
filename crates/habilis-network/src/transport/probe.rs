@@ -217,6 +217,7 @@ pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool 
 /// selection; without it iroh retries every 60 s. When UDP answers, the
 /// watcher sees it selected and the session is detached.
 pub(crate) fn nudge_webrtc_riders(state: &EventLoopState, ctx: &HandlerCtx<'_>) {
+    // No in-flight guard, by design: each dial is bounded by `DIAL_TIMEOUT`.
     for peer in webrtc_riders(state) {
         let endpoint = ctx.endpoint.clone();
         n0_future::task::spawn(async move {
