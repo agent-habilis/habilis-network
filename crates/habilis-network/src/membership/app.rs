@@ -347,11 +347,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::OfferSession { peer, reply } => {
-                if let Some(addr) = state
-                    .peer_endpoints
-                    .get(&Nickname::from(peer.as_str()))
-                    .cloned()
-                {
+                if let Some(addr) = state.peer_endpoints.get(peer.as_str()).cloned() {
                     state
                         .direct
                         .insert(addr.id, crate::daemon::state::DirectState::RelayOnly);
@@ -362,10 +358,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::SelectedRung { peer, reply } => {
-                let id = state
-                    .peer_endpoints
-                    .get(&Nickname::from(peer.as_str()))
-                    .map(|addr| addr.id);
+                let id = state.peer_endpoints.get(peer.as_str()).map(|addr| addr.id);
                 let pool = state.unicast_pool.clone();
                 // Off the event loop: a dial can take seconds.
                 n0_future::task::spawn(async move {
