@@ -168,6 +168,13 @@ pub enum Request {
         peer: String,
         reply: oneshot::Sender<Option<&'static str>>,
     },
+    /// Tests only: whether the multihop topology of this node has a route to the
+    /// member `peer` now. A route exists from the first link-state on.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    HasRoute {
+        peer: String,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// A rung of the path ladder, for [`Request::BlockRung`].
@@ -372,6 +379,16 @@ impl NodeDriver for MembershipApp {
                     };
                     let _ = reply.send(rung);
                 });
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::HasRoute { peer, reply } => {
+                let has_route = state.peer_endpoints.get(peer.as_str()).is_some_and(|addr| {
+                    state
+                        .multihop()
+                        .is_some_and(|handle| handle.route_addr(addr.id).is_some())
+                });
+                let _ = reply.send(has_route);
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

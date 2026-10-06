@@ -217,7 +217,6 @@ pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool 
 /// selection; without it iroh retries every 60 s. When UDP answers, the
 /// watcher sees it selected and the session is detached.
 pub(crate) fn nudge_webrtc_riders(state: &EventLoopState, ctx: &HandlerCtx<'_>) {
-    // No in-flight guard, by design: each dial is bounded by `DIAL_TIMEOUT`.
     for peer in webrtc_riders(state) {
         let endpoint = ctx.endpoint.clone();
         n0_future::task::spawn(async move {
@@ -228,6 +227,7 @@ pub(crate) fn nudge_webrtc_riders(state: &EventLoopState, ctx: &HandlerCtx<'_>) 
     // The watcher does this when the path is lost, but a route learned later
     // (link-state comes every 15 s) is then missing, and nothing else runs a
     // lookup for a pair that already has a session or no offer to make.
+    // No in-flight guard in both loops, by design: each dial is bounded by `DIAL_TIMEOUT`.
     for addr in state
         .peer_endpoints
         .values()
