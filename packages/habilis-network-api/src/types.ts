@@ -41,8 +41,10 @@ export interface JoinOpts {
    * derived id like `transport`. Ignored when joining by id.
    */
   relayUrls?: string[]
-  /** Active-view cap. Omit for the engine default. */
+  /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
+  /** Cap on WebRTC sessions (D). Omit for the engine default, 32. */
+  maxSessions?: number
 }
 
 export interface CreateOpts {
@@ -68,7 +70,10 @@ export interface CreateOpts {
    * Needs `'relay'` in `lookup`, and is part of the mesh id.
    */
   relayUrls?: string[]
+  /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
+  /** Cap on WebRTC sessions (D). Omit for the engine default, 32. */
+  maxSessions?: number
 }
 
 /**

@@ -49,7 +49,8 @@ typedef struct habilis_network_mesh habilis_network_mesh;
  * inherits all three from the id; a topic fixes `lookup` to all three lookups.
  *
  * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
- * default active-view cap.
+ * default active-view cap (G, 32). `max_sessions == 0` takes the default cap on
+ * WebRTC sessions (D, 32).
  */
 typedef struct {
   const char *mesh;
@@ -65,6 +66,7 @@ typedef struct {
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
                              default. Needs "relay" in `lookup` */
   size_t max_peers;
+  size_t max_sessions;
 } habilis_network_opts;
 
 /*

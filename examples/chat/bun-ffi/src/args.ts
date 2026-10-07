@@ -27,7 +27,8 @@ export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
                           same list; relay needs relay in --lookup)
     --relay-url <url>     custom relay ladder, repeatable (which relay, nothing
                           more; part of the mesh id like --transport)
-    --max-peers <n>       active-view cap
+    --max-peers <n>       active-view cap (G, default 32)
+    --max-sessions <n>    cap on WebRTC sessions (D, default 32)
     --json                automation mode: NDJSON events out, commands in
 `
 
@@ -54,6 +55,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
       name: { type: 'string' },
       nick: { type: 'string' },
       'max-peers': { type: 'string' },
+      'max-sessions': { type: 'string' },
       json: { type: 'boolean' },
     },
   })
@@ -87,9 +89,18 @@ export function parseChatArgs(argv: string[]): ChatArgs {
     }
   }
 
+  let maxSessions: number | undefined
+  if (values['max-sessions'] !== undefined) {
+    maxSessions = Number(values['max-sessions'])
+    if (!Number.isInteger(maxSessions) || maxSessions < 1) {
+      throw new Error('--max-sessions takes a positive integer')
+    }
+  }
+
   const common = {
     ...(values.nick === undefined ? {} : { nick: values.nick }),
     ...(maxPeers === undefined ? {} : { maxPeers }),
+    ...(maxSessions === undefined ? {} : { maxSessions }),
   }
 
   let entry: Entry
