@@ -258,7 +258,7 @@ async fn build_member_endpoint(
             build.transports,
             Some(&admission),
             build.relay_transport,
-            Some(build.max_peers),
+            crate::lookup::underlay_cap(build.max_peers),
         )
         .await?;
         Ok((endpoint, Some(handle), webrtc, admission, underlay_webrtc))

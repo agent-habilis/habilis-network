@@ -711,6 +711,30 @@ pub(crate) async fn build_peer_multihop(
     Ok((endpoint, handle, webrtc))
 }
 
+/// Tests only: while set, no node of this process gets a `WebRTC` leg on its
+/// underlay, which gives a harness the control cell of a measurement of what the
+/// leg costs. A flag of the process, like `block_ip_paths`: set it before the node
+/// starts.
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+static UNDERLAY_LEG_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tests only: see [`UNDERLAY_LEG_OFF`].
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+pub fn set_underlay_leg_off(off: bool) {
+    UNDERLAY_LEG_OFF.store(off, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The cap of the `WebRTC` leg of the underlay for a node with `max_peers` (G):
+/// `Some(G)`, or `None` while a test switched the leg off.
+#[cfg(feature = "host")]
+pub(crate) fn underlay_cap(max_peers: usize) -> Option<usize> {
+    #[cfg(feature = "iroh-test-utils")]
+    if UNDERLAY_LEG_OFF.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    Some(max_peers)
+}
+
 /// [`build_peer_multihop`], and with `underlay_cap` set the underlay also gets a
 /// `WebRTC` leg: its own `WebRtcHandle`, an admission table with that cap (G),
 /// and the signal protocol on its router, answered for gossip neighbors only.
@@ -1042,6 +1066,18 @@ mod tests {
         };
         let (_, _, _, webrtc_off) = build(off, Some(5)).await;
         assert!(webrtc_off.is_none(), "WebRTC off, no leg");
+    }
+
+    // A test can switch the leg of the underlay off for the whole process, which
+    // is the control cell of a measurement.
+    #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+    #[test]
+    fn a_test_can_switch_the_underlay_leg_off() {
+        assert_eq!(super::underlay_cap(7), Some(7), "on by default");
+        super::set_underlay_leg_off(true);
+        assert_eq!(super::underlay_cap(7), None, "switched off");
+        super::set_underlay_leg_off(false);
+        assert_eq!(super::underlay_cap(7), Some(7), "switched on again");
     }
 
     // One identity per peer: the application endpoint (UDP and relay), the

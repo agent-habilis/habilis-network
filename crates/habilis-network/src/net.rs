@@ -7,6 +7,12 @@
 pub use crate::gossip::conn_path;
 #[cfg(feature = "host")]
 pub use crate::lookup::multihop_handle_config;
+#[cfg(all(
+    feature = "host",
+    feature = "iroh-test-utils",
+    not(target_arch = "wasm32")
+))]
+pub use crate::lookup::set_underlay_leg_off;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use crate::lookup::test_relay;
 pub use crate::lookup::{
