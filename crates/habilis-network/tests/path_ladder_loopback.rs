@@ -345,6 +345,24 @@ async fn cut_ip_between(first: &Member, second: &Member) {
     }
 }
 
+/// Take the `WebRTC` rung away from both ends, on the application endpoint and on
+/// the underlay, through the shared tables. Since an underlay may open a `WebRTC`
+/// session to a neighbor of its own, as the lower underlay id offers one, cutting
+/// only alice's application endpoint leaves a direct underlay edge on about half
+/// of the draws of the two ids, and carol then forwards nothing.
+async fn cut_webrtc_between(first: &Member, second: &Member) {
+    first.block_rung(Rung::WebRtc, true).await;
+    second.block_rung(Rung::WebRtc, true).await;
+    for member in [first, second] {
+        let underlay = member
+            .membership
+            .node
+            .underlay_id()
+            .expect("multihop is on");
+        habilis_network_iroh_webrtc_transport::block_rung(underlay, Rung::WebRtc, true);
+    }
+}
+
 /// With IP and `WebRTC` gone between alice and bob, the pair is carried by the
 /// multihop rung through carol, the only member that can reach both. The proof is
 /// carol's count of forwarded cells: a selected multihop rung alone does not show
@@ -370,8 +388,24 @@ async fn the_multihop_rung_forwards_through_a_third_member() {
     );
     alice.expect_rung("bob", "ip", "nothing blocked").await;
 
+    // The lower underlay id offers an underlay session to its neighbor, so which
+    // of alice and bob has it decides a draw: the line says which one it was.
+    let (alice_underlay, bob_underlay) = (
+        alice.membership.node.underlay_id().expect("multihop is on"),
+        bob.membership.node.underlay_id().expect("multihop is on"),
+    );
+    eprintln!(
+        "UNDERLAY IDS alice={} bob={} lower={}",
+        alice_underlay.fmt_short(),
+        bob_underlay.fmt_short(),
+        if alice_underlay < bob_underlay {
+            "alice"
+        } else {
+            "bob"
+        }
+    );
     cut_ip_between(&alice, &bob).await;
-    alice.block_rung(Rung::WebRtc, true).await;
+    cut_webrtc_between(&alice, &bob).await;
     alice
         .expect_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
         .await;

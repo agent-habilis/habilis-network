@@ -362,9 +362,12 @@ pub async fn build_endpoint(
 
     let opts = transports.opts;
     builder = install_transports(builder, &transports);
-    // Tests only: the underlay is an endpoint of its own, and a test that takes the
-    // IP paths away from a pair (`habilis_network_iroh_webrtc_transport::block_ip_to`)
-    // needs a selector on it that reads the same tables.
+    // Tests only: the underlay is an endpoint of its own, and a test that takes
+    // paths away from a pair (`habilis_network_iroh_webrtc_transport::block_ip_to`)
+    // needs a selector on it that reads the same tables. An underlay with a
+    // `WebRtcHandle` already runs `WebRtcPreferred` (see `install_transports`),
+    // which reads them. This one is for an underlay without a handle, which would
+    // otherwise run iroh's default selector: it gets `MultihopLadder`.
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
     if let Some(id) = underlay_id.filter(|_| underlay && transports.webrtc.is_none()) {
         builder = builder
