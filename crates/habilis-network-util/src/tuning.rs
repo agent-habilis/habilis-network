@@ -773,29 +773,6 @@ pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 /// does.
 pub const LANE_WANTED_SECS: u64 = 60;
 
-/// How many bytes of one QUIC stream a node buffers for a peer that sends faster than the node
-/// reads (decision D11). The node grants this much to the sender, so it is also the most that a
-/// stream can hold in the receiver.
-pub const QUIC_STREAM_RECEIVE_WINDOW: u32 = 256 * 1024;
-
-/// How many bytes of all the streams of one QUIC connection together a node buffers for a peer
-/// (decision D11). Without it, 32 streams of a peer could hold 32 stream windows.
-pub const QUIC_CONNECTION_RECEIVE_WINDOW: u32 = 1024 * 1024;
-
-/// How many bytes a node sends to a peer before the peer acknowledges them (decision D11): the most
-/// that one connection holds in the send buffer of the node.
-pub const QUIC_SEND_WINDOW: u64 = 1024 * 1024;
-
-/// How many unidirectional and bidirectional streams a peer may have open to a node at once
-/// (decision D11). Gossip and the unicast plane open one short stream per message.
-pub const QUIC_MAX_UNI_STREAMS: u32 = 32;
-pub const QUIC_MAX_BIDI_STREAMS: u32 = 4;
-
-/// How many bytes of QUIC datagrams a node buffers for a peer (decision D11). The engine sends no QUIC
-/// datagrams today, so this is a reserve bound, not a measured need: it keeps a peer that does send
-/// them from growing the buffer.
-pub const QUIC_DATAGRAM_BUFFER: usize = 64 * 1024;
-
 /// How long after a `Neighbor` request a node reads "no link came up" as a refusal: the longer of
 /// the relink cooldown (10 s) and the probe deadline (15 s), plus 5 s. A link that comes up later
 /// than this is not a reply to the request.

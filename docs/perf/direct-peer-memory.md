@@ -344,7 +344,7 @@ The test `a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation` has 
 
 ## The ceiling C of direct connections (decision D11)
 
-D11 replaces the cap D with one ceiling C. A node never refuses an offer or a connection because of C. It evicts the least valuable peer when a newcomer needs the place. The numbers in this section are design values and test results. The memory and the throughput cost with the new limits are **not measured yet**: they need a run on a free host.
+D11 replaces the cap D with one ceiling C. A node never refuses an offer or a connection because of C. It evicts the least valuable peer when a newcomer needs the place. The numbers in this section are design values and test results. The memory of a node with C in place is **not measured yet**: it needs a run on a free host.
 
 ### What C counts
 
@@ -373,38 +373,20 @@ A pair that needs the lane has no direct path without a session. On a mesh whose
 
 The underlay keeps its own ledger with G as its ceiling. Before D11, that table refused the session after the G-th. Now it evicts at G. The leg opens a session only to a gossip neighbor, so its count stays at G or less, and the ledger does not act. Test: `a_ledger_with_g_as_its_ceiling_never_evicts_while_the_sessions_stay_within_g`.
 
-### QUIC limits
+### No limit on the memory of one connection
 
-Every endpoint of the engine, the multihop underlay included, sets the memory limits of a QUIC connection (`build_endpoint`). The numbers are starting values, to be confirmed by a measurement:
-
-| Limit | Value |
-| -- | -- |
-| Window of one stream | 256 KiB |
-| Window of all the streams of a connection | 1 MiB |
-| Send window (bytes not yet acknowledged) | 1 MiB |
-| Unidirectional streams open at once | 32 |
-| Bidirectional streams open at once | 4 |
-| Buffer for datagrams | 64 KiB |
-
-The keep-alive, the idle timeout and the multipath settings stay at the iroh defaults. Two tests show the limits: a receiver that never reads takes in at most one stream window, and 16 streams that nobody reads take in at most the connection window.
-
-**The cost in throughput.** A window limits a path to one window per round trip. At 100 ms, a stream with 256 KiB reaches about 20 Mbit/s, and a connection with 1 MiB reaches about 84 Mbit/s. This is a real cut for a large blob on a long path. The bench cells of Phase 3 must be run again with the limits, and they must report the cut as it is.
+D11 caps the number of direct connections only. A connection may use as much memory as it needs, and every endpoint keeps the iroh defaults for windows and streams. RAM is bounded by the count C and by time: the 900 s backstop closes what nobody used. The flood mode of the harness (`MESH_FLOOD_PEERS`) stays, and it measures what one connection costs.
 
 ### Keep-alive cost
 
 iroh sends a heartbeat on each connection every 5 s. At C = 64 and G = 32, that is 96 connections and about 19 packets per second when the node is idle. This number comes from the iroh default and from the sum. It is not measured here.
 
-### The formula after D11
+### RAM after D11
 
-```text
-RSS = base + G x 1.1 + C x max(worst session, worst connection)
-```
-
-`base` is the idle node plus the stacks (29 MB plus about 5 MB in the table above). The worst session and the worst connection come from the flood run (`MESH_FLOOD_PEERS`), which is not done yet. Until it is, the term for C has no value in this document.
+The formula above (G x 1.1 for the gossip links, a cost per session or connection) holds with C in place of D. There is no per-connection worst case in this document. The flood run reads the cost of one busy connection, and it is not done yet.
 
 ### Not measured yet
 
-- The memory of a node with the QUIC limits, with the flood run at K = 1, 4 and 11 peers.
-- The throughput cost of the limits (the Phase 3 cells).
+- The memory of one busy connection, with the flood run at K = 1, 4 and 11 peers.
 - The rate of evictions per member per minute at N = 24 with C = 8, and the share of pooled closes that are followed by a re-dial with C = 64.
 - A mesh of two nodes with real `WebRTC` sessions at the ceiling is tested only with loopback sessions in the unit tests.
