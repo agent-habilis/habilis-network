@@ -412,6 +412,7 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
             return None;
         }
     };
+    tracing::debug!(target: "habilis_network::beacon", "rival probe endpoint built");
     // Clamped so at most one probe is outstanding per heal tick even when
     // tests shorten the cadence below the probe cap.
     let budget = Duration::from_secs(HEAL_PROBE_SECS.min(heal_interval_secs()));

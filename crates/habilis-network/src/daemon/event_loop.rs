@@ -784,6 +784,8 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // latency this change was meant to leave untouched.
             found_rival = beacon::probe_verdict(&mut rival_probe) => {
                 state.idle.external += 1;
+                let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
+                state.probe_backoff.note_verdict(found_rival, Instant::now(), spread);
                 // One free verdict is not enough to claim: a live beacon's
                 // rival re-check periodically releases the rendezvous to
                 // re-probe it, and a probe landing inside that window reads

@@ -362,6 +362,21 @@ pub const HEAL_PROBE_SECS: u64 = 5;
 /// that briefly outlives one heal interval (still detached) is fine.
 pub const HEAL_HARD_PROBE_SECS: u64 = 20;
 
+/// The longest wait between two rival probes of a member that keeps finding the rival.
+/// A probe is a throwaway endpoint and a relay registration, and without a back-off every
+/// member that holds no rendezvous starts one at each heal tick. The wait doubles with each
+/// probe that finds the rival, from one heal interval up to this value (or 8 heal intervals,
+/// if that is less: tests shorten the heal interval and must keep their cadence).
+///
+/// Cost: when the host of the rendezvous dies, the first probe after the death comes sooner
+/// than this wait. The members that hold a link to the rendezvous do not wait: the
+/// reclaim window opens at the `NeighborDown` and is not held back. The members that hold
+/// none probe on their own phases. With N such members at the longest wait, the first probe
+/// comes after about 120 / N s on average: 40 s at N = 4, 5 s at N = 24. The worst case, with
+/// all phases aligned, is the full 120 s; a new joiner then waits that long, plus the two
+/// free readings and the claim, as it does today. The jitter on the wait keeps the phases apart.
+pub const HEAL_PROBE_BACKOFF_MAX_SECS: u64 = 120;
+
 /// A heal inter-tick gap above this many seconds means the process was
 /// frozen between ticks (App Nap / coalescing / sleep) and must hard
 /// re-bootstrap. Safely above the default heal interval (15s) so normal

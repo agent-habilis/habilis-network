@@ -337,6 +337,8 @@ pub struct EventLoopState {
     /// must fall in one arbitration, so every reopen or settle of the
     /// rendezvous identity clears it (`forget_rendezvous_verdict`).
     pub(crate) rendezvous_probe_read_free: bool,
+    /// The wait between two rival probes started on the heal tick; see `ProbeBackoff`.
+    pub(crate) probe_backoff: super::probe_backoff::ProbeBackoff,
     /// Whether grafting the rendezvous must wait for an attached `WebRTC`
     /// session — true for a webrtc-shaped node on a lookup-only mesh; see
     /// `transport::webrtc::rendezvous_graftable`.
@@ -737,6 +739,7 @@ impl EventLoopState {
             rendezvous_offer_fallback: false,
             rendezvous_answers_jsep: true,
             rendezvous_probe_read_free: false,
+            probe_backoff: super::probe_backoff::ProbeBackoff::default(),
             rendezvous_graft_needs_session: false,
             local_udp_transport: true,
             announced: false,
@@ -1016,6 +1019,7 @@ impl EventLoopState {
     /// [`Self::reclaim_until`].
     pub(crate) fn arm_reclaim(&mut self, now: Instant) {
         self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
+        self.probe_backoff.reset();
     }
 
     /// Whether this node should hold, or come back to, the rendezvous link:
@@ -1088,6 +1092,7 @@ impl EventLoopState {
     /// holder's.
     pub(crate) fn forget_rendezvous_verdict(&mut self) {
         self.rendezvous_probe_read_free = false;
+        self.probe_backoff.reset();
         if let Some(rendezvous) = self.rendezvous_id {
             self.webrtc_admission.forget_refusal(rendezvous);
         }
@@ -1549,6 +1554,9 @@ impl EventLoopState {
         // A peer at a new address is not the peer that refused.
         if changed {
             self.graft_backoff.reset(id);
+            if self.rendezvous_id == Some(id) {
+                self.probe_backoff.reset();
+            }
         }
     }
 
@@ -2396,6 +2404,44 @@ mod tests {
 
         state.forget_rendezvous_verdict();
         assert!(!state.rendezvous_probe_read_free);
+    }
+
+    // The probe wait ends at the three events that reopen the rendezvous: the reclaim window
+    // opens, the arbitration is forgotten, and the rendezvous gets a new address. The address of
+    // any other peer does not end it.
+    #[test]
+    fn the_events_that_reopen_the_rendezvous_end_the_probe_wait() {
+        let now = Instant::now();
+        let rendezvous = endpoint_id(9);
+        let stranger = endpoint_id(8);
+        let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
+
+        let mut state = fresh_state();
+        state.rendezvous_id = Some(rendezvous);
+        state.probe_backoff.note_verdict(true, now, 0.0);
+        assert!(!state.probe_backoff.due(now), "the wait is on");
+
+        state.arm_reclaim(now);
+        assert!(state.probe_backoff.due(now), "the reclaim window");
+
+        state.probe_backoff.note_verdict(true, now, 0.0);
+        state.forget_rendezvous_verdict();
+        assert!(state.probe_backoff.due(now), "the arbitration is forgotten");
+
+        state.probe_backoff.note_verdict(true, now, 0.0);
+        state.note_peer_endpoint(nick("stranger"), iroh::EndpointAddr::new(stranger));
+        state.note_peer_endpoint(
+            nick("stranger"),
+            iroh::EndpointAddr::new(stranger).with_relay_url(relay.clone()),
+        );
+        assert!(!state.probe_backoff.due(now), "a new address of another peer");
+
+        state.note_peer_endpoint(nick("host"), iroh::EndpointAddr::new(rendezvous));
+        state.note_peer_endpoint(
+            nick("host"),
+            iroh::EndpointAddr::new(rendezvous).with_relay_url(relay),
+        );
+        assert!(state.probe_backoff.due(now), "a new address of the rendezvous");
     }
 
     // Under a long flap storm against a steady peer set, every collection *we*

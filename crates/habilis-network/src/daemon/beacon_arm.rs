@@ -124,6 +124,11 @@ pub(super) async fn maybe_cohost(
     probe: &mut Option<beacon::RivalProbe>,
 ) {
     if may_cohost(arm.policy, state.meshed, arm.started) {
+        // A member that keeps finding the rival probes less often; the reclaim window is not held back.
+        let would_probe = arm.params.bind_ports.is_empty() && probes_before_claim(arm.policy);
+        if would_probe && probe.is_none() && !state.probe_backoff.due(Instant::now()) {
+            return;
+        }
         let claimed = beacon::ensure(
             arm.params,
             ctx.endpoint,
