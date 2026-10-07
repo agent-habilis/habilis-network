@@ -75,6 +75,15 @@ fn selected_path_is_direct(connection: &Connection) -> bool {
         .any(|path| path.is_selected() && !matches!(path.remote_addr(), TransportAddr::Relay(_)))
 }
 
+/// The paths of a connection as text, a star on the selected one.
+fn path_list(paths: impl IntoIterator<Item = (TransportAddr, bool)>) -> String {
+    paths
+        .into_iter()
+        .map(|(addr, selected)| format!("{addr:?}{}", if selected { "*" } else { "" }))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// What the relay may do for cells, set by the mesh policy.
 #[derive(Debug, Clone, Copy)]
 struct RelayRule {
@@ -91,6 +100,8 @@ struct RelayRule {
 struct RelayGate {
     allow_relay: bool,
     reading: Option<(Instant, bool)>,
+    /// The path list at the last refusal, so that the log says it once per change.
+    last_refused_paths: Option<String>,
 }
 
 impl RelayGate {
@@ -98,6 +109,7 @@ impl RelayGate {
         Self {
             allow_relay,
             reading: None,
+            last_refused_paths: None,
         }
     }
 
@@ -112,6 +124,18 @@ impl RelayGate {
             _ => {
                 let admitted = selected_path_is_direct(connection);
                 self.reading = Some((now, admitted));
+                if !admitted {
+                    let paths = path_list(
+                        connection
+                            .paths()
+                            .iter()
+                            .map(|path| (path.remote_addr().clone(), path.is_selected())),
+                    );
+                    if self.last_refused_paths.as_deref() != Some(paths.as_str()) {
+                        tracing::debug!(%paths, "multihop underlay: no direct path is selected");
+                        self.last_refused_paths = Some(paths);
+                    }
+                }
                 admitted
             }
         }
@@ -580,7 +604,7 @@ impl ProtocolHandler for ForwardAcceptor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering};
+    use super::{Arc, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, TransportAddr};
     use crate::addr::{Route, RouteHop};
     use crate::test_support::relay_server;
     use crate::wire::Cell;
@@ -838,6 +862,15 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(from.forwarder.stuck_hops(), vec![to.hop.app_id]);
+    }
+
+    #[test]
+    fn the_path_list_marks_the_selected_path_with_a_star() {
+        let ip = TransportAddr::Ip("127.0.0.1:9".parse().expect("an address"));
+        let relay = TransportAddr::Relay("http://127.0.0.1:1".parse().expect("a relay url"));
+        let list = super::path_list([(relay, true), (ip, false)]);
+        assert!(list.starts_with("Relay("), "{list}");
+        assert!(list.ends_with(")* Ip(127.0.0.1:9)"), "{list}");
     }
 
     #[test]
