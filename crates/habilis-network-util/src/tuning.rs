@@ -771,6 +771,24 @@ pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 /// that the held frame asks for must start within this time, or the want lapses.
 pub const LANE_WANTED_SECS: u64 = 60;
 
+/// How many bytes of one QUIC stream a node buffers for a peer that sends faster than the node
+/// reads (decision D11). The node grants this much to the sender, so it is also the most that a
+/// stream can hold in the receiver.
+pub const QUIC_STREAM_RECEIVE_WINDOW: u32 = 256 * 1024;
+
+/// How many bytes a node sends to a peer before the peer acknowledges them (decision D11): the most
+/// that one connection holds in the send buffer of the node.
+pub const QUIC_SEND_WINDOW: u64 = 1024 * 1024;
+
+/// How many unidirectional and bidirectional streams a peer may have open to a node at once
+/// (decision D11). Gossip and the unicast plane open one short stream per message.
+pub const QUIC_MAX_UNI_STREAMS: u32 = 32;
+pub const QUIC_MAX_BIDI_STREAMS: u32 = 4;
+
+/// How many bytes of datagrams a node buffers for a peer, the most that the multihop and the
+/// `WebRTC` paths can queue in the receiver of one connection (decision D11).
+pub const QUIC_DATAGRAM_BUFFER: usize = 64 * 1024;
+
 /// The one idle backstop of the direct connections (decision D11). The ceiling frees a place
 /// when a newcomer needs it; this only closes what nobody used for a quarter of an hour, so
 /// that a quiet node holds nothing for ever. It is the idle close of a pooled connection and of
