@@ -12,7 +12,7 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request};
+use habilis_network::membership::{self, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -36,15 +36,24 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![
+        Self::create_with(
+            nick,
+            relay,
+            vec![
                 Transport::Udp,
                 Transport::WebRtc,
                 Transport::Multihop,
                 Transport::Relay,
             ],
+        )
+        .await
+    }
+
+    async fn create_with(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
+        Self::open(&membership::Opts {
+            nick: Some(nick.to_owned()),
+            lookup: vec![Lookup::Relay],
+            transport,
             relay_urls: vec![relay.to_string()],
             ..membership::Opts::default()
         })
@@ -96,6 +105,33 @@ impl Member {
             .await
             .ok()
             .flatten()
+    }
+
+    async fn block_rung_to(&self, rung: Rung, peer: &str, blocked: bool) {
+        self.membership
+            .request(|reply| Request::BlockRungTo {
+                rung,
+                peer: peer.to_owned(),
+                blocked,
+                reply,
+            })
+            .await
+            .expect("the loop answers");
+    }
+
+    async fn forwarded_cells(&self) -> u64 {
+        self.membership
+            .request(|reply| Request::ForwardedCells { reply })
+            .await
+            .expect("the loop answers")
+    }
+
+    fn underlay_id(&self) -> iroh::EndpointId {
+        self.membership.node.underlay_id().expect("multihop is on")
+    }
+
+    fn underlay_ports(&self) -> Vec<u16> {
+        self.membership.node.underlay_ports().to_vec()
     }
 
     /// How many `WebRTC` sessions the underlay of this member holds.
@@ -184,6 +220,91 @@ async fn the_underlay_opens_a_webrtc_session_to_a_neighbor_that_has_no_ip_path()
     bob.wait_for_underlay_session("bob, IP blocked").await;
 
     for member in [alice, bob] {
+        let _ = member.membership.node.leave().await;
+    }
+}
+
+/// The proof of the leg of the underlay: a cell is forwarded over a `WebRTC` edge
+/// of the underlay, through a third member.
+///
+/// Alice has `WebRTC` and no IP to carol, on the application endpoint and on the
+/// underlay. Carol and bob keep IP. Alice and bob are cut entirely: no IP, and no
+/// `WebRTC` to each other (one remote of each, so that the other pair keeps it).
+/// The list is `udp,webrtc,multihop`, with no relay for payload, so the relay
+/// gate keeps cells off the relay and the only way from alice to bob is carol. The
+/// edge from alice to carol is a `WebRTC` session of the underlays, which exists
+/// only since the underlay has a leg of its own. Carol's count of forwarded cells
+/// shows that she was a hop, and not that the pair used a direct link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
+    init_logging();
+    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+    let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
+    let alice = Member::create_with("alice", &relay, list).await;
+    let bob = Member::join("bob", &alice).await;
+    let carol = Member::join("carol", &alice).await;
+    assert!(
+        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+        "the three members never formed a mesh"
+    );
+    alice.wait_for_rung("bob", "ip", "nothing blocked").await;
+
+    // IP: alice to carol and alice to bob, on both endpoints of each member.
+    // Carol and bob keep it.
+    let (alice_underlay, bob_underlay, carol_underlay) =
+        (alice.underlay_id(), bob.underlay_id(), carol.underlay_id());
+    habilis_network_iroh_webrtc_transport::block_ip_to(
+        alice_underlay,
+        bob.underlay_ports()
+            .into_iter()
+            .chain(carol.underlay_ports()),
+    );
+    habilis_network_iroh_webrtc_transport::block_ip_to(bob_underlay, alice.underlay_ports());
+    habilis_network_iroh_webrtc_transport::block_ip_to(carol_underlay, alice.underlay_ports());
+    alice
+        .block_ip_to(bob.ports().into_iter().chain(carol.ports()).collect())
+        .await;
+    bob.block_ip_to(alice.ports()).await;
+    carol.block_ip_to(alice.ports()).await;
+
+    // WebRTC: alice and bob lose it to each other only, on both endpoints.
+    alice.block_rung_to(Rung::WebRtc, "bob", true).await;
+    bob.block_rung_to(Rung::WebRtc, "alice", true).await;
+    habilis_network_iroh_webrtc_transport::block_rung_to(
+        alice_underlay,
+        Rung::WebRtc,
+        bob_underlay,
+        true,
+    );
+    habilis_network_iroh_webrtc_transport::block_rung_to(
+        bob_underlay,
+        Rung::WebRtc,
+        alice_underlay,
+        true,
+    );
+
+    alice
+        .wait_for_rung("carol", "webrtc", "alice to carol")
+        .await;
+    alice
+        .wait_for_underlay_session("alice, IP blocked to carol")
+        .await;
+    alice
+        .wait_for_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
+        .await;
+
+    let started = Instant::now();
+    while carol.forwarded_cells().await == 0 {
+        assert!(
+            started.elapsed() < STEP_DEADLINE,
+            "alice reached bob on the multihop rung, but carol forwarded no cell"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    for member in [alice, bob, carol] {
         let _ = member.membership.node.leave().await;
     }
 }

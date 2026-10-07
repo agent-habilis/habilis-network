@@ -149,6 +149,17 @@ pub enum Request {
         blocked: bool,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: take one rung of the path ladder away from this node alone (or
+    /// give it back), to the member `peer` only. [`Request::BlockRung`] takes it
+    /// from every remote. Only the `WebRTC` rung has a remote in its address, so
+    /// only that rung is cut this way.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    BlockRungTo {
+        rung: Rung,
+        peer: String,
+        blocked: bool,
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: forget that the member `peer` is proven direct, and offer it a
     /// `WebRTC` session now, as the path watcher does when a direct path is lost.
     /// A test uses it to attach a session at a chosen moment instead of at the
@@ -371,6 +382,29 @@ impl NodeDriver for MembershipApp {
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
                         crate::transport::webrtc::nudge(&endpoint, peer).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::BlockRungTo {
+                rung,
+                peer,
+                blocked,
+                reply,
+            } => {
+                if let Some(addr) = state.peer_endpoints.get(peer.as_str()) {
+                    let remote = addr.id;
+                    habilis_network_iroh_webrtc_transport::block_rung_to(
+                        ctx.endpoint.id(),
+                        rung,
+                        remote,
+                        blocked,
+                    );
+                    let endpoint = ctx.endpoint.clone();
+                    n0_future::task::spawn(async move {
+                        crate::transport::webrtc::nudge(&endpoint, remote).await;
                     });
                 }
                 let _ = reply.send(());
