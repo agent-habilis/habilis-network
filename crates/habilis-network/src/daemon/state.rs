@@ -196,6 +196,8 @@ pub struct EventLoopState {
     pub(crate) below_target_since: Option<Instant>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
+    /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
+    pub(crate) graft_backoff: crate::transport::graft_backoff::GraftBackoff,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
@@ -705,6 +707,7 @@ impl EventLoopState {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: crate::transport::redial::Redials::default(),
             join_fallback_at: None,
+            graft_backoff: crate::transport::graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
@@ -910,6 +913,15 @@ impl EventLoopState {
     /// two or more links fewer than G for `STARVED_SECS`, and the last fallback is
     /// `STARVED_SECS` old. A `true` stamps the fallback.
     pub(crate) fn starved_join_due(&mut self, now: Instant) -> bool {
+        let due = self.starved_join_ready(now);
+        if due {
+            self.join_fallback_at = Some(now);
+        }
+        due
+    }
+
+    /// [`Self::starved_join_due`] without the stamp: whether a fallback would be due at `now`.
+    pub(crate) fn starved_join_ready(&self, now: Instant) -> bool {
         let window = Duration::from_secs(STARVED_SECS);
         let starved = self
             .below_target_since
@@ -917,11 +929,22 @@ impl EventLoopState {
         let waited = self
             .join_fallback_at
             .is_none_or(|at| now.duration_since(at) >= window);
-        let due = starved && waited;
-        if due {
-            self.join_fallback_at = Some(now);
-        }
-        due
+        starved && waited
+    }
+
+    /// Whether a paced graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
+    /// wait runs. A starved node whose fallback is due asks every peer, because a `Join` is not
+    /// refused.
+    pub(crate) fn graft_blocked(&self, peer: EndpointId, now: Instant) -> bool {
+        self.graft_backoff.is_blocked(&peer, now) && !self.starved_join_ready(now)
+    }
+
+    /// Read which `Neighbor` requests were refused. Every alive tick.
+    pub(crate) fn settle_graft_backoff(&mut self, now: Instant) {
+        let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
+        let linked = &self.linked_endpoints;
+        self.graft_backoff
+            .settle(now, |peer| linked.contains(peer), spread);
     }
 
     /// Remember that a `NeighborUp` was held back by the flood window.
@@ -961,6 +984,7 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let addr = self.peer_endpoints.remove(nick)?;
+        self.graft_backoff.reset(addr.id);
         self.proven_endpoints.forget_endpoint(addr.id);
         self.direct.remove(&addr.id);
         self.path_watchers.remove(&addr.id);
@@ -980,6 +1004,7 @@ impl EventLoopState {
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);
+        self.graft_backoff.reset(peer);
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
     }
 
@@ -1511,7 +1536,16 @@ impl EventLoopState {
     /// peer advertises IP, and rebuilding a bare address from the id there made
     /// every native peer look like a browser.
     pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
+        let id = endpoint.id;
+        let changed = self
+            .peer_endpoints
+            .get(&nickname)
+            .is_some_and(|before| *before != endpoint);
         self.peer_endpoints.insert(nickname, endpoint);
+        // A peer at a new address is not the peer that refused.
+        if changed {
+            self.graft_backoff.reset(id);
+        }
     }
 
     /// Mark the gossip topic closed without a real stream end — how the

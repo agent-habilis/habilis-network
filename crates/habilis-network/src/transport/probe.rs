@@ -487,11 +487,17 @@ pub(crate) enum GraftRequest {
     Join,
     /// Low priority: a peer with a full view refuses and keeps its neighbors.
     Neighbor,
+    /// No request: the peer refused lately and its wait runs.
+    Skip,
 }
 
 /// The request that grafts `peer`. The rendezvous gets a `Join`, because a low
 /// priority request to a peer that holds a tombstone for us is refused for ever.
 /// Every other graft only fills a view, and must not make a full one drop a neighbor.
+///
+/// A peer that refused a `Neighbor` request lately is skipped by a paced graft, for the wait of
+/// its backoff (`GraftBackoff`). The `PeerInfo` graft is not held, but its request is recorded
+/// too, so that its silence reads as a refusal.
 ///
 /// A low priority request evicts nobody, so a node that arrives when every other node is
 /// full gets no link from it. A `paced` graft (the fill tick, a proven direct path) asks
@@ -510,8 +516,12 @@ pub(crate) fn graft_request(
     }
     state.note_link_count(state.linked_endpoints.len(), max_peers, now);
     if paced && state.starved_join_due(now) {
+        // A `Join` is not refused, so it ignores the backoff of the peer.
         GraftRequest::Join
+    } else if paced && state.graft_backoff.is_blocked(&peer, now) {
+        GraftRequest::Skip
     } else {
+        state.graft_backoff.asked(peer, now);
         GraftRequest::Neighbor
     }
 }
@@ -533,6 +543,7 @@ pub(crate) async fn request_graft(
     ) {
         GraftRequest::Join => ctx.sender.join_peers(vec![peer]).await,
         GraftRequest::Neighbor => ctx.sender.neighbor_peers(vec![peer]).await,
+        GraftRequest::Skip => Ok(()),
     }
 }
 
@@ -579,7 +590,9 @@ pub(crate) async fn retry_direct(
     distrust_links: bool,
 ) {
     // Every alive tick, so that the clock of a starved node does not outlive its cause.
-    state.note_link_count(state.linked_endpoints.len(), ctx.max_peers, Instant::now());
+    let now = Instant::now();
+    state.note_link_count(state.linked_endpoints.len(), ctx.max_peers, now);
+    state.settle_graft_backoff(now);
     if state.relay_transport {
         fill_active_view(state, ctx).await;
         return;
@@ -617,6 +630,7 @@ fn next_fill(
         .filter(|addr| addr.id != rendezvous_id)
         .filter(|addr| !state.linked_endpoints.contains(&addr.id))
         .filter(|addr| !state.relink_on_cooldown(addr.id, now))
+        .filter(|addr| !state.graft_blocked(addr.id, now))
         .collect();
     free.sort_unstable_by_key(|addr| (needs_webrtc_lane(addr), addr.id));
     let first_group = free.first().map_or(0, |first| {
@@ -653,7 +667,16 @@ fn retry_candidates(
     rendezvous_id: EndpointId,
     distrust_links: bool,
 ) -> Vec<iroh::EndpointAddr> {
-    let now = Instant::now();
+    retry_candidates_at(state, rendezvous_id, distrust_links, Instant::now())
+}
+
+/// [`retry_candidates`] at `now`.
+fn retry_candidates_at(
+    state: &EventLoopState,
+    rendezvous_id: EndpointId,
+    distrust_links: bool,
+    now: Instant,
+) -> Vec<iroh::EndpointAddr> {
     let mut peers: Vec<iroh::EndpointAddr> = state
         .peer_endpoints
         .values()
@@ -668,6 +691,7 @@ fn retry_candidates(
                         .is_some_and(|handle| handle.has_session(&addr.id)))
         })
         .filter(|addr| !state.relink_on_cooldown(addr.id, now))
+        .filter(|addr| !state.graft_blocked(addr.id, now))
         .cloned()
         .collect();
     peers.sort_unstable_by_key(|addr| addr.id);
@@ -680,7 +704,7 @@ mod tests {
 
     use super::{
         GraftRequest, PathKind, ensure_watchers, graft_request, may_graft, retry_candidates,
-        webrtc_riders,
+        retry_candidates_at, webrtc_riders,
     };
     use crate::daemon::state::EventLoopState;
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -746,6 +770,145 @@ mod tests {
             GraftRequest::Join,
             "and again after a window"
         );
+    }
+
+    /// A peer that refused a `Neighbor` request is left alone by the paced grafts for the wait of
+    /// its backoff: the retry pass does not probe it, and the fill does not pick it. The request
+    /// that is not paced (the `PeerInfo` graft, one per `PeerInfo`) is not held, but it is
+    /// recorded as asked, so that its silence reads as a refusal too.
+    #[test]
+    fn a_peer_that_refused_is_skipped_by_the_paced_grafts_but_not_the_peer_info_graft() {
+        use std::time::Duration;
+        let mut state = fresh_state();
+        let (rendezvous, refuser, other) = (endpoint_id(3), endpoint_id(4), endpoint_id(5));
+        let native =
+            |id| EndpointAddr::new(id).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
+        state
+            .peer_endpoints
+            .insert(nick("refuser"), native(refuser));
+        state.peer_endpoints.insert(nick("other"), native(other));
+        let start = crate::util::clock::Instant::now();
+
+        // The request is not paced: it goes out and is recorded.
+        assert_eq!(
+            graft_request(&mut state, refuser, rendezvous, 8, start, false),
+            GraftRequest::Neighbor
+        );
+        let later = start + Duration::from_secs(crate::util::tuning::GRAFT_REFUSED_AFTER_SECS + 1);
+        state.settle_graft_backoff(later);
+
+        assert_eq!(
+            graft_request(&mut state, refuser, rendezvous, 8, later, true),
+            GraftRequest::Skip,
+            "a paced graft leaves the peer that refused"
+        );
+        assert_eq!(
+            graft_request(&mut state, refuser, rendezvous, 8, later, false),
+            GraftRequest::Neighbor,
+            "the PeerInfo graft is not held"
+        );
+        assert_eq!(
+            graft_request(&mut state, other, rendezvous, 8, later, true),
+            GraftRequest::Neighbor,
+            "another peer is asked"
+        );
+        let ids: Vec<_> = retry_candidates(&state, rendezvous, false)
+            .into_iter()
+            .map(|addr| addr.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [other],
+            "the retry pass does not probe the peer that refused"
+        );
+        assert_eq!(
+            super::next_fill(&state, 8, rendezvous, later, 0).map(|addr| addr.id),
+            Some(other),
+            "the fill does not pick it either"
+        );
+    }
+
+    /// The starved fallback ignores the backoff. A peer that holds a tombstone for this node (it saw
+    /// a `Disconnect` with `left = true`) refuses every `Neighbor` request for ever. A `Join` is
+    /// the only way past it, and it is never refused. Do not make the fallback honor the backoff.
+    #[test]
+    fn the_starved_fallback_ignores_the_backoff_for_a_peer_with_a_tombstone() {
+        use std::time::Duration;
+        let mut state = fresh_state();
+        let (rendezvous, tombstone) = (endpoint_id(3), endpoint_id(4));
+        state.peer_endpoints.insert(
+            nick("tombstone"),
+            EndpointAddr::new(tombstone).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
+        );
+        let start = crate::util::clock::Instant::now();
+        let window = Duration::from_secs(crate::util::tuning::STARVED_SECS);
+        // G = 4 and two links: starved once the window has passed.
+        state.linked_endpoints.insert(endpoint_id(10));
+        state.linked_endpoints.insert(endpoint_id(11));
+        assert_eq!(
+            graft_request(&mut state, tombstone, rendezvous, 4, start, false),
+            GraftRequest::Neighbor
+        );
+        let refused =
+            start + Duration::from_secs(crate::util::tuning::GRAFT_REFUSED_AFTER_SECS + 1);
+        state.settle_graft_backoff(refused);
+        assert_eq!(
+            graft_request(&mut state, tombstone, rendezvous, 4, refused, true),
+            GraftRequest::Skip,
+            "before the window: the backoff holds"
+        );
+
+        let starved = start + window + Duration::from_secs(1);
+        assert_eq!(
+            retry_candidates_at(&state, rendezvous, false, starved)
+                .first()
+                .map(|addr| addr.id),
+            Some(tombstone),
+            "a starved node asks every peer"
+        );
+        assert_eq!(
+            graft_request(&mut state, tombstone, rendezvous, 4, starved, true),
+            GraftRequest::Join,
+            "the fallback is a Join, whatever the backoff says"
+        );
+    }
+
+    /// The link coming up, or a new address of the peer, ends the backoff.
+    #[test]
+    fn a_neighbor_up_or_a_new_address_ends_the_backoff() {
+        use std::time::Duration;
+        let mut state = fresh_state();
+        let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
+        let addr = |port: u16| {
+            EndpointAddr::new(peer).with_ip_addr(format!("127.0.0.1:{port}").parse().expect("addr"))
+        };
+        let start = crate::util::clock::Instant::now();
+        let later = start + Duration::from_secs(crate::util::tuning::GRAFT_REFUSED_AFTER_SECS + 1);
+        let refuse = |node: &mut EventLoopState| {
+            node.graft_backoff = crate::transport::graft_backoff::GraftBackoff::default();
+            let _ = graft_request(node, peer, rendezvous, 8, start, false);
+            node.settle_graft_backoff(later);
+            assert!(node.graft_blocked(peer, later), "refused");
+        };
+
+        refuse(&mut state);
+        state.link(peer);
+        assert!(!state.graft_blocked(peer, later), "the link came up");
+
+        state.unlink(peer);
+        refuse(&mut state);
+        state.note_peer_endpoint(nick("peer"), addr(4000));
+        assert!(
+            state.graft_blocked(peer, later),
+            "the first address is not a change"
+        );
+        state.note_peer_endpoint(nick("peer"), addr(4000));
+        assert!(
+            state.graft_blocked(peer, later),
+            "the same address again is not a change"
+        );
+        state.note_peer_endpoint(nick("peer"), addr(4001));
+        assert!(!state.graft_blocked(peer, later), "a new address");
     }
 
     #[test]

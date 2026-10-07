@@ -793,6 +793,19 @@ pub const QUIC_MAX_BIDI_STREAMS: u32 = 4;
 /// `WebRTC` paths can queue in the receiver of one connection (decision D11).
 pub const QUIC_DATAGRAM_BUFFER: usize = 64 * 1024;
 
+/// How long after a `Neighbor` request a node reads "no link came up" as a refusal: the longer of
+/// the relink cooldown (10 s) and the probe deadline (15 s), plus 5 s. A link that comes up later
+/// than this is not a reply to the request.
+pub const GRAFT_REFUSED_AFTER_SECS: u64 = 20;
+
+/// The first wait before a peer that refused a `Neighbor` request is asked again. Each refusal in
+/// a row doubles it, up to [`GRAFT_BACKOFF_MAX_SECS`]. A `NeighborUp` or a new address of the peer
+/// starts it over.
+pub const GRAFT_BACKOFF_FIRST_SECS: u64 = 60;
+
+/// The longest wait before a peer that keeps refusing is asked again, 15 minutes.
+pub const GRAFT_BACKOFF_MAX_SECS: u64 = 900;
+
 /// The one idle backstop of the direct connections (decision D11). The ceiling frees a place
 /// when a newcomer needs it; this only closes what nobody used for a quarter of an hour, so
 /// that a quiet node holds nothing for ever. It is the idle close of a pooled connection and of

@@ -31,6 +31,7 @@ mod admission;
 pub(crate) mod ceiling;
 mod direct_gossip;
 pub(crate) mod endpoint_proof;
+pub(crate) mod graft_backoff;
 #[cfg(feature = "host")]
 pub(crate) mod ipc;
 pub(crate) mod outbox;
