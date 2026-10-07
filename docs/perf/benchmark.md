@@ -202,8 +202,10 @@ rounds. The range is min–max across both runs.
   0.08 ms to the median round trip. The cause is not measured. One
   possibility is that every packet is wrapped and carried by a second
   QUIC connection, the underlay.
-- A third member halves multihop again (about 435 Mbit/s) and doubles
-  the added round trip. Each member that forwards adds a similar cost.
+- A third member halves multihop again (about 435 Mbit/s) and adds about
+  0.2 ms to the median round trip, against 0.08 ms for the direct link.
+  Two runs with one forwarding member do not show whether each further member
+  adds the same cost.
 - The p99 of the via-third cell was 0.30 ms in run 1 and 0.53 ms in run 2.
   The host was busier in run 2. This single value is not a result.
 - The relay cell is fast because the relay is on the same machine. Do not
