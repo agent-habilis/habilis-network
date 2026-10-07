@@ -950,6 +950,13 @@ impl EventLoopState {
     /// alive tick re-probed (about 40 s with the relink cooldown).
     pub(crate) fn unlink(&mut self, peer: EndpointId) {
         self.linked_endpoints.remove(&peer);
+        self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+    }
+
+    /// A gossip link to `peer` is up.
+    pub(crate) fn link(&mut self, peer: EndpointId) {
+        self.linked_endpoints.insert(peer);
+        self.webrtc_admission.set_neighbors(&self.linked_endpoints);
     }
 
     /// Open the fast `beacon::ensure` burst; the only writer of
@@ -2211,6 +2218,23 @@ mod tests {
     // A `NeighborDown` drops the gossip link, not the pooled unicast
     // connection the verdict describes. Erasing the verdict with the link
     // parked every directed frame on a flap until the alive tick re-probed.
+    /// A session to a gossip neighbor is not a unit of the ceiling, because the gossip link
+    /// holds the peer anyway. The ledger learns of a neighbor when the link comes up, and that
+    /// the peer is not one when it goes down.
+    #[test]
+    fn a_session_counts_against_the_ceiling_only_while_its_peer_is_not_a_neighbor() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state.webrtc_admission.note_success(bob);
+        assert_eq!(state.webrtc_admission.direct_units(), 1);
+
+        state.link(bob);
+        assert_eq!(state.webrtc_admission.direct_units(), 0, "a neighbor");
+
+        state.unlink(bob);
+        assert_eq!(state.webrtc_admission.direct_units(), 1, "no longer one");
+    }
+
     #[test]
     fn unlinking_a_peer_keeps_its_path_verdict() {
         let mut state = fresh_state();

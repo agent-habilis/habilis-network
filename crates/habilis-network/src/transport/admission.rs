@@ -650,6 +650,16 @@ impl SignalAdmission {
         self.lock().evicted_by.holds(&peer, Instant::now())
     }
 
+    /// The gossip neighbors changed. A session counts only while its peer is not one, so a
+    /// peer that stops being a neighbor can take the ceiling over.
+    pub(crate) fn set_neighbors(&self, neighbors: &std::collections::HashSet<EndpointId>) {
+        let mut inner = self.lock();
+        let evictions = inner.ceiling.set_neighbors(neighbors, Instant::now());
+        let victims = inner.take_victims(&evictions);
+        drop(inner);
+        victims.end();
+    }
+
     /// How many peers the node holds a direct connection to, against the ceiling.
     pub(crate) fn direct_units(&self) -> usize {
         self.lock().ceiling.units()
@@ -893,6 +903,26 @@ mod tests {
         assert!(!hub.has_session(&peer(1)), "the least recently used goes");
         assert!(hub.has_session(&peer(2)) && hub.has_session(&peer(3)));
         assert_eq!(admission.direct_units(), 2);
+    }
+
+    /// The ledger of the underlay leg has G as its ceiling, and the leg holds a session only
+    /// to a gossip neighbor, so at most G. Up to G sessions, nothing is evicted.
+    #[test]
+    fn a_ledger_with_g_as_its_ceiling_never_evicts_while_the_sessions_stay_within_g() {
+        let ceiling = 4;
+        let admission = SignalAdmission::new(ceiling);
+        let hub = FakeHub::default();
+        for byte in 1..=4 {
+            drop(admission.try_admit(peer(byte), &hub).expect("admit"));
+            hub.attach(peer(byte));
+            admission.note_success(peer(byte));
+        }
+        admission.note_success(peer(2));
+        admission.lock().sample();
+
+        assert_eq!(hub.live_peers().len(), ceiling, "every session stays");
+        assert_eq!(admission.direct_units(), ceiling);
+        assert_eq!(admission.over_ceiling(), 0);
     }
 
     #[test]

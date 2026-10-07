@@ -101,7 +101,7 @@ pub(crate) async fn handle_gossip_event(
                 // used to insert here optimistically — before any link
                 // formed — leaving permanent ghosts that suppressed
                 // both; see the 2026-06-12 roster-collapse review.)
-                state.linked_endpoints.insert(node_id);
+                state.link(node_id);
                 // A new neighbor: the underlay may owe it a session, and may take
                 // its signal.
                 #[cfg(feature = "host")]
