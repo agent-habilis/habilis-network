@@ -114,6 +114,12 @@ impl WebRtcTransport {
         self.registry.live_len()
     }
 
+    /// The remote ids of every live session.
+    #[must_use]
+    pub fn live_peer_ids(&self) -> Vec<EndpointId> {
+        self.registry.live_ids()
+    }
+
     /// A builder preset that makes this the endpoint's *only* transport
     /// (no IP, no relay) — for tests and single-purpose peers like a browser
     /// tab. A consumer that wants `WebRTC` to stay additive calls

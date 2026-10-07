@@ -238,6 +238,12 @@ impl WebRtcHandle {
         self.inner.session_count()
     }
 
+    /// The remote ids of every live session.
+    #[must_use]
+    pub fn live_peer_ids(&self) -> Vec<iroh_base::EndpointId> {
+        self.inner.live_peer_ids()
+    }
+
     /// Tear down the session for `remote`, if any.
     #[must_use]
     pub fn detach(&self, remote: &iroh_base::EndpointId) -> bool {
