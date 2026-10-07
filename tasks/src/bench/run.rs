@@ -34,6 +34,7 @@ impl Cell {
             | Self::LadderWebRtc => "webrtc",
             Self::HabilisNetworkNativeNative | Self::IrohNativeNative | Self::LadderUdp => "ip",
             Self::LadderMultihopDirect | Self::LadderMultihopThird => "multihop",
+            Self::LadderRelay => "relay",
             Self::RawChromeChrome | Self::RawChromeChromeDatagram => "data-channel",
         }
     }
@@ -48,6 +49,7 @@ impl Cell {
                 | Self::LadderWebRtc
                 | Self::LadderMultihopDirect
                 | Self::LadderMultihopThird
+                | Self::LadderRelay
         )
     }
 }
@@ -452,6 +454,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             Cell::LadderWebRtc => runtime.block_on(native::ladder_webrtc(args)),
             Cell::LadderMultihopDirect => runtime.block_on(multihop::ladder_multihop_direct(args)),
             Cell::LadderMultihopThird => runtime.block_on(multihop::ladder_multihop_third(args)),
+            Cell::LadderRelay => runtime.block_on(native::ladder_relay(args)),
         };
         let row = Row { cell, outcome };
         let line = format!("{}  {}", row.cell.label(), row.headline());

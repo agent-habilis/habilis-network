@@ -98,9 +98,11 @@ pub(crate) enum Cell {
     LadderMultihopDirect,
     /// The ladder's multihop rung through a third member.
     LadderMultihopThird,
+    /// The ladder's relay rung: no IP transport, a local relay between.
+    LadderRelay,
 }
 
-const CELLS: [Cell; 13] = [
+const CELLS: [Cell; 14] = [
     Cell::HabilisNetworkChromeChrome,
     Cell::HabilisNetworkChromeNative,
     Cell::HabilisNetworkSafariNative,
@@ -114,6 +116,7 @@ const CELLS: [Cell; 13] = [
     Cell::LadderWebRtc,
     Cell::LadderMultihopDirect,
     Cell::LadderMultihopThird,
+    Cell::LadderRelay,
 ];
 
 impl Cell {
@@ -132,6 +135,7 @@ impl Cell {
             Self::LadderWebRtc => "ladder webrtc",
             Self::LadderMultihopDirect => "ladder multihop (direct)",
             Self::LadderMultihopThird => "ladder multihop (via third)",
+            Self::LadderRelay => "ladder relay",
         }
     }
 }

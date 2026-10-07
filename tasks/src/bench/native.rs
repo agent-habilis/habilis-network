@@ -309,11 +309,35 @@ pub(crate) async fn ladder_webrtc(args: &Args) -> Outcome {
     Box::pin(run).await.into()
 }
 
+/// The ladder's relay cell: two endpoints with no IP transport, one local
+/// relay between them, throughput and round trips.
+pub(crate) async fn ladder_relay(args: &Args) -> Outcome {
+    let run = async {
+        let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .map_err(|error| format!("the local relay failed: {error:#}"))?;
+        let bind = || async {
+            Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::custom([relay_url.clone()]))
+                .clear_ip_transports()
+                .bind()
+                .await
+                .map_err(|error| format!("bind failed: {error:#}"))
+        };
+        let client = bind().await?;
+        let server = bind().await?;
+        let addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+        ladder_measure(&client, addr, args, 0.0).await
+    };
+    Box::pin(run).await.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, BENCH_ALPN, Bench, Outcome, Router, ip_addr, ladder_udp, ladder_webrtc, rounds,
-        vanilla,
+        Args, BENCH_ALPN, Bench, Outcome, Router, ip_addr, ladder_relay, ladder_udp, ladder_webrtc,
+        rounds, vanilla,
     };
     use crate::bench::Direction;
     use habilis_network_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
@@ -433,6 +457,18 @@ mod tests {
         };
 
         assert_eq!(measured.path, "webrtc");
+        assert!(measured.rtt.is_some());
+    }
+
+    /// With no IP transport on either side and a local relay between them, the
+    /// relay is the only path there is, and the cell says so.
+    #[tokio::test]
+    async fn the_ladder_relay_cell_is_on_the_relay_path_with_round_trips() {
+        let Outcome::Ok(measured) = ladder_relay(&small_args()).await else {
+            panic!("the ladder relay cell did not measure");
+        };
+
+        assert_eq!(measured.path, "relay");
         assert!(measured.rtt.is_some());
     }
 }
