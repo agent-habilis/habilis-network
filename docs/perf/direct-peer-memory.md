@@ -206,3 +206,70 @@ A separate spike, not part of this document, reports that a peer past the cap ke
 Gossip links and per-member state cost more than a cap on direct unicast connections saves. The WebRTC cap already exists. It limits the sessions to 16, which is about 3 MB at 0.2 MB per session.
 
 Caveat: the figure at N = 65 is an extrapolation from N up to 33. No full mesh of 60 or more nodes formed.
+
+## Choosing G and D from a memory budget
+
+This section turns the measurements above into a rule for two caps. Phase 2 of the plan sets both caps and measures the rule with the committed harness. Until then, the rule uses only the numbers in this document.
+
+### The two caps
+
+- **G** is the size of the gossip active view (`max_peers`). The planned default is 32. Today it is 64 (`GOSSIP_ACTIVE_VIEW_CAPACITY` in `crates/habilis-network-util/src/tuning.rs`).
+- **D** is the cap on WebRTC sessions. The planned default is 32, and the cap can be set. It replaces `MAX_DIRECT_PEERS`, which is 16 today (`crates/habilis-network/src/transport/webrtc.rs`).
+- D counts WebRTC sessions only. Plain QUIC connections are not counted, and no count cap limits them. The idle closes limit them in time: 120 s on the dial side (`UNICAST_IDLE_SECS`) and 240 s on the accept side (`UNICAST_ACCEPT_IDLE_SECS`).
+
+G bounds a count. It does not refuse a member. The iroh-gossip fork (`src/proto/hyparview.rs`, `on_join` and `add_active`) always accepts a high-priority `Join` or `Neighbor` request. If the active view is full, it first drops a random active member, and that member gets a disconnect. It refuses only a low-priority `Neighbor` request at a full view. A burst of joins can therefore replace the neighbors of a node that is at G. The number of links stays at G or less, but the churn is not bounded.
+
+### The formula
+
+Peak resident memory of one native node, in MB, in a release build:
+
+```text
+RSS = 29 + 5 + (G + D) x 1.1 + 0.2 x C
+```
+
+C is the number of live plain QUIC connections beyond the one that each gossip member already brings. Each term comes from a measurement above:
+
+| Term | MB | Source in this document |
+| -- | -- | -- |
+| Idle node | 29 | UDP, N = 2, gossip only: 29 / 29. The isolated WebRTC nodes sit at about 30. |
+| Stacks | about 5 | WebRTC stack 3 to 4, multihop underlay 1.5 to 3 (Costs per peer). The sum is 4.5 to 7, so 5 is the low end. A node without WebRTC pays only the underlay. |
+| One member of G | 1.1 | 1.06 per added member, N 17 to 33 (Main finding). The step N 8 to 17 gives 0.44. |
+| One session of D | at most 1.1 | The formula uses the cost of a gossip member. A WebRTC session alone costs about 0.2, net of the stack (Costs per peer). The D part is therefore an upper bound. |
+| One plain connection | at most 0.2 | Sending over a pooled connection (Costs per peer). |
+
+Read the formula with these limits:
+
+- The cost per member rises with N. The measured steps are 0.5, 0.44 and 1.06 MB, and the last step stops at N = 33. Above N = 33 the 1.1 is an extrapolation (see Decision).
+- The result is a peak. It includes the burst at join time.
+- The numbers are for native processes. A browser session costs more, and this document does not measure it.
+- For a debug build, use 3.3 in place of 1.1 as the worst case. In the three N = 66 debug runs, the peak per direct link is 2.25, 2.43 and 3.31 MB. These figures divide the whole peak, idle size included, by the links, so they are an upper bound for the cost of one link. Those runs also had timer stalls (see above).
+
+### G + D against RSS
+
+Release build, C = 0. The last column holds the closest reading of this document.
+
+| G + D | Formula (MB) | Reading, median / max (MB) |
+| -- | -- | -- |
+| 8 | 43 | N = 8, UDP directed, 7 links: 32 / 32 |
+| 16 | 52 | N = 17, UDP directed with multihop, 16 links: 41 / 42 |
+| 32 | 69 | N = 33, UDP directed with multihop, 32 links: 60.5 / 65 |
+| 48 | 87 | no reading |
+| 64 | 104 | N = 65, UDP, 9 to 18 isolated nodes: 73 / 126 (multihop), 79 / 100 and 94 / 123 (gossip only). Use these as a lower bound. |
+| 96 | 140 | no reading |
+
+The formula is above every median in the table. At G + D = 64 it is below the largest maxima (123 and 126). Those come from runs with isolated nodes, and from one run that this document does not explain. Use the formula as a planning ceiling for the median node. It is not a limit for the worst node.
+
+The D part is the loosest. In the WebRTC N = 17 run, a node holds 15.0 sessions and 14.1 gossip links (G + D about 29) and reads 44.5 / 46 MB. That run has no underlay, so the formula gives 29 + 3.5 + 29 x 1.1, which is 64 MB.
+
+To choose the caps from a memory budget of B MB, solve the formula for G + D:
+
+```text
+G + D = (B - 34 - 0.2 x C) / 1.1
+```
+
+With C = 0, B = 128 gives G + D = 85, and B = 64 gives 27. The planned defaults give G + D = 64, which is about 104 MB for the median node in a release build.
+
+### What this section does not measure
+
+- The number of live plain connections under load, the number of sessions over time, and the refusals per peer. Phase 2 measures them with the committed harness at N = 66, G = 32 and D = 32. The harness is not committed yet.
+- A full mesh above N = 33. No earlier run formed one.
