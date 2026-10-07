@@ -336,7 +336,7 @@ pub(crate) async fn flush_pending(
             delivered += 1;
             continue;
         };
-        if state.pending_outbound.push((msg, bytes)) {
+        if requeue(state, msg, bytes, &error) {
             requeued += 1;
             tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not deliverable yet; requeued");
         } else {
@@ -349,6 +349,15 @@ pub(crate) async fn flush_pending(
         edge,
         "meshed: flushed buffered messages"
     );
+}
+
+/// Put a frame that failed to deliver back in `pending_outbound`. A frame that is held for a lane
+/// peer asks for its session, at every flush: a frame that was parked before the peer was known has
+/// no other chance to ask, and without the session the lane pair never links. Returns whether the
+/// frame was kept.
+fn requeue(state: &mut EventLoopState, msg: Message, bytes: Bytes, error: &anyhow::Error) -> bool {
+    crate::transport::note_held(state, error);
+    state.pending_outbound.push((msg, bytes))
 }
 
 /// Validate + dispatch one inbound wire message, regardless of transport. Both
@@ -2676,5 +2685,45 @@ mod left_tests {
         );
         endpoint.close().await;
         leaver_endpoint.close().await;
+    }
+}
+
+#[cfg(test)]
+mod requeue_tests {
+    use bytes::Bytes;
+
+    use super::requeue;
+    use crate::protocol::{MeshId, Message};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+
+    /// A frame is parked before its addressee is known. The peer becomes known with a relay-only
+    /// address, the flush delivers the frame again and it is held: the requeue asks for the session.
+    #[test]
+    fn a_frame_parked_before_its_peer_is_known_asks_for_the_session_at_the_flush() {
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.local_udp_transport = true;
+        let bob = endpoint_id(1);
+        let frame = Message::new_pong(&MeshId::from("test"), &nick("alice"), nick("bob"));
+        let bytes = Bytes::from_static(b"frame");
+        let now = crate::util::clock::Instant::now();
+        let first = crate::transport::resolve(&frame, bytes.clone(), &state)
+            .expect_err("no endpoint is known for bob yet");
+        assert!(requeue(&mut state, frame.clone(), bytes.clone(), &first));
+        assert!(!state.lane_session_wanted(bob, now), "bob is unknown");
+
+        state.note_peer_endpoint(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+        );
+        let second = crate::transport::resolve(&frame, bytes.clone(), &state)
+            .expect_err("a lookup-only relay holds the frame");
+        assert!(requeue(&mut state, frame, bytes, &second));
+
+        assert!(
+            state.lane_session_wanted(bob, now),
+            "the requeued frame asks"
+        );
     }
 }
