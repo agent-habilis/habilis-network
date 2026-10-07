@@ -17,7 +17,7 @@ export interface WireOpts {
   readonly transport: string | null
   readonly relayUrls: string | null
   readonly maxPeers: number
-  readonly maxSessions: number
+  readonly maxDirect: number
 }
 
 export type Command =

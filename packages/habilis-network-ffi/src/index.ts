@@ -179,7 +179,7 @@ export function joinWire(opts: JoinOpts): WireOpts {
     transport: listWire(opts.transport),
     relayUrls: listWire(opts.relayUrls),
     maxPeers: opts.maxPeers ?? 0,
-    maxSessions: opts.maxSessions ?? 0,
+    maxDirect: opts.maxDirect ?? 0,
   }
 }
 
@@ -193,7 +193,7 @@ export function createWire(opts: CreateOpts): WireOpts {
     transport: listWire(opts.transport),
     relayUrls: listWire(opts.relayUrls),
     maxPeers: opts.maxPeers ?? 0,
-    maxSessions: opts.maxSessions ?? 0,
+    maxDirect: opts.maxDirect ?? 0,
   }
 }
 

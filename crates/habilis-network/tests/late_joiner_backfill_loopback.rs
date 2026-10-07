@@ -164,7 +164,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
         SetupParams {
             author: nick(name),
             max_peers: 16,
-            max_sessions: 0,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),

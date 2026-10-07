@@ -5,7 +5,7 @@
 #
 # The driver reads its settings from the environment (see the header of
 # crates/habilis-network/examples/mesh_peer_load.rs): MESH_TRANSPORT,
-# MESH_TRANSPORTS, MESH_TRAFFIC, MESH_MAX_PEERS, MESH_MAX_SESSIONS,
+# MESH_TRANSPORTS, MESH_TRAFFIC, MESH_MAX_PEERS, MESH_MAX_DIRECT,
 # MESH_BLOCK_UDP_AFTER_SECS, MESH_UNDERLAY_LEG. `STAGGER` is the gap between two
 # node starts, in seconds (default 0.3).
 #

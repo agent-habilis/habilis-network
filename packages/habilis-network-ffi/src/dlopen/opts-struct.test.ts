@@ -11,7 +11,7 @@ const BASE: WireOpts = {
   transport: null,
   relayUrls: null,
   maxPeers: 0,
-  maxSessions: 0,
+  maxDirect: 0,
 }
 
 /** Hands out a distinct fake address per buffer and remembers which was which. */
@@ -68,9 +68,9 @@ describe('encodeOpts', () => {
     expect(view.getBigUint64(56, true)).toBe(12n)
   })
 
-  test('max_sessions follows max_peers', () => {
+  test('max_direct follows max_peers', () => {
     const { struct } = encodeOpts(
-      { ...BASE, maxPeers: 12, maxSessions: 7 },
+      { ...BASE, maxPeers: 12, maxDirect: 7 },
       fakePointers().pointerOf,
     )
     const view = new DataView(struct.buffer)

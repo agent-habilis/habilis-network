@@ -165,11 +165,11 @@ describe('wire opts', () => {
     expect(() => joinWire({})).toThrow('join needs a topic or an id')
     expect(() => joinWire({ topic: 't', id: 'm' })).toThrow('not both')
     expect(joinWire({ topic: 't' })).toMatchObject({ topic: 't', mesh: null, lookup: null })
-    expect(joinWire({ id: 'm', nick: 'ana', maxPeers: 3, maxSessions: 5 })).toMatchObject({
+    expect(joinWire({ id: 'm', nick: 'ana', maxPeers: 3, maxDirect: 5 })).toMatchObject({
       mesh: 'm',
       nick: 'ana',
       maxPeers: 3,
-      maxSessions: 5,
+      maxDirect: 5,
     })
   })
 
@@ -183,7 +183,7 @@ describe('wire opts', () => {
       transport: null,
       relayUrls: null,
       maxPeers: 0,
-      maxSessions: 0,
+      maxDirect: 0,
     })
     expect(createWire({ lookup: ['mdns', 'dht', 'relay'], name: 'salon' })).toMatchObject({
       lookup: 'mdns,dht,relay',

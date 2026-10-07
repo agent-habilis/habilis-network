@@ -13,7 +13,7 @@
 //! - `MESH_TRAFFIC=off`: no directed messages, gossip only. With traffic on, every
 //!   node sends one directed message per second to every roster peer, which is one
 //!   unicast connection per peer, the worst case.
-//! - `MESH_MAX_PEERS` (G) and `MESH_MAX_SESSIONS` (D): the caps. `0`, or unset,
+//! - `MESH_MAX_PEERS` (G) and `MESH_MAX_DIRECT` (C): the bounds. `0`, or unset,
 //!   takes the engine default.
 //! - `MESH_TRAFFIC_UNTIL_SECS=180`: the directed messages stop after that many seconds.
 //!   With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is
@@ -226,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
         SetupParams {
             author: author.clone(),
             max_peers: usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0),
-            max_sessions: usize::try_from(env_number("MESH_MAX_SESSIONS")).unwrap_or(0),
+            max_direct: usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0),
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),

@@ -48,7 +48,7 @@ full text.
 | `MESH_TRANSPORTS` | the whole list, for example `udp,webrtc,multihop,relay`; only the creator reads it |
 | `MESH_TRAFFIC` | `off`: no directed messages. On, each node sends one per second to each roster peer |
 | `MESH_MAX_PEERS` | G, the gossip active view; `0` takes the engine default |
-| `MESH_MAX_SESSIONS` | D, the cap on WebRTC sessions; `0` takes the engine default. D has an effect only when `webrtc` is in the list: set `MESH_TRANSPORTS=udp,webrtc,multihop` for a run of D. The default list has no `webrtc` |
+| `MESH_MAX_DIRECT` | C, the ceiling of direct connections (WebRTC sessions and unicast connections together); `0` takes the engine default, 64. A newcomer past C evicts the least valuable peer |
 | `MESH_TRAFFIC_UNTIL_SECS` | the directed messages stop after this many seconds. With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is the run of the idle detach |
 | `MESH_TRAFFIC_BURSTY` | `1`: instead of a message per second to every peer, every 60 to 240 s (random) one message to each of 3 to 5 random peers. A connection then idles, and is needed again |
 | `MESH_FLOOD_PEERS` | K: from second 30 on, messages of 3000 bytes to the first K roster peers as fast as the node accepts them. The RSS against K is the worst case of one connection (with `MESH_TRAFFIC=off`) |

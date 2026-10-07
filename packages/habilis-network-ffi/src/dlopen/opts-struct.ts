@@ -13,7 +13,7 @@
  *   const char *transport;   // offset 40
  *   const char *relay_urls;  // offset 48
  *   size_t max_peers;        // offset 56
- *   size_t max_sessions;     // offset 64
+ *   size_t max_direct;       // offset 64
  * } habilis_network_opts;             // 72 bytes
  * ```
  *
@@ -31,7 +31,7 @@ const LOOKUP_OFFSET = 32
 const TRANSPORT_OFFSET = 40
 const RELAY_URLS_OFFSET = 48
 const MAX_PEERS_OFFSET = 56
-const MAX_SESSIONS_OFFSET = 64
+const MAX_DIRECT_OFFSET = 64
 
 export const OPTS_BYTES = 72
 
@@ -96,7 +96,7 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   field(TRANSPORT_OFFSET, opts.transport)
   field(RELAY_URLS_OFFSET, opts.relayUrls)
   view.setBigUint64(MAX_PEERS_OFFSET, BigInt(opts.maxPeers), LITTLE_ENDIAN)
-  view.setBigUint64(MAX_SESSIONS_OFFSET, BigInt(opts.maxSessions), LITTLE_ENDIAN)
+  view.setBigUint64(MAX_DIRECT_OFFSET, BigInt(opts.maxDirect), LITTLE_ENDIAN)
 
   return { struct, keepAlive }
 }

@@ -60,8 +60,8 @@ pub struct Opts {
     pub relay_urls: Vec<String>,
     /// Active-view cap (G); `0` takes the engine default.
     pub max_peers: usize,
-    /// Cap on `WebRTC` sessions (D); `0` takes the engine default.
-    pub max_sessions: usize,
+    /// Ceiling of direct connections (C); `0` takes the engine default.
+    pub max_direct: usize,
 }
 
 /// The ladder these options name, or `None` for the default. Parsed as one
@@ -137,7 +137,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
         SetupParams {
             author,
             max_peers,
-            max_sessions: opts.max_sessions,
+            max_direct: opts.max_direct,
             // An embedded library writes no files and binds no control
             // socket, so it claims no /tmp root of its own.
             runtime_base: None,

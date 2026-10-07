@@ -33,8 +33,8 @@ thread_local! {
 }
 
 /// The mesh selectors, mirroring `habilis_network_opts` in the header. String fields are
-/// NUL-terminated C strings or NULL; `max_peers == 0` and `max_sessions == 0` take
-/// the engine defaults (32 each).
+/// NUL-terminated C strings or NULL; `max_peers == 0` and `max_direct == 0` take
+/// the engine defaults (G is 32, C is 64).
 #[repr(C)]
 #[derive(Debug)]
 pub struct HabilisNetworkOpts {
@@ -52,8 +52,8 @@ pub struct HabilisNetworkOpts {
     pub relay_urls: *const c_char,
     /// G: the gossip active-view cap.
     pub max_peers: usize,
-    /// D: the cap on `WebRTC` sessions.
-    pub max_sessions: usize,
+    /// C: the ceiling of direct connections, `WebRTC` sessions and unicast connections together.
+    pub max_direct: usize,
 }
 
 /// The layout `packages/habilis-network-ffi/src/dlopen/opts-struct.ts` hand-encodes,
@@ -82,7 +82,7 @@ const _: () = {
     assert!(offset_of!(HabilisNetworkOpts, transport) == 40);
     assert!(offset_of!(HabilisNetworkOpts, relay_urls) == 48);
     assert!(offset_of!(HabilisNetworkOpts, max_peers) == 56);
-    assert!(offset_of!(HabilisNetworkOpts, max_sessions) == 64);
+    assert!(offset_of!(HabilisNetworkOpts, max_direct) == 64);
 };
 
 /// One received message's metadata, mirroring `habilis_network_msg` in the header. The
@@ -333,7 +333,7 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             transport,
             relay_urls,
             max_peers: opts.max_peers,
-            max_sessions: opts.max_sessions,
+            max_direct: opts.max_direct,
         };
         match Mesh::open(&parsed) {
             Ok(opened) => {

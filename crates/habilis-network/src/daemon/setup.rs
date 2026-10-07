@@ -250,7 +250,7 @@ async fn build_member_endpoint(
     }
     // Made before the endpoint, because the endpoint reports its connections
     // to this table from the first handshake on.
-    let admission = crate::transport::SignalAdmission::new(build.max_sessions);
+    let admission = crate::transport::SignalAdmission::new(build.max_direct);
     if build.multihop {
         // The underlay holds a session only to a gossip neighbor, so G caps them.
         let (endpoint, handle, webrtc, underlay_webrtc) = build_peer_multihop_with(
@@ -303,7 +303,7 @@ async fn build_member_endpoint(
             None,
         ));
     }
-    let admission = crate::transport::SignalAdmission::new(build.max_sessions);
+    let admission = crate::transport::SignalAdmission::new(build.max_direct);
     let (endpoint, webrtc) =
         crate::lookup::build_peer_webrtc_with(build.lookups, build.transports, Some(&admission))
             .await?;
@@ -358,8 +358,8 @@ impl std::fmt::Debug for InjectedEndpoint {
 pub struct SetupParams {
     pub author: Nickname,
     pub max_peers: usize,
-    /// D: the cap on `WebRTC` sessions. `0` takes [`crate::transport::MAX_DIRECT_PEERS`].
-    pub max_sessions: usize,
+    /// C: the ceiling of direct connections. `0` takes [`crate::transport::MAX_DIRECT_PEERS`].
+    pub max_direct: usize,
     /// The consumer's per-user runtime base (see
     /// [`runtime_base`](crate::util::runtime_base)) — the root the socket, the
     /// default state file, and the default log dir live under. Supplied rather
@@ -470,7 +470,7 @@ struct SetupBuild<'a> {
     author: &'a Nickname,
     sink: &'a dyn NodeSink,
     max_peers: usize,
-    max_sessions: usize,
+    max_direct: usize,
     lookups: &'a LookupOpts,
     unicast_acceptor: &'a crate::transport::UnicastAcceptor,
     /// The mesh policy's `multihop`: register the multi-hop transport on the
@@ -561,20 +561,20 @@ struct Assembled {
     topic_string: Option<String>,
 }
 
-/// G and D with `0` taken as the default. Every option set (`Opts`, the C
+/// G and C with `0` taken as the default. Every option set (`Opts`, the C
 /// struct, the browser object, a caller's own `SetupParams`) ends in
 /// [`setup_mesh`], so this is the one place where that has to hold.
-fn resolve_caps(max_peers: usize, max_sessions: usize) -> (usize, usize) {
+fn resolve_caps(max_peers: usize, max_direct: usize) -> (usize, usize) {
     (
         if max_peers == 0 {
             crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY
         } else {
             max_peers
         },
-        if max_sessions == 0 {
+        if max_direct == 0 {
             crate::transport::MAX_DIRECT_PEERS
         } else {
-            max_sessions
+            max_direct
         },
     )
 }
@@ -590,7 +590,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     let SetupParams {
         author,
         max_peers,
-        max_sessions,
+        max_direct,
         runtime_base,
         state_file,
         sink,
@@ -601,7 +601,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         transports,
         per_peer_gate,
     } = params;
-    let (max_peers, max_sessions) = resolve_caps(max_peers, max_sessions);
+    let (max_peers, max_direct) = resolve_caps(max_peers, max_direct);
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
     // caller-side and passed back in here as the real port.
@@ -639,7 +639,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         author: &author,
         sink: sink.as_ref(),
         max_peers,
-        max_sessions,
+        max_direct,
         lookups: &lookups,
         unicast_acceptor: &unicast_acceptor,
         multihop,
@@ -1129,7 +1129,7 @@ mod tests {
                 super::SetupParams {
                     author,
                     max_peers: 8,
-                    max_sessions: 0,
+                    max_direct: 0,
                     runtime_base: None,
                     state_file: None,
                     sink: std::sync::Arc::new(crate::embed::SilentSink),
@@ -1156,7 +1156,7 @@ mod tests {
         use crate::transport::MAX_DIRECT_PEERS;
         use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 
-        for (max_peers, max_sessions, want_g, want_d) in [
+        for (max_peers, max_direct, want_g, want_d) in [
             (0, 0, GOSSIP_ACTIVE_VIEW_CAPACITY, MAX_DIRECT_PEERS),
             (5, 3, 5, 3),
         ] {
@@ -1167,7 +1167,7 @@ mod tests {
                 super::SetupParams {
                     author,
                     max_peers,
-                    max_sessions,
+                    max_direct,
                     runtime_base: None,
                     state_file: None,
                     sink: std::sync::Arc::new(crate::embed::SilentSink),
@@ -1182,21 +1182,17 @@ mod tests {
             .await
             .expect("a loopback mesh sets up");
             assert_eq!(config.max_peers, want_g, "G for {max_peers}");
-            assert_eq!(
-                config.webrtc_admission.cap(),
-                want_d,
-                "D for {max_sessions}"
-            );
+            assert_eq!(config.webrtc_admission.cap(), want_d, "D for {max_direct}");
             config.router.shutdown().await.expect("the router stops");
         }
     }
 
-    // The planned defaults of the two caps (decision D2 of the plan): 32 gossip
-    // neighbors and 32 `WebRTC` sessions.
+    // The defaults of the two bounds: G is 32 gossip neighbors, and C (decision D11) is 64
+    // direct peers, counting `WebRTC` sessions and unicast connections.
     #[test]
-    fn the_default_caps_are_32() {
+    fn the_default_bounds_are_32_neighbors_and_64_direct_peers() {
         assert_eq!(crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY, 32);
-        assert_eq!(crate::transport::MAX_DIRECT_PEERS, 32);
+        assert_eq!(crate::transport::MAX_DIRECT_PEERS, 64);
     }
 
     /// An endpoint a caller built to inject: the engine's wiring, a multihop
@@ -1258,7 +1254,7 @@ mod tests {
             super::SetupParams {
                 author,
                 max_peers: 8,
-                max_sessions: 0,
+                max_direct: 0,
                 runtime_base: None,
                 state_file: None,
                 sink: std::sync::Arc::new(crate::embed::SilentSink),

@@ -43,8 +43,8 @@ export interface JoinOpts {
   relayUrls?: string[]
   /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
-  /** Cap on WebRTC sessions (D). Omit for the engine default, 32. */
-  maxSessions?: number
+  /** Ceiling of direct connections (C). Omit for the engine default, 64. */
+  maxDirect?: number
 }
 
 export interface CreateOpts {
@@ -72,8 +72,8 @@ export interface CreateOpts {
   relayUrls?: string[]
   /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
-  /** Cap on WebRTC sessions (D). Omit for the engine default, 32. */
-  maxSessions?: number
+  /** Ceiling of direct connections (C). Omit for the engine default, 64. */
+  maxDirect?: number
 }
 
 /**
