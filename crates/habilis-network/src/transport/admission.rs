@@ -323,6 +323,20 @@ impl Inner {
         victims
     }
 
+    /// End the unit of the unicast connections of `peer` in the ledger if it holds none that is
+    /// alive.
+    fn drop_quic_without_connection(&mut self, peer: EndpointId) {
+        let alive = self.slots.get(&peer).is_some_and(|slot| {
+            slot.conns
+                .iter()
+                .filter_map(WeakConnectionHandle::upgrade)
+                .any(|conn| conn.close_reason().is_none() && conn.alpn() == super::UNICAST_ALPN)
+        });
+        if !alive {
+            self.ceiling.unregister_quic(peer);
+        }
+    }
+
     /// Drop the connections that are gone, and the slots nothing holds.
     fn sample(&mut self) {
         for slot in self.slots.values_mut() {
@@ -331,6 +345,9 @@ impl Inner {
                     .upgrade()
                     .is_some_and(|conn| conn.close_reason().is_none())
             });
+        }
+        for peer in self.ceiling.quic_peers() {
+            self.drop_quic_without_connection(peer);
         }
         let hub = self.hub.clone();
         if let Some(hub) = &hub {
@@ -668,21 +685,21 @@ impl SignalAdmission {
         victims.end();
     }
 
-    /// When the peer closes `conn` with the `EVICTED` code, note it, so that no proactive dial
-    /// goes back to that peer for a while.
+    /// When `conn` closes, whatever the reason, the peer leaves the ledger unless it holds another
+    /// unicast connection: a unit ends with its last connection. When the peer closes it with the
+    /// `EVICTED` code, note that too, so that no proactive dial goes back to that peer for a while.
     fn watch_for_eviction(&self, conn: Connection) {
         let admission = self.clone();
         tokio::spawn(async move {
-            let iroh::endpoint::ConnectionError::ApplicationClosed(close) = conn.closed().await
-            else {
-                return;
-            };
-            if close.error_code.into_inner() == u64::from(super::webrtc::close_code::EVICTED) {
+            let reason = conn.closed().await;
+            let peer = conn.remote_id();
+            let mut inner = admission.lock();
+            inner.drop_quic_without_connection(peer);
+            if let iroh::endpoint::ConnectionError::ApplicationClosed(close) = reason
+                && close.error_code.into_inner() == u64::from(super::webrtc::close_code::EVICTED)
+            {
                 let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
-                admission
-                    .lock()
-                    .evicted_by
-                    .note(conn.remote_id(), Instant::now(), spread);
+                inner.evicted_by.note(peer, Instant::now(), spread);
             }
         });
     }
@@ -1460,6 +1477,52 @@ mod tests {
         assert!(
             !fixture.admission.evicted_recently(first),
             "the evictor does not back off"
+        );
+        fixture.shutdown().await;
+    }
+
+    /// **A connection that closes leaves the ledger.** Four connections at a ceiling of four; one
+    /// closes on its own (an idle close, a reset). The count falls to three, and the next newcomer
+    /// evicts nobody. A unit that is a ghost keeps the count at the ceiling for ever, and every newcomer
+    /// then evicts a live peer.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_that_closes_leaves_the_ledger() {
+        let mut fixture = Fixture::new(4).await;
+        let mut conns = Vec::new();
+        for _ in 0..4 {
+            conns.push(fixture.dial().await);
+        }
+        assert_eq!(fixture.admission.direct_units(), 4);
+
+        conns[0].1.close(0u32.into(), b"idle");
+        for _ in 0..40 {
+            fixture.admission.lock().sample();
+            if fixture.admission.direct_units() == 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            fixture.admission.direct_units(),
+            3,
+            "the closed connection left the ledger"
+        );
+
+        let _fifth = fixture.dial().await;
+        // The first server saw its connection close by us, which is not an eviction.
+        let mut evicted = Vec::new();
+        while let Some((peer, reason)) = fixture.next_closed(Duration::from_millis(700)).await {
+            if let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason
+                && close.error_code.into_inner()
+                    == u64::from(super::super::webrtc::close_code::EVICTED)
+            {
+                evicted.push(peer);
+            }
+        }
+        assert!(
+            evicted.is_empty(),
+            "a fifth dial at three units evicts nobody: {evicted:?}"
         );
         fixture.shutdown().await;
     }
