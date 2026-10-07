@@ -40,6 +40,33 @@ pub(crate) const MIN_AGE: Duration = Duration::from_mins(1);
 /// The batch down to 90 percent of the ceiling runs at most this often.
 pub(crate) const BATCH_EVERY: Duration = Duration::from_secs(5);
 
+/// How long a peer that evicted us is left alone by proactive dials, before the jitter.
+pub(crate) const EVICTED_BACKOFF: Duration = Duration::from_mins(1);
+
+/// The jitter on [`EVICTED_BACKOFF`], as a fraction either way, so that the peers one node
+/// evicted at once do not come back at once.
+pub(crate) const EVICTED_JITTER: f64 = 0.2;
+
+/// The peers that evicted us, each until when proactive dials to it wait. A send is never
+/// held by this: a node that has something to say dials at once.
+#[derive(Debug, Default)]
+pub(crate) struct EvictionBackoff {
+    until: HashMap<EndpointId, Instant>,
+}
+
+impl EvictionBackoff {
+    /// `peer` evicted us at `now`. `spread` is in `-1.0..=1.0` and scales the jitter.
+    pub(crate) fn note(&mut self, peer: EndpointId, now: Instant, spread: f64) {
+        self.until.retain(|_, until| now < *until);
+        let wait = EVICTED_BACKOFF.mul_f64(1.0 + EVICTED_JITTER * spread.clamp(-1.0, 1.0));
+        self.until.insert(peer, now + wait);
+    }
+
+    pub(crate) fn holds(&self, peer: &EndpointId, now: Instant) -> bool {
+        self.until.get(peer).is_some_and(|until| now < *until)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct Entry {
     opened_at: Option<Instant>,
@@ -291,6 +318,35 @@ impl Ceiling {
 mod tests {
     use super::*;
     use crate::testing::endpoint_id;
+
+    #[test]
+    fn an_eviction_holds_proactive_dials_for_a_minute_within_the_jitter() {
+        let start = Instant::now();
+        let peer = endpoint_id(1);
+        for (spread, secs) in [(-1.0, 48), (0.0, 60), (1.0, 72)] {
+            let mut backoff = EvictionBackoff::default();
+            assert!(
+                !backoff.holds(&peer, start),
+                "nothing is held before an eviction"
+            );
+            backoff.note(peer, start, spread);
+            assert!(backoff.holds(&peer, at(start, secs - 1)));
+            assert!(!backoff.holds(&peer, at(start, secs + 1)));
+            assert!(
+                !backoff.holds(&endpoint_id(2), start),
+                "only that peer is held"
+            );
+        }
+    }
+
+    #[test]
+    fn a_noted_eviction_forgets_the_expired_ones() {
+        let start = Instant::now();
+        let mut backoff = EvictionBackoff::default();
+        backoff.note(endpoint_id(1), start, 0.0);
+        backoff.note(endpoint_id(2), at(start, 100), 0.0);
+        assert_eq!(backoff.until.len(), 1);
+    }
 
     fn at(start: Instant, secs: u64) -> Instant {
         start + Duration::from_secs(secs)

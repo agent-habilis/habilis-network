@@ -549,6 +549,14 @@ impl UnicastPool {
         if let Some(conn) = existing {
             return Ok(conn);
         }
+        if self
+            .inner
+            .admission
+            .get()
+            .is_some_and(|table| table.evicted_recently(eid))
+        {
+            bail!("unicast probe waits: the peer evicted our connection lately");
+        }
         self.dial_pooled(eid, Hold::Probing).await
     }
 
@@ -1063,6 +1071,48 @@ mod tests {
             .expect("the ledger holds it");
 
         assert!(second > first, "the second send is a later use");
+        router.shutdown().await.expect("shutdown");
+        node.close().await;
+    }
+
+    /// A peer that evicted us is left alone by the proactive dial of a probe, and a send to
+    /// it dials at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_evicting_peer_is_not_probed_but_a_send_dials_it() {
+        use iroh::protocol::Router;
+
+        use super::super::accept::UnicastAcceptor;
+        use super::super::admission::SignalAdmission;
+
+        let (tx, _frames) = tokio::sync::mpsc::channel(8);
+        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, UnicastAcceptor::new(tx, true))
+            .spawn();
+        let admission = SignalAdmission::new(8);
+        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .hooks(admission.connection_hook())
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::new(node.clone(), true);
+        pool.set_admission(admission.clone());
+        admission.note_evicted(server.id());
+
+        assert!(
+            pool.probe_connection(server.id()).await.is_err(),
+            "the probe waits"
+        );
+        pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"now"))
+            .await
+            .expect("a send dials at once");
+
         router.shutdown().await.expect("shutdown");
         node.close().await;
     }

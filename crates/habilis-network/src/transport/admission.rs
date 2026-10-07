@@ -205,6 +205,8 @@ struct Inner {
     idle_since: HashMap<EndpointId, Instant>,
     /// The direct connections of the node against the ceiling, see [`super::ceiling`].
     ceiling: super::ceiling::Ceiling,
+    /// The peers that closed a connection of ours with the `EVICTED` code.
+    evicted_by: super::ceiling::EvictionBackoff,
 }
 
 impl std::fmt::Debug for Inner {
@@ -323,6 +325,7 @@ impl SignalAdmission {
                 observing: false,
                 idle_since: HashMap::new(),
                 ceiling: super::ceiling::Ceiling::new(cap),
+                evicted_by: super::ceiling::EvictionBackoff::default(),
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
@@ -563,6 +566,9 @@ impl SignalAdmission {
             );
         }
         drop(inner);
+        if conn.alpn() == super::UNICAST_ALPN {
+            self.watch_for_eviction(conn.clone());
+        }
         for victim in victims {
             tracing::info!(
                 target: super::LOG_TARGET,
@@ -574,6 +580,25 @@ impl SignalAdmission {
                 b"evicted at capacity",
             );
         }
+    }
+
+    /// When the peer closes `conn` with the `EVICTED` code, note it, so that no proactive dial
+    /// goes back to that peer for a while.
+    fn watch_for_eviction(&self, conn: Connection) {
+        let admission = self.clone();
+        tokio::spawn(async move {
+            let iroh::endpoint::ConnectionError::ApplicationClosed(close) = conn.closed().await
+            else {
+                return;
+            };
+            if close.error_code.into_inner() == u64::from(super::webrtc::close_code::EVICTED) {
+                let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
+                admission
+                    .lock()
+                    .evicted_by
+                    .note(conn.remote_id(), Instant::now(), spread);
+            }
+        });
     }
 
     /// A send or a stream is in flight on the connection of `peer`: the ledger does not
@@ -590,6 +615,17 @@ impl SignalAdmission {
     #[cfg(test)]
     pub(crate) fn last_use(&self, peer: EndpointId) -> Option<Instant> {
         self.lock().ceiling.last_use(peer)
+    }
+
+    /// Note an eviction by `peer`, for a test that does not run the eviction.
+    #[cfg(test)]
+    pub(crate) fn note_evicted(&self, peer: EndpointId) {
+        self.lock().evicted_by.note(peer, Instant::now(), 0.0);
+    }
+
+    /// Whether `peer` evicted our connection lately, so that no proactive dial goes to it.
+    pub(crate) fn evicted_recently(&self, peer: EndpointId) -> bool {
+        self.lock().evicted_by.holds(&peer, Instant::now())
     }
 
     /// How many peers the node holds a direct connection to, against the ceiling.
@@ -1126,6 +1162,11 @@ mod tests {
 
         /// The node dials a new server on the unicast protocol.
         async fn dial(&mut self) -> (EndpointId, Connection) {
+            self.dial_with(None).await
+        }
+
+        /// As [`Self::dial`], and the server binds with `hook`.
+        async fn dial_with(&mut self, hook: Option<ConnectionHook>) -> (EndpointId, Connection) {
             use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
             #[derive(Debug, Clone)]
@@ -1140,7 +1181,7 @@ mod tests {
                     Ok(())
                 }
             }
-            let server = Self::bind(&self.relay_url, None).await;
+            let server = Self::bind(&self.relay_url, hook).await;
             let id = server.id();
             let router = Router::builder(server.clone())
                 .accept(super::super::UNICAST_ALPN, Report(id, self.reports.clone()))
@@ -1208,6 +1249,39 @@ mod tests {
         for (_, conn) in &conns[1..] {
             assert!(conn.close_reason().is_none(), "the others stay open");
         }
+        fixture.shutdown().await;
+    }
+
+    /// **The evicted peer backs off.** The node that reads the `EVICTED` code on a connection
+    /// holds its proactive dials to the evictor for a while. The node that evicted does not
+    /// back off.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_peer_that_reads_the_evicted_code_backs_off_from_the_evictor() {
+        let mut fixture = Fixture::new(1).await;
+        let evicted = SignalAdmission::new(8);
+        let (first, _first_conn) = fixture.dial_with(Some(evicted.connection_hook())).await;
+        let _second = fixture.dial().await;
+        let (peer, _) = fixture
+            .next_closed(Duration::from_secs(10))
+            .await
+            .expect("a connection must be evicted");
+        assert_eq!(peer, first, "the first one is evicted");
+
+        let me = fixture.node.id();
+        let mut backed_off = false;
+        for _ in 0..40 {
+            backed_off = evicted.evicted_recently(me);
+            if backed_off {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(backed_off, "the evicted peer holds its proactive dials");
+        assert!(
+            !fixture.admission.evicted_recently(first),
+            "the evictor does not back off"
+        );
         fixture.shutdown().await;
     }
 
