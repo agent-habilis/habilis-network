@@ -176,11 +176,25 @@ mod tests {
         }
     }
 
+    /// Whether the IPv6 loopback (`::1`) can be bound on this machine.
+    fn ipv6_loopback_available() -> bool {
+        std::net::UdpSocket::bind("[::1]:0").is_ok()
+    }
+
     /// Three members, A and C with no IP path to each other and B between them. The
     /// gossip links run over IP; a QUIC connection from A to C has only the gossip
     /// path, and an echo over it completes through the real flood.
+    ///
+    /// **Needs the IPv6 loopback.** A binds `[::1]` only and C binds `127.0.0.1`
+    /// only, which is what leaves them without an IP path to each other. On a
+    /// machine that cannot bind `::1` the test logs that it was skipped and
+    /// passes, so that a runner without IPv6 does not go red.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_quic_echo_between_two_members_with_no_direct_path_completes_over_real_gossip() {
+        if !ipv6_loopback_available() {
+            eprintln!("SKIPPED: this machine cannot bind the IPv6 loopback [::1]");
+            return;
+        }
         let topic = TopicId::from_bytes([9u8; 32]);
         let lookups = [
             MemoryLookup::new(),
