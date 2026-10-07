@@ -1789,6 +1789,57 @@ mod tests {
         server.close().await;
     }
 
+    /// **A node with a cap of two holds two sessions and refuses the third offer.**
+    ///
+    /// The cap is the setting `max_sessions` (D) of the node. The third dialer reads
+    /// the close code as an at-cap refusal and does not run a gathering round again
+    /// on every tick; the node keeps its two sessions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_node_with_a_cap_of_two_holds_two_sessions_and_refuses_the_third_offer() {
+        let (server, server_hub) = endpoint().await;
+        let admission = SignalAdmission::new(2);
+        let router = serve(&server, &server_hub, &admission);
+
+        let mut clients = Vec::new();
+        let mut errors = Vec::new();
+        for _ in 0..3 {
+            let (client, client_hub) = endpoint().await;
+            let outcome = dial_signal_with(
+                &client,
+                server.addr(),
+                &client_hub,
+                quick(),
+                IceProfile { host_only: true },
+            )
+            .await;
+            errors.push(outcome.err());
+            clients.push((client, client_hub));
+        }
+
+        assert!(
+            errors[0].is_none() && errors[1].is_none(),
+            "the first two offers attach"
+        );
+        let refusal = errors[2].as_ref().expect("the third offer must be refused");
+        assert!(
+            is_cap_refusal(refusal),
+            "the third dialer must read an at-cap refusal, got: {refusal:#}"
+        );
+        assert_eq!(
+            server_hub.session_count(),
+            2,
+            "the node holds exactly two sessions"
+        );
+        assert!(clients[0].1.has_session(&server.id()) && clients[1].1.has_session(&server.id()));
+        assert!(!clients[2].1.has_session(&server.id()));
+
+        router.shutdown().await.expect("shutdown");
+        for (client, _) in clients {
+            client.close().await;
+        }
+        server.close().await;
+    }
+
     /// `Router::shutdown` must reach the spawned answer tasks.
     ///
     /// They are not in the Router's own `JoinSet` — spawning is deliberate, so
