@@ -12,7 +12,7 @@
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
-use habilis_network::membership::{self, Membership, Request, Rung};
+use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -20,9 +20,13 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// that offers the underlay session, then for a second ICE round.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 
+/// How long a message may take over a route that is already up.
+const PAYLOAD_DEADLINE: Duration = Duration::from_secs(30);
+
 struct Member {
     membership: Membership,
     _events: UnboundedReceiver<String>,
+    seen_msgs: Vec<Inbound>,
 }
 
 impl Member {
@@ -32,6 +36,7 @@ impl Member {
         Self {
             membership,
             _events: events,
+            seen_msgs: Vec::new(),
         }
     }
 
@@ -150,6 +155,16 @@ impl Member {
             .request(|reply| Request::Send { to, body, reply })
             .await
             .expect("the loop answers")
+    }
+
+    /// Whether a directed message with this text has arrived at this member.
+    fn saw_msg(&mut self, text: &str) -> bool {
+        while let Ok(msg) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(msg);
+        }
+        self.seen_msgs
+            .iter()
+            .any(|msg| msg.directed && msg.text == text)
     }
 
     /// Wait until the selected rung to `peer` is `expected`. A probe goes out each
@@ -325,7 +340,7 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
     let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
         .await
         .expect("local relay");
-    let (alice, bob, carol) = three_members(&relay).await;
+    let (alice, mut bob, carol) = three_members(&relay).await;
     // First the application pair loses IP, with the underlays on IP: sessions open
     // on demand, from a send that a payload path carries, and a pair with no such
     // path (the relay is lookup only here) would never be offered one. Here the
@@ -378,6 +393,27 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
         let _ = alice.send("bob", &format!("forward probe {probes}")).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+
+    // A payload cell goes from alice to bob over the hop: the message arrives, and
+    // carol has forwarded more cells than before it was sent.
+    let before = carol.forwarded_cells().await;
+    let text = "payload over the hop";
+    alice
+        .send("bob", text)
+        .await
+        .unwrap_or_else(|error| panic!("the send over the hop was refused: {error}"));
+    let sent_at = Instant::now();
+    while !bob.saw_msg(text) {
+        assert!(
+            sent_at.elapsed() < PAYLOAD_DEADLINE,
+            "the message never reached bob over the hop"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(
+        carol.forwarded_cells().await > before,
+        "the message reached bob, but carol forwarded no cell for it"
+    );
 
     for member in [alice, bob, carol] {
         let _ = member.membership.node.leave().await;
