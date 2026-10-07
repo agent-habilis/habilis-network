@@ -20,6 +20,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// that offers the underlay session, then for a second ICE round.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 
+/// How long the direct link of two underlays that have lost their paths takes to
+/// leave the topology: the stuck time of 20 s, one link-state of 15 s, and a margin.
+const LINK_AGES_OUT: Duration = Duration::from_secs(40);
+
 /// How long a message may take over a route that is already up.
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -404,6 +408,17 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
         );
         probes += 1;
         let _ = alice.send("bob", &format!("forward probe {probes}")).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    // The direct link between the underlays of alice and bob ages out of the
+    // topology after the stuck time of 20 s plus one link-state of 15 s, and the
+    // block of its WebRTC session is read by the selector at its next path event.
+    // Until then a cell can still cross it, and carol forwards nothing for it. So
+    // traffic goes on for that long before the payload is sent.
+    let settle_until = Instant::now() + LINK_AGES_OUT;
+    while Instant::now() < settle_until {
+        let _ = alice.send("bob", "settle probe").await;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
