@@ -679,8 +679,30 @@ pub(crate) fn wants_session(
     proven: bool,
 ) -> bool {
     let udp_selected = kind == Some(super::probe::PathKind::Ip);
-    let proven = proven && kind != Some(super::probe::PathKind::Multihop);
+    let proven = proven
+        && !matches!(
+            kind,
+            Some(super::probe::PathKind::Multihop | super::probe::PathKind::Relay)
+        );
     pair_needs_lane || !(udp_selected || proven)
+}
+
+/// Whether this node leaves the offer of a session to its peer. The higher id waits to be
+/// dialled, so that one offer crosses per pair, unless a frame is held for the peer or the
+/// proof of a direct path is stale.
+///
+/// The proof is stale when the pair was `proven` direct and the selected path reads as the
+/// relay. Only the lower id has a path watcher (`ensure_watchers`), so a higher id that sends
+/// is the only one that can see the direct path go, and nobody else would offer. A crossing
+/// is settled in favour of the lower id (see `WebRtcSignalAcceptor::accept`).
+pub(crate) fn waits_for_the_offer(
+    local_is_higher: bool,
+    frame_held: bool,
+    kind: Option<super::probe::PathKind>,
+    proven: bool,
+) -> bool {
+    let proof_is_stale = proven && kind == Some(super::probe::PathKind::Relay);
+    local_is_higher && !frame_held && !proof_is_stale
 }
 
 /// Whether *this* node's rendezvous graft must wait for a data-channel
@@ -716,11 +738,9 @@ pub(crate) fn negotiate_session(
     // see the native peer's IP, skip, and the native — waiting to be dialled —
     // would never offer. The pair would silently never get a channel.
     let needs_lane = pair_needs_lane(&addr, state.local_udp_transport);
-    if !wants_session(
-        needs_lane,
-        state.pair_path_kind(peer),
-        state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct),
-    ) {
+    let kind = state.pair_path_kind(peer);
+    let proven = state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct);
+    if !wants_session(needs_lane, kind, proven) {
         tracing::debug!(
             target: LOG_TARGET,
             %peer,
@@ -732,7 +752,8 @@ pub(crate) fn negotiate_session(
     // the peer: that frame cannot wait for an offer that the lower id has no reason to make. If
     // both offer at once, the lower id wins (see `WebRtcSignalAcceptor::accept`).
     let local = ctx.endpoint.id();
-    if local > peer && !state.lane_session_wanted(peer, crate::util::clock::Instant::now()) {
+    let frame_held = state.lane_session_wanted(peer, crate::util::clock::Instant::now());
+    if waits_for_the_offer(local > peer, frame_held, kind, proven) {
         return;
     }
     // Every other gate — already have a session, already negotiating, at the
@@ -1484,6 +1505,45 @@ mod tests {
         assert!(
             !wants_session(false, Some(PathKind::WebRtc), true),
             "proven direct, riding a session"
+        );
+    }
+
+    // The proof of a direct path is a state of the engine, and only a watcher on a
+    // pooled connection takes it back. When the admission table reads the relay as the
+    // selected path, the proof is stale: the pair offers, as one that was never proven.
+    #[test]
+    fn a_proven_pair_that_reads_as_relay_is_offered_a_session() {
+        assert!(wants_session(false, Some(PathKind::Relay), true));
+    }
+
+    // Only the lower id watches a pooled connection, so when the higher id is the one
+    // that sends, the lower id never sees the direct path go. The higher id then offers
+    // by itself, once its own reading contradicts the proof; the lower id wins a crossing.
+    #[test]
+    fn the_higher_id_offers_when_the_proof_of_a_direct_path_is_stale() {
+        assert!(
+            waits_for_the_offer(true, false, None, false),
+            "nothing to say"
+        );
+        assert!(
+            waits_for_the_offer(true, false, Some(PathKind::Ip), true),
+            "the proof holds"
+        );
+        assert!(
+            !waits_for_the_offer(true, true, None, false),
+            "a frame is held for the peer"
+        );
+        assert!(
+            !waits_for_the_offer(true, false, Some(PathKind::Relay), true),
+            "the pair reads as relay although it was proven"
+        );
+        assert!(
+            waits_for_the_offer(true, false, Some(PathKind::Relay), false),
+            "never proven: the lower id offers"
+        );
+        assert!(
+            !waits_for_the_offer(false, false, Some(PathKind::Ip), true),
+            "the lower id never waits"
         );
     }
 
