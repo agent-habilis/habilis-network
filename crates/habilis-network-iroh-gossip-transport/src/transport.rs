@@ -221,6 +221,12 @@ impl GossipHandle {
         }
     }
 
+    /// The topic missed messages for this member (`Event::Lagged`). The receive loop
+    /// calls this, and so must the engine's split of the mesh topic.
+    pub fn note_lagged(&self) {
+        self.shared.counters.lagged();
+    }
+
     /// What this handle has counted so far.
     #[must_use]
     pub fn stats(&self) -> Stats {

@@ -33,6 +33,9 @@ pub struct Stats {
     /// Packets that arrived queued for iroh but were larger than the buffer iroh
     /// offered, and were dropped.
     pub dropped_oversized_in: u64,
+    /// Times the topic told this member that it missed messages, because the
+    /// receive loop was not reading fast enough (`Event::Lagged`).
+    pub topic_lagged: u64,
     /// Frames sent without a charge on the budget, because the destination has
     /// no established connection: a handshake.
     pub exempt_frames: u64,
@@ -56,6 +59,7 @@ pub(crate) struct Counters {
     dropped_budget: AtomicU64,
     dropped_oversized_in: AtomicU64,
     exempt_frames: AtomicU64,
+    topic_lagged: AtomicU64,
 }
 
 impl Counters {
@@ -78,6 +82,7 @@ impl Counters {
             dropped_budget: read(&self.dropped_budget),
             dropped_oversized_in: read(&self.dropped_oversized_in),
             exempt_frames: read(&self.exempt_frames),
+            topic_lagged: read(&self.topic_lagged),
         }
     }
 
@@ -135,6 +140,10 @@ impl Counters {
 
     pub(crate) fn dropped_oversized_in(&self) {
         bump(&self.dropped_oversized_in, 1);
+    }
+
+    pub(crate) fn lagged(&self) {
+        bump(&self.topic_lagged, 1);
     }
 
     pub(crate) fn exempt(&self) {

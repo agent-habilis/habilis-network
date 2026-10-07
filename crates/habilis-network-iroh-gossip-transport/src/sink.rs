@@ -57,11 +57,20 @@ pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
 pub fn spawn_receive_loop(mut receiver: GossipReceiver, handle: GossipHandle) -> ReceiveLoop {
     n0_future::task::spawn(async move {
         while let Some(Ok(event)) = receiver.next().await {
-            if let Event::Received(message) = event {
-                let _ = handle.deliver(&message.content);
-            }
+            handle_event(&handle, event);
         }
     })
+}
+
+/// What the receive loop does with one topic event.
+pub(crate) fn handle_event(handle: &GossipHandle, event: Event) {
+    match event {
+        Event::Received(message) => {
+            let _ = handle.deliver(&message.content);
+        }
+        Event::Lagged => handle.note_lagged(),
+        Event::NeighborUp(_) | Event::NeighborDown(_) => {}
+    }
 }
 
 impl FrameSink for GossipSink {
@@ -82,6 +91,7 @@ mod tests {
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
     use iroh::{Endpoint, RelayMode, SecretKey};
+    use iroh_gossip::api::Event;
     use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
     use iroh_gossip::proto::TopicId;
 
@@ -364,5 +374,19 @@ mod tests {
             before + 1,
             "counted as no sink"
         );
+    }
+
+    /// A `Lagged` event of the topic is counted, and the other events that carry no
+    /// frame change nothing.
+    #[test]
+    fn a_lagged_event_is_counted_and_a_neighbor_event_is_not() {
+        let handle = GossipHandle::new(secret(1).public());
+
+        super::handle_event(&handle, Event::Lagged);
+        super::handle_event(&handle, Event::Lagged);
+        super::handle_event(&handle, Event::NeighborUp(secret(2).public()));
+
+        assert_eq!(handle.stats().topic_lagged, 2);
+        assert_eq!(handle.stats().frames_in, 0);
     }
 }
