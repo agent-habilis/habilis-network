@@ -114,24 +114,31 @@ pub fn climb<'a>(
     best_of(paths.iter().filter(|path| usable_on(rung, path)))
 }
 
-/// Whether a test took the path `path` away from the node `local`, on `rung`:
-/// the one table that every selector of this workspace reads. Without
-/// `test-hooks` it is always `false`.
-#[cfg(feature = "test-hooks")]
+/// The IP address a path leads to, or `None` for a relay or custom path.
 #[must_use]
-pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
-    let remote = match path.network_path().remote() {
+pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
+    match path.network_path().remote() {
         Addr::Ip(remote) => Some(remote),
         Addr::Relay(..) | Addr::Custom(_) => None,
-    };
-    is_blocked(local, rung, remote)
+    }
 }
 
-/// Whether a test took the path `path` away from the node `local`, on `rung`.
-/// Without `test-hooks` it is always `false`.
+/// Whether a test took the path `path` away from the node `local`, on `rung`:
+/// [`is_blocked`] for a selector, which has a path and not an address.
+#[must_use]
+pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
+    is_blocked(local, rung, ip_remote(path))
+}
+
+/// Without `test-hooks` nothing is ever blocked, so a selector reads the same
+/// function in every build and needs no feature of its own.
 #[cfg(not(feature = "test-hooks"))]
 #[must_use]
-pub fn blocked(_local: iroh::EndpointId, _rung: Rung, _path: &PathSelectionData<'_>) -> bool {
+pub fn is_blocked(
+    _local: iroh::EndpointId,
+    _rung: Rung,
+    _remote: Option<std::net::SocketAddr>,
+) -> bool {
     false
 }
 

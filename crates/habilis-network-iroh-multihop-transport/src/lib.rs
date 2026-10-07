@@ -411,7 +411,7 @@ impl MultihopHandle {
     /// `Builder::path_selector`.
     #[must_use]
     pub fn path_selector(&self) -> Arc<dyn PathSelector> {
-        Arc::new(MultihopLadder)
+        Arc::new(MultihopLadder::new(self.inner.self_id))
     }
 }
 
