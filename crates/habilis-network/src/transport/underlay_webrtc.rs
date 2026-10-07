@@ -279,21 +279,21 @@ mod tests {
         let neighbor = vec![(member, EndpointAddr::new(high))];
 
         // On WebRTC the neighbor is wanted, and its session stays.
-        let wanted: Vec<EndpointId> =
+        let wanted_on_webrtc: Vec<EndpointId> =
             wanted_underlays(&neighbor, neighbor_kinds(member, other, other))
                 .iter()
                 .map(|addr| addr.id)
                 .collect();
-        assert_eq!(plan(low, &wanted, &[high]), Plan::default());
+        assert_eq!(plan(low, &wanted_on_webrtc, &[high]), Plan::default());
 
         // Its path climbs to IP: no longer wanted, the session goes.
-        let wanted: Vec<EndpointId> =
+        let wanted_on_ip: Vec<EndpointId> =
             wanted_underlays(&neighbor, neighbor_kinds(other, member, other))
                 .iter()
                 .map(|addr| addr.id)
                 .collect();
         assert_eq!(
-            plan(low, &wanted, &[high]),
+            plan(low, &wanted_on_ip, &[high]),
             Plan {
                 dial: vec![],
                 detach: vec![high]
@@ -301,12 +301,13 @@ mod tests {
         );
 
         // It leaves the gossip view: the same.
-        let wanted: Vec<EndpointId> = wanted_underlays(&[], neighbor_kinds(member, other, other))
-            .iter()
-            .map(|addr| addr.id)
-            .collect();
+        let wanted_after_leaving: Vec<EndpointId> =
+            wanted_underlays(&[], neighbor_kinds(member, other, other))
+                .iter()
+                .map(|addr| addr.id)
+                .collect();
         assert_eq!(
-            plan(low, &wanted, &[high]),
+            plan(low, &wanted_after_leaving, &[high]),
             Plan {
                 dial: vec![],
                 detach: vec![high]
@@ -335,7 +336,13 @@ mod tests {
             iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
                 Some(close.error_code.into_inner())
             }
-            _ => None,
+            iroh::endpoint::ConnectionError::VersionMismatch
+            | iroh::endpoint::ConnectionError::TransportError(_)
+            | iroh::endpoint::ConnectionError::ConnectionClosed(_)
+            | iroh::endpoint::ConnectionError::Reset
+            | iroh::endpoint::ConnectionError::TimedOut
+            | iroh::endpoint::ConnectionError::LocallyClosed
+            | iroh::endpoint::ConnectionError::CidsExhausted => None,
         }
     }
 

@@ -1034,14 +1034,14 @@ mod tests {
         );
         assert_eq!(leg.handle.session_count(), 0);
 
-        let (_, _, _, none) = build(TransportOpts::default(), None).await;
-        assert!(none.is_none(), "no cap, no leg");
+        let (_, _, _, without_cap) = build(TransportOpts::default(), None).await;
+        assert!(without_cap.is_none(), "no cap, no leg");
         let off = TransportOpts {
             webrtc: false,
             ..TransportOpts::default()
         };
-        let (_, _, _, none) = build(off, Some(5)).await;
-        assert!(none.is_none(), "WebRTC off, no leg");
+        let (_, _, _, webrtc_off) = build(off, Some(5)).await;
+        assert!(webrtc_off.is_none(), "WebRTC off, no leg");
     }
 
     // One identity per peer: the application endpoint (UDP and relay), the
