@@ -25,8 +25,8 @@ use crate::util::tuning::{
     RELINK_COOLDOWN_SECS, SEEN_IDS_CAP,
 };
 
-/// `RELINK_COOLDOWN_SECS` as a `Duration` — the window both per-endpoint
-/// throttles (`relink`, `peerinfo`) use.
+/// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
+/// re-link throttle (`relink`) and of the `PeerInfo` flood gate.
 const RELINK_COOLDOWN: Duration = Duration::from_secs(RELINK_COOLDOWN_SECS);
 
 /// How long an author whose digest we could not read stays unreported. A build
@@ -182,17 +182,8 @@ pub struct EventLoopState {
     /// stops one bad node's flap from amplifying into a mesh-wide connection
     /// storm. Bounded by construction (see [`Cooldown`]).
     pub(crate) relink: Cooldown<EndpointId>,
-    /// Per-endpoint `PeerInfo` re-flood throttle. `relink` only throttles the
-    /// *inbound* re-dial in `handle_peer_info`; this throttles the *outbound*
-    /// re-flood every `NeighborUp` would otherwise trigger (`gossip::recv`).
-    /// Without it a single flapping link re-floods the whole mesh on every
-    /// up-transition — the residual amplifier behind the soak's ~7.4k-per-host
-    /// `neighbor up` storm. Kept separate from `relink` so the two throttles
-    /// stay independently reasoned (and a new neighbor still gets exactly one
-    /// re-flood).
-    pub(crate) peerinfo: Cooldown<EndpointId>,
     /// When we last flooded our `PeerInfo`, whatever triggered it. Stamped by
-    /// `broadcast_peer_info`; read by the `joined` re-flood gate.
+    /// `broadcast_peer_info`; read by the `joined` and `NeighborUp` re-flood gates.
     pub(crate) peerinfo_flooded_at: Option<Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
@@ -690,7 +681,6 @@ impl EventLoopState {
             ),
             peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
-            peerinfo: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
@@ -854,19 +844,12 @@ impl EventLoopState {
         self.relink.note(peer, now);
     }
 
-    /// `true` if a `NeighborUp` for `peer` already made us re-flood our own
-    /// `PeerInfo` within the cooldown window of `now`, so the caller should
-    /// skip re-flooding again. This is what stops a flapping link from
-    /// re-broadcasting our address to the whole mesh on *every* up-transition
-    /// (see `peerinfo`); a genuinely new neighbor, having no entry, still gets
-    /// exactly one re-flood.
-    pub(crate) fn peerinfo_on_cooldown(&self, peer: EndpointId, now: Instant) -> bool {
-        self.peerinfo.on_cooldown(&peer, now)
-    }
-
-    /// Record a `PeerInfo` re-flood triggered by `peer` at `now`.
-    pub(crate) fn note_peerinfo(&mut self, peer: EndpointId, now: Instant) {
-        self.peerinfo.note(peer, now);
+    /// Whether a `NeighborUp` at `now` re-floods our `PeerInfo`: once per
+    /// window since any flood, whichever neighbor brings it. A key per neighbor
+    /// let every new link flood again, and every flood is answered by a graft
+    /// from each peer that hears it. A flapping link floods once per window too.
+    pub(crate) fn neighbor_up_refloods_peerinfo(&self, now: Instant) -> bool {
+        self.joined_refloods_peerinfo(false, now)
     }
 
     /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
@@ -2064,42 +2047,43 @@ mod tests {
 
     // The residual flap amplifier the re-link cooldown did NOT cover: every
     // `NeighborUp` re-floods our own `PeerInfo` to the whole mesh, and a
-    // flapping link re-triggers `NeighborUp` on each up-transition, so without
-    // a second cooldown one bad node re-floods the mesh ~once per flap (the
-    // ~7.4k-per-host `neighbor up` storm seen in the distributed soak). The
-    // PeerInfo cooldown collapses that to once per window per endpoint while
-    // still letting a genuinely new neighbor get exactly one re-flood.
+    // flapping link re-triggers `NeighborUp` on each up-transition. Every flood
+    // is also answered by a graft from each peer that hears it, and a graft at
+    // a full view evicts a neighbor, so a window per neighbor lets the floods
+    // cascade. The window is per flood: one flapping peer, or five peers, flood
+    // once per window.
     #[test]
-    fn peerinfo_cooldown_caps_a_flapping_peer() {
-        let peer = endpoint_id(7);
+    fn neighbors_up_in_one_window_flood_peerinfo_once() {
         let start = Instant::now();
 
-        // The pre-fix `NeighborUp` arm re-flooded unconditionally when
-        // `announced`, so 100 flaps == 100 mesh-wide PeerInfo broadcasts. The
-        // gate below replays the same 100 flaps and counts what now actually
-        // re-floods.
-        let mut state = fresh_state();
-        let mut refloods = 0;
+        let mut flapping = fresh_state();
+        let mut flapping_refloods = 0;
         for index in 0..100u32 {
             let now = start + Duration::from_millis(u64::from(index) * 10);
-            if !state.peerinfo_on_cooldown(peer, now) {
-                state.note_peerinfo(peer, now);
-                refloods += 1;
+            if flapping.neighbor_up_refloods_peerinfo(now) {
+                flapping.peerinfo_flooded_at = Some(now);
+                flapping_refloods += 1;
             }
         }
         assert_eq!(
-            refloods, 1,
-            "the cooldown caps PeerInfo re-floods to one per window (was 100, one per flap)"
+            flapping_refloods, 1,
+            "a flapping peer floods once per window"
         );
 
-        // A genuinely different neighbor in the same window still gets its own
-        // re-flood (the choke targets the *flapping* endpoint, not all peers).
-        let fresh_peer = endpoint_id(8);
-        assert!(!state.peerinfo_on_cooldown(fresh_peer, start));
+        let mut state = fresh_state();
+        let mut refloods = 0;
+        for index in 0..5u64 {
+            let now = start + Duration::from_millis(index * 10);
+            if state.neighbor_up_refloods_peerinfo(now) {
+                state.peerinfo_flooded_at = Some(now);
+                refloods += 1;
+            }
+        }
+        assert_eq!(refloods, 1, "five neighbors flood once per window");
 
-        // Past the window the flapping peer may re-flood once more (no permanent silence).
+        // Past the window a neighbor up floods once more (no permanent silence).
         let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
-        assert!(!state.peerinfo_on_cooldown(peer, later));
+        assert!(state.neighbor_up_refloods_peerinfo(later));
     }
 
     #[test]
@@ -2247,8 +2231,8 @@ mod tests {
             let now = start + Duration::from_millis(u64::from(index) * 100);
             let peer = peers[index as usize % peers.len()];
             // NeighborUp → PeerInfo reflood gate + (via handle_peer_info) link.
-            if !state.peerinfo_on_cooldown(peer, now) {
-                state.note_peerinfo(peer, now);
+            if state.neighbor_up_refloods_peerinfo(now) {
+                state.peerinfo_flooded_at = Some(now);
             }
             if !state.relink_on_cooldown(peer, now) {
                 state.note_relink(peer, now);
@@ -2265,11 +2249,6 @@ mod tests {
             state.relink.len() <= peers.len(),
             "relink flat: {}",
             state.relink.len()
-        );
-        assert!(
-            state.peerinfo.len() <= peers.len(),
-            "peerinfo flat: {}",
-            state.peerinfo.len()
         );
         assert!(
             state.linked_endpoints.len() <= peers.len(),

@@ -57,22 +57,20 @@ pub(crate) async fn handle_gossip_event(
             // first link is the rendezvous relay, and `joined` is a
             // one-shot — sending it before any link exists loses it.
             // Later neighbors only get a `PeerInfo` re-send, and only once
-            // per cooldown window per endpoint: a flapping link must not
+            // per window since any flood: a flapping link must not
             // re-flood our address to the whole mesh on every up-transition
             // (the residual amplifier behind the soak's `neighbor up` storm).
             let now = Instant::now();
             if state.announced {
-                if state.peerinfo_on_cooldown(node_id, now) {
-                    tracing::debug!(target: "habilis_network::gossip", endpoint_id = %node_id, "skipped PeerInfo re-flood (cooldown)");
-                } else {
+                if state.neighbor_up_refloods_peerinfo(now) {
                     broadcast_peer_info(state, ctx).await;
-                    state.note_peerinfo(node_id, now);
                     state.last_sent_at = now;
+                } else {
+                    tracing::debug!(target: "habilis_network::gossip", endpoint_id = %node_id, "skipped PeerInfo re-flood (cooldown)");
                 }
             } else {
                 announce_arrival(state, ctx).await;
                 state.announced = true;
-                state.note_peerinfo(node_id, now);
                 state.last_sent_at = now;
                 tracing::info!(target: "habilis_network::gossip", "announced arrival on first gossip link");
             }
