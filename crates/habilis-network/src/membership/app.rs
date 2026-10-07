@@ -169,6 +169,12 @@ pub enum Request {
         peer: String,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: the endpoint id of this node. A test that needs the order of two
+    /// ids (the lower id offers a session) reads them here.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    EndpointId {
+        reply: oneshot::Sender<iroh::EndpointId>,
+    },
     /// Tests only: the rung of the selected path on this node's pooled
     /// connection to the member `peer`: `ip`, `webrtc`, `multihop` or `relay`.
     /// It opens the connection first if there is none. This is the connection
@@ -234,6 +240,16 @@ pub enum Request {
     ))]
     RedialCounts {
         reply: oneshot::Sender<[u64; 6]>,
+    },
+    /// Tests only: the direct peers the ledger of the ceiling counts now, and by how many it is over
+    /// the ceiling, as `(units, over_ceiling)`.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    DirectUnits {
+        reply: oneshot::Sender<(usize, usize)>,
     },
 }
 
@@ -447,6 +463,11 @@ impl NodeDriver for MembershipApp {
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::EndpointId { reply } => {
+                let _ = reply.send(ctx.endpoint.id());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::SelectedRung { peer, reply } => {
                 let id = state.peer_endpoints.get(peer.as_str()).map(|addr| addr.id);
                 let pool = state.unicast_pool.clone();
@@ -509,6 +530,18 @@ impl NodeDriver for MembershipApp {
                         .count()
                 });
                 let _ = reply.send(sessions);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::DirectUnits { reply } => {
+                let _ = reply.send((
+                    state.webrtc_admission.direct_units(),
+                    state.webrtc_admission.over_ceiling(),
+                ));
                 false
             }
             #[cfg(all(
