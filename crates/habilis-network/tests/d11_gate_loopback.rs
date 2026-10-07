@@ -12,6 +12,11 @@
 //!   sent when the roster holds, must arrive: the node that holds the frame is the higher id in one of
 //!   the two directions.
 //!
+//! Limit of the lane test: if the two members are already linked by other means when the frame goes,
+//! the frame is plain delivery and says nothing about the held-frame path. The census line of the
+//! run (`link_len`, `meshed`) and the log show which of the two ran; a passing run must show a
+//! member link that came after the first frame.
+//!
 //! What these do not show: a slow reader. The acceptor of a real member reads at once, so the busy
 //! mark with a slow reader is covered by the unit test in `transport/pool.rs`.
 

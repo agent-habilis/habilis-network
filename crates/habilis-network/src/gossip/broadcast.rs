@@ -74,6 +74,8 @@ pub async fn send_app(
             }
             outcome => return outcome,
         }
+    } else {
+        mark_parked(state, &frame, &bytes);
     }
     if state.pending_outbound.push((frame, bytes)) {
         // Buffered until the meshed edge flushes it through the same send
@@ -304,4 +306,72 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCt
     broadcast_msg(ctx.sender, &joined).await;
     super::recv::retain_own_broadcast(state, &joined);
     broadcast_peer_info(state, ctx).await;
+}
+
+/// A directed frame that is parked because the node is not meshed yet still asks for the session
+/// of a peer that needs one: a node becomes meshed by its first link to a member, and on a lane pair
+/// that link needs the session, so a frame that waited for the link could never ask for it. The rule
+/// is the one of a frame held on a meshed node ([`crate::transport::note_held`]).
+fn mark_parked(state: &mut EventLoopState, frame: &Message, bytes: &Bytes) {
+    if let Err(error) = crate::transport::resolve(frame, bytes.clone(), state) {
+        crate::transport::note_held(state, &error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::mark_parked;
+    use crate::protocol::{MeshId, Message};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+
+    /// A node that is not meshed parks a directed frame to a lane peer, and the park asks for the
+    /// peer's session.
+    #[test]
+    fn an_unmeshed_directed_frame_to_a_lane_peer_marks_the_peer_wanted() {
+        let mut state = fresh_state();
+        state.meshed = false;
+        state.local_udp_transport = true;
+        let bob = endpoint_id(1);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+        );
+        let frame = Message::new_pong(&MeshId::from("test"), &nick("alice"), nick("bob"));
+        let bytes = Bytes::from_static(b"frame");
+        let now = crate::util::clock::Instant::now();
+        assert!(
+            !state.lane_session_wanted(bob, now),
+            "nothing is parked yet"
+        );
+
+        mark_parked(&mut state, &frame, &bytes);
+
+        assert!(state.lane_session_wanted(bob, now), "the parked frame asks");
+    }
+
+    /// A broadcast has no addressee, so parking it asks for nothing.
+    #[test]
+    fn an_unmeshed_broadcast_asks_for_no_session() {
+        let mut state = fresh_state();
+        state.meshed = false;
+        let bob = endpoint_id(1);
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(bob));
+        let frame = Message::new_app(
+            &MeshId::from("test"),
+            &nick("alice"),
+            crate::protocol::message::AppFrameParams {
+                tag: crate::protocol::AppTag::from("app_msg"),
+                to: None,
+                corr: None,
+                body: crate::protocol::MessageBody::from("hi"),
+            },
+        );
+        mark_parked(&mut state, &frame, &Bytes::from_static(b"frame"));
+        assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+    }
 }
