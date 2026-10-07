@@ -11,18 +11,21 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench, exchange, on_webrtc};
-use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Builder, presets};
+use habilis_network_iroh_webrtc_transport::bench::{
+    BENCH_ALPN, Bench, exchange, on_webrtc, rtt_samples,
+};
+use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Builder, Connection, Path, presets};
 use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
 use habilis_network_iroh_webrtc_transport::iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr,
 };
 use habilis_network_iroh_webrtc_transport::{
-    IceConfig, WebRtcHandle, WebRtcTransport, answer_with, custom_addr, offer_with,
+    IceConfig, WEBRTC_TRANSPORT_ID, WebRtcHandle, WebRtcTransport, answer_with, custom_addr,
+    offer_with,
 };
 
 use super::Args;
-use super::run::{Measured, Outcome, Sample, TRANSFER_TIMEOUT};
+use super::run::{Measured, Outcome, Rtt, Sample, TRANSFER_TIMEOUT};
 
 /// A JSEP round on loopback is milliseconds; this is the stall bound.
 pub(crate) const JSEP_DEADLINE: Duration = Duration::from_secs(30);
@@ -52,9 +55,7 @@ impl WebRtcPeer {
     }
 }
 
-fn path_of(
-    connection: &habilis_network_iroh_webrtc_transport::iroh::endpoint::Connection,
-) -> String {
+fn path_of(connection: &Connection) -> String {
     if on_webrtc(connection) {
         return "webrtc".to_owned();
     }
@@ -76,13 +77,25 @@ async fn rounds(
         .connect(server, BENCH_ALPN)
         .await
         .map_err(|error| format!("connect failed: {error:#}"))?;
+    let samples = rounds_on(&connection, args, path_of).await?;
+    connection.close(0u32.into(), b"done");
+    Ok(samples)
+}
+
+/// The transfers of [`rounds`] over a connection that is already open, with
+/// `path` naming what carried each one.
+async fn rounds_on(
+    connection: &Connection,
+    args: &Args,
+    path: impl Fn(&Connection) -> String,
+) -> Result<Vec<Sample>, String> {
     let mut samples = Vec::with_capacity(args.rounds + 1);
     for _ in 0..=args.rounds {
-        let path = path_of(&connection);
+        let path = path(connection);
         let started = Instant::now();
         let bytes = tokio::time::timeout(
             TRANSFER_TIMEOUT,
-            exchange(&connection, args.direction.protocol(), args.bytes),
+            exchange(connection, args.direction.protocol(), args.bytes),
         )
         .await
         .map_err(|_| format!("a transfer stalled past {TRANSFER_TIMEOUT:?}"))?
@@ -94,8 +107,59 @@ async fn rounds(
             path,
         });
     }
-    connection.close(0u32.into(), b"done");
     Ok(samples)
+}
+
+/// Probes sent and dropped before the timed ones: the first round trips pay
+/// for the congestion window and for path setup.
+const RTT_WARMUP: usize = 50;
+/// Timed round trips per ladder cell.
+const RTT_ROUNDS: usize = 1000;
+
+/// The selected path of `connection`, named the way a cell expects it. The
+/// selected path, not any path: a cell that claims a rung must have used it.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "`TransportAddr` is non-exhaustive: a rung this runner does not name is `other`"
+)]
+pub(crate) fn selected_path(connection: &Connection) -> String {
+    connection
+        .paths()
+        .iter()
+        .find(Path::is_selected)
+        .map_or("other", |path| match path.remote_addr() {
+            TransportAddr::Ip(_) => "ip",
+            TransportAddr::Relay(_) => "relay",
+            TransportAddr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => "webrtc",
+            _ => "other",
+        })
+        .to_owned()
+}
+
+/// One ladder cell over one connection from `client` to `server`: the transfer
+/// rounds, then the round trips, both on the selected path.
+async fn ladder_measure(
+    client: &Endpoint,
+    server: EndpointAddr,
+    args: &Args,
+    negotiate_ms: f64,
+) -> Result<Measured, String> {
+    let connection = client
+        .connect(server, BENCH_ALPN)
+        .await
+        .map_err(|error| format!("connect failed: {error:#}"))?;
+    let samples = rounds_on(&connection, args, selected_path).await?;
+    let round_trips = tokio::time::timeout(
+        TRANSFER_TIMEOUT,
+        rtt_samples(&connection, RTT_WARMUP, RTT_ROUNDS),
+    )
+    .await
+    .map_err(|_| format!("the round trips stalled past {TRANSFER_TIMEOUT:?}"))?
+    .map_err(|error| format!("round trips failed: {error:#}"))?;
+    connection.close(0u32.into(), b"done");
+    let mut measured = Measured::from_samples(negotiate_ms, samples)?;
+    measured.rtt = Rtt::from_samples(&round_trips);
+    Ok(measured)
 }
 
 /// The first `IPv4` socket the endpoint bound, as a dialable address.
@@ -212,9 +276,21 @@ async fn ip_pair<F: Future<Output = Result<Endpoint, String>>>(
     run.await.into()
 }
 
+/// The ladder's UDP cell: plain iroh on loopback, throughput and round trips.
+pub(crate) async fn ladder_udp(args: &Args) -> Outcome {
+    let run = async {
+        let client = vanilla().await?;
+        let server = vanilla().await?;
+        let addr = ip_addr(&server)?;
+        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+        ladder_measure(&client, addr, args, 0.0).await
+    };
+    run.await.into()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Args, BENCH_ALPN, Bench, Router, ip_addr, rounds, vanilla};
+    use super::{Args, BENCH_ALPN, Bench, Outcome, Router, ip_addr, ladder_udp, rounds, vanilla};
     use crate::bench::Direction;
     use habilis_network_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
 
@@ -299,5 +375,29 @@ mod tests {
     async fn a_bench_server_refuses_a_reply_past_the_transfer_ceiling() {
         let past = u32::try_from(MAX_TRANSFER_BYTES + 1).expect("the ceiling fits in u32");
         assert_eq!(reply_to(0, past).await, 0);
+    }
+
+    fn small_args() -> Args {
+        Args {
+            only: None,
+            bytes: 64 * 1024,
+            rounds: 2,
+            direction: Direction::Down,
+            list: false,
+            json: None,
+        }
+    }
+
+    /// The ladder's UDP cell carries both measurements: the transfer rounds
+    /// and the 1000 round trips after 50 warm-up probes, on the IP path.
+    #[tokio::test]
+    async fn the_ladder_udp_cell_measures_throughput_and_round_trips_on_ip() {
+        let Outcome::Ok(measured) = ladder_udp(&small_args()).await else {
+            panic!("the ladder udp cell did not measure");
+        };
+
+        assert_eq!(measured.path, "ip");
+        let rtt = measured.rtt.expect("round-trip percentiles");
+        assert!(rtt.p50_ms > 0.0 && rtt.p99_ms >= rtt.p50_ms);
     }
 }

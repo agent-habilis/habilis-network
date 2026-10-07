@@ -88,9 +88,11 @@ pub(crate) enum Cell {
     /// is the channel's own per-message cost; the gap from here to
     /// [`Self::HabilisNetworkChromeChrome`] is the integration's.
     RawChromeChromeDatagram,
+    /// The ladder's UDP rung: plain iroh on loopback, with round trips.
+    LadderUdp,
 }
 
-const CELLS: [Cell; 9] = [
+const CELLS: [Cell; 10] = [
     Cell::HabilisNetworkChromeChrome,
     Cell::HabilisNetworkChromeNative,
     Cell::HabilisNetworkSafariNative,
@@ -100,6 +102,7 @@ const CELLS: [Cell; 9] = [
     Cell::IrohNativeNative,
     Cell::RawChromeChrome,
     Cell::RawChromeChromeDatagram,
+    Cell::LadderUdp,
 ];
 
 impl Cell {
@@ -114,6 +117,7 @@ impl Cell {
             Self::IrohNativeNative => "iroh native-native",
             Self::RawChromeChrome => "webrtc chrome-chrome (raw, 64 KiB msgs)",
             Self::RawChromeChromeDatagram => "webrtc chrome-chrome (raw, 1200 B msgs)",
+            Self::LadderUdp => "ladder udp",
         }
     }
 }
