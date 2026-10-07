@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
+use habilis_network::util::tuning::STARVED_SECS;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// Long enough for a mesh of ten to form and for the alive ticks to fill what the
@@ -35,6 +36,10 @@ const CHURN_WINDOW: Duration = Duration::from_mins(5);
 /// What a settled view may change: the alive tick fills one gap and the relink
 /// cooldown paces the rest.
 const MAX_LINK_UPS_PER_MEMBER_PER_MINUTE: f64 = 2.0;
+
+/// The share of G that a member holds on average. Without a floor, a view that nothing
+/// fills passes the test above.
+const MIN_MEAN_LINKS_OF_G: f64 = 0.9;
 
 struct Member {
     membership: Membership,
@@ -190,27 +195,42 @@ async fn a_mesh_of_ten_links_every_member_to_every_other() {
 /// grafts nobody needs. After the views settle, the links may change at most twice per
 /// member per minute. The links are sampled every five seconds, so a flap shorter than
 /// that is not counted: the figure is a floor of the real churn.
-/// Takes eight minutes, so it only runs when asked for: `-- --ignored`.
+///
+/// A frozen overlay has no churn either, so the views must also stay filled: the mean
+/// number of links per member is at least 90 percent of G, and every member holds at
+/// least G - 1 links in at least half of the samples. A member that every other member
+/// refuses gets a link only from the fallback of a starved node (`STARVED_SECS`), so the
+/// window starts after two of them.
+/// Takes eighteen minutes, so it only runs when asked for: `-- --ignored`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "eight minutes: the views are sampled"]
+#[ignore = "eighteen minutes: the views are sampled"]
 async fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
     init_logging();
     let (members, keep) = mesh(12, VIEW_CAP).await;
 
     let started = Instant::now();
+    let settle = FILL_DEADLINE + Duration::from_secs(2 * STARVED_SECS);
     let mut link_ups = 0_u32;
+    let mut link_total = 0_u32;
+    let mut link_samples = 0_u32;
+    let mut near_target = vec![0_u32; members.len()];
     let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
-    while started.elapsed() < FILL_DEADLINE + CHURN_WINDOW {
+    while started.elapsed() < settle + CHURN_WINDOW {
         let mut now = Vec::with_capacity(members.len());
         for (index, member) in members.iter().enumerate() {
             let links = member.linked_set().await;
             if let Some(before) = previous.get(index) {
                 link_ups += u32::try_from(links.difference(before).count()).unwrap_or(u32::MAX);
             }
+            if started.elapsed() >= settle {
+                link_total += u32::try_from(links.len()).unwrap_or(u32::MAX);
+                link_samples += 1;
+                near_target[index] += u32::from(links.len() + 1 >= VIEW_CAP);
+            }
             now.push(links);
         }
-        // Only the window after the formation counts.
-        if started.elapsed() >= FILL_DEADLINE {
+        // Only the window after the settling counts.
+        if started.elapsed() >= settle {
             previous = now;
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -218,8 +238,25 @@ async fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
     let minutes = CHURN_WINDOW.as_secs_f64() / 60.0;
     let per_member_per_minute =
         f64::from(link_ups) / f64::from(u32::try_from(members.len()).unwrap_or(1)) / minutes;
+    let samples_per_member = link_samples / u32::try_from(members.len()).unwrap_or(1);
+    let mean_links = f64::from(link_total) / f64::from(link_samples.max(1));
+    let view_cap = f64::from(u32::try_from(VIEW_CAP).unwrap_or(0));
     eprintln!(
-        "link ups in {minutes} min: {link_ups}, {per_member_per_minute:.1} per member per min"
+        "link ups in {minutes} min: {link_ups}, {per_member_per_minute:.1} per member per min; \
+         mean links per member {mean_links:.2} of {VIEW_CAP}"
+    );
+    eprintln!("samples at G - 1 or more, per member: {near_target:?} of {samples_per_member}");
+    assert!(
+        near_target
+            .iter()
+            .all(|count| count * 2 >= samples_per_member),
+        "a member held fewer than G - 1 links in more than half of the samples: \
+         {near_target:?} of {samples_per_member}"
+    );
+    assert!(
+        mean_links >= MIN_MEAN_LINKS_OF_G * view_cap,
+        "a frozen overlay: {mean_links:.2} links per member on average, at least \
+         {MIN_MEAN_LINKS_OF_G} of {VIEW_CAP} wanted"
     );
     assert!(
         per_member_per_minute <= MAX_LINK_UPS_PER_MEMBER_PER_MINUTE,
