@@ -58,8 +58,10 @@ pub struct Opts {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
-    /// Active-view cap; `0` takes the engine default.
+    /// Active-view cap (G); `0` takes the engine default.
     pub max_peers: usize,
+    /// Cap on `WebRTC` sessions (D); `0` takes the engine default.
+    pub max_sessions: usize,
 }
 
 /// The ladder these options name, or `None` for the default. Parsed as one
@@ -135,6 +137,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
         SetupParams {
             author,
             max_peers,
+            max_sessions: opts.max_sessions,
             // An embedded library writes no files and binds no control
             // socket, so it claims no /tmp root of its own.
             runtime_base: None,

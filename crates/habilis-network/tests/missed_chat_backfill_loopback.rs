@@ -181,6 +181,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
         SetupParams {
             author: nick(name),
             max_peers: 16,
+            max_sessions: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),

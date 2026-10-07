@@ -705,21 +705,22 @@ pub const FAST_ROUND_AHEAD_MAX: usize = 16;
 /// a peer whose heads we can never hold must not hold a place for ever.
 pub const FAST_ROUND_AHEAD_TTL_SECS: u64 = 60;
 
-/// `HyParView` **active view** capacity — the number of direct gossip neighbors
-/// (open QUIC links) each member maintains per topic. A mesh at or below this
-/// size forms a **full mesh** with nothing to shuffle, so it has **zero
-/// membership churn** (and thus none of the per-connection-churn memory leak);
-/// past it the overlay maintains a partial mesh and continuously
-/// promotes/demotes peers (the churn). Raised from iroh-gossip's default of 5
-/// to **64** so realistic agent meshes (≤ 65) stay churn-free. The ceiling is
-/// performance, not correctness: each slot is a live connection + keepalive
-/// (~0.5 MB resident per link) and a full mesh costs O(S²) broadcast
-/// amplification, so a fully-meshed node runs ~50 MB — 64 deliberately trades
-/// that heavier per-node cost for a larger churn-free mesh. This is the default
-/// for the public `--max-peers` cap; the passive (healing/shuffle) pool is
-/// derived as 2× the live view. Set `--max-peers` *small* to deliberately
+/// `HyParView` **active view** capacity (G): the number of direct gossip
+/// neighbors (open QUIC links) each member keeps per topic. A mesh of G + 1
+/// members or fewer forms a **full mesh** with nothing to shuffle, so it has
+/// **zero membership churn** (and none of the per-connection-churn memory leak).
+/// Past that the overlay is partial and keeps promoting and demoting peers.
+///
+/// The default is **32**, chosen together with D, the `WebRTC` session cap
+/// (`MAX_DIRECT_PEERS`): the memory of a node follows both, see "Choosing G and
+/// D from a memory budget" in `docs/perf/direct-peer-memory.md`. It was 64,
+/// which kept meshes of up to 65 free of churn at 50 to 100 MB per node. G is a
+/// count bound only: `HyParView` still accepts a high-priority join at a full
+/// view and drops a random member. This is the default for the public
+/// `--max-peers` cap, and `0` asks for it. The passive (healing/shuffle) pool is
+/// derived as 2x the live view. Set `--max-peers` *small* to deliberately
 /// reproduce the gossip-churn leak at any node count.
-pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 64;
+pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 32;
 
 /// How often the direct-peer slot table drops the connections that are gone and
 /// the peers that nothing holds. One timer per admission table, not one task

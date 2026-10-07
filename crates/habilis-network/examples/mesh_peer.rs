@@ -181,6 +181,7 @@ async fn run_peer(
         SetupParams {
             author: author.clone(),
             max_peers: 16,
+            max_sessions: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),

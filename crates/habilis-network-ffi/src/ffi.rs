@@ -328,6 +328,8 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
             transport,
             relay_urls,
             max_peers: opts.max_peers,
+            // The C struct does not carry D yet: `0` takes the engine default.
+            max_sessions: 0,
         };
         match Mesh::open(&parsed) {
             Ok(opened) => {

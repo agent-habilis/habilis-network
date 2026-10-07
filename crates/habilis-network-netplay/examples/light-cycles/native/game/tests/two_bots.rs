@@ -40,6 +40,7 @@ async fn spawn_bot(topic: &str, nick: &str) -> Bot {
         SetupParams {
             author,
             max_peers: 16,
+            max_sessions: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),

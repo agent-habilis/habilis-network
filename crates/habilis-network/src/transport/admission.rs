@@ -261,6 +261,12 @@ impl SignalAdmission {
         }
     }
 
+    /// The cap this table enforces: D, the most `WebRTC` sessions the node holds.
+    #[must_use]
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
     /// Whether the hook keeps the relay policy on the gossip connections that
     /// this node dials: on when the mesh lets no payload ride the relay.
     pub(crate) fn watch_dialed_gossip(&self, on: bool) {

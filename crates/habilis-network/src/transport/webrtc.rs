@@ -572,14 +572,15 @@ async fn dial_signal_round(
     Ok(())
 }
 
-/// The most direct peers one node will negotiate sessions with.
+/// The default of D, the most `WebRTC` sessions one node holds (32). A node sets
+/// its own with `SetupParams::max_sessions`; `0` takes this value.
 ///
 /// This caps the *session* mesh, which is dense by intent — we want every peer
 /// we know about, not just our gossip neighbours. It is deliberately not the
-/// same knob as HyParView's `active_view_capacity`: that one sizes the gossip
-/// overlay and is fixed when the mesh is built, while this one is ours and can
-/// move at runtime. Each session costs a peer connection and, in a browser, up
-/// to a full ICE gathering budget — so the ceiling is real, not notional.
+/// same knob as HyParView's `active_view_capacity` (G): that one sizes the gossip
+/// overlay and is fixed when the mesh is built. Each session costs a peer
+/// connection and, in a browser, up to a full ICE gathering budget — so the
+/// ceiling is real, not notional.
 ///
 /// Enforced on **both** roles, and counting rounds in flight, by
 /// [`super::admission::SignalAdmission`]. It was neither for a while: only
@@ -587,10 +588,10 @@ async fn dial_signal_round(
 /// rule never dials — answered everyone who asked, and the header rendered
 /// counts above the ceiling.
 ///
-/// Public so the CLI and the browser render the same denominator they enforce.
-/// It used to be written out three times, and the UI read a different copy from
-/// the one the engine checked.
-pub const MAX_DIRECT_PEERS: usize = 16;
+/// Public so the CLI and the browser can render a denominator. A node with its
+/// own cap reports it with [`super::admission::SignalAdmission::cap`], because
+/// this constant is only the default.
+pub const MAX_DIRECT_PEERS: usize = 32;
 
 /// Start a `WebRTC` negotiation with `peer`, if one is wanted and not already
 /// running. Fire-and-forget: the caller does **not** wait, and the graft
