@@ -136,7 +136,7 @@ pub(crate) mod close_code {
     }
 }
 
-use close_code::{CAP_REFUSED, SIGNAL_ABORTED, SIGNAL_FAILED};
+use close_code::{CAP_REFUSED, EVICTED, SIGNAL_ABORTED, SIGNAL_FAILED};
 
 /// Register `remote`'s `WebRTC` transport address after a session attach.
 ///
@@ -257,12 +257,13 @@ async fn exchange_envelopes(
     }
 }
 
-/// Whether the peer closed `conn` to tell us to back off.
+/// Whether the peer closed `conn` to tell us to back off: it refused at its cap (the code of
+/// older peers), or it evicted us lately.
 fn refused_at_cap(conn: &Connection) -> bool {
     matches!(
         conn.close_reason(),
         Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
-            if close.error_code.into_inner() == u64::from(CAP_REFUSED)
+            if [u64::from(CAP_REFUSED), u64::from(EVICTED)].contains(&close.error_code.into_inner())
     )
 }
 
@@ -359,6 +360,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             Err(reason) => {
                 let (code, why): (u32, &[u8]) = match reason {
                     Refusal::ShuttingDown => (SIGNAL_ABORTED, b"shutting down"),
+                    Refusal::Evicted => (EVICTED, b"evicted lately"),
                     Refusal::InFlight | Refusal::HaveSession | Refusal::Cooling => {
                         (SIGNAL_FAILED, b"already negotiating")
                     }
@@ -1773,6 +1775,57 @@ mod tests {
         for (client, _) in clients {
             client.close().await;
         }
+        server.close().await;
+    }
+
+    /// **The evicted peer reads code 11 on its offer.** At a ceiling of one, the second session
+    /// evicts the first. The first peer offers again at once, and the dialer reads the refusal as the
+    /// `EVICTED` code, so it can wait instead of taking the place back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_peer_whose_session_was_evicted_reads_the_evicted_code_on_its_next_offer() {
+        let (server, server_hub) = endpoint().await;
+        let admission = SignalAdmission::new(1);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (first, first_hub) = endpoint().await;
+        let (second, second_hub) = endpoint().await;
+        for (client, hub) in [(&first, &first_hub), (&second, &second_hub)] {
+            dial_signal_with(
+                client,
+                server.addr(),
+                hub,
+                quick(),
+                IceProfile { host_only: true },
+            )
+            .await
+            .expect("an offer attaches");
+        }
+        assert!(
+            until(|| !server_hub.has_session(&first.id())).await,
+            "the first session was evicted"
+        );
+
+        let error = dial_signal_with(
+            &first,
+            server.addr(),
+            &first_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect_err("the evicted peer is refused for a minute");
+        assert!(
+            is_cap_refusal(&error),
+            "the dialer reads the refusal as a code to wait on: {error:#}"
+        );
+        assert!(
+            server_hub.has_session(&second.id()),
+            "the newcomer keeps its place"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        first.close().await;
+        second.close().await;
         server.close().await;
     }
 

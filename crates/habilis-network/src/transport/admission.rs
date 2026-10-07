@@ -134,6 +134,8 @@ pub(crate) enum Refusal {
     HaveSession,
     /// This peer refused us at *its* cap recently.
     Cooling,
+    /// We evicted this peer lately, and its offer would take the place back.
+    Evicted,
     /// The Router is shutting down.
     ShuttingDown,
 }
@@ -243,6 +245,9 @@ struct Inner {
     ceiling: super::ceiling::Ceiling,
     /// The peers that closed a connection of ours with the `EVICTED` code.
     evicted_by: super::ceiling::EvictionBackoff,
+    /// The peers that we evicted. A peer whose session we detach has no connection to read the code
+    /// on, so we refuse its offer for the same minute instead.
+    we_evicted: super::ceiling::EvictionBackoff,
 }
 
 impl std::fmt::Debug for Inner {
@@ -305,6 +310,8 @@ impl Inner {
         for peer in &evictions.evict {
             self.ceiling.unregister_quic(*peer);
             self.ceiling.unregister_session(*peer);
+            let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
+            self.we_evicted.note(*peer, Instant::now(), spread);
             if let Some(hub) = self.hub.as_ref().filter(|hub| hub.has_session(peer)) {
                 victims.sessions.push((*peer, Arc::clone(hub)));
             }
@@ -391,6 +398,7 @@ impl SignalAdmission {
                 idle_since: HashMap::new(),
                 ceiling: super::ceiling::Ceiling::new(cap),
                 evicted_by: super::ceiling::EvictionBackoff::default(),
+                we_evicted: super::ceiling::EvictionBackoff::default(),
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
@@ -524,6 +532,10 @@ impl SignalAdmission {
         if inner.refused.on_cooldown(&peer, now) {
             return Err(Refusal::Cooling);
         }
+        // Only the offer of the peer: our own offer, from a frame that is held for it, is a send.
+        if !outgoing && inner.we_evicted.holds(&peer, now) {
+            return Err(Refusal::Evicted);
+        }
         if inner.hub.is_none() {
             inner.hub = Some(Arc::new(handle.clone()));
         }
@@ -550,7 +562,19 @@ impl SignalAdmission {
     where
         H: Sessions + Clone,
     {
-        self.admit(peer, handle, Instant::now(), true)
+        self.try_admit_offer_at(peer, handle, Instant::now())
+    }
+
+    fn try_admit_offer_at<H>(
+        &self,
+        peer: EndpointId,
+        handle: &H,
+        now: Instant,
+    ) -> Result<AdmissionGuard, Refusal>
+    where
+        H: Sessions + Clone,
+    {
+        self.admit(peer, handle, now, true)
     }
 
     /// The peer offers a session while this node's own offer to it runs: give ours up, so that the
@@ -1045,6 +1069,42 @@ mod tests {
         assert_eq!(
             admission.try_admit(peer(1), &hub).unwrap_err(),
             Refusal::InFlight
+        );
+    }
+
+    /// A peer that holds no unicast connection has no way to read the `EVICTED` code when its
+    /// session is detached. The evictor remembers the peer for the same minute instead, and refuses
+    /// its offer, so that two peers at the ceiling do not offer sessions back and forth.
+    #[test]
+    fn a_peer_whose_session_was_evicted_is_refused_for_a_minute_and_answered_after() {
+        let admission = SignalAdmission::new(1);
+        let hub = FakeHub::default();
+        for byte in [1, 2] {
+            drop(admission.try_admit(peer(byte), &hub).expect("admit"));
+            hub.attach(peer(byte));
+            admission.note_success(peer(byte));
+        }
+        assert!(!hub.has_session(&peer(1)), "the first session was evicted");
+        let now = Instant::now();
+
+        assert_eq!(
+            admission
+                .try_admit_at(peer(1), &hub, now + Duration::from_secs(30))
+                .unwrap_err(),
+            Refusal::Evicted,
+            "its offer within the minute"
+        );
+        assert!(
+            admission
+                .try_admit_offer_at(peer(1), &hub, now + Duration::from_secs(30))
+                .is_ok(),
+            "our own offer to it is not refused by this"
+        );
+        assert!(
+            admission
+                .try_admit_at(peer(1), &hub, now + Duration::from_secs(90))
+                .is_ok(),
+            "its offer after the minute"
         );
     }
 
