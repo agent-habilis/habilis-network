@@ -107,6 +107,10 @@ pub(crate) mod close_code {
     /// A unicast connection nothing sent on for the idle timeout: closed by the
     /// pool on the dial side, by the acceptor on the other.
     pub(crate) const IDLE: u32 = 8;
+    // Reserved, each added with the change that sends it: 9 `NOT_A_NEIGHBOR`
+    // (now private to `underlay_webrtc.rs`), 10 `GOSSIP_ON_GOSSIP_PATH`, 11
+    // `EVICTED` (closed at the direct-connection ceiling). The next free number
+    // is 12.
 
     #[cfg(test)]
     mod tests {
