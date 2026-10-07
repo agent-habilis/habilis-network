@@ -214,8 +214,8 @@ This section turns the measurements above into a rule for two caps. Phase 2 of t
 ### The two caps
 
 - **G** is the size of the gossip active view (`max_peers`). The planned default is 32. Today it is 64 (`GOSSIP_ACTIVE_VIEW_CAPACITY` in `crates/habilis-network-util/src/tuning.rs`).
-- **D** is the cap on WebRTC sessions. The planned default is 32, and the cap can be set. It replaces `MAX_DIRECT_PEERS`, which is 16 today (`crates/habilis-network/src/transport/webrtc.rs`).
-- D counts WebRTC sessions only. Plain QUIC connections are not counted, and no count cap limits them. The idle closes limit them in time: 120 s on the dial side (`UNICAST_IDLE_SECS`) and 240 s on the accept side (`UNICAST_ACCEPT_IDLE_SECS`).
+- **D** was the cap on WebRTC sessions. Decision D11 replaced it with **C**, the ceiling of direct connections, which counts WebRTC sessions and unicast connections together. The default is 64 (`MAX_DIRECT_PEERS`) and the setting is `max_direct`. See the section "The ceiling C of direct connections (decision D11)" at the end of this document. The text and the measurements below were made with D, before D11.
+- D counted WebRTC sessions only. Plain QUIC connections were not counted, and no count cap limited them. The idle closes limited them in time: 120 s on the dial side and 240 s on the accept side. Today one backstop of 900 s (`DIRECT_IDLE_BACKSTOP_SECS`) replaces both.
 
 G bounds a count. It does not refuse a member. The iroh-gossip fork (`src/proto/hyparview.rs`, `on_join` and `add_active`) always accepts a high-priority `Join` or `Neighbor` request. If the active view is full, it first drops a random active member, and that member gets a disconnect. It refuses only a low-priority `Neighbor` request at a full view. A burst of joins can therefore replace the neighbors of a node that is at G. The number of links stays at G or less, but the churn is not bounded.
 
@@ -337,7 +337,71 @@ The test `a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation` has 
 
 ### Known limits
 
-- **The lane pair is never detached.** A pair that needs the `WebRTC` lane (a browser, or a node without UDP) is never held back and never detached, so such pairs hold their sessions for ever. D counts them. A mesh of browsers can fill D with sessions that carry nothing. This is not solved.
+- **The lane pair was never detached.** Before D11, a pair that needs the `WebRTC` lane (a browser, or a node without UDP) was never held back and never detached, so such pairs held their sessions for ever. D11 solves this: see "Lane peers" in the section on C.
 - **D and the idle detach were not exercised at scale.** The sessions form at N = 6 (5 or 6 per node), but no run hit the cap D, and no run showed a detach of 120 s. The detach has unit tests and one test with a real connection.
 - **The last member to start can stay under-filled.** With no eviction, a member that arrives when every other member is full gets no link from its requests. The mean stays at 97 percent of G in the run above.
 - **The `PeerInfo` graft leaves one slot free** in a mesh larger than G + 1 (`peer_info_graft_below`). Its reason, a graft that evicts, is gone since the graft is a low priority request. It is kept because every measurement above was made with it.
+
+## The ceiling C of direct connections (decision D11)
+
+D11 replaces the cap D with one ceiling C. A node never refuses an offer or a connection because of C. It evicts the least valuable peer when a newcomer needs the place. The numbers in this section are design values and test results. The memory and the throughput cost with the new limits are **not measured yet**: they need a run on a free host.
+
+### What C counts
+
+A peer is one unit when the node holds a unicast QUIC connection to it, or a `WebRTC` session to it while it is not a gossip neighbor. A gossip neighbor is held by its gossip link, so its session is not a unit. The gossip connections and the multihop underlay are not counted. The default of C is 64 (`MAX_DIRECT_PEERS`). The setting is `max_direct`. It replaced `max_sessions` at the same place in the C struct (offset 64, 72 bytes), so the meaning of the field changed but not its layout.
+
+### The ledger
+
+The ledger is a pure type, `Ceiling` (`crates/habilis-network/src/transport/ceiling.rs`). The admission table (`SignalAdmission`) holds one, and every QUIC connection of the endpoint reaches it through the connection hook. Its rules:
+
+1. **An eviction is triggered only by an admission.** A unit that is added, or a peer that stops being a neighbor, can evict. A timer never evicts, except the backstop below. A node at C with no newcomer is quiet. Test: `a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used` ends with exactly one eviction and no other.
+2. **The order of the victims.** A peer that was idle for 30 s or more goes first, the least recently used first. A peer younger than 60 s goes last. A peer with a send or a stream in flight is never a victim.
+3. **If every candidate is busy, the newcomer is admitted** and the count is over C by the number of busy units. The gauge `over_ceiling` in the census line says so. Test: `when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling`.
+4. **A batch down to 90 percent of C** (rounded up) runs with an admission, at most once in 5 s, so that the next admissions do not each evict.
+5. **The backstop.** A connection or a session that nobody used for 900 s closes. It is the one idle timeout of the direct connections.
+
+An eviction closes the unicast connections of the victim with the close code `EVICTED` (11) and detaches its session. The victim reads the code and does not dial the evictor again by itself for 60 s (with a jitter of 20 percent). A send to the evictor dials at once.
+
+### Lane peers
+
+A pair that needs the lane has no direct path without a session. On a mesh whose relay is lookup only, a frame to such a peer is held. The held frame marks the peer wanted for 60 s, and the wanted peer is offered a session. When the session attaches, the held frames are flushed. If the higher id of the pair holds the frame, it offers at once. When both ids offer together, the lower id wins: the higher id gives its offer up and answers. An idle lane peer gets no session and loses an unused one at the backstop. On a mesh whose relay carries payload, the send goes over the relay and nothing is held.
+
+### The underlay leg
+
+The underlay keeps its own ledger with G as its ceiling. Before D11, that table refused the session after the G-th. Now it evicts at G. The leg opens a session only to a gossip neighbor, so its count stays at G or less, and the ledger does not act. Test: `a_ledger_with_g_as_its_ceiling_never_evicts_while_the_sessions_stay_within_g`.
+
+### QUIC limits
+
+Every endpoint of the engine, the multihop underlay included, sets the memory limits of a QUIC connection (`build_endpoint`). The numbers are starting values, to be confirmed by a measurement:
+
+| Limit | Value |
+| -- | -- |
+| Window of one stream | 256 KiB |
+| Window of all the streams of a connection | 1 MiB |
+| Send window (bytes not yet acknowledged) | 1 MiB |
+| Unidirectional streams open at once | 32 |
+| Bidirectional streams open at once | 4 |
+| Buffer for datagrams | 64 KiB |
+
+The keep-alive, the idle timeout and the multipath settings stay at the iroh defaults. Two tests show the limits: a receiver that never reads takes in at most one stream window, and 16 streams that nobody reads take in at most the connection window.
+
+**The cost in throughput.** A window limits a path to one window per round trip. At 100 ms, a stream with 256 KiB reaches about 20 Mbit/s, and a connection with 1 MiB reaches about 84 Mbit/s. This is a real cut for a large blob on a long path. The bench cells of Phase 3 must be run again with the limits, and they must report the cut as it is.
+
+### Keep-alive cost
+
+iroh sends a heartbeat on each connection every 5 s. At C = 64 and G = 32, that is 96 connections and about 19 packets per second when the node is idle. This number comes from the iroh default and from the sum. It is not measured here.
+
+### The formula after D11
+
+```text
+RSS = base + G x 1.1 + C x max(worst session, worst connection)
+```
+
+`base` is the idle node plus the stacks (29 MB plus about 5 MB in the table above). The worst session and the worst connection come from the flood run (`MESH_FLOOD_PEERS`), which is not done yet. Until it is, the term for C has no value in this document.
+
+### Not measured yet
+
+- The memory of a node with the QUIC limits, with the flood run at K = 1, 4 and 11 peers.
+- The throughput cost of the limits (the Phase 3 cells).
+- The rate of evictions per member per minute at N = 24 with C = 8, and the share of pooled closes that are followed by a re-dial with C = 64.
+- A mesh of two nodes with real `WebRTC` sessions at the ceiling is tested only with loopback sessions in the unit tests.
