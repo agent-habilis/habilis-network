@@ -268,6 +268,48 @@ interval longer than that would not show. The lost packets here are those of the
 IP path. The inner QUIC retransmits of a pair that gossip carries come with the
 gossip-only cell.
 
+## The gossip rung
+
+`ladder gossip` measures a QUIC connection that gossip carries, over the real iroh-gossip topic (not an in-memory flood). Three members, A, B and C, join one
+topic over IP. A has the `IPv6` loopback only and C has `IPv4` only, so A and C cannot send each other an IP packet. A dials C with the gossip address alone,
+and every packet of the connection is a frame that B reads and passes on. B has both address families and holds the gossip links. `cargo task benchmark --only 'ladder
+gossip'` runs it, and it is skipped, with the reason, on a machine that cannot bind `::1`.
+
+Apple M5, macOS 27.2, rustc 1.95.0, the runner's `bench` build. One run, 8 MiB downloads, 5 timed rounds after 1 warm-up, then 50 + 1000 round trips. Load average
+2.55 at the start.
+
+| | ladder gossip |
+|---|---|
+| selected path | gossip |
+| throughput, median of the rounds (min–max) | 732 Mbit/s (670–815) |
+| round trip p50, p99 | 0.17 ms, 0.27 ms |
+| frames originated (A and C together) | 46052 |
+| frames received (all members together) | 91814 |
+| flood amplification (received over originated) | 1.99 |
+| bytes out: A, C | 3.36 MB, 57.2 MB |
+| bytes in: A, B, C | 56.8 MB, 60.5 MB, 3.36 MB |
+| frames out at C, frames in at A | 38781, 38523 |
+| lost packets of the inner QUIC connection: at A, at C | 0, 249 |
+
+**Reading.**
+
+- A connection that gossip carries moves 732 Mbit/s and answers in 0.17 ms at the median, on loopback. Beside the other rungs of the ladder table above, that is below IP (2141–2176
+  Mbit/s) and the relay (1752–1813), and above multihop through a third member (430–441). The round trip is in the range of multihop (0.12–0.25 ms). These are
+  loopback numbers: there is no network time in them, and they say what the transports cost, not what a network adds.
+- The flood costs what a flood must. Each frame reached both other members: amplification 1.99 against the expected N−1 = 2 at N = 3. B only reads and passes frames on,
+  and it received 60.5 MB, more than the 50.3 MB that A downloaded (6 transfers of 8 MiB) because the flood also carries the acknowledgements and the round-trip probes. The cost of a gossip
+  pair is paid by every member, in proportion to the bytes the pair moves.
+- Frames cost a header of 66 bytes each on frames that average 1474 bytes (C's bytes out over its frames out): 4.5%.
+- The inner connection lost 249 packets at C, the sender of the bulk, and none at A. C put 38781 frames on the topic and A read 38523: **258 fewer**, which matches the 249 lost packets within 9. So
+  under this load the topic delivered about 0.65% fewer frames than were sent, and QUIC recovered them by retransmitting. I did not measure **where** they were lost (the sink queue of 256
+  frames, or the topic's own queue, which drops the oldest messages when it is full). The report does not carry the sink's refusal count or the topic's `Lagged` events; adding them
+  is the next step if the loss matters.
+- The inner QUIC did not collapse under 0.65% loss on loopback. This is no proof about a real network, where the outer connection's retransmits and the inner ones can stack:
+  the concern in the design (two loss-recovery loops) is **not settled** by this run.
+
+**Limits.** One run. The debug build of the runner. Three members, one pair. The topic's byte budget was not set, so nothing was limited. The loss figure is the gap between two counters, and its
+cause is not measured.
+
 ## What this says about removing the inner encryption
 
 - It is not what limits throughput in any cell.
