@@ -2434,14 +2434,20 @@ mod tests {
             nick("stranger"),
             iroh::EndpointAddr::new(stranger).with_relay_url(relay.clone()),
         );
-        assert!(!state.probe_backoff.due(now), "a new address of another peer");
+        assert!(
+            !state.probe_backoff.due(now),
+            "a new address of another peer"
+        );
 
         state.note_peer_endpoint(nick("host"), iroh::EndpointAddr::new(rendezvous));
         state.note_peer_endpoint(
             nick("host"),
             iroh::EndpointAddr::new(rendezvous).with_relay_url(relay),
         );
-        assert!(state.probe_backoff.due(now), "a new address of the rendezvous");
+        assert!(
+            state.probe_backoff.due(now),
+            "a new address of the rendezvous"
+        );
     }
 
     // Under a long flap storm against a steady peer set, every collection *we*

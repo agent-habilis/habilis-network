@@ -62,7 +62,8 @@ impl ProbeBackoff {
     /// The wait that the next probe finding the rival earns, before the jitter.
     fn wait(&self) -> Duration {
         let base = Duration::from_secs(heal_interval_secs());
-        let longest = Duration::from_secs(HEAL_PROBE_BACKOFF_MAX_SECS).min(base * 2u32.pow(MAX_STEPS));
+        let longest =
+            Duration::from_secs(HEAL_PROBE_BACKOFF_MAX_SECS).min(base * 2u32.pow(MAX_STEPS));
         (base * 2u32.pow(self.rivals_in_a_row.min(MAX_STEPS))).min(longest)
     }
 }
@@ -137,6 +138,10 @@ mod tests {
         assert_eq!(rival_at(&mut low, now, -1.0), secs(12));
         assert_eq!(rival_at(&mut high, now, 1.0), secs(18));
         let mut beyond = ProbeBackoff::default();
-        assert_eq!(rival_at(&mut beyond, now, 7.0), secs(18), "a draw outside -1..1 is clamped");
+        assert_eq!(
+            rival_at(&mut beyond, now, 7.0),
+            secs(18),
+            "a draw outside -1..1 is clamped"
+        );
     }
 }

@@ -205,7 +205,11 @@ mod tests {
         Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .alpns(vec![ALPN.to_vec()])
-            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().expect("loopback"))
+            .bind_addr(
+                "127.0.0.1:0"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("loopback"),
+            )
             .expect("valid bind addr")
             .bind()
             .await
@@ -232,7 +236,12 @@ mod tests {
             .connect(server.addr(), ALPN)
             .await
             .expect("the dial succeeds");
-        (client, server, dialed, accepting.await.expect("the accept task ends"))
+        (
+            client,
+            server,
+            dialed,
+            accepting.await.expect("the accept task ends"),
+        )
     }
 
     #[tokio::test]
