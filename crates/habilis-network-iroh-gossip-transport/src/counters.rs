@@ -30,6 +30,9 @@ pub struct Stats {
     pub dropped_not_allowed: u64,
     /// Datagrams over the byte budget, to a destination with a connection.
     pub dropped_budget: u64,
+    /// Packets that arrived queued for iroh but were larger than the buffer iroh
+    /// offered, and were dropped.
+    pub dropped_oversized_in: u64,
     /// Frames sent without a charge on the budget, because the destination has
     /// no established connection: a handshake.
     pub exempt_frames: u64,
@@ -51,6 +54,7 @@ pub(crate) struct Counters {
     dropped_sink_refused: AtomicU64,
     dropped_not_allowed: AtomicU64,
     dropped_budget: AtomicU64,
+    dropped_oversized_in: AtomicU64,
     exempt_frames: AtomicU64,
 }
 
@@ -72,6 +76,7 @@ impl Counters {
             dropped_sink_refused: read(&self.dropped_sink_refused),
             dropped_not_allowed: read(&self.dropped_not_allowed),
             dropped_budget: read(&self.dropped_budget),
+            dropped_oversized_in: read(&self.dropped_oversized_in),
             exempt_frames: read(&self.exempt_frames),
         }
     }
@@ -126,6 +131,10 @@ impl Counters {
 
     pub(crate) fn dropped_budget(&self) {
         bump(&self.dropped_budget, 1);
+    }
+
+    pub(crate) fn dropped_oversized_in(&self) {
+        bump(&self.dropped_oversized_in, 1);
     }
 
     pub(crate) fn exempt(&self) {

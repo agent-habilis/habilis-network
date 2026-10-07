@@ -36,4 +36,6 @@ bytes.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The engine's message cap, which the frame size must equal (a test pins it).
+habilis-network-util = { path = "../habilis-network-util", default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util"] }

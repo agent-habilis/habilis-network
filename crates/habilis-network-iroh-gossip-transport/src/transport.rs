@@ -41,6 +41,12 @@ const INBOUND_CAP: usize = 256;
 /// It never blocks. `false` means the frame was not accepted.
 pub trait FrameSink: std::fmt::Debug + Send + Sync + 'static {
     fn try_send(&self, frame: Bytes) -> bool;
+
+    /// Whether the sink can still carry a frame. A sink whose topic has closed
+    /// says no, and the path is not valid until the next `attach`.
+    fn is_alive(&self) -> bool {
+        true
+    }
 }
 
 /// What became of a frame that arrived from the topic.
@@ -80,6 +86,14 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// A path is valid while a sink is attached and alive.
+    pub(crate) fn path_is_valid(&self) -> bool {
+        self.attached.load(Ordering::SeqCst)
+            && locked(&self.sink)
+                .as_ref()
+                .is_some_and(|sink| sink.is_alive())
+    }
+
     /// One QUIC datagram to `dst`: framed and handed to the sink. A datagram that
     /// does not fit a frame, or that has no sink to go to, is dropped and the call
     /// still succeeds, as a NIC drops what it cannot carry. QUIC recovers.
@@ -92,7 +106,7 @@ impl Shared {
             Err(EncodeError::Empty) => return self.counters.dropped_empty(),
             Err(EncodeError::TooLarge { .. }) => return self.counters.dropped_too_large(),
         };
-        let sink = locked(&self.sink).clone();
+        let sink = locked(&self.sink).clone().filter(|sink| sink.is_alive());
         let Some(sink) = sink else {
             return self.counters.dropped_no_sink();
         };
@@ -322,6 +336,7 @@ impl CustomEndpoint for GossipEndpoint {
                 if bufs[count].len() < len {
                     // Larger than the buffer iroh handed us: dropped, as a NIC
                     // drops a jumbo frame on a path with a smaller MTU.
+                    self.shared.counters.dropped_oversized_in();
                     continue;
                 }
                 bufs[count][..len].copy_from_slice(&packet.bytes);
@@ -350,7 +365,7 @@ impl CustomSender for GossipSender {
     /// Valid only for a gossip address, and only while a sink is attached: a path
     /// that cannot carry a packet must not be selected.
     fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
-        parse_gossip_addr(addr).is_some() && self.shared.attached.load(Ordering::SeqCst)
+        parse_gossip_addr(addr).is_some() && self.shared.path_is_valid()
     }
 
     fn poll_send(
@@ -812,5 +827,36 @@ mod tests {
 
         assert_eq!(locked(&recorder.0).len(), 100);
         assert_eq!(handle.stats().dropped_budget, 0);
+    }
+
+    /// A packet larger than the buffer iroh offers is dropped, counted, and does
+    /// not stop the next one.
+    #[test]
+    fn an_oversized_packet_is_counted_and_the_next_one_is_read() {
+        let me = secret(1).public();
+        let handle = GossipHandle::new(me);
+        let mut endpoint = handle.transport.bind().expect("bind");
+        let waker = Arc::new(CountingWaker::default());
+        let std_waker = std::task::Waker::from(Arc::clone(&waker));
+        let mut cx = Context::from_waker(&std_waker);
+        let mut storage = [0u8; 50];
+        let mut bufs = [io::IoSliceMut::new(&mut storage)];
+        let mut metas = [noq_udp::RecvMeta::default()];
+        let mut infos = [RecvInfo::new(gossip_addr(me), None)];
+        let big = frame::encode(me, secret(2).public(), &[5u8; 100]).expect("a frame");
+        let small = frame::encode(me, secret(2).public(), &[5u8; 40]).expect("a frame");
+
+        assert_eq!(handle.deliver(&big), Delivery::Queued);
+        let first = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(
+            first.is_pending(),
+            "the only packet was too large: {first:?}"
+        );
+        assert_eq!(handle.stats().dropped_oversized_in, 1);
+
+        assert_eq!(handle.deliver(&small), Delivery::Queued);
+        let second = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(matches!(second, Poll::Ready(Ok(1))), "{second:?}");
+        assert_eq!(handle.stats().dropped_oversized_in, 1);
     }
 }

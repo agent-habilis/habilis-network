@@ -1,5 +1,8 @@
 //! A sink over a real gossip topic.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use bytes::Bytes;
 use iroh_gossip::api::GossipSender;
 use tokio::sync::mpsc;
@@ -13,12 +16,13 @@ const QUEUE: usize = 256;
 /// Hands frames to the topic's sender from a task of its own, because the
 /// sender's `broadcast` is async and a sink must not block.
 ///
-/// The task ends when the topic is closed or when the sink is dropped. After the
-/// first, the queue has no reader and the sink refuses every frame, which the
-/// handle counts as `dropped_sink_refused`.
+/// The task ends when the topic is closed or when the sink is dropped. When it
+/// ends it clears the alive flag, and the handle then treats the path as not valid
+/// and counts a datagram as `dropped_no_sink`.
 #[derive(Debug)]
 pub struct GossipSink {
     queue: mpsc::Sender<Bytes>,
+    alive: Arc<AtomicBool>,
 }
 
 impl GossipSink {
@@ -26,20 +30,27 @@ impl GossipSink {
     #[must_use]
     pub fn spawn(sender: GossipSender) -> Self {
         let (queue, mut frames) = mpsc::channel::<Bytes>(QUEUE);
+        let alive = Arc::new(AtomicBool::new(true));
+        let task_alive = Arc::clone(&alive);
         n0_future::task::spawn(async move {
             while let Some(frame) = frames.recv().await {
                 if sender.broadcast(frame).await.is_err() {
                     break;
                 }
             }
+            task_alive.store(false, Ordering::SeqCst);
         });
-        Self { queue }
+        Self { queue, alive }
     }
 }
 
 impl FrameSink for GossipSink {
     fn try_send(&self, frame: Bytes) -> bool {
         self.queue.try_send(frame).is_ok()
+    }
+
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
     }
 }
 
@@ -313,5 +324,43 @@ mod tests {
         for reader in readers {
             reader.abort();
         }
+    }
+
+    /// When the topic closes, the sink's task ends, and the path is not valid any
+    /// more: a packet on it would go nowhere.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_topic_makes_the_path_invalid() {
+        let lookup = MemoryLookup::new();
+        let (endpoint, gossip, _router) = member(5, &lookup).await;
+        let handle = GossipHandle::new(endpoint.id());
+        let topic = gossip
+            .subscribe(TopicId::from_bytes([3u8; 32]), vec![])
+            .await
+            .expect("join");
+        let (sender, _receiver) = topic.split();
+        handle.attach_gossip(sender);
+        assert!(
+            handle.shared.path_is_valid(),
+            "valid while the topic is open"
+        );
+
+        gossip.shutdown().await.expect("shutdown");
+        let other = secret(6).public();
+        for _ in 0..100 {
+            handle.shared.send_datagram(other, &[1u8; 50]);
+            if !handle.shared.path_is_valid() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert!(!handle.shared.path_is_valid(), "the topic is closed");
+        let before = handle.stats().dropped_no_sink;
+        handle.shared.send_datagram(other, &[1u8; 50]);
+        assert_eq!(
+            handle.stats().dropped_no_sink,
+            before + 1,
+            "counted as no sink"
+        );
     }
 }

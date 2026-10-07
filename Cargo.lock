@@ -1828,6 +1828,7 @@ version = "0.6.0"
 dependencies = [
  "bytes",
  "habilis-network-iroh-transport-util",
+ "habilis-network-util",
  "iroh",
  "iroh-base",
  "iroh-gossip",

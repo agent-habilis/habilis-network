@@ -204,4 +204,16 @@ mod tests {
             })
         );
     }
+
+    /// The frame is written twice, here and in the engine, which is below this crate
+    /// in no way that a constant could cross. This pins them equal: a mesh message
+    /// of the engine's cap fits one gossip message, and so does a frame.
+    /// It was green on its first run.
+    #[test]
+    fn the_largest_frame_equals_the_engine_message_cap() {
+        assert_eq!(
+            MAX_FRAME_LEN,
+            habilis_network_util::consts::MAX_MESSAGE_SIZE
+        );
+    }
 }
