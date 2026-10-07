@@ -101,7 +101,8 @@ published to a registry; pin it with
   gossip neighbor's session and the gossip links do not count. Nothing is refused
   for it: a newcomer past C evicts the least valuable peer (idle first, the least
   recently used first, a unit younger than 60 s last, one with a send in flight
-  never). An evicted connection closes with the code `EVICTED` (11), and its peer
+  never). C is not a hard limit: the count can exceed it for a moment by the
+  sends in flight, because a busy unit is never a victim. An evicted connection closes with the code `EVICTED` (11), and its peer
   makes no proactive dial back for about a minute; a send still dials at once. A
   peer whose session was evicted has its offer refused with the same code for that
   minute. One idle backstop of 900 s closes a connection or session that nobody used.
