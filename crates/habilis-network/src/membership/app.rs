@@ -179,6 +179,16 @@ pub enum Request {
         peer: String,
         reply: oneshot::Sender<bool>,
     },
+    /// Tests only: how many multihop cells this node has passed on for other
+    /// nodes. `0` when multihop is off.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    ForwardedCells {
+        reply: oneshot::Sender<u64>,
+    },
 }
 
 /// A rung of the path ladder, for [`Request::BlockRung`].
@@ -397,6 +407,19 @@ impl NodeDriver for MembershipApp {
                         .is_some_and(|handle| handle.route_addr(addr.id).is_some())
                 });
                 let _ = reply.send(has_route);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::ForwardedCells { reply } => {
+                let forwarded = state.multihop().map_or(
+                    0,
+                    habilis_network_iroh_multihop_transport::MultihopHandle::forwarded_cells,
+                );
+                let _ = reply.send(forwarded);
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
