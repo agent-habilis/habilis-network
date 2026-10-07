@@ -142,12 +142,13 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/a
 # `default-features = false` for the same reason as `iroh`: the browser leg
 # cannot carry the host-only defaults.
 #
-# Fork branch `leave-peers` (agent-habilis/iroh-gossip PR #2, not merged): fork
+# Fork branch `feat/neighbor-peers` (agent-habilis/iroh-gossip PR #5, not merged): fork
 # main (the connection-churn leak fix, upstream PR n0-computer/iroh-gossip#147,
 # plus its own iroh/iroh-base repoint, since this crate is another that sat
 # between us and iroh), then `GossipSender::leave_peers` and a tombstone for a
 # peer that left on purpose, then the TimeBoundCache expiry-heap fix, then the
-# repoint of its own iroh and iroh-base to the rev that this file names for them.
+# repoint of its own iroh and iroh-base to the rev that this file names for them,
+# then NeighborPeers and the fix of a stuck pending Neighbor request.
 iroh-gossip = { version = "=0.101.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "06d4f6127e6899f32a9217f2b049713e372d30f6", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
