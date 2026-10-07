@@ -4,8 +4,9 @@
 //! while it holds no rendezvous. In a settled mesh every probe finds the rival, and every
 //! probe costs an endpoint, a relay registration and a connection on the host. Each probe that
 //! finds the rival now doubles the wait before the next one, from one heal interval up to
-//! [`HEAL_PROBE_BACKOFF_MAX_SECS`]. A probe that reads the rendezvous as free starts again at
-//! one heal interval, so the second free reading that a claim needs comes at the old pace.
+//! [`HEAL_PROBE_BACKOFF_MAX_SECS`]. A probe that reads the rendezvous as free holds nothing
+//! back and starts the waits over, so the second free reading that a claim needs comes at the
+//! next heal tick, as before.
 //!
 //! Only the heal tick is held back. The reclaim window, which a `NeighborDown` of the
 //! rendezvous opens, probes at once, and so does anything that reopens the arbitration: see
@@ -20,9 +21,11 @@ use crate::util::tuning::{HEAL_PROBE_BACKOFF_MAX_SECS, heal_interval_secs};
 /// probe together again.
 const JITTER: f64 = 0.2;
 
-/// The longest wait, in heal intervals.
+/// The exponent of the longest wait: 2^3 = 8 heal intervals.
 const MAX_STEPS: u32 = 3;
 
+/// A reclaim window that opens while the rival is still up resets the wait, and its own probes
+/// find the rival and raise it again: up to 60 s at once, by design.
 #[derive(Debug, Default)]
 pub(crate) struct ProbeBackoff {
     /// Probes in a row that found the rival.
@@ -40,14 +43,12 @@ impl ProbeBackoff {
     /// A probe ended with `found_rival` at `now`. `spread` is a draw in `-1.0..=1.0` for the
     /// jitter.
     pub(crate) fn note_verdict(&mut self, found_rival: bool, now: Instant, spread: f64) {
-        let base = Duration::from_secs(heal_interval_secs());
         if found_rival {
             let wait = self.wait();
             self.rivals_in_a_row = self.rivals_in_a_row.saturating_add(1);
             self.next_at = Some(now + wait.mul_f64(1.0 + JITTER * spread.clamp(-1.0, 1.0)));
         } else {
-            self.rivals_in_a_row = 0;
-            self.next_at = Some(now + base);
+            self.reset();
         }
     }
 
@@ -104,15 +105,14 @@ mod tests {
     }
 
     #[test]
-    fn a_free_reading_starts_again_at_one_heal_interval() {
+    fn a_free_reading_lets_the_next_probe_start_at_the_next_tick_and_the_waits_start_over() {
         let mut backoff = ProbeBackoff::default();
         let now = Instant::now();
         for _ in 0..3 {
             rival_at(&mut backoff, now, 0.0);
         }
         backoff.note_verdict(false, now, 0.0);
-        assert!(!backoff.due(now + secs(14)));
-        assert!(backoff.due(now + secs(15)));
+        assert!(backoff.due(now), "the second free reading is not held back");
         assert_eq!(rival_at(&mut backoff, now, 0.0), secs(15));
     }
 
