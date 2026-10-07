@@ -763,6 +763,18 @@ pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 /// dialed again on the next send.
 pub const UNICAST_IDLE_SECS: u64 = 120;
 
+/// How long a `WebRTC` session may sit with no QUIC connection to its peer and
+/// no negotiation round before the engine detaches it (decision D4).
+///
+/// A gossip neighbor always has its gossip connection, so only a peer that is
+/// not a neighbor idles out. The clock starts when the last connection to the
+/// peer is gone, so it adds to the idle close of that connection. A pooled
+/// unicast connection closes after [`UNICAST_IDLE_SECS`] on the dial side, but
+/// after [`UNICAST_ACCEPT_IDLE_SECS`] on the accept side. A pair whose last
+/// connection is on the accept side therefore detaches its session up to 240 +
+/// 120 = 360 s after its last send, plus one tick of the retry pass.
+pub const WEBRTC_SESSION_IDLE_SECS: u64 = 120;
+
 /// How long an accepted unicast connection may carry no new stream before the
 /// acceptor closes it. Twice [`UNICAST_IDLE_SECS`], so that the dialing pool is
 /// the one that normally closes; this is a backstop for a dialer that is gone.

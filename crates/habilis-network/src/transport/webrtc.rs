@@ -689,6 +689,11 @@ pub(crate) fn negotiate_session(
         // No transport registered: the beacon, or a multihop peer.
         return;
     };
+    // An idle pair stays where it is until the next send.
+    if idled_out(state, &addr) {
+        tracing::debug!(target: LOG_TARGET, %peer, "idled out; leaving this pair alone until a send");
+        return;
+    }
     // A pair where both ends run UDP races the punch: the data channel gives
     // 6× less throughput at 36× the latency (docs/architecture.md §11), so it is worth a
     // JSEP round only while UDP has not won. Once it has, nothing is offered,
@@ -1276,6 +1281,9 @@ pub(crate) fn retry_sessions(
     if state.webrtc.is_none() {
         return;
     }
+    // First let go of what nothing uses, so that a slot frees before this pass
+    // decides who gets one.
+    detach_idle_sessions_at(state, crate::util::clock::Instant::now());
     // Collected first: `negotiate_session` needs `&mut state`, so the borrow of
     // `peer_endpoints` cannot be held across the calls.
     // The peer's own advertised address, not one rebuilt from its id: a
@@ -1308,6 +1316,7 @@ pub(crate) fn retry_sessions(
                 .as_ref()
                 .is_some_and(|handle| handle.has_session(&addr.id))
         })
+        .filter(|addr| !idled_out(state, addr))
         .cloned()
         .collect();
     // Sorted because the cap now bites here: in a mesh larger than the ceiling
@@ -1317,6 +1326,59 @@ pub(crate) fn retry_sessions(
     for addr in peers {
         negotiate_session(state, ctx, addr.id, addr);
     }
+}
+
+/// Whether the pair with `addr` stays where it is until a send: the pool let go
+/// of its connection for want of use, the peer is no gossip neighbor, and the
+/// pair has an IP path to fall back on. A pair that needs the lane is never held
+/// back, because its session is the only direct path it has, and a send could
+/// not dial the peer without one.
+fn idled_out(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) -> bool {
+    state.unicast_pool.idled_out(addr.id)
+        && !state.linked_endpoints.contains(&addr.id)
+        && !pair_needs_lane(addr, state.local_udp_transport)
+}
+
+/// Detach the sessions that nothing has held for
+/// [`WEBRTC_SESSION_IDLE_SECS`](crate::util::tuning::WEBRTC_SESSION_IDLE_SECS),
+/// and mark their peers idled out, so the retry pass leaves them alone until a
+/// send dials the peer (decision D4: a node frees what it does not use).
+///
+/// Held means a live QUIC connection of any protocol, or a round in flight, as
+/// the admission table sees them. A gossip neighbor always has its gossip
+/// connection, so it never idles out. The clock starts when the last connection
+/// is gone, so it adds to that connection's own idle close. A pooled unicast
+/// connection closes after 120 s on the dial side but after 240 s on the accept
+/// side, so a pair whose last connection is on the accept side detaches its
+/// session up to about 360 s after its last send, plus one tick of the retry
+/// pass.
+///
+/// A pair that needs the lane keeps its session, and so does a peer whose
+/// address is not known: see [`idled_out`]. Returns the peers detached.
+fn detach_idle_sessions_at(
+    state: &mut crate::daemon::state::EventLoopState,
+    now: crate::util::clock::Instant,
+) -> Vec<EndpointId> {
+    let Some(handle) = state.webrtc.clone() else {
+        return Vec::new();
+    };
+    let window = std::time::Duration::from_secs(crate::util::tuning::WEBRTC_SESSION_IDLE_SECS);
+    let mut detached = Vec::new();
+    for peer in state.webrtc_admission.idle_sessions(now, window) {
+        let kept = state.linked_endpoints.contains(&peer)
+            || state
+                .peer_endpoints
+                .values()
+                .find(|addr| addr.id == peer)
+                .is_none_or(|addr| pair_needs_lane(addr, state.local_udp_transport));
+        if kept || !handle.detach(&peer) {
+            continue;
+        }
+        state.unicast_pool.mark_idled_out(peer);
+        tracing::debug!(target: LOG_TARGET, %peer, "detached an idle session");
+        detached.push(peer);
+    }
+    detached
 }
 
 // Host-only: two real loopback endpoints and a tokio runtime. The logic under
@@ -2480,6 +2542,165 @@ mod tests {
     /// gate holds it and refuses it after `PROBE_DEADLINE`, and the attach
     /// that follows does not replace it. Observed every 30 s for a whole
     /// browser-first cell.
+    /// A pair stays where it is until a send only when the pool let go of its
+    /// connection for want of use, the peer is no gossip neighbor, and the pair
+    /// has an IP path to fall back on. A pair that needs the lane is never held
+    /// back: its session is the only direct path it has, and a send could not dial
+    /// the peer without one.
+    #[test]
+    fn an_idle_non_neighbor_pair_with_an_ip_path_stays_put_until_a_send() {
+        let peer = crate::testing::endpoint_id(7);
+        let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
+        let lane_pair = EndpointAddr::new(peer)
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+        let mut state = crate::testing::fresh_state();
+        state.local_udp_transport = true;
+
+        assert!(!idled_out(&state, &ip_pair), "the pool still holds it");
+        state.unicast_pool.mark_idled_out(peer);
+        assert!(idled_out(&state, &ip_pair), "idle, no neighbor, an IP path");
+        assert!(
+            !idled_out(&state, &lane_pair),
+            "a pair that needs the lane is never held back"
+        );
+        state.linked_endpoints.insert(peer);
+        assert!(
+            !idled_out(&state, &ip_pair),
+            "a gossip neighbor is never idle"
+        );
+    }
+
+    /// A session nothing uses is detached once the idle window has passed, and
+    /// its peer is marked, so the retry pass leaves the pair alone until a send.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_nothing_uses_is_detached_and_its_peer_idled_out() {
+        use crate::util::clock::Instant;
+
+        let (server, server_hub) = endpoint_with_lookup().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, client_hub) = endpoint_with_lookup().await;
+        let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        // The round holds the slot as in production, and teaches the table its hub.
+        let round = client_admission
+            .try_admit(server.id(), &client_hub)
+            .expect("room");
+        dial_signal_with(
+            &client,
+            server.addr(),
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session");
+        drop(round);
+        assert!(client_hub.has_session(&server.id()));
+
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(client_hub.clone());
+        state.webrtc_admission = client_admission.clone();
+        state.local_udp_transport = true;
+        state.peer_endpoints.insert(
+            crate::testing::nick("bob"),
+            EndpointAddr::new(server.id()).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
+        );
+        let window = Duration::from_secs(crate::util::tuning::WEBRTC_SESSION_IDLE_SECS);
+        let start = Instant::now();
+
+        assert!(detach_idle_sessions_at(&mut state, start).is_empty());
+        assert!(
+            detach_idle_sessions_at(
+                &mut state,
+                start + window.saturating_sub(Duration::from_secs(1))
+            )
+            .is_empty()
+        );
+        assert!(client_hub.has_session(&server.id()), "not yet");
+        assert_eq!(
+            detach_idle_sessions_at(&mut state, start + window),
+            vec![server.id()]
+        );
+        assert!(!client_hub.has_session(&server.id()), "the session is gone");
+        assert!(
+            state.unicast_pool.idled_out(server.id()),
+            "its peer is idled out"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// The retry pass offers a session to a pair that has none, and leaves an
+    /// idled-out pair alone until a send clears the mark.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_retry_pass_leaves_an_idled_out_pair_alone() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+
+        let (endpoint, handle) = endpoint().await;
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        // Only the lower id offers, so the peer's id must be above ours.
+        let peer = (1u8..=255)
+            .map(crate::testing::endpoint_id)
+            .find(|id| *id > endpoint.id())
+            .expect("an id above ours");
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle);
+        state.local_udp_transport = true;
+        state.peer_endpoints.insert(
+            crate::testing::nick("bob"),
+            EndpointAddr::new(peer).with_ip_addr("127.0.0.1:9".parse().expect("addr")),
+        );
+
+        state.unicast_pool.mark_idled_out(peer);
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "an idled-out pair is not offered a session"
+        );
+
+        state.unicast_pool.forget(peer).await;
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "once a send cleared the mark, the pair is offered a session"
+        );
+        // The dial to a closed port would hold its slot for a long deadline.
+        state.webrtc_admission.close();
+        assert!(
+            until(|| state.webrtc_admission.in_flight() == 0).await,
+            "closing the table cancels the round"
+        );
+        endpoint.close().await;
+    }
+
     #[test]
     fn an_offer_fallback_holds_the_timer_graft() {
         let mut state = crate::testing::fresh_state();

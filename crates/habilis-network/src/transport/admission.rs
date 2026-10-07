@@ -19,6 +19,15 @@
 //! gone and the peers that nothing holds. The cap never evicts a peer: at the
 //! cap a newcomer is refused, and a slot frees when its session ends.
 //!
+//! # Idle sessions
+//!
+//! The same table says when a session is idle: the peer holds no live
+//! connection, of any protocol, and no round is in flight. [`SignalAdmission::idle_sessions`]
+//! hands back the peers that have been in that state for a window, and the
+//! retry pass detaches their sessions (`webrtc::detach_idle_sessions_at`), so a
+//! slot frees without a newcomer evicting anyone. A gossip neighbor always has
+//! its gossip connection, so it never idles out.
+//!
 //! # What a single table buys
 //!
 //! **The ceiling becomes real.** The role rule (lower id offers) makes the
@@ -191,6 +200,9 @@ struct Inner {
     closed: bool,
     /// An endpoint hook reports to this table.
     observing: bool,
+    /// Since when each peer with a session has had nothing on it: no live
+    /// connection and no round in flight. See [`Self::take_idle`].
+    idle_since: HashMap<EndpointId, Instant>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -213,6 +225,37 @@ impl Inner {
             .values()
             .filter(|slot| slot.round.is_some())
             .count()
+    }
+
+    /// The peers whose session nothing has held for `window`, each handed back
+    /// once. Held means a live connection of any protocol, or a round in flight.
+    /// The clock of a peer starts the first time it is seen unheld, and starts
+    /// over if it is held again, so the window runs from the last use.
+    fn take_idle(&mut self, now: Instant, window: Duration) -> Vec<EndpointId> {
+        self.sample();
+        let Some(hub) = self.hub.clone() else {
+            self.idle_since.clear();
+            return Vec::new();
+        };
+        let unheld: Vec<EndpointId> = self
+            .slots
+            .iter()
+            .filter(|(peer, slot)| {
+                slot.round.is_none() && slot.conns.is_empty() && hub.has_session(peer)
+            })
+            .map(|(peer, _)| *peer)
+            .collect();
+        self.idle_since.retain(|peer, _| unheld.contains(peer));
+        let mut idle = Vec::new();
+        for peer in unheld {
+            let since = *self.idle_since.entry(peer).or_insert(now);
+            if now.saturating_duration_since(since) >= window {
+                self.idle_since.remove(&peer);
+                idle.push(peer);
+            }
+        }
+        idle.sort_unstable();
+        idle
     }
 
     /// Drop the connections that are gone, and the slots nothing holds.
@@ -255,6 +298,7 @@ impl SignalAdmission {
                 sampler_running: false,
                 closed: false,
                 observing: false,
+                idle_since: HashMap::new(),
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
@@ -271,6 +315,13 @@ impl SignalAdmission {
     /// this node dials: on when the mesh lets no payload ride the relay.
     pub(crate) fn watch_dialed_gossip(&self, on: bool) {
         self.watch_dialed_gossip.store(on, Ordering::Relaxed);
+    }
+
+    /// The peers whose session nothing has held for `window` (see
+    /// [`Inner::take_idle`]). Each is handed back once, and the caller detaches
+    /// it.
+    pub(crate) fn idle_sessions(&self, now: Instant, window: Duration) -> Vec<EndpointId> {
+        self.lock().take_idle(now, window)
     }
 
     /// The selected path of `peer`, read from any live connection that the hook
@@ -684,6 +735,68 @@ mod tests {
         assert!(admission.lock().slots.is_empty());
     }
 
+    /// A session that no connection and no round holds is idle, and is handed
+    /// back once it has been idle for the whole window, not before.
+    #[test]
+    fn a_session_nothing_holds_idles_out_after_the_window() {
+        let admission = SignalAdmission::new(4);
+        let hub = FakeHub::default();
+        drop(admission.try_admit(peer(1), &hub).expect("room"));
+        hub.attach(peer(1));
+        let window = Duration::from_secs(tuning::WEBRTC_SESSION_IDLE_SECS);
+        let start = Instant::now();
+
+        let mut inner = admission.lock();
+        assert!(
+            inner.take_idle(start, window).is_empty(),
+            "the clock starts"
+        );
+        assert!(
+            inner
+                .take_idle(
+                    start + window.saturating_sub(Duration::from_secs(1)),
+                    window
+                )
+                .is_empty(),
+            "one second short of the window"
+        );
+        assert_eq!(inner.take_idle(start + window, window), vec![peer(1)]);
+        assert!(
+            inner.take_idle(start + window, window).is_empty(),
+            "handed back once"
+        );
+    }
+
+    /// A round in flight holds the peer: its session is not idle however long
+    /// the round runs.
+    #[test]
+    fn a_round_in_flight_keeps_a_session_from_idling() {
+        let admission = SignalAdmission::new(4);
+        let hub = FakeHub::default();
+        let _guard = admission.try_admit(peer(1), &hub).expect("room");
+        hub.attach(peer(1));
+        let window = Duration::from_secs(tuning::WEBRTC_SESSION_IDLE_SECS);
+        let start = Instant::now();
+
+        let mut inner = admission.lock();
+        assert!(inner.take_idle(start, window).is_empty());
+        assert!(inner.take_idle(start + window * 3, window).is_empty());
+    }
+
+    /// Only a peer with a session can idle out.
+    #[test]
+    fn a_peer_with_no_session_is_never_idle() {
+        let admission = SignalAdmission::new(4);
+        let hub = FakeHub::default();
+        drop(admission.try_admit(peer(1), &hub).expect("room"));
+        let window = Duration::from_secs(tuning::WEBRTC_SESSION_IDLE_SECS);
+        let start = Instant::now();
+
+        let mut inner = admission.lock();
+        assert!(inner.take_idle(start, window).is_empty());
+        assert!(inner.take_idle(start + window * 3, window).is_empty());
+    }
+
     /// The wait after a refusal doubles with each one in a row, stops at the
     /// longest, and starts over once the peer has taken a round.
     #[test]
@@ -740,6 +853,79 @@ mod tests {
         backoff.note(peer(1), now);
         assert!(backoff.on_cooldown(&peer(1), now));
         assert!(!backoff.on_cooldown(&peer(2), now));
+    }
+
+    /// A live connection to the peer holds its session, whatever the protocol:
+    /// a gossip neighbor never idles out. Once the connection is gone, the
+    /// session is idle, and the window runs from then.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_connection_holds_a_session_until_it_closes() {
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let bind = |hook: Option<ConnectionHook>| {
+            let relay_url = relay_url.clone();
+            async move {
+                let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                    .relay_mode(iroh::RelayMode::custom([relay_url]))
+                    .clear_ip_transports();
+                if let Some(hook) = hook {
+                    builder = builder.hooks(hook);
+                }
+                builder.bind().await.expect("bind an endpoint on the relay")
+            }
+        };
+        let admission = SignalAdmission::new(2);
+        let hub = FakeHub::default();
+        let server = bind(None).await;
+        let router = Router::builder(server.clone())
+            .accept(iroh_gossip::net::GOSSIP_ALPN, Hold)
+            .spawn();
+        let client = bind(Some(admission.connection_hook())).await;
+        let neighbor = server.id();
+        drop(admission.try_admit(neighbor, &hub).expect("room"));
+        hub.attach(neighbor);
+        let relayed = iroh::EndpointAddr::new(neighbor).with_relay_url(relay_url.clone());
+        let conn = client
+            .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
+            .await
+            .expect("dial over the relay");
+        let window = Duration::from_secs(tuning::WEBRTC_SESSION_IDLE_SECS);
+        let start = Instant::now();
+
+        assert!(admission.lock().take_idle(start, window).is_empty());
+        assert!(
+            admission
+                .lock()
+                .take_idle(start + window * 3, window)
+                .is_empty(),
+            "a live connection holds the session"
+        );
+
+        conn.close(0u32.into(), b"done");
+        conn.closed().await;
+        let later = start + window * 3;
+        assert!(
+            admission.lock().take_idle(later, window).is_empty(),
+            "the clock starts when the connection is gone"
+        );
+        assert_eq!(
+            admission.lock().take_idle(later + window, window),
+            vec![neighbor]
+        );
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
     }
 
     /// The accept side watches every gossip connection it holds, so one that

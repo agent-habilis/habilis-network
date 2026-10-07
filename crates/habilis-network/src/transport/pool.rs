@@ -242,8 +242,9 @@ impl UnicastPool {
         })
     }
 
-    /// Mark `eid` as idled out, for a test that has no connection to close.
-    #[cfg(test)]
+    /// Mark `eid` as idled out without a connection to close: its `WebRTC`
+    /// session was detached for want of use, so nothing re-offers one until a
+    /// send dials the peer, which clears the mark.
     pub(crate) fn mark_idled_out(&self, eid: EndpointId) {
         self.inner
             .idled
