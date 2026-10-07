@@ -502,9 +502,11 @@ pub(crate) async fn graft_proven(
 }
 
 /// The alive-tick retry: every known peer that is neither linked nor mid-probe
-/// gets another `ensure_direct`, subject to the relink cooldown. A no-op while
-/// the relay may carry payload. The rendezvous is skipped: it accepts no
-/// unicast, so it cannot be probed; its link is gated on the beacon's side.
+/// gets another `ensure_direct`, subject to the relink cooldown. While the relay
+/// may carry payload there is no probe to hold a graft, so the tick fills the
+/// active view instead, one member per tick (see [`fill_active_view`]). The
+/// rendezvous is skipped: it accepts no unicast, so it cannot be probed; its
+/// link is gated on the beacon's side.
 ///
 /// With `distrust_links` (the re-bridge after a resume or starvation) every
 /// link and proven path is stale by definition, so linked peers are retried
@@ -516,6 +518,7 @@ pub(crate) async fn retry_direct(
     distrust_links: bool,
 ) {
     if state.relay_transport {
+        fill_active_view(state, ctx).await;
         return;
     }
     for addr in retry_candidates(state, ctx.rendezvous_id, distrust_links) {
@@ -525,6 +528,47 @@ pub(crate) async fn retry_direct(
         if ensure_direct(state, ctx, addr.id, &addr) {
             graft_proven(state, ctx, addr.id).await;
         }
+    }
+}
+
+/// The member that the fill tick grafts next: the lowest id among the native
+/// members (a browser comes after every native one) that is not linked, not the
+/// rendezvous and not on its relink cooldown. `None` once the active view holds
+/// `max_peers` (G) links, or when nobody is free.
+fn next_fill(
+    state: &EventLoopState,
+    max_peers: usize,
+    rendezvous_id: EndpointId,
+    now: Instant,
+) -> Option<iroh::EndpointAddr> {
+    if state.linked_endpoints.len() >= max_peers {
+        return None;
+    }
+    state
+        .peer_endpoints
+        .values()
+        .filter(|addr| addr.id != rendezvous_id)
+        .filter(|addr| !state.linked_endpoints.contains(&addr.id))
+        .filter(|addr| !state.relink_on_cooldown(addr.id, now))
+        .min_by_key(|addr| (needs_webrtc_lane(addr), addr.id))
+        .cloned()
+}
+
+/// Graft one member toward G: the gossip active view is a target, not only a
+/// cap. The attempt starts the member's relink cooldown, so a member that did
+/// not link waits out the window before it is tried again, and the next tick
+/// takes the next member.
+async fn fill_active_view(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    let now = Instant::now();
+    let Some(addr) = next_fill(state, ctx.max_peers, ctx.rendezvous_id, now) else {
+        return;
+    };
+    state.note_relink(addr.id, now);
+    let _ = crate::lookup::add_peer_addr(ctx.endpoint, addr.clone());
+    state.unicast_pool.note_addr(&addr);
+    tracing::debug!(target: super::LOG_TARGET, peer = %addr.id, linked = state.linked_endpoints.len(), "filling the active view");
+    if ensure_direct(state, ctx, addr.id, &addr) {
+        graft_proven(state, ctx, addr.id).await;
     }
 }
 
@@ -560,6 +604,7 @@ mod tests {
     use iroh::EndpointAddr;
 
     use super::{PathKind, ensure_watchers, may_graft, retry_candidates, webrtc_riders};
+    use crate::daemon::state::EventLoopState;
     use crate::testing::{endpoint_id, fresh_state, nick};
 
     // The pool closes a connection that nothing sent on, and the watcher is
@@ -851,6 +896,129 @@ mod tests {
             router.shutdown().await.expect("shutdown");
         }
         client.close().await;
+    }
+
+    // G is a target, not only a cap: while the active view is below G, one
+    // member is grafted per tick. Native members come before browsers, and
+    // within each group the order is fixed.
+    #[test]
+    fn the_fill_tick_picks_a_native_member_that_is_not_linked_yet() {
+        use iroh::TransportAddr;
+        let mut state = fresh_state();
+        let rendezvous = endpoint_id(1);
+        let ids: Vec<_> = (2u8..=6).map(endpoint_id).collect();
+        let native = |id| {
+            EndpointAddr::from_parts(
+                id,
+                [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
+            )
+        };
+        let browser = |id| {
+            EndpointAddr::new(id).with_relay_url("https://relay.invalid".parse().expect("url"))
+        };
+        // ids[0] is a browser, ids[1] is linked, ids[2] is cooling down,
+        // ids[3] and ids[4] are native and free.
+        state
+            .peer_endpoints
+            .insert(nick("beacon"), native(rendezvous));
+        state
+            .peer_endpoints
+            .insert(nick("browser"), browser(ids[0]));
+        state.peer_endpoints.insert(nick("linked"), native(ids[1]));
+        state.peer_endpoints.insert(nick("cooling"), native(ids[2]));
+        state.peer_endpoints.insert(nick("free-a"), native(ids[3]));
+        state.peer_endpoints.insert(nick("free-b"), native(ids[4]));
+        state.linked_endpoints.insert(ids[1]);
+        let now = crate::util::clock::Instant::now();
+        state.note_relink(ids[2], now);
+        let mut free = [ids[3], ids[4]];
+        free.sort_unstable();
+
+        let next = super::next_fill(&state, 8, rendezvous, now).map(|addr| addr.id);
+        assert_eq!(
+            next,
+            Some(free[0]),
+            "the lowest native member that is free, not the browser, the linked, \
+             the cooling or the rendezvous"
+        );
+        assert_eq!(
+            super::next_fill(&state, 1, rendezvous, now).map(|addr| addr.id),
+            None,
+            "a full view grafts nobody"
+        );
+    }
+
+    // On a mesh whose relay may carry payload there is no probe to hold a graft,
+    // and a `PeerInfo` is not repeated: the alive tick fills the view, one member
+    // per tick, and a member that was just tried waits out its cooldown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_alive_tick_fills_one_member_per_tick_on_a_relay_transport_mesh() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use iroh::{RelayMode, TransportAddr, endpoint::presets};
+
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let rendezvous = endpoint_id(1);
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 8,
+            rendezvous_id: rendezvous,
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = fresh_state();
+        state.relay_transport = true;
+        let ids: Vec<_> = (2u8..=4).map(endpoint_id).collect();
+        for (index, id) in ids.iter().enumerate() {
+            state.peer_endpoints.insert(
+                nick(&format!("peer{index}")),
+                EndpointAddr::from_parts(
+                    *id,
+                    [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
+                ),
+            );
+        }
+        let mut ordered = ids.clone();
+        ordered.sort_unstable();
+        let tried = |view: &EventLoopState| {
+            let now = crate::util::clock::Instant::now();
+            ordered
+                .iter()
+                .filter(|id| view.relink_on_cooldown(**id, now))
+                .count()
+        };
+
+        super::retry_direct(&mut state, &ctx, false).await;
+        assert_eq!(tried(&state), 1, "one member per tick");
+        assert!(
+            state.relink_on_cooldown(ordered[0], crate::util::clock::Instant::now()),
+            "the first in the fixed order"
+        );
+        super::retry_direct(&mut state, &ctx, false).await;
+        assert_eq!(tried(&state), 2, "the next tick takes the next member");
+        endpoint.close().await;
     }
 
     #[test]
