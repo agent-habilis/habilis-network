@@ -25,7 +25,7 @@
 //! demoted relay path is what lets a connection survive a dead data channel —
 //! so the relay stays open and unused rather than being torn down.
 
-use habilis_network_iroh_transport_util::{Rung, climb, rung_of};
+use habilis_network_iroh_transport_util::{Rung, blocked, climb, rung_of};
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
@@ -55,23 +55,6 @@ impl WebRtcPreferred {
     pub(crate) fn new(local: iroh_base::EndpointId) -> Self {
         Self { local }
     }
-}
-
-/// Whether a test took this path away from the node `local`.
-#[cfg(feature = "test-hooks")]
-fn blocked(local: iroh_base::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
-    if rung_blocked(local, rung) {
-        return true;
-    }
-    rung == Rung::Ip
-        && (ip_blocked()
-            || matches!(path.network_path().remote(), iroh::endpoint::transports::Addr::Ip(remote)
-                if ip_blocked_to(local, remote.port())))
-}
-
-#[cfg(not(feature = "test-hooks"))]
-fn blocked(_local: iroh_base::EndpointId, _rung: Rung, _path: &PathSelectionData<'_>) -> bool {
-    false
 }
 
 /// The rung of a custom transport that this crate does not name. This selector
@@ -129,89 +112,4 @@ impl PathSelector for WebRtcPreferred {
 }
 
 #[cfg(feature = "test-hooks")]
-static IP_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Tests only: while set, no IP path is selected, in every endpoint of the
-/// process. iroh re-runs selection on its path-stat updates, so a live
-/// connection leaves UDP within a few seconds and returns once it is cleared.
-#[cfg(feature = "test-hooks")]
-pub fn block_ip_paths(blocked: bool) {
-    IP_BLOCKED.store(blocked, std::sync::atomic::Ordering::SeqCst);
-}
-
-#[cfg(feature = "test-hooks")]
-static IP_BLOCKED_TO: std::sync::Mutex<
-    Option<std::collections::HashMap<iroh_base::EndpointId, std::collections::HashSet<u16>>>,
-> = std::sync::Mutex::new(None);
-
-/// Tests only: from now on the endpoint `local` selects no IP path whose remote
-/// port is one of `remote_ports`. It replaces the node's earlier set, and an
-/// empty set clears it. Another node of the process is not affected, which is
-/// what lets a test cut one group of nodes from another while each group keeps
-/// its own links. iroh tells a selector the remote *address* of a path, not the
-/// remote endpoint, so the key is the port: every address one endpoint binds
-/// shares it, and a test names the ports of the endpoints it means.
-///
-/// # Panics
-///
-/// Panics if another thread panicked while it held the block table.
-#[cfg(feature = "test-hooks")]
-pub fn block_ip_to(local: iroh_base::EndpointId, remote_ports: impl IntoIterator<Item = u16>) {
-    let ports: std::collections::HashSet<u16> = remote_ports.into_iter().collect();
-    let mut blocks = IP_BLOCKED_TO.lock().expect("ip blocks");
-    let blocks = blocks.get_or_insert_with(std::collections::HashMap::new);
-    if ports.is_empty() {
-        blocks.remove(&local);
-    } else {
-        blocks.insert(local, ports);
-    }
-}
-
-#[cfg(feature = "test-hooks")]
-fn ip_blocked_to(local: iroh_base::EndpointId, remote_port: u16) -> bool {
-    IP_BLOCKED_TO
-        .lock()
-        .expect("ip blocks")
-        .as_ref()
-        .and_then(|blocks| blocks.get(&local))
-        .is_some_and(|ports| ports.contains(&remote_port))
-}
-
-#[cfg(feature = "test-hooks")]
-static RUNGS_BLOCKED: std::sync::Mutex<
-    Option<std::collections::HashSet<(iroh_base::EndpointId, Rung)>>,
-> = std::sync::Mutex::new(None);
-
-/// Tests only: while `blocked`, the endpoint `local` selects no path of `rung`,
-/// whoever the remote is. With `block_ip_to` it takes a node down the ladder one
-/// rung at a time, so a test can show each step. A path of a custom transport
-/// carries no remote id that this crate can read for multihop, so a rung is
-/// blocked whole, and another node of the process is not affected.
-///
-/// # Panics
-///
-/// Panics if another thread panicked while it held the block table.
-#[cfg(feature = "test-hooks")]
-pub fn block_rung(local: iroh_base::EndpointId, rung: Rung, blocked: bool) {
-    let mut blocks = RUNGS_BLOCKED.lock().expect("rung blocks");
-    let blocks = blocks.get_or_insert_with(std::collections::HashSet::new);
-    if blocked {
-        blocks.insert((local, rung));
-    } else {
-        blocks.remove(&(local, rung));
-    }
-}
-
-#[cfg(feature = "test-hooks")]
-fn rung_blocked(local: iroh_base::EndpointId, rung: Rung) -> bool {
-    RUNGS_BLOCKED
-        .lock()
-        .expect("rung blocks")
-        .as_ref()
-        .is_some_and(|blocks| blocks.contains(&(local, rung)))
-}
-
-#[cfg(feature = "test-hooks")]
-fn ip_blocked() -> bool {
-    IP_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
-}
+pub use habilis_network_iroh_transport_util::{block_ip_paths, block_ip_to, block_rung};

@@ -114,6 +114,127 @@ pub fn climb<'a>(
     best_of(paths.iter().filter(|path| usable_on(rung, path)))
 }
 
+/// Whether a test took the path `path` away from the node `local`, on `rung`:
+/// the one table that every selector of this workspace reads. Without
+/// `test-hooks` it is always `false`.
+#[cfg(feature = "test-hooks")]
+#[must_use]
+pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
+    let remote = match path.network_path().remote() {
+        Addr::Ip(remote) => Some(remote),
+        Addr::Relay(..) | Addr::Custom(_) => None,
+    };
+    is_blocked(local, rung, remote)
+}
+
+/// Whether a test took the path `path` away from the node `local`, on `rung`.
+/// Without `test-hooks` it is always `false`.
+#[cfg(not(feature = "test-hooks"))]
+#[must_use]
+pub fn blocked(_local: iroh::EndpointId, _rung: Rung, _path: &PathSelectionData<'_>) -> bool {
+    false
+}
+
+#[cfg(feature = "test-hooks")]
+static IP_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "test-hooks")]
+type PortBlocks = std::sync::Mutex<
+    Option<std::collections::HashMap<iroh::EndpointId, std::collections::HashSet<u16>>>,
+>;
+
+#[cfg(feature = "test-hooks")]
+static IP_BLOCKED_TO: PortBlocks = std::sync::Mutex::new(None);
+
+#[cfg(feature = "test-hooks")]
+static RUNGS_BLOCKED: std::sync::Mutex<
+    Option<std::collections::HashSet<(iroh::EndpointId, Rung)>>,
+> = std::sync::Mutex::new(None);
+
+/// The pure table behind [`blocked`]: whether `rung` is taken from `local`, for a
+/// path whose IP remote is `remote` (`None` for a path that has no IP address).
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held a block table.
+#[cfg(feature = "test-hooks")]
+#[must_use]
+pub fn is_blocked(
+    local: iroh::EndpointId,
+    rung: Rung,
+    remote: Option<std::net::SocketAddr>,
+) -> bool {
+    let rung_blocked = RUNGS_BLOCKED
+        .lock()
+        .expect("rung blocks")
+        .as_ref()
+        .is_some_and(|blocks| blocks.contains(&(local, rung)));
+    if rung_blocked {
+        return true;
+    }
+    rung == Rung::Ip
+        && (IP_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
+            || remote.is_some_and(|remote| {
+                IP_BLOCKED_TO
+                    .lock()
+                    .expect("ip blocks")
+                    .as_ref()
+                    .and_then(|blocks| blocks.get(&local))
+                    .is_some_and(|ports| ports.contains(&remote.port()))
+            }))
+}
+
+/// Tests only: while set, no IP path is selected, in every endpoint of the
+/// process. iroh re-runs selection on its path-stat updates, so a live
+/// connection leaves UDP within a few seconds and returns once it is cleared.
+#[cfg(feature = "test-hooks")]
+pub fn block_ip_paths(blocked: bool) {
+    IP_BLOCKED.store(blocked, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Tests only: from now on the endpoint `local` selects no IP path whose remote
+/// port is one of `remote_ports`. It replaces the node's earlier set, and an
+/// empty set clears it. Another node of the process is not affected, which is
+/// what lets a test cut one group of nodes from another while each group keeps
+/// its own links. iroh tells a selector the remote *address* of a path, not the
+/// remote endpoint, so the key is the port: every address one endpoint binds
+/// shares it, and a test names the ports of the endpoints it means.
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the block table.
+#[cfg(feature = "test-hooks")]
+pub fn block_ip_to(local: iroh::EndpointId, remote_ports: impl IntoIterator<Item = u16>) {
+    let ports: std::collections::HashSet<u16> = remote_ports.into_iter().collect();
+    let mut blocks = IP_BLOCKED_TO.lock().expect("ip blocks");
+    let blocks = blocks.get_or_insert_with(std::collections::HashMap::new);
+    if ports.is_empty() {
+        blocks.remove(&local);
+    } else {
+        blocks.insert(local, ports);
+    }
+}
+
+/// Tests only: while `blocked`, the endpoint `local` selects no path of `rung`,
+/// whoever the remote is. With [`block_ip_to`] it takes a node down the ladder
+/// one rung at a time, so a test can show each step. A path of a custom
+/// transport carries no remote id that a selector can read for multihop, so a
+/// rung is blocked whole, and another node of the process is not affected.
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the block table.
+#[cfg(feature = "test-hooks")]
+pub fn block_rung(local: iroh::EndpointId, rung: Rung, blocked: bool) {
+    let mut blocks = RUNGS_BLOCKED.lock().expect("rung blocks");
+    let blocks = blocks.get_or_insert_with(std::collections::HashSet::new);
+    if blocked {
+        blocks.insert((local, rung));
+    } else {
+        blocks.remove(&(local, rung));
+    }
+}
+
 /// Undo a transmit's GSO batching: one QUIC datagram per element.
 ///
 /// An empty payload still yields one empty datagram rather than none, so a
@@ -197,6 +318,43 @@ mod tests {
         );
         assert_eq!(expected_rung(all, |_| false), None);
         assert_eq!(expected_rung(|_| false, all), None);
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn node(seed: u8) -> iroh::EndpointId {
+        iroh::SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    /// A block on IP ports of one node leaves the others alone, whatever rung or
+    /// port they ask about.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn an_ip_port_block_takes_one_port_of_the_ip_rung_from_one_node() {
+        let (blocked, other) = (node(11), node(12));
+        let at = |port: u16| Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+        block_ip_to(blocked, [4000, 4001]);
+        assert!(is_blocked(blocked, Rung::Ip, at(4000)));
+        assert!(is_blocked(blocked, Rung::Ip, at(4001)));
+        assert!(!is_blocked(blocked, Rung::Ip, at(4002)), "another port");
+        assert!(!is_blocked(other, Rung::Ip, at(4000)), "another node");
+        assert!(!is_blocked(blocked, Rung::Relay, None), "another rung");
+        block_ip_to(blocked, []);
+        assert!(
+            !is_blocked(blocked, Rung::Ip, at(4000)),
+            "an empty set clears"
+        );
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_rung_block_takes_one_whole_rung_from_one_node() {
+        let (blocked, other) = (node(13), node(14));
+        block_rung(blocked, Rung::Multihop, true);
+        assert!(is_blocked(blocked, Rung::Multihop, None));
+        assert!(!is_blocked(blocked, Rung::WebRtc, None), "another rung");
+        assert!(!is_blocked(other, Rung::Multihop, None), "another node");
+        block_rung(blocked, Rung::Multihop, false);
+        assert!(!is_blocked(blocked, Rung::Multihop, None));
     }
 
     /// The property the three copies disagreed on.
