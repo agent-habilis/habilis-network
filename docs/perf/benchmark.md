@@ -300,15 +300,45 @@ Apple M5, macOS 27.2, rustc 1.95.0, the runner's `bench` build. One run, 8 MiB d
   and it received 60.5 MB, more than the 50.3 MB that A downloaded (6 transfers of 8 MiB) because the flood also carries the acknowledgements and the round-trip probes. The cost of a gossip
   pair is paid by every member, in proportion to the bytes the pair moves.
 - Frames cost a header of 66 bytes each on frames that average 1474 bytes (C's bytes out over its frames out): 4.5%.
-- The inner connection lost 249 packets at C, the sender of the bulk, and none at A. C put 38781 frames on the topic and A read 38523: **258 fewer**, which matches the 249 lost packets within 9. So
-  under this load the topic delivered about 0.65% fewer frames than were sent, and QUIC recovered them by retransmitting. I did not measure **where** they were lost (the sink queue of 256
-  frames, or the topic's own queue, which drops the oldest messages when it is full). The report does not carry the sink's refusal count or the topic's `Lagged` events; adding them
-  is the next step if the loss matters.
-- The inner QUIC did not collapse under 0.65% loss on loopback. This is no proof about a real network, where the outer connection's retransmits and the inner ones can stack:
+- The inner connection lost 249 packets at C, the sender of the bulk, and none at A. C put 38781 frames on the topic and A read 38523: **258 fewer**, which matches the 249 lost packets within 9.
+  So in this first run the topic delivered about 0.65% fewer frames than were sent, and QUIC recovered them by retransmitting. Three more runs, below, say where they are lost.
+- The inner QUIC did not collapse under 0.4% to 1% loss on loopback. This is no proof about a real network, where the outer connection's retransmits and the inner ones can stack:
   the concern in the design (two loss-recovery loops) is **not settled** by this run.
 
-**Limits.** One run. The debug build of the runner. Three members, one pair. The topic's byte budget was not set, so nothing was limited. The loss figure is the gap between two counters, and its
-cause is not measured.
+**Limits.** The debug build of the runner. Three members, one pair. The topic's byte budget was not set, so nothing was limited.
+
+### Where the frames are lost: three more runs
+
+The report now also counts, per member, the frames that the sink queue refused (`dropped_sink_refused`), the inbound queue to iroh (`queue_full`), oversized packets, and the
+topic's `Lagged` events. Three runs of `cargo task benchmark --only 'ladder gossip' --rounds 5 --json`, same machine and build. Load average 1.96 at the start of run 1 and 8.89 at the
+start of runs 2 and 3.
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| throughput, median (min–max), Mbit/s | 712 (706–754) | 681 (656–716) | 882 (845–917) |
+| round trip p50, p99, ms | 0.16, 0.25 | 0.17, 0.25 | 0.17, 0.21 |
+| flood amplification | 1.98 | 1.99 | 1.99 |
+| frames C put on the topic, frames A read, gap | 38803, 38531, **272** | 37504, 37147, **357** | 37356, 37209, **147** |
+| frames the sink at C refused (not counted in the line above) | **161** | 0 | 0 |
+| lost packets of the inner connection at C | 422 | 357 | 147 |
+| `Lagged` events at A, at B | 4, 13 | 4, 0 | 5, 8 |
+| `queue_full`, oversized packets at any member | 0, 0 | 0, 0 | 0, 0 |
+| frames A put on the topic, frames C read | 7241, 7245 | 5811, 5815 | 5719, 5722 |
+
+**Reading.**
+
+- Every frame that did not arrive shows up as a lost packet of the inner connection: gap plus sink refusals is 433, 357 and 147 against 422, 357 and 147 lost packets. In runs 2 and 3 the two are equal.
+  QUIC retransmitted all of them, and the transfers completed.
+- The loss is at two places. **The sink queue at C** refused 161 frames, in run 1 only: a burst filled its 256 frames. **The topic's delivery to A** is the larger part: a gap of 147 to 357 frames after
+  the sink, with 4 or 5 `Lagged` events at A in every run. My inbound queue to iroh was never full and no packet was oversized, so those two are not where frames are lost.
+- The `Lagged` event is the topic saying that the receive loop did not read fast enough: the subscription holds 2048 events by default (`TOPIC_EVENTS_DEFAULT_CAP`, set with
+  `subscription_capacity` in `JoinOptions`), and the oldest are dropped when it is full. The documentation of that option says the subscriber is closed after a `Lagged` event; in these runs A kept
+  receiving after its first one, so I do not know which of the two holds in this fork.
+- This is at an offered load of about 700 Mbit/s, on a debug build where one runtime serves three endpoints. The default budget of 1 MiB/s is about 800 times lower. Nothing here says the
+  budget would see loss. It says what the topic does when a member is pushed far past it, and that the engine's receive path must not be slower than the reader here: the engine reads the topic in
+  its event loop, which also does other work.
+- The A to C direction (acknowledgements and probes) lost nothing: C read 4 to 3 frames **more** than A put on the topic in each run, and I did not look into those few extra frames (a count taken at two
+  different instants is the likely cause).
 
 ## What this says about removing the inner encryption
 
