@@ -224,17 +224,17 @@ G bounds a count. It does not refuse a member. The iroh-gossip fork (`src/proto/
 Peak resident memory of one native node, in MB, in a release build:
 
 ```text
-RSS = 29 + 5 + (G + D) x 1.1 + 0.2 x C
+RSS = 29 + 5 + G x 1.1 + D x 0.2 + C x 0.2
 ```
 
-C is the number of live plain QUIC connections beyond the one that each gossip member already brings. Each term comes from a measurement above:
+G and D are the caps. C is the number of live plain QUIC connections beyond the one that each gossip member already brings. The formula takes each cap as full. Each term comes from a measurement above:
 
 | Term | MB | Source in this document |
 | -- | -- | -- |
 | Idle node | 29 | UDP, N = 2, gossip only: 29 / 29. The isolated WebRTC nodes sit at about 30. |
 | Stacks | about 5 | WebRTC stack 3 to 4, multihop underlay 1.5 to 3 (Costs per peer). The sum is 4.5 to 7, so 5 is the low end. A node without WebRTC pays only the underlay. |
 | One member of G | 1.1 | 1.06 per added member, N 17 to 33 (Main finding). The step N 8 to 17 gives 0.44. |
-| One session of D | at most 1.1 | The formula uses the cost of a gossip member. A WebRTC session alone costs about 0.2, net of the stack (Costs per peer). The D part is therefore an upper bound. |
+| One session of D | 0.2 | About 0.2 per added WebRTC session, net of the stack (Costs per peer). |
 | One plain connection | at most 0.2 | Sending over a pooled connection (Costs per peer). |
 
 Read the formula with these limits:
@@ -244,30 +244,30 @@ Read the formula with these limits:
 - The numbers are for native processes. A browser session costs more, and this document does not measure it.
 - For a debug build, use 3.3 in place of 1.1 as the worst case. In the three N = 66 debug runs, the peak per direct link is 2.25, 2.43 and 3.31 MB. These figures divide the whole peak, idle size included, by the links, so they are an upper bound for the cost of one link. Those runs also had timer stalls (see above).
 
-### G + D against RSS
+### G and D against RSS
 
 Release build, C = 0. The last column holds the closest reading of this document.
 
-| G + D | Formula (MB) | Reading, median / max (MB) |
-| -- | -- | -- |
-| 8 | 43 | N = 8, UDP directed, 7 links: 32 / 32 |
-| 16 | 52 | N = 17, UDP directed with multihop, 16 links: 41 / 42 |
-| 32 | 69 | N = 33, UDP directed with multihop, 32 links: 60.5 / 65 |
-| 48 | 87 | no reading |
-| 64 | 104 | N = 65, UDP, 9 to 18 isolated nodes: 73 / 126 (multihop), 79 / 100 and 94 / 123 (gossip only). Use these as a lower bound. |
-| 96 | 140 | no reading |
+| G | D | Formula (MB) | Reading, median / max (MB) |
+| -- | -- | -- | -- |
+| 7 | 0 | 42 | N = 8, UDP directed, 7 links: 32 / 32 |
+| 16 | 0 | 52 | N = 17, UDP directed with multihop, 16 links: 41 / 42 |
+| 32 | 0 | 69 | N = 33, UDP directed with multihop, 32 links: 60.5 / 65 |
+| 64 | 0 | 104 | N = 65, UDP, 9 to 18 isolated nodes: 73 / 126 (multihop), 79 / 100 and 94 / 123 (gossip only). Use these as a lower bound. |
+| 32 | 16 | 72 | no reading (the planned G with today's D) |
+| 32 | 32 | 76 | no reading (the planned defaults) |
 
-The formula is above every median in the table. At G + D = 64 it is below the largest maxima (123 and 126). Those come from runs with isolated nodes, and from one run that this document does not explain. Use the formula as a planning ceiling for the median node. It is not a limit for the worst node.
+The formula is above every median in the table. At G = 64 it is below the largest maxima (123 and 126). Those come from runs with isolated nodes, and from one run that this document does not explain. Use the formula as a planning ceiling for the median node. It is not a limit for the worst node.
 
-The D part is the loosest. In the WebRTC N = 17 run, a node holds 15.0 sessions and 14.1 gossip links (G + D about 29) and reads 44.5 / 46 MB. That run has no underlay, so the formula gives 29 + 3.5 + 29 x 1.1, which is 64 MB.
+The WebRTC N = 17 run is the one reading with sessions. A node holds 14.1 gossip links and 15.0 sessions, and reads 44.5 / 46 MB. That run has no underlay, so its stack is 3.5 MB. The formula gives 29 + 3.5 + 14.1 x 1.1 + 15.0 x 0.2, which is 51.0 MB. This is 6.5 MB above the median and 5 MB above the maximum. The single cost of 1.1 for all 29 peers gave 64 MB. Most of the remaining gap is the 1.1, because a member costs 0.44 at N 8 to 17. With 0.44 the formula gives 41.7 MB, which is below the reading.
 
-To choose the caps from a memory budget of B MB, solve the formula for G + D:
+To choose the caps from a memory budget of B MB, solve the formula for G:
 
 ```text
-G + D = (B - 34 - 0.2 x C) / 1.1
+G = (B - 34 - 0.2 x (D + C)) / 1.1
 ```
 
-With C = 0, B = 128 gives G + D = 85, and B = 64 gives 27. The planned defaults give G + D = 64, which is about 104 MB for the median node in a release build.
+With C = 0, B = 128 gives G = 85 for D = 0 and G = 79 for D = 32. B = 64 gives G = 27 and G = 21. A session or a plain connection costs only 0.2, so B = 128 and G = 32 leave room for 294 of them together (D + C). The planned defaults, G = 32 and D = 32, give about 76 MB for the median node in a release build.
 
 ### What this section does not measure
 
