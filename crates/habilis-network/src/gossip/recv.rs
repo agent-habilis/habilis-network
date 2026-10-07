@@ -679,6 +679,12 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
                     updated,
                     "multihop link-state received"
                 );
+                // The vector holds the underlay address of its origin, which a
+                // neighbor needs before the underlay can offer it a session.
+                #[cfg(feature = "host")]
+                if updated {
+                    crate::transport::underlay_webrtc::tick_now(state);
+                }
             }
             Err(error) => {
                 tracing::debug!(target: "habilis_network::gossip",
