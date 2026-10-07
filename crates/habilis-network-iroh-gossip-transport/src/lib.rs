@@ -7,6 +7,7 @@
 mod addr;
 mod counters;
 pub mod frame;
+mod lookup;
 pub mod memory;
 mod transport;
 

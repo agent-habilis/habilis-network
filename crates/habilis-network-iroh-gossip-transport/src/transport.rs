@@ -5,6 +5,7 @@
 //! joined. Before that, the path is not valid and a packet is dropped, which QUIC
 //! treats as loss.
 
+use std::collections::HashSet;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,6 +13,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use iroh::EndpointId;
+use iroh::address_lookup::AddressLookup;
 use iroh::endpoint::transports::{
     CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
 };
@@ -60,11 +62,13 @@ struct Packet {
 }
 
 #[derive(Debug)]
-struct Shared {
-    app_id: EndpointId,
+pub(crate) struct Shared {
+    pub(crate) app_id: EndpointId,
     local_addr: CustomAddr,
     sink: Mutex<Option<Arc<dyn FrameSink>>>,
-    attached: AtomicBool,
+    pub(crate) attached: AtomicBool,
+    /// Destinations that the engine stopped, because a higher rung carries them.
+    blocked: Mutex<HashSet<EndpointId>>,
     counters: Counters,
 }
 
@@ -73,6 +77,9 @@ impl Shared {
     /// does not fit a frame, or that has no sink to go to, is dropped and the call
     /// still succeeds, as a NIC drops what it cannot carry. QUIC recovers.
     fn send_datagram(&self, dst: EndpointId, datagram: &[u8]) {
+        if locked(&self.blocked).contains(&dst) {
+            return self.counters.dropped_not_allowed();
+        }
         let frame = match frame::encode(dst, self.app_id, datagram) {
             Ok(frame) => frame,
             Err(EncodeError::Empty) => return self.counters.dropped_empty(),
@@ -108,6 +115,7 @@ impl GossipHandle {
             local_addr: gossip_addr(app_id),
             sink: Mutex::new(None),
             attached: AtomicBool::new(false),
+            blocked: Mutex::new(HashSet::new()),
             counters: Counters::default(),
         });
         let (inbound, receiver) = mpsc::channel(INBOUND_CAP);
@@ -125,6 +133,28 @@ impl GossipHandle {
     #[must_use]
     pub fn app_id(&self) -> EndpointId {
         self.shared.app_id
+    }
+
+    /// The address lookup, for `Builder::address_lookup`: it answers the first dial
+    /// of a peer with the gossip address.
+    #[must_use]
+    pub fn address_lookup(&self) -> impl AddressLookup + use<> {
+        crate::lookup::GossipLookup {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// Allow frames to `dst`, or stop them. The engine calls this when the selected
+    /// path of a pair changes: a pair that a higher rung carries has no use for the
+    /// flood. A destination that was never named is allowed, so that a handshake to
+    /// a new peer is not dropped.
+    pub fn allow(&self, dst: EndpointId, allowed: bool) {
+        let mut blocked = locked(&self.shared.blocked);
+        if allowed {
+            blocked.remove(&dst);
+        } else {
+            blocked.insert(dst);
+        }
     }
 
     /// What this handle has counted so far.
@@ -612,5 +642,78 @@ mod tests {
                 + (frame::HEADER_LEN as u64 + 1)
                 + 2
         );
+    }
+
+    /// A destination that the engine does not allow gets no frame, and the drop is
+    /// counted. The others are not affected, and allowing it again lets frames go.
+    #[test]
+    fn a_destination_that_is_not_allowed_gets_no_frame() {
+        let handle = GossipHandle::new(secret(1).public());
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(recorder.clone());
+        let (bob, carol) = (secret(2).public(), secret(3).public());
+
+        handle.allow(bob, false);
+        handle.shared.send_datagram(bob, &[1u8; 100]);
+        handle.shared.send_datagram(carol, &[1u8; 100]);
+
+        let sent = locked(&recorder.0).clone();
+        assert_eq!(sent.len(), 1, "only the frame to carol");
+        assert_eq!(frame::decode(&sent[0]).expect("a frame").dst, carol);
+        assert_eq!(handle.stats().dropped_not_allowed, 1);
+
+        handle.allow(bob, true);
+        handle.shared.send_datagram(bob, &[1u8; 100]);
+        assert_eq!(locked(&recorder.0).len(), 2, "allowed again");
+    }
+
+    /// A destination that was never named is allowed: its handshake must pass.
+    #[test]
+    fn a_destination_that_was_never_named_is_allowed() {
+        let handle = GossipHandle::new(secret(1).public());
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(recorder.clone());
+
+        handle.shared.send_datagram(secret(9).public(), &[1u8; 100]);
+
+        assert_eq!(locked(&recorder.0).len(), 1);
+        assert_eq!(handle.stats().dropped_not_allowed, 0);
+    }
+
+    /// A dial by id alone reaches the peer: the lookup supplies the gossip address.
+    #[tokio::test]
+    async fn a_dial_by_id_alone_is_resolved_by_the_gossip_lookup() {
+        let hub = MemoryHub::new();
+        let (alice_handle, bob_handle) = (
+            GossipHandle::new(secret(1).public()),
+            GossipHandle::new(secret(2).public()),
+        );
+        hub.join(&alice_handle);
+        hub.join(&bob_handle);
+        let build = |key: SecretKey, handle: GossipHandle| async move {
+            Endpoint::builder(presets::Minimal)
+                .secret_key(key)
+                .relay_mode(RelayMode::Disabled)
+                .add_custom_transport(handle.custom_transport())
+                .address_lookup(handle.address_lookup())
+                .clear_ip_transports()
+                .clear_relay_transports()
+                .bind()
+                .await
+                .expect("bind")
+        };
+        let alice = build(secret(1), alice_handle).await;
+        let bob = build(secret(2), bob_handle).await;
+        let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+
+        let connection =
+            tokio::time::timeout(Duration::from_secs(10), alice.connect(bob.id(), ECHO_ALPN))
+                .await
+                .expect("connect timed out")
+                .expect("connect by id");
+
+        echo_once(&connection, b"found by id").await;
+        connection.close(0u32.into(), b"done");
+        router.shutdown().await.expect("shutdown");
     }
 }

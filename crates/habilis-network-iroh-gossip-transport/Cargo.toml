@@ -28,6 +28,7 @@ habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transpor
 noq-udp.workspace = true
 n0-watcher.workspace = true
 tokio.workspace = true
+n0-future.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 

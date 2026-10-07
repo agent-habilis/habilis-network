@@ -25,6 +25,9 @@ pub struct Stats {
     pub dropped_too_large: u64,
     pub dropped_empty: u64,
     pub dropped_sink_refused: u64,
+    /// Datagrams to a destination that the engine does not allow: a higher rung
+    /// carries that pair.
+    pub dropped_not_allowed: u64,
 }
 
 #[derive(Debug, Default)]
@@ -41,6 +44,7 @@ pub(crate) struct Counters {
     dropped_too_large: AtomicU64,
     dropped_empty: AtomicU64,
     dropped_sink_refused: AtomicU64,
+    dropped_not_allowed: AtomicU64,
 }
 
 impl Counters {
@@ -59,6 +63,7 @@ impl Counters {
             dropped_too_large: read(&self.dropped_too_large),
             dropped_empty: read(&self.dropped_empty),
             dropped_sink_refused: read(&self.dropped_sink_refused),
+            dropped_not_allowed: read(&self.dropped_not_allowed),
         }
     }
 
@@ -104,6 +109,10 @@ impl Counters {
 
     pub(crate) fn dropped_sink_refused(&self) {
         bump(&self.dropped_sink_refused, 1);
+    }
+
+    pub(crate) fn dropped_not_allowed(&self) {
+        bump(&self.dropped_not_allowed, 1);
     }
 }
 
