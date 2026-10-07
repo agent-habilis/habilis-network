@@ -455,12 +455,12 @@ pub(crate) fn ensure_direct(
         return true;
     }
     if needs_webrtc || known == Some(DirectState::Pending) {
-        // A browser peer proves itself through `negotiate_session`; an IP
-        // peer's probe is already running.
+        // A browser peer proves itself through `negotiate_session`; an IP peer's probe is already
+        // running. A graft is the one proactive reason for a session (the exception of plan D4 for
+        // gossip links), as a held frame is: a cold pair that nobody sends to would stay `Pending`
+        // for ever, and no member would link to another.
         state.direct.entry(peer).or_insert(DirectState::Pending);
         if needs_webrtc {
-            // This graft is the reason for the session, as a held frame is. A cold pair that
-            // nobody sends to would stay `Pending` for ever, and no member would link to another.
             state.want_lane_session(peer, Instant::now());
             super::webrtc::negotiate_session(state, ctx, peer, peer_addr.clone());
         }
@@ -627,7 +627,7 @@ pub(crate) async fn retry_direct(
         fill_active_view(state, ctx).await;
         return;
     }
-    for addr in retry_candidates(state, ctx.rendezvous_id, distrust_links) {
+    for addr in retry_candidates(state, ctx.rendezvous_id, ctx.max_peers, distrust_links) {
         if distrust_links {
             state.direct.remove(&addr.id);
         }
@@ -695,18 +695,30 @@ async fn fill_active_view(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
 fn retry_candidates(
     state: &EventLoopState,
     rendezvous_id: EndpointId,
+    max_peers: usize,
     distrust_links: bool,
 ) -> Vec<iroh::EndpointAddr> {
-    retry_candidates_at(state, rendezvous_id, distrust_links, Instant::now())
+    retry_candidates_at(
+        state,
+        rendezvous_id,
+        max_peers,
+        distrust_links,
+        Instant::now(),
+    )
 }
 
 /// [`retry_candidates`] at `now`.
 fn retry_candidates_at(
     state: &EventLoopState,
     rendezvous_id: EndpointId,
+    max_peers: usize,
     distrust_links: bool,
     now: Instant,
 ) -> Vec<iroh::EndpointAddr> {
+    // A graft is the reason for a session, and none runs at G.
+    if !distrust_links && state.linked_endpoints.len() >= max_peers {
+        return Vec::new();
+    }
     let mut peers: Vec<iroh::EndpointAddr> = state
         .peer_endpoints
         .values()
@@ -842,7 +854,7 @@ mod tests {
             GraftRequest::Neighbor,
             "another peer is asked"
         );
-        let ids: Vec<_> = retry_candidates(&state, rendezvous, false)
+        let ids: Vec<_> = retry_candidates(&state, rendezvous, 8, false)
             .into_iter()
             .map(|addr| addr.id)
             .collect();
@@ -890,7 +902,7 @@ mod tests {
 
         let starved = start + window + Duration::from_secs(1);
         assert_eq!(
-            retry_candidates_at(&state, rendezvous, false, starved)
+            retry_candidates_at(&state, rendezvous, 8, false, starved)
                 .first()
                 .map(|addr| addr.id),
             Some(tombstone),
@@ -965,6 +977,34 @@ mod tests {
             GraftRequest::Neighbor,
             "the proof ends the wait, and the old ask is not read as a refusal again"
         );
+    }
+
+    /// A node whose active view holds G links offers no session to the other members: a graft
+    /// is the reason for a session, and none runs at G. The re-bridge after a resume still
+    /// retries every peer.
+    #[test]
+    fn a_node_at_g_retries_nobody_unless_it_distrusts_its_links() {
+        let mut state = fresh_state();
+        let rendezvous = endpoint_id(3);
+        let (linked, unlinked) = (endpoint_id(4), endpoint_id(5));
+        for (name, id) in [("linked", linked), ("unlinked", unlinked)] {
+            state
+                .peer_endpoints
+                .insert(nick(name), EndpointAddr::new(id));
+        }
+        state.linked_endpoints.insert(linked);
+        let ids = |max_peers: usize, distrust_links: bool| -> Vec<_> {
+            retry_candidates(&state, rendezvous, max_peers, distrust_links)
+                .into_iter()
+                .map(|addr| addr.id)
+                .collect()
+        };
+
+        assert_eq!(ids(2, false), vec![unlinked], "below G: the free member");
+        assert!(ids(1, false).is_empty(), "at G: nobody");
+        let mut every_peer = vec![linked, unlinked];
+        every_peer.sort_unstable();
+        assert_eq!(ids(1, true), every_peer, "the re-bridge asks every peer");
     }
 
     #[test]
@@ -1091,7 +1131,7 @@ mod tests {
         }
         state.linked_endpoints.insert(linked);
         let ids = |distrust_links: bool| -> Vec<_> {
-            retry_candidates(&state, rendezvous, distrust_links)
+            retry_candidates(&state, rendezvous, 8, distrust_links)
                 .into_iter()
                 .map(|addr| addr.id)
                 .collect()
