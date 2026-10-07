@@ -438,19 +438,22 @@ impl SignalAdmission {
         self.lock().take_idle(now, window)
     }
 
-    /// The selected path of `peer`, read from any live connection that the hook
-    /// recorded for it: the gossip link, the pooled unicast connection, or an
-    /// inbound one. iroh selects one path per remote, so any of them answers. A pair
-    /// that only gossips has no pooled connection, and this is how the engine sees
-    /// it. `None` if the peer has no live connection with a selected path.
+    /// The selected path of `peer`, read from the live connections that the hook
+    /// recorded for it: the gossip link, the pooled unicast connection, and the inbound
+    /// ones. iroh selects a path per connection, so the best of them stands for the pair
+    /// (see [`best_kind`](super::probe::best_kind)): a link that is still on the relay
+    /// can sit beside one that is already direct. A pair that only gossips has no pooled
+    /// connection, and this is how the engine sees it. `None` if the peer has no live
+    /// connection with a selected path.
     pub(crate) fn selected_kind(&self, peer: EndpointId) -> Option<super::probe::PathKind> {
         let handles: Vec<WeakConnectionHandle> = self.lock().slots.get(&peer)?.conns.clone();
-        handles
-            .iter()
-            .filter_map(WeakConnectionHandle::upgrade)
-            .filter(|conn| conn.close_reason().is_none())
-            .map(|conn| super::probe::selected_kind(&conn))
-            .find(|kind| *kind != super::probe::PathKind::None)
+        super::probe::best_kind(
+            handles
+                .iter()
+                .filter_map(WeakConnectionHandle::upgrade)
+                .filter(|conn| conn.close_reason().is_none())
+                .map(|conn| super::probe::selected_kind(&conn)),
+        )
     }
 
     /// Whether [`connection_hook`](Self::connection_hook) was called on this

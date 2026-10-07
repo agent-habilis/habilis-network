@@ -773,8 +773,18 @@ pub(crate) fn negotiate_session(
         return;
     }
     // A pair that reads as the relay is not direct, whatever the proof says: take the proof back,
-    // so that a frame is parked for the session and not refused on the relay.
-    let demoted = proof_is_stale(kind, proven) && kind == Some(super::probe::PathKind::Relay);
+    // so that a frame is parked for the session and not refused on the relay. Not while a session
+    // is attached: the reading comes from the first connection of the peer, and a gossip link that
+    // is still on the relay can read so while the session already carries the pair. Then the
+    // connection that reads as relay is nudged onto the session, and the proof stands.
+    let reads_as_relay =
+        proof_is_stale(kind, proven) && kind == Some(super::probe::PathKind::Relay);
+    let has_session = handle.has_session(&peer);
+    if reads_as_relay && has_session {
+        let endpoint = ctx.endpoint.clone();
+        n0_future::task::spawn(async move { nudge_session(&endpoint, peer).await });
+    }
+    let demoted = reads_as_relay && !has_session;
     if demoted {
         state
             .direct
@@ -785,13 +795,6 @@ pub(crate) fn negotiate_session(
             detector = "admission",
             "direct path lost; racing again"
         );
-        // With a session already attached no offer follows (`HaveSession`): the connection
-        // that reads as relay is nudged onto it. The parked frames then flush with the next
-        // probe of the pair, not at once.
-        if handle.has_session(&peer) {
-            let endpoint = ctx.endpoint.clone();
-            n0_future::task::spawn(async move { nudge_session(&endpoint, peer).await });
-        }
     }
     // Every other gate — already have a session, already negotiating, at the
     // cap, cooling off after a refusal — is one synchronous decision under one
@@ -3348,6 +3351,92 @@ mod tests {
             until(|| handle.has_session(&server.id()) && server_hub.has_session(&endpoint.id()))
                 .await,
             "a frame is held for the lower id: the higher id offers, and the session attaches"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        server.close().await;
+        endpoint.close().await;
+    }
+
+    /// The reading of the admission table comes from the first connection of the peer with a
+    /// selected path, so a gossip link that is still on the relay can read `Relay` while a session
+    /// already carries the pair. With a session attached the proof stands: no demotion, no offer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pair_with_a_session_keeps_its_proof_when_a_connection_reads_as_relay() {
+        use crate::daemon::state::DirectState;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::transport::probe::PathKind;
+
+        let (endpoint, handle) = endpoint().await;
+        // The peer's key must be below ours: we are the higher id, so a session is offered here
+        // only for a held frame, which the test uses to attach one.
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() < endpoint.id())
+            .expect("a key below ours");
+        let (server, server_hub) = endpoint_with(key).await;
+        let server_admission = SignalAdmission::new(8);
+        let router = serve(&server, &server_hub, &server_admission);
+
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle.clone());
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state
+            .peer_endpoints
+            .insert(crate::testing::nick("bob"), server.addr());
+        let bob = server.id();
+
+        // Attach a session: a frame is held for the peer, and the higher id offers for it.
+        state.want_lane_session(bob, crate::util::clock::Instant::now());
+        state.direct.insert(bob, DirectState::RelayOnly);
+        state.path_kinds.insert(bob, PathKind::Relay);
+        retry_sessions(&mut state, &ctx);
+        assert!(
+            until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
+            "the session attaches"
+        );
+
+        // The session is up and the proof is back, but a connection still reads as the relay. The
+        // frame is still held, so that the pair is not left alone for want of a send.
+        state.direct.insert(bob, DirectState::Direct);
+        state.path_kinds.insert(bob, PathKind::Relay);
+        let addr = server.addr();
+        negotiate_session(&mut state, &ctx, bob, addr);
+        assert_eq!(
+            state.direct.get(&bob),
+            Some(&DirectState::Direct),
+            "a session carries the pair: the reading of one connection does not take the proof back"
         );
 
         router.shutdown().await.expect("shutdown");

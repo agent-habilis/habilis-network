@@ -410,6 +410,25 @@ pub(crate) fn step(kind: PathKind, has_session: bool, route: Option<iroh::Transp
     Step { action, nudge }
 }
 
+/// Pure: the kind that stands for a peer whose connections read as `kinds`: the best of them, in
+/// the order of the ladder (IP, a session, multihop, the relay), and `None` when no connection has
+/// a selected path yet. iroh selects a path per connection, and a link that is still on the relay
+/// can sit beside a connection that is already direct: the first reading must not speak for the
+/// pair.
+pub(crate) fn best_kind(kinds: impl IntoIterator<Item = PathKind>) -> Option<PathKind> {
+    let rank = |kind: &PathKind| match kind {
+        PathKind::Ip => 0,
+        PathKind::WebRtc => 1,
+        PathKind::Multihop => 2,
+        PathKind::Relay => 3,
+        PathKind::None => 4,
+    };
+    kinds
+        .into_iter()
+        .filter(|kind| *kind != PathKind::None)
+        .min_by_key(rank)
+}
+
 /// Pure: the kind of a pair's selected path, from the watcher's last report if it
 /// has one, else from any live connection of the admission table. A pair that only
 /// gossips has no pooled connection and so no watcher, but its gossip connection
@@ -1263,6 +1282,34 @@ mod tests {
             "the watcher's report comes first"
         );
         assert_eq!(pair_kind(None, None), None);
+    }
+
+    // iroh selects a path per connection: a gossip link that is still on the relay can sit beside a
+    // connection that is already direct, and the pair reads as its best one.
+    #[test]
+    fn a_peer_reads_as_the_best_kind_of_its_connections() {
+        use super::best_kind;
+        assert_eq!(
+            best_kind([PathKind::Relay, PathKind::Ip]),
+            Some(PathKind::Ip),
+            "a connection on UDP beats a link on the relay, whichever comes first"
+        );
+        assert_eq!(
+            best_kind([PathKind::Relay, PathKind::Multihop, PathKind::WebRtc]),
+            Some(PathKind::WebRtc),
+            "a session ranks above multihop and the relay"
+        );
+        assert_eq!(
+            best_kind([PathKind::Relay, PathKind::Multihop]),
+            Some(PathKind::Multihop)
+        );
+        assert_eq!(
+            best_kind([PathKind::None, PathKind::Relay]),
+            Some(PathKind::Relay),
+            "a connection with no selected path says nothing"
+        );
+        assert_eq!(best_kind([PathKind::None]), None);
+        assert_eq!(best_kind([]), None);
     }
 
     // UDP can come back before a new session attaches, and nothing else
