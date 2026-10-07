@@ -27,3 +27,7 @@ test-hooks = []
 
 [dependencies]
 iroh.workspace = true
+
+[dev-dependencies]
+# `CustomAddr` is not re-exported through `iroh`; a test builds one to read its id.
+iroh-base.workspace = true

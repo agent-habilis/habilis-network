@@ -152,25 +152,34 @@ pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
     }
 }
 
-/// The endpoint id a `WebRTC` path leads to, read from its custom address, or
-/// `None` for any other path. A custom address of another transport carries no
-/// single remote (a multihop address is a route), so only `WebRTC` has one.
+/// The endpoint id that an address leads to, when the address names one: a relay
+/// address carries the endpoint it reaches, and a `WebRTC` custom address is that
+/// endpoint's id. An IP address does not, and a custom address of another
+/// transport carries no single remote (a multihop address is a route), so those
+/// give `None`.
 #[must_use]
-pub fn webrtc_remote(path: &PathSelectionData<'_>) -> Option<iroh::EndpointId> {
-    match path.network_path().remote() {
-        Addr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => {
-            let bytes: [u8; 32] = addr.data().try_into().ok()?;
+pub fn remote_id_of(addr: &Addr) -> Option<iroh::EndpointId> {
+    match addr {
+        Addr::Relay(_, id) => Some(*id),
+        Addr::Custom(custom) if custom.id() == WEBRTC_TRANSPORT_ID => {
+            let bytes: [u8; 32] = custom.data().try_into().ok()?;
             iroh::EndpointId::from_bytes(&bytes).ok()
         }
-        Addr::Ip(_) | Addr::Relay(..) | Addr::Custom(_) => None,
+        Addr::Ip(_) | Addr::Custom(_) => None,
     }
+}
+
+/// [`remote_id_of`] for the address of a path.
+#[must_use]
+pub fn remote_id(path: &PathSelectionData<'_>) -> Option<iroh::EndpointId> {
+    remote_id_of(&path.network_path().remote())
 }
 
 /// Whether a test took the path `path` away from the node `local`, on `rung`:
 /// [`is_blocked_to`] for a selector, which has a path and not an address.
 #[must_use]
 pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
-    is_blocked_to(local, rung, ip_remote(path), webrtc_remote(path))
+    is_blocked_to(local, rung, ip_remote(path), remote_id(path))
 }
 
 /// Without `test-hooks` nothing is ever blocked, so a selector reads the same
@@ -237,8 +246,8 @@ pub fn is_blocked(
 }
 
 /// [`is_blocked`], and also the blocks of one remote endpoint
-/// ([`block_rung_to`]): `remote_id` is the endpoint a `WebRTC` path leads to
-/// (`None` for a path that has no single remote id).
+/// ([`block_rung_to`]): `remote_id` is the endpoint a `WebRTC` or a relay path
+/// leads to (`None` for a path that has no single remote id).
 ///
 /// # Panics
 ///
@@ -335,8 +344,9 @@ pub fn block_rung(local: iroh::EndpointId, rung: Rung, blocked: bool) {
 /// Tests only: while `blocked`, the endpoint `local` selects no path of `rung`
 /// that leads to the endpoint `remote`, and keeps the same rung to every other
 /// remote. It is [`block_rung`] for one remote, which a test needs to cut one pair
-/// of a group of nodes. Only a `WebRTC` path names its remote in its address, so
-/// only that rung is blocked this way: the block of any other rung has no effect.
+/// of a group of nodes. Only a `WebRTC` path and a relay path name their remote in
+/// their address ([`remote_id_of`]), so only those two rungs are blocked this way:
+/// the block of any other rung has no effect.
 ///
 /// # Panics
 ///
@@ -455,6 +465,43 @@ mod tests {
         );
         assert_eq!(expected_rung(all, |_| false), None);
         assert_eq!(expected_rung(|_| false, all), None);
+    }
+
+    /// A relay path and a `WebRTC` path name the endpoint they lead to in their
+    /// address; an IP path and the custom path of another transport do not.
+    #[test]
+    fn a_relay_or_webrtc_path_names_its_remote_and_no_other_does() {
+        let id = iroh::SecretKey::from_bytes(&[31; 32]).public();
+        let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
+        assert_eq!(remote_id_of(&Addr::Relay(relay, id)), Some(id));
+        let webrtc = iroh_base::CustomAddr::from_parts(WEBRTC_TRANSPORT_ID, id.as_bytes());
+        assert_eq!(remote_id_of(&Addr::Custom(webrtc)), Some(id));
+        let foreign = iroh_base::CustomAddr::from_parts(0x1234, id.as_bytes());
+        assert_eq!(remote_id_of(&Addr::Custom(foreign)), None);
+        let ip = std::net::SocketAddr::from(([127, 0, 0, 1], 4000));
+        assert_eq!(remote_id_of(&Addr::Ip(ip)), None);
+    }
+
+    /// The relay rung can be taken from one remote: the block reads the endpoint id
+    /// that the relay address names.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_relay_block_takes_the_relay_rung_to_one_remote_only() {
+        let (local, remote, other) = (node(32), node(33), node(34));
+        let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
+        let to = |id| remote_id_of(&Addr::Relay(relay.clone(), id));
+        block_rung_to(local, Rung::Relay, remote, true);
+        assert!(is_blocked_to(local, Rung::Relay, None, to(remote)));
+        assert!(
+            !is_blocked_to(local, Rung::Relay, None, to(other)),
+            "another remote"
+        );
+        assert!(
+            !is_blocked_to(local, Rung::Ip, None, to(remote)),
+            "another rung"
+        );
+        block_rung_to(local, Rung::Relay, remote, false);
+        assert!(!is_blocked_to(local, Rung::Relay, None, to(remote)));
     }
 
     #[cfg(feature = "test-hooks")]

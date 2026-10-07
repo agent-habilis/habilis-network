@@ -8,7 +8,7 @@
 //! with the list of transports.
 
 use habilis_network_iroh_transport_util::{
-    Rung, climb, custom_rung, ip_remote, is_blocked_to, webrtc_remote,
+    Rung, climb, custom_rung, ip_remote, is_blocked_to, remote_id,
 };
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
@@ -44,7 +44,7 @@ impl PathSelector for MultihopLadder {
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
         let chosen = climb(&paths, custom_rung, |rung, path| {
-            self.usable(rung, ip_remote(path), webrtc_remote(path))
+            self.usable(rung, ip_remote(path), remote_id(path))
         });
         let mut selection = PathSelection::none();
         if let Some(path) = chosen {
