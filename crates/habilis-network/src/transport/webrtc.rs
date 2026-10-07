@@ -1339,7 +1339,7 @@ pub(crate) fn retry_sessions(
 fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) -> bool {
     !pair_needs_lane(addr, state.local_udp_transport)
         && !state.linked_endpoints.contains(&addr.id)
-        && state.unicast_pool.connection(addr.id).is_none()
+        && state.unicast_pool.used_connection(addr.id).is_none()
 }
 
 /// Detach the sessions that nothing has held for

@@ -763,6 +763,14 @@ pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 /// dialed again on the next send.
 pub const UNICAST_IDLE_SECS: u64 = 120;
 
+/// How long the pooled connection of a direct-path probe stays after the probe
+/// ends, when no send takes it (decision D4: direct connections are on demand).
+/// The graft that follows a proven path forms its gossip link inside this
+/// window, and iroh keeps the proven path for the peer while any connection to
+/// it is open. Longer than that, the probe connection would be a pre-warmed
+/// unicast connection for a pair that never sent.
+pub const PROBE_HOLD_SECS: u64 = 15;
+
 /// How long a `WebRTC` session may sit with no QUIC connection to its peer and
 /// no negotiation round before the engine detaches it (decision D4).
 ///

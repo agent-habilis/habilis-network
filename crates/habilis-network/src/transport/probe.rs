@@ -130,7 +130,7 @@ pub(crate) fn ensure_watchers(
         .map(|addr| addr.id)
         .collect();
     for peer in peers {
-        let Some(conn) = state.unicast_pool.connection(peer) else {
+        let Some(conn) = state.unicast_pool.used_connection(peer) else {
             // Nothing to watch: the pair was never sent to, or the pool closed
             // its connection, and the watcher went with it. The last path kind it
             // reported must go too, or every alive tick connects to the peer
@@ -443,13 +443,16 @@ pub(crate) fn ensure_direct(
     let pool = state.unicast_pool.clone();
     let tx = state.direct_proven.clone();
     n0_future::task::spawn(async move {
-        let direct = match pool.warm_or_dial(peer).await {
+        let direct = match pool.probe_connection(peer).await {
             Ok(conn) => wait_direct(&conn, PROBE_DEADLINE).await,
             Err(error) => {
                 tracing::debug!(target: super::LOG_TARGET, %peer, %error, "direct-path probe could not connect");
                 false
             }
         };
+        // The graft that follows a proven path forms its link inside the probe
+        // hold, and the probe's own connection goes after it unless a send took it.
+        pool.probe_done(peer).await;
         let _ = tx.send(DirectOutcome { peer, direct });
     });
     false

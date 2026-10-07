@@ -22,7 +22,7 @@ use super::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
-use crate::util::tuning::UNICAST_IDLE_SECS;
+use crate::util::tuning::{PROBE_HOLD_SECS, UNICAST_IDLE_SECS};
 
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
@@ -57,11 +57,24 @@ impl std::fmt::Debug for UnicastPool {
     }
 }
 
+/// Why a pooled connection is held, which decides when it closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// A send opened or used it: it closes after the idle timeout.
+    Used,
+    /// A direct-path probe opened it and is still running.
+    Probing,
+    /// The probe ended at this time and no send has taken the connection since:
+    /// it closes after the probe hold.
+    Probed(PoolInstant),
+}
+
 /// A pooled connection and when a send last used it.
 struct Pooled {
     conn: Connection,
     /// On the clock the tokio runtime keeps, so a test can pause it.
     last_used: PoolInstant,
+    hold: Hold,
 }
 
 struct PoolInner {
@@ -73,6 +86,9 @@ struct PoolInner {
     /// peer's acceptor closes an unused connection on its own side too, so a
     /// link that nobody sends on does not hold its two ends open for ever.
     idle: Duration,
+    /// How long the connection of a direct-path probe stays after the probe ends
+    /// when no send takes it.
+    probe_hold: Duration,
     /// Set once the sweeper is running, so that it starts at the first dial.
     sweeping: AtomicBool,
     /// When each endpoint's last dial failed, for the
@@ -116,21 +132,39 @@ pub(crate) enum WarmSend {
 impl UnicastPool {
     /// A pool wired to `endpoint`, able to dial and carry unicast traffic.
     pub(crate) fn new(endpoint: Endpoint, relay_transport: bool) -> Self {
-        Self::with_idle(
+        Self::with_timeouts(
             endpoint,
             relay_transport,
             Duration::from_secs(UNICAST_IDLE_SECS),
+            Duration::from_secs(PROBE_HOLD_SECS),
         )
     }
 
     /// [`Self::new`] with the idle timeout spelled out, for tests that must not
     /// wait the real one.
+    #[cfg(test)]
     pub(crate) fn with_idle(endpoint: Endpoint, relay_transport: bool, idle: Duration) -> Self {
+        Self::with_timeouts(
+            endpoint,
+            relay_transport,
+            idle,
+            Duration::from_secs(PROBE_HOLD_SECS),
+        )
+    }
+
+    /// [`Self::new`] with the idle timeout and the probe hold spelled out.
+    pub(crate) fn with_timeouts(
+        endpoint: Endpoint,
+        relay_transport: bool,
+        idle: Duration,
+        probe_hold: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(PoolInner {
                 endpoint: Some(endpoint),
                 conns: Mutex::new(HashMap::new()),
                 idle,
+                probe_hold,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
@@ -151,6 +185,7 @@ impl UnicastPool {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
                 idle: Duration::from_secs(UNICAST_IDLE_SECS),
+                probe_hold: Duration::from_secs(PROBE_HOLD_SECS),
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
@@ -198,10 +233,12 @@ impl UnicastPool {
     /// no pooled connection at all, so the synchronous read below cannot
     /// answer for a pair that linked through the rendezvous.
     pub(crate) async fn udp_won(&self, eid: EndpointId) -> bool {
-        match self.warm_or_dial(eid).await {
+        let won = match self.probe_connection(eid).await {
             Ok(conn) => super::path::wait_ip(&conn, PATH_SELECT_TIMEOUT).await,
             Err(_) => false,
-        }
+        };
+        self.probe_done(eid).await;
+        won
     }
 
     /// Remember `addr` as the address to dial its peer at.
@@ -211,12 +248,27 @@ impl UnicastPool {
         }
     }
 
-    /// The open pooled connection to `eid`, for the path watcher. A contended
-    /// lock reads as none; the next alive tick asks again.
+    /// The open pooled connection to `eid`, whoever opened it. A contended lock
+    /// reads as none.
+    #[cfg(test)]
     pub(crate) fn connection(&self, eid: EndpointId) -> Option<Connection> {
         self.inner.conns.try_lock().ok().and_then(|conns| {
             conns
                 .get(&eid)
+                .map(|pooled| &pooled.conn)
+                .filter(|conn| conn.close_reason().is_none())
+                .cloned()
+        })
+    }
+
+    /// The open pooled connection to `eid` that a send opened or used. A
+    /// connection that only a direct-path probe opened is not one: the pair was
+    /// never sent to. A contended lock reads as none.
+    pub(crate) fn used_connection(&self, eid: EndpointId) -> Option<Connection> {
+        self.inner.conns.try_lock().ok().and_then(|conns| {
+            conns
+                .get(&eid)
+                .filter(|pooled| pooled.hold == Hold::Used)
                 .map(|pooled| &pooled.conn)
                 .filter(|conn| conn.close_reason().is_none())
                 .cloned()
@@ -243,18 +295,20 @@ impl UnicastPool {
             .get_mut(&eid)
             .filter(|pooled| pooled.conn.close_reason().is_none())?;
         pooled.last_used = PoolInstant::now();
+        pooled.hold = Hold::Used;
         Some(pooled.conn.clone())
     }
 
-    /// Close the connections nothing has used for [`PoolInner::idle`]. One task
-    /// for the whole pool, started with the first connection and gone with the
-    /// pool.
+    /// Close the connections nothing has used for [`PoolInner::idle`], and the
+    /// connections of a probe that ended [`PoolInner::probe_hold`] ago with no
+    /// send taking them. One task for the whole pool, started with the first
+    /// connection and gone with the pool.
     fn ensure_sweeper(&self) {
         if self.inner.sweeping.swap(true, Ordering::AcqRel) {
             return;
         }
         let pool = Arc::downgrade(&self.inner);
-        let period = (self.inner.idle / 4).max(Duration::from_millis(1));
+        let period = (self.inner.idle.min(self.inner.probe_hold) / 4).max(Duration::from_millis(1));
         n0_future::task::spawn(async move {
             loop {
                 n0_future::time::sleep(period).await;
@@ -263,7 +317,14 @@ impl UnicastPool {
                 };
                 let now = PoolInstant::now();
                 inner.conns.lock().await.retain(|eid, pooled| {
-                    let idle = now.saturating_duration_since(pooled.last_used) >= inner.idle;
+                    let idle = match pooled.hold {
+                        Hold::Probed(ended) => {
+                            now.saturating_duration_since(ended) >= inner.probe_hold
+                        }
+                        Hold::Used | Hold::Probing => {
+                            now.saturating_duration_since(pooled.last_used) >= inner.idle
+                        }
+                    };
                     if idle {
                         tracing::debug!(target: LOG_TARGET, %eid, "closing an idle pooled unicast connection");
                         pooled.conn.close(IDLE.into(), b"idle");
@@ -440,12 +501,56 @@ impl UnicastPool {
     /// # Errors
     /// See [`Self::dial_and_send`].
     pub(crate) async fn warm_or_dial(&self, eid: EndpointId) -> Result<Connection> {
-        let Some(endpoint) = self.inner.endpoint.clone() else {
+        if self.inner.endpoint.is_none() {
             bail!("unicast pool has no endpoint");
-        };
+        }
         if let Some(conn) = self.warm(eid).await {
             return Ok(conn);
         }
+        self.dial_pooled(eid, Hold::Used).await
+    }
+
+    /// The pooled connection that a direct-path probe uses: the one a send
+    /// already opened, left as it is, or else one dialed for the probe, which
+    /// does not count as a send. See [`Self::probe_done`].
+    ///
+    /// # Errors
+    /// See [`Self::dial_and_send`].
+    pub(crate) async fn probe_connection(&self, eid: EndpointId) -> Result<Connection> {
+        if self.inner.endpoint.is_none() {
+            bail!("unicast pool has no endpoint");
+        }
+        let existing = self
+            .inner
+            .conns
+            .lock()
+            .await
+            .get(&eid)
+            .map(|pooled| &pooled.conn)
+            .filter(|conn| conn.close_reason().is_none())
+            .cloned();
+        if let Some(conn) = existing {
+            return Ok(conn);
+        }
+        self.dial_pooled(eid, Hold::Probing).await
+    }
+
+    /// The probe on `eid` has ended, whatever its verdict. A connection that only
+    /// the probe opened now closes after the probe hold, unless a send takes it
+    /// first. A connection that a send opened is left alone.
+    pub(crate) async fn probe_done(&self, eid: EndpointId) {
+        if let Some(pooled) = self.inner.conns.lock().await.get_mut(&eid)
+            && pooled.hold == Hold::Probing
+        {
+            pooled.hold = Hold::Probed(PoolInstant::now());
+        }
+    }
+
+    /// Dial `eid` and pool the connection under `hold`.
+    async fn dial_pooled(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
+        let Some(endpoint) = self.inner.endpoint.clone() else {
+            bail!("unicast pool has no endpoint");
+        };
         if self
             .inner
             .dial_failures
@@ -470,6 +575,7 @@ impl UnicastPool {
                     Pooled {
                         conn: conn.clone(),
                         last_used: PoolInstant::now(),
+                        hold,
                     },
                 );
                 self.ensure_sweeper();
@@ -735,6 +841,93 @@ mod tests {
 
         advance_secs(7).await;
         assert!(closed_as_idle(&conn), "then it idles out as well");
+
+        tokio::time::resume();
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// A loopback server that holds every unicast connection open, and a pool
+    /// dialed to it with the given idle timeout and probe hold.
+    async fn pool_with_holds(
+        idle: Duration,
+        probe_hold: Duration,
+    ) -> (
+        super::UnicastPool,
+        iroh::EndpointId,
+        iroh::protocol::Router,
+        iroh::Endpoint,
+    ) {
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let bind = || async {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, Hold)
+            .spawn();
+        let client = bind().await;
+        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::with_timeouts(client.clone(), false, idle, probe_hold);
+        (pool, server.id(), router, client)
+    }
+
+    /// The connection of a direct-path probe is not a send: it counts as no use,
+    /// and is closed a fixed hold after the probe ends, long before the idle
+    /// timeout, unless a send takes it first.
+    #[tokio::test]
+    async fn a_probe_connection_is_closed_after_the_hold_unless_a_send_takes_it() {
+        let (pool, server, router, client) =
+            pool_with_holds(Duration::from_secs(80), Duration::from_secs(8)).await;
+        let conn = pool.probe_connection(server).await.expect("dial");
+        assert!(
+            pool.used_connection(server).is_none(),
+            "a probe is not a send"
+        );
+        pool.probe_done(server).await;
+        tokio::time::pause();
+
+        advance_secs(6).await;
+        assert!(
+            conn.close_reason().is_none() && pool.connection(server).is_some(),
+            "inside the hold the probe connection stays, so the graft can form on it"
+        );
+        advance_secs(6).await;
+        assert!(
+            pool.inner.conns.lock().await.is_empty(),
+            "after the hold the connection leaves the pool"
+        );
+        assert!(closed_as_idle(&conn), "and is closed, not just dropped");
+
+        tokio::time::resume();
+        let probed = pool.probe_connection(server).await.expect("probe again");
+        pool.probe_done(server).await;
+        tokio::time::pause();
+        advance_secs(5).await;
+        assert!(
+            pool.warm_or_dial(server).await.is_ok(),
+            "a send takes the probe connection"
+        );
+        assert!(pool.used_connection(server).is_some(), "and now it is used");
+        advance_secs(20).await;
+        assert!(
+            probed.close_reason().is_none(),
+            "a used connection follows the idle timeout, not the hold"
+        );
 
         tokio::time::resume();
         router.shutdown().await.expect("shutdown");
