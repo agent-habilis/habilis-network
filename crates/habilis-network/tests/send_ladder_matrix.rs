@@ -270,6 +270,13 @@ impl Member {
             .expect("the loop answers");
     }
 
+    async fn endpoint_id(&self) -> EndpointId {
+        self.membership
+            .request(|reply| Request::EndpointId { reply })
+            .await
+            .expect("the loop answers")
+    }
+
     /// Whether this member's multihop topology has a route to `peer` now.
     async fn has_route(&self, peer: &str) -> bool {
         self.membership
@@ -440,7 +447,48 @@ async fn apply(cut: Cut, alice: &Member, bob: &Member) {
     }
 }
 
-async fn run(cell: Cell, name: &str) {
+/// Which endpoint id alice, the member that sends, has next to bob's. The ids are random, and
+/// only the lower id offers a session, so a cell that lets iroh draw them runs half of its
+/// runs one way and half the other. A cell that must hold either way names the order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SenderId {
+    Any,
+    Higher,
+    Lower,
+}
+
+impl SenderId {
+    fn holds(self, alice: EndpointId, bob: EndpointId) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Higher => alice > bob,
+            Self::Lower => alice < bob,
+        }
+    }
+}
+
+/// Stand up alice, bob and carol, again until alice has the id order that the cell names. The
+/// chance is one half for each try.
+async fn members(
+    relay: &RelayUrl,
+    transports: &[Transport],
+    sender_id: SenderId,
+) -> (Member, Member, Member) {
+    for _ in 0..20 {
+        let alice = Member::create("alice", relay, transports.to_vec()).await;
+        let bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
+        if sender_id.holds(alice.endpoint_id().await, bob.endpoint_id().await) {
+            return (alice, bob, carol);
+        }
+        for member in [alice, bob, carol] {
+            member.leave().await;
+        }
+    }
+    panic!("no draw of ids gave alice the order {sender_id:?} in 20 tries");
+}
+
+async fn run(cell: Cell, name: &str, sender_id: SenderId) {
     init_logging();
     assert!(
         !cell.target_full && !cell.kinds.is_empty(),
@@ -449,9 +497,7 @@ async fn run(cell: Cell, name: &str) {
     let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
         .await
         .expect("local relay");
-    let alice = Member::create("alice", &relay, cell.transports.to_vec()).await;
-    let mut bob = Member::join("bob", &alice).await;
-    let carol = Member::join("carol", &alice).await;
+    let (alice, mut bob, carol) = members(&relay, cell.transports, sender_id).await;
     assert!(
         rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
         "{name}: the three members never formed a mesh"
@@ -584,10 +630,40 @@ macro_rules! cells {
                     .iter()
                     .find(|(name, _)| *name == stringify!($name))
                     .expect("the cell is in the table");
-                run(*cell, stringify!($name)).await;
+                run(*cell, stringify!($name), SenderId::Any).await;
             }
         )*
     };
+}
+
+/// `udp_webrtc_ip_direct` with the order of the ids fixed: only the lower id offers a session,
+/// and a pair that loses IP while the higher id sends needs the higher id to offer by itself.
+async fn udp_webrtc_ip_direct_with(sender_id: SenderId, name: &str) {
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
+        .expect("the cell is in the table");
+    run(*cell, name, sender_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn udp_webrtc_ip_direct_sender_has_the_higher_id() {
+    udp_webrtc_ip_direct_with(
+        SenderId::Higher,
+        "udp_webrtc_ip_direct_sender_has_the_higher_id",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn udp_webrtc_ip_direct_sender_has_the_lower_id() {
+    udp_webrtc_ip_direct_with(
+        SenderId::Lower,
+        "udp_webrtc_ip_direct_sender_has_the_lower_id",
+    )
+    .await;
 }
 
 cells! {
