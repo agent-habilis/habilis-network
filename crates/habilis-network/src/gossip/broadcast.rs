@@ -70,14 +70,12 @@ pub async fn send_app(
         // path flushes it (see `gossip::recv::flush_pending`).
         match crate::transport::deliver(&frame, bytes.clone(), state, ctx.sender).await {
             Err(error) if error.is::<crate::transport::HeldForDirect>() => {
-                crate::transport::note_held(state, &error);
-                offer_for_parked(state, ctx, &frame);
+                park_and_offer(state, ctx, &frame, &bytes);
             }
             outcome => return outcome,
         }
     } else {
-        mark_parked(state, &frame, &bytes);
-        offer_for_parked(state, ctx, &frame);
+        park_and_offer(state, ctx, &frame, &bytes);
     }
     if state.pending_outbound.push((frame, bytes)) {
         // Buffered until the meshed edge flushes it through the same send
@@ -320,8 +318,21 @@ fn mark_parked(state: &mut EventLoopState, frame: &Message, bytes: &Bytes) {
     }
 }
 
+/// A directed frame is parked, by `send_app` or by a flush that held it again: ask for the session
+/// of its peer, and offer it now. One helper for both, so that the two cannot drift.
+pub(crate) fn park_and_offer(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    frame: &Message,
+    bytes: &Bytes,
+) {
+    mark_parked(state, frame, bytes);
+    offer_for_parked(state, ctx, frame);
+}
+
 /// Offer the session of the peer now, if the parked frame asked for it. Without this the offer waits
-/// for the next tick of the retry pass, up to 30 s, and a user of a lane pair waits with it.
+/// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
+/// or a pair with an IP path that reads as the relay (`note_held` marks both).
 fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Message) {
     let Some(nick) = crate::protocol::message::sole_addressee(&frame.kind) else {
         return;
@@ -389,5 +400,38 @@ mod tests {
         );
         mark_parked(&mut state, &frame, &Bytes::from_static(b"frame"));
         assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+    }
+
+    /// The offer goes out at once for a peer that is wanted, and a second call does not start a
+    /// second one: the admission table keeps one round per peer.
+    #[cfg(feature = "host")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offering_for_a_parked_frame_starts_one_round_and_no_more() {
+        let node = crate::testing::LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        let frame = node.frame_to_bob();
+        assert_eq!(state.webrtc_admission.in_flight(), 0);
+
+        state.want_lane_session(node.bob, crate::util::clock::Instant::now());
+        super::offer_for_parked(&mut state, &ctx, &frame);
+        assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
+        super::offer_for_parked(&mut state, &ctx, &frame);
+        assert_eq!(state.webrtc_admission.in_flight(), 1, "not a second round");
+
+        state.webrtc_admission.close();
+        node.endpoint.close().await;
+    }
+
+    /// A peer that nobody asked for is not offered a session.
+    #[cfg(feature = "host")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_is_offered_for_a_peer_that_is_not_wanted() {
+        let node = crate::testing::LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        super::offer_for_parked(&mut state, &ctx, &node.frame_to_bob());
+        assert_eq!(state.webrtc_admission.in_flight(), 0);
+        node.endpoint.close().await;
     }
 }

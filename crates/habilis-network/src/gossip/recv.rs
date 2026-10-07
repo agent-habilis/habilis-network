@@ -336,7 +336,7 @@ pub(crate) async fn flush_pending(
             delivered += 1;
             continue;
         };
-        if requeue(state, msg, bytes, &error) {
+        if requeue(state, ctx, msg, bytes) {
             requeued += 1;
             tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not deliverable yet; requeued");
         } else {
@@ -355,8 +355,8 @@ pub(crate) async fn flush_pending(
 /// peer asks for its session, at every flush: a frame that was parked before the peer was known has
 /// no other chance to ask, and without the session the lane pair never links. Returns whether the
 /// frame was kept.
-fn requeue(state: &mut EventLoopState, msg: Message, bytes: Bytes, error: &anyhow::Error) -> bool {
-    crate::transport::note_held(state, error);
+fn requeue(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, msg: Message, bytes: Bytes) -> bool {
+    super::broadcast::park_and_offer(state, ctx, &msg, &bytes);
     state.pending_outbound.push((msg, bytes))
 }
 
@@ -2688,42 +2688,50 @@ mod left_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host"))]
 mod requeue_tests {
     use bytes::Bytes;
 
     use super::requeue;
-    use crate::protocol::{MeshId, Message};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{LaneNode, nick};
 
     /// A frame is parked before its addressee is known. The peer becomes known with a relay-only
-    /// address, the flush delivers the frame again and it is held: the requeue asks for the session.
-    #[test]
-    fn a_frame_parked_before_its_peer_is_known_asks_for_the_session_at_the_flush() {
-        let mut state = fresh_state();
+    /// address, the flush delivers the frame again and it is held: the requeue asks for the session
+    /// and offers it at once, so that the frame does not wait for the next tick of the retry pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frame_parked_before_its_peer_is_known_asks_for_the_session_at_the_flush() {
+        let node = LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
         state.meshed = true;
-        state.local_udp_transport = true;
-        let bob = endpoint_id(1);
-        let frame = Message::new_pong(&MeshId::from("test"), &nick("alice"), nick("bob"));
+        let addr = state
+            .peer_endpoints
+            .remove(&nick("bob"))
+            .expect("the fixture knows bob");
+        let frame = node.frame_to_bob();
         let bytes = Bytes::from_static(b"frame");
         let now = crate::util::clock::Instant::now();
-        let first = crate::transport::resolve(&frame, bytes.clone(), &state)
+        crate::transport::resolve(&frame, bytes.clone(), &state)
             .expect_err("no endpoint is known for bob yet");
-        assert!(requeue(&mut state, frame.clone(), bytes.clone(), &first));
-        assert!(!state.lane_session_wanted(bob, now), "bob is unknown");
+        assert!(requeue(&mut state, &ctx, frame.clone(), bytes.clone()));
+        assert!(!state.lane_session_wanted(node.bob, now), "bob is unknown");
+        assert_eq!(state.webrtc_admission.in_flight(), 0);
 
-        state.note_peer_endpoint(
-            nick("bob"),
-            iroh::EndpointAddr::new(bob)
-                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
-        );
-        let second = crate::transport::resolve(&frame, bytes.clone(), &state)
+        state.note_peer_endpoint(nick("bob"), addr);
+        crate::transport::resolve(&frame, bytes.clone(), &state)
             .expect_err("a lookup-only relay holds the frame");
-        assert!(requeue(&mut state, frame, bytes, &second));
+        assert!(requeue(&mut state, &ctx, frame, bytes));
 
         assert!(
-            state.lane_session_wanted(bob, now),
+            state.lane_session_wanted(node.bob, now),
             "the requeued frame asks"
         );
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "and the offer is in flight at once"
+        );
+        state.webrtc_admission.close();
+        node.endpoint.close().await;
     }
 }
