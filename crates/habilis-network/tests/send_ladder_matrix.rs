@@ -27,7 +27,7 @@
 
 use std::time::{Duration, Instant};
 
-use habilis_network::iroh::RelayUrl;
+use habilis_network::iroh::{EndpointId, RelayUrl};
 use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, MeshConfig, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -91,16 +91,21 @@ enum Cut {
     WebRtcBobToAlice,
     /// The `WebRTC` rung between the two underlays, in both directions.
     WebRtcUnderlays,
+    /// The relay rung between the two underlays, in both directions. With the relay
+    /// allowed for payload the relay gate is off, so the direct underlay edge would
+    /// otherwise stay alive over the relay and carol would forward nothing.
+    RelayUnderlays,
     /// The whole multihop rung of alice's application endpoint.
     MultihopAlice,
 }
 
 impl Cell {
     /// What the cell cuts, in order. A cell that goes through a third member cuts
-    /// the direct underlay edge on every rung that could carry it: IP, and the
-    /// `WebRTC` session that an underlay may open to a neighbor of its own, which
-    /// the lower underlay id offers. Left open, that edge revives and carol
-    /// forwards nothing.
+    /// the direct underlay edge on every rung that could carry it: IP, the `WebRTC`
+    /// session that an underlay may open to a neighbor of its own (the lower
+    /// underlay id offers one), and, when the list lets the relay carry payload, the
+    /// relay between the two underlays. Left open, that edge stays or revives and
+    /// carol forwards nothing.
     fn cuts(self) -> Vec<Cut> {
         let mut cuts = Vec::new();
         if self.blocked >= Blocked::Ip {
@@ -118,6 +123,9 @@ impl Cell {
                 Cut::WebRtcUnderlays,
                 Cut::WebRtcBobToAlice,
             ]);
+            if self.has(Transport::Relay) {
+                cuts.push(Cut::RelayUnderlays);
+            }
         }
         cuts
     }
@@ -383,6 +391,20 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
 /// Make one cut of a cell between alice and bob. The underlay is an endpoint of
 /// its own, with its own id and ports: left alone, the direct link between the two
 /// underlays is a route, and no member would forward a cell.
+fn block_underlay_rung(
+    rung: Rung,
+    underlays: [(Option<EndpointId>, Option<EndpointId>, Vec<u16>); 2],
+) {
+    for (from, to, _) in underlays {
+        habilis_network_iroh_webrtc_transport::block_rung_to(
+            from.expect("multihop is on"),
+            rung,
+            to.expect("multihop is on"),
+            true,
+        );
+    }
+}
+
 async fn apply(cut: Cut, alice: &Member, bob: &Member) {
     let underlays = [(alice, bob), (bob, alice)].map(|(from, to)| {
         (
@@ -404,16 +426,8 @@ async fn apply(cut: Cut, alice: &Member, bob: &Member) {
         }
         Cut::WebRtcAlice => alice.block_rung(Rung::WebRtc, true).await,
         Cut::WebRtcBobToAlice => bob.block_rung_to(Rung::WebRtc, "alice").await,
-        Cut::WebRtcUnderlays => {
-            for (from, to, _) in underlays {
-                habilis_network_iroh_webrtc_transport::block_rung_to(
-                    from.expect("multihop is on"),
-                    Rung::WebRtc,
-                    to.expect("multihop is on"),
-                    true,
-                );
-            }
-        }
+        Cut::WebRtcUnderlays => block_underlay_rung(Rung::WebRtc, underlays),
+        Cut::RelayUnderlays => block_underlay_rung(Rung::Relay, underlays),
         Cut::MultihopAlice => alice.block_rung(Rung::Multihop, true).await,
     }
 }
@@ -635,6 +649,11 @@ fn a_cell_through_a_third_member_cuts_the_underlay_edge_on_every_rung() {
         ] {
             assert_eq!(cuts.contains(&cut), cell.via_third, "{name}: {cut:?}");
         }
+        assert_eq!(
+            cuts.contains(&Cut::RelayUnderlays),
+            cell.via_third && cell.has(Transport::Relay),
+            "{name}: the relay between the underlays"
+        );
     }
 }
 
