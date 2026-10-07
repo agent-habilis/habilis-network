@@ -76,6 +76,11 @@ blob = ["host"]
 # builds unconditionally: IpcMessage is in the event loop signatures, so
 # gating it needs ipc.rs split by dependency first.)
 default = ["host", "mdns", "dht"]
+# The multihop transport: reach a peer with no direct path through other peers.
+# On under `host`, and the only way the crate is in the graph. The crate builds
+# for wasm32 (a gate row checks it), so a browser build can turn this on without
+# `host`. Nothing in the browser endpoint uses it yet.
+multihop = ["dep:habilis-network-iroh-multihop-transport"]
 # Both need real UDP sockets, so each implies `host`.
 mdns = ["host", "dep:iroh-mdns-address-lookup"]
 dht = ["host", "dep:iroh-mainline-address-lookup"]
@@ -94,7 +99,7 @@ host = [
     "habilis-network-protocol/host",
     "habilis-network-doc/host",
     "habilis-network-logging/host",
-    "dep:habilis-network-iroh-multihop-transport",
+    "multihop",
     "dep:interprocess",
     "dep:libc",
     # Base tokio is the portable floor (`sync`, `macros`, `time`, `rt`); these

@@ -54,11 +54,11 @@ mod wire;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 
 use iroh::address_lookup::AddressLookup;
 use iroh::endpoint::transports::{CustomTransport, PathSelector};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use n0_future::time::{Duration, Instant};
 
 pub use addr::{Route, RouteHop};
 pub use metric::LinkMetric;
@@ -298,7 +298,8 @@ impl MultihopHandle {
     }
 
     /// The ports this node's underlay endpoint is bound on, for a test that
-    /// blocks IP between underlays.
+    /// blocks IP between underlays. Not in a browser, which binds no socket.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn underlay_ports(&self) -> Vec<u16> {
         self.inner

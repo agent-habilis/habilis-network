@@ -12,7 +12,7 @@ use iroh::EndpointId;
 use iroh::TransportAddr;
 use iroh::address_lookup::{AddressLookup, Error, Item};
 use iroh::endpoint_info::{EndpointData, EndpointInfo};
-use n0_future::stream::{self, Boxed};
+use n0_future::{boxed::BoxStream, stream};
 
 use crate::topology::Topology;
 
@@ -42,7 +42,7 @@ impl MultihopLookup {
 impl AddressLookup for MultihopLookup {
     fn publish(&self, _data: &EndpointData) {}
 
-    fn resolve(&self, endpoint_id: EndpointId) -> Option<Boxed<Result<Item, Error>>> {
+    fn resolve(&self, endpoint_id: EndpointId) -> Option<BoxStream<Result<Item, Error>>> {
         // One route: the pool's alternates are for the send path's own failover,
         // not iroh's path set, and nothing here reads past the first.
         //

@@ -17,13 +17,14 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use iroh_base::CustomAddr;
+use n0_future::time::{Duration, Instant, MissedTickBehavior};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
@@ -238,6 +239,9 @@ pub(crate) struct Forwarder {
     /// This node's application-layer id, the other half of the identity a cell's
     /// current hop must name.
     self_app_id: EndpointId,
+    /// Spawns the writers from a thread that is not in the runtime. A browser has
+    /// no runtime to hold: it spawns on its single thread.
+    #[cfg(not(target_arch = "wasm32"))]
     runtime: Handle,
     pool: Arc<WriterPool>,
     /// Terminal deliveries destined for the local application endpoint.
@@ -261,6 +265,7 @@ impl Forwarder {
         Self {
             underlay,
             self_app_id,
+            #[cfg(not(target_arch = "wasm32"))]
             runtime: Handle::current(),
             pool: Arc::new(WriterPool::default()),
             inbound,
@@ -406,14 +411,18 @@ impl Forwarder {
             writers.insert(dst.id, tx.clone());
         }
         self.pool.track(dst.id, app_id);
-        self.runtime.spawn(writer_task(
+        let writer = writer_task(
             self.underlay.clone(),
             dst,
             rx,
             tx.clone(),
             Arc::clone(&self.pool),
             self.rule,
-        ));
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        self.runtime.spawn(writer);
+        #[cfg(target_arch = "wasm32")]
+        n0_future::task::spawn(writer);
         Some(tx)
     }
 }
@@ -458,8 +467,8 @@ async fn drain_to_hop(
     // Looks at the path once a second even when no cell comes, so a hop that was
     // withdrawn for staying on the relay (and so carries no cells) is a link
     // again once a direct path opens.
-    let mut recheck = tokio::time::interval(Duration::from_secs(1));
-    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut recheck = n0_future::time::interval(Duration::from_secs(1));
+    recheck.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             // A connection that ended under us ends the writer. Without this arm a
@@ -506,7 +515,7 @@ async fn dial_with_retry(underlay: &Endpoint, dst: &EndpointAddr) -> Option<Conn
             Err(error) => {
                 tracing::trace!(hop = %dst.id.fmt_short(), attempt, %error, "underlay dial attempt failed");
                 // Linear backoff; adjacent hops that are momentarily busy settle fast.
-                tokio::time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
+                n0_future::time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
             }
         }
     }
@@ -555,7 +564,7 @@ impl ProtocolHandler for ForwardAcceptor {
         let gate = Arc::new(Mutex::new(RelayGate::new(self.forwarder.rule.allow_relay)));
         // Loop ends when the upstream hop closes the connection: normal teardown.
         while let Ok(recv) = connection.accept_uni().await {
-            tokio::spawn(self.clone().read_loop(
+            n0_future::task::spawn(self.clone().read_loop(
                 upstream,
                 connection.clone(),
                 Arc::clone(&gate),

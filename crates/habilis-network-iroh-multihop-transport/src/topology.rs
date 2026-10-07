@@ -8,10 +8,10 @@
 //! origin into one metric-weighted graph and runs Dijkstra locally.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iroh::{EndpointAddr, EndpointId, SecretKey};
 use iroh_base::Signature;
+use n0_future::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::addr::{Route, RouteHop};
@@ -24,7 +24,7 @@ pub(crate) const DEFAULT_VECTOR_MAX_AGE: Duration = Duration::from_secs(45);
 /// Milliseconds since the Unix epoch: what a vector's `seq` counts.
 pub(crate) fn wall_clock_ms() -> u64 {
     SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+        .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
@@ -367,7 +367,7 @@ pub struct TopologyEdge {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use n0_future::time::{Duration, Instant};
 
     use super::{LinkVector, Topology};
     use iroh::{EndpointAddr, EndpointId, SecretKey};

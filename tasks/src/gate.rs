@@ -170,6 +170,14 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
     },
+    // The multihop transport forwards through a browser too, so its crate must
+    // build for the browser by itself: the engine's own rows do not reach it
+    // while `host` is the only thing that turns it on.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("habilis-network-iroh-multihop-transport"),
+        args: &[],
+    },
     // The engine itself must reach the browser, not merely be avoidable from
     // it. `--no-default-features` is the portable half: no `host`, so no IPC
     // listener, no state file, no process helpers.
@@ -227,6 +235,11 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmClippy,
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-multihop-transport"),
+        args: &[],
     },
     Step {
         kind: Kind::WasmClippy,
