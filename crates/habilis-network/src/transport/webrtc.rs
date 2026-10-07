@@ -2710,8 +2710,13 @@ mod tests {
 
         let (endpoint, handle) = endpoint().await;
         // Only the lower id offers, so the peer's key must be above ours.
-        let key = (1u8..=255)
-            .map(|seed| SecretKey::from_bytes(&[seed; 32]))
+        // The id of our endpoint is random: with 255 seeds, one run in 256 found no key above it.
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
             .find(|key| key.public() > endpoint.id())
             .expect("a key above ours");
         let server = Endpoint::builder(presets::Minimal)

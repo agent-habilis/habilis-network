@@ -874,8 +874,13 @@ mod tests {
         };
         let client = bind(None).await;
         // The watcher only follows higher ids: take both keys above the client's.
-        let mut keys = (1u8..=255)
-            .map(|seed| SecretKey::from_bytes(&[seed; 32]))
+        // The id of the client is random: with 255 seeds a high id left fewer than two keys.
+        let mut keys = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
             .filter(|key| key.public() > client.id());
         let bob = bind(keys.next()).await;
         let beacon = bind(keys.next()).await;
