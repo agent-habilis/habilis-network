@@ -210,6 +210,17 @@ pub enum Request {
     UnderlaySessions {
         reply: oneshot::Sender<usize>,
     },
+    /// Tests only: how many `WebRTC` sessions of this node go to a member that is
+    /// neither a gossip neighbor nor the rendezvous. Such a session carries only what
+    /// was sent over it, so it must go after it idled for 120 s.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    SessionsToNonNeighbors {
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 /// A rung of the path ladder, for [`Request::BlockRung`].
@@ -463,6 +474,26 @@ impl NodeDriver for MembershipApp {
                     .underlay_webrtc
                     .as_ref()
                     .map_or(0, |underlay| underlay.handle.session_count());
+                let _ = reply.send(sessions);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::SessionsToNonNeighbors { reply } => {
+                let sessions = state.webrtc.as_ref().map_or(0, |webrtc| {
+                    state
+                        .peer_endpoints
+                        .values()
+                        .filter(|addr| {
+                            webrtc.has_session(&addr.id)
+                                && !state.linked_endpoints.contains(&addr.id)
+                                && addr.id != ctx.rendezvous_id
+                        })
+                        .count()
+                });
                 let _ = reply.send(sessions);
                 false
             }

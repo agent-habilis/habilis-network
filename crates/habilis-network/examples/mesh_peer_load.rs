@@ -15,6 +15,9 @@
 //!   unicast connection per peer, the worst case.
 //! - `MESH_MAX_PEERS` (G) and `MESH_MAX_SESSIONS` (D): the caps. `0`, or unset,
 //!   takes the engine default.
+//! - `MESH_TRAFFIC_UNTIL_SECS=180`: the directed messages stop after that many seconds.
+//!   With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is
+//!   the run of the idle detach: sessions to members that are not neighbors must go.
 //! - `MESH_BLOCK_UDP_AFTER_SECS=60`: after that many seconds the node takes IP away
 //!   from every connection of the process, once. This is the second phase of the
 //!   underlay measurement: the app endpoint and the underlay fall back to `WebRTC`.
@@ -23,7 +26,8 @@
 //!
 //! Prints one line per second:
 //! `t <s> phase <1|2> peers <roster> links <gossip neighbors> sessions <app WebRTC
-//! sessions> underlay <underlay WebRTC sessions> rss_mb <current resident memory>`.
+//! sessions> underlay <underlay WebRTC sessions> rss_mb <current resident memory>
+//! idle_sessions <app WebRTC sessions to members that are not neighbors>`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -67,6 +71,19 @@ fn transports() -> anyhow::Result<Vec<Transport>> {
     }
 }
 
+/// The answer of a request that is a count, `0` when the node is gone.
+async fn count(
+    sender: &mpsc::Sender<Request>,
+    request: impl FnOnce(oneshot::Sender<usize>) -> Request,
+) -> usize {
+    let (reply, answer) = oneshot::channel();
+    if sender.send(request(reply)).await.is_ok() {
+        answer.await.unwrap_or(0)
+    } else {
+        0
+    }
+}
+
 /// The nicknames of the roster, and how many of them are gossip neighbors.
 async fn roster(sender: &mpsc::Sender<Request>) -> Option<(Vec<String>, usize)> {
     let (reply, answer) = oneshot::channel();
@@ -96,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
 
     let traffic = std::env::var("MESH_TRAFFIC").as_deref() != Ok("off");
     let block_udp_after = Some(env_number("MESH_BLOCK_UDP_AFTER_SECS")).filter(|secs| *secs > 0);
+    let traffic_until = Some(env_number("MESH_TRAFFIC_UNTIL_SECS")).filter(|secs| *secs > 0);
     if std::env::var("MESH_UNDERLAY_LEG").as_deref() == Ok("off") {
         habilis_network::net::set_underlay_leg_off(true);
     }
@@ -168,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
             let Some((nicks, links)) = roster(&sender).await else {
                 break;
             };
-            if traffic {
+            if traffic && traffic_until.is_none_or(|until| elapsed < until) {
                 for nick in &nicks {
                     let (reply, _) = oneshot::channel();
                     let _ = sender
@@ -180,18 +198,11 @@ async fn main() -> anyhow::Result<()> {
                         .await;
                 }
             }
-            let (reply, answer) = oneshot::channel();
-            let underlay = if sender
-                .send(Request::UnderlaySessions { reply })
-                .await
-                .is_ok()
-            {
-                answer.await.unwrap_or(0)
-            } else {
-                0
-            };
+            let underlay = count(&sender, |reply| Request::UnderlaySessions { reply }).await;
+            let idle_sessions =
+                count(&sender, |reply| Request::SessionsToNonNeighbors { reply }).await;
             println!(
-                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {}",
+                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions}",
                 if blocked { 2 } else { 1 },
                 nicks.len(),
                 webrtc.session_count(),

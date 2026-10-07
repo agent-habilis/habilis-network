@@ -49,6 +49,7 @@ full text.
 | `MESH_TRAFFIC` | `off`: no directed messages. On, each node sends one per second to each roster peer |
 | `MESH_MAX_PEERS` | G, the gossip active view; `0` takes the engine default |
 | `MESH_MAX_SESSIONS` | D, the cap on WebRTC sessions; `0` takes the engine default. D has an effect only when `webrtc` is in the list: set `MESH_TRANSPORTS=udp,webrtc,multihop` for a run of D. The default list has no `webrtc` |
+| `MESH_TRAFFIC_UNTIL_SECS` | the directed messages stop after this many seconds. With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is the run of the idle detach |
 | `MESH_BLOCK_UDP_AFTER_SECS` | after this many seconds the node takes IP away from every connection of its process, once |
 | `MESH_UNDERLAY_LEG` | `off`: the multihop underlay holds no WebRTC leg (the control cell) |
 | `STAGGER` | seconds between two node starts (`run.sh`, default 0.3) |
@@ -58,12 +59,13 @@ full text.
 Each node prints one line per second:
 
 ```text
-t 123 phase 1 peers 47 links 32 sessions 0 underlay 0 rss_mb 91
+t 123 phase 1 peers 47 links 32 sessions 0 underlay 0 rss_mb 91 idle_sessions 0
 ```
 
 `peers` is the roster, `links` the gossip neighbors, `sessions` the WebRTC sessions of
 the app endpoint, `underlay` those of the multihop underlay, and `rss_mb` the current
-resident memory. `phase` is 2 once the node has taken IP away.
+resident memory. `idle_sessions` counts the WebRTC sessions to members that are not gossip
+neighbors. `phase` is 2 once the node has taken IP away.
 
 A run folder holds `n<i>.out` and `n<i>.err` per node, `summary.txt` (the last census
 line of each node), `host.log` (one line per 10 s), `canary.log` (every pause of the host
