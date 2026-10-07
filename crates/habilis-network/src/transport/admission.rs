@@ -241,6 +241,8 @@ struct Inner {
     ceiling: super::ceiling::Ceiling,
     /// The peers that closed a connection of ours with the `EVICTED` code.
     evicted_by: super::ceiling::EvictionBackoff,
+    /// Where an answered session is reported to the event loop, set once the loop has its channel.
+    proven_sink: Option<tokio::sync::mpsc::UnboundedSender<super::probe::DirectOutcome>>,
     /// The peers that we evicted. A peer whose session we detach has no connection to read the code
     /// on, so we refuse its offer for the same minute instead.
     we_evicted: super::ceiling::EvictionBackoff,
@@ -399,6 +401,7 @@ impl SignalAdmission {
                 ceiling: super::ceiling::Ceiling::new(cap),
                 evicted_by: super::ceiling::EvictionBackoff::default(),
                 we_evicted: super::ceiling::EvictionBackoff::default(),
+                proven_sink: None,
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
@@ -763,6 +766,26 @@ impl SignalAdmission {
         let victims = inner.take_victims(&evictions);
         drop(inner);
         victims.end();
+    }
+
+    /// The event loop's channel for the sessions that this node answered.
+    pub(crate) fn set_proven_sink(
+        &self,
+        sink: tokio::sync::mpsc::UnboundedSender<super::probe::DirectOutcome>,
+    ) {
+        self.lock().proven_sink = Some(sink);
+    }
+
+    /// A session to `peer` attached on the answering side. The loop flushes the frames held for the
+    /// peer, if there are any: the offering side does the same on its own attach.
+    pub(crate) fn report_answered(&self, peer: EndpointId) {
+        if let Some(sink) = &self.lock().proven_sink {
+            let _ = sink.send(super::probe::DirectOutcome {
+                peer,
+                direct: true,
+                answered: true,
+            });
+        }
     }
 
     /// How many peers the node holds a direct connection to, against the ceiling.

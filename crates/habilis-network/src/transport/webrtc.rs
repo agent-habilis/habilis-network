@@ -401,6 +401,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             {
                 Ok(Ok(())) => {
                     admission.note_success(remote);
+                    admission.report_answered(remote);
                     register_session_addr(&endpoint, remote);
                     conn.close(0u32.into(), b"jsep done");
                     // A connection that we dialed before the attach moves onto the
@@ -904,7 +905,11 @@ fn spawn_offer_round(
             if offer == Offer::Rendezvous {
                 tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached to the rendezvous");
             }
-            let _ = proven.send(crate::transport::probe::DirectOutcome { peer, direct: true });
+            let _ = proven.send(crate::transport::probe::DirectOutcome {
+                peer,
+                direct: true,
+                answered: false,
+            });
         }
     });
     state
@@ -3110,6 +3115,78 @@ mod tests {
         lower_router.shutdown().await.expect("shutdown");
         higher.close().await;
         lower.close().await;
+    }
+
+    /// **The answering side reports the attach.** A frame parked on the higher id of a crossed pair
+    /// is flushed when the session attaches, although the node answered and did not offer: the
+    /// answerer tells the event loop, through the table, which flushes what is held for the peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_answering_side_reports_the_attach_to_the_event_loop() {
+        let (first, first_hub) = endpoint().await;
+        let (second, second_hub) = endpoint().await;
+        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+            ((first, first_hub), (second, second_hub))
+        } else {
+            ((second, second_hub), (first, first_hub))
+        };
+        let higher_admission = SignalAdmission::new(8);
+        let (sink, mut attached) = tokio::sync::mpsc::unbounded_channel();
+        higher_admission.set_proven_sink(sink);
+        let higher_router = serve(&higher, &higher_hub, &higher_admission);
+
+        dial_signal_with(
+            &lower,
+            higher.addr(),
+            &lower_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the offer of the lower id is answered");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), attached.recv())
+            .await
+            .expect("the answerer reports the attach")
+            .expect("the sink stays open");
+        assert_eq!(outcome.peer, lower.id());
+        assert!(outcome.direct && outcome.answered);
+
+        higher_router.shutdown().await.expect("shutdown");
+        higher.close().await;
+        lower.close().await;
+    }
+
+    /// The loop acts on an answered session only when a frame is held for the peer.
+    #[test]
+    fn an_answered_session_is_applied_only_when_a_frame_is_held_for_the_peer() {
+        use crate::transport::probe::DirectOutcome;
+
+        let peer = crate::testing::endpoint_id(7);
+        let now = crate::util::clock::Instant::now();
+        let mut state = crate::testing::fresh_state();
+        let answered = DirectOutcome {
+            peer,
+            direct: true,
+            answered: true,
+        };
+        let offered = DirectOutcome {
+            answered: false,
+            ..answered
+        };
+
+        assert!(
+            !answered.applies(&state, now),
+            "nothing is held for the peer"
+        );
+        assert!(
+            offered.applies(&state, now),
+            "our own verdict always applies"
+        );
+        state.want_lane_session(peer, now);
+        assert!(
+            answered.applies(&state, now),
+            "a frame is held for the peer"
+        );
     }
 
     /// The offer of the lower id is refused as before when the round that runs is an answer, not

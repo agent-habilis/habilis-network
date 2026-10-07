@@ -26,6 +26,18 @@ use crate::util::clock::Instant;
 pub(crate) struct DirectOutcome {
     pub(crate) peer: EndpointId,
     pub(crate) direct: bool,
+    /// The session came from an offer of the peer that this node answered. The answerer grafts and
+    /// flushes only when a frame is held for the peer, see [`DirectOutcome::applies`].
+    pub(crate) answered: bool,
+}
+
+impl DirectOutcome {
+    /// Whether the loop acts on this outcome at `now`. An answered session is not a verdict of
+    /// this node's own probe: it matters only when a frame is held for the peer, which waits for
+    /// the attach to be flushed.
+    pub(crate) fn applies(self, state: &EventLoopState, now: Instant) -> bool {
+        !self.answered || state.lane_session_wanted(self.peer, now)
+    }
 }
 
 /// Which kind of path iroh has selected to a peer, as the race sees it.
@@ -457,7 +469,11 @@ pub(crate) fn ensure_direct(
         // The graft that follows a proven path forms its link inside the probe
         // hold, and the probe's own connection goes after it unless a send took it.
         pool.probe_done(peer).await;
-        let _ = tx.send(DirectOutcome { peer, direct });
+        let _ = tx.send(DirectOutcome {
+            peer,
+            direct,
+            answered: false,
+        });
     });
     false
 }
@@ -470,7 +486,10 @@ pub(crate) async fn on_outcome(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) {
-    let DirectOutcome { peer, direct } = outcome;
+    if !outcome.applies(state, Instant::now()) {
+        return;
+    }
+    let DirectOutcome { peer, direct, .. } = outcome;
     if direct {
         graft_proven(state, ctx, peer).await;
     } else if state.demote_unproven(peer) {

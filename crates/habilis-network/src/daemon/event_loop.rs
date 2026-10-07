@@ -198,6 +198,9 @@ pub async fn run<A: NodeDriver>(
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();
     state.direct_proven = direct_tx;
+    state
+        .webrtc_admission
+        .set_proven_sink(state.direct_proven.clone());
     // Path watchers report here; the loop re-races or detaches on it.
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.path_changes = path_tx;
