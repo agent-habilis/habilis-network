@@ -116,8 +116,9 @@ published to a registry; pin it with
   engine asks for a link with the low-priority `NeighborPeers` command, so that a
   graft no longer makes a full peer drop a neighbor.
 - Every endpoint, the multihop underlay and the blob endpoint included, sets
-  generous QUIC windows: 8 MiB for a stream, 32 MiB for a connection, 32 MiB to
-  send. One connection holds at most 64 MiB in the worst case.
+  generous QUIC windows: 16 MiB for a stream, 16 MiB for a connection and 16 MiB
+  to send, so that one blob stream can use the whole window. One connection holds at
+  most 32 MiB in the worst case.
 
 ### Changed
 

@@ -1055,23 +1055,24 @@ mod tests {
     // unit-tested in `protocol::mesh`, and the relay ladder logic in
     // [`super::relay`].
 
-    /// **A receiver that never reads grants the generous stream window.** Every endpoint of the
-    /// engine sets the QUIC windows of decision D11: 8 `MiB` for a stream, far above the iroh default
-    /// of about 1.2 `MiB`, and still a bound for a peer that sends faster than the node reads.
+    /// **A receiver that never reads grants the whole window to one stream.** Every endpoint of the
+    /// engine sets the QUIC windows of decision D11: 16 `MiB` for a stream and for a connection, far
+    /// above the iroh default of about 1.2 `MiB`, so that one blob stream can use the whole window, and
+    /// still a bound for a peer that sends faster than the node reads. The test pins the value, so
+    /// that a change of the constant is a change of the test.
     ///
     /// The sender is a plain iroh endpoint whose own buffer is capped at 64 `KiB`. It cannot get
     /// more than that ahead of what the receiver has taken in, so the bytes that its writes
     /// accept, less its own buffer, are what the receiver granted. Nobody reads at the receiver.
     #[cfg(feature = "host")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_receiver_that_never_reads_grants_the_generous_stream_window() {
+    async fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
-        use crate::util::tuning::QUIC_STREAM_RECEIVE_WINDOW;
-
         const ALPN: &[u8] = b"habilis-test/flood/0";
+        const WINDOW: usize = 16 * 1024 * 1024;
         const SENDER_BUFFER: usize = 64 * 1024;
         let receiver = super::build_endpoint(
             &LookupOpts::loopback(),
@@ -1127,20 +1128,20 @@ mod tests {
         writing.abort();
         receiving.abort();
 
-        let window = usize::try_from(QUIC_STREAM_RECEIVE_WINDOW).expect("a window fits usize");
         assert!(
-            taken_in > 4 * 1024 * 1024 && taken_in <= window + 64 * 1024,
-            "the receiver took in {taken_in} bytes of a stream nobody read; the window is {window}"
+            taken_in > WINDOW - 4 * 1024 * 1024 && taken_in <= WINDOW + 64 * 1024,
+            "the receiver took in {taken_in} bytes of a stream nobody read; the window is {WINDOW}"
         );
         sender.close().await;
         receiver.close().await;
     }
 
     /// **Many streams that nobody reads still fit in the connection window.** Forty streams
-    /// at 8 `MiB` each could hold 320 `MiB`; the window of the connection (decision D11) holds the
-    /// receiver to 32 `MiB` for all of them together, where the iroh defaults let it take in about
-    /// 47 `MiB`. Counted at the sender, as in
-    /// `a_receiver_that_never_reads_grants_the_generous_stream_window`.
+    /// at 16 `MiB` each could hold 640 `MiB`; the window of the connection (decision D11) holds the
+    /// receiver to 16 `MiB` for all of them together, where the iroh defaults let it take in about
+    /// 47 `MiB`. The test pins the value, and also that the receiver does take in the window. Counted
+    /// at the sender, as in
+    /// `a_receiver_that_never_reads_grants_the_whole_window_to_one_stream`.
     #[cfg(feature = "host")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn streams_that_nobody_reads_fit_in_the_connection_window() {
@@ -1148,9 +1149,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
-        use crate::util::tuning::QUIC_CONNECTION_RECEIVE_WINDOW;
-
         const ALPN: &[u8] = b"habilis-test/flood/1";
+        const WINDOW: usize = 16 * 1024 * 1024;
         const SENDER_BUFFER: usize = 64 * 1024;
         const STREAMS: usize = 40;
         let receiver = super::build_endpoint(
@@ -1210,10 +1210,9 @@ mod tests {
         }
         receiving.abort();
 
-        let window = usize::try_from(QUIC_CONNECTION_RECEIVE_WINDOW).expect("a window fits usize");
         assert!(
-            taken_in <= window + 64 * 1024,
-            "the receiver took in {taken_in} bytes of {STREAMS} streams nobody read; the connection window is {window}"
+            taken_in > WINDOW - 4 * 1024 * 1024 && taken_in <= WINDOW + 64 * 1024,
+            "the receiver took in {taken_in} bytes of {STREAMS} streams nobody read; the connection window is {WINDOW}"
         );
         sender.close().await;
         receiver.close().await;

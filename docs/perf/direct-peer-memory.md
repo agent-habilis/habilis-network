@@ -379,11 +379,11 @@ The count C is the real limit. Every endpoint of the engine, the multihop underl
 
 | Window | Value |
 | -- | -- |
-| One stream, receive | 8 MiB |
-| All the streams of a connection, receive | 32 MiB |
-| Send, bytes not yet acknowledged | 32 MiB |
+| One stream, receive | 16 MiB |
+| All the streams of a connection, receive | 16 MiB |
+| Send, bytes not yet acknowledged | 16 MiB |
 
-The stream counts, the datagram buffer, the keep-alive, the idle timeout and the multipath settings stay at the iroh defaults. The iroh default is about 1.2 MiB for a stream. A window allows one window per round trip, so 32 MiB at 100 ms is about 2.7 Gbit/s: no practical cap on speed. The 32 MiB window of a connection is tighter than the iroh default, which is unbounded. The 8 MiB window of a stream is looser than the iroh default of about 1.2 MiB. The worst case for one connection is 64 MiB: 32 MiB to receive and 32 MiB to send. The gossip links share the endpoint config, so the bound for the node is base + (G + C) x 64 MiB, about 6 GiB at G = 32 and C = 64. A node reaches it only if every peer is a slow reader and a slow acknowledger at once. A real node stays far below it. Two tests show the windows: a receiver that never reads takes in about 8 MiB of a stream, and 40 unread streams take in at most 32 MiB together. The flood mode of the harness (`MESH_FLOOD_PEERS`) measures what one connection costs.
+The stream counts, the datagram buffer, the keep-alive, the idle timeout and the multipath settings stay at the iroh defaults. The iroh default is about 1.2 MiB for a stream. The window of a stream is the window of the connection, so one blob stream can use the whole window. A window allows one window per round trip, so 16 MiB at 100 ms is about 1.3 Gbit/s. The 16 MiB window of a connection is tighter than the iroh default, which is unbounded. The 16 MiB window of a stream is looser than the iroh default of about 1.2 MiB. The worst case for one connection is 32 MiB: 16 MiB to receive and 16 MiB to send. The gossip links share the endpoint config, so the bound for the node is base + (G + C) x 32 MiB, about 3 GiB at G = 32 and C = 64. A node reaches it only if every peer is a slow reader and a slow acknowledger at once. A real node stays far below it. Two tests show the windows: a receiver that never reads takes in about 16 MiB of a stream, and 40 unread streams take in about 16 MiB together. The windows were 8 MiB for a stream and 32 MiB for the connection and for sending until the user lowered them to 16 MiB; the runs below were taken at the earlier values. The flood mode of the harness (`MESH_FLOOD_PEERS`) measures what one connection costs.
 
 ### Keep-alive cost
 
@@ -391,7 +391,7 @@ iroh sends a heartbeat on each connection every 5 s. At C = 64 and G = 32, that 
 
 ### RAM after D11
 
-The formula above holds with C in place of D for the sessions and connections. One connection can add up to 32 MiB in the worst case (see the windows above). The cost of a busy connection is not measured: the flood run does it, and it is not done yet.
+The formula above holds with C in place of D for the sessions and connections. One connection can add up to 32 MiB in the worst case: 16 MiB to receive and 16 MiB to send (see the windows above). The cost of a busy connection is not measured: the flood run does it, and it is not done yet.
 
 ### Not measured yet
 
@@ -401,7 +401,7 @@ The formula above holds with C in place of D for the sessions and connections. O
 
 ## D11 gate runs, 2026-10-07
 
-One host (a Mac shared with other work), release build of `mesh_peer_load`, native processes. The load is the 1-min load average of the host at the start of the run, and the reading is the only control: the host was busy with Spotlight and `spindump` before 12:25, which is not our load. Nothing of this is a result at scale: N is 12 or 24.
+One host (a Mac shared with other work), release build of `mesh_peer_load`, native processes. The QUIC windows of these runs were 8 MiB for a stream and 32 MiB for a connection and for sending, the values before the user lowered all three to 16 MiB: the numbers below are not rerun at 16 MiB. The load is the 1-min load average of the host at the start of the run, and the reading is the only control: the host was busy with Spotlight and `spindump` before 12:25, which is not our load. Nothing of this is a result at scale: N is 12 or 24.
 
 | Run | HEAD | N | G | C | Time | Load1 at start |
 | -- | -- | -- | -- | -- | -- | -- |
@@ -430,7 +430,7 @@ Every node floods frames of 3000 bytes to its first K roster peers from second 3
 | session | 4 | 90 | 44 |
 | session | 11 | 54 | 42 |
 
-The run of session K = 4 was repeated for 600 s. Its top node (n4) read 56, 57, 57, 54, 41, 41, 41, 42 and 42 MB at one-minute marks, with 1, 3, 4, 2, 2, 1, 1, 0 and 1 live direct units. It peaked at 57 MB, stayed there for about 4 minutes, and fell back to 41 MB: no growth, so no sign of a leak. 57 minus the 35 MB of an idle node is about 22 MB for at most 4 live units, about 5 MB for each, far under the bound of 64 MiB for one connection. The peak of 90 MB of the 150 s run did not come back, and its cause is not known.
+The run of session K = 4 was repeated for 600 s. Its top node (n4) read 56, 57, 57, 54, 41, 41, 41, 42 and 42 MB at one-minute marks, with 1, 3, 4, 2, 2, 1, 1, 0 and 1 live direct units. It peaked at 57 MB, stayed there for about 4 minutes, and fell back to 41 MB: no growth, so no sign of a leak. 57 minus the 35 MB of an idle node is about 22 MB for at most 4 live units, about 5 MB for each, far under the bound for one connection (64 MiB at the windows of that run, 32 MiB at the windows of today). The peak of 90 MB of the 150 s run did not come back, and its cause is not known.
 
 ### Bursty at N = 24
 
