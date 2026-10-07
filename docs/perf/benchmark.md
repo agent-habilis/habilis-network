@@ -153,6 +153,64 @@ slow devices, but on this machine the tab is half idle and the number does
 not move: the ceiling is in Chrome's network process, where SCTP and DTLS
 run, and the tab profile does not see it.
 
+## The path ladder
+
+The `ladder` cells put one cell on each rung of the path ladder, with the
+same bulk transfer and a round-trip probe. They are native only and run on
+loopback, so they measure what each transport costs and not what a real
+network adds. `cargo task benchmark --only ladder` runs them.
+
+| cell | what carries the bytes |
+|---|---|
+| ladder udp | plain iroh on loopback UDP |
+| ladder webrtc | str0m at both ends, the data channel is the only path |
+| ladder multihop (direct) | two multihop nodes with one underlay link between them |
+| ladder multihop (via third) | the same two nodes with a third member between them |
+| ladder relay | no IP transport on either side, one local relay between them |
+
+**Method.** Throughput is measured as in the cells above: one reused
+connection, one discarded warm-up round, then the timed rounds. The round
+trips follow on the same connection. One probe is one bi-stream with a
+1 KiB request and a 1 KiB echo, timed on the client from stream open to
+the last echoed byte. 50 probes are discarded and 1000 are timed. RTT p50
+and p99 are nearest-rank percentiles of the 1000.
+
+Each cell checks the path that carried it, and takes the path iroh selected,
+not any path that was open. The via-third cell also fails if the third member
+forwarded no cells, so it cannot report a direct number under its name. The
+relay is `test_relay::spawn_plain` in the same process, over plain HTTP.
+
+Apple M5, macOS 27.2, rustc 1.95.0. 8 MiB downloads, 5 timed rounds, two
+runs. Load average was 3.95 at the start of run 1 and 11.70 at the start of
+run 2, with other agents sharing the host. `Mbit/s` is the median of the
+rounds. The range is min–max across both runs.
+
+| cell | path | Mbit/s run 1 | Mbit/s run 2 | range | RTT p50 ms (run 1, 2) | RTT p99 ms (run 1, 2) |
+|---|---|---|---|---|---|---|
+| ladder udp | ip | 2176 | 2141 | 2111–2197 | 0.04, 0.04 | 0.06, 0.06 |
+| ladder webrtc | webrtc | 70 | 74 | 63–101 | 0.11, 0.11 | 0.15, 0.15 |
+| ladder multihop (direct) | multihop | 871 | 841 | 788–887 | 0.12, 0.12 | 0.16, 0.15 |
+| ladder multihop (via third) | multihop | 441 | 430 | 403–449 | 0.24, 0.25 | 0.30, 0.53 |
+| ladder relay | relay | 1813 | 1752 | 1600–1830 | 0.08, 0.08 | 0.12, 0.11 |
+
+**Reading.**
+
+- UDP is the ceiling on both measures. The webrtc cell matches the
+  webrtc-only cell above (64–104 Mbit/s), so the path ladder adds nothing
+  to it.
+- Multihop with a direct link carries 40% of the UDP throughput and adds
+  0.08 ms to the median round trip. The cause is not measured. One
+  possibility is that every packet is wrapped and carried by a second
+  QUIC connection, the underlay.
+- A third member halves multihop again (about 435 Mbit/s) and doubles
+  the added round trip. Each member that forwards adds a similar cost.
+- The p99 of the via-third cell was 0.30 ms in run 1 and 0.53 ms in run 2.
+  The host was busier in run 2. This single value is not a result.
+- The relay cell is fast because the relay is on the same machine. Do not
+  read it as the speed of a real relay. Only its order against the other
+  rungs on loopback is a result.
+- The gossip rung has no cell here. It needs the gossip transport (Phase 6).
+
 ## What this says about removing the inner encryption
 
 - It is not what limits throughput in any cell.
