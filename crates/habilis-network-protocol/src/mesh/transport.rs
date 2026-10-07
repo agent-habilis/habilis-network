@@ -31,6 +31,12 @@ pub enum Transport {
     Relay,
 }
 
+/// The error for `multihop` as the only transport: it forwards over a direct
+/// path, so it cannot stand alone. Until multihop also rides `webrtc`, the
+/// direct path it needs is `udp`.
+pub(super) const MULTIHOP_ALONE: &str =
+    "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp`";
+
 impl Transport {
     const NAMES: &[&str] = &["udp", "webrtc", "multihop", "relay"];
 
@@ -115,7 +121,8 @@ impl TransportPolicy {
     /// `udp,webrtc,multihop`.
     ///
     /// # Errors
-    /// The list is non-empty and names neither `udp` nor `webrtc`.
+    /// The list is non-empty and names neither `udp` nor `webrtc`; `multihop`
+    /// alone gets its own message.
     pub fn from_transports(transports: &[Transport]) -> Result<Self> {
         if transports.is_empty() {
             return Ok(Self::default());
@@ -126,6 +133,9 @@ impl TransportPolicy {
             multihop: transports.contains(&Transport::Multihop),
             relay_transport: transports.contains(&Transport::Relay),
         };
+        if matches!(transports, [Transport::Multihop]) {
+            bail!(MULTIHOP_ALONE);
+        }
         if !policy.udp && !policy.webrtc {
             bail!("a transport list needs a direct path: name `udp`, `webrtc`, or both");
         }

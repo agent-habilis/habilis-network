@@ -306,6 +306,9 @@ impl MeshConfig {
     pub fn validate(&self) -> Result<()> {
         self.lookups.validate()?;
         let transport = &self.transport;
+        if transport.multihop && !transport.udp && !transport.webrtc && !transport.relay_transport {
+            bail!(super::transport::MULTIHOP_ALONE);
+        }
         if !transport.udp && !transport.webrtc {
             bail!("a mesh needs a direct path: transport `udp`, `webrtc`, or both");
         }
@@ -1060,6 +1063,75 @@ mod lookup_tests {
         );
         let bytes = vec![0b0111, super::TRANSPORT_WEBRTC | super::TRANSPORT_MULTIHOP];
         assert!(MeshConfig::from_bytes(&bytes).is_err());
+    }
+
+    const NEEDS_A_DIRECT_PATH: &str =
+        "a transport list needs a direct path: name `udp`, `webrtc`, or both";
+    const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp`";
+    const MULTIHOP_NEEDS_UDP: &str =
+        "transport `multihop` needs `udp`: its underlay is a UDP endpoint";
+
+    /// Every subset of the four transports, each with its result: `Ok`, or the
+    /// exact error. A relay lookup is on, so the relay rules do not speak here.
+    #[test]
+    fn every_subset_of_the_transports_resolves_or_names_its_error() {
+        use Transport::{Multihop, Relay, Udp, WebRtc};
+        let rows: [(&[Transport], Result<(), &str>); 16] = [
+            (&[], Ok(())),
+            (&[Udp], Ok(())),
+            (&[WebRtc], Ok(())),
+            (&[Multihop], Err(MULTIHOP_ALONE)),
+            (&[Relay], Err(NEEDS_A_DIRECT_PATH)),
+            (&[Udp, WebRtc], Ok(())),
+            (&[Udp, Multihop], Ok(())),
+            (&[Udp, Relay], Ok(())),
+            (&[WebRtc, Multihop], Err(MULTIHOP_NEEDS_UDP)),
+            (&[WebRtc, Relay], Ok(())),
+            (&[Multihop, Relay], Err(NEEDS_A_DIRECT_PATH)),
+            (&[Udp, WebRtc, Multihop], Ok(())),
+            (&[Udp, WebRtc, Relay], Ok(())),
+            (&[Udp, Multihop, Relay], Ok(())),
+            (&[WebRtc, Multihop, Relay], Err(MULTIHOP_NEEDS_UDP)),
+            (&[Udp, WebRtc, Multihop, Relay], Ok(())),
+        ];
+        let mask = |list: &[Transport]| {
+            [Udp, WebRtc, Multihop, Relay]
+                .iter()
+                .enumerate()
+                .filter(|(_, transport)| list.contains(transport))
+                .fold(0u8, |mask, (bit, _)| mask | 1 << bit)
+        };
+        let covered: std::collections::HashSet<u8> =
+            rows.iter().map(|(list, _)| mask(list)).collect();
+        assert_eq!(covered.len(), 16, "the table names every subset once");
+        for (list, expected) in rows {
+            let got = MeshConfig::resolve(&[Lookup::Relay], None, list)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            assert_eq!(
+                got,
+                expected.map_err(str::to_owned),
+                "the transport list {list:?}"
+            );
+        }
+    }
+
+    /// A mesh id that is decoded passes `validate` and not `from_transports`, so
+    /// `validate` names the same mistake.
+    #[test]
+    fn an_id_with_multihop_alone_names_that_mistake() {
+        let alone = MeshConfig::from_bytes(&[0b0111, super::TRANSPORT_MULTIHOP])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(alone, MULTIHOP_ALONE);
+        let with_relay = super::TRANSPORT_MULTIHOP | super::TRANSPORT_RELAY;
+        let with_relay_error = MeshConfig::from_bytes(&[0b0111, with_relay])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            with_relay_error,
+            "a mesh needs a direct path: transport `udp`, `webrtc`, or both"
+        );
     }
 
     #[test]
