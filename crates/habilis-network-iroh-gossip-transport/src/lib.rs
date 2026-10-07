@@ -10,6 +10,7 @@ mod counters;
 pub mod frame;
 mod lookup;
 pub mod memory;
+mod recursion;
 mod sink;
 mod transport;
 
@@ -18,5 +19,6 @@ pub use budget::DEFAULT_BUDGET_BYTES_PER_SEC;
 pub use counters::Stats;
 pub use frame::{DecodeError, EncodeError, Frame};
 pub use habilis_network_iroh_transport_util::GOSSIP_TRANSPORT_ID;
+pub use recursion::{selected_is_gossip, watch_recursion};
 pub use sink::GossipSink;
 pub use transport::{Delivery, FrameSink, GossipHandle};
