@@ -776,6 +776,10 @@ pub const LANE_WANTED_SECS: u64 = 60;
 /// stream can hold in the receiver.
 pub const QUIC_STREAM_RECEIVE_WINDOW: u32 = 256 * 1024;
 
+/// How many bytes of all the streams of one QUIC connection together a node buffers for a peer
+/// (decision D11). Without it, 32 streams of a peer could hold 32 stream windows.
+pub const QUIC_CONNECTION_RECEIVE_WINDOW: u32 = 1024 * 1024;
+
 /// How many bytes a node sends to a peer before the peer acknowledges them (decision D11): the most
 /// that one connection holds in the send buffer of the node.
 pub const QUIC_SEND_WINDOW: u64 = 1024 * 1024;

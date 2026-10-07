@@ -291,13 +291,14 @@ pub fn install_transports(
 /// than the node reads, or opens streams without end, cannot make the node hold more than these.
 fn quic_limits() -> iroh::endpoint::QuicTransportConfig {
     use crate::util::tuning::{
-        QUIC_DATAGRAM_BUFFER, QUIC_MAX_BIDI_STREAMS, QUIC_MAX_UNI_STREAMS, QUIC_SEND_WINDOW,
-        QUIC_STREAM_RECEIVE_WINDOW,
+        QUIC_CONNECTION_RECEIVE_WINDOW, QUIC_DATAGRAM_BUFFER, QUIC_MAX_BIDI_STREAMS,
+        QUIC_MAX_UNI_STREAMS, QUIC_SEND_WINDOW, QUIC_STREAM_RECEIVE_WINDOW,
     };
     use iroh::endpoint::{QuicTransportConfig, VarInt};
 
     QuicTransportConfig::builder()
         .stream_receive_window(VarInt::from_u32(QUIC_STREAM_RECEIVE_WINDOW))
+        .receive_window(VarInt::from_u32(QUIC_CONNECTION_RECEIVE_WINDOW))
         .send_window(QUIC_SEND_WINDOW)
         .max_concurrent_uni_streams(VarInt::from_u32(QUIC_MAX_UNI_STREAMS))
         .max_concurrent_bidi_streams(VarInt::from_u32(QUIC_MAX_BIDI_STREAMS))
@@ -1131,6 +1132,88 @@ mod tests {
         assert!(
             taken_in <= window + 32 * 1024,
             "the receiver took in {taken_in} bytes of a stream nobody read; the window is {window}"
+        );
+        sender.close().await;
+        receiver.close().await;
+    }
+
+    /// **Many streams that nobody reads still fit in the connection window.** Sixteen streams
+    /// at 256 `KiB` each could hold 4 `MiB`; the window of the connection (decision D11) holds the
+    /// receiver to 1 `MiB` for all of them together. Counted at the sender, as in
+    /// `a_receiver_that_never_reads_buffers_at_most_the_stream_window`.
+    #[cfg(feature = "host")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streams_that_nobody_reads_fit_in_the_connection_window() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use crate::util::tuning::QUIC_CONNECTION_RECEIVE_WINDOW;
+
+        const ALPN: &[u8] = b"habilis-test/flood/1";
+        const SENDER_BUFFER: usize = 64 * 1024;
+        const STREAMS: usize = 16;
+        let receiver = super::build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            vec![ALPN.to_vec()],
+            super::TransportHandles::default(),
+        )
+        .await
+        .expect("bind the receiver");
+        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .send_window(SENDER_BUFFER as u64)
+                    .build(),
+            )
+            .bind()
+            .await
+            .expect("bind the sender");
+
+        let receiving = tokio::spawn({
+            let receiver = receiver.clone();
+            async move {
+                let incoming = receiver.accept().await.expect("an incoming connection");
+                let conn = incoming.await.expect("the handshake");
+                let mut streams = Vec::new();
+                while let Ok(stream) = conn.accept_uni().await {
+                    streams.push(stream);
+                }
+            }
+        });
+        let conn = sender
+            .connect(receiver.addr(), ALPN)
+            .await
+            .expect("connect to the receiver");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let mut writers = Vec::new();
+        for _ in 0..STREAMS {
+            let mut stream = conn.open_uni().await.expect("open a stream");
+            let accepted = Arc::clone(&accepted);
+            writers.push(tokio::spawn(async move {
+                let chunk = vec![0u8; 16 * 1024];
+                while stream.write_all(&chunk).await.is_ok() {
+                    accepted.fetch_add(chunk.len(), Ordering::Relaxed);
+                }
+            }));
+        }
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let taken_in = accepted
+            .load(Ordering::Relaxed)
+            .saturating_sub(SENDER_BUFFER);
+        for writer in writers {
+            writer.abort();
+        }
+        receiving.abort();
+
+        let window = usize::try_from(QUIC_CONNECTION_RECEIVE_WINDOW).expect("a window fits usize");
+        assert!(
+            taken_in <= window + 64 * 1024,
+            "the receiver took in {taken_in} bytes of {STREAMS} streams nobody read; the connection window is {window}"
         );
         sender.close().await;
         receiver.close().await;
