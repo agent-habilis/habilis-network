@@ -82,6 +82,18 @@ impl Member {
             .unwrap_or(0)
     }
 
+    /// The rung of the selected path on this member's pooled connection to `peer`.
+    async fn rung_to(&self, peer: &str) -> Option<&'static str> {
+        self.membership
+            .request(|reply| Request::SelectedRung {
+                peer: peer.to_owned(),
+                reply,
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
     async fn direct_units(&self) -> (usize, usize) {
         self.membership
             .request(|reply| Request::DirectUnits { reply })
@@ -216,6 +228,11 @@ async fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
         "the two members never formed a mesh"
     );
 
+    // How long a lane pair waits for its first session after the roster formed. About the probe
+    // deadline (15 s) would be a gap: a pair with no path but a session must not wait for a probe.
+    let formed = Instant::now();
+    let mut first_arrival = None;
+    let mut first_session = None;
     // One of the two ids is the higher: the frame is held on it in one direction, and on the lower
     // id in the other.
     assert!(
@@ -225,6 +242,19 @@ async fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
     assert!(
         delivered(&bob, &mut alice, "alice", "lane frame bob to alice").await,
         "bob to alice never arrived"
+    );
+
+    first_arrival.get_or_insert(formed.elapsed());
+    while first_session.is_none() && formed.elapsed() < Duration::from_mins(1) {
+        if alice.rung_to("bob").await == Some("webrtc") {
+            first_session = Some(formed.elapsed());
+        } else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    eprintln!(
+        "LANE TIMING: roster formed to the frames of both directions: {first_arrival:?}; \
+         to the first webrtc rung of alice to bob: {first_session:?}"
     );
 
     alice.leave().await;
