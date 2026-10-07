@@ -7,6 +7,7 @@
 //! sends on the gossip path, not network time.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use habilis_network_iroh_gossip_transport::memory::MemoryHub;
@@ -16,7 +17,7 @@ use habilis_network_iroh_gossip_transport::{
 use habilis_network_iroh_multihop_transport::underlay_path_selector;
 use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench};
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Connection, presets};
-use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
+use habilis_network_iroh_webrtc_transport::iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use habilis_network_iroh_webrtc_transport::iroh::{
     Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr,
 };
@@ -71,6 +72,35 @@ pub(crate) async fn ladder_gossip_backup(args: &Args) -> Outcome {
         Ok(measured)
     };
     run.await.into()
+}
+
+/// The bulk server, keeping a handle to the connection it serves so that the
+/// measurement can read the server's side of the inner QUIC statistics.
+#[derive(Debug, Clone)]
+struct Tap {
+    inner: Bench,
+    served: Arc<Mutex<Option<Connection>>>,
+}
+
+impl ProtocolHandler for Tap {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        *self
+            .served
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connection.clone());
+        self.inner.accept(connection).await
+    }
+}
+
+impl Tap {
+    /// Packets that the server's side of the connection counts as lost.
+    fn lost_packets(&self) -> u64 {
+        self.served
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or(0, |connection| connection.stats().lost_packets)
+    }
 }
 
 /// An endpoint with IP on loopback and gossip beside it, ranked IP first.
@@ -166,8 +196,12 @@ async fn run_group(
     }
     let alice = endpoint(&keys[0], &handles[0]).await?;
     let bob = endpoint(&keys[1], &handles[1]).await?;
+    let tap = Tap {
+        inner: Bench,
+        served: Arc::default(),
+    };
     let _router = Router::builder(bob.clone())
-        .accept(BENCH_ALPN, Bench)
+        .accept(BENCH_ALPN, tap.clone())
         .spawn();
     let socket = bob
         .bound_sockets()
@@ -192,10 +226,15 @@ async fn run_group(
     let secs = idle().as_secs_f64();
     let selected_idle = selected_path(&connection);
 
-    let lost_before = connection.stats().lost_packets;
+    let client_lost_before = connection.stats().lost_packets;
+    let server_lost_before = tap.lost_packets();
     let samples = rounds_on(&connection, args, selected_path).await?;
     let bulk_after = all(&handles);
-    let lost_after = connection.stats().lost_packets;
+    let client_lost = connection
+        .stats()
+        .lost_packets
+        .saturating_sub(client_lost_before);
+    let server_lost = tap.lost_packets().saturating_sub(server_lost_before);
     let bulk_bytes: usize = samples.iter().skip(1).map(|sample| sample.bytes).sum();
 
     let report = json!({
@@ -216,7 +255,8 @@ async fn run_group(
         "bulk": {
             "bytes_timed_rounds": bulk_bytes,
             "flood_frames": sum_frames_out(&bulk_after) - sum_frames_out(&idle_after),
-            "connection_lost_packets": lost_after.saturating_sub(lost_before),
+            "lost_packets_a": client_lost,
+            "lost_packets_b": server_lost,
             "selected_path_after": selected_path(&connection),
         },
     });
@@ -260,5 +300,8 @@ mod tests {
         assert_eq!(control["flood_frames_idle"], 0);
         assert!(with_path["flood_frames_idle"].is_u64(), "{with_path}");
         assert!(with_path["idle"]["bystander_mean"]["frames_in_per_s"].is_f64());
+        // Both ends of the inner connection report their lost packets in the bulk.
+        assert!(with_path["bulk"]["lost_packets_a"].is_u64(), "{with_path}");
+        assert!(with_path["bulk"]["lost_packets_b"].is_u64(), "{with_path}");
     }
 }
