@@ -350,10 +350,18 @@ impl Member {
         let mut seen = None;
         let mut held_since: Option<Instant> = None;
         let mut probes = 0u32;
+        let mut logged = None;
         while started.elapsed() < STEP_DEADLINE {
             probes += 1;
             let _ = self.send(peer, &format!("probe {cell} {probes}")).await;
             seen = self.rung_to(peer).await;
+            if logged != Some(seen) {
+                eprintln!(
+                    "DIAG {cell}: the rung read changed to {seen:?} at probe {probes}, {:.1} s",
+                    started.elapsed().as_secs_f32()
+                );
+                logged = Some(seen);
+            }
             if seen == Some(expected) {
                 if held_since.get_or_insert_with(Instant::now).elapsed() >= hold {
                     return;
