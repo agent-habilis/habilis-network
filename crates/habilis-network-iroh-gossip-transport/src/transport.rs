@@ -18,6 +18,7 @@ use iroh::endpoint::transports::{
 use iroh_base::CustomAddr;
 use tokio::sync::mpsc;
 
+use crate::counters::{Counters, Stats};
 use crate::frame::{self, EncodeError};
 use crate::{gossip_addr, parse_gossip_addr};
 
@@ -64,6 +65,7 @@ struct Shared {
     local_addr: CustomAddr,
     sink: Mutex<Option<Arc<dyn FrameSink>>>,
     attached: AtomicBool,
+    counters: Counters,
 }
 
 impl Shared {
@@ -73,11 +75,18 @@ impl Shared {
     fn send_datagram(&self, dst: EndpointId, datagram: &[u8]) {
         let frame = match frame::encode(dst, self.app_id, datagram) {
             Ok(frame) => frame,
-            Err(EncodeError::Empty | EncodeError::TooLarge { .. }) => return,
+            Err(EncodeError::Empty) => return self.counters.dropped_empty(),
+            Err(EncodeError::TooLarge { .. }) => return self.counters.dropped_too_large(),
         };
         let sink = locked(&self.sink).clone();
-        if let Some(sink) = sink {
-            sink.try_send(frame);
+        let Some(sink) = sink else {
+            return self.counters.dropped_no_sink();
+        };
+        let bytes = frame.len();
+        if sink.try_send(frame) {
+            self.counters.sent(bytes);
+        } else {
+            self.counters.dropped_sink_refused();
         }
     }
 }
@@ -99,6 +108,7 @@ impl GossipHandle {
             local_addr: gossip_addr(app_id),
             sink: Mutex::new(None),
             attached: AtomicBool::new(false),
+            counters: Counters::default(),
         });
         let (inbound, receiver) = mpsc::channel(INBOUND_CAP);
         let transport = Arc::new(GossipTransport {
@@ -115,6 +125,12 @@ impl GossipHandle {
     #[must_use]
     pub fn app_id(&self) -> EndpointId {
         self.shared.app_id
+    }
+
+    /// What this handle has counted so far.
+    #[must_use]
+    pub fn stats(&self) -> Stats {
+        self.shared.counters.snapshot()
     }
 
     /// The transport, for `Builder::add_custom_transport`.
@@ -138,20 +154,26 @@ impl GossipHandle {
     /// A frame from the topic. Never blocks: the engine's receive loop calls this.
     #[must_use]
     pub fn deliver(&self, frame: &[u8]) -> Delivery {
+        let counters = &self.shared.counters;
+        counters.arrived(frame.len());
         let Ok(frame) = frame::decode(frame) else {
+            counters.malformed();
             return Delivery::Malformed;
         };
         if frame.dst != self.shared.app_id {
+            counters.not_for_us();
             return Delivery::NotForUs;
         }
         let packet = Packet {
             remote: gossip_addr(frame.src),
             bytes: frame.datagram.to_vec(),
         };
-        match self.inbound.try_send(packet) {
-            Ok(()) => Delivery::Queued,
-            Err(_) => Delivery::QueueFull,
+        if self.inbound.try_send(packet).is_err() {
+            counters.queue_full();
+            return Delivery::QueueFull;
         }
+        counters.queued();
+        Delivery::Queued
     }
 }
 
@@ -499,5 +521,96 @@ mod tests {
         );
         connection.close(0u32.into(), b"done");
         router.shutdown().await.expect("shutdown");
+    }
+
+    /// A frame is counted where it leaves and where it arrives, and the two ends
+    /// agree with what the flood carried.
+    #[tokio::test]
+    async fn an_echo_moves_the_counters_of_both_ends() {
+        let (hub, (alice, alice_handle), (bob, bob_handle), router) = pair().await;
+        let connection = alice
+            .connect(dial(bob.id()), ECHO_ALPN)
+            .await
+            .expect("connect over gossip");
+        echo_once(&connection, b"count me").await;
+
+        let (alice_stats, bob_stats) = (alice_handle.stats(), bob_handle.stats());
+        assert!(
+            alice_stats.frames_out > 0 && bob_stats.frames_out > 0,
+            "{alice_stats:?} {bob_stats:?}"
+        );
+        assert!(
+            alice_stats.queued > 0 && bob_stats.queued > 0,
+            "{alice_stats:?} {bob_stats:?}"
+        );
+        let sent = hub.sent();
+        assert_eq!(
+            alice_stats.frames_out + bob_stats.frames_out,
+            sent.len() as u64
+        );
+        let flooded: usize = sent.iter().map(Bytes::len).sum();
+        assert_eq!(alice_stats.bytes_out + bob_stats.bytes_out, flooded as u64);
+        assert_eq!(
+            alice_stats.frames_in, bob_stats.frames_out,
+            "alice reads what bob sent"
+        );
+        assert_eq!(
+            bob_stats.frames_in, alice_stats.frames_out,
+            "bob reads what alice sent"
+        );
+        connection.close(0u32.into(), b"done");
+        router.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn a_dropped_datagram_is_counted_by_its_reason() {
+        let handle = GossipHandle::new(secret(1).public());
+        let bob = secret(2).public();
+
+        handle.shared.send_datagram(bob, &[1u8; 100]);
+        handle.attach(Arc::new(Recorder::default()));
+        handle
+            .shared
+            .send_datagram(bob, &vec![1u8; frame::MAX_DATAGRAM_LEN + 1]);
+        handle.shared.send_datagram(bob, &[]);
+        handle.shared.send_datagram(bob, &[1u8; 100]);
+
+        let stats = handle.stats();
+        assert_eq!(stats.dropped_no_sink, 1);
+        assert_eq!(stats.dropped_too_large, 1);
+        assert_eq!(stats.dropped_empty, 1);
+        assert_eq!(stats.frames_out, 1);
+        assert_eq!(stats.bytes_out, (frame::HEADER_LEN + 100) as u64);
+    }
+
+    #[test]
+    fn a_frame_that_arrives_is_counted_by_what_became_of_it() {
+        let me = secret(1).public();
+        let handle = GossipHandle::new(me);
+        let for_me = frame::encode(me, secret(2).public(), &[1u8; 50]).expect("frame");
+        let for_carol = frame::encode(secret(3).public(), secret(2).public(), &[1]).expect("frame");
+
+        let _ = handle.deliver(&for_me);
+        let _ = handle.deliver(&for_carol);
+        let _ = handle.deliver(b"{}");
+        for _ in 0..INBOUND_CAP {
+            let _ = handle.deliver(&for_me);
+        }
+
+        let stats = handle.stats();
+        assert_eq!(stats.frames_in, INBOUND_CAP as u64 + 3);
+        assert_eq!(
+            stats.queued, INBOUND_CAP as u64,
+            "the queue holds its capacity"
+        );
+        assert_eq!(stats.queue_full, 1);
+        assert_eq!(stats.not_for_us, 1);
+        assert_eq!(stats.malformed, 1);
+        assert_eq!(
+            stats.bytes_in,
+            (INBOUND_CAP as u64 + 1) * (frame::HEADER_LEN as u64 + 50)
+                + (frame::HEADER_LEN as u64 + 1)
+                + 2
+        );
     }
 }
