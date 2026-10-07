@@ -185,45 +185,54 @@ fn loopback_builder() -> Result<Builder, String> {
         .map_err(|error| format!("bind address refused: {error:#}"))
 }
 
+/// Two endpoints whose only transport is `WebRTC`, with the JSEP round done in
+/// memory: the client, the server serving [`Bench`], and the round's
+/// milliseconds. The server's router is returned so it stays alive.
+async fn webrtc_pair() -> Result<(WebRtcPeer, WebRtcPeer, Router, f64), String> {
+    let client = WebRtcPeer::bind().await?;
+    let server = WebRtcPeer::bind().await?;
+    let router = Router::builder(server.endpoint.clone())
+        .accept(BENCH_ALPN, Bench)
+        .spawn();
+
+    let started = Instant::now();
+    let (pending_offer, offer) = offer_with(client.id, &IceConfig::host_only())
+        .await
+        .map_err(|error| format!("offer failed: {error:#}"))?;
+    let (pending_answer, answer) = answer_with(server.id, &offer, &IceConfig::host_only())
+        .await
+        .map_err(|error| format!("answer failed: {error:#}"))?;
+    let (client_session, server_session) = tokio::join!(
+        pending_offer.complete(&answer, JSEP_DEADLINE),
+        pending_answer.complete(JSEP_DEADLINE),
+    );
+    client
+        .transport
+        .attach(
+            server.id,
+            client_session.map_err(|error| format!("client complete failed: {error:#}"))?,
+        )
+        .map_err(|error| format!("client attach failed: {error:#}"))?;
+    server
+        .transport
+        .attach(
+            client.id,
+            server_session.map_err(|error| format!("server complete failed: {error:#}"))?,
+        )
+        .map_err(|error| format!("server attach failed: {error:#}"))?;
+    let negotiate_ms = started.elapsed().as_secs_f64() * 1000.0;
+    Ok((client, server, router, negotiate_ms))
+}
+
+fn webrtc_addr(server: &WebRtcPeer) -> EndpointAddr {
+    EndpointAddr::from_parts(server.id, [TransportAddr::Custom(custom_addr(server.id))])
+}
+
 /// str0m at both ends: JSEP in memory, then the data channel is the only path.
 pub(crate) async fn habilis_network_native_native_webrtc(args: &Args) -> Outcome {
     let run = async {
-        let client = WebRtcPeer::bind().await?;
-        let server = WebRtcPeer::bind().await?;
-        let _router = Router::builder(server.endpoint.clone())
-            .accept(BENCH_ALPN, Bench)
-            .spawn();
-
-        let started = Instant::now();
-        let (pending_offer, offer) = offer_with(client.id, &IceConfig::host_only())
-            .await
-            .map_err(|error| format!("offer failed: {error:#}"))?;
-        let (pending_answer, answer) = answer_with(server.id, &offer, &IceConfig::host_only())
-            .await
-            .map_err(|error| format!("answer failed: {error:#}"))?;
-        let (client_session, server_session) = tokio::join!(
-            pending_offer.complete(&answer, JSEP_DEADLINE),
-            pending_answer.complete(JSEP_DEADLINE),
-        );
-        client
-            .transport
-            .attach(
-                server.id,
-                client_session.map_err(|error| format!("client complete failed: {error:#}"))?,
-            )
-            .map_err(|error| format!("client attach failed: {error:#}"))?;
-        server
-            .transport
-            .attach(
-                client.id,
-                server_session.map_err(|error| format!("server complete failed: {error:#}"))?,
-            )
-            .map_err(|error| format!("server attach failed: {error:#}"))?;
-        let negotiate_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-        let addr =
-            EndpointAddr::from_parts(server.id, [TransportAddr::Custom(custom_addr(server.id))]);
-        let samples = rounds(&client.endpoint, addr, args).await?;
+        let (client, server, _router, negotiate_ms) = Box::pin(webrtc_pair()).await?;
+        let samples = rounds(&client.endpoint, webrtc_addr(&server), args).await?;
         Measured::from_samples(negotiate_ms, samples)
     };
     Box::pin(run).await.into()
@@ -288,9 +297,22 @@ pub(crate) async fn ladder_udp(args: &Args) -> Outcome {
     run.await.into()
 }
 
+/// The ladder's `WebRTC` cell: str0m at both ends, the data channel the only
+/// path, throughput and round trips.
+pub(crate) async fn ladder_webrtc(args: &Args) -> Outcome {
+    let run = async {
+        let (client, server, _router, negotiate_ms) = Box::pin(webrtc_pair()).await?;
+        ladder_measure(&client.endpoint, webrtc_addr(&server), args, negotiate_ms).await
+    };
+    Box::pin(run).await.into()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Args, BENCH_ALPN, Bench, Outcome, Router, ip_addr, ladder_udp, rounds, vanilla};
+    use super::{
+        Args, BENCH_ALPN, Bench, Outcome, Router, ip_addr, ladder_udp, ladder_webrtc, rounds,
+        vanilla,
+    };
     use crate::bench::Direction;
     use habilis_network_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
 
@@ -399,5 +421,16 @@ mod tests {
         assert_eq!(measured.path, "ip");
         let rtt = measured.rtt.expect("round-trip percentiles");
         assert!(rtt.p50_ms > 0.0 && rtt.p99_ms >= rtt.p50_ms);
+    }
+
+    /// The ladder's `WebRTC` cell is on the data channel, and measures both.
+    #[tokio::test]
+    async fn the_ladder_webrtc_cell_measures_throughput_and_round_trips_on_webrtc() {
+        let Outcome::Ok(measured) = ladder_webrtc(&small_args()).await else {
+            panic!("the ladder webrtc cell did not measure");
+        };
+
+        assert_eq!(measured.path, "webrtc");
+        assert!(measured.rtt.is_some());
     }
 }

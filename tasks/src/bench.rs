@@ -90,9 +90,11 @@ pub(crate) enum Cell {
     RawChromeChromeDatagram,
     /// The ladder's UDP rung: plain iroh on loopback, with round trips.
     LadderUdp,
+    /// The ladder's `WebRTC` rung: str0m at both ends, with round trips.
+    LadderWebRtc,
 }
 
-const CELLS: [Cell; 10] = [
+const CELLS: [Cell; 11] = [
     Cell::HabilisNetworkChromeChrome,
     Cell::HabilisNetworkChromeNative,
     Cell::HabilisNetworkSafariNative,
@@ -103,6 +105,7 @@ const CELLS: [Cell; 10] = [
     Cell::RawChromeChrome,
     Cell::RawChromeChromeDatagram,
     Cell::LadderUdp,
+    Cell::LadderWebRtc,
 ];
 
 impl Cell {
@@ -118,6 +121,7 @@ impl Cell {
             Self::RawChromeChrome => "webrtc chrome-chrome (raw, 64 KiB msgs)",
             Self::RawChromeChromeDatagram => "webrtc chrome-chrome (raw, 1200 B msgs)",
             Self::LadderUdp => "ladder udp",
+            Self::LadderWebRtc => "ladder webrtc",
         }
     }
 }

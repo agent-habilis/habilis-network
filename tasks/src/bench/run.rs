@@ -30,7 +30,8 @@ impl Cell {
             | Self::HabilisNetworkChromeNative
             | Self::HabilisNetworkSafariNative
             | Self::HabilisNetworkSafariChrome
-            | Self::HabilisNetworkNativeNativeWebRtc => "webrtc",
+            | Self::HabilisNetworkNativeNativeWebRtc
+            | Self::LadderWebRtc => "webrtc",
             Self::HabilisNetworkNativeNative | Self::IrohNativeNative | Self::LadderUdp => "ip",
             Self::RawChromeChrome | Self::RawChromeChromeDatagram => "data-channel",
         }
@@ -43,6 +44,7 @@ impl Cell {
                 | Self::HabilisNetworkNativeNativeWebRtc
                 | Self::IrohNativeNative
                 | Self::LadderUdp
+                | Self::LadderWebRtc
         )
     }
 }
@@ -444,6 +446,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             }
             Cell::IrohNativeNative => runtime.block_on(native::iroh_native_native(args)),
             Cell::LadderUdp => runtime.block_on(native::ladder_udp(args)),
+            Cell::LadderWebRtc => runtime.block_on(native::ladder_webrtc(args)),
         };
         let row = Row { cell, outcome };
         let line = format!("{}  {}", row.cell.label(), row.headline());
