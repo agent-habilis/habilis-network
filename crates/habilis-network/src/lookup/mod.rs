@@ -727,6 +727,13 @@ pub fn set_underlay_leg_off(off: bool) {
 /// The cap of the `WebRTC` leg of the underlay for a node with `max_peers` (G):
 /// `Some(G)`, or `None` while a test switched the leg off.
 #[cfg(feature = "host")]
+#[cfg_attr(
+    not(feature = "iroh-test-utils"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "None only when a test switched the leg off"
+    )
+)]
 pub(crate) fn underlay_cap(max_peers: usize) -> Option<usize> {
     #[cfg(feature = "iroh-test-utils")]
     if UNDERLAY_LEG_OFF.load(std::sync::atomic::Ordering::SeqCst) {
