@@ -1417,7 +1417,9 @@ async fn handle_peer_info(
         // With the relay lookup only, the graft waits for a proven direct
         // path (`transport::probe`); the loop grafts on the probe's verdict.
         if crate::transport::probe::ensure_direct(state, ctx, peer_id, &peer_addr) {
-            if let Err(error) = crate::transport::probe::request_graft(ctx, peer_id).await {
+            if let Err(error) =
+                crate::transport::probe::request_graft(state, ctx, peer_id, false).await
+            {
                 tracing::warn!(target: "habilis_network::gossip", endpoint_id = %peer_id, %error, "PeerInfo graft request failed");
             }
         } else {

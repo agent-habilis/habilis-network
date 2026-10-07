@@ -22,7 +22,7 @@ use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RECLAIM_WINDOW_SECS,
-    RELINK_COOLDOWN_SECS, SEEN_IDS_CAP,
+    RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
 };
 
 /// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
@@ -188,6 +188,11 @@ pub struct EventLoopState {
     /// A `NeighborUp` wanted to flood our `PeerInfo` inside the window and was
     /// held back. The alive tick pays it once the window ends.
     pub(crate) peerinfo_deferred: bool,
+    /// Since when this node holds two or more links fewer than G, with the link to
+    /// the rendezvous counted. Cleared as soon as it holds G - 1. See `note_link_count`.
+    pub(crate) below_target_since: Option<Instant>,
+    /// When a graft last fell back to a `Join` for a starved node.
+    pub(crate) join_fallback_at: Option<Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
@@ -642,6 +647,10 @@ impl EventLoopState {
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one initializer for every field of the state"
+    )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let StateInit {
             #[cfg(feature = "host")]
@@ -686,6 +695,8 @@ impl EventLoopState {
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
             peerinfo_deferred: false,
+            below_target_since: None,
+            join_fallback_at: None,
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
@@ -854,6 +865,34 @@ impl EventLoopState {
     /// from each peer that hears it. A flapping link floods once per window too.
     pub(crate) fn neighbor_up_refloods_peerinfo(&self, now: Instant) -> bool {
         self.joined_refloods_peerinfo(false, now)
+    }
+
+    /// Record how many links this node holds out of `max_peers` (G). Below G - 1 starts
+    /// the clock of a starved node, and G - 1 or more stops it.
+    pub(crate) fn note_link_count(&mut self, linked: usize, max_peers: usize, now: Instant) {
+        if linked.saturating_add(1) < max_peers {
+            self.below_target_since.get_or_insert(now);
+        } else {
+            self.below_target_since = None;
+        }
+    }
+
+    /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held
+    /// two or more links fewer than G for `STARVED_SECS`, and the last fallback is
+    /// `STARVED_SECS` old. A `true` stamps the fallback.
+    pub(crate) fn starved_join_due(&mut self, now: Instant) -> bool {
+        let window = Duration::from_secs(STARVED_SECS);
+        let starved = self
+            .below_target_since
+            .is_some_and(|since| now.duration_since(since) >= window);
+        let waited = self
+            .join_fallback_at
+            .is_none_or(|at| now.duration_since(at) >= window);
+        let due = starved && waited;
+        if due {
+            self.join_fallback_at = Some(now);
+        }
+        due
     }
 
     /// Remember that a `NeighborUp` was held back by the flood window.

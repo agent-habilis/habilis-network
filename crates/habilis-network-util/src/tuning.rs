@@ -418,6 +418,15 @@ pub const QUIET_CAP: usize = 1024;
 /// still maintains links independently — this only throttles *our* piling-on.
 pub const RELINK_COOLDOWN_SECS: u64 = 10;
 
+/// How long a node may hold two or more links fewer than G, and how long it waits
+/// between two fallbacks, before a graft asks with a `Join` instead of a low
+/// priority request. A low priority request evicts nobody, so a member that arrives
+/// when every other member is full gets no link from it. A `Join` evicts a random
+/// neighbor of the peer, and that peer lands at G - 1, so one fallback per 300 s per
+/// member bounds the churn to 0.2 link-ups per member per minute, and a fallback
+/// starts no chain.
+pub const STARVED_SECS: u64 = 300;
+
 /// How often an advertising `create` re-broadcasts its mesh id into
 /// the directory. Short enough that a fresh discoverer sees every live
 /// mesh within one cycle (the join-horizon only surfaces ads stamped

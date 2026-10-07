@@ -492,8 +492,24 @@ pub(crate) enum GraftRequest {
 /// The request that grafts `peer`. The rendezvous gets a `Join`, because a low
 /// priority request to a peer that holds a tombstone for us is refused for ever.
 /// Every other graft only fills a view, and must not make a full one drop a neighbor.
-pub(crate) fn graft_request(peer: EndpointId, rendezvous_id: EndpointId) -> GraftRequest {
+///
+/// A low priority request evicts nobody, so a node that arrives when every other node is
+/// full gets no link from it. A `paced` graft (the fill tick, a proven direct path) asks
+/// with a `Join` instead when the node is starved: it held two or more links fewer than G
+/// for `STARVED_SECS`, at most once per `STARVED_SECS`. A `PeerInfo` graft is not paced.
+pub(crate) fn graft_request(
+    state: &mut EventLoopState,
+    peer: EndpointId,
+    rendezvous_id: EndpointId,
+    max_peers: usize,
+    now: Instant,
+    paced: bool,
+) -> GraftRequest {
     if peer == rendezvous_id {
+        return GraftRequest::Join;
+    }
+    state.note_link_count(state.linked_endpoints.len(), max_peers, now);
+    if paced && state.starved_join_due(now) {
         GraftRequest::Join
     } else {
         GraftRequest::Neighbor
@@ -502,10 +518,19 @@ pub(crate) fn graft_request(peer: EndpointId, rendezvous_id: EndpointId) -> Graf
 
 /// Ask gossip for the link to `peer`, in the way [`graft_request`] says.
 pub(crate) async fn request_graft(
+    state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
     peer: EndpointId,
+    paced: bool,
 ) -> Result<(), iroh_gossip::api::ApiError> {
-    match graft_request(peer, ctx.rendezvous_id) {
+    match graft_request(
+        state,
+        peer,
+        ctx.rendezvous_id,
+        ctx.max_peers,
+        Instant::now(),
+        paced,
+    ) {
         GraftRequest::Join => ctx.sender.join_peers(vec![peer]).await,
         GraftRequest::Neighbor => ctx.sender.neighbor_peers(vec![peer]).await,
     }
@@ -527,7 +552,7 @@ pub(crate) async fn graft_proven(
     }
     if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < ctx.max_peers {
         state.note_relink(peer, Instant::now());
-        if let Err(error) = request_graft(ctx, peer).await {
+        if let Err(error) = request_graft(state, ctx, peer, true).await {
             tracing::warn!(target: super::LOG_TARGET, %peer, %error, "graft request failed");
         }
     }
@@ -552,6 +577,8 @@ pub(crate) async fn retry_direct(
     ctx: &HandlerCtx<'_>,
     distrust_links: bool,
 ) {
+    // Every alive tick, so that the clock of a starved node does not outlive its cause.
+    state.note_link_count(state.linked_endpoints.len(), ctx.max_peers, Instant::now());
     if state.relay_transport {
         fill_active_view(state, ctx).await;
         return;
@@ -662,12 +689,137 @@ mod tests {
     // low priority request for ever, so it is asked with a `Join`.
     #[test]
     fn a_graft_asks_with_low_priority_except_for_the_rendezvous() {
+        let mut state = fresh_state();
         let rendezvous = endpoint_id(3);
+        let now = crate::util::clock::Instant::now();
         assert_eq!(
-            graft_request(endpoint_id(4), rendezvous),
+            graft_request(&mut state, endpoint_id(4), rendezvous, 4, now, true),
             GraftRequest::Neighbor
         );
-        assert_eq!(graft_request(rendezvous, rendezvous), GraftRequest::Join);
+        assert_eq!(
+            graft_request(&mut state, rendezvous, rendezvous, 4, now, true),
+            GraftRequest::Join
+        );
+    }
+
+    // With no eviction, a member that arrives when every other member is full gets no link.
+    // After STARVED_SECS below G - 1 links, a paced graft asks with a `Join` once, and then
+    // waits STARVED_SECS again.
+    #[test]
+    fn a_starved_node_falls_back_to_a_join_once_per_window() {
+        use std::time::Duration;
+        let mut state = fresh_state();
+        let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
+        let start = crate::util::clock::Instant::now();
+        let window = Duration::from_secs(crate::util::tuning::STARVED_SECS);
+        // G = 4 and two links: G - 2.
+        state.linked_endpoints.insert(endpoint_id(10));
+        state.linked_endpoints.insert(endpoint_id(11));
+
+        let ask =
+            |node: &mut EventLoopState, at| graft_request(node, peer, rendezvous, 4, at, true);
+        assert_eq!(
+            ask(&mut state, start),
+            GraftRequest::Neighbor,
+            "not yet starved"
+        );
+        assert_eq!(
+            ask(
+                &mut state,
+                start + window.saturating_sub(Duration::from_secs(1))
+            ),
+            GraftRequest::Neighbor
+        );
+        assert_eq!(
+            ask(&mut state, start + window),
+            GraftRequest::Join,
+            "starved for the window"
+        );
+        assert_eq!(
+            ask(&mut state, start + window + Duration::from_secs(1)),
+            GraftRequest::Neighbor,
+            "one fallback per window"
+        );
+        assert_eq!(
+            ask(&mut state, start + window * 2),
+            GraftRequest::Join,
+            "and again after a window"
+        );
+    }
+
+    #[test]
+    fn a_node_with_g_minus_one_links_is_not_starved() {
+        use std::time::Duration;
+        let mut state = fresh_state();
+        let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
+        let start = crate::util::clock::Instant::now();
+        for seed in 10..13 {
+            state.linked_endpoints.insert(endpoint_id(seed));
+        }
+        let late = start + Duration::from_secs(crate::util::tuning::STARVED_SECS * 2);
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 4, start, true),
+            GraftRequest::Neighbor
+        );
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 4, late, true),
+            GraftRequest::Neighbor
+        );
+    }
+
+    #[test]
+    fn a_link_that_comes_back_to_g_minus_one_stops_the_clock() {
+        use std::time::Duration;
+        let mut state = fresh_state();
+        let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
+        let start = crate::util::clock::Instant::now();
+        let window = Duration::from_secs(crate::util::tuning::STARVED_SECS);
+        state.linked_endpoints.insert(endpoint_id(10));
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 4, start, true),
+            GraftRequest::Neighbor
+        );
+        // A link comes in: G - 1 = 3 links. The clock stops.
+        state.linked_endpoints.insert(endpoint_id(11));
+        state.linked_endpoints.insert(endpoint_id(12));
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 4, start + window / 2, true),
+            GraftRequest::Neighbor
+        );
+        // The links go away again: the clock starts at the next look, not in the past.
+        state.linked_endpoints.clear();
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 4, start + window, true),
+            GraftRequest::Neighbor
+        );
+        assert_eq!(
+            graft_request(
+                &mut state,
+                peer,
+                rendezvous,
+                4,
+                start + (window * 2).saturating_sub(Duration::from_secs(1)),
+                true
+            ),
+            GraftRequest::Neighbor
+        );
+    }
+
+    #[test]
+    fn a_peer_info_graft_never_falls_back_to_a_join() {
+        use std::time::Duration;
+        let mut state = fresh_state();
+        let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
+        let start = crate::util::clock::Instant::now();
+        let late = start + Duration::from_secs(crate::util::tuning::STARVED_SECS * 3);
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 4, start, false),
+            GraftRequest::Neighbor
+        );
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 4, late, false),
+            GraftRequest::Neighbor
+        );
     }
 
     // The pool closes a connection that nothing sent on, and the watcher is
