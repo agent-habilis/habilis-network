@@ -233,6 +233,22 @@ impl Member {
             .unwrap_or(0)
     }
 
+    /// The lane that a directed frame to `peer` takes now, as the roster names it:
+    /// `relay-only` is the one where the frame is parked until a direct path is proven.
+    async fn lane_to(&self, peer: &str) -> Option<String> {
+        let json = self
+            .membership
+            .request(|reply| Request::Peers { reply })
+            .await
+            .expect("the loop answers");
+        let roster = serde_json::from_str::<serde_json::Value>(&json).ok()?;
+        roster["peers"]
+            .as_array()?
+            .iter()
+            .find(|entry| entry["nickname"] == peer)
+            .and_then(|entry| entry["transport"].as_str().map(str::to_owned))
+    }
+
     fn ports(&self) -> Vec<u16> {
         self.membership.node.bound_ports().to_vec()
     }
@@ -634,6 +650,107 @@ macro_rules! cells {
             }
         )*
     };
+}
+
+/// A frame that is parked for the session arrives once the session is up. The sender has the
+/// higher id, so nobody but its own engine can see IP go: the proof of a direct path is taken
+/// back, the frames are parked (the roster reads `relay-only`), and the session carries them
+/// when it attaches. Every probe that was sent while the lane read `relay-only` must reach bob,
+/// and the run prints how long after the rung changed the last one arrived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
+    const NAME: &str = "udp_webrtc_ip_direct_parks_a_frame";
+    const AFTER_THE_RUNG: Duration = Duration::from_secs(3);
+    init_logging();
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
+        .expect("the cell is in the table");
+    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+    let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Higher).await;
+    assert!(
+        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+        "{NAME}: the three members never formed a mesh"
+    );
+    alice.expect_rung("bob", "ip", NAME).await;
+    for cut in cell.cuts() {
+        apply(cut, &alice, &bob).await;
+    }
+
+    // (text, the lane read before the send, when it went)
+    let mut sent: Vec<(String, bool, Instant)> = Vec::new();
+    let started = Instant::now();
+    let mut on_the_rung_since: Option<Instant> = None;
+    let mut next_probe = Instant::now();
+    let mut last_parked_send: Option<Instant> = None;
+    // The lane reads `relay-only` only between the moment the proof is taken back and the
+    // attach, well under a second: so the lane is read every 20 ms, and a frame goes at once
+    // while it reads so (at most one every 100 ms), besides the probe of every second.
+    while started.elapsed() < STEP_DEADLINE {
+        let parked = alice.lane_to("bob").await.as_deref() == Some("relay-only");
+        let due = Instant::now() >= next_probe;
+        let extra = parked
+            && last_parked_send
+                .is_none_or(|sent_at| sent_at.elapsed() >= Duration::from_millis(100));
+        if due || extra {
+            let text = format!("parked {NAME} {}", sent.len());
+            let _ = alice.send("bob", &text).await;
+            sent.push((text, parked, Instant::now()));
+            if parked {
+                last_parked_send = Some(Instant::now());
+            }
+        }
+        if due {
+            next_probe = Instant::now() + Duration::from_secs(1);
+            if alice.rung_to("bob").await == Some("webrtc") {
+                let since = *on_the_rung_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= AFTER_THE_RUNG {
+                    break;
+                }
+            } else {
+                on_the_rung_since = None;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let on_the_rung = on_the_rung_since.unwrap_or_else(|| {
+        panic!(
+            "{NAME}: the rung never became webrtc after {} probes",
+            sent.len()
+        )
+    });
+
+    let parked: Vec<&(String, bool, Instant)> = sent.iter().filter(|probe| probe.1).collect();
+    assert!(
+        !parked.is_empty(),
+        "{NAME}: no probe went while the lane read relay-only, so the test proved nothing"
+    );
+    let waiting = Instant::now();
+    let mut late = Duration::ZERO;
+    for (text, _, _) in &parked {
+        while !bob.saw_msg(text) {
+            assert!(
+                waiting.elapsed() < PAYLOAD_DEADLINE,
+                "{NAME}: the frame {text:?} was parked and never reached bob"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        late = late.max(on_the_rung.elapsed());
+    }
+    eprintln!(
+        "DIAG {NAME}: {} probes, {} sent while the lane read relay-only (first after {:?}), \
+         the last one reached bob {:?} after the rung was first read",
+        sent.len(),
+        parked.len(),
+        parked.first().map(|probe| probe.2.duration_since(started)),
+        late,
+    );
+    for member in [alice, bob, carol] {
+        member.leave().await;
+    }
 }
 
 /// `udp_webrtc_ip_direct` with the order of the ids fixed: only the lower id offers a session,
