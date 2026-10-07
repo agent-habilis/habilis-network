@@ -1331,14 +1331,23 @@ pub(crate) fn retry_sessions(
 /// Whether the pair with `addr` waits for a send before it is offered a
 /// session (decision D4: direct connections are on demand). It does when the
 /// peer is no gossip neighbor, the pair has an IP path to fall back on, and the
-/// pool holds no connection to the peer, so nothing was sent to it within the
-/// idle window. A pair that needs the lane is never held back, because its
+/// pool holds no connection that a send opened, so nothing was sent to it within
+/// the idle window. A pair that needs the lane is never held back, because its
 /// session is the only direct path it has, and a send could not dial the peer
 /// without one. A gossip neighbor keeps its session proactive, because the
 /// gossip link is always on.
+///
+/// One more pair is not held back: on a mesh whose relay is lookup only, a pair
+/// whose direct-path probe failed (`RelayOnly`). A directed frame to it is parked,
+/// never dialed, so no send ever opens a connection, and its gossip graft waits
+/// for a proven direct path. A pair behind NAT, with addresses but no punched
+/// path, would wait for ever. A session is its way out.
 fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) -> bool {
+    let probe_failed = !state.relay_transport
+        && state.direct.get(&addr.id) == Some(&crate::daemon::state::DirectState::RelayOnly);
     !pair_needs_lane(addr, state.local_udp_transport)
         && !state.linked_endpoints.contains(&addr.id)
+        && !probe_failed
         && state.unicast_pool.used_connection(addr.id).is_none()
 }
 
@@ -2567,6 +2576,52 @@ mod tests {
         assert!(
             !held_back(&state, &ip_pair),
             "a gossip neighbor is never held back"
+        );
+    }
+
+    /// A pair behind NAT has IP addresses but no direct path. On a mesh whose relay
+    /// is lookup only, a directed frame to it is parked, so nothing is ever sent and
+    /// no connection opens, and the probe that proves a direct path fails. Waiting
+    /// for a send would wait for ever. Once the probe has failed and the pair is
+    /// `RelayOnly`, a session is the way out, so the pair is no longer held back.
+    #[test]
+    fn a_pair_whose_probe_failed_on_a_lookup_only_relay_is_offered_a_session() {
+        use crate::daemon::state::DirectState;
+
+        let peer = crate::testing::endpoint_id(7);
+        let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
+        let mut state = crate::testing::fresh_state();
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+
+        for (known, held) in [
+            (None, true),
+            (Some(DirectState::Pending), true),
+            (Some(DirectState::Direct), true),
+            (Some(DirectState::RelayOnly), false),
+        ] {
+            match known {
+                Some(known) => {
+                    state.direct.insert(peer, known);
+                }
+                None => {
+                    state.direct.remove(&peer);
+                }
+            }
+            assert_eq!(
+                held_back(&state, &ip_pair),
+                held,
+                "lookup-only relay, direct state {known:?}"
+            );
+        }
+
+        // With the relay carrying payload the pair can talk without a session, so
+        // a failed probe is no reason to open one before a send.
+        state.relay_transport = true;
+        state.direct.insert(peer, DirectState::RelayOnly);
+        assert!(
+            held_back(&state, &ip_pair),
+            "the relay carries payload: wait for a send"
         );
     }
 
