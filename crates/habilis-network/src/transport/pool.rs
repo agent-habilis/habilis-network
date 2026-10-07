@@ -22,7 +22,7 @@ use super::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
-use crate::util::tuning::{PROBE_HOLD_SECS, UNICAST_IDLE_SECS};
+use crate::util::tuning::{DIRECT_IDLE_BACKSTOP_SECS, PROBE_HOLD_SECS};
 
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
@@ -138,7 +138,7 @@ impl UnicastPool {
         Self::with_timeouts(
             endpoint,
             relay_transport,
-            Duration::from_secs(UNICAST_IDLE_SECS),
+            Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS),
             Duration::from_secs(PROBE_HOLD_SECS),
         )
     }
@@ -200,7 +200,7 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
-                idle: Duration::from_secs(UNICAST_IDLE_SECS),
+                idle: Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS),
                 probe_hold: Duration::from_secs(PROBE_HOLD_SECS),
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
@@ -1115,5 +1115,14 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         node.close().await;
+    }
+
+    /// The idle close of a pooled connection is the one backstop of the direct connections.
+    #[test]
+    fn a_pool_closes_an_idle_connection_after_the_one_backstop() {
+        assert_eq!(
+            super::UnicastPool::disconnected().inner.idle,
+            Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS)
+        );
     }
 }

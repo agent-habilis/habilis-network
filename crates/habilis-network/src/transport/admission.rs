@@ -949,7 +949,7 @@ mod tests {
         let hub = FakeHub::default();
         drop(admission.try_admit(peer(1), &hub).expect("room"));
         hub.attach(peer(1));
-        let window = Duration::from_secs(tuning::WEBRTC_SESSION_IDLE_SECS);
+        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
         let start = Instant::now();
 
         let mut inner = admission.lock();
@@ -981,7 +981,7 @@ mod tests {
         let hub = FakeHub::default();
         let _guard = admission.try_admit(peer(1), &hub).expect("room");
         hub.attach(peer(1));
-        let window = Duration::from_secs(tuning::WEBRTC_SESSION_IDLE_SECS);
+        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
         let start = Instant::now();
 
         let mut inner = admission.lock();
@@ -995,7 +995,7 @@ mod tests {
         let admission = SignalAdmission::new(4);
         let hub = FakeHub::default();
         drop(admission.try_admit(peer(1), &hub).expect("room"));
-        let window = Duration::from_secs(tuning::WEBRTC_SESSION_IDLE_SECS);
+        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
         let start = Instant::now();
 
         let mut inner = admission.lock();
@@ -1107,7 +1107,7 @@ mod tests {
             .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
             .await
             .expect("dial over the relay");
-        let window = Duration::from_secs(tuning::WEBRTC_SESSION_IDLE_SECS);
+        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
         let start = Instant::now();
 
         assert!(admission.lock().take_idle(start, window).is_empty());

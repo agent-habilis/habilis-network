@@ -767,10 +767,11 @@ pub const RENDEZVOUS_DWELL_SECS: u64 = 30;
 /// the owed return is a debt with an end, not a state.
 pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 
-/// How long a unicast connection may carry no stream before it is closed, on
-/// the dial side (the pool) and on the accept side. A closed connection is
-/// dialed again on the next send.
-pub const UNICAST_IDLE_SECS: u64 = 120;
+/// The one idle backstop of the direct connections (decision D11). The ceiling frees a place
+/// when a newcomer needs it; this only closes what nobody used for a quarter of an hour, so
+/// that a quiet node holds nothing for ever. It is the idle close of a pooled connection and of
+/// an accepted one, and the wait before an unheld session is detached.
+pub const DIRECT_IDLE_BACKSTOP_SECS: u64 = 900;
 
 /// How long the pooled connection of a direct-path probe stays after the probe
 /// ends, when no send takes it (decision D4: direct connections are on demand).
@@ -779,23 +780,6 @@ pub const UNICAST_IDLE_SECS: u64 = 120;
 /// it is open. Longer than that, the probe connection would be a pre-warmed
 /// unicast connection for a pair that never sent.
 pub const PROBE_HOLD_SECS: u64 = 15;
-
-/// How long a `WebRTC` session may sit with no QUIC connection to its peer and
-/// no negotiation round before the engine detaches it (decision D4).
-///
-/// A gossip neighbor always has its gossip connection, so only a peer that is
-/// not a neighbor idles out. The clock starts when the last connection to the
-/// peer is gone, so it adds to the idle close of that connection. A pooled
-/// unicast connection closes after [`UNICAST_IDLE_SECS`] on the dial side, but
-/// after [`UNICAST_ACCEPT_IDLE_SECS`] on the accept side. A pair whose last
-/// connection is on the accept side therefore detaches its session up to 240 +
-/// 120 = 360 s after its last send, plus one tick of the retry pass.
-pub const WEBRTC_SESSION_IDLE_SECS: u64 = 120;
-
-/// How long an accepted unicast connection may carry no new stream before the
-/// acceptor closes it. Twice [`UNICAST_IDLE_SECS`], so that the dialing pool is
-/// the one that normally closes; this is a backstop for a dialer that is gone.
-pub const UNICAST_ACCEPT_IDLE_SECS: u64 = 2 * UNICAST_IDLE_SECS;
 
 /// Max bytes a per-member log file grows before rotating to `<file>.1`
 /// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag

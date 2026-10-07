@@ -1359,19 +1359,16 @@ fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) 
 }
 
 /// Detach the sessions that nothing has held for
-/// [`WEBRTC_SESSION_IDLE_SECS`](crate::util::tuning::WEBRTC_SESSION_IDLE_SECS)
-/// (decision D4: a node frees what it does not use). A detached pair holds no
-/// pooled connection, so [`held_back`] leaves it alone until a send dials the
+/// [`DIRECT_IDLE_BACKSTOP_SECS`](crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS)
+/// (decision D11: the ceiling frees a place for a newcomer, this frees what nobody uses).
+/// A detached pair holds no pooled connection, so [`held_back`] leaves it alone until a send dials the
 /// peer.
 ///
 /// Held means a live QUIC connection of any protocol, or a round in flight, as
 /// the admission table sees them. A gossip neighbor always has its gossip
 /// connection, so it never idles out. The clock starts when the last connection
-/// is gone, so it adds to that connection's own idle close. A pooled unicast
-/// connection closes after 120 s on the dial side but after 240 s on the accept
-/// side, so a pair whose last connection is on the accept side detaches its
-/// session up to about 360 s after its last send, plus one tick of the retry
-/// pass.
+/// is gone, so it adds to that connection's own idle close: a pair detaches its session up
+/// to 900 + 900 s after its last send, plus one tick of the retry pass.
 ///
 /// A pair that needs the lane keeps its session, and so does a peer whose
 /// address is not known: see [`held_back`]. Returns the peers detached.
@@ -1382,7 +1379,7 @@ fn detach_idle_sessions_at(
     let Some(handle) = state.webrtc.clone() else {
         return Vec::new();
     };
-    let window = std::time::Duration::from_secs(crate::util::tuning::WEBRTC_SESSION_IDLE_SECS);
+    let window = std::time::Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS);
     let mut detached = Vec::new();
     for peer in state.webrtc_admission.idle_sessions(now, window) {
         let kept = state.linked_endpoints.contains(&peer)
@@ -2630,7 +2627,7 @@ mod tests {
             crate::testing::nick("bob"),
             EndpointAddr::new(server.id()).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
-        let window = Duration::from_secs(crate::util::tuning::WEBRTC_SESSION_IDLE_SECS);
+        let window = Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS);
         let start = Instant::now();
 
         assert!(detach_idle_sessions_at(&mut state, start).is_empty());

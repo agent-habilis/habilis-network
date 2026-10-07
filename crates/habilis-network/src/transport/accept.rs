@@ -12,7 +12,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::sync::mpsc;
 
 use crate::util::consts::MAX_MESSAGE_SIZE;
-use crate::util::tuning::UNICAST_ACCEPT_IDLE_SECS;
+use crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS;
 
 use super::LOG_TARGET;
 use super::path::{PROBE_DEADLINE, refuse_unless_direct};
@@ -28,8 +28,8 @@ pub(crate) struct UnicastAcceptor {
     tx: mpsc::Sender<Bytes>,
     relay_transport: bool,
     /// How long an accepted connection may carry no new stream before it is
-    /// closed. The dialing pool closes its own end after half this time, so the
-    /// acceptor's timeout is a backstop for a dialer that is gone.
+    /// closed. The dialing pool has the same timeout, so this is the backstop for a dialer
+    /// that is gone.
     idle: Duration,
     /// The table whose ceiling the accepted connections count against: a stream that is being
     /// read marks its connection busy.
@@ -47,7 +47,7 @@ impl UnicastAcceptor {
         Self::with_idle(
             tx,
             relay_transport,
-            Duration::from_secs(UNICAST_ACCEPT_IDLE_SECS),
+            Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS),
         )
     }
 
@@ -237,5 +237,15 @@ mod tests {
         tokio::time::resume();
         router.shutdown().await.expect("shutdown");
         client.close().await;
+    }
+
+    /// The idle close of an accepted connection is the one backstop of the direct connections.
+    #[test]
+    fn an_acceptor_closes_an_idle_connection_after_the_one_backstop() {
+        let (tx, _frames) = mpsc::channel(1);
+        assert_eq!(
+            UnicastAcceptor::new(tx, true).idle,
+            Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS)
+        );
     }
 }
