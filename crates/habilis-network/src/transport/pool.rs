@@ -692,7 +692,8 @@ async fn send_one(
     Ok(())
 }
 
-/// How long a connection stays busy after a send finished, if the peer has not read the frame.
+/// How long a connection stays busy after a send finished, if the peer has not read the frame. A
+/// reader that is slower than this is not protected: the connection can be evicted under its frame.
 const BUSY_AFTER_FINISH: Duration = Duration::from_secs(2);
 
 #[cfg(test)]

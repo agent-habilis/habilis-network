@@ -1136,10 +1136,11 @@ mod tests {
         receiver.close().await;
     }
 
-    /// **Many streams that nobody reads still fit in the connection window.** Sixteen streams
-    /// at 256 `KiB` each could hold 4 `MiB`; the window of the connection (decision D11) holds the
-    /// receiver to 1 `MiB` for all of them together. Counted at the sender, as in
-    /// `a_receiver_that_never_reads_buffers_at_most_the_stream_window`.
+    /// **Many streams that nobody reads still fit in the connection window.** Forty streams
+    /// at 8 `MiB` each could hold 320 `MiB`; the window of the connection (decision D11) holds the
+    /// receiver to 32 `MiB` for all of them together, where the iroh defaults let it take in about
+    /// 47 `MiB`. Counted at the sender, as in
+    /// `a_receiver_that_never_reads_grants_the_generous_stream_window`.
     #[cfg(feature = "host")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn streams_that_nobody_reads_fit_in_the_connection_window() {

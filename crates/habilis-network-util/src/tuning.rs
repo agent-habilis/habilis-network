@@ -774,7 +774,8 @@ pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 pub const LANE_WANTED_SECS: u64 = 60;
 
 /// How many bytes of one QUIC stream a node buffers for a peer that sends faster than the node
-/// reads (decision D11): 8 `MiB`, far above the iroh default, and a bound all the same.
+/// reads (decision D11): 8 `MiB`, far above the iroh default, and a bound all the same. It stays
+/// below the window of the connection on purpose: one stream cannot take the whole connection.
 pub const QUIC_STREAM_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
 
 /// How many bytes of all the streams of one QUIC connection together a node buffers for a peer
