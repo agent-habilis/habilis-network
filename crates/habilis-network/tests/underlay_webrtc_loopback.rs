@@ -341,6 +341,7 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
         .await
         .expect("local relay");
     let (alice, mut bob, carol) = three_members(&relay).await;
+    let run_started = Instant::now();
     // First the application pair loses IP, with the underlays on IP: sessions open
     // on demand, from a send that a payload path carries, and a pair with no such
     // path (the relay is lookup only here) would never be offered one. Here the
@@ -350,9 +351,17 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
     alice
         .wait_for_rung("carol", "webrtc", "alice to carol")
         .await;
+    eprintln!(
+        "TIMING alice to carol on webrtc after {:?}",
+        run_started.elapsed()
+    );
     alice
         .wait_for_underlay_session("carol", "alice, IP blocked to carol")
         .await;
+    eprintln!(
+        "TIMING underlay session of alice after {:?}",
+        run_started.elapsed()
+    );
 
     // Then the underlays lose IP too, and alice and bob lose WebRTC to each other
     // only, on both endpoints. Alice keeps her WebRTC session to carol, and
@@ -376,6 +385,10 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
     alice
         .wait_for_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
         .await;
+    eprintln!(
+        "TIMING alice to bob on multihop after {:?}",
+        run_started.elapsed()
+    );
 
     // The multihop rung can be selected while the route is still the direct link
     // between the two underlays, which has no path left and ages out of the
