@@ -334,7 +334,7 @@ start of runs 2 and 3.
 - The `Lagged` event is the topic saying that the receive loop did not read fast enough: the subscription holds 2048 events by default (`TOPIC_EVENTS_DEFAULT_CAP`, set with
   `subscription_capacity` in `JoinOptions`), and the oldest are dropped when it is full. The documentation of that option says the subscriber is closed after a `Lagged` event; in these runs A kept
   receiving after its first one, so I do not know which of the two holds in this fork.
-- This is at an offered load of about 700 Mbit/s, on a debug build where one runtime serves three endpoints. The default budget of 1 MiB/s is about 800 times lower. Nothing here says the
+- This is at an offered load of about 700 Mbit/s, on a debug build where one runtime serves three endpoints. The default budget of 1 MiB/s is about 80 times lower (700 Mbit/s is about 87 MB/s). Nothing here says the
   budget would see loss. It says what the topic does when a member is pushed far past it, and that the engine's receive path must not be slower than the reader here: the engine reads the topic in
   its event loop, which also does other work.
 - The A to C direction (acknowledgements and probes) lost nothing: C read 4 to 3 frames **more** than A put on the topic in each run, and I did not look into those few extra frames (a count taken at two
