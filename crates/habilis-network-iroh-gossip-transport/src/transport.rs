@@ -76,7 +76,7 @@ impl Shared {
     /// One QUIC datagram to `dst`: framed and handed to the sink. A datagram that
     /// does not fit a frame, or that has no sink to go to, is dropped and the call
     /// still succeeds, as a NIC drops what it cannot carry. QUIC recovers.
-    fn send_datagram(&self, dst: EndpointId, datagram: &[u8]) {
+    pub(crate) fn send_datagram(&self, dst: EndpointId, datagram: &[u8]) {
         if locked(&self.blocked).contains(&dst) {
             return self.counters.dropped_not_allowed();
         }
@@ -102,7 +102,7 @@ impl Shared {
 /// the endpoint builder, and `attach` a sink once the topic is joined.
 #[derive(Debug, Clone)]
 pub struct GossipHandle {
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
     inbound: mpsc::Sender<Packet>,
     transport: Arc<GossipTransport>,
 }
@@ -133,6 +133,14 @@ impl GossipHandle {
     #[must_use]
     pub fn app_id(&self) -> EndpointId {
         self.shared.app_id
+    }
+
+    /// Send frames on `sender`, the mesh topic, from now on.
+    ///
+    /// The engine calls this when it joins the topic, and again where it replaces
+    /// the topic's sender after a resubscribe.
+    pub fn attach_gossip(&self, sender: iroh_gossip::api::GossipSender) {
+        self.attach(Arc::new(crate::sink::GossipSink::spawn(sender)));
     }
 
     /// The address lookup, for `Builder::address_lookup`: it answers the first dial

@@ -9,10 +9,12 @@ mod counters;
 pub mod frame;
 mod lookup;
 pub mod memory;
+mod sink;
 mod transport;
 
 pub use addr::{gossip_addr, parse_gossip_addr};
 pub use counters::Stats;
 pub use frame::{DecodeError, EncodeError, Frame};
 pub use habilis_network_iroh_transport_util::GOSSIP_TRANSPORT_ID;
+pub use sink::GossipSink;
 pub use transport::{Delivery, FrameSink, GossipHandle};

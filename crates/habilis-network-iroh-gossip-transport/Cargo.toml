@@ -29,6 +29,9 @@ noq-udp.workspace = true
 n0-watcher.workspace = true
 tokio.workspace = true
 n0-future.workspace = true
+# The topic that the frames ride. The engine owns the `Gossip`; this crate only
+# needs the sender of the topic it is handed.
+iroh-gossip.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 

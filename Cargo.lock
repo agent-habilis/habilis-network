@@ -1830,6 +1830,7 @@ dependencies = [
  "habilis-network-iroh-transport-util",
  "iroh",
  "iroh-base",
+ "iroh-gossip",
  "n0-future",
  "n0-watcher",
  "noq-udp",
