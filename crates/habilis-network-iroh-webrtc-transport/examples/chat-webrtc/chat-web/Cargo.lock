@@ -1387,7 +1387,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=51e891cff102a7e0696a5a931c2e9770b0225b59#51e891cff102a7e0696a5a931c2e9770b0225b59"
+source = "git+https://github.com/agent-habilis/iroh?rev=2b4bdd45cb6d7e7ab213fea418cffa8c735b93de#2b4bdd45cb6d7e7ab213fea418cffa8c735b93de"
 dependencies = [
  "backon",
  "blake3",
@@ -1436,7 +1436,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=51e891cff102a7e0696a5a931c2e9770b0225b59#51e891cff102a7e0696a5a931c2e9770b0225b59"
+source = "git+https://github.com/agent-habilis/iroh?rev=2b4bdd45cb6d7e7ab213fea418cffa8c735b93de#2b4bdd45cb6d7e7ab213fea418cffa8c735b93de"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1454,7 +1454,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=51e891cff102a7e0696a5a931c2e9770b0225b59#51e891cff102a7e0696a5a931c2e9770b0225b59"
+source = "git+https://github.com/agent-habilis/iroh?rev=2b4bdd45cb6d7e7ab213fea418cffa8c735b93de#2b4bdd45cb6d7e7ab213fea418cffa8c735b93de"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -1504,7 +1504,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=51e891cff102a7e0696a5a931c2e9770b0225b59#51e891cff102a7e0696a5a931c2e9770b0225b59"
+source = "git+https://github.com/agent-habilis/iroh?rev=2b4bdd45cb6d7e7ab213fea418cffa8c735b93de#2b4bdd45cb6d7e7ab213fea418cffa8c735b93de"
 dependencies = [
  "blake3",
  "bytes",
