@@ -152,6 +152,8 @@ pub(crate) async fn handle_gossip_event(
                 rendezvous_neighbor_down(state, ctx, node_id);
             } else {
                 state.unlink(node_id);
+                let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
+                state.plan_regraft_on_last_link_loss(node_id, Instant::now(), spread);
                 if let Some(addr) = state.relay_race_on_link_loss(node_id, Instant::now()) {
                     crate::transport::webrtc::negotiate_session(state, ctx, node_id, addr);
                 }

@@ -656,6 +656,25 @@ pub(crate) async fn retry_direct(
     }
 }
 
+/// Graft again the proven peers whose last link went down about a second ago (see
+/// [`EventLoopState::plan_regraft_on_last_link_loss`]). The reclaim ticker calls this, because
+/// the heal tick would leave the pair apart for 10 to 15 s.
+pub(crate) async fn regraft_due(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    for peer in state.take_regrafts_due(Instant::now()) {
+        let Some(addr) = state.peer_endpoints.values().find(|addr| addr.id == peer).cloned()
+        else {
+            continue;
+        };
+        state.note_relink(peer, Instant::now());
+        let _ = crate::lookup::add_peer_addr(ctx.endpoint, addr.clone());
+        state.unicast_pool.note_addr(&addr);
+        tracing::debug!(target: super::LOG_TARGET, %peer, "the last link went down: grafting the proven peer again");
+        if ensure_direct(state, ctx, peer, &addr) {
+            graft_proven(state, ctx, peer).await;
+        }
+    }
+}
+
 /// The member that the fill tick grafts next, among the free ones: a member that
 /// is not linked, not the rendezvous and not on its relink cooldown. The natives
 /// come before every browser, each group ordered by id, and `pick` indexes the

@@ -831,6 +831,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous) {
                     maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 }
+                crate::transport::probe::regraft_due(&mut state, &ctx).await;
                 gossip::antientropy::resume_fast_rounds(&mut state, &ctx).await;
             }
             _ = intervals.antientropy.tick() => {

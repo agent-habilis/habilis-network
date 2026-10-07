@@ -433,6 +433,11 @@ pub const QUIET_CAP: usize = 1024;
 /// still maintains links independently — this only throttles *our* piling-on.
 pub const RELINK_COOLDOWN_SECS: u64 = 10;
 
+/// How long after a proven pair loses the last link of a node it is grafted again, before the
+/// jitter of 30 %. The heal tick would take 10 to 15 s. The relink cooldown above paces a pair
+/// that flaps.
+pub const REGRAFT_AFTER_MS: u64 = 1000;
+
 /// How long a node may hold two or more links fewer than G, and how long it waits
 /// between two fallbacks, before a graft asks with a `Join` instead of a low
 /// priority request. A low priority request evicts nobody, so a member that arrives

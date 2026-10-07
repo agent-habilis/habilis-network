@@ -22,7 +22,7 @@ use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED_SECS, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
-    RECLAIM_WINDOW_SECS, RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
+    RECLAIM_WINDOW_SECS, REGRAFT_AFTER_MS, RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
 };
 
 /// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
@@ -201,6 +201,8 @@ pub struct EventLoopState {
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
+    /// The proven peers whose last gossip link went down, with the time of their quick re-graft.
+    regraft_at: HashMap<EndpointId, Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
@@ -711,6 +713,7 @@ impl EventLoopState {
             join_fallback_at: None,
             graft_backoff: crate::transport::graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
+            regraft_at: HashMap::new(),
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
@@ -932,6 +935,44 @@ impl EventLoopState {
         Some(addr)
     }
 
+    /// A proven peer was the last link of this node and went down: plan its re-graft at
+    /// `now` plus [`REGRAFT_AFTER_MS`] with a jitter of 30 % either way (`spread` in
+    /// `-1.0..=1.0`). A peer on its relink cooldown is left to the heal tick, so a flapping
+    /// pair does not dial every second. Returns whether a re-graft is planned.
+    pub(crate) fn plan_regraft_on_last_link_loss(
+        &mut self,
+        peer: EndpointId,
+        now: Instant,
+        spread: f64,
+    ) -> bool {
+        if !self.linked_endpoints.is_empty()
+            || self.direct.get(&peer) != Some(&DirectState::Direct)
+            || self.relink_on_cooldown(peer, now)
+        {
+            return false;
+        }
+        let jitter = 1.0 + 0.3 * spread.clamp(-1.0, 1.0);
+        let after = Duration::from_millis(REGRAFT_AFTER_MS).mul_f64(jitter);
+        self.regraft_at.insert(peer, now + after);
+        true
+    }
+
+    /// The peers whose planned re-graft is due at `now` and that are still unlinked.
+    pub(crate) fn take_regrafts_due(&mut self, now: Instant) -> Vec<EndpointId> {
+        let due: Vec<EndpointId> = self
+            .regraft_at
+            .iter()
+            .filter(|(_, at)| now >= **at)
+            .map(|(peer, _)| *peer)
+            .collect();
+        for peer in &due {
+            self.regraft_at.remove(peer);
+        }
+        due.into_iter()
+            .filter(|peer| !self.linked_endpoints.contains(peer))
+            .collect()
+    }
+
     /// The session of `peer` attached: it is no longer wanted.
     pub(crate) fn clear_lane_wanted(&mut self, peer: EndpointId) {
         self.lane_wanted.remove(&peer);
@@ -1045,6 +1086,7 @@ impl EventLoopState {
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);
+        self.regraft_at.remove(&peer);
         self.graft_backoff.reset(peer);
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
     }
@@ -1659,6 +1701,69 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    /// A proven pair that loses the last link of this node is re-grafted in about a second,
+    /// not at the heal tick (10 to 15 s). A pair that flaps is paced by the relink cooldown.
+    #[test]
+    fn a_proven_peer_that_was_the_last_link_is_regrafted_in_about_a_second() {
+        let (bob, carol) = (endpoint_id(1), endpoint_id(2));
+        let now = Instant::now();
+        let after = |millis: u64| now + Duration::from_millis(millis);
+        let lost = |peers_left: &[EndpointId], verdict: DirectState| {
+            let mut node = fresh_state();
+            node.direct.insert(bob, verdict);
+            for peer in peers_left {
+                node.link(*peer);
+            }
+            node
+        };
+
+        let mut centered = lost(&[], DirectState::Direct);
+        assert!(centered.plan_regraft_on_last_link_loss(bob, now, 0.0));
+        assert!(centered.take_regrafts_due(after(900)).is_empty(), "not yet");
+        assert_eq!(centered.take_regrafts_due(after(1100)), vec![bob], "due");
+        assert!(
+            centered.take_regrafts_due(after(1200)).is_empty(),
+            "taken once"
+        );
+
+        let mut early = lost(&[], DirectState::Direct);
+        assert!(early.plan_regraft_on_last_link_loss(bob, now, -1.0));
+        assert_eq!(
+            early.take_regrafts_due(after(750)),
+            vec![bob],
+            "jitter down"
+        );
+        let mut late = lost(&[], DirectState::Direct);
+        assert!(late.plan_regraft_on_last_link_loss(bob, now, 1.0));
+        assert!(late.take_regrafts_due(after(1250)).is_empty(), "jitter up");
+        assert_eq!(late.take_regrafts_due(after(1350)), vec![bob]);
+
+        let mut back = lost(&[], DirectState::Direct);
+        back.plan_regraft_on_last_link_loss(bob, now, 0.0);
+        back.link(bob);
+        assert!(
+            back.take_regrafts_due(after(1100)).is_empty(),
+            "the link came back"
+        );
+
+        let mut other_link = lost(&[carol], DirectState::Direct);
+        assert!(
+            !other_link.plan_regraft_on_last_link_loss(bob, now, 0.0),
+            "another link is left"
+        );
+        let mut unproven = lost(&[], DirectState::RelayOnly);
+        assert!(
+            !unproven.plan_regraft_on_last_link_loss(bob, now, 0.0),
+            "never proven"
+        );
+        let mut flapping = lost(&[], DirectState::Direct);
+        flapping.note_relink(bob, now);
+        assert!(
+            !flapping.plan_regraft_on_last_link_loss(bob, now, 0.0),
+            "on the relink cooldown"
+        );
     }
 
     /// The release rule's two answers, on a node that lets go at two links.
