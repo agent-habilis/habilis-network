@@ -458,6 +458,24 @@ impl SignalAdmission {
         )
     }
 
+    /// Whether any live connection of `peer` with a selected path reads below IP: the relay, a
+    /// session or a route (see [`any_not_ip`](super::probe::any_not_ip)).
+    pub(crate) fn any_connection_not_ip(&self, peer: EndpointId) -> bool {
+        let handles: Vec<WeakConnectionHandle> = self
+            .lock()
+            .slots
+            .get(&peer)
+            .map(|slot| slot.conns.clone())
+            .unwrap_or_default();
+        super::probe::any_not_ip(
+            handles
+                .iter()
+                .filter_map(WeakConnectionHandle::upgrade)
+                .filter(|conn| conn.close_reason().is_none())
+                .map(|conn| super::probe::selected_kind(&conn)),
+        )
+    }
+
     /// Whether [`connection_hook`](Self::connection_hook) was called on this
     /// table. Without a hook the table sees none of the endpoint's connections:
     /// the relay policy is not kept on the gossip connections that the node
@@ -1532,6 +1550,38 @@ mod tests {
             }
             self.node.close().await;
         }
+    }
+
+    /// **Two live connections of one peer.** A session may be detached only when no connection
+    /// of the pair reads below IP. The table reads every live connection, not the first.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_table_reads_every_live_connection_of_a_peer() {
+        let mut fixture = Fixture::new(4).await;
+        let (peer, first) = fixture.dial().await;
+        assert!(
+            fixture.admission.any_connection_not_ip(peer),
+            "one relay connection reads below IP"
+        );
+        let relayed = iroh::EndpointAddr::new(peer).with_relay_url(fixture.relay_url.clone());
+        let second = fixture
+            .node
+            .connect(relayed, super::super::UNICAST_ALPN)
+            .await
+            .expect("a second connection over the relay");
+        first.close(0u32.into(), b"done");
+        first.closed().await;
+        assert!(
+            fixture.admission.any_connection_not_ip(peer),
+            "the second connection is still live and reads below IP"
+        );
+        second.close(0u32.into(), b"done");
+        second.closed().await;
+        assert!(
+            !fixture.admission.any_connection_not_ip(peer),
+            "no live connection is left"
+        );
+        fixture.shutdown().await;
     }
 
     /// **The ceiling of direct connections.** A node whose ceiling is 4 dials five peers over

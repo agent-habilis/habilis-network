@@ -686,7 +686,9 @@ pub(crate) fn wants_session(
 /// Detach the session of `peer` when UDP is selected again for a pair that does not need the
 /// lane. Only the lower id has a path watcher, and only on a pooled connection that a send
 /// opened (decision D4), so a pair that only gossips has no one to report UDP's return. The
-/// reading of the admission table is the sign. Returns whether a session was detached.
+/// reading of the admission table is the sign, and it must hold for every live connection of
+/// the pair: a connection that still rides the session keeps it. Returns whether a session was
+/// detached.
 fn detach_session_under_udp(
     state: &mut crate::daemon::state::EventLoopState,
     peer: EndpointId,
@@ -697,6 +699,7 @@ fn detach_session_under_udp(
     };
     if needs_lane
         || state.pair_path_kind(peer) != Some(super::probe::PathKind::Ip)
+        || state.webrtc_admission.any_connection_not_ip(peer)
         || !handle.detach(&peer)
     {
         return false;
@@ -1025,8 +1028,9 @@ fn spawn_offer_round(
         if offer == Offer::UdpRace && pool.udp_won(peer).await {
             // UDP won while the round ran: the session would sit unused and hold
             // one of the direct-peer slots.
-            let _ = handle.detach(&peer);
-            tracing::debug!(target: LOG_TARGET, %peer, "udp won the race; webrtc session detached");
+            if handle.detach(&peer) {
+                tracing::debug!(target: LOG_TARGET, %peer, "udp won the race; webrtc session detached");
+            }
         } else {
             if offer == Offer::Rendezvous {
                 tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached to the rendezvous");

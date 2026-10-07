@@ -430,6 +430,15 @@ pub(crate) fn best_kind(kinds: impl IntoIterator<Item = PathKind>) -> Option<Pat
         .min_by_key(rank)
 }
 
+/// Pure: whether any connection with a selected path reads as something below IP. A session
+/// that one connection rides is in use, whatever the others read: [`best_kind`] would read IP
+/// for `[Ip, WebRtc]`, and the session must stay.
+pub(crate) fn any_not_ip(kinds: impl IntoIterator<Item = PathKind>) -> bool {
+    kinds
+        .into_iter()
+        .any(|kind| !matches!(kind, PathKind::Ip | PathKind::None))
+}
+
 /// Pure: the kind of a pair's selected path, from the watcher's last report if it
 /// has one, else from any live connection of the admission table. A pair that only
 /// gossips has no pooled connection and so no watcher, but its gossip connection
@@ -1048,6 +1057,24 @@ mod tests {
         let mut every_peer = vec![linked, unlinked];
         every_peer.sort_unstable();
         assert_eq!(ids(1, true), every_peer, "the re-bridge asks every peer");
+    }
+
+    /// A session stays while any connection of the pair rides it or the relay: `best_kind` reads
+    /// IP for `[Ip, WebRtc]`, `any_not_ip` does not let that detach the session.
+    #[test]
+    fn a_session_stays_while_any_connection_reads_below_ip() {
+        use super::any_not_ip;
+        use PathKind::{Ip, Multihop, None, Relay, WebRtc};
+
+        assert!(!any_not_ip([]), "no connection");
+        assert!(!any_not_ip([Ip, Ip]), "all IP: the session goes");
+        assert!(
+            !any_not_ip([Ip, None]),
+            "a connection without a path counts for nothing"
+        );
+        assert!(any_not_ip([Ip, WebRtc]), "one rides the session");
+        assert!(any_not_ip([Ip, Relay]), "one is still on the relay");
+        assert!(any_not_ip([Multihop, Ip]), "one rides a route");
     }
 
     #[test]
