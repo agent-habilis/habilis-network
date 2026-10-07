@@ -4858,6 +4858,7 @@ dependencies = [
  "anstyle",
  "clap",
  "habilis-network",
+ "habilis-network-iroh-gossip-transport",
  "habilis-network-iroh-multihop-transport",
  "habilis-network-iroh-webrtc-transport",
  "serde",
