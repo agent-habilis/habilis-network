@@ -959,10 +959,11 @@ mod tests {
         );
 
         state.note_path_proven(peer);
+        state.settle_graft_backoff(later);
         assert_eq!(
             graft_request(&mut state, peer, rendezvous, 8, later, true),
             GraftRequest::Neighbor,
-            "the proof ends the wait"
+            "the proof ends the wait, and the old ask is not read as a refusal again"
         );
     }
 

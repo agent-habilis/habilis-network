@@ -909,6 +909,10 @@ impl EventLoopState {
 
     /// A proven pair lost its gossip link while its path reads as the relay. Returns the
     /// address to offer a session to, now, and marks the session wanted.
+    ///
+    /// The path comes from [`Self::pair_path_kind`]: the watcher's report if there is one, else
+    /// the admission table, which is the source for a pair that only gossips. A loss that nobody
+    /// can read (no kind) is left to the retry tick.
     pub(crate) fn relay_race_on_link_loss(
         &mut self,
         peer: EndpointId,
@@ -934,7 +938,8 @@ impl EventLoopState {
     }
 
     /// A direct path to `peer` is proven. This is new information, so a refusal of the peer
-    /// before it no longer holds the graft that follows.
+    /// before it no longer holds the graft that follows. The proof says that the pair is
+    /// reachable, not that the peer has room: one more ask per attach is the price.
     pub(crate) fn note_path_proven(&mut self, peer: EndpointId) {
         self.direct.insert(peer, DirectState::Direct);
         self.clear_lane_wanted(peer);
