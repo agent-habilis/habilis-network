@@ -152,6 +152,9 @@ pub(crate) async fn handle_gossip_event(
                 rendezvous_neighbor_down(state, ctx, node_id);
             } else {
                 state.unlink(node_id);
+                if let Some(addr) = state.relay_race_on_link_loss(node_id, Instant::now()) {
+                    crate::transport::webrtc::negotiate_session(state, ctx, node_id, addr);
+                }
             }
             if arms_reclaim(
                 is_rendezvous && !state.rendezvous_released,

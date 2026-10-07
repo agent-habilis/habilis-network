@@ -907,6 +907,27 @@ impl EventLoopState {
         })
     }
 
+    /// A proven pair lost its gossip link while its path reads as the relay. Returns the
+    /// address to offer a session to, now, and marks the session wanted.
+    pub(crate) fn relay_race_on_link_loss(
+        &mut self,
+        peer: EndpointId,
+        now: Instant,
+    ) -> Option<EndpointAddr> {
+        if self.direct.get(&peer) != Some(&DirectState::Direct)
+            || self.pair_path_kind(peer) != Some(crate::transport::probe::PathKind::Relay)
+        {
+            return None;
+        }
+        let addr = self
+            .peer_endpoints
+            .values()
+            .find(|addr| addr.id == peer)?
+            .clone();
+        self.want_lane_session(peer, now);
+        Some(addr)
+    }
+
     /// The session of `peer` attached: it is no longer wanted.
     pub(crate) fn clear_lane_wanted(&mut self, peer: EndpointId) {
         self.lane_wanted.remove(&peer);
@@ -1590,6 +1611,50 @@ mod tests {
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::testing::{endpoint_id, fresh_state, nick};
+
+    /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
+    /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.
+    #[test]
+    fn a_proven_pair_on_the_relay_is_raced_again_when_its_link_goes_down() {
+        use crate::transport::probe::PathKind;
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let addr = iroh::EndpointAddr::new(bob)
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+        let node = |direct: Option<DirectState>, kind: PathKind| {
+            let mut node = fresh_state();
+            node.peer_endpoints.insert(nick("bob"), addr.clone());
+            node.direct.extend(direct.map(|verdict| (bob, verdict)));
+            node.path_kinds.insert(bob, kind);
+            node
+        };
+
+        let mut proven = node(Some(DirectState::Direct), PathKind::Relay);
+        assert_eq!(proven.relay_race_on_link_loss(bob, now), Some(addr.clone()));
+        assert!(
+            proven.lane_session_wanted(bob, now),
+            "the offer is not held back"
+        );
+        assert_eq!(
+            proven.relay_race_on_link_loss(endpoint_id(2), now),
+            None,
+            "an unknown peer"
+        );
+        for (direct, kind, why) in [
+            (Some(DirectState::Direct), PathKind::Ip, "UDP still holds"),
+            (
+                Some(DirectState::RelayOnly),
+                PathKind::Relay,
+                "never proven",
+            ),
+            (None, PathKind::Relay, "no verdict"),
+        ] {
+            assert_eq!(
+                node(direct, kind).relay_race_on_link_loss(bob, now),
+                None,
+                "{why}"
+            );
+        }
+    }
 
     /// The release rule's two answers, on a node that lets go at two links.
     fn two_link_node() -> EventLoopState {
