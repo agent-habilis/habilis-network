@@ -352,7 +352,6 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             Ok(guard) => guard,
             Err(reason) => {
                 let (code, why): (u32, &[u8]) = match reason {
-                    Refusal::AtCap => (CAP_REFUSED, b"at the direct-peer cap"),
                     Refusal::ShuttingDown => (SIGNAL_ABORTED, b"shutting down"),
                     Refusal::InFlight | Refusal::HaveSession | Refusal::Cooling => {
                         (SIGNAL_FAILED, b"already negotiating")
@@ -1718,128 +1717,39 @@ mod tests {
         client.close().await;
     }
 
-    /// At the ceiling, the answerer refuses before doing any JSEP work, and
-    /// says *why* with a distinct close code so the dialer can back off rather
-    /// than re-offer every tick.
+    /// **A node with a ceiling of two holds two sessions, and the third offer is answered.**
     ///
-    /// A cap of zero is the cheap way to stand at the ceiling; the arithmetic
-    /// (`sessions + in-flight >= cap`) is the same at sixteen.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_offer_at_the_cap_is_refused_with_the_cap_code() {
-        let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(0);
-        let router = serve(&server, &server_hub, &admission);
-
-        let (client, _client_hub) = endpoint().await;
-        let conn = client
-            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
-            .await
-            .expect("dial the signal ALPN");
-
-        let reason = tokio::time::timeout(Duration::from_secs(5), conn.closed())
-            .await
-            .expect("the refusal must be prompt — no gathering should have happened");
-        match reason {
-            iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
-                assert_eq!(
-                    close.error_code.into_inner(),
-                    u64::from(CAP_REFUSED),
-                    "expected the at-cap close code"
-                );
-            }
-            other @ (iroh::endpoint::ConnectionError::VersionMismatch
-            | iroh::endpoint::ConnectionError::TransportError(_)
-            | iroh::endpoint::ConnectionError::ConnectionClosed(_)
-            | iroh::endpoint::ConnectionError::Reset
-            | iroh::endpoint::ConnectionError::TimedOut
-            | iroh::endpoint::ConnectionError::LocallyClosed
-            | iroh::endpoint::ConnectionError::CidsExhausted) => {
-                panic!("expected an application close, got {other:?}")
-            }
-        }
-        assert_eq!(server_hub.session_count(), 0);
-
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
-    }
-
-    /// **The dialer must recognise a prompt refusal, not just a timed-out one.**
-    ///
-    /// The answerer refuses at its cap by closing the connection straight away,
-    /// so the offer round fails on the *read*, not on the exchange deadline.
-    /// Only the timeout branch consulted the close code, so the refusal came
-    /// back as a plain read error and the dialer re-ran a full gathering round
-    /// against the same peer on every retry tick, forever.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_prompt_cap_refusal_is_recognised_by_the_dialer() {
-        let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(0);
-        let router = serve(&server, &server_hub, &admission);
-
-        let (client, client_hub) = endpoint().await;
-        let error = dial_signal_with(
-            &client,
-            server.addr(),
-            &client_hub,
-            quick(),
-            IceProfile { host_only: true },
-        )
-        .await
-        .expect_err("a server at its cap must refuse the offer");
-
-        assert!(
-            is_cap_refusal(&error),
-            "the dialer must read this as an at-cap refusal, got: {error:#}"
-        );
-
-        router.shutdown().await.expect("shutdown");
-        client.close().await;
-        server.close().await;
-    }
-
-    /// **A node with a cap of two holds two sessions and refuses the third offer.**
-    ///
-    /// The cap is the setting `max_sessions` (D) of the node. The third dialer reads
-    /// the close code as an at-cap refusal and does not run a gathering round again
-    /// on every tick; the node keeps its two sessions.
+    /// The ceiling is the setting of the node (C). No offer is refused for it. The session
+    /// that was used least recently is detached when the third attaches, so the node keeps
+    /// two sessions.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_node_with_a_cap_of_two_holds_two_sessions_and_refuses_the_third_offer() {
+    async fn a_node_with_a_ceiling_of_two_answers_a_third_offer_and_detaches_the_oldest() {
         let (server, server_hub) = endpoint().await;
         let admission = SignalAdmission::new(2);
         let router = serve(&server, &server_hub, &admission);
 
         let mut clients = Vec::new();
-        let mut errors = Vec::new();
         for _ in 0..3 {
             let (client, client_hub) = endpoint().await;
-            let outcome = dial_signal_with(
+            dial_signal_with(
                 &client,
                 server.addr(),
                 &client_hub,
                 quick(),
                 IceProfile { host_only: true },
             )
-            .await;
-            errors.push(outcome.err());
+            .await
+            .expect("every offer attaches");
             clients.push((client, client_hub));
         }
 
         assert!(
-            errors[0].is_none() && errors[1].is_none(),
-            "the first two offers attach"
+            until(|| !server_hub.has_session(&clients[0].0.id())).await,
+            "the least recently used session is detached"
         );
-        let refusal = errors[2].as_ref().expect("the third offer must be refused");
-        assert!(
-            is_cap_refusal(refusal),
-            "the third dialer must read an at-cap refusal, got: {refusal:#}"
-        );
-        assert_eq!(
-            server_hub.session_count(),
-            2,
-            "the node holds exactly two sessions"
-        );
-        assert!(clients[0].1.has_session(&server.id()) && clients[1].1.has_session(&server.id()));
-        assert!(!clients[2].1.has_session(&server.id()));
+        assert!(server_hub.has_session(&clients[1].0.id()));
+        assert!(server_hub.has_session(&clients[2].0.id()));
+        assert_eq!(server_hub.session_count(), 2, "the node holds two sessions");
 
         router.shutdown().await.expect("shutdown");
         for (client, _) in clients {

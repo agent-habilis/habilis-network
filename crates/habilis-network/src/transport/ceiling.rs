@@ -128,6 +128,15 @@ impl Ceiling {
         self.entries.get(&peer).and_then(|entry| entry.last_use)
     }
 
+    /// The peers that hold a session, in no order.
+    pub(crate) fn session_peers(&self) -> Vec<EndpointId> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.session)
+            .map(|(peer, _)| *peer)
+            .collect()
+    }
+
     /// The units that count against the ceiling now.
     pub(crate) fn units(&self) -> usize {
         self.entries

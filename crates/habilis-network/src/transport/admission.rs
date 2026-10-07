@@ -16,8 +16,9 @@
 //! # Pruning
 //!
 //! A sampler visits the table on a timer. It drops the connections that are
-//! gone and the peers that nothing holds. The cap never evicts a peer: at the
-//! cap a newcomer is refused, and a slot frees when its session ends.
+//! gone and the peers that nothing holds. It also drops the ledger entries of the sessions
+//! that ended. The ceiling refuses no newcomer: a session or a unicast connection that attaches
+//! at the ceiling evicts the least valuable peer, see [`super::ceiling`].
 //!
 //! # Idle sessions
 //!
@@ -131,8 +132,6 @@ pub(crate) enum Refusal {
     InFlight,
     /// We already hold a usable session with this peer.
     HaveSession,
-    /// At the direct-peer ceiling, counting rounds in flight.
-    AtCap,
     /// This peer refused us at *its* cap recently.
     Cooling,
     /// The Router is shutting down.
@@ -143,10 +142,10 @@ pub(crate) enum Refusal {
 /// for sessions, which cannot be negotiated inside a unit test.
 pub(crate) trait Sessions: Send + Sync + 'static {
     fn has_session(&self, peer: &EndpointId) -> bool;
-    fn session_count(&self) -> usize;
-    fn local(&self) -> String {
-        String::new()
-    }
+    /// The peers that hold a live session now.
+    fn live_peers(&self) -> Vec<EndpointId>;
+    /// End the session of `peer`. `true` if there was one.
+    fn detach(&self, peer: &EndpointId) -> bool;
 }
 
 impl Sessions for WebRtcHandle {
@@ -154,12 +153,12 @@ impl Sessions for WebRtcHandle {
         WebRtcHandle::has_session(self, peer)
     }
 
-    fn session_count(&self) -> usize {
-        WebRtcHandle::session_count(self)
+    fn live_peers(&self) -> Vec<EndpointId> {
+        self.live_peer_ids()
     }
 
-    fn local(&self) -> String {
-        self.transport().local_id().fmt_short().to_string()
+    fn detach(&self, peer: &EndpointId) -> bool {
+        WebRtcHandle::detach(self, peer)
     }
 }
 
@@ -186,6 +185,37 @@ impl Slot {
         Self {
             round: None,
             conns: Vec::new(),
+        }
+    }
+}
+
+/// What an eviction ends: the connections, closed with the `EVICTED` code, and the sessions.
+#[derive(Default)]
+struct Victims {
+    conns: Vec<Connection>,
+    sessions: Vec<(EndpointId, Arc<dyn Sessions>)>,
+}
+
+impl Victims {
+    fn end(self) {
+        for victim in self.conns {
+            tracing::info!(
+                target: super::LOG_TARGET,
+                peer = %victim.remote_id().fmt_short(),
+                "evicting a direct connection at the ceiling"
+            );
+            victim.close(
+                super::webrtc::close_code::EVICTED.into(),
+                b"evicted at capacity",
+            );
+        }
+        for (peer, hub) in self.sessions {
+            tracing::info!(
+                target: super::LOG_TARGET,
+                peer = %peer.fmt_short(),
+                "evicting a session at the ceiling"
+            );
+            let _ = hub.detach(&peer);
         }
     }
 }
@@ -262,16 +292,20 @@ impl Inner {
         idle
     }
 
-    /// The live unicast connections of the peers that `evictions` names, and the end of
-    /// their units in the ledger: the caller closes them once it has dropped the lock.
-    fn take_victims(&mut self, evictions: &super::ceiling::Admission) -> Vec<Connection> {
-        let mut victims = Vec::new();
+    /// The connections and the sessions of the peers that `evictions` names, and the end of
+    /// their units in the ledger: the caller ends them once it has dropped the lock.
+    fn take_victims(&mut self, evictions: &super::ceiling::Admission) -> Victims {
+        let mut victims = Victims::default();
         for peer in &evictions.evict {
             self.ceiling.unregister_quic(*peer);
+            self.ceiling.unregister_session(*peer);
+            if let Some(hub) = self.hub.as_ref().filter(|hub| hub.has_session(peer)) {
+                victims.sessions.push((*peer, Arc::clone(hub)));
+            }
             let Some(slot) = self.slots.get(peer) else {
                 continue;
             };
-            victims.extend(
+            victims.conns.extend(
                 slot.conns
                     .iter()
                     .filter_map(WeakConnectionHandle::upgrade)
@@ -293,6 +327,14 @@ impl Inner {
             });
         }
         let hub = self.hub.clone();
+        if let Some(hub) = &hub {
+            let live = hub.live_peers();
+            for peer in self.ceiling.session_peers() {
+                if !live.contains(&peer) {
+                    self.ceiling.unregister_session(peer);
+                }
+            }
+        }
         self.slots.retain(|peer, slot| {
             slot.round.is_some()
                 || !slot.conns.is_empty()
@@ -449,21 +491,6 @@ impl SignalAdmission {
         if inner.hub.is_none() {
             inner.hub = Some(Arc::new(handle.clone()));
         }
-        // Reservations count. A peer can briefly appear in both this and
-        // `session_count` — between attach and the guard's drop — which biases
-        // toward refusing one dial we could have made. The next tick fixes it.
-        if handle.session_count() + inner.rounds_in_flight() >= self.cap {
-            tracing::info!(
-                target: "habilis_network::transport",
-                local = %handle.local(),
-                refused = %peer.fmt_short(),
-                sessions = handle.session_count(),
-                in_flight = inner.rounds_in_flight(),
-                cap = self.cap,
-                "cap refusal"
-            );
-            return Err(Refusal::AtCap);
-        }
         inner.slot(peer).round = Some(Round::Admitted);
         drop(inner);
         Ok(AdmissionGuard {
@@ -497,7 +524,12 @@ impl SignalAdmission {
     /// A round with `peer` ended in a session: it is no longer refusing us, so
     /// its wait starts over.
     pub(crate) fn note_success(&self, peer: EndpointId) {
-        self.forget_refusal(peer);
+        let mut inner = self.lock();
+        inner.refused.forget(&peer);
+        let evictions = inner.ceiling.register_session(peer, Instant::now());
+        let victims = inner.take_victims(&evictions);
+        drop(inner);
+        victims.end();
     }
 
     /// Drop the wait that `peer`'s refusals earned, because the peer at that
@@ -569,17 +601,7 @@ impl SignalAdmission {
         if conn.alpn() == super::UNICAST_ALPN {
             self.watch_for_eviction(conn.clone());
         }
-        for victim in victims {
-            tracing::info!(
-                target: super::LOG_TARGET,
-                peer = %victim.remote_id().fmt_short(),
-                "evicting a direct connection at the ceiling"
-            );
-            victim.close(
-                super::webrtc::close_code::EVICTED.into(),
-                b"evicted at capacity",
-            );
-        }
+        victims.end();
     }
 
     /// When the peer closes `conn` with the `EVICTED` code, note it, so that no proactive dial
@@ -761,19 +783,15 @@ mod tests {
         assert!(admission.try_admit(peer(1), &hub).is_ok());
     }
 
-    /// The dial-side half of the cap bug: the retry tick admits in a tight loop
-    /// with nothing awaited, so `session_count()` never moves and only the
-    /// reservations can hold the line.
+    /// Rounds in flight are not a count against a cap: the ceiling acts when a session
+    /// attaches, so the retry tick may admit a round for every peer.
     #[test]
-    fn rounds_in_flight_count_against_the_cap() {
+    fn rounds_in_flight_are_not_refused_by_a_ceiling() {
         let admission = SignalAdmission::new(2);
         let hub = hub();
         let _one = admission.try_admit(peer(1), &hub).expect("first admit");
         let _two = admission.try_admit(peer(2), &hub).expect("second admit");
-        assert_eq!(
-            admission.try_admit(peer(3), &hub).unwrap_err(),
-            Refusal::AtCap
-        );
+        assert!(admission.try_admit(peer(3), &hub).is_ok());
     }
 
     #[test]
@@ -847,9 +865,34 @@ mod tests {
             self.0.lock().expect("fake hub").contains(peer)
         }
 
-        fn session_count(&self) -> usize {
-            self.0.lock().expect("fake hub").len()
+        fn live_peers(&self) -> Vec<EndpointId> {
+            self.0.lock().expect("fake hub").iter().copied().collect()
         }
+
+        fn detach(&self, peer: &EndpointId) -> bool {
+            self.0.lock().expect("fake hub").remove(peer)
+        }
+    }
+
+    /// **Sessions count against the ceiling, and none is refused for it.** At a ceiling of 2, a
+    /// third session is admitted, and the least recently used of the first two is detached.
+    #[test]
+    fn a_third_session_at_a_ceiling_of_two_detaches_the_least_recently_used() {
+        let admission = SignalAdmission::new(2);
+        let hub = FakeHub::default();
+        for byte in [1, 2, 3] {
+            drop(
+                admission
+                    .try_admit(peer(byte), &hub)
+                    .expect("the ceiling refuses no session"),
+            );
+            hub.attach(peer(byte));
+            admission.note_success(peer(byte));
+        }
+
+        assert!(!hub.has_session(&peer(1)), "the least recently used goes");
+        assert!(hub.has_session(&peer(2)) && hub.has_session(&peer(3)));
+        assert_eq!(admission.direct_units(), 2);
     }
 
     #[test]
