@@ -103,6 +103,10 @@ pub(crate) async fn handle_gossip_event(
                 // formed — leaving permanent ghosts that suppressed
                 // both; see the 2026-06-12 roster-collapse review.)
                 state.linked_endpoints.insert(node_id);
+                // A new neighbor: the underlay may owe it a session, and may take
+                // its signal.
+                #[cfg(feature = "host")]
+                crate::transport::underlay_webrtc::tick_now(state);
                 if state.relay_transport {
                     state.observe_path(node_id, conn);
                 } else {

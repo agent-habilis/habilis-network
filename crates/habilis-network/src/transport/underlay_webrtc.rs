@@ -18,7 +18,9 @@ use iroh::{Endpoint, EndpointId};
 use super::{LOG_TARGET, SignalAdmission, WebRtcSignalAcceptor};
 
 /// The close code of a signal from an endpoint that is not a neighbor of ours.
-/// The codes of `webrtc::close_code` stop at 8.
+/// The codes of `webrtc::close_code` stop at 8. This one moves into that module
+/// with the code of the gossip rung (Phase 6 step 7), so that its test of
+/// distinct numbers covers it too.
 const NOT_A_NEIGHBOR: u32 = 9;
 
 /// What one tick does with the sessions of the underlay.
@@ -128,6 +130,17 @@ impl ProtocolHandler for UnderlaySignalGate {
     }
 }
 
+/// [`tick`] now, when the engine learns something that changes the neighbors or
+/// their paths (a neighbor came up, a path changed), without waiting for the alive
+/// tick. A hop that stays on the relay is withdrawn from the vector after 20 s,
+/// so a session offered 30 s late would come too late for the route it carries.
+/// It does nothing for a node that has no underlay leg.
+pub(crate) fn tick_now(state: &crate::daemon::state::EventLoopState) {
+    if let Some(underlay) = state.underlay_webrtc.as_ref() {
+        tick(state, underlay);
+    }
+}
+
 /// One alive tick: offer a session to each neighbor that needs one, and drop the
 /// sessions that no neighbor needs. A neighbor needs one when its application
 /// path is `WebRTC`; see the module note.
@@ -153,6 +166,11 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
     let held = underlay.handle.live_peer_ids();
     let Plan { dial, detach } = plan(underlay.endpoint.id(), &wanted, &kept, &held);
 
+    for peer in &wanted {
+        if !held.contains(peer) && !dial.contains(peer) {
+            tracing::debug!(target: LOG_TARGET, %peer, "wanted, but the neighbor is the one that offers");
+        }
+    }
     for peer in detach {
         if underlay.handle.detach(&peer) {
             tracing::debug!(target: LOG_TARGET, %peer, "underlay session detached: its neighbor left, or the pair is on IP");

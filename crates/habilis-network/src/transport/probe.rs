@@ -286,6 +286,10 @@ pub(crate) async fn on_path_change(
     }
     tracing::debug!(target: super::LOG_TARGET, %peer, ?kind, "selected path changed");
     state.path_kinds.insert(peer, kind);
+    // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
+    // session now, not at the alive tick.
+    #[cfg(feature = "host")]
+    crate::transport::underlay_webrtc::tick_now(state);
     let Some(handle) = state.webrtc.clone() else {
         return;
     };
