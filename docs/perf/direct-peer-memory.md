@@ -12,7 +12,7 @@ A gossip link is not under the planned cap. A cap on direct peers only limits un
 
 ## Method
 
-Each node is one process. A throw-away driver, `mesh_peer_load`, is not committed. This section gives the facts that are needed to rebuild it.
+Each node is one process. The driver, `mesh_peer_load`, was a throw-away file when these runs were made. It is now committed as `crates/habilis-network/examples/mesh_peer_load.rs`, with the scripts in `scripts/perf/` (see its README). This section gives the facts of the runs below.
 
 - The driver uses the public `membership` API: `resolve_kind`, `setup_mesh` and `MembershipApp`. It does not copy `mesh_peer.rs`. The reason is that `send_app` is private to the crate.
 - The first process creates the mesh. It also starts a local plain-HTTP relay with `net::test_relay::spawn_plain`. No run uses a public relay, the DHT or mDNS.

@@ -228,3 +228,7 @@ wasm-bindgen-test = "0.3"
 [[example]]
 name = "mesh_peer"
 required-features = ["host"]
+
+[[example]]
+name = "mesh_peer_load"
+required-features = ["host", "iroh-test-utils"]
