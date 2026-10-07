@@ -640,7 +640,11 @@ mod tests {
         let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
         forwarder.handle_cell(subject, source.underlay.id);
         assert!(received.try_recv().is_ok());
-        assert_eq!(forwarder.forwarded_cells(), 0, "a delivery is not a forward");
+        assert_eq!(
+            forwarder.forwarded_cells(),
+            0,
+            "a delivery is not a forward"
+        );
     }
 
     #[tokio::test]

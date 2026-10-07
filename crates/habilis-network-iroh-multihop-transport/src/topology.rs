@@ -621,7 +621,11 @@ mod tests {
         assert_eq!(store.app_id_of(bob_underlay), Some(bob));
         assert_eq!(store.app_id_of(alice_underlay), Some(alice));
         assert_eq!(store.app_id_of(eid(103)), None, "an unknown underlay");
-        assert_eq!(store.app_id_of(bob), None, "an app id is not an underlay id");
+        assert_eq!(
+            store.app_id_of(bob),
+            None,
+            "an app id is not an underlay id"
+        );
     }
 
     #[test]
