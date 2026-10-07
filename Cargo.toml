@@ -148,7 +148,7 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/a
 # between us and iroh), then `GossipSender::leave_peers` and a tombstone for a
 # peer that left on purpose, then the TimeBoundCache expiry-heap fix, then the
 # repoint of its own iroh and iroh-base to the rev that this file names for them.
-iroh-gossip = { version = "=0.101.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "1ca691bceb43b78dccff3424480703771435362d", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.101.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "06d4f6127e6899f32a9217f2b049713e372d30f6", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
