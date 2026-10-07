@@ -544,6 +544,7 @@ pub(crate) async fn graft_proven(
     peer: EndpointId,
 ) {
     state.direct.insert(peer, DirectState::Direct);
+    state.clear_lane_wanted(peer);
     // A session to the rendezvous that attached after this node let go of it
     // must not graft it again: every graft of the rendezvous waits for
     // `rendezvous_wanted`.

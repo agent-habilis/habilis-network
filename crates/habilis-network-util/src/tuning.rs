@@ -767,6 +767,10 @@ pub const RENDEZVOUS_DWELL_SECS: u64 = 30;
 /// the owed return is a debt with an end, not a state.
 pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 
+/// How long the session of a lane peer stays wanted after a frame was held for it. The offer
+/// that the held frame asks for must start within this time, or the want lapses.
+pub const LANE_WANTED_SECS: u64 = 60;
+
 /// The one idle backstop of the direct connections (decision D11). The ceiling frees a place
 /// when a newcomer needs it; this only closes what nobody used for a quarter of an hour, so
 /// that a quiet node holds nothing for ever. It is the idle close of a pooled connection and of

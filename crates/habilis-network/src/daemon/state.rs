@@ -21,8 +21,8 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RECLAIM_WINDOW_SECS,
-    RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
+    KNOWN_ENDPOINTS_CAP, LANE_WANTED_SECS, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
+    RECLAIM_WINDOW_SECS, RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
 };
 
 /// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
@@ -196,6 +196,9 @@ pub struct EventLoopState {
     pub(crate) below_target_since: Option<Instant>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
+    /// The lane peers that a frame is held for, and since when. Such a peer is offered a
+    /// session although nothing was sent over a connection yet.
+    lane_wanted: HashMap<EndpointId, Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
@@ -702,6 +705,7 @@ impl EventLoopState {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: crate::transport::redial::Redials::default(),
             join_fallback_at: None,
+            lane_wanted: HashMap::new(),
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
@@ -880,6 +884,26 @@ impl EventLoopState {
         } else {
             self.below_target_since = None;
         }
+    }
+
+    /// A frame is held for the lane peer `peer` at `now`: its session is wanted.
+    pub(crate) fn want_lane_session(&mut self, peer: EndpointId, now: Instant) {
+        let window = Duration::from_secs(LANE_WANTED_SECS);
+        self.lane_wanted
+            .retain(|_, since| now.saturating_duration_since(*since) < window);
+        self.lane_wanted.insert(peer, now);
+    }
+
+    /// Whether a frame was held for `peer` within the last `LANE_WANTED_SECS`.
+    pub(crate) fn lane_session_wanted(&self, peer: EndpointId, now: Instant) -> bool {
+        self.lane_wanted.get(&peer).is_some_and(|since| {
+            now.saturating_duration_since(*since) < Duration::from_secs(LANE_WANTED_SECS)
+        })
+    }
+
+    /// The session of `peer` attached: it is no longer wanted.
+    pub(crate) fn clear_lane_wanted(&mut self, peer: EndpointId) {
+        self.lane_wanted.remove(&peer);
     }
 
     /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held

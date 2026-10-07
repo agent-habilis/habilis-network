@@ -69,7 +69,9 @@ pub async fn send_app(
         // held off a relay-only peer is parked, not failed: the proven direct
         // path flushes it (see `gossip::recv::flush_pending`).
         match crate::transport::deliver(&frame, bytes.clone(), state, ctx.sender).await {
-            Err(error) if error.is::<crate::transport::HeldForDirect>() => {}
+            Err(error) if error.is::<crate::transport::HeldForDirect>() => {
+                crate::transport::note_held(state, &error);
+            }
             outcome => return outcome,
         }
     }
