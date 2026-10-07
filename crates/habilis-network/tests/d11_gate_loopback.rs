@@ -31,6 +31,10 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 const ROSTER_DEADLINE: Duration = Duration::from_mins(2);
 const FRAME_DEADLINE: Duration = Duration::from_mins(2);
+/// How long a lane pair may take from the roster to a frame in both directions. The session is
+/// offered when the frame is held, not at the next tick of the retry pass (30 s), so the wait is an
+/// ICE round, a few seconds.
+const LANE_DEADLINE: Duration = Duration::from_secs(15);
 
 struct Member {
     membership: Membership,
@@ -250,6 +254,11 @@ async fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
     );
 
     first_arrival.get_or_insert(formed.elapsed());
+    assert!(
+        formed.elapsed() < LANE_DEADLINE,
+        "the frames of both directions took {:?} after the roster, more than {LANE_DEADLINE:?}",
+        formed.elapsed()
+    );
     while first_session.is_none() && formed.elapsed() < Duration::from_mins(1) {
         if alice.rung_to("bob").await == Some("webrtc") {
             first_session = Some(formed.elapsed());

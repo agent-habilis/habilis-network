@@ -71,11 +71,13 @@ pub async fn send_app(
         match crate::transport::deliver(&frame, bytes.clone(), state, ctx.sender).await {
             Err(error) if error.is::<crate::transport::HeldForDirect>() => {
                 crate::transport::note_held(state, &error);
+                offer_for_parked(state, ctx, &frame);
             }
             outcome => return outcome,
         }
     } else {
         mark_parked(state, &frame, &bytes);
+        offer_for_parked(state, ctx, &frame);
     }
     if state.pending_outbound.push((frame, bytes)) {
         // Buffered until the meshed edge flushes it through the same send
@@ -315,6 +317,20 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCt
 fn mark_parked(state: &mut EventLoopState, frame: &Message, bytes: &Bytes) {
     if let Err(error) = crate::transport::resolve(frame, bytes.clone(), state) {
         crate::transport::note_held(state, &error);
+    }
+}
+
+/// Offer the session of the peer now, if the parked frame asked for it. Without this the offer waits
+/// for the next tick of the retry pass, up to 30 s, and a user of a lane pair waits with it.
+fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Message) {
+    let Some(nick) = crate::protocol::message::sole_addressee(&frame.kind) else {
+        return;
+    };
+    let Some(addr) = state.peer_endpoints.get(nick).cloned() else {
+        return;
+    };
+    if state.lane_session_wanted(addr.id, crate::util::clock::Instant::now()) {
+        crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
     }
 }
 
