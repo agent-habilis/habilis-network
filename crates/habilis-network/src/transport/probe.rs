@@ -125,6 +125,11 @@ pub(crate) fn selected_kind(conn: &Connection) -> PathKind {
 /// link on such a pair is not watched either: a direct path that it loses is
 /// found by the relay policy on the link, and the peer is probed again from the
 /// alive tick.
+///
+/// Who races again a pair that loses IP: the lower id, through this watcher. When
+/// the higher id is the one that sends, there is no watcher at all, and the higher
+/// id offers by itself once the admission table reads the relay for a pair that it
+/// holds as proven (`negotiate_session`, `waits_for_the_offer`).
 pub(crate) fn ensure_watchers(
     state: &mut EventLoopState,
     local: EndpointId,

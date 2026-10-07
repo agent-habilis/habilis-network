@@ -679,12 +679,20 @@ pub(crate) fn wants_session(
     proven: bool,
 ) -> bool {
     let udp_selected = kind == Some(super::probe::PathKind::Ip);
-    let proven = proven
-        && !matches!(
+    let proven = proven && !proof_is_stale(kind, proven);
+    pair_needs_lane || !(udp_selected || proven)
+}
+
+/// Whether the proof of a direct path is stale: the pair was `proven` direct, and its selected
+/// path now reads as the relay or as multihop, both below a session. Only a path watcher takes
+/// a proof back, and only the lower id has one, so the reading of the admission table is the
+/// only sign of the loss that a pair can have.
+fn proof_is_stale(kind: Option<super::probe::PathKind>, proven: bool) -> bool {
+    proven
+        && matches!(
             kind,
             Some(super::probe::PathKind::Multihop | super::probe::PathKind::Relay)
-        );
-    pair_needs_lane || !(udp_selected || proven)
+        )
 }
 
 /// Whether this node leaves the offer of a session to its peer. The higher id waits to be
@@ -701,8 +709,7 @@ pub(crate) fn waits_for_the_offer(
     kind: Option<super::probe::PathKind>,
     proven: bool,
 ) -> bool {
-    let proof_is_stale = proven && kind == Some(super::probe::PathKind::Relay);
-    local_is_higher && !frame_held && !proof_is_stale
+    local_is_higher && !frame_held && !proof_is_stale(kind, proven)
 }
 
 /// Whether *this* node's rendezvous graft must wait for a data-channel
@@ -741,11 +748,20 @@ pub(crate) fn negotiate_session(
     let kind = state.pair_path_kind(peer);
     let proven = state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct);
     if !wants_session(needs_lane, kind, proven) {
-        tracing::debug!(
-            target: LOG_TARGET,
-            %peer,
-            "udp already selected; leaving this pair on iroh's own transports"
-        );
+        if kind == Some(super::probe::PathKind::Ip) {
+            tracing::debug!(
+                target: LOG_TARGET,
+                %peer,
+                "udp already selected; leaving this pair on iroh's own transports"
+            );
+        } else {
+            tracing::debug!(
+                target: LOG_TARGET,
+                %peer,
+                ?kind,
+                "pair proven direct; leaving it on iroh's own transports"
+            );
+        }
         return;
     }
     // The higher id waits to be dialled, so one offer crosses per pair. Unless a frame is held for
@@ -755,6 +771,14 @@ pub(crate) fn negotiate_session(
     let frame_held = state.lane_session_wanted(peer, crate::util::clock::Instant::now());
     if waits_for_the_offer(local > peer, frame_held, kind, proven) {
         return;
+    }
+    // A pair that reads as the relay is not direct, whatever the proof says: take the proof back,
+    // so that a frame is parked for the session and not refused on the relay.
+    if proof_is_stale(kind, proven) && kind == Some(super::probe::PathKind::Relay) {
+        state
+            .direct
+            .insert(peer, crate::daemon::state::DirectState::RelayOnly);
+        tracing::info!(target: LOG_TARGET, %peer, "direct proof is stale; the pair reads as relay");
     }
     // Every other gate — already have a session, already negotiating, at the
     // cap, cooling off after a refusal — is one synchronous decision under one
@@ -2934,6 +2958,123 @@ mod tests {
         );
 
         // The dial to a closed signal port would hold its slot for a long deadline.
+        state.webrtc_admission.close();
+        assert!(
+            until(|| state.webrtc_admission.in_flight() == 0).await,
+            "closing the table cancels the round"
+        );
+        router.shutdown().await.expect("shutdown");
+        endpoint.close().await;
+    }
+
+    /// Only the lower id has a path watcher, so a pair that loses IP while the higher id sends
+    /// is seen by nobody but the higher id, and by its admission table alone: the proof of a
+    /// direct path is stale where the selected path reads as the relay. The higher id then
+    /// offers by itself and takes the proof back, so that a frame is parked for the session
+    /// instead of being refused on the relay. A pair that reads as UDP keeps its proof and gets
+    /// no offer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_higher_id_offers_and_demotes_a_proven_pair_that_reads_as_relay() {
+        use crate::daemon::state::DirectState;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::transport::probe::PathKind;
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        let (endpoint, handle) = endpoint().await;
+        // The peer's key must be below ours, so that we are the higher id and wait to be dialled.
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() < endpoint.id())
+            .expect("a key below ours");
+        let server = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("bind a loopback server");
+        let router = Router::builder(server.clone())
+            .accept(crate::transport::UNICAST_ALPN, Hold)
+            .spawn();
+        crate::lookup::add_peer_addr(&endpoint, server.addr()).expect("register the server");
+
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle);
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state
+            .peer_endpoints
+            .insert(crate::testing::nick("bob"), server.addr());
+        let bob = server.id();
+        state
+            .unicast_pool
+            .warm_or_dial(bob)
+            .await
+            .expect("a send dials the peer");
+        state.direct.insert(bob, DirectState::Direct);
+
+        state.path_kinds.insert(bob, PathKind::Ip);
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "UDP is selected: no offer"
+        );
+        assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
+
+        state.path_kinds.insert(bob, PathKind::Relay);
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "the proof is stale: the higher id offers"
+        );
+        assert_eq!(
+            state.direct.get(&bob),
+            Some(&DirectState::RelayOnly),
+            "and takes the proof back, so that a frame is parked"
+        );
+
         state.webrtc_admission.close();
         assert!(
             until(|| state.webrtc_admission.in_flight() == 0).await,
