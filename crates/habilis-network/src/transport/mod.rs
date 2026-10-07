@@ -21,13 +21,6 @@
 
 mod accept;
 mod admission;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the ledger is wired into the connection hook in the next commit"
-    )
-)]
 pub(crate) mod ceiling;
 mod direct_gossip;
 pub(crate) mod endpoint_proof;

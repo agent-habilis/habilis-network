@@ -1377,14 +1377,10 @@ fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) 
 /// A detached pair holds no pooled connection, so [`held_back`] leaves it alone until a send dials the
 /// peer.
 ///
-/// Held means a live QUIC connection of any protocol, or a round in flight, as
-/// the admission table sees them. A gossip neighbor always has its gossip
-/// connection, so it never idles out. The clock starts when the last connection
-/// is gone, so it adds to that connection's own idle close: a pair detaches its session up
-/// to 900 + 900 s after its last send, plus one tick of the retry pass.
-///
-/// A pair that needs the lane keeps its session, and so does a peer whose
-/// address is not known: see [`held_back`]. Returns the peers detached.
+/// The last use is the one of the ledger of the admission table. A round in flight holds a peer,
+/// and so does a live gossip connection, so a gossip neighbor never idles out. A pair detaches its
+/// session a window after its last send, plus one tick of the retry pass. A peer whose address is
+/// not known keeps its session: see [`held_back`]. Returns the peers detached.
 fn detach_idle_sessions_at(
     state: &mut crate::daemon::state::EventLoopState,
     now: crate::util::clock::Instant,
@@ -2740,6 +2736,8 @@ mod tests {
         .await
         .expect("the signal round must attach a session");
         drop(round);
+        // Both roles tell the table of the attach, as `spawn_offer_round` does.
+        client_admission.note_success(server.id());
         assert!(client_hub.has_session(&server.id()));
 
         let mut state = crate::testing::fresh_state();

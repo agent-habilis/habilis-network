@@ -22,12 +22,11 @@
 //!
 //! # Idle sessions
 //!
-//! The same table says when a session is idle: the peer holds no live
-//! connection, of any protocol, and no round is in flight. [`SignalAdmission::idle_sessions`]
-//! hands back the peers that have been in that state for a window, and the
-//! retry pass detaches their sessions (`webrtc::detach_idle_sessions_at`), so a
-//! slot frees without a newcomer evicting anyone. A gossip neighbor always has
-//! its gossip connection, so it never idles out.
+//! The same table says when a session is idle: no round is in flight, no gossip connection holds
+//! the peer, and the last use of the peer in the ledger is a window ago. [`SignalAdmission::idle_sessions`]
+//! hands back such peers, and the retry pass detaches their sessions
+//! (`webrtc::detach_idle_sessions_at`), so a session goes a window after its last use. A gossip
+//! neighbor always has its gossip connection, so it never idles out.
 //!
 //! # What a single table buys
 //!
@@ -238,9 +237,6 @@ struct Inner {
     closed: bool,
     /// An endpoint hook reports to this table.
     observing: bool,
-    /// Since when each peer with a session has had nothing on it: no live
-    /// connection and no round in flight. See [`Self::take_idle`].
-    idle_since: HashMap<EndpointId, Instant>,
     /// The direct connections of the node against the ceiling, see [`super::ceiling`].
     ceiling: super::ceiling::Ceiling,
     /// The peers that closed a connection of ours with the `EVICTED` code.
@@ -272,30 +268,35 @@ impl Inner {
             .count()
     }
 
-    /// The peers whose session nothing has held for `window`, each handed back
-    /// once. Held means a live connection of any protocol, or a round in flight.
-    /// The clock of a peer starts the first time it is seen unheld, and starts
-    /// over if it is held again, so the window runs from the last use.
+    /// The peers whose session was last used `window` ago or more, each handed back once. The
+    /// last use is the one of the ledger, so a session goes a window after its last use, and no
+    /// later. A round in flight holds the peer, and so does a live gossip connection: a gossip
+    /// neighbor never idles out. A peer that is handed back starts a new window, in case the caller
+    /// keeps its session.
     fn take_idle(&mut self, now: Instant, window: Duration) -> Vec<EndpointId> {
         self.sample();
         let Some(hub) = self.hub.clone() else {
-            self.idle_since.clear();
             return Vec::new();
         };
-        let unheld: Vec<EndpointId> = self
-            .slots
-            .iter()
-            .filter(|(peer, slot)| {
-                slot.round.is_none() && slot.conns.is_empty() && hub.has_session(peer)
-            })
-            .map(|(peer, _)| *peer)
-            .collect();
-        self.idle_since.retain(|peer, _| unheld.contains(peer));
         let mut idle = Vec::new();
-        for peer in unheld {
-            let since = *self.idle_since.entry(peer).or_insert(now);
-            if now.saturating_duration_since(since) >= window {
-                self.idle_since.remove(&peer);
+        for peer in self.ceiling.session_peers() {
+            let held = self.slots.get(&peer).is_some_and(|slot| {
+                slot.round.is_some()
+                    || slot
+                        .conns
+                        .iter()
+                        .filter_map(WeakConnectionHandle::upgrade)
+                        .any(|conn| conn.alpn() == iroh_gossip::net::GOSSIP_ALPN)
+            });
+            if held || !hub.has_session(&peer) {
+                continue;
+            }
+            if self
+                .ceiling
+                .unused_for(peer, now)
+                .is_some_and(|unused| unused >= window)
+            {
+                self.ceiling.touch(peer, now);
                 idle.push(peer);
             }
         }
@@ -395,7 +396,6 @@ impl SignalAdmission {
                 sampler_running: false,
                 closed: false,
                 observing: false,
-                idle_since: HashMap::new(),
                 ceiling: super::ceiling::Ceiling::new(cap),
                 evicted_by: super::ceiling::EvictionBackoff::default(),
                 we_evicted: super::ceiling::EvictionBackoff::default(),
@@ -1124,22 +1124,20 @@ mod tests {
         assert!(admission.lock().slots.is_empty());
     }
 
-    /// A session that no connection and no round holds is idle, and is handed
-    /// back once it has been idle for the whole window, not before.
+    /// A session that nobody used for the window is idle, and is handed back once it has been
+    /// unused for the whole window, not before.
     #[test]
-    fn a_session_nothing_holds_idles_out_after_the_window() {
+    fn a_session_nothing_uses_idles_out_after_the_window() {
         let admission = SignalAdmission::new(4);
         let hub = FakeHub::default();
         drop(admission.try_admit(peer(1), &hub).expect("room"));
         hub.attach(peer(1));
+        admission.note_success(peer(1));
         let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
         let start = Instant::now();
 
         let mut inner = admission.lock();
-        assert!(
-            inner.take_idle(start, window).is_empty(),
-            "the clock starts"
-        );
+        assert!(inner.take_idle(start, window).is_empty(), "just used");
         assert!(
             inner
                 .take_idle(
@@ -1156,6 +1154,31 @@ mod tests {
         );
     }
 
+    /// One source of truth for idle: the ledger's last use. A session goes a window after the last
+    /// use of its peer, not a window after the first look of the sweep, and not a window after
+    /// its connection closed, which would add a second window to the idle close of the connection.
+    #[test]
+    fn a_session_idles_out_a_window_after_its_last_use_not_after_the_first_look() {
+        let admission = SignalAdmission::new(4);
+        let hub = FakeHub::default();
+        drop(admission.try_admit(peer(1), &hub).expect("room"));
+        hub.attach(peer(1));
+        admission.note_success(peer(1));
+        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let start = Instant::now();
+
+        let mut inner = admission.lock();
+        assert!(
+            inner.take_idle(start + window / 2, window).is_empty(),
+            "half a window after the last use"
+        );
+        assert_eq!(
+            inner.take_idle(start + window, window),
+            vec![peer(1)],
+            "a window after the last use, not a window after the first look"
+        );
+    }
+
     /// A round in flight holds the peer: its session is not idle however long
     /// the round runs.
     #[test]
@@ -1164,6 +1187,7 @@ mod tests {
         let hub = FakeHub::default();
         let _guard = admission.try_admit(peer(1), &hub).expect("room");
         hub.attach(peer(1));
+        admission.note_success(peer(1));
         let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
         let start = Instant::now();
 
@@ -1244,9 +1268,9 @@ mod tests {
         assert!(!backoff.on_cooldown(&peer(2), now));
     }
 
-    /// A live connection to the peer holds its session, whatever the protocol:
-    /// a gossip neighbor never idles out. Once the connection is gone, the
-    /// session is idle, and the window runs from then.
+    /// A live gossip connection to the peer holds its session: a gossip neighbor never idles out.
+    /// Once the connection is gone, the session is idle a window after its last use, with no second
+    /// window added for the connection.
     #[cfg(feature = "iroh-test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_connection_holds_a_session_until_it_closes() {
@@ -1285,6 +1309,7 @@ mod tests {
         let neighbor = server.id();
         drop(admission.try_admit(neighbor, &hub).expect("room"));
         hub.attach(neighbor);
+        admission.note_success(neighbor);
         let relayed = iroh::EndpointAddr::new(neighbor).with_relay_url(relay_url.clone());
         let conn = client
             .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
@@ -1305,13 +1330,10 @@ mod tests {
         conn.close(0u32.into(), b"done");
         conn.closed().await;
         let later = start + window * 3;
-        assert!(
-            admission.lock().take_idle(later, window).is_empty(),
-            "the clock starts when the connection is gone"
-        );
         assert_eq!(
-            admission.lock().take_idle(later + window, window),
-            vec![neighbor]
+            admission.lock().take_idle(later, window),
+            vec![neighbor],
+            "a window after the last use, whatever the connection did"
         );
         router.shutdown().await.expect("shutdown");
         client.close().await;

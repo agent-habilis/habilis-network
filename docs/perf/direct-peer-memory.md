@@ -358,7 +358,8 @@ The ledger is a pure type, `Ceiling` (`crates/habilis-network/src/transport/ceil
 2. **The order of the victims.** A peer that was idle for 30 s or more goes first, the least recently used first. A peer younger than 60 s goes last. A peer with a send or a stream in flight is never a victim.
 3. **If every candidate is busy, the newcomer is admitted** and the count is over C by the number of busy units. The gauge `over_ceiling` in the census line says so. Test: `when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling`.
 4. **A batch down to 90 percent of C** (rounded up) runs with an admission, at most once in 5 s, so that the next admissions do not each evict.
-5. **The backstop.** A connection or a session that nobody used for 900 s closes. It is the one idle timeout of the direct connections.
+5. **The backstop.** A connection or a session that nobody used for 900 s closes. It is the one idle timeout of the direct connections. A session reads its last use in the ledger, so it goes 900 s after the last use, and no second window is added when its connection has closed.
+6. **A unit ends with its last connection.** When the last unicast connection of a peer closes, for any reason, the peer leaves the ledger, so a connection that closed by itself never keeps the count at C.
 
 **A busy sender.** A node that sends to more than C peers in rotation makes each target evict one of its own idle units for every send, and the sender pays one dial per send. The rules of the order protect the hot connections: the victims are idle ones, and a unit younger than 60 s goes last. Only members of the mesh pass the admission gate, so a stranger from outside cannot cause an eviction. A misbehaving member can, and it pays for it with its own dials.
 

@@ -128,6 +128,13 @@ impl Ceiling {
         self.entries.get(&peer).and_then(|entry| entry.last_use)
     }
 
+    /// How long ago `peer` was last used, at `now`. `None` when the ledger does not know the peer,
+    /// or when a send or a stream is in flight on it: a busy peer is not idle.
+    pub(crate) fn unused_for(&self, peer: EndpointId, now: Instant) -> Option<Duration> {
+        let entry = self.entries.get(&peer).filter(|entry| entry.busy == 0)?;
+        Some(now.saturating_duration_since(entry.last_use?))
+    }
+
     /// The peers that hold a unicast connection, in no order.
     pub(crate) fn quic_peers(&self) -> Vec<EndpointId> {
         self.entries
