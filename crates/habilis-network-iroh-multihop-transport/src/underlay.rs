@@ -239,8 +239,11 @@ pub(crate) struct Forwarder {
     /// This node's application-layer id, the other half of the identity a cell's
     /// current hop must name.
     self_app_id: EndpointId,
-    /// Spawns the writers from a thread that is not in the runtime. A browser has
-    /// no runtime to hold: it spawns on its single thread.
+    /// The runtime that spawns the writers. `enqueue` runs inside `poll_send`, which
+    /// iroh calls from the socket's send path (`Transports::poll_send` in iroh's
+    /// `socket/transports.rs`). It is kept so that a native spawn never depends on
+    /// that caller being inside the runtime; nothing here shows that it is ever
+    /// outside. A browser has no runtime and spawns on its one thread.
     #[cfg(not(target_arch = "wasm32"))]
     runtime: Handle,
     pool: Arc<WriterPool>,
