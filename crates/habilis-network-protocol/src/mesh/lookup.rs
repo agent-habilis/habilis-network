@@ -306,7 +306,7 @@ impl MeshConfig {
     pub fn validate(&self) -> Result<()> {
         self.lookups.validate()?;
         let transport = &self.transport;
-        if transport.multihop && !transport.udp && !transport.webrtc && !transport.relay_transport {
+        if transport.multihop_has_no_direct_path() {
             bail!(super::transport::MULTIHOP_ALONE);
         }
         if !transport.udp && !transport.webrtc {
@@ -1087,7 +1087,7 @@ mod lookup_tests {
             (&[Udp, Relay], Ok(())),
             (&[WebRtc, Multihop], Err(MULTIHOP_NEEDS_UDP)),
             (&[WebRtc, Relay], Ok(())),
-            (&[Multihop, Relay], Err(NEEDS_A_DIRECT_PATH)),
+            (&[Multihop, Relay], Err(MULTIHOP_ALONE)),
             (&[Udp, WebRtc, Multihop], Ok(())),
             (&[Udp, WebRtc, Relay], Ok(())),
             (&[Udp, Multihop, Relay], Ok(())),
@@ -1128,10 +1128,22 @@ mod lookup_tests {
         let with_relay_error = MeshConfig::from_bytes(&[0b0111, with_relay])
             .unwrap_err()
             .to_string();
-        assert_eq!(
-            with_relay_error,
-            "a mesh needs a direct path: transport `udp`, `webrtc`, or both"
-        );
+        assert_eq!(with_relay_error, MULTIHOP_ALONE);
+    }
+
+    /// One rule, not one per caller: a list that names `multihop` twice is
+    /// still multihop with no direct transport, and says so as a list of one.
+    #[test]
+    fn multihop_named_twice_is_still_multihop_alone() {
+        for list in [
+            &[Transport::Multihop, Transport::Multihop][..],
+            &[Transport::Multihop, Transport::Relay, Transport::Multihop][..],
+        ] {
+            let error = MeshConfig::resolve(&[Lookup::Relay], None, list)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, MULTIHOP_ALONE, "{list:?}");
+        }
     }
 
     #[test]

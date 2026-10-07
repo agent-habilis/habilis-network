@@ -31,9 +31,9 @@ pub enum Transport {
     Relay,
 }
 
-/// The error for `multihop` as the only transport: it forwards over a direct
-/// path, so it cannot stand alone. Until multihop also rides `webrtc`, the
-/// direct path it needs is `udp`.
+/// The error for `multihop` with no direct transport next to it: it forwards
+/// over a direct path, so it cannot stand alone, and `relay` is not one. Until
+/// multihop also rides `webrtc`, the direct path it needs is `udp`.
 pub(super) const MULTIHOP_ALONE: &str =
     "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp`";
 
@@ -121,8 +121,8 @@ impl TransportPolicy {
     /// `udp,webrtc,multihop`.
     ///
     /// # Errors
-    /// The list is non-empty and names neither `udp` nor `webrtc`; `multihop`
-    /// alone gets its own message.
+    /// The list is non-empty and names neither `udp` nor `webrtc`; with
+    /// `multihop` in it, the message says that multihop needs a direct path.
     pub fn from_transports(transports: &[Transport]) -> Result<Self> {
         if transports.is_empty() {
             return Ok(Self::default());
@@ -133,7 +133,7 @@ impl TransportPolicy {
             multihop: transports.contains(&Transport::Multihop),
             relay_transport: transports.contains(&Transport::Relay),
         };
-        if matches!(transports, [Transport::Multihop]) {
+        if policy.multihop_has_no_direct_path() {
             bail!(MULTIHOP_ALONE);
         }
         if !policy.udp && !policy.webrtc {
@@ -144,6 +144,13 @@ impl TransportPolicy {
 }
 
 impl TransportPolicy {
+    /// `multihop` is on and neither `udp` nor `webrtc` is: the one rule that
+    /// [`MULTIHOP_ALONE`] reports, for a list a create names and for a mesh id
+    /// that is decoded alike.
+    pub(super) fn multihop_has_no_direct_path(self) -> bool {
+        self.multihop && !self.udp && !self.webrtc
+    }
+
     /// The policy as the one byte the mesh id carries.
     pub(crate) fn to_byte(self) -> u8 {
         let mut byte = 0u8;
