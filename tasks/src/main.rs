@@ -100,9 +100,14 @@ enum Task {
     Benchmark(bench::Args),
     /// Run every cell of the send ladder matrix, one at a time: transport list,
     /// blocked rungs and a third member, each with the rung it must settle on and
-    /// a message that must arrive. The gate runs two of them; the rest are the
-    /// nightly's.
-    Matrix,
+    /// a message that must arrive. Then the D11 gate: the ceiling of direct
+    /// connections and a lane pair, on real members. The gate runs two of the
+    /// cells; the rest are the nightly's.
+    Matrix {
+        /// Only list the tests that would run, and run none.
+        #[arg(long)]
+        list: bool,
+    },
     /// Remove build artifacts.
     Clean,
 }
@@ -141,7 +146,7 @@ fn dispatch(sh: &Shell, task: Task) -> TaskOutcome {
         Task::BuildWasm => wasm::build_peer(sh),
         Task::E2e(args) => e2e::run(&args),
         Task::Benchmark(args) => bench::run(&args),
-        Task::Matrix => matrix::run(sh),
+        Task::Matrix { list } => matrix::run(sh, list),
         Task::Clean => dev::clean(sh),
     }
 }
