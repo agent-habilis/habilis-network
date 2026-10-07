@@ -219,6 +219,12 @@ This section turns the measurements above into a rule for two caps. Phase 2 of t
 
 G bounds a count. It does not refuse a member. The iroh-gossip fork (`src/proto/hyparview.rs`, `on_join` and `add_active`) always accepts a high-priority `Join` or `Neighbor` request. If the active view is full, it first drops a random active member, and that member gets a disconnect. It refuses only a low-priority `Neighbor` request at a full view. A burst of joins can therefore replace the neighbors of a node that is at G. The number of links stays at G or less, but the churn is not bounded.
 
+### Sessions of the multihop underlay
+
+The multihop underlay is an endpoint of its own, and it can hold WebRTC sessions too. A node opens one to a gossip neighbor only when its application path to that neighbor is WebRTC, that is, when the pair has no IP path. Where IP works, the underlay reaches the neighbor over IP, and the node opens no session. These sessions count in G, not in D. The underlay keeps its own table of sessions, with a cap of G, and a session exists only to a gossip neighbor. So a node holds at most D + G WebRTC sessions. In practice only neighbors that have no IP path add to the count.
+
+This document has no reading with underlay sessions. As a planning value, take the cost of one underlay session as the cost of one session of D (0.2 MB). That is an assumption, and a measurement must confirm it.
+
 ### The formula
 
 Peak resident memory of one native node, in MB, in a release build:
@@ -273,3 +279,4 @@ With C = 0, B = 128 gives G = 85 for D = 0 and G = 79 for D = 32. B = 64 gives G
 
 - The number of live plain connections under load, the number of sessions over time, and the refusals per peer. Phase 2 measures them with the committed harness at N = 66, G = 32 and D = 32. The harness is not committed yet.
 - A full mesh above N = 33. No earlier run formed one.
+- The cost of a session of the multihop underlay. See the section on those sessions above.
