@@ -201,7 +201,7 @@ pub struct EventLoopState {
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
-    /// The proven peers whose last gossip link went down, with the time of their quick re-graft.
+    /// The proven peers whose gossip link went down, with the time of their quick re-graft.
     regraft_at: HashMap<EndpointId, Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
@@ -935,22 +935,21 @@ impl EventLoopState {
         Some(addr)
     }
 
-    /// A proven peer was the last link of this node and went down: plan its re-graft at
+    /// The gossip link of a proven peer went down: plan its re-graft at
     /// `now` plus [`REGRAFT_AFTER_MS`] with a jitter of 30 % either way (`spread` in
     /// `-1.0..=1.0`). A peer on its relink cooldown is left to the heal tick, so a flapping
     /// pair does not dial every second. A pair that reads as the relay is left to
     /// [`Self::relay_race_on_link_loss`]: its graft follows the attach, and a dial over the relay
-    /// would arm the graft backoff for nothing. Both ends plan, so their grafts can cross until
-    /// the tie-break of the fork is pinned: a crossing costs one more relink cooldown (10 s), no
-    /// loop. Returns whether a re-graft is planned.
-    pub(crate) fn plan_regraft_on_last_link_loss(
+    /// would arm the graft backoff for nothing. Both ends plan, so their grafts can cross: the
+    /// tie-break pinned in the fork (51ec92d) keeps one of the two links, and the relink cooldown
+    /// (10 s) paces what is left. Returns whether a re-graft is planned.
+    pub(crate) fn plan_regraft_on_link_loss(
         &mut self,
         peer: EndpointId,
         now: Instant,
         spread: f64,
     ) -> bool {
-        if !self.linked_endpoints.is_empty()
-            || self.direct.get(&peer) != Some(&DirectState::Direct)
+        if self.direct.get(&peer) != Some(&DirectState::Direct)
             || self.pair_path_kind(peer) == Some(crate::transport::probe::PathKind::Relay)
             || self.relink_on_cooldown(peer, now)
         {
@@ -1708,10 +1707,11 @@ mod tests {
         }
     }
 
-    /// A proven pair that loses the last link of this node is re-grafted in about a second,
+    /// A proven pair that loses its link is re-grafted in about a second, whatever the other links
+    /// of the node are,
     /// not at the heal tick (10 to 15 s). A pair that flaps is paced by the relink cooldown.
     #[test]
-    fn a_proven_peer_that_was_the_last_link_is_regrafted_in_about_a_second() {
+    fn a_proven_peer_that_lost_its_link_is_regrafted_in_about_a_second() {
         let (bob, carol) = (endpoint_id(1), endpoint_id(2));
         let now = Instant::now();
         let after = |millis: u64| now + Duration::from_millis(millis);
@@ -1725,7 +1725,7 @@ mod tests {
         };
 
         let mut centered = lost(&[], DirectState::Direct);
-        assert!(centered.plan_regraft_on_last_link_loss(bob, now, 0.0));
+        assert!(centered.plan_regraft_on_link_loss(bob, now, 0.0));
         assert!(centered.take_regrafts_due(after(900)).is_empty(), "not yet");
         assert_eq!(centered.take_regrafts_due(after(1100)), vec![bob], "due");
         assert!(
@@ -1734,19 +1734,19 @@ mod tests {
         );
 
         let mut early = lost(&[], DirectState::Direct);
-        assert!(early.plan_regraft_on_last_link_loss(bob, now, -1.0));
+        assert!(early.plan_regraft_on_link_loss(bob, now, -1.0));
         assert_eq!(
             early.take_regrafts_due(after(750)),
             vec![bob],
             "jitter down"
         );
         let mut late = lost(&[], DirectState::Direct);
-        assert!(late.plan_regraft_on_last_link_loss(bob, now, 1.0));
+        assert!(late.plan_regraft_on_link_loss(bob, now, 1.0));
         assert!(late.take_regrafts_due(after(1250)).is_empty(), "jitter up");
         assert_eq!(late.take_regrafts_due(after(1350)), vec![bob]);
 
         let mut back = lost(&[], DirectState::Direct);
-        back.plan_regraft_on_last_link_loss(bob, now, 0.0);
+        back.plan_regraft_on_link_loss(bob, now, 0.0);
         back.link(bob);
         assert!(
             back.take_regrafts_due(after(1100)).is_empty(),
@@ -1755,18 +1755,18 @@ mod tests {
 
         let mut other_link = lost(&[carol], DirectState::Direct);
         assert!(
-            !other_link.plan_regraft_on_last_link_loss(bob, now, 0.0),
-            "another link is left"
+            other_link.plan_regraft_on_link_loss(bob, now, 0.0),
+            "a proven pair is grafted again whatever the other links are"
         );
         let mut unproven = lost(&[], DirectState::RelayOnly);
         assert!(
-            !unproven.plan_regraft_on_last_link_loss(bob, now, 0.0),
+            !unproven.plan_regraft_on_link_loss(bob, now, 0.0),
             "never proven"
         );
         let mut flapping = lost(&[], DirectState::Direct);
         flapping.note_relink(bob, now);
         assert!(
-            !flapping.plan_regraft_on_last_link_loss(bob, now, 0.0),
+            !flapping.plan_regraft_on_link_loss(bob, now, 0.0),
             "on the relink cooldown"
         );
     }
@@ -1785,11 +1785,11 @@ mod tests {
         };
 
         assert!(
-            !lost(PathKind::Relay).plan_regraft_on_last_link_loss(bob, now, 0.0),
+            !lost(PathKind::Relay).plan_regraft_on_link_loss(bob, now, 0.0),
             "the relay reading belongs to the race"
         );
         assert!(
-            lost(PathKind::Ip).plan_regraft_on_last_link_loss(bob, now, 0.0),
+            lost(PathKind::Ip).plan_regraft_on_link_loss(bob, now, 0.0),
             "an IP path is grafted again"
         );
     }
