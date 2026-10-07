@@ -3198,6 +3198,83 @@ mod tests {
         endpoint.close().await;
     }
 
+    /// **A graft that this node asks for opens the session of a lane peer.** In a mesh where every
+    /// pair needs the lane and nothing is sent, no frame is held. The graft of a member is the
+    /// reason for its session: without it the pair stays `Pending` for ever and no member links
+    /// to another member.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_graft_of_a_cold_lane_peer_opens_its_session() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+
+        let (endpoint, handle) = endpoint().await;
+        // Only the lower id offers, so the peer's key must be above ours.
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() > endpoint.id())
+            .expect("a key above ours");
+        let (server, _server_hub) = endpoint_with(key).await;
+        let peer = server.id();
+
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle);
+        state.local_udp_transport = true;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        let addr = EndpointAddr::new(peer)
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+        state
+            .peer_endpoints
+            .insert(crate::testing::nick("bob"), addr.clone());
+        assert!(
+            held_back(&state, &addr),
+            "cold: nothing asks for the session yet"
+        );
+
+        let grafted = crate::transport::probe::ensure_direct(&mut state, &ctx, peer, &addr);
+        assert!(!grafted, "the graft waits for the session");
+        assert!(
+            !held_back(&state, &addr),
+            "the graft asks for the session of the lane peer"
+        );
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "the session is offered at once"
+        );
+
+        // The dial to a closed signal port would hold its slot for a long deadline.
+        state.webrtc_admission.close();
+        endpoint.close().await;
+    }
+
     /// **A frame held on the higher-id node opens the session.** The lower id has no reason to
     /// offer, so the higher id offers when a frame is held for the peer, and the session attaches
     /// on both nodes.

@@ -458,6 +458,12 @@ pub(crate) fn ensure_direct(
         // A browser peer proves itself through `negotiate_session`; an IP
         // peer's probe is already running.
         state.direct.entry(peer).or_insert(DirectState::Pending);
+        if needs_webrtc {
+            // This graft is the reason for the session, as a held frame is. A cold pair that
+            // nobody sends to would stay `Pending` for ever, and no member would link to another.
+            state.want_lane_session(peer, Instant::now());
+            super::webrtc::negotiate_session(state, ctx, peer, peer_addr.clone());
+        }
         return false;
     }
     state.direct.insert(peer, DirectState::Pending);
