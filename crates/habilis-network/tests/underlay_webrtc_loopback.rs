@@ -139,6 +139,17 @@ impl Member {
         self.membership.node.underlay_ports().to_vec()
     }
 
+    /// Whether this member's multihop topology has a route to `peer` now.
+    async fn has_route(&self, peer: &str) -> bool {
+        self.membership
+            .request(|reply| Request::HasRoute {
+                peer: peer.to_owned(),
+                reply,
+            })
+            .await
+            .expect("the loop answers")
+    }
+
     /// How many `WebRTC` sessions the underlay of this member holds.
     async fn underlay_sessions(&self) -> usize {
         self.membership
@@ -174,10 +185,21 @@ impl Member {
         let started = Instant::now();
         let mut seen = None;
         let mut probes = 0_u32;
+        // When the topology first held a route to `peer`: a rung that stays on the
+        // relay with no route is a chain that did not close (the underlay session,
+        // the link-state), and one that stays on it with a route is the climb.
+        let mut route_since: Option<Duration> = None;
         while started.elapsed() < STEP_DEADLINE {
             probes += 1;
             let _ = self.send(peer, &format!("probe {step} {probes}")).await;
             seen = self.rung_to(peer).await;
+            if route_since.is_none() && self.has_route(peer).await {
+                route_since = Some(started.elapsed());
+                eprintln!(
+                    "TIMING {step}: a route to {peer} after {:?}",
+                    started.elapsed()
+                );
+            }
             if seen == Some(expected) {
                 return;
             }
@@ -185,7 +207,7 @@ impl Member {
         }
         panic!(
             "{step}: expected the rung {expected}, the last rung read was {seen:?} \
-             after {probes} probes"
+             after {probes} probes; a route to {peer} first held after {route_since:?}"
         );
     }
 
