@@ -1,0 +1,26 @@
+[package]
+name = "habilis-network-iroh-gossip-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "Gossip as an iroh custom transport: QUIC packets carried as frames on the mesh gossip topic."
+license = "MIT"
+repository = "https://github.com/agent-habilis/habilis-network"
+readme = "README.md"
+keywords = ["iroh", "transport", "p2p", "quic", "gossip"]
+categories = ["network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_iroh_gossip_transport"
+path = "src/lib.rs"
+
+[dependencies]
+# The id type of a frame's two ends. Named from iroh-base like the sibling
+# transport crates, so that the graph carries one copy of it.
+iroh-base.workspace = true
+bytes.workspace = true
