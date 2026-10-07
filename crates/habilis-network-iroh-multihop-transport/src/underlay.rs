@@ -244,6 +244,8 @@ pub(crate) struct Forwarder {
     inbound: mpsc::Sender<Delivered>,
     /// Cells refused by the gates in [`Forwarder::handle_cell`] or by a budget.
     dropped: AtomicU64,
+    /// Cells passed on to a next hop for other nodes. Our own sends are not counted.
+    forwarded: AtomicU64,
     /// What the relay may do for cells.
     rule: RelayRule,
 }
@@ -263,11 +265,17 @@ impl Forwarder {
             pool: Arc::new(WriterPool::default()),
             inbound,
             dropped: AtomicU64::new(0),
+            forwarded: AtomicU64::new(0),
             rule: RelayRule {
                 allow_relay,
                 stuck_after,
             },
         }
+    }
+
+    /// How many cells this node passed on for other nodes.
+    pub(crate) fn forwarded_cells(&self) -> u64 {
+        self.forwarded.load(Ordering::Relaxed)
     }
 
     /// The application ids of the hops stuck on the relay past the deadline.
@@ -366,6 +374,7 @@ impl Forwarder {
         match cell.next_hop() {
             Some(next) => {
                 let next = next.clone();
+                self.forwarded.fetch_add(1, Ordering::Relaxed);
                 self.enqueue(&next, cell.advanced());
             }
             None => self.deliver(cell),
@@ -631,6 +640,7 @@ mod tests {
         let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
         forwarder.handle_cell(subject, source.underlay.id);
         assert!(received.try_recv().is_ok());
+        assert_eq!(forwarder.forwarded_cells(), 0, "a delivery is not a forward");
     }
 
     #[tokio::test]
@@ -681,6 +691,16 @@ mod tests {
         forwarder.handle_cell(subject, source.underlay.id);
         assert!(received.try_recv().is_err(), "not ours to deliver");
         assert_eq!(live_writers(&forwarder), 1);
+        assert_eq!(forwarder.forwarded_cells(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_cell_is_not_counted_as_forwarded() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let source = stranger(1);
+        let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
+        forwarder.handle_cell(subject, source.underlay.id);
+        assert_eq!(forwarder.forwarded_cells(), 0);
     }
 
     /// A node whose underlay can only use the relay, as a forwarder with its

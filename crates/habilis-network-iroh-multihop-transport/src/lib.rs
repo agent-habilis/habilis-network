@@ -290,6 +290,27 @@ impl MultihopHandle {
         self.inner.forwarder.stuck_hops()
     }
 
+    /// How many cells this node passed on for other nodes. Cells it sends for
+    /// itself, and cells that end here, are not counted.
+    #[must_use]
+    pub fn forwarded_cells(&self) -> u64 {
+        self.inner.forwarder.forwarded_cells()
+    }
+
+    /// The application id of the peer whose multihop underlay endpoint is
+    /// `underlay_id`, from the link-vectors we hold. `None` if no vector names it.
+    ///
+    /// # Panics
+    /// If the routing-table lock is poisoned by a panic in another thread.
+    #[must_use]
+    pub fn app_id_of(&self, underlay_id: EndpointId) -> Option<EndpointId> {
+        self.inner
+            .topology
+            .read()
+            .expect("topology lock poisoned")
+            .app_id_of(underlay_id)
+    }
+
     /// This node's current underlay dial address, for advertising to peers so
     /// they can route through us.
     #[must_use]

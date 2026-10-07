@@ -276,6 +276,16 @@ impl Topology {
             .map(|held| held.vector.underlay.clone())
     }
 
+    /// The application id of the origin whose advertised underlay endpoint is
+    /// `underlay_id`, if we hold a vector from it.
+    #[must_use]
+    pub fn app_id_of(&self, underlay_id: EndpointId) -> Option<EndpointId> {
+        self.vectors
+            .iter()
+            .find(|(_, held)| held.vector.underlay.id == underlay_id)
+            .map(|(origin, _)| *origin)
+    }
+
     /// Up to `max_paths` **node-disjoint** source [`Route`]s from `src` to `dst`,
     /// shortest first — the primary plus failover candidates. A route is dropped
     /// if any hop hasn't advertised its underlay address yet (we can't dial a hop
@@ -592,6 +602,26 @@ mod tests {
         );
         // Every hop carries a dialable underlay addr for that node.
         assert_eq!(routes[0].hops()[0].underlay, EndpointAddr::new(nb));
+    }
+
+    #[test]
+    fn a_known_underlay_maps_to_its_app_id() {
+        let (alice, bob) = (eid(1), eid(2));
+        let (alice_underlay, bob_underlay) = (eid(101), eid(102));
+        let mut store = Topology::default();
+        for (origin, underlay) in [(alice, alice_underlay), (bob, bob_underlay)] {
+            let signed = LinkVector::signed(
+                &secret_of(origin),
+                1,
+                EndpointAddr::new(underlay),
+                Vec::new(),
+            );
+            ingest(&mut store, signed);
+        }
+        assert_eq!(store.app_id_of(bob_underlay), Some(bob));
+        assert_eq!(store.app_id_of(alice_underlay), Some(alice));
+        assert_eq!(store.app_id_of(eid(103)), None, "an unknown underlay");
+        assert_eq!(store.app_id_of(bob), None, "an app id is not an underlay id");
     }
 
     #[test]
