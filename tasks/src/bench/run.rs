@@ -11,7 +11,7 @@ use crate::util::wasm;
 use crate::util::{output, repo_root};
 
 use super::web::Engine::{Chrome, Safari};
-use super::{Args, Cell, Direction, native, serve, wanted, web};
+use super::{Args, Cell, Direction, multihop, native, serve, wanted, web};
 
 impl Direction {
     pub(crate) fn protocol(self) -> bench::Direction {
@@ -33,6 +33,7 @@ impl Cell {
             | Self::HabilisNetworkNativeNativeWebRtc
             | Self::LadderWebRtc => "webrtc",
             Self::HabilisNetworkNativeNative | Self::IrohNativeNative | Self::LadderUdp => "ip",
+            Self::LadderMultihopDirect | Self::LadderMultihopThird => "multihop",
             Self::RawChromeChrome | Self::RawChromeChromeDatagram => "data-channel",
         }
     }
@@ -45,6 +46,8 @@ impl Cell {
                 | Self::IrohNativeNative
                 | Self::LadderUdp
                 | Self::LadderWebRtc
+                | Self::LadderMultihopDirect
+                | Self::LadderMultihopThird
         )
     }
 }
@@ -447,6 +450,8 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             Cell::IrohNativeNative => runtime.block_on(native::iroh_native_native(args)),
             Cell::LadderUdp => runtime.block_on(native::ladder_udp(args)),
             Cell::LadderWebRtc => runtime.block_on(native::ladder_webrtc(args)),
+            Cell::LadderMultihopDirect => runtime.block_on(multihop::ladder_multihop_direct(args)),
+            Cell::LadderMultihopThird => runtime.block_on(multihop::ladder_multihop_third(args)),
         };
         let row = Row { cell, outcome };
         let line = format!("{}  {}", row.cell.label(), row.headline());

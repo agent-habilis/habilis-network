@@ -19,6 +19,8 @@ use crate::TaskOutcome;
 use crate::util::output;
 
 #[cfg(feature = "bench")]
+mod multihop;
+#[cfg(feature = "bench")]
 mod native;
 #[cfg(feature = "bench")]
 mod run;
@@ -92,9 +94,13 @@ pub(crate) enum Cell {
     LadderUdp,
     /// The ladder's `WebRTC` rung: str0m at both ends, with round trips.
     LadderWebRtc,
+    /// The ladder's multihop rung over a direct underlay link.
+    LadderMultihopDirect,
+    /// The ladder's multihop rung through a third member.
+    LadderMultihopThird,
 }
 
-const CELLS: [Cell; 11] = [
+const CELLS: [Cell; 13] = [
     Cell::HabilisNetworkChromeChrome,
     Cell::HabilisNetworkChromeNative,
     Cell::HabilisNetworkSafariNative,
@@ -106,6 +112,8 @@ const CELLS: [Cell; 11] = [
     Cell::RawChromeChromeDatagram,
     Cell::LadderUdp,
     Cell::LadderWebRtc,
+    Cell::LadderMultihopDirect,
+    Cell::LadderMultihopThird,
 ];
 
 impl Cell {
@@ -122,6 +130,8 @@ impl Cell {
             Self::RawChromeChromeDatagram => "webrtc chrome-chrome (raw, 1200 B msgs)",
             Self::LadderUdp => "ladder udp",
             Self::LadderWebRtc => "ladder webrtc",
+            Self::LadderMultihopDirect => "ladder multihop (direct)",
+            Self::LadderMultihopThird => "ladder multihop (via third)",
         }
     }
 }

@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use habilis_network_iroh_multihop_transport::MULTIHOP_TRANSPORT_ID;
 use habilis_network_iroh_webrtc_transport::bench::{
     BENCH_ALPN, Bench, exchange, on_webrtc, rtt_samples,
 };
@@ -131,6 +132,7 @@ pub(crate) fn selected_path(connection: &Connection) -> String {
             TransportAddr::Ip(_) => "ip",
             TransportAddr::Relay(_) => "relay",
             TransportAddr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => "webrtc",
+            TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID => "multihop",
             _ => "other",
         })
         .to_owned()
@@ -138,7 +140,7 @@ pub(crate) fn selected_path(connection: &Connection) -> String {
 
 /// One ladder cell over one connection from `client` to `server`: the transfer
 /// rounds, then the round trips, both on the selected path.
-async fn ladder_measure(
+pub(super) async fn ladder_measure(
     client: &Endpoint,
     server: EndpointAddr,
     args: &Args,
