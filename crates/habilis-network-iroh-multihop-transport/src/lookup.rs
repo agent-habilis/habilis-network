@@ -57,7 +57,7 @@ impl AddressLookup for MultihopLookup {
             .route_to(self.self_id, endpoint_id, 1)
             .into_iter()
             .next();
-        tracing::debug!(target: "habilis_lookup", me = %self.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = route.is_some(), "multihop lookup");
+        tracing::debug!(target: "habilis_lookup", me = %self.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = route.is_some(), hops = %route.as_ref().map_or_else(String::new, crate::addr::Route::describe), "multihop lookup");
         let route = route?;
         let info = EndpointInfo::from_parts(
             endpoint_id,

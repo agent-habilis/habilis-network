@@ -273,6 +273,9 @@ impl MultihopHandle {
             .route_to(self.inner.self_id, dst, 1)
             .into_iter()
             .next()
+            .inspect(|route| {
+                tracing::debug!(target: "habilis_lookup", me = %self.inner.self_id.fmt_short(), remote = %dst.fmt_short(), hops = %route.describe(), "multihop route chosen (route_addr)");
+            })
             .map(|route| route.encode())
     }
 
