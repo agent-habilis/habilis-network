@@ -18,6 +18,8 @@
 //! - `MESH_TRAFFIC_UNTIL_SECS=180`: the directed messages stop after that many seconds.
 //!   With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is
 //!   the run of the idle detach: sessions to members that are not neighbors must go.
+//! - `MESH_TRAFFIC_BURSTY=1`: instead of a message per second to every peer, every 60 to 240 s
+//!   (random) one message to each of 3 to 5 random peers.
 //! - `MESH_BLOCK_UDP_AFTER_SECS=60`: after that many seconds the node takes IP away
 //!   from every connection of the process, once. This is the second phase of the
 //!   underlay measurement: the app endpoint and the underlay fall back to `WebRTC`.
@@ -27,7 +29,9 @@
 //! Prints one line per second:
 //! `t <s> phase <1|2> peers <roster> links <gossip neighbors> sessions <app WebRTC
 //! sessions> underlay <underlay WebRTC sessions> rss_mb <current resident memory>
-//! idle_sessions <app WebRTC sessions to members that are not neighbors>`.
+//! idle_sessions <app WebRTC sessions to members that are not neighbors> qclose <closes of
+//! plain QUIC connections> qredial <of them followed by a connection to the same peer within
+//! 300 s> sclose <closes of WebRTC sessions> sredial <of them followed by one within 300 s>`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -101,6 +105,50 @@ async fn roster(sender: &mpsc::Sender<Request>) -> Option<(Vec<String>, usize)> 
     Some((nicks, links))
 }
 
+/// One directed message to each of `nicks`.
+async fn send_to<'a>(
+    sender: &mpsc::Sender<Request>,
+    nicks: impl IntoIterator<Item = &'a String>,
+) -> anyhow::Result<()> {
+    for nick in nicks {
+        let (reply, _) = oneshot::channel();
+        let _ = sender
+            .send(Request::Send {
+                to: Nickname::new(nick.clone()).ok(),
+                body: msg_body("load")?,
+                reply,
+            })
+            .await;
+    }
+    Ok(())
+}
+
+/// The traffic of this second. Steady: one message to every roster peer. Bursty: every 60 to
+/// 240 s, at random, one message to each of 3 to 5 random peers, so a connection is idle for
+/// a while, and then needed again.
+async fn talk(
+    sender: &mpsc::Sender<Request>,
+    nicks: &[String],
+    bursty: bool,
+    elapsed: u64,
+    next_burst: &mut u64,
+) -> anyhow::Result<()> {
+    use rand::seq::SliceRandom;
+    if !bursty {
+        return send_to(sender, nicks).await;
+    }
+    if elapsed >= *next_burst {
+        let mut rng = rand::rng();
+        let wanted = rand::Rng::random_range(&mut rng, 3..=5);
+        let mut targets: Vec<&String> = nicks.iter().collect();
+        targets.shuffle(&mut rng);
+        targets.truncate(wanted);
+        send_to(sender, targets).await?;
+        *next_burst = elapsed + rand::Rng::random_range(&mut rng, 60..=240);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -114,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
     let traffic = std::env::var("MESH_TRAFFIC").as_deref() != Ok("off");
     let block_udp_after = Some(env_number("MESH_BLOCK_UDP_AFTER_SECS")).filter(|secs| *secs > 0);
     let traffic_until = Some(env_number("MESH_TRAFFIC_UNTIL_SECS")).filter(|secs| *secs > 0);
+    let bursty = std::env::var("MESH_TRAFFIC_BURSTY").as_deref() == Ok("1");
     if std::env::var("MESH_UNDERLAY_LEG").as_deref() == Ok("off") {
         habilis_network::net::set_underlay_leg_off(true);
     }
@@ -166,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
 
     let started = Instant::now();
     let mut blocked = false;
+    let mut next_burst = rand::Rng::random_range(&mut rand::rng(), 60..=240);
     let ticker = async {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -187,26 +237,27 @@ async fn main() -> anyhow::Result<()> {
                 break;
             };
             if traffic && traffic_until.is_none_or(|until| elapsed < until) {
-                for nick in &nicks {
-                    let (reply, _) = oneshot::channel();
-                    let _ = sender
-                        .send(Request::Send {
-                            to: Nickname::new(nick.clone()).ok(),
-                            body: msg_body("load")?,
-                            reply,
-                        })
-                        .await;
-                }
+                talk(&sender, &nicks, bursty, elapsed, &mut next_burst).await?;
             }
             let underlay = count(&sender, |reply| Request::UnderlaySessions { reply }).await;
             let idle_sessions =
                 count(&sender, |reply| Request::SessionsToNonNeighbors { reply }).await;
+            let (reply, answer) = oneshot::channel();
+            let redials = if sender.send(Request::RedialCounts { reply }).await.is_ok() {
+                answer.await.unwrap_or([0; 4])
+            } else {
+                [0; 4]
+            };
             println!(
-                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions}",
+                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions} qclose {} qredial {} sclose {} sredial {}",
                 if blocked { 2 } else { 1 },
                 nicks.len(),
                 webrtc.session_count(),
                 current_resident_memory_mb().unwrap_or(0),
+                redials[0],
+                redials[1],
+                redials[2],
+                redials[3],
             );
         }
         anyhow::Ok(())

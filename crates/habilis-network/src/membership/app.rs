@@ -221,6 +221,18 @@ pub enum Request {
     SessionsToNonNeighbors {
         reply: oneshot::Sender<usize>,
     },
+    /// Tests only: the closes of direct connections, and how many of them were followed by
+    /// a connection to the same peer within 300 s, as `[quic closes, quic re-dials, session
+    /// closes, session re-dials]`. Each request samples the peers, so ask about once per
+    /// second.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    RedialCounts {
+        reply: oneshot::Sender<[u64; 4]>,
+    },
 }
 
 /// A rung of the path ladder, for [`Request::BlockRung`].
@@ -495,6 +507,32 @@ impl NodeDriver for MembershipApp {
                         .count()
                 });
                 let _ = reply.send(sessions);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::RedialCounts { reply } => {
+                let now = crate::util::clock::Instant::now();
+                let ids: Vec<_> = state.peer_endpoints.values().map(|addr| addr.id).collect();
+                for id in ids {
+                    let quic = state.webrtc_admission.has_live_connection(id);
+                    let session = state
+                        .webrtc
+                        .as_ref()
+                        .is_some_and(|hub| hub.has_session(&id));
+                    state.redials.quic.observe(now, id, quic);
+                    state.redials.session.observe(now, id, session);
+                }
+                let counts = [
+                    state.redials.quic.closes(),
+                    state.redials.quic.redials(),
+                    state.redials.session.closes(),
+                    state.redials.session.redials(),
+                ];
+                let _ = reply.send(counts);
                 false
             }
             #[cfg(all(

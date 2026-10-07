@@ -317,6 +317,17 @@ impl SignalAdmission {
         self.watch_dialed_gossip.store(on, Ordering::Relaxed);
     }
 
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    /// Tests only: whether the hook recorded a live connection to `peer`.
+    pub(crate) fn has_live_connection(&self, peer: EndpointId) -> bool {
+        self.lock().slots.get(&peer).is_some_and(|slot| {
+            slot.conns
+                .iter()
+                .filter_map(WeakConnectionHandle::upgrade)
+                .any(|conn| conn.close_reason().is_none())
+        })
+    }
+
     /// The peers whose session nothing has held for `window` (see
     /// [`Inner::take_idle`]). Each is handed back once, and the caller detaches
     /// it.

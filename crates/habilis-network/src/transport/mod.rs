@@ -29,6 +29,8 @@ pub(crate) mod outbox;
 pub(crate) mod path;
 mod pool;
 pub(crate) mod probe;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) mod redial;
 // The JSEP exchange that fills `lookup::TransportHandles::webrtc`. Portable:
 // a browser peer negotiates with a CLI peer over the same envelope, and only
 // the backend behind it differs.

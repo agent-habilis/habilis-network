@@ -50,6 +50,7 @@ full text.
 | `MESH_MAX_PEERS` | G, the gossip active view; `0` takes the engine default |
 | `MESH_MAX_SESSIONS` | D, the cap on WebRTC sessions; `0` takes the engine default. D has an effect only when `webrtc` is in the list: set `MESH_TRANSPORTS=udp,webrtc,multihop` for a run of D. The default list has no `webrtc` |
 | `MESH_TRAFFIC_UNTIL_SECS` | the directed messages stop after this many seconds. With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is the run of the idle detach |
+| `MESH_TRAFFIC_BURSTY` | `1`: instead of a message per second to every peer, every 60 to 240 s (random) one message to each of 3 to 5 random peers. A connection then idles, and is needed again |
 | `MESH_BLOCK_UDP_AFTER_SECS` | after this many seconds the node takes IP away from every connection of its process, once |
 | `MESH_UNDERLAY_LEG` | `off`: the multihop underlay holds no WebRTC leg (the control cell) |
 | `STAGGER` | seconds between two node starts (`run.sh`, default 0.3) |
@@ -64,7 +65,10 @@ t 123 phase 1 peers 47 links 32 sessions 0 underlay 0 rss_mb 91 idle_sessions 0
 
 `peers` is the roster, `links` the gossip neighbors, `sessions` the WebRTC sessions of
 the app endpoint, `underlay` those of the multihop underlay, and `rss_mb` the current
-resident memory. `idle_sessions` counts the WebRTC sessions to members that are not gossip
+resident memory. `qclose` and `sclose` count the closes of plain QUIC connections and of
+WebRTC sessions, and `qredial` and `sredial` the closes that were followed by a connection to
+the same peer within 300 s: `python3 scripts/perf/redial_report.py <run folder>` prints them
+per node per hour, and the share of closes that were followed by a re-dial. `idle_sessions` counts the WebRTC sessions to members that are not gossip
 neighbors. `phase` is 2 once the node has taken IP away.
 
 A run folder holds `n<i>.out` and `n<i>.err` per node, `summary.txt` (the last census

@@ -188,6 +188,9 @@ pub struct EventLoopState {
     /// A `NeighborUp` wanted to flood our `PeerInfo` inside the window and was
     /// held back. The alive tick pays it once the window ends.
     pub(crate) peerinfo_deferred: bool,
+    /// Tests only: the closes of direct connections and the reconnects soon after.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) redials: crate::transport::redial::Redials,
     /// Since when this node holds two or more links fewer than G, with the link to
     /// the rendezvous counted. Cleared as soon as it holds G - 1. See `note_link_count`.
     pub(crate) below_target_since: Option<Instant>,
@@ -696,6 +699,8 @@ impl EventLoopState {
             peerinfo_flooded_at: None,
             peerinfo_deferred: false,
             below_target_since: None,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            redials: crate::transport::redial::Redials::default(),
             join_fallback_at: None,
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
