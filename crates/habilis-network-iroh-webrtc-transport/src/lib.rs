@@ -78,7 +78,7 @@ mod selector;
 #[cfg(feature = "test-hooks")]
 pub use habilis_network_iroh_transport_util::Rung;
 #[cfg(feature = "test-hooks")]
-pub use selector::{block_ip_paths, block_ip_to, block_rung};
+pub use selector::{block_ip_paths, block_ip_to, block_rung, block_rung_to};
 mod signaling;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};

@@ -7,7 +7,9 @@
 //! in [`Rung`], shared with the `WebRTC` selector, so that it does not change
 //! with the list of transports.
 
-use habilis_network_iroh_transport_util::{Rung, climb, custom_rung, ip_remote, is_blocked};
+use habilis_network_iroh_transport_util::{
+    Rung, climb, custom_rung, ip_remote, is_blocked_to, webrtc_remote,
+};
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
@@ -28,8 +30,13 @@ impl MultihopLadder {
     /// Whether a path of `rung`, to the IP address `remote` (none for a relay or a
     /// custom path), is one that a test has not taken from this node. Always true
     /// without the `test-hooks` of `habilis-network-iroh-transport-util`.
-    fn usable(&self, rung: Rung, remote: Option<std::net::SocketAddr>) -> bool {
-        !is_blocked(self.local, rung, remote)
+    fn usable(
+        &self,
+        rung: Rung,
+        remote: Option<std::net::SocketAddr>,
+        remote_id: Option<iroh::EndpointId>,
+    ) -> bool {
+        !is_blocked_to(self.local, rung, remote, remote_id)
     }
 }
 
@@ -37,7 +44,7 @@ impl PathSelector for MultihopLadder {
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
         let chosen = climb(&paths, custom_rung, |rung, path| {
-            self.usable(rung, ip_remote(path))
+            self.usable(rung, ip_remote(path), webrtc_remote(path))
         });
         let mut selection = PathSelection::none();
         if let Some(path) = chosen {
@@ -49,7 +56,7 @@ impl PathSelector for MultihopLadder {
 
 #[cfg(test)]
 mod tests {
-    use habilis_network_iroh_transport_util::{block_ip_to, block_rung};
+    use habilis_network_iroh_transport_util::{block_ip_to, block_rung, block_rung_to};
 
     use super::*;
 
@@ -76,17 +83,23 @@ mod tests {
         let (local, other) = (node(21), node(22));
         let ladder = MultihopLadder::new(local);
         block_ip_to(local, [5000]);
-        assert!(!ladder.usable(Rung::Ip, Some(at(5000))), "the blocked port");
-        assert!(ladder.usable(Rung::Ip, Some(at(5001))), "another port");
-        assert!(ladder.usable(Rung::Multihop, None), "another rung");
-        assert!(ladder.usable(Rung::Relay, None), "another rung");
         assert!(
-            MultihopLadder::new(other).usable(Rung::Ip, Some(at(5000))),
+            !ladder.usable(Rung::Ip, Some(at(5000)), None),
+            "the blocked port"
+        );
+        assert!(
+            ladder.usable(Rung::Ip, Some(at(5001)), None),
+            "another port"
+        );
+        assert!(ladder.usable(Rung::Multihop, None, None), "another rung");
+        assert!(ladder.usable(Rung::Relay, None, None), "another rung");
+        assert!(
+            MultihopLadder::new(other).usable(Rung::Ip, Some(at(5000)), None),
             "another node"
         );
         block_ip_to(local, []);
         assert!(
-            ladder.usable(Rung::Ip, Some(at(5000))),
+            ladder.usable(Rung::Ip, Some(at(5000)), None),
             "an empty set clears"
         );
     }
@@ -96,10 +109,30 @@ mod tests {
         let (local, other) = (node(23), node(24));
         let ladder = MultihopLadder::new(local);
         block_rung(local, Rung::Multihop, true);
-        assert!(!ladder.usable(Rung::Multihop, None));
-        assert!(ladder.usable(Rung::Ip, Some(at(1))), "another rung");
-        assert!(MultihopLadder::new(other).usable(Rung::Multihop, None));
+        assert!(!ladder.usable(Rung::Multihop, None, None));
+        assert!(ladder.usable(Rung::Ip, Some(at(1)), None), "another rung");
+        assert!(MultihopLadder::new(other).usable(Rung::Multihop, None, None));
         block_rung(local, Rung::Multihop, false);
-        assert!(ladder.usable(Rung::Multihop, None));
+        assert!(ladder.usable(Rung::Multihop, None, None));
+    }
+
+    /// The ladder also gives up the `WebRTC` rung to one remote only, which is what
+    /// lets a test cut one pair of three members and keep the others.
+    #[test]
+    fn the_ladder_of_a_node_gives_up_webrtc_to_one_remote_only() {
+        let (local, cut, kept) = (node(25), node(26), node(27));
+        let ladder = MultihopLadder::new(local);
+        block_rung_to(local, Rung::WebRtc, cut, true);
+        assert!(!ladder.usable(Rung::WebRtc, None, Some(cut)));
+        assert!(
+            ladder.usable(Rung::WebRtc, None, Some(kept)),
+            "another remote"
+        );
+        assert!(
+            ladder.usable(Rung::Ip, Some(at(1)), Some(cut)),
+            "another rung"
+        );
+        block_rung_to(local, Rung::WebRtc, cut, false);
+        assert!(ladder.usable(Rung::WebRtc, None, Some(cut)));
     }
 }

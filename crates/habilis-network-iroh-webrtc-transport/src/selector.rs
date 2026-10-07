@@ -95,7 +95,9 @@ impl PathSelector for WebRtcPreferred {
 }
 
 #[cfg(feature = "test-hooks")]
-pub use habilis_network_iroh_transport_util::{block_ip_paths, block_ip_to, block_rung};
+pub use habilis_network_iroh_transport_util::{
+    block_ip_paths, block_ip_to, block_rung, block_rung_to,
+};
 
 #[cfg(test)]
 mod tests {

@@ -152,11 +152,25 @@ pub fn ip_remote(path: &PathSelectionData<'_>) -> Option<std::net::SocketAddr> {
     }
 }
 
+/// The endpoint id a `WebRTC` path leads to, read from its custom address, or
+/// `None` for any other path. A custom address of another transport carries no
+/// single remote (a multihop address is a route), so only `WebRTC` has one.
+#[must_use]
+pub fn webrtc_remote(path: &PathSelectionData<'_>) -> Option<iroh::EndpointId> {
+    match path.network_path().remote() {
+        Addr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => {
+            let bytes: [u8; 32] = addr.data().try_into().ok()?;
+            iroh::EndpointId::from_bytes(&bytes).ok()
+        }
+        Addr::Ip(_) | Addr::Relay(..) | Addr::Custom(_) => None,
+    }
+}
+
 /// Whether a test took the path `path` away from the node `local`, on `rung`:
-/// [`is_blocked`] for a selector, which has a path and not an address.
+/// [`is_blocked_to`] for a selector, which has a path and not an address.
 #[must_use]
 pub fn blocked(local: iroh::EndpointId, rung: Rung, path: &PathSelectionData<'_>) -> bool {
-    is_blocked(local, rung, ip_remote(path))
+    is_blocked_to(local, rung, ip_remote(path), webrtc_remote(path))
 }
 
 /// Without `test-hooks` nothing is ever blocked, so a selector reads the same
@@ -167,6 +181,18 @@ pub fn is_blocked(
     _local: iroh::EndpointId,
     _rung: Rung,
     _remote: Option<std::net::SocketAddr>,
+) -> bool {
+    false
+}
+
+/// [`is_blocked`], and the remote endpoint id of the path when it has one.
+#[cfg(not(feature = "test-hooks"))]
+#[must_use]
+pub fn is_blocked_to(
+    _local: iroh::EndpointId,
+    _rung: Rung,
+    _remote: Option<std::net::SocketAddr>,
+    _remote_id: Option<iroh::EndpointId>,
 ) -> bool {
     false
 }
@@ -187,8 +213,15 @@ static RUNGS_BLOCKED: std::sync::Mutex<
     Option<std::collections::HashSet<(iroh::EndpointId, Rung)>>,
 > = std::sync::Mutex::new(None);
 
+#[cfg(feature = "test-hooks")]
+static RUNGS_BLOCKED_TO: std::sync::Mutex<
+    Option<std::collections::HashSet<(iroh::EndpointId, Rung, iroh::EndpointId)>>,
+> = std::sync::Mutex::new(None);
+
 /// The pure table behind [`blocked`]: whether `rung` is taken from `local`, for a
 /// path whose IP remote is `remote` (`None` for a path that has no IP address).
+/// A block of one remote endpoint ([`block_rung_to`]) is not read here: use
+/// [`is_blocked_to`] for a path that may have one.
 ///
 /// # Panics
 ///
@@ -200,12 +233,40 @@ pub fn is_blocked(
     rung: Rung,
     remote: Option<std::net::SocketAddr>,
 ) -> bool {
+    is_blocked_to(local, rung, remote, None)
+}
+
+/// [`is_blocked`], and also the blocks of one remote endpoint
+/// ([`block_rung_to`]): `remote_id` is the endpoint a `WebRTC` path leads to
+/// (`None` for a path that has no single remote id).
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held a block table.
+#[cfg(feature = "test-hooks")]
+#[must_use]
+pub fn is_blocked_to(
+    local: iroh::EndpointId,
+    rung: Rung,
+    remote: Option<std::net::SocketAddr>,
+    remote_id: Option<iroh::EndpointId>,
+) -> bool {
     let rung_blocked = RUNGS_BLOCKED
         .lock()
         .expect("rung blocks")
         .as_ref()
         .is_some_and(|blocks| blocks.contains(&(local, rung)));
     if rung_blocked {
+        return true;
+    }
+    let remote_blocked = remote_id.is_some_and(|remote_id| {
+        RUNGS_BLOCKED_TO
+            .lock()
+            .expect("rung blocks to a remote")
+            .as_ref()
+            .is_some_and(|blocks| blocks.contains(&(local, rung, remote_id)))
+    });
+    if remote_blocked {
         return true;
     }
     rung == Rung::Ip
@@ -268,6 +329,26 @@ pub fn block_rung(local: iroh::EndpointId, rung: Rung, blocked: bool) {
         blocks.insert((local, rung));
     } else {
         blocks.remove(&(local, rung));
+    }
+}
+
+/// Tests only: while `blocked`, the endpoint `local` selects no path of `rung`
+/// that leads to the endpoint `remote`, and keeps the same rung to every other
+/// remote. It is [`block_rung`] for one remote, which a test needs to cut one pair
+/// of a group of nodes. Only a `WebRTC` path names its remote in its address, so
+/// only that rung is blocked this way: the block of any other rung has no effect.
+///
+/// # Panics
+///
+/// Panics if another thread panicked while it held the block table.
+#[cfg(feature = "test-hooks")]
+pub fn block_rung_to(local: iroh::EndpointId, rung: Rung, remote: iroh::EndpointId, blocked: bool) {
+    let mut blocks = RUNGS_BLOCKED_TO.lock().expect("rung blocks to a remote");
+    let blocks = blocks.get_or_insert_with(std::collections::HashSet::new);
+    if blocked {
+        blocks.insert((local, rung, remote));
+    } else {
+        blocks.remove(&(local, rung, remote));
     }
 }
 
@@ -411,6 +492,51 @@ mod tests {
         assert!(!is_blocked(other, Rung::Multihop, None), "another node");
         block_rung(blocked, Rung::Multihop, false);
         assert!(!is_blocked(blocked, Rung::Multihop, None));
+    }
+
+    /// A block of one remote takes the `WebRTC` rung from one remote only: another
+    /// remote, another node, another rung and a path with no remote id are not
+    /// touched.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_remote_block_takes_a_rung_from_one_remote_only() {
+        let (local, other_node) = (node(15), node(16));
+        let (cut, kept) = (node(17), node(18));
+        block_rung_to(local, Rung::WebRtc, cut, true);
+        assert!(is_blocked_to(local, Rung::WebRtc, None, Some(cut)));
+        assert!(
+            !is_blocked_to(local, Rung::WebRtc, None, Some(kept)),
+            "another remote"
+        );
+        assert!(
+            !is_blocked_to(other_node, Rung::WebRtc, None, Some(cut)),
+            "another node"
+        );
+        assert!(
+            !is_blocked_to(local, Rung::Multihop, None, Some(cut)),
+            "another rung"
+        );
+        assert!(
+            !is_blocked_to(local, Rung::WebRtc, None, None),
+            "a path that names no remote"
+        );
+        assert!(
+            !is_blocked(local, Rung::WebRtc, None),
+            "is_blocked reads no remote block"
+        );
+        block_rung_to(local, Rung::WebRtc, cut, false);
+        assert!(!is_blocked_to(local, Rung::WebRtc, None, Some(cut)));
+    }
+
+    /// A block of the whole rung still takes it from every remote.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_whole_rung_block_still_takes_the_rung_from_every_remote() {
+        let (local, remote) = (node(19), node(20));
+        block_rung(local, Rung::WebRtc, true);
+        assert!(is_blocked_to(local, Rung::WebRtc, None, Some(remote)));
+        block_rung(local, Rung::WebRtc, false);
+        assert!(!is_blocked_to(local, Rung::WebRtc, None, Some(remote)));
     }
 
     /// The property the three copies disagreed on.
