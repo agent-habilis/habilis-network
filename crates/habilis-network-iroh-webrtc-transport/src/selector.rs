@@ -25,14 +25,12 @@
 //! demoted relay path is what lets a connection survive a dead data channel —
 //! so the relay stays open and unused rather than being torn down.
 
-use habilis_network_iroh_transport_util::{Rung, blocked, climb, rung_of};
+use habilis_network_iroh_transport_util::{blocked, climb, custom_rung, rung_of};
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
 
-use crate::WEBRTC_TRANSPORT_ID;
-
-/// Prefers, in order: direct IP, `WebRTC`, multihop, relay.
+/// Prefers, in order: direct IP, `WebRTC`, multihop, gossip, relay.
 ///
 /// On a browser target the first rung is always empty — iroh's whole IP stack
 /// is `cfg(not(wasm_browser))`, and ICE *is* the tab's hole punch. A browser has
@@ -41,9 +39,9 @@ use crate::WEBRTC_TRANSPORT_ID;
 ///
 /// An endpoint has a single `Builder::path_selector` slot, so this selector and
 /// `MultihopLadder` cannot both be installed. They rank by the same ladder
-/// ([`Rung`]), which is what makes the last-call-wins wiring safe. This one does
-/// not know multihop's transport id: any custom transport that is not `WebRTC`
-/// stands on the multihop rung, as the only other one does.
+/// (`Rung`) and name a custom transport with the same function, `custom_rung` of
+/// `habilis-network-iroh-transport-util`, which is what makes the last-call-wins
+/// wiring safe.
 #[derive(Debug)]
 pub(crate) struct WebRtcPreferred {
     /// The endpoint this selector serves, so that a test can take paths away
@@ -54,21 +52,6 @@ pub(crate) struct WebRtcPreferred {
 impl WebRtcPreferred {
     pub(crate) fn new(local: iroh_base::EndpointId) -> Self {
         Self { local }
-    }
-}
-
-/// The rung of a custom transport that this crate does not name. This selector
-/// knows only its own transport id, so any other custom transport stands on the
-/// multihop rung. `MultihopLadder` does the opposite for a foreign id and ranks it
-/// below the relay. The two agree because they are never installed together
-/// where both kinds of path exist: a `WebRTC` path cannot reach `MultihopLadder`,
-/// which an endpoint gets only when its list has no `WebRTC`, and multihop is the
-/// only other custom transport. A third one needs both ids passed to `rung_of`.
-fn custom_rung(id: u64) -> Rung {
-    if id == WEBRTC_TRANSPORT_ID {
-        Rung::WebRtc
-    } else {
-        Rung::Multihop
     }
 }
 
@@ -113,3 +96,16 @@ impl PathSelector for WebRtcPreferred {
 
 #[cfg(feature = "test-hooks")]
 pub use habilis_network_iroh_transport_util::{block_ip_paths, block_ip_to, block_rung};
+
+#[cfg(test)]
+mod tests {
+    use habilis_network_iroh_transport_util::{Rung, custom_rung};
+
+    /// The ladder names this crate's transport by the id that the transport uses.
+    /// The ids are written twice, here and in the util crate, which is below this
+    /// one; this is the guard that they stay equal. It was green on its first run.
+    #[test]
+    fn the_ladder_knows_the_webrtc_transport_id_of_this_crate() {
+        assert_eq!(custom_rung(crate::WEBRTC_TRANSPORT_ID), Rung::WebRtc);
+    }
+}

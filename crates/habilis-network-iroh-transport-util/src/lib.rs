@@ -42,8 +42,8 @@ pub fn best_of<'a>(
 }
 
 /// One rung of the path ladder, best first: a direct IP path, then `WebRTC`, then
-/// multihop, then the relay. A node with every rung climbs to the highest one it
-/// has, and falls one rung when that path goes away.
+/// multihop, then gossip, then the relay. A node with every rung climbs to the
+/// highest one it has, and falls one rung when that path goes away.
 ///
 /// The order is the declaration order, and both selectors take it from here, so
 /// that it does not depend on which transports an endpoint has installed.
@@ -52,6 +52,10 @@ pub enum Rung {
     Ip,
     WebRtc,
     Multihop,
+    /// QUIC packets carried as frames on the mesh gossip topic. It stands above
+    /// the relay, which is infrastructure, and below every path between two
+    /// members.
+    Gossip,
     Relay,
     /// A custom transport that the caller does not name, below every other rung.
     Other,
@@ -59,10 +63,11 @@ pub enum Rung {
 
 impl Rung {
     /// Every rung, best first.
-    pub const LADDER: [Self; 5] = [
+    pub const LADDER: [Self; 6] = [
         Self::Ip,
         Self::WebRtc,
         Self::Multihop,
+        Self::Gossip,
         Self::Relay,
         Self::Other,
     ];
@@ -77,6 +82,30 @@ pub fn rung_of(path: &PathSelectionData<'_>, custom: impl Fn(u64) -> Rung) -> Ru
         Addr::Ip(_) => Rung::Ip,
         Addr::Relay(..) => Rung::Relay,
         Addr::Custom(addr) => custom(addr.id()),
+    }
+}
+
+/// Transport id of the `WebRTC` custom transport.
+pub const WEBRTC_TRANSPORT_ID: u64 = 0x5752_5443;
+/// Transport id of the multihop custom transport.
+pub const MULTIHOP_TRANSPORT_ID: u64 = 0x6d68;
+/// Transport id of the gossip custom transport.
+pub const GOSSIP_TRANSPORT_ID: u64 = 0x6773;
+
+/// The rung of a custom transport id: the one function every selector asks, so
+/// that no selector ranks a transport it does not know below the relay or above
+/// its place. An id that none of the three names is [`Rung::Other`].
+///
+/// The ids live here because this crate is below the transport crates, which
+/// cannot name each other. Each transport crate keeps its own constant, and a
+/// test in that crate checks that it equals the one here.
+#[must_use]
+pub fn custom_rung(id: u64) -> Rung {
+    match id {
+        WEBRTC_TRANSPORT_ID => Rung::WebRtc,
+        MULTIHOP_TRANSPORT_ID => Rung::Multihop,
+        GOSSIP_TRANSPORT_ID => Rung::Gossip,
+        _ => Rung::Other,
     }
 }
 
@@ -280,27 +309,47 @@ mod tests {
         );
         assert!(Rung::Ip < Rung::WebRtc);
         assert!(Rung::WebRtc < Rung::Multihop, "multihop is below WebRTC");
-        assert!(Rung::Multihop < Rung::Relay, "the relay is the last rung");
+        assert!(Rung::Multihop < Rung::Gossip, "gossip is below multihop");
+        assert!(Rung::Gossip < Rung::Relay, "the relay is below gossip");
+        assert!(Rung::Relay < Rung::Other, "a foreign transport is last");
     }
 
     /// The pure ladder: over every set of allowed rungs and every set of
-    /// available ones, the node stands on the best rung in both.
+    /// available ones, the node stands on the best rung in both. The order is
+    /// written out here and not read from `LADDER`, so that a rung missing from
+    /// `LADDER` fails this test.
     #[test]
     fn the_expected_rung_is_the_best_rung_that_is_allowed_and_available() {
+        const ORDER: [Rung; 6] = [
+            Rung::Ip,
+            Rung::WebRtc,
+            Rung::Multihop,
+            Rung::Gossip,
+            Rung::Relay,
+            Rung::Other,
+        ];
         let set = |mask: u8| move |rung: Rung| mask >> (rung as u8) & 1 == 1;
-        for allowed in 0..32u8 {
-            for available in 0..32u8 {
-                let expected = Rung::LADDER
+        for allowed in 0..64u8 {
+            for available in 0..64u8 {
+                let expected = ORDER
                     .into_iter()
-                    .filter(|&rung| set(allowed)(rung) && set(available)(rung))
-                    .min();
+                    .find(|&rung| set(allowed)(rung) && set(available)(rung));
                 assert_eq!(
                     expected_rung(set(allowed), set(available)),
                     expected,
-                    "allowed {allowed:#07b}, available {available:#07b}"
+                    "allowed {allowed:#08b}, available {available:#08b}"
                 );
             }
         }
+    }
+
+    /// One function names the rung of a custom transport id, for every selector.
+    #[test]
+    fn a_custom_transport_id_names_its_rung() {
+        assert_eq!(custom_rung(WEBRTC_TRANSPORT_ID), Rung::WebRtc);
+        assert_eq!(custom_rung(MULTIHOP_TRANSPORT_ID), Rung::Multihop);
+        assert_eq!(custom_rung(GOSSIP_TRANSPORT_ID), Rung::Gossip);
+        assert_eq!(custom_rung(0x1234), Rung::Other, "a foreign id is last");
     }
 
     #[test]
