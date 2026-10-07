@@ -1,5 +1,5 @@
 //! Path selection for an endpoint that has multihop and no `WebRTC`: the same
-//! ladder as the `WebRTC` selector, IP, then multihop, then the relay.
+//! ladder as the `WebRTC` selector, IP, then multihop, then gossip, then the relay.
 //!
 //! iroh's default selector treats a custom transport as primary. This one puts
 //! multihop below a direct path and above the relay: a route through other
@@ -7,12 +7,10 @@
 //! in [`Rung`], shared with the `WebRTC` selector, so that it does not change
 //! with the list of transports.
 
-use habilis_network_iroh_transport_util::{Rung, climb, ip_remote, is_blocked};
+use habilis_network_iroh_transport_util::{Rung, climb, custom_rung, ip_remote, is_blocked};
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
-
-use crate::MULTIHOP_TRANSPORT_ID;
 
 /// The ladder of one node. `local` is the endpoint this selector serves, so that a
 /// test can take a rung, or an IP port, away from this node alone: the underlay
@@ -35,16 +33,6 @@ impl MultihopLadder {
     }
 }
 
-/// The rung of a custom transport id. A foreign one ranks below the relay. See
-/// `WebRtcPreferred` in the `WebRTC` crate for why the two functions agree.
-fn custom_rung(id: u64) -> Rung {
-    if id == MULTIHOP_TRANSPORT_ID {
-        Rung::Multihop
-    } else {
-        Rung::Other
-    }
-}
-
 impl PathSelector for MultihopLadder {
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
@@ -64,6 +52,14 @@ mod tests {
     use habilis_network_iroh_transport_util::{block_ip_to, block_rung};
 
     use super::*;
+
+    /// The ladder names this crate's transport by the id that the transport uses.
+    /// The ids are written twice, here and in the util crate, which is below this
+    /// one; this is the guard that they stay equal.
+    #[test]
+    fn the_ladder_knows_the_multihop_transport_id_of_this_crate() {
+        assert_eq!(custom_rung(crate::MULTIHOP_TRANSPORT_ID), Rung::Multihop);
+    }
 
     fn node(seed: u8) -> iroh::EndpointId {
         iroh::SecretKey::from_bytes(&[seed; 32]).public()
