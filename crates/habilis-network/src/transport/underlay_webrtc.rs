@@ -194,6 +194,7 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
         );
         let addr = addr.clone();
         let ice = state.webrtc_ice;
+        let epoch = guard.epoch();
         let task = n0_future::task::spawn(async move {
             let _guard = guard;
             match Box::pin(super::webrtc::dial_signal(&endpoint, addr, &handle, ice)).await {
@@ -214,7 +215,7 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
                 }
             }
         });
-        underlay.admission.track(peer, task.abort_handle());
+        underlay.admission.track(peer, epoch, task.abort_handle());
     }
 }
 

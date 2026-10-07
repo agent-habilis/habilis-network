@@ -348,6 +348,12 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         //   here and their `Connection`s dropped with them. Before this, a peer
         //   that connected and never opened a stream left a detached task
         //   parked on `accept_bi` forever, one per connection.
+        // Glare: when the lower id offers while our own offer to it runs, ours is given up and the
+        // offer of the lower id is answered. The lower id always wins; it refuses a crossed offer
+        // of the higher id, as the lower id has always done.
+        if remote < self.local && self.admission.preempt_offer(remote) {
+            tracing::debug!(target: LOG_TARGET, %remote, "gave up our offer for the offer of the lower id");
+        }
         let guard = match self.admission.try_admit(remote, &self.handle) {
             Ok(guard) => guard,
             Err(reason) => {
@@ -363,6 +369,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             }
         };
 
+        let epoch = guard.epoch();
         let handle = self.handle.clone();
         let endpoint = self.endpoint.clone();
         let local = self.local;
@@ -420,7 +427,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                 }
             }
         });
-        self.admission.track(remote, task.abort_handle());
+        self.admission.track(remote, epoch, task.abort_handle());
         Ok(())
     }
 
@@ -718,9 +725,11 @@ pub(crate) fn negotiate_session(
         );
         return;
     }
-    // The higher id waits to be dialled, so exactly one offer crosses per pair.
+    // The higher id waits to be dialled, so one offer crosses per pair. Unless a frame is held for
+    // the peer: that frame cannot wait for an offer that the lower id has no reason to make. If
+    // both offer at once, the lower id wins (see `WebRtcSignalAcceptor::accept`).
     let local = ctx.endpoint.id();
-    if local > peer {
+    if local > peer && !state.lane_session_wanted(peer, crate::util::clock::Instant::now()) {
         return;
     }
     // Every other gate — already have a session, already negotiating, at the
@@ -729,7 +738,7 @@ pub(crate) fn negotiate_session(
     // function is called in a tight loop by `retry_sessions` with nothing
     // awaited between calls, so a check that read only `session_count()` saw
     // the same zero twenty times and spawned twenty dials.
-    let guard = match state.webrtc_admission.try_admit(peer, &handle) {
+    let guard = match state.webrtc_admission.try_admit_offer(peer, &handle) {
         Ok(guard) => guard,
         Err(reason) => {
             tracing::debug!(target: LOG_TARGET, %peer, ?reason, "not negotiating");
@@ -867,6 +876,7 @@ fn spawn_offer_round(
     let ice = state.webrtc_ice;
     let proven = state.direct_proven.clone();
     let pool = state.unicast_pool.clone();
+    let epoch = guard.epoch();
     let task = n0_future::task::spawn(async move {
         let _guard = guard;
         if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
@@ -895,7 +905,9 @@ fn spawn_offer_round(
             let _ = proven.send(crate::transport::probe::DirectOutcome { peer, direct: true });
         }
     });
-    state.webrtc_admission.track(peer, task.abort_handle());
+    state
+        .webrtc_admission
+        .track(peer, epoch, task.abort_handle());
 }
 
 /// Whether the periodic heal legs may graft-dial the rendezvous at all.
@@ -1586,6 +1598,20 @@ mod tests {
     /// Offline: loopback only, no relay, no address lookup.
     async fn endpoint() -> (Endpoint, WebRtcHandle) {
         let key = SecretKey::generate();
+        let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .add_custom_transport(handle.transport())
+            .bind()
+            .await
+            .expect("bind loopback endpoint");
+        (endpoint, handle)
+    }
+
+    /// [`endpoint`] with the key given.
+    async fn endpoint_with(key: SecretKey) -> (Endpoint, WebRtcHandle) {
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
@@ -2871,6 +2897,176 @@ mod tests {
         );
         router.shutdown().await.expect("shutdown");
         endpoint.close().await;
+    }
+
+    /// **A frame held on the higher-id node opens the session.** The lower id has no reason to
+    /// offer, so the higher id offers when a frame is held for the peer, and the session attaches
+    /// on both nodes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frame_held_on_the_higher_id_node_opens_the_session() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+
+        let (endpoint, handle) = endpoint().await;
+        // Only the lower id offers unless a frame is held, and here the peer is the lower id.
+        // The id of our endpoint is random, so many seeds are tried.
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() < endpoint.id())
+            .expect("a key below ours");
+        let (server, server_hub) = endpoint_with(key).await;
+        let server_admission = SignalAdmission::new(8);
+        let router = serve(&server, &server_hub, &server_admission);
+
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle.clone());
+        state.local_udp_transport = false;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state
+            .peer_endpoints
+            .insert(crate::testing::nick("bob"), server.addr());
+
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "an idle lane peer is not offered a session"
+        );
+
+        state.want_lane_session(server.id(), crate::util::clock::Instant::now());
+        retry_sessions(&mut state, &ctx);
+        assert!(
+            until(|| handle.has_session(&server.id()) && server_hub.has_session(&endpoint.id()))
+                .await,
+            "a frame is held for the lower id: the higher id offers, and the session attaches"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        server.close().await;
+        endpoint.close().await;
+    }
+
+    /// **Glare.** Both nodes of a pair offer at once. The lower id wins: the higher id gives its
+    /// offer up when the offer of the lower id arrives, and answers it. The pair ends with exactly
+    /// one session, and the offer that was given up is cancelled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_crossed_pair_ends_with_one_session_and_the_lower_id_wins() {
+        let (first, first_hub) = endpoint().await;
+        let (second, second_hub) = endpoint().await;
+        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+            ((first, first_hub), (second, second_hub))
+        } else {
+            ((second, second_hub), (first, first_hub))
+        };
+        let lower_admission = SignalAdmission::new(8);
+        let higher_admission = SignalAdmission::new(8);
+        let lower_router = serve(&lower, &lower_hub, &lower_admission);
+        let higher_router = serve(&higher, &higher_hub, &higher_admission);
+
+        // The higher id has an offer to the lower id in flight that never ends on its own.
+        let offer = higher_admission
+            .try_admit_offer(lower.id(), &higher_hub)
+            .expect("the higher id offers");
+        let epoch = offer.epoch();
+        let offering = tokio::spawn(async move {
+            let _offer = offer;
+            std::future::pending::<()>().await;
+        });
+        higher_admission.track(lower.id(), epoch, offering.abort_handle());
+
+        dial_signal_with(
+            &lower,
+            higher.addr(),
+            &lower_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the offer of the lower id is answered");
+
+        assert!(
+            until(|| higher_hub.has_session(&lower.id())).await,
+            "the higher id answered"
+        );
+        assert!(lower_hub.has_session(&higher.id()));
+        assert_eq!(lower_hub.session_count(), 1);
+        assert_eq!(higher_hub.session_count(), 1);
+        assert!(
+            offering
+                .await
+                .expect_err("the offer is cancelled")
+                .is_cancelled(),
+            "the higher id gave its offer up"
+        );
+
+        higher_router.shutdown().await.expect("shutdown");
+        lower_router.shutdown().await.expect("shutdown");
+        higher.close().await;
+        lower.close().await;
+    }
+
+    /// The offer of the lower id is refused as before when the round that runs is an answer, not
+    /// an offer of the higher id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_lower_id_still_refuses_a_crossed_offer() {
+        let (first, first_hub) = endpoint().await;
+        let (second, second_hub) = endpoint().await;
+        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+            ((first, first_hub), (second, second_hub))
+        } else {
+            ((second, second_hub), (first, first_hub))
+        };
+        let lower_admission = SignalAdmission::new(8);
+        let lower_router = serve(&lower, &lower_hub, &lower_admission);
+
+        // The lower id has its own offer to the higher id in flight.
+        let _offer = lower_admission
+            .try_admit_offer(higher.id(), &lower_hub)
+            .expect("the lower id offers");
+
+        let outcome = dial_signal_with(
+            &higher,
+            lower.addr(),
+            &higher_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await;
+
+        assert!(outcome.is_err(), "the lower id keeps its own offer");
+        assert_eq!(lower_hub.session_count(), 0);
+
+        lower_router.shutdown().await.expect("shutdown");
+        higher.close().await;
+        lower.close().await;
     }
 
     #[test]

@@ -178,6 +178,10 @@ struct Slot {
     round: Option<Round>,
     /// Every QUIC connection to the peer, whatever its protocol or path.
     conns: Vec<WeakConnectionHandle>,
+    /// Which round holds the slot: a guard releases the slot only if its round still does.
+    epoch: u64,
+    /// The round that holds the slot is an offer of this node, not an answer.
+    outgoing: bool,
 }
 
 impl Slot {
@@ -185,6 +189,8 @@ impl Slot {
         Self {
             round: None,
             conns: Vec::new(),
+            epoch: 0,
+            outgoing: false,
         }
     }
 }
@@ -469,6 +475,19 @@ impl SignalAdmission {
     where
         H: Sessions + Clone,
     {
+        self.admit(peer, handle, now, false)
+    }
+
+    fn admit<H>(
+        &self,
+        peer: EndpointId,
+        handle: &H,
+        now: Instant,
+        outgoing: bool,
+    ) -> Result<AdmissionGuard, Refusal>
+    where
+        H: Sessions + Clone,
+    {
         let mut inner = self.lock();
         if inner.closed {
             return Err(Refusal::ShuttingDown);
@@ -491,12 +510,50 @@ impl SignalAdmission {
         if inner.hub.is_none() {
             inner.hub = Some(Arc::new(handle.clone()));
         }
-        inner.slot(peer).round = Some(Round::Admitted);
+        let slot = inner.slot(peer);
+        slot.round = Some(Round::Admitted);
+        slot.epoch += 1;
+        slot.outgoing = outgoing;
+        let epoch = slot.epoch;
         drop(inner);
         Ok(AdmissionGuard {
             admission: self.clone(),
             peer,
+            epoch,
         })
+    }
+
+    /// [`Self::try_admit`] for a round that this node offers, not one that it answers. Only such
+    /// a round can be given up for an offer of the peer, see [`Self::preempt_offer`].
+    pub(crate) fn try_admit_offer<H>(
+        &self,
+        peer: EndpointId,
+        handle: &H,
+    ) -> Result<AdmissionGuard, Refusal>
+    where
+        H: Sessions + Clone,
+    {
+        self.admit(peer, handle, Instant::now(), true)
+    }
+
+    /// The peer offers a session while this node's own offer to it runs: give ours up, so that the
+    /// peer's offer is answered. Returns whether an offer was given up. A round that answers is
+    /// never given up, and the guard of the round that was given up releases nothing later.
+    pub(crate) fn preempt_offer(&self, peer: EndpointId) -> bool {
+        let mut inner = self.lock();
+        let Some(slot) = inner
+            .slots
+            .get_mut(&peer)
+            .filter(|slot| slot.outgoing && slot.round.is_some())
+        else {
+            return false;
+        };
+        if let Some(Round::Running(abort)) = slot.round.take() {
+            abort.abort();
+        }
+        slot.epoch += 1;
+        slot.outgoing = false;
+        true
     }
 
     /// Record the task holding `peer`'s slot, so shutdown can cancel it.
@@ -504,14 +561,19 @@ impl SignalAdmission {
     /// Separate from `try_admit` because the slot must be claimed *before* the
     /// task is spawned — that ordering is what bounds the task count — and the
     /// abort handle does not exist until after.
-    pub(crate) fn track(&self, peer: EndpointId, abort: AbortHandle) {
-        if let Some(round) = self
+    ///
+    /// `epoch` names the round, from [`AdmissionGuard::epoch`]. A round that was given up before
+    /// its task was recorded has its task aborted here.
+    pub(crate) fn track(&self, peer: EndpointId, epoch: u64, abort: AbortHandle) {
+        match self
             .lock()
             .slots
             .get_mut(&peer)
+            .filter(|slot| slot.epoch == epoch)
             .and_then(|slot| slot.round.as_mut())
         {
-            *round = Round::Running(abort);
+            Some(round) => *round = Round::Running(abort),
+            None => abort.abort(),
         }
     }
 
@@ -564,8 +626,10 @@ impl SignalAdmission {
             .is_some_and(|slot| slot.round.is_some())
     }
 
-    fn release(&self, peer: EndpointId) {
-        if let Some(slot) = self.lock().slots.get_mut(&peer) {
+    fn release(&self, peer: EndpointId, epoch: u64) {
+        if let Some(slot) = self.lock().slots.get_mut(&peer)
+            && slot.epoch == epoch
+        {
             slot.round = None;
         }
     }
@@ -745,11 +809,19 @@ impl EndpointHooks for ConnectionHook {
 pub(crate) struct AdmissionGuard {
     admission: SignalAdmission,
     peer: EndpointId,
+    epoch: u64,
+}
+
+impl AdmissionGuard {
+    /// Which round of the peer this guard holds.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 impl Drop for AdmissionGuard {
     fn drop(&mut self) {
-        self.admission.release(self.peer);
+        self.admission.release(self.peer, self.epoch);
     }
 }
 
@@ -835,13 +907,14 @@ mod tests {
         let admission = SignalAdmission::new(16);
         let hub = hub();
         let guard = admission.try_admit(peer(1), &hub).expect("admit");
+        let epoch = guard.epoch();
 
         let task = n0_future::task::spawn(async move {
             let _guard = guard;
             // Never returns on its own — only an abort ends this.
             std::future::pending::<()>().await;
         });
-        admission.track(peer(1), task.abort_handle());
+        admission.track(peer(1), epoch, task.abort_handle());
         assert_eq!(admission.in_flight(), 1);
 
         admission.close();
@@ -923,6 +996,39 @@ mod tests {
         assert_eq!(hub.live_peers().len(), ceiling, "every session stays");
         assert_eq!(admission.direct_units(), ceiling);
         assert_eq!(admission.over_ceiling(), 0);
+    }
+
+    /// Glare: our offer to a peer is given up for the offer of that peer. The guard of the offer
+    /// that was given up must not release the round that took its place.
+    #[test]
+    fn a_preempted_offer_does_not_release_the_round_that_replaced_it() {
+        let admission = SignalAdmission::new(8);
+        let hub = FakeHub::default();
+        let offer = admission.try_admit_offer(peer(1), &hub).expect("offer");
+        assert!(admission.preempt_offer(peer(1)), "our offer is given up");
+        assert_eq!(admission.in_flight(), 0);
+
+        let answer = admission
+            .try_admit(peer(1), &hub)
+            .expect("the peer's offer");
+        drop(offer);
+        assert_eq!(admission.in_flight(), 1, "the answer keeps its slot");
+        drop(answer);
+        assert_eq!(admission.in_flight(), 0);
+    }
+
+    /// A round that answers an offer is never given up for another offer of the same peer.
+    #[test]
+    fn a_round_that_answers_is_not_preempted() {
+        let admission = SignalAdmission::new(8);
+        let hub = FakeHub::default();
+        let _answer = admission.try_admit(peer(1), &hub).expect("answer");
+        assert!(!admission.preempt_offer(peer(1)));
+        assert_eq!(admission.in_flight(), 1);
+        assert_eq!(
+            admission.try_admit(peer(1), &hub).unwrap_err(),
+            Refusal::InFlight
+        );
     }
 
     #[test]
