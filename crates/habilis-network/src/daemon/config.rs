@@ -173,6 +173,11 @@ pub struct EventLoopConfig {
     /// there.
     #[cfg(feature = "host")]
     pub(crate) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
+    /// The `WebRTC` leg of the multihop underlay; `run()` moves it into
+    /// `EventLoopState::underlay_webrtc`. `None` when multihop is off, and on an
+    /// injected endpoint, whose underlay the caller built.
+    #[cfg(feature = "host")]
+    pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
     /// This peer's `WebRTC` transport handle. Portable: it is the browser's
     /// only direct path onto the mesh, and an extra candidate path for a native
     /// peer. `run()` moves it into `EventLoopState::webrtc`.

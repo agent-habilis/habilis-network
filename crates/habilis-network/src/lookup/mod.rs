@@ -366,7 +366,7 @@ pub async fn build_endpoint(
     // IP paths away from a pair (`habilis_network_iroh_webrtc_transport::block_ip_to`)
     // needs a selector on it that reads the same tables.
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
-    if let Some(id) = underlay_id.filter(|_| underlay) {
+    if let Some(id) = underlay_id.filter(|_| underlay && transports.webrtc.is_none()) {
         builder = builder
             .path_selector(habilis_network_iroh_multihop_transport::underlay_path_selector(id));
     }
@@ -690,7 +690,9 @@ fn mint_secret() -> SecretKey {
 ///
 /// # Errors
 /// Returns an error if either endpoint fails to bind.
-#[cfg(feature = "host")]
+// The engine builds through `build_peer_multihop_with`; this is the form without
+// the `WebRTC` leg of the underlay, which the tests of the receive path build with.
+#[cfg(all(feature = "host", test))]
 pub(crate) async fn build_peer_multihop(
     lookups: &LookupOpts,
     opts: TransportOpts,
@@ -701,25 +703,96 @@ pub(crate) async fn build_peer_multihop(
     habilis_network_iroh_multihop_transport::MultihopHandle,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
 )> {
+    let (endpoint, handle, webrtc, _underlay_webrtc) =
+        build_peer_multihop_with(lookups, opts, admission, relay_payload, None).await?;
+    Ok((endpoint, handle, webrtc))
+}
+
+/// [`build_peer_multihop`], and with `underlay_cap` set the underlay also gets a
+/// `WebRTC` leg: its own `WebRtcHandle`, an admission table with that cap (G),
+/// and the signal protocol on its router, answered for gossip neighbors only.
+/// See [`crate::transport::underlay_webrtc`]. `None`, or an instance with
+/// `WebRTC` off, leaves the underlay on IP and the relay.
+///
+/// # Errors
+/// Returns an error if either endpoint fails to bind.
+#[cfg(feature = "host")]
+pub(crate) async fn build_peer_multihop_with(
+    lookups: &LookupOpts,
+    opts: TransportOpts,
+    admission: Option<&crate::transport::SignalAdmission>,
+    relay_payload: bool,
+    underlay_cap: Option<usize>,
+) -> Result<(
+    Endpoint,
+    habilis_network_iroh_multihop_transport::MultihopHandle,
+    habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+)> {
     let secret = mint_secret();
     let webrtc = new_webrtc_handle(secret.public());
+    let underlay_secret = habilis_network_iroh_multihop_transport::underlay_secret(&secret);
+    // The `WebRTC` leg of the underlay: the handle and the table are made before
+    // the endpoint, because the endpoint takes the transport and reports its
+    // connections to the table from the first handshake on.
+    let underlay_leg = underlay_cap.filter(|_| opts.webrtc).map(|cap| {
+        (
+            new_webrtc_handle(underlay_secret.public()),
+            crate::transport::SignalAdmission::new(cap),
+        )
+    });
     let underlay = build_endpoint(
         lookups,
-        Some(habilis_network_iroh_multihop_transport::underlay_secret(
-            &secret,
-        )),
+        Some(underlay_secret),
         None,
         Vec::new(),
         TransportHandles {
             underlay: true,
+            webrtc: underlay_leg.as_ref().map(|(handle, _)| handle.clone()),
+            admission: underlay_leg.as_ref().map(|(_, table)| table.clone()),
             ..TransportHandles::default()
         },
     )
     .await?;
-    let handle = habilis_network_iroh_multihop_transport::MultihopHandle::new(
+    let mut protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = Vec::new();
+    let mut underlay_webrtc = None;
+    if let Some((handle, table)) = underlay_leg {
+        let allowed = crate::transport::underlay_webrtc::Allowed::default();
+        let ice = crate::transport::IceProfile {
+            host_only: lookups.is_loopback(),
+        };
+        let acceptor = crate::transport::WebRtcSignalAcceptor::new(
+            handle.clone(),
+            underlay.clone(),
+            underlay.id(),
+            table.clone(),
+            ice,
+        );
+        protocols.push((
+            crate::transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
+            Box::new(crate::transport::underlay_webrtc::UnderlaySignalGate::new(
+                acceptor,
+                allowed.clone(),
+            )),
+        ));
+        // A session that attached is used only after a connect that completes, and
+        // the nudge is that connect: see `webrtc::nudge_session`.
+        protocols.push((
+            crate::transport::webrtc::NUDGE_ALPN.to_vec(),
+            Box::new(crate::transport::webrtc::NudgeAcceptor),
+        ));
+        underlay_webrtc = Some(crate::transport::underlay_webrtc::UnderlayWebRtc {
+            handle,
+            admission: table,
+            endpoint: underlay.clone(),
+            allowed,
+        });
+    }
+    let handle = habilis_network_iroh_multihop_transport::MultihopHandle::with_protocols(
         &secret,
         underlay,
         multihop_handle_config(relay_payload),
+        protocols,
     )?;
     let endpoint = build_endpoint(
         lookups,
@@ -735,7 +808,7 @@ pub(crate) async fn build_peer_multihop(
         },
     )
     .await?;
-    Ok((endpoint, handle, webrtc))
+    Ok((endpoint, handle, webrtc, underlay_webrtc))
 }
 
 /// Register a peer's address so the endpoint can connect to it.

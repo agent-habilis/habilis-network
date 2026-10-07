@@ -92,6 +92,8 @@ pub async fn run<A: NodeDriver>(
         state_file,
         #[cfg(feature = "host")]
         multihop,
+        #[cfg(feature = "host")]
+        underlay_webrtc,
         webrtc,
         webrtc_enabled,
         local_udp_transport,
@@ -178,6 +180,7 @@ pub async fn run<A: NodeDriver>(
     #[cfg(feature = "host")]
     {
         state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
+        state.underlay_webrtc = underlay_webrtc;
     }
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
@@ -708,6 +711,12 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // hiccup) is never retried, and the pair stays relay-only for
                 // the life of the link. Observed exactly that, CLI↔browser.
                 crate::transport::webrtc::retry_sessions(&mut state, &ctx);
+                // The same for the sessions of the multihop underlay, which open
+                // only to a neighbor that has no IP path to us.
+                #[cfg(feature = "host")]
+                if let Some(underlay) = state.underlay_webrtc.clone() {
+                    crate::transport::underlay_webrtc::tick(&state, &underlay);
+                }
                 // Same cadence for the direct-path probes a lookup-only relay
                 // holds grafts on: a peer whose punch missed the deadline, or
                 // whose session attached since, gets another look.

@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::gossip::event::{NodeEvent, NodeSink};
 #[cfg(feature = "host")]
-use crate::lookup::build_peer_multihop;
+use crate::lookup::build_peer_multihop_with;
 use crate::lookup::{
     StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
 };
@@ -213,6 +213,7 @@ async fn build_member_endpoint(
     Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
     crate::transport::SignalAdmission,
+    Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
 )> {
     if let Some(injected) = build.injected.as_ref() {
         // Shared endpoint: no key to mint, nothing to bind. The caller built it
@@ -237,25 +238,30 @@ async fn build_member_endpoint(
             build.lookups,
             build.relay_transport,
         )?;
+        // The caller built the underlay of its handle itself, so there is no
+        // `WebRTC` leg on it.
         return Ok((
             injected.endpoint.clone(),
             multihop.cloned(),
             injected.webrtc.clone(),
             injected.admission.clone(),
+            None,
         ));
     }
     // Made before the endpoint, because the endpoint reports its connections
     // to this table from the first handshake on.
     let admission = crate::transport::SignalAdmission::new(build.max_sessions);
     if build.multihop {
-        let (endpoint, handle, webrtc) = build_peer_multihop(
+        // The underlay holds a session only to a gossip neighbor, so G caps them.
+        let (endpoint, handle, webrtc, underlay_webrtc) = build_peer_multihop_with(
             build.lookups,
             build.transports,
             Some(&admission),
             build.relay_transport,
+            Some(build.max_peers),
         )
         .await?;
-        Ok((endpoint, Some(handle), webrtc, admission))
+        Ok((endpoint, Some(handle), webrtc, admission, underlay_webrtc))
     } else {
         let (endpoint, webrtc) = crate::lookup::build_peer_webrtc_with(
             build.lookups,
@@ -263,7 +269,7 @@ async fn build_member_endpoint(
             Some(&admission),
         )
         .await?;
-        Ok((endpoint, None, webrtc, admission))
+        Ok((endpoint, None, webrtc, admission, None))
     }
 }
 
@@ -278,6 +284,7 @@ async fn build_member_endpoint(
     Option<()>,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
     crate::transport::SignalAdmission,
+    Option<()>,
 )> {
     if let Some(injected) = build.injected.as_ref() {
         crate::lookup::check_injected_identity(
@@ -293,13 +300,14 @@ async fn build_member_endpoint(
             None,
             injected.webrtc.clone(),
             injected.admission.clone(),
+            None,
         ));
     }
     let admission = crate::transport::SignalAdmission::new(build.max_sessions);
     let (endpoint, webrtc) =
         crate::lookup::build_peer_webrtc_with(build.lookups, build.transports, Some(&admission))
             .await?;
-    Ok((endpoint, None, webrtc, admission))
+    Ok((endpoint, None, webrtc, admission, None))
 }
 
 /// An endpoint the caller already built, shared with the mesh.
@@ -534,6 +542,10 @@ struct Assembled {
     /// field's own type does not exist.
     #[cfg(feature = "host")]
     multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
+    /// The `WebRTC` leg of the multihop underlay, threaded into `EventLoopState`
+    /// for the alive tick that opens its sessions. `None` when multihop is off.
+    #[cfg(feature = "host")]
+    underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
     /// This peer's `WebRTC` transport handle, threaded into `EventLoopState` so
     /// the session manager can negotiate with peers as it learns of them, and
     /// so a consumer can read its live direct-peer count.
@@ -651,6 +663,8 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         mint_mesh,
         #[cfg(feature = "host")]
             multihop: multihop_handle,
+        #[cfg(feature = "host")]
+        underlay_webrtc,
         webrtc,
         webrtc_admission,
         webrtc_ice,
@@ -712,6 +726,8 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         state_file,
         #[cfg(feature = "host")]
         multihop: multihop_handle,
+        #[cfg(feature = "host")]
+        underlay_webrtc,
         webrtc,
         webrtc_enabled: transports.webrtc,
         local_udp_transport: transports.udp,
@@ -805,7 +821,8 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
             reason = "no multihop handle off a host — see `build_member_endpoint`"
         )
     )]
-    let (endpoint, multihop, webrtc, admission) = build_member_endpoint(build).await?;
+    let (endpoint, multihop, webrtc, admission, underlay_webrtc) =
+        build_member_endpoint(build).await?;
 
     let mut mesh = Mesh::new(seed, name.clone(), config);
     // Invite-only: mint the invite root + issuer keypair and bake the issuer
@@ -897,6 +914,8 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         mint_mesh,
         #[cfg(feature = "host")]
         multihop,
+        #[cfg(feature = "host")]
+        underlay_webrtc,
         webrtc,
         webrtc_admission,
         webrtc_ice,
@@ -939,7 +958,8 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
             reason = "no multihop handle off a host — see `build_member_endpoint`"
         )
     )]
-    let (endpoint, multihop, webrtc, admission) = build_member_endpoint(build).await?;
+    let (endpoint, multihop, webrtc, admission, underlay_webrtc) =
+        build_member_endpoint(build).await?;
 
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     // Must precede the join: the peer resolves the rendezvous id via
@@ -996,6 +1016,8 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         mint_mesh: None,
         #[cfg(feature = "host")]
         multihop,
+        #[cfg(feature = "host")]
+        underlay_webrtc,
         webrtc,
         webrtc_admission,
         webrtc_ice,

@@ -366,6 +366,11 @@ pub struct EventLoopState {
     /// [`habilis_network_iroh_multihop_transport`].
     #[cfg(feature = "host")]
     pub(crate) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
+    /// The `WebRTC` leg of the multihop underlay: its handle, admission table and
+    /// endpoint. `None` when multihop is off. See
+    /// [`crate::transport::underlay_webrtc`].
+    #[cfg(feature = "host")]
+    pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
     /// The `WebRTC` transport handle, when one is registered on this peer's
     /// endpoint. Portable — it is the browser's only direct path, and an
     /// opportunistic extra one for a native peer. `None` on the beacon.
@@ -722,6 +727,8 @@ impl EventLoopState {
             unicast_pool: crate::transport::UnicastPool::disconnected(),
             #[cfg(feature = "host")]
             multihop: None,
+            #[cfg(feature = "host")]
+            underlay_webrtc: None,
             webrtc: None,
             webrtc_admission,
             webrtc_ice,
