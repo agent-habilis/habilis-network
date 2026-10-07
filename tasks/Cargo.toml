@@ -42,6 +42,9 @@ tracing-subscriber = { workspace = true, optional = true }
 # the engine. iroh is reached through the transport's re-export, never named
 # here (the workspace rule: only `habilis-network` names `iroh`).
 habilis-network-iroh-webrtc-transport = { path = "../crates/habilis-network-iroh-webrtc-transport", features = ["native", "bench"], optional = true }
+# The multihop cells stand up real multihop nodes, and the relay cell uses the
+# engine's local test relay (`habilis-network`, above, with `iroh-test-utils`).
+habilis-network-iroh-multihop-transport = { path = "../crates/habilis-network-iroh-multihop-transport", optional = true }
 
 [features]
 # The mesh and chat e2e suites need the engine and its test relay. Off by
@@ -52,7 +55,7 @@ habilis-network-iroh-webrtc-transport = { path = "../crates/habilis-network-iroh
 mesh = ["dep:habilis-network", "dep:tokio", "dep:tracing-subscriber"]
 # The throughput benchmark's native halves. Same re-exec pattern; a lighter
 # closure than `mesh`, since it needs the transport and not the engine.
-bench = ["dep:habilis-network-iroh-webrtc-transport", "dep:tokio"]
+bench = ["dep:habilis-network-iroh-webrtc-transport", "dep:habilis-network-iroh-multihop-transport", "dep:habilis-network", "dep:tokio"]
 
 [lints]
 workspace = true
