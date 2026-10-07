@@ -938,7 +938,11 @@ impl EventLoopState {
     /// A proven peer was the last link of this node and went down: plan its re-graft at
     /// `now` plus [`REGRAFT_AFTER_MS`] with a jitter of 30 % either way (`spread` in
     /// `-1.0..=1.0`). A peer on its relink cooldown is left to the heal tick, so a flapping
-    /// pair does not dial every second. Returns whether a re-graft is planned.
+    /// pair does not dial every second. A pair that reads as the relay is left to
+    /// [`Self::relay_race_on_link_loss`]: its graft follows the attach, and a dial over the relay
+    /// would arm the graft backoff for nothing. Both ends plan, so their grafts can cross until
+    /// the tie-break of the fork is pinned: a crossing costs one more relink cooldown (10 s), no
+    /// loop. Returns whether a re-graft is planned.
     pub(crate) fn plan_regraft_on_last_link_loss(
         &mut self,
         peer: EndpointId,
@@ -947,6 +951,7 @@ impl EventLoopState {
     ) -> bool {
         if !self.linked_endpoints.is_empty()
             || self.direct.get(&peer) != Some(&DirectState::Direct)
+            || self.pair_path_kind(peer) == Some(crate::transport::probe::PathKind::Relay)
             || self.relink_on_cooldown(peer, now)
         {
             return false;
@@ -1763,6 +1768,29 @@ mod tests {
         assert!(
             !flapping.plan_regraft_on_last_link_loss(bob, now, 0.0),
             "on the relink cooldown"
+        );
+    }
+
+    /// A pair that reads as the relay is raced again by `relay_race_on_link_loss`, and its graft
+    /// follows the attach. A quick re-graft would dial the relay for nothing and arm the backoff.
+    #[test]
+    fn a_pair_that_reads_as_the_relay_is_not_regrafted_quickly() {
+        use crate::transport::probe::PathKind;
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let lost = |kind: PathKind| {
+            let mut node = fresh_state();
+            node.direct.insert(bob, DirectState::Direct);
+            node.path_kinds.insert(bob, kind);
+            node
+        };
+
+        assert!(
+            !lost(PathKind::Relay).plan_regraft_on_last_link_loss(bob, now, 0.0),
+            "the relay reading belongs to the race"
+        );
+        assert!(
+            lost(PathKind::Ip).plan_regraft_on_last_link_loss(bob, now, 0.0),
+            "an IP path is grafted again"
         );
     }
 

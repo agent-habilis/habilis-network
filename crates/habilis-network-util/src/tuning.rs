@@ -435,7 +435,8 @@ pub const RELINK_COOLDOWN_SECS: u64 = 10;
 
 /// How long after a proven pair loses the last link of a node it is grafted again, before the
 /// jitter of 30 %. The heal tick would take 10 to 15 s. The relink cooldown above paces a pair
-/// that flaps.
+/// that flaps. Both ends of a pair plan it, so the two grafts can cross: that costs one more
+/// relink cooldown, no loop.
 pub const REGRAFT_AFTER_MS: u64 = 1000;
 
 /// How long a node may hold two or more links fewer than G, and how long it waits
