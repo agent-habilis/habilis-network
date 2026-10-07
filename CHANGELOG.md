@@ -96,6 +96,27 @@ published to a registry; pin it with
   suite sweeps the relay policy, the native transport set and the join mode;
   the stream suite streams bytes both ways between the binary and the page.
   Behind the `mesh` feature of `tasks`, and local-only for now.
+- A ceiling C on the direct connections of a node (default 64): the unicast
+  connections and the `WebRTC` sessions together, with a peer counted once. A
+  gossip neighbor's session and the gossip links do not count. Nothing is refused
+  for it: a newcomer past C evicts the least valuable peer (idle first, the least
+  recently used first, a unit younger than 60 s last, one with a send in flight
+  never). An evicted connection closes with the code `EVICTED` (11), and its peer
+  makes no proactive dial back for about a minute; a send still dials at once. A
+  peer whose session was evicted has its offer refused with the same code for that
+  minute. One idle backstop of 900 s closes a connection or session that nobody used.
+- A lane peer (a browser, or a node without UDP) gets a session when a frame is held
+  for it, and loses an unused one at the backstop, instead of keeping it for ever.
+  When both ids offer at once, the lower id wins.
+- A peer that refuses a graft is left alone for 60 s, then 120 s, up to 15 min
+  (with a jitter of 20 percent), so a late node no longer asks the same full peers
+  every few seconds. A starved node, one that holds two or more links fewer than the
+  active view for five minutes, falls back to a `Join` once per five minutes. The
+  engine asks for a link with the low-priority `NeighborPeers` command, so that a
+  graft no longer makes a full peer drop a neighbor.
+- Every endpoint, the multihop underlay and the blob endpoint included, sets
+  generous QUIC windows: 8 MiB for a stream, 32 MiB for a connection, 32 MiB to
+  send. One connection holds at most 64 MiB in the worst case.
 
 ### Changed
 
@@ -230,6 +251,14 @@ published to a registry; pin it with
   transport on the node. A browser always has no UDP, so a tab now refuses
   a mesh with no relay lookup at join, and a stream node refuses it at bind.
   A native node meets this rule only when its own paths leave out UDP.
+- **Breaking:** the setting `max_sessions` is now `max_direct`, the ceiling C of
+  direct connections (default 64, it was the cap of 32 on `WebRTC` sessions). The
+  field of the C struct keeps its place (offset 64, 72 bytes), the TS option is
+  `maxDirect`, the CLI flag `--max-direct`, and the load driver variable
+  `MESH_MAX_DIRECT`. A node no longer refuses an offer at a cap: the cap code of
+  older peers is still read.
+- The idle closes of the pool (120 s), the acceptor (240 s) and the session
+  detach (120 s) are one backstop of 900 s, read from the last use of the peer.
 
 ### Fixed
 
