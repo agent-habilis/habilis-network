@@ -270,7 +270,7 @@ impl Topology {
     }
 
     /// The underlay address an origin advertised, for dialing a hop through it.
-    fn underlay(&self, origin: EndpointId) -> Option<EndpointAddr> {
+    pub(crate) fn underlay_of(&self, origin: EndpointId) -> Option<EndpointAddr> {
         self.vectors
             .get(&origin)
             .map(|held| held.vector.underlay.clone())
@@ -301,7 +301,7 @@ impl Topology {
                     .hops
                     .iter()
                     .map(|hop| {
-                        self.underlay(*hop).map(|underlay| RouteHop {
+                        self.underlay_of(*hop).map(|underlay| RouteHop {
                             app_id: *hop,
                             underlay,
                         })

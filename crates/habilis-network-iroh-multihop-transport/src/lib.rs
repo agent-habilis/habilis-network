@@ -167,6 +167,28 @@ impl MultihopHandle {
         underlay: Endpoint,
         config: HandleConfig,
     ) -> anyhow::Result<Self> {
+        Self::with_protocols(secret, underlay, config, Vec::new())
+    }
+
+    /// [`new`](Self::new), and the underlay also accepts `protocols`, each an ALPN
+    /// and its handler. The underlay has one router, so a protocol of the
+    /// embedder (the `WebRTC` signal, which opens a session on the underlay) can
+    /// only be registered here.
+    ///
+    /// # Errors
+    /// As [`new`](Self::new), and a protocol takes the ALPN of the forwarder.
+    pub fn with_protocols(
+        secret: &SecretKey,
+        underlay: Endpoint,
+        config: HandleConfig,
+        protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            protocols
+                .iter()
+                .all(|(alpn, _)| alpn.as_slice() != underlay::FORWARD_ALPN),
+            "the forwarder keeps its own ALPN on the underlay"
+        );
         let app_id = secret.public();
         anyhow::ensure!(
             underlay.id() == underlay_secret(secret).public(),
@@ -193,12 +215,14 @@ impl MultihopHandle {
         });
 
         let transport = Arc::new(MultihopTransport::new(shared, inbound_rx));
-        let router = iroh::protocol::Router::builder(underlay.clone())
-            .accept(
-                underlay::FORWARD_ALPN,
-                ForwardAcceptor::new(Arc::clone(&forwarder)),
-            )
-            .spawn();
+        let mut router = iroh::protocol::Router::builder(underlay.clone()).accept(
+            underlay::FORWARD_ALPN,
+            ForwardAcceptor::new(Arc::clone(&forwarder)),
+        );
+        for (alpn, handler) in protocols {
+            router = router.accept(alpn, handler);
+        }
+        let router = router.spawn();
 
         Ok(Self {
             inner: Arc::new(HandleInner {
@@ -308,6 +332,20 @@ impl MultihopHandle {
             .iter()
             .map(std::net::SocketAddr::port)
             .collect()
+    }
+
+    /// The underlay address that `origin` advertised in its newest link-vector,
+    /// for dialing its underlay directly. `None` if we hold no vector from it.
+    ///
+    /// # Panics
+    /// If the routing-table lock is poisoned by a panic in another thread.
+    #[must_use]
+    pub fn underlay_addr_of(&self, origin: EndpointId) -> Option<EndpointAddr> {
+        self.inner
+            .topology
+            .read()
+            .expect("topology lock poisoned")
+            .underlay_of(origin)
     }
 
     /// How many cells this node passed on for other nodes. Cells it sends for
@@ -562,6 +600,119 @@ mod tests {
             let _ = write!(out, "{byte:02x}");
             out
         })
+    }
+
+    /// An underlay on loopback only, bound to the derived key of `secret`.
+    async fn loopback_underlay(secret: &SecretKey) -> Endpoint {
+        Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(secret))
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr(
+                "127.0.0.1:0"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("loopback"),
+            )
+            .expect("valid bind addr")
+            .bind()
+            .await
+            .expect("bind a loopback underlay")
+    }
+
+    /// Counts the connections it accepts, then waits for the dialer to close.
+    #[derive(Debug, Clone)]
+    struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl iroh::protocol::ProtocolHandler for Counting {
+        async fn accept(
+            &self,
+            connection: iroh::endpoint::Connection,
+        ) -> Result<(), iroh::protocol::AcceptError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            connection.closed().await;
+            Ok(())
+        }
+    }
+
+    const EXTRA_ALPN: &[u8] = b"test/extra/1";
+
+    #[tokio::test]
+    async fn an_extra_protocol_is_accepted_on_the_underlay() {
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let secret = SecretKey::from_bytes(&[51; 32]);
+        let handle = MultihopHandle::with_protocols(
+            &secret,
+            loopback_underlay(&secret).await,
+            HandleConfig::default(),
+            vec![(
+                EXTRA_ALPN.to_vec(),
+                Box::new(Counting(std::sync::Arc::clone(&accepted))),
+            )],
+        )
+        .expect("an extra ALPN is allowed");
+
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr(
+                "127.0.0.1:0"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("loopback"),
+            )
+            .expect("valid bind addr")
+            .bind()
+            .await
+            .expect("bind a client");
+        let connection = client
+            .connect(handle.underlay_addr(), EXTRA_ALPN)
+            .await
+            .expect("the underlay answers the extra ALPN");
+        connection.close(0u32.into(), b"done");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_forward_alpn_cannot_be_given_to_another_handler() {
+        let secret = SecretKey::from_bytes(&[52; 32]);
+        let result = MultihopHandle::with_protocols(
+            &secret,
+            loopback_underlay(&secret).await,
+            HandleConfig::default(),
+            vec![(
+                crate::underlay::FORWARD_ALPN.to_vec(),
+                Box::new(Counting(std::sync::Arc::default())),
+            )],
+        );
+        assert!(result.is_err(), "the forwarder keeps its own ALPN");
+    }
+
+    #[tokio::test]
+    async fn the_underlay_address_of_an_origin_comes_from_its_link_vector() {
+        let (me, other) = (
+            SecretKey::from_bytes(&[53; 32]),
+            SecretKey::from_bytes(&[54; 32]),
+        );
+        let handle =
+            MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
+                .expect("underlay on the derived key");
+        assert_eq!(
+            handle.underlay_addr_of(other.public()),
+            None,
+            "no vector yet"
+        );
+
+        let their_underlay = iroh::EndpointAddr::new(underlay_secret(&other).public());
+        let vector = crate::LinkVector::signed(
+            &other,
+            crate::topology::wall_clock_ms(),
+            their_underlay.clone(),
+            Vec::new(),
+        );
+        assert!(handle.feed_topology(vector));
+        assert_eq!(
+            handle.underlay_addr_of(other.public()),
+            Some(their_underlay)
+        );
+        assert_eq!(handle.underlay_addr_of(me.public()), None, "not our own");
     }
 
     /// A handle whose underlay can only reach other underlays through the relay.
