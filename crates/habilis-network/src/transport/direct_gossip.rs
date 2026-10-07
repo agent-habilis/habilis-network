@@ -7,12 +7,16 @@
 //! like any peer link. iroh-gossip's dialer has no handshake timeout, so the
 //! far side simply waits.
 
+use futures_util::StreamExt as _;
 use habilis_network_iroh_webrtc_transport::WebRtcHandle;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_gossip::net::Gossip;
+use n0_future::time::Instant;
 
-use super::path::{GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct};
+use super::path::{
+    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectOnlyGossip {
@@ -76,6 +80,9 @@ impl ProtocolHandler for DirectOnlyGossip {
         {
             return Ok(());
         }
+        if !self.relay_transport {
+            watch_relay_policy(&conn);
+        }
         self.inner
             .handle_connection(conn)
             .await
@@ -89,10 +96,127 @@ impl ProtocolHandler for DirectOnlyGossip {
     }
 }
 
+/// Keep the relay policy on a gossip connection, whichever end dialed it: one whose selected
+/// path has been the relay for longer than [`PROBE_DEADLINE`], the wait of the accept gate, is closed with
+/// [`GOSSIP_RELAY_REFUSED_CODE`], on a mesh whose relay is lookup only.
+///
+/// The accept gate checks the path once, at the start. A path that is lost
+/// later (a session detached, a NAT mapping gone) leaves a link that is still
+/// up on the relay, and nothing then says that no payload may ride it. The
+/// close gives both ends a `NeighborDown`, and the heal or the come-back rule
+/// of each end decides whether to link again. The wait restarts at every
+/// return to a direct path, so a path that flaps is left alone.
+///
+/// The links to the rendezvous are closed too, and each costs a `NeighborDown`:
+/// the rendezvous has no path watcher, and a session to it is offered only while
+/// the node is not linked to it (`negotiate_rendezvous_session`), so the session
+/// comes after this close, whatever the deadline. A wait of 60 s gave the same
+/// two downs, later. Only the host and a node with fewer than the release count
+/// of links hold that link, so the cost is one re-graft each.
+///
+/// Holds the connection weakly: the watcher must not keep a link open that
+/// gossip has dropped.
+pub(super) fn watch_relay_policy(gossip_conn: &Connection) {
+    let weak = gossip_conn.weak_handle();
+    let mut events = gossip_conn.path_events();
+    n0_future::task::spawn(async move {
+        let mut on_relay_since: Option<Instant> = None;
+        loop {
+            let Some(conn) = weak.upgrade() else {
+                return;
+            };
+            if conn.close_reason().is_some() {
+                return;
+            }
+            if selected_is_direct(&conn) {
+                on_relay_since = None;
+            } else {
+                let since = *on_relay_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= PROBE_DEADLINE {
+                    tracing::info!(
+                        target: super::LOG_TARGET,
+                        remote = %conn.remote_id(),
+                        dialed = conn.side().is_client(),
+                        "gossip link on the relay path past the deadline: closing it"
+                    );
+                    conn.close(GOSSIP_RELAY_REFUSED_CODE.into(), b"relay path refused");
+                    return;
+                }
+            }
+            let wait = on_relay_since.map(|since| PROBE_DEADLINE.saturating_sub(since.elapsed()));
+            drop(conn);
+            tokio::select! {
+                next = events.next() => {
+                    if next.is_none() {
+                        return;
+                    }
+                }
+                () = async {
+                    match wait {
+                        Some(wait) => n0_future::time::sleep(wait).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
+            }
+        }
+    });
+}
+
 /// Whether the gate refuses a gossip dial at once rather than holding it,
 /// from what this node knows about the dialer's `WebRTC` session.
 fn refuse_before_session(has_session: bool, negotiating: bool, we_offer: bool) -> bool {
     !has_session && (we_offer || !negotiating)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod watcher_tests {
+    use std::time::Duration;
+
+    use iroh::endpoint::Connection;
+    use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+    use super::watch_relay_policy;
+
+    /// The watcher must not keep a link open that gossip has dropped. A handler
+    /// that starts the watch and returns drops the last strong handle, so the
+    /// connection must close, and the dialer sees it close. A watcher that held
+    /// the connection, or a path stream that did, would leave it up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_relay_watcher_does_not_keep_a_connection_alive() {
+        const ALPN: &[u8] = b"habilis-mesh/test-watch/0";
+
+        #[derive(Debug, Clone)]
+        struct WatchAndDrop;
+        impl ProtocolHandler for WatchAndDrop {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                watch_relay_policy(&conn);
+                Ok(())
+            }
+        }
+        let bind = || async {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(ALPN, WatchAndDrop)
+            .spawn();
+        let client = bind().await;
+        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+
+        let conn = client.connect(server.id(), ALPN).await.expect("connect");
+        let closed = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await;
+
+        assert!(
+            closed.is_ok(),
+            "the connection stayed up after its handler dropped it: the watcher holds it"
+        );
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
 }
 
 #[cfg(test)]

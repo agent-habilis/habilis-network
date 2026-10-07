@@ -103,6 +103,13 @@ pub struct TransportHandles {
     /// QUIC over a `WebRTC` data channel. The browser's only way onto the
     /// mesh, and an opportunistic extra path for a native peer.
     pub webrtc: Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
+    /// The table that decides who holds a direct-peer slot. When set, the
+    /// endpoint reports every connection to it, so that it can drop the ones
+    /// that are gone.
+    pub admission: Option<crate::transport::SignalAdmission>,
+    /// The endpoint is a multi-hop underlay, an internal forwarding endpoint
+    /// and not a peer or a beacon. Changes only the role a log line names.
+    pub underlay: bool,
     /// Which transports this instance may carry data on. Lives here rather than
     /// as another positional argument for the same reason the handles do.
     pub opts: TransportOpts,
@@ -132,10 +139,6 @@ impl TransportHandles {
 ///
 /// `Default` is "everything this target has".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "one independent on/off per transport; a bitflags type would read worse"
-)]
 pub struct TransportOpts {
     /// QUIC on direct and hole-punched UDP paths, plus the address lookups
     /// that find them. Cleared by a WebRTC-only instance.
@@ -153,8 +156,6 @@ pub struct TransportOpts {
     /// on the endpoint, no offer is answered and none is made — so a pair
     /// with IP cleared too has the relay as its only path.
     pub webrtc: bool,
-    /// Source-routed multi-hop. Host-only.
-    pub multihop: bool,
 }
 
 impl Default for TransportOpts {
@@ -163,7 +164,6 @@ impl Default for TransportOpts {
             udp: true,
             relay: true,
             webrtc: true,
-            multihop: false,
         }
     }
 }
@@ -203,7 +203,6 @@ impl TransportOpts {
             udp: false,
             relay: true,
             webrtc: true,
-            multihop: false,
         }
     }
 }
@@ -229,6 +228,81 @@ impl TransportOpts {
     }
 }
 
+/// Install on `builder` every custom transport and hook a mesh node needs: the
+/// multi-hop transport (with its address lookup and backup path selector), the
+/// `WebRTC` transport with its selector, and the connection hook that records
+/// the endpoint's connections in the admission table.
+///
+/// The one definition of that wiring. [`build_endpoint`] calls it, and a caller
+/// that builds its own endpoint to inject into a mesh calls it too, so the two
+/// cannot drift. Without the hook the table sees none of the endpoint's
+/// connections: the relay policy is not kept on the gossip connections that the
+/// node dials, and a slot whose connection is gone is never pruned.
+///
+/// The handles must have been made from the key the builder is given, and the
+/// admission table must be the one the mesh is set up with: see
+/// [`check_injected_identity`].
+///
+/// Call it after your own `preset` and before `bind`, and make no
+/// `path_selector` or `hooks` call after it: both are single slots, and the last
+/// call wins.
+#[must_use]
+pub fn install_transports(
+    mut builder: iroh::endpoint::Builder,
+    transports: &TransportHandles,
+) -> iroh::endpoint::Builder {
+    // Register the multi-hop custom transport (plus its address lookup + backup
+    // path selector) so a `connect` to a peer with no direct path rides the
+    // multihop path. The handle's app id must match this endpoint's key — the
+    // caller (`build_peer_multihop`) pins the same secret.
+    #[cfg(feature = "host")]
+    if let Some(handle) = transports.multihop.clone() {
+        builder = builder.preset(handle);
+    }
+    // WebRTC is additive: it joins IP and relay as another candidate path
+    // rather than replacing them. Two native peers are better served by iroh's
+    // own hole-punching; this is the browser's only path, and a fallback for
+    // NATs that defeat hole-punching but not ICE.
+    if let Some(handle) = transports.webrtc.clone() {
+        if transports.opts.webrtc {
+            builder = builder.add_custom_transport(handle.transport());
+            // MUST come after `builder.preset(handle)` for multihop above: there
+            // is a single `path_selector` slot and the last call wins. Safe only
+            // because both selectors rank by the same ladder (IP, WebRTC,
+            // multihop, relay), whichever one is installed. Do not "tidy" this
+            // above the preset.
+            builder = builder.path_selector(handle.path_selector());
+        } else if cfg!(feature = "iroh-test-utils") {
+            // Tests only: a mesh whose list leaves out `webrtc` still takes the
+            // selector, without the transport, so that a test can take IP paths
+            // away from one node to others (`Request::BlockIpTo`). Without it
+            // such a node uses iroh's own selector, which the hook cannot reach.
+            builder = builder.path_selector(handle.path_selector());
+        }
+    }
+    if let Some(admission) = &transports.admission {
+        builder = builder.hooks(admission.connection_hook());
+    }
+    builder
+}
+
+/// The memory windows of a QUIC connection, on every endpoint of the engine, the multihop underlay
+/// and the blob endpoint included (decision D11). They are generous on purpose: the count of direct
+/// connections is the real limit, and these only keep one connection from growing without bound.
+/// Keep-alive, idle timeout, multipath, stream counts and datagrams stay at the iroh defaults.
+fn quic_limits() -> iroh::endpoint::QuicTransportConfig {
+    use crate::util::tuning::{
+        QUIC_CONNECTION_RECEIVE_WINDOW, QUIC_SEND_WINDOW, QUIC_STREAM_RECEIVE_WINDOW,
+    };
+    use iroh::endpoint::{QuicTransportConfig, VarInt};
+
+    QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(QUIC_STREAM_RECEIVE_WINDOW))
+        .receive_window(VarInt::from_u32(QUIC_CONNECTION_RECEIVE_WINDOW))
+        .send_window(QUIC_SEND_WINDOW)
+        .build()
+}
+
 /// # Errors
 /// Returns an error if the inputs are invalid or the operation fails.
 #[cfg_attr(
@@ -247,7 +321,8 @@ pub async fn build_endpoint(
 ) -> Result<Endpoint> {
     // A peer endpoint carrying a custom transport also pins a key, so it is
     // *not* a beacon; the presence of a handle disambiguates.
-    let is_beacon = secret_key.is_some() && transports.is_empty();
+    let is_beacon = secret_key.is_some() && transports.is_empty() && !transports.underlay;
+    let underlay = transports.underlay;
     let network = lookups.network_label();
     let mut builder = if lookups.is_loopback() {
         debug_assert!(
@@ -288,6 +363,8 @@ pub async fn build_endpoint(
         Endpoint::builder(presets::Minimal).relay_mode(relay::relay_mode(&lookups.relay_lookup))
     };
 
+    #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+    let underlay_id = secret_key.as_ref().map(SecretKey::public);
     if let Some(secret_key) = secret_key {
         builder = builder.secret_key(secret_key);
     }
@@ -300,28 +377,18 @@ pub async fn build_endpoint(
         builder = builder.alpns(alpns);
     }
 
-    // Register the multi-hop custom transport (plus its address lookup + backup
-    // path selector) so a `connect` to a peer with no direct path rides the
-    // multihop path. The handle's app id must match this endpoint's key — the
-    // caller (`build_peer_multihop`) pins the same secret.
-    #[cfg(feature = "host")]
-    if let Some(handle) = transports.multihop {
-        builder = builder.preset(handle);
-    }
-    // WebRTC is additive: it joins IP and relay as another candidate path
-    // rather than replacing them. Two native peers are better served by iroh's
-    // own hole-punching; this is the browser's only path, and a fallback for
-    // NATs that defeat hole-punching but not ICE.
-    if let Some(handle) = transports.webrtc
-        && transports.opts.webrtc
-    {
-        builder = builder.add_custom_transport(handle.transport());
-        // MUST come after `builder.preset(handle)` for multihop above: there is
-        // a single `path_selector` slot and the last call wins. Safe only
-        // because this selector's bottom tier ranks foreign custom transports
-        // below the relay, reproducing MultihopBackup's own policy. Do not
-        // "tidy" this above the preset.
-        builder = builder.path_selector(handle.path_selector());
+    let opts = transports.opts;
+    builder = install_transports(builder, &transports);
+    // Tests only: the underlay is an endpoint of its own, and a test that takes
+    // paths away from a pair (`habilis_network_iroh_webrtc_transport::block_ip_to`)
+    // needs a selector on it that reads the same tables. An underlay with a
+    // `WebRtcHandle` already runs `WebRtcPreferred` (see `install_transports`),
+    // which reads them. This one is for an underlay without a handle, which would
+    // otherwise run iroh's default selector: it gets `MultihopLadder`.
+    #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+    if let Some(id) = underlay_id.filter(|_| underlay && transports.webrtc.is_none()) {
+        builder = builder
+            .path_selector(habilis_network_iroh_multihop_transport::underlay_path_selector(id));
     }
     // Data-plane exclusivity: with IP cleared, a WebRTC-only peer cannot
     // silently fall back onto a hole-punched path, so a run that *claims* to be
@@ -333,7 +400,7 @@ pub async fn build_endpoint(
     // does not *exist* on a wasm build of iroh, because a browser has no IP
     // transports to clear. The flag is already satisfied there by construction.
     #[cfg(not(target_arch = "wasm32"))]
-    if !transports.opts.udp {
+    if !opts.udp {
         // `clear_ip_transports` only — deliberately **not**
         // `clear_address_lookup`. That was the first attempt and it silently
         // broke everything: `add_peer_addr` registers a `MemoryLookup` on the
@@ -351,13 +418,15 @@ pub async fn build_endpoint(
         );
     }
 
-    // Transport config is intentionally left at iroh's defaults: iroh tunes
+    // Transport config is left at iroh's defaults, but for the memory windows: iroh tunes
     // keep-alive / idle (and the per-path multipath settings) for its
     // holepunching, and its own docs warn that adjusting them "may cause
     // suboptimal usage". A prior aggressive 10s idle / 5s keep-alive override
     // fought that tuning — marginal / distant links falsely idle-timed-out,
     // HyParView refilled from passive, and the resulting NeighborDown/Up churn
-    // drove a per-connection memory leak. So we set nothing here.
+    // drove a per-connection memory leak. So we set only the memory windows of a connection
+    // (decision D11), never the keep-alive, the idle timeout or the multipath settings.
+    builder = builder.transport_config(quic_limits());
 
     // For the private rendezvous endpoint this returns `AddrInUse`
     // when another member already holds the deterministic port — the
@@ -371,11 +440,11 @@ pub async fn build_endpoint(
     // that need the bound endpoint's id), so `clear_address_lookup` above does
     // not reach them — they have to be skipped here as well. Both exist to find
     // IP paths, so an instance with IP off has no use for either.
-    if lookups.mdns && transports.opts.udp {
+    if lookups.mdns && opts.udp {
         #[cfg(all(feature = "host", feature = "mdns"))]
         mdns::wire(&endpoint)?;
     }
-    if lookups.dht && transports.opts.udp {
+    if lookups.dht && opts.udp {
         #[cfg(all(feature = "host", feature = "dht"))]
         dht::wire(&endpoint)?;
     }
@@ -384,7 +453,13 @@ pub async fn build_endpoint(
         mdns = lookups.mdns,
         dht = lookups.dht,
         relay = ?lookups.relay_lookup,
-        role = if is_beacon { "beacon" } else { "peer" },
+        role = if underlay {
+            "underlay"
+        } else if is_beacon {
+            "beacon"
+        } else {
+            "peer"
+        },
         endpoint_id = %endpoint.id(),
         "endpoint bound"
     );
@@ -398,6 +473,40 @@ pub async fn build_endpoint(
 /// Binding the socket fails, or an address-lookup service cannot be wired.
 pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
     build_endpoint(lookups, None, None, Vec::new(), TransportHandles::default()).await
+}
+
+/// What `check_injected_identity` reads off an injected multi-hop handle.
+#[derive(Debug, Clone, Copy)]
+pub struct InjectedMultihop {
+    /// The hop identity the handle stamps on every cell.
+    pub hop_identity: iroh::EndpointId,
+    /// Whether the handle lets the relay carry cells.
+    pub relay_payload: bool,
+}
+
+#[cfg(feature = "host")]
+impl From<&habilis_network_iroh_multihop_transport::MultihopHandle> for InjectedMultihop {
+    fn from(handle: &habilis_network_iroh_multihop_transport::MultihopHandle) -> Self {
+        Self {
+            hop_identity: handle.app_id(),
+            relay_payload: handle.relay_payload(),
+        }
+    }
+}
+
+/// The multi-hop handle configuration this engine uses for a mesh: whether the
+/// relay may carry cells is the mesh's `relay` rule, the other numbers are the
+/// engine's. A caller that builds its own handle to inject uses this.
+#[cfg(feature = "host")]
+#[must_use]
+pub fn multihop_handle_config(
+    relay_payload: bool,
+) -> habilis_network_iroh_multihop_transport::HandleConfig {
+    habilis_network_iroh_multihop_transport::HandleConfig {
+        relay_payload,
+        vector_max_age: Duration::from_secs(crate::util::tuning::LINKSTATE_MAX_AGE_SECS),
+        relay_stuck_after: Duration::from_secs(crate::util::tuning::MULTIHOP_RELAY_STUCK_SECS),
+    }
 }
 
 /// Assert a caller-supplied endpoint and hub agree on identity.
@@ -417,7 +526,10 @@ pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
 pub fn check_injected_identity(
     endpoint: &Endpoint,
     webrtc: &habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    multihop: Option<InjectedMultihop>,
+    admission: &crate::transport::SignalAdmission,
     mesh_lookups: &LookupOpts,
+    mesh_relay_transport: bool,
 ) -> Result<()> {
     let bound = endpoint.id();
     let advertised = webrtc.transport().local_id();
@@ -425,6 +537,38 @@ pub fn check_injected_identity(
         bound == advertised,
         "injected endpoint binds {bound} but its WebRTC transport advertises \
          {advertised}; they must share one key or every WebRTC dial goes nowhere"
+    );
+    // The hop identity the multi-hop handle stamps on every cell must be the key
+    // the endpoint binds, or a route that names this peer reaches nobody. Its
+    // underlay has a key of its own, see `build_peer_multihop`.
+    if let Some(InjectedMultihop {
+        hop_identity,
+        relay_payload,
+    }) = multihop
+    {
+        anyhow::ensure!(
+            bound == hop_identity,
+            "injected endpoint binds {bound} but its multihop handle has hop identity \
+             {hop_identity}; they must share one key or every route to this peer goes nowhere"
+        );
+        // Whether the relay may carry cells is a rule of the mesh, in its id. A
+        // handle that lets it, on a mesh that does not, would carry other peers'
+        // cells over the relay.
+        anyhow::ensure!(
+            !relay_payload || mesh_relay_transport,
+            "injected multihop handle lets the relay carry cells but the mesh's transport \
+             list has no `relay`: build the handle with `relay_payload` off"
+        );
+    }
+    // A table that no hook reports to cannot keep the relay policy on the dialed
+    // gossip connections, and never prunes a slot whose connection is gone. This
+    // proves that `connection_hook` was called on the table, not that the hook
+    // is on this endpoint.
+    anyhow::ensure!(
+        admission.is_observed(),
+        "injected admission table has no endpoint hook reporting to it: build the endpoint \
+         with `install_transports` and this table, or the relay policy on dialed gossip \
+         connections is not kept and slots of closed connections are not pruned"
     );
 
     // The other half of the injection contract, and the half that had no check
@@ -480,9 +624,23 @@ pub async fn build_peer_webrtc(
     Endpoint,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
 )> {
-    let mut key_bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
-    let secret = SecretKey::from_bytes(&key_bytes);
+    build_peer_webrtc_with(lookups, opts, None).await
+}
+
+/// [`build_peer_webrtc`], reporting the endpoint's connections to `admission`,
+/// which keeps one entry per peer and drops the connections that are gone.
+///
+/// # Errors
+/// Returns an error if the endpoint fails to bind.
+pub(crate) async fn build_peer_webrtc_with(
+    lookups: &LookupOpts,
+    opts: TransportOpts,
+    admission: Option<&crate::transport::SignalAdmission>,
+) -> Result<(
+    Endpoint,
+    habilis_network_iroh_webrtc_transport::WebRtcHandle,
+)> {
+    let secret = mint_secret();
     let handle = new_webrtc_handle(secret.public());
     let endpoint = build_endpoint(
         lookups,
@@ -493,6 +651,8 @@ pub async fn build_peer_webrtc(
             #[cfg(feature = "host")]
             multihop: None,
             webrtc: Some(handle.clone()),
+            admission: admission.cloned(),
+            underlay: false,
             opts,
         },
     )
@@ -503,25 +663,6 @@ pub async fn build_peer_webrtc(
         "the WebRTC transport must advertise this endpoint's identity"
     );
     Ok((endpoint, handle))
-}
-
-/// A `WebRtcHandle` for an endpoint that was built *without* it registered.
-///
-/// Only the multihop path needs this: multihop pins the key for its own hop
-/// identity, so it owns the endpoint and `WebRTC` cannot be a custom transport on
-/// it. The handle still answers inbound JSEP (the Router arm is independent of
-/// the transport registration), it just has no path to send over — so a
-/// multihop peer negotiates nothing. Kept rather than skipped so the wiring has
-/// one shape, and so making the two coexist later is a change in one place.
-///
-/// `host`-only with multihop itself — `habilis-network-iroh-multihop-transport` is not
-/// in the wasm dependency table, so a browser peer has no multihop path to
-/// detach for.
-#[cfg(feature = "host")]
-pub(crate) fn detached_webrtc_handle(
-    local: iroh::EndpointId,
-) -> habilis_network_iroh_webrtc_transport::WebRtcHandle {
-    new_webrtc_handle(local)
 }
 
 /// Build the target's `WebRtcHandle`. The constructors differ — str0m natively,
@@ -543,28 +684,169 @@ pub(crate) fn new_webrtc_handle(
     habilis_network_iroh_webrtc_transport::WebRtcHandle::hub(local)
 }
 
-/// A peer endpoint with the multi-hop transport registered, plus the
-/// [`MultihopHandle`](habilis_network_iroh_multihop_transport::MultihopHandle) that owns the
-/// forwarding underlay and routing table. The app endpoint's key is pinned so it
-/// matches the handle's advertised hop identity. The underlay is a second,
-/// plain peer endpoint dedicated to hop-by-hop packet forwarding.
+/// A fresh random identity. Every endpoint of one peer is built from the one
+/// key this returns, so that a peer is one peer on every path.
+fn mint_secret() -> SecretKey {
+    let mut key_bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
+    SecretKey::from_bytes(&key_bytes)
+}
+
+/// A peer endpoint with the multi-hop **and** the `WebRTC` transport
+/// registered, with the handles that own their state: the
+/// [`MultihopHandle`](habilis_network_iroh_multihop_transport::MultihopHandle)
+/// (forwarding underlay and routing table) and the `WebRTC` session registry.
+///
+/// One key is the peer's identity on every path: the application endpoint (UDP
+/// and relay), the `WebRTC` address and the multi-hop hop identity. It is minted
+/// here, before any endpoint exists, because each handle has to know the
+/// identity its endpoint will bind.
+///
+/// The underlay is the exception, on purpose. It is an internal forwarding
+/// endpoint on a key derived from the peer's, so it is stable across restarts and
+/// the link-vector, which the peer signs, names it. A relay delivers a packet that names an id to one
+/// endpoint registered under it, so an underlay on the application key would
+/// take the application endpoint's relayed packets, or lose its own (measured:
+/// 12 of 12 relay-only dials went to the endpoint that registered second). The
+/// underlay needs the relay to punch through a NAT, so it cannot share the id.
+///
+/// # Errors
+/// Returns an error if either endpoint fails to bind.
+// The engine builds through `build_peer_multihop_with`; this is the form without
+// the `WebRTC` leg of the underlay, which the tests of the receive path build with.
+#[cfg(all(feature = "host", test))]
+pub(crate) async fn build_peer_multihop(
+    lookups: &LookupOpts,
+    opts: TransportOpts,
+    admission: Option<&crate::transport::SignalAdmission>,
+    relay_payload: bool,
+) -> Result<(
+    Endpoint,
+    habilis_network_iroh_multihop_transport::MultihopHandle,
+    habilis_network_iroh_webrtc_transport::WebRtcHandle,
+)> {
+    let (endpoint, handle, webrtc, _underlay_webrtc) =
+        build_peer_multihop_with(lookups, opts, admission, relay_payload, None).await?;
+    Ok((endpoint, handle, webrtc))
+}
+
+/// Tests only: while set, no node of this process gets a `WebRTC` leg on its
+/// underlay, which gives a harness the control cell of a measurement of what the
+/// leg costs. A flag of the process, like `block_ip_paths`: set it before the node
+/// starts.
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+static UNDERLAY_LEG_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tests only: see [`UNDERLAY_LEG_OFF`].
+#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+pub fn set_underlay_leg_off(off: bool) {
+    UNDERLAY_LEG_OFF.store(off, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The cap of the `WebRTC` leg of the underlay for a node with `max_peers` (G):
+/// `Some(G)`, or `None` while a test switched the leg off.
+#[cfg(feature = "host")]
+#[cfg_attr(
+    not(feature = "iroh-test-utils"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "None only when a test switched the leg off"
+    )
+)]
+pub(crate) fn underlay_cap(max_peers: usize) -> Option<usize> {
+    #[cfg(feature = "iroh-test-utils")]
+    if UNDERLAY_LEG_OFF.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    Some(max_peers)
+}
+
+/// [`build_peer_multihop`], and with `underlay_cap` set the underlay also gets a
+/// `WebRTC` leg: its own `WebRtcHandle`, an admission table with that cap (G),
+/// and the signal protocol on its router, answered for gossip neighbors only.
+/// See [`crate::transport::underlay_webrtc`]. `None`, or an instance with
+/// `WebRTC` off, leaves the underlay on IP and the relay.
 ///
 /// # Errors
 /// Returns an error if either endpoint fails to bind.
 #[cfg(feature = "host")]
-pub(crate) async fn build_peer_multihop(
+pub(crate) async fn build_peer_multihop_with(
     lookups: &LookupOpts,
+    opts: TransportOpts,
+    admission: Option<&crate::transport::SignalAdmission>,
+    relay_payload: bool,
+    underlay_cap: Option<usize>,
 ) -> Result<(
     Endpoint,
     habilis_network_iroh_multihop_transport::MultihopHandle,
+    habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
 )> {
-    let mut key_bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut key_bytes);
-    let secret = SecretKey::from_bytes(&key_bytes);
-    let underlay =
-        build_endpoint(lookups, None, None, Vec::new(), TransportHandles::default()).await?;
-    let handle =
-        habilis_network_iroh_multihop_transport::MultihopHandle::new(secret.public(), underlay);
+    let secret = mint_secret();
+    let webrtc = new_webrtc_handle(secret.public());
+    let underlay_secret = habilis_network_iroh_multihop_transport::underlay_secret(&secret);
+    // The `WebRTC` leg of the underlay: the handle and the table are made before
+    // the endpoint, because the endpoint takes the transport and reports its
+    // connections to the table from the first handshake on.
+    let underlay_leg = underlay_cap.filter(|_| opts.webrtc).map(|cap| {
+        (
+            new_webrtc_handle(underlay_secret.public()),
+            crate::transport::SignalAdmission::new(cap),
+        )
+    });
+    let underlay = build_endpoint(
+        lookups,
+        Some(underlay_secret),
+        None,
+        Vec::new(),
+        TransportHandles {
+            underlay: true,
+            webrtc: underlay_leg.as_ref().map(|(handle, _)| handle.clone()),
+            admission: underlay_leg.as_ref().map(|(_, table)| table.clone()),
+            ..TransportHandles::default()
+        },
+    )
+    .await?;
+    let mut protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = Vec::new();
+    let mut underlay_webrtc = None;
+    if let Some((handle, table)) = underlay_leg {
+        let allowed = crate::transport::underlay_webrtc::Allowed::default();
+        let ice = crate::transport::IceProfile {
+            host_only: lookups.is_loopback(),
+        };
+        let acceptor = crate::transport::WebRtcSignalAcceptor::new(
+            handle.clone(),
+            underlay.clone(),
+            underlay.id(),
+            table.clone(),
+            ice,
+        );
+        protocols.push((
+            crate::transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
+            Box::new(crate::transport::underlay_webrtc::UnderlaySignalGate::new(
+                acceptor,
+                allowed.clone(),
+            )),
+        ));
+        // A session that attached is used only after a connect that completes, and
+        // the nudge is that connect: see `webrtc::nudge_session`.
+        protocols.push((
+            crate::transport::webrtc::NUDGE_ALPN.to_vec(),
+            Box::new(crate::transport::webrtc::NudgeAcceptor),
+        ));
+        underlay_webrtc = Some(crate::transport::underlay_webrtc::UnderlayWebRtc {
+            handle,
+            admission: table,
+            endpoint: underlay.clone(),
+            allowed,
+        });
+    }
+    let handle = habilis_network_iroh_multihop_transport::MultihopHandle::with_protocols(
+        &secret,
+        underlay,
+        multihop_handle_config(relay_payload),
+        protocols,
+    )?;
     let endpoint = build_endpoint(
         lookups,
         Some(secret),
@@ -572,12 +854,14 @@ pub(crate) async fn build_peer_multihop(
         Vec::new(),
         TransportHandles {
             multihop: Some(handle.clone()),
-            webrtc: None,
-            opts: TransportOpts::default(),
+            webrtc: Some(webrtc.clone()),
+            admission: admission.cloned(),
+            underlay: false,
+            opts,
         },
     )
     .await?;
-    Ok((endpoint, handle))
+    Ok((endpoint, handle, webrtc, underlay_webrtc))
 }
 
 /// Register a peer's address so the endpoint can connect to it.
@@ -684,6 +968,9 @@ pub(crate) fn build_mesh(
     // Cloned before the Router consumes the endpoint; the signal acceptor
     // registers webrtc transport addresses on attach.
     let endpoint_for_acceptor = endpoint.clone();
+    if let Some((_, admission, _)) = &webrtc {
+        admission.watch_dialed_gossip(!relay_transport);
+    }
     let session_gate = webrtc
         .as_ref()
         .filter(|_| needs_session)
@@ -768,12 +1055,310 @@ mod tests {
     // unit-tested in `protocol::mesh`, and the relay ladder logic in
     // [`super::relay`].
 
+    /// **A receiver that never reads grants the generous stream window.** Every endpoint of the
+    /// engine sets the QUIC windows of decision D11: 8 `MiB` for a stream, far above the iroh default
+    /// of about 1.2 `MiB`, and still a bound for a peer that sends faster than the node reads.
+    ///
+    /// The sender is a plain iroh endpoint whose own buffer is capped at 64 `KiB`. It cannot get
+    /// more than that ahead of what the receiver has taken in, so the bytes that its writes
+    /// accept, less its own buffer, are what the receiver granted. Nobody reads at the receiver.
+    #[cfg(feature = "host")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_receiver_that_never_reads_grants_the_generous_stream_window() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use crate::util::tuning::QUIC_STREAM_RECEIVE_WINDOW;
+
+        const ALPN: &[u8] = b"habilis-test/flood/0";
+        const SENDER_BUFFER: usize = 64 * 1024;
+        let receiver = super::build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            vec![ALPN.to_vec()],
+            super::TransportHandles::default(),
+        )
+        .await
+        .expect("bind the receiver");
+        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .send_window(SENDER_BUFFER as u64)
+                    .build(),
+            )
+            .bind()
+            .await
+            .expect("bind the sender");
+
+        let receiving = tokio::spawn({
+            let receiver = receiver.clone();
+            async move {
+                let incoming = receiver.accept().await.expect("an incoming connection");
+                let conn = incoming.await.expect("the handshake");
+                let stream = conn.accept_uni().await.expect("a stream");
+                // Nothing is read: the connection and the stream stay open and unread.
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                drop((conn, stream));
+            }
+        });
+        let conn = sender
+            .connect(receiver.addr(), ALPN)
+            .await
+            .expect("connect to the receiver");
+        let mut stream = conn.open_uni().await.expect("open a stream");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let writing = tokio::spawn({
+            let accepted = Arc::clone(&accepted);
+            async move {
+                let chunk = vec![0u8; 16 * 1024];
+                while stream.write_all(&chunk).await.is_ok() {
+                    accepted.fetch_add(chunk.len(), Ordering::Relaxed);
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let taken_in = accepted
+            .load(Ordering::Relaxed)
+            .saturating_sub(SENDER_BUFFER);
+        writing.abort();
+        receiving.abort();
+
+        let window = usize::try_from(QUIC_STREAM_RECEIVE_WINDOW).expect("a window fits usize");
+        assert!(
+            taken_in > 4 * 1024 * 1024 && taken_in <= window + 64 * 1024,
+            "the receiver took in {taken_in} bytes of a stream nobody read; the window is {window}"
+        );
+        sender.close().await;
+        receiver.close().await;
+    }
+
+    /// **Many streams that nobody reads still fit in the connection window.** Forty streams
+    /// at 8 `MiB` each could hold 320 `MiB`; the window of the connection (decision D11) holds the
+    /// receiver to 32 `MiB` for all of them together, where the iroh defaults let it take in about
+    /// 47 `MiB`. Counted at the sender, as in
+    /// `a_receiver_that_never_reads_grants_the_generous_stream_window`.
+    #[cfg(feature = "host")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streams_that_nobody_reads_fit_in_the_connection_window() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use crate::util::tuning::QUIC_CONNECTION_RECEIVE_WINDOW;
+
+        const ALPN: &[u8] = b"habilis-test/flood/1";
+        const SENDER_BUFFER: usize = 64 * 1024;
+        const STREAMS: usize = 40;
+        let receiver = super::build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            vec![ALPN.to_vec()],
+            super::TransportHandles::default(),
+        )
+        .await
+        .expect("bind the receiver");
+        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .send_window(SENDER_BUFFER as u64)
+                    .build(),
+            )
+            .bind()
+            .await
+            .expect("bind the sender");
+
+        let receiving = tokio::spawn({
+            let receiver = receiver.clone();
+            async move {
+                let incoming = receiver.accept().await.expect("an incoming connection");
+                let conn = incoming.await.expect("the handshake");
+                let mut streams = Vec::new();
+                while let Ok(stream) = conn.accept_uni().await {
+                    streams.push(stream);
+                }
+            }
+        });
+        let conn = sender
+            .connect(receiver.addr(), ALPN)
+            .await
+            .expect("connect to the receiver");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let mut writers = Vec::new();
+        for _ in 0..STREAMS {
+            let mut stream = conn.open_uni().await.expect("open a stream");
+            let accepted = Arc::clone(&accepted);
+            writers.push(tokio::spawn(async move {
+                let chunk = vec![0u8; 16 * 1024];
+                while stream.write_all(&chunk).await.is_ok() {
+                    accepted.fetch_add(chunk.len(), Ordering::Relaxed);
+                }
+            }));
+        }
+
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let taken_in = accepted
+            .load(Ordering::Relaxed)
+            .saturating_sub(SENDER_BUFFER);
+        for writer in writers {
+            writer.abort();
+        }
+        receiving.abort();
+
+        let window = usize::try_from(QUIC_CONNECTION_RECEIVE_WINDOW).expect("a window fits usize");
+        assert!(
+            taken_in <= window + 64 * 1024,
+            "the receiver took in {taken_in} bytes of {STREAMS} streams nobody read; the connection window is {window}"
+        );
+        sender.close().await;
+        receiver.close().await;
+    }
+
     #[tokio::test]
     async fn loopback_all_off_binds() {
         let endpoint = build_peer_endpoint(&LookupOpts::loopback())
             .await
             .expect("loopback endpoint must bind");
         endpoint.close().await;
+    }
+
+    // The underlay gets a `WebRTC` leg only when it is asked for, and only when
+    // this instance has `WebRTC` on. Its table takes the cap it is given (G).
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn the_underlay_leg_takes_the_cap_it_is_given_and_needs_webrtc_on() {
+        let build = |opts: TransportOpts, cap: Option<usize>| async move {
+            super::build_peer_multihop_with(&LookupOpts::loopback(), opts, None, false, cap)
+                .await
+                .expect("a multihop peer binds")
+        };
+
+        let (_endpoint, handle, _webrtc, leg) = build(TransportOpts::default(), Some(5)).await;
+        let leg = leg.expect("a leg when a cap is given");
+        assert_eq!(leg.admission.cap(), 5, "the table has the cap of G");
+        assert_eq!(
+            leg.endpoint.id(),
+            handle.underlay_id(),
+            "the leg is on the underlay"
+        );
+        assert_eq!(leg.handle.session_count(), 0);
+
+        let (_, _, _, without_cap) = build(TransportOpts::default(), None).await;
+        assert!(without_cap.is_none(), "no cap, no leg");
+        let off = TransportOpts {
+            webrtc: false,
+            ..TransportOpts::default()
+        };
+        let (_, _, _, webrtc_off) = build(off, Some(5)).await;
+        assert!(webrtc_off.is_none(), "WebRTC off, no leg");
+    }
+
+    // A test can switch the leg of the underlay off for the whole process, which
+    // is the control cell of a measurement.
+    #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+    #[test]
+    fn a_test_can_switch_the_underlay_leg_off() {
+        assert_eq!(super::underlay_cap(7), Some(7), "on by default");
+        super::set_underlay_leg_off(true);
+        assert_eq!(super::underlay_cap(7), None, "switched off");
+        super::set_underlay_leg_off(false);
+        assert_eq!(super::underlay_cap(7), Some(7), "switched on again");
+    }
+
+    // One identity per peer: the application endpoint (UDP and relay), the
+    // WebRTC address and the multihop hop identity share one key. The underlay
+    // has a key of its own (see `build_peer_multihop`).
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn one_key_serves_udp_webrtc_and_multihop() {
+        let (endpoint, handle, webrtc) = super::build_peer_multihop(
+            &LookupOpts::loopback(),
+            TransportOpts::default(),
+            None,
+            false,
+        )
+        .await
+        .expect("a multihop peer binds");
+        assert_eq!(handle.app_id(), endpoint.id(), "hop identity");
+        assert_eq!(
+            webrtc.transport().local_id(),
+            endpoint.id(),
+            "WebRTC address"
+        );
+        assert_ne!(
+            handle.underlay_addr().id,
+            endpoint.id(),
+            "a relay hands an id's packets to one endpoint only"
+        );
+        endpoint.close().await;
+    }
+
+    // An injected endpoint's handles must all carry the key it binds, the
+    // multihop handle must obey the mesh's relay rule, and the admission table
+    // must have a hook reporting to it.
+    #[tokio::test]
+    async fn an_injected_endpoint_is_checked_against_every_handle() {
+        use crate::transport::SignalAdmission;
+
+        let lookups = LookupOpts::loopback();
+        let (endpoint, webrtc) = super::build_peer_webrtc(&lookups, TransportOpts::default())
+            .await
+            .expect("a peer binds");
+        let observed = SignalAdmission::new(16);
+        let _hook = observed.connection_hook();
+        let check = |multihop, admission: &SignalAdmission, mesh_relay| {
+            super::check_injected_identity(
+                &endpoint, &webrtc, multihop, admission, &lookups, mesh_relay,
+            )
+        };
+        let hop = |id, relay_payload| {
+            Some(super::InjectedMultihop {
+                hop_identity: id,
+                relay_payload,
+            })
+        };
+
+        check(None, &observed, false).expect("no multihop handle is allowed");
+        check(hop(endpoint.id(), false), &observed, false).expect("a hop identity on the same key");
+
+        let other = iroh::SecretKey::from_bytes(&[5; 32]).public();
+        let key_error =
+            check(hop(other, false), &observed, false).expect_err("a hop identity on another key");
+        assert!(key_error.to_string().contains("multihop"), "{key_error}");
+
+        let relay_error = check(hop(endpoint.id(), true), &observed, false)
+            .expect_err("relay cells on a lookup-only mesh");
+        assert!(relay_error.to_string().contains("relay"), "{relay_error}");
+        check(hop(endpoint.id(), true), &observed, true)
+            .expect("the mesh lets the relay carry cells");
+
+        let unobserved = SignalAdmission::new(16);
+        let hook_error = check(None, &unobserved, false).expect_err("a table no hook reports to");
+        assert!(hook_error.to_string().contains("hook"), "{hook_error}");
+
+        let (stranger, other_webrtc) = super::build_peer_webrtc(&lookups, TransportOpts::default())
+            .await
+            .expect("a second peer binds");
+        let webrtc_error = super::check_injected_identity(
+            &endpoint,
+            &other_webrtc,
+            None,
+            &observed,
+            &lookups,
+            false,
+        )
+        .expect_err("a WebRTC handle on another key");
+        assert!(
+            webrtc_error.to_string().contains("WebRTC"),
+            "{webrtc_error}"
+        );
+        endpoint.close().await;
+        stranger.close().await;
     }
 
     #[tokio::test]

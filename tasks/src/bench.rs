@@ -19,6 +19,10 @@ use crate::TaskOutcome;
 use crate::util::output;
 
 #[cfg(feature = "bench")]
+mod gossip;
+#[cfg(feature = "bench")]
+mod multihop;
+#[cfg(feature = "bench")]
 mod native;
 #[cfg(feature = "bench")]
 mod run;
@@ -88,9 +92,24 @@ pub(crate) enum Cell {
     /// is the channel's own per-message cost; the gap from here to
     /// [`Self::HabilisNetworkChromeChrome`] is the integration's.
     RawChromeChromeDatagram,
+    /// The ladder's UDP rung: plain iroh on loopback, with round trips.
+    LadderUdp,
+    /// The ladder's `WebRTC` rung: str0m at both ends, with round trips.
+    LadderWebRtc,
+    /// The ladder's multihop rung over a direct underlay link.
+    LadderMultihopDirect,
+    /// The ladder's multihop rung through a third member.
+    LadderMultihopThird,
+    /// The ladder's relay rung: no IP transport, a local relay between.
+    LadderRelay,
+    /// One pair on IP with the gossip path open under it: the flood it costs.
+    GossipBackupPath,
+    /// The ladder's gossip rung: a QUIC connection between two members with no IP
+    /// path, carried by the real gossip flood through a third member.
+    LadderGossip,
 }
 
-const CELLS: [Cell; 9] = [
+const CELLS: [Cell; 16] = [
     Cell::HabilisNetworkChromeChrome,
     Cell::HabilisNetworkChromeNative,
     Cell::HabilisNetworkSafariNative,
@@ -100,6 +119,13 @@ const CELLS: [Cell; 9] = [
     Cell::IrohNativeNative,
     Cell::RawChromeChrome,
     Cell::RawChromeChromeDatagram,
+    Cell::LadderUdp,
+    Cell::LadderWebRtc,
+    Cell::LadderMultihopDirect,
+    Cell::LadderMultihopThird,
+    Cell::LadderRelay,
+    Cell::GossipBackupPath,
+    Cell::LadderGossip,
 ];
 
 impl Cell {
@@ -114,6 +140,13 @@ impl Cell {
             Self::IrohNativeNative => "iroh native-native",
             Self::RawChromeChrome => "webrtc chrome-chrome (raw, 64 KiB msgs)",
             Self::RawChromeChromeDatagram => "webrtc chrome-chrome (raw, 1200 B msgs)",
+            Self::LadderUdp => "ladder udp",
+            Self::LadderWebRtc => "ladder webrtc",
+            Self::LadderMultihopDirect => "ladder multihop (direct)",
+            Self::LadderMultihopThird => "ladder multihop (via third)",
+            Self::LadderRelay => "ladder relay",
+            Self::GossipBackupPath => "gossip backup path",
+            Self::LadderGossip => "ladder gossip",
         }
     }
 }

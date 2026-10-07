@@ -44,9 +44,11 @@ pub struct Opts {
     /// any uses only those; naming none is a loopback mesh. Ignored with a
     /// `topic` (always all three) or a `mesh` id (which carries its own).
     pub lookup: Vec<Lookup>,
-    /// What may carry payload: any of `udp`, `webrtc`, `relay`, with `udp` or
-    /// `webrtc` among them. Empty ⇒ `udp,webrtc`, so all data is peer to peer
-    /// and the relay serves lookup only. `relay`, or a list without `udp`,
+    /// What may carry payload: any of `udp`, `webrtc`, `multihop`, `relay`, with
+    /// `udp` or `webrtc` among them, and `udp` with `multihop`. Empty ⇒
+    /// `udp,webrtc,multihop`, so all data is peer to peer (through other members
+    /// when no direct path exists) and the relay serves lookup only. `relay`, or
+    /// a list without `udp`,
     /// needs `relay` in `lookup`. Part of the mesh id, so a joiner inherits
     /// it; ignored when joining by id.
     pub transport: Vec<Transport>,
@@ -56,8 +58,10 @@ pub struct Opts {
     /// different meshes. Empty ⇒ the default ladder. Ignored when joining
     /// by id.
     pub relay_urls: Vec<String>,
-    /// Active-view cap; `0` takes the engine default.
+    /// Active-view cap (G); `0` takes the engine default.
     pub max_peers: usize,
+    /// Ceiling of direct connections (C); `0` takes the engine default.
+    pub max_direct: usize,
 }
 
 /// The ladder these options name, or `None` for the default. Parsed as one
@@ -133,6 +137,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
         SetupParams {
             author,
             max_peers,
+            max_direct: opts.max_direct,
             // An embedded library writes no files and binds no control
             // socket, so it claims no /tmp root of its own.
             runtime_base: None,
@@ -147,7 +152,6 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
             // Everything this target has; the mesh's transport list narrows
             // it in `setup_mesh`.
             transports: TransportOpts::default(),
-            multihop: false,
             // An embedded member publishes no per-peer identity, so `meta`
             // stays free-form.
             per_peer_gate: None,

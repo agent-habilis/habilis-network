@@ -77,15 +77,27 @@ impl Direction {
 /// token reply size; the bulk is what follows on the request stream.
 const HEADER_LEN: usize = 5;
 
-fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
+/// The mode byte of an echo probe: the request carries `wanted` bytes and the
+/// reply returns as many. A mode byte rather than a [`Direction`], because a
+/// probe measures latency and not a direction of bulk.
+const MODE_ECHO: u8 = 3;
+
+fn header_with_mode(mode: u8, wanted: u32) -> [u8; HEADER_LEN] {
     let mut bytes = [0u8; HEADER_LEN];
-    bytes[0] = match direction {
-        Direction::Download => 0,
-        Direction::Upload => 1,
-        Direction::Both => 2,
-    };
+    bytes[0] = mode;
     bytes[1..].copy_from_slice(&wanted.to_le_bytes());
     bytes
+}
+
+fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
+    header_with_mode(
+        match direction {
+            Direction::Download => 0,
+            Direction::Upload => 1,
+            Direction::Both => 2,
+        },
+        wanted,
+    )
 }
 
 /// The bulk peer: reads a header, then plays whichever direction it names.
@@ -108,7 +120,7 @@ impl ProtocolHandler for Bench {
             let wanted = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
             // The peer names the reply size, so the ceiling `exchange` keeps
             // on its side has to hold here too, or one header asks for 4 GiB.
-            if head[0] > 2 || wanted > MAX_TRANSFER_BYTES {
+            if head[0] > MODE_ECHO || wanted > MAX_TRANSFER_BYTES {
                 return Err(AcceptError::from_err(std::io::Error::other(format!(
                     "refused request: mode {}, {wanted} bytes wanted",
                     head[0]
@@ -118,7 +130,7 @@ impl ProtocolHandler for Bench {
             // Anything after the header on the request stream is the client's
             // bulk upload. Drained and verified before replying, so a corrupted
             // upload fails as an upload rather than as a mismatched reply.
-            if matches!(head[0], 1 | 2) {
+            if matches!(head[0], 1 | 2 | MODE_ECHO) {
                 let uploaded = recv
                     .read_to_end(MAX_TRANSFER_BYTES)
                     .await
@@ -262,4 +274,85 @@ pub async fn exchange(
     );
     anyhow::ensure!(is_payload(&body), "reply body did not match");
     Ok(direction.bytes_for(bulk))
+}
+
+/// Bytes of one round-trip probe: a 1 `KiB` request and a 1 `KiB` echo.
+pub const RTT_PROBE_BYTES: usize = 1024;
+
+/// Round-trip time of `rounds` probes after `warmup` discarded ones, over an
+/// already-open `connection` to a [`Bench`] server.
+///
+/// # Errors
+/// A stream or write failure, or a reply that is not the probe.
+pub async fn rtt_samples(
+    connection: &Connection,
+    warmup: usize,
+    rounds: usize,
+) -> anyhow::Result<Vec<std::time::Duration>> {
+    let probe = payload(RTT_PROBE_BYTES);
+    let head = header_with_mode(MODE_ECHO, u32::try_from(RTT_PROBE_BYTES)?);
+    let mut samples = Vec::with_capacity(rounds);
+    for round in 0..warmup + rounds {
+        let started = std::time::Instant::now();
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(&head).await?;
+        send.write_all(&probe).await?;
+        send.finish()?;
+        let echo = recv.read_to_end(RTT_PROBE_BYTES + 64).await?;
+        let elapsed = started.elapsed();
+        anyhow::ensure!(echo == probe, "the echo is not the probe");
+        if round >= warmup {
+            samples.push(elapsed);
+        }
+    }
+    Ok(samples)
+}
+
+#[cfg(all(test, feature = "native"))]
+mod tests {
+    use std::net::SocketAddr;
+
+    use iroh::endpoint::presets;
+    use iroh::protocol::Router;
+    use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
+
+    use super::{BENCH_ALPN, Bench, rtt_samples};
+
+    async fn loopback_endpoint() -> Endpoint {
+        let loopback: SocketAddr = "127.0.0.1:0".parse().expect("a literal loopback address");
+        Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr(loopback)
+            .expect("a loopback bind address")
+            .bind()
+            .await
+            .expect("bind a loopback endpoint")
+    }
+
+    #[tokio::test]
+    async fn rtt_samples_returns_one_timed_probe_per_round() {
+        let server = loopback_endpoint().await;
+        let _router = Router::builder(server.clone())
+            .accept(BENCH_ALPN, Bench)
+            .spawn();
+        let socket = server
+            .bound_sockets()
+            .into_iter()
+            .find(SocketAddr::is_ipv4)
+            .expect("an IPv4 socket");
+        let client = loopback_endpoint().await;
+        let connection = client
+            .connect(
+                EndpointAddr::from_parts(server.id(), [TransportAddr::Ip(socket)]),
+                BENCH_ALPN,
+            )
+            .await
+            .expect("connect over loopback");
+
+        let samples = rtt_samples(&connection, 3, 20).await.expect("rtt samples");
+
+        assert_eq!(samples.len(), 20);
+        assert!(samples.iter().all(|sample| !sample.is_zero()));
+        connection.close(0u32.into(), b"done");
+    }
 }

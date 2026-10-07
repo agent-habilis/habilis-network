@@ -259,6 +259,13 @@ Two members can claim the beacon role inside each other's probe window.
 A periodic re-arbitration sheds the rival copy, so the single-beacon invariant holds eventually, not at claim time.
 The rendezvous endpoint never authors application messages, and it is never a directed target.
 It accepts no unicast, so a member cannot probe it for a direct path; its accept gate is what keeps its link off the relay.
+A member holds the rendezvous link only while it needs it.
+Once it has three links to other members it tells gossip to leave the rendezvous.
+The beacon then learns that the member left on purpose, keeps no claim on it and does not dial it back.
+Gossip closes the link itself. Once the link is closed and the rendezvous is not wanted, the heal tick detaches the `WebRTC` session. A close from the member's side would reach the beacon as a lost connection.
+This frees a direct-peer slot and a place in the beacon's gossip view for the next joiner.
+It comes back only while it has fewer than three links, or for two minutes after the sweep removed a silent roster peer, because a partition may have split the mesh and the rendezvous is where the islands meet again. A node that came back stays 30 s, then lets go again.
+The member that hosts the beacon keeps its link, so that the beacon's view is never empty: a joiner is introduced to the mesh through that view, and without it the mesh splits into islands that never meet.
 
 ## 6. The engine at run time
 
@@ -438,14 +445,15 @@ A payload lane (gossip graft, unicast, blob) sends to a peer only after iroh sel
 A gossip graft waits for that proof (`transport::probe`), so a pair never dials a link through the relay.
 The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::path::refuse_unless_direct`).
 The rendezvous link is gated the same way on the beacon, so no gossip frame ever crosses the relay.
+The gate checks the path once, so every gossip connection is watched afterwards, the ones this node accepted and the ones iroh-gossip dials for it (the endpoint hook starts that watch): one whose selected path stays on the relay for `PROBE_DEADLINE`, the wait of the accept gate, is closed with the same coded reason.
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
 `transport.relay_transport = true` lets payload fall back to the relay, as before the policy existed.
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
-An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
+An id of version 1, minted before the policy had its own byte, is refused with a request to upgrade: the mesh is created again.
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
+`transport` (`--transport udp,webrtc,multihop,relay`, `transport: ['udp', 'webrtc', 'multihop', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` needs `udp`, and `udp,webrtc,multihop` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
@@ -498,7 +506,7 @@ sequenceDiagram
 Over the authenticated relay stream the receiver ignores the claimed endpoint id and trusts the TLS-proven remote id.
 The lower endpoint id offers, and one shared admission table caps in-flight sessions for both roles.
 TURN is refused by policy: the project relays through its own iroh relay instead.
-A custom path selector ranks direct IP first, then WebRTC, then relay.
+A custom path selector ranks direct IP first, then WebRTC, then multihop, then relay: one ladder (`Rung` in `habilis-network-iroh-transport-util`) that both selectors take, so the order does not depend on the transport list.
 The default iroh selector skips paths with no RTT sample, and a fresh WebRTC path always is one.
 Without the custom selector, the connection settles on the relay for its whole life.
 

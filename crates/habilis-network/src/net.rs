@@ -5,14 +5,23 @@
 //! needs an `Endpoint` reaches in here and accepts the coupling.
 
 pub use crate::gossip::conn_path;
+#[cfg(feature = "host")]
+pub use crate::lookup::multihop_handle_config;
+#[cfg(all(
+    feature = "host",
+    feature = "iroh-test-utils",
+    not(target_arch = "wasm32")
+))]
+pub use crate::lookup::set_underlay_leg_off;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use crate::lookup::test_relay;
+pub use crate::lookup::{
+    InjectedMultihop, TransportHandles, TransportOpts, add_peer_addr, build_endpoint,
+    build_peer_endpoint, check_injected_identity, install_transports, probe_connect, probe_ladder,
+    relay_ladder,
+};
 #[cfg(feature = "host")]
 pub use crate::lookup::{NetworkCapability, capability_probe};
-pub use crate::lookup::{
-    TransportHandles, TransportOpts, add_peer_addr, build_endpoint, build_peer_endpoint,
-    check_injected_identity, probe_connect, probe_ladder, relay_ladder,
-};
 pub use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 /// The direct-`WebRTC`-session ceiling this engine enforces, so a consumer
 /// renders the same denominator the engine checks. It used to be written out
@@ -28,7 +37,8 @@ pub mod direct {
     pub use crate::lookup::build_peer_webrtc;
     pub use crate::transport::path::{PROBE_DEADLINE, refuse_unless_direct, wait_direct};
     pub use crate::transport::webrtc::{
-        IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor, dial_signal, pair_needs_lane,
+        IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor, dial_signal, is_cap_refusal,
+        pair_needs_lane,
     };
     pub use crate::transport::{MAX_DIRECT_PEERS, SignalAdmission};
     pub use habilis_network_iroh_webrtc_transport::WebRtcHandle;

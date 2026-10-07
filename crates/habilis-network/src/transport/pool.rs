@@ -6,20 +6,23 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
+use n0_future::time::Instant as PoolInstant;
 use tokio::sync::Mutex;
 
 use super::path::wait_direct;
+use super::webrtc::close_code::IDLE;
 use super::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
+use crate::util::tuning::{DIRECT_IDLE_BACKSTOP_SECS, PROBE_HOLD_SECS};
 
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
@@ -54,11 +57,40 @@ impl std::fmt::Debug for UnicastPool {
     }
 }
 
+/// Why a pooled connection is held, which decides when it closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// A send opened or used it: it closes after the idle timeout.
+    Used,
+    /// A direct-path probe opened it and is still running.
+    Probing,
+    /// The probe ended at this time and no send has taken the connection since:
+    /// it closes after the probe hold.
+    Probed(PoolInstant),
+}
+
+/// A pooled connection and when a send last used it.
+struct Pooled {
+    conn: Connection,
+    /// On the clock the tokio runtime keeps, so a test can pause it.
+    last_used: PoolInstant,
+    hold: Hold,
+}
+
 struct PoolInner {
     /// `None` for a detached pool (unit-test states / pre-wiring default): every
     /// operation is inert, so a directed send simply errors instead of dialing.
     endpoint: Option<Endpoint>,
-    conns: Mutex<HashMap<EndpointId, Connection>>,
+    conns: Mutex<HashMap<EndpointId, Pooled>>,
+    /// How long a pooled connection may go unused before it is closed. The
+    /// peer's acceptor closes an unused connection on its own side too, so a
+    /// link that nobody sends on does not hold its two ends open for ever.
+    idle: Duration,
+    /// How long the connection of a direct-path probe stays after the probe ends
+    /// when no send takes it.
+    probe_hold: Duration,
+    /// Set once the sweeper is running, so that it starts at the first dial.
+    sweeping: AtomicBool,
     /// When each endpoint's last dial failed, for the
     /// [`DIAL_FAILURE_COOLDOWN`] gate. An entry clears on a successful dial or
     /// a graceful `Left`; expired ones are pruned on the next `note`.
@@ -83,6 +115,9 @@ struct PoolInner {
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
     relay_transport: bool,
+    /// The table whose ceiling the connections of this pool count against. Set once the
+    /// table exists, which is after the pool.
+    admission: std::sync::OnceLock<super::admission::SignalAdmission>,
 }
 
 /// What [`UnicastPool::send_if_warm`] did with the frame.
@@ -100,17 +135,60 @@ pub(crate) enum WarmSend {
 impl UnicastPool {
     /// A pool wired to `endpoint`, able to dial and carry unicast traffic.
     pub(crate) fn new(endpoint: Endpoint, relay_transport: bool) -> Self {
+        Self::with_timeouts(
+            endpoint,
+            relay_transport,
+            Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS),
+            Duration::from_secs(PROBE_HOLD_SECS),
+        )
+    }
+
+    /// [`Self::new`] with the idle timeout spelled out, for tests that must not
+    /// wait the real one.
+    #[cfg(test)]
+    pub(crate) fn with_idle(endpoint: Endpoint, relay_transport: bool, idle: Duration) -> Self {
+        Self::with_timeouts(
+            endpoint,
+            relay_transport,
+            idle,
+            Duration::from_secs(PROBE_HOLD_SECS),
+        )
+    }
+
+    /// [`Self::new`] with the idle timeout and the probe hold spelled out.
+    pub(crate) fn with_timeouts(
+        endpoint: Endpoint,
+        relay_transport: bool,
+        idle: Duration,
+        probe_hold: Duration,
+    ) -> Self {
         Self {
             inner: Arc::new(PoolInner {
                 endpoint: Some(endpoint),
                 conns: Mutex::new(HashMap::new()),
+                idle,
+                probe_hold,
+                sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashSet::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
                 relay_transport,
+                admission: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Report the sends of this pool to `admission`, so that a connection with a send in
+    /// flight is never evicted at the ceiling and a used one is not the least recently used.
+    pub(crate) fn set_admission(&self, admission: super::admission::SignalAdmission) {
+        let _ = self.inner.admission.set(admission);
+    }
+
+    /// [`send_one`], marked busy in the ledger for as long as it runs.
+    async fn send_marked(&self, eid: EndpointId, conn: &Connection, bytes: &[u8]) -> Result<()> {
+        let busy = self.inner.admission.get().map(|table| table.busy(eid));
+        send_one(conn, bytes, busy).await
     }
 
     /// A detached pool with no endpoint — every operation is a no-op. The
@@ -122,11 +200,15 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
+                idle: Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS),
+                probe_hold: Duration::from_secs(PROBE_HOLD_SECS),
+                sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashSet::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
                 relay_transport: false,
+                admission: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -151,7 +233,7 @@ impl UnicastPool {
         }
         let pool = self.clone();
         n0_future::task::spawn(async move {
-            let Err(error) = send_one(&conn, &bytes).await else {
+            let Err(error) = pool.send_marked(eid, &conn, &bytes).await else {
                 return;
             };
             tracing::debug!(target: LOG_TARGET, %error, "unicast send failed; dropping connection and redialing");
@@ -168,10 +250,12 @@ impl UnicastPool {
     /// no pooled connection at all, so the synchronous read below cannot
     /// answer for a pair that linked through the rendezvous.
     pub(crate) async fn udp_won(&self, eid: EndpointId) -> bool {
-        match self.warm_or_dial(eid).await {
+        let won = match self.probe_connection(eid).await {
             Ok(conn) => super::path::wait_ip(&conn, PATH_SELECT_TIMEOUT).await,
             Err(_) => false,
-        }
+        };
+        self.probe_done(eid).await;
+        won
     }
 
     /// Remember `addr` as the address to dial its peer at.
@@ -181,35 +265,91 @@ impl UnicastPool {
         }
     }
 
-    /// The open pooled connection to `eid`, for the path watcher. A contended
-    /// lock reads as none; the next alive tick asks again.
+    /// The open pooled connection to `eid`, whoever opened it. A contended lock
+    /// reads as none.
+    #[cfg(test)]
     pub(crate) fn connection(&self, eid: EndpointId) -> Option<Connection> {
         self.inner.conns.try_lock().ok().and_then(|conns| {
             conns
                 .get(&eid)
+                .map(|pooled| &pooled.conn)
                 .filter(|conn| conn.close_reason().is_none())
                 .cloned()
         })
     }
 
-    /// Whether the pooled connection to `eid` is on a selected UDP path.
-    /// Synchronous for the event loop's offer decisions: a contended lock, or
-    /// no pooled connection, reads as `false`, so the node offers.
+    /// The open pooled connection to `eid` that a send opened or used. A
+    /// connection that only a direct-path probe opened is not one: the pair was
+    /// never sent to. A contended lock reads as none.
+    pub(crate) fn used_connection(&self, eid: EndpointId) -> Option<Connection> {
+        self.inner.conns.try_lock().ok().and_then(|conns| {
+            conns
+                .get(&eid)
+                .filter(|pooled| pooled.hold == Hold::Used)
+                .map(|pooled| &pooled.conn)
+                .filter(|conn| conn.close_reason().is_none())
+                .cloned()
+        })
+    }
+
+    /// Whether the pooled connection to `eid` is on a selected UDP path. The
+    /// offer decisions read the admission table instead, which sees every
+    /// connection of the peer and not only the pooled one.
+    #[cfg(test)]
     pub(crate) fn selected_is_ip(&self, eid: EndpointId) -> bool {
         self.inner.conns.try_lock().is_ok_and(|conns| {
-            conns.get(&eid).is_some_and(|conn| {
-                conn.close_reason().is_none() && super::path::selected_is_ip(conn)
+            conns.get(&eid).is_some_and(|pooled| {
+                pooled.conn.close_reason().is_none() && super::path::selected_is_ip(&pooled.conn)
             })
         })
     }
 
-    /// The pooled connection to `eid`, if one is open.
+    /// The pooled connection to `eid`, if one is open. Taking it counts as
+    /// using it: every caller is about to send or probe on it.
     async fn warm(&self, eid: EndpointId) -> Option<Connection> {
-        let conns = self.inner.conns.lock().await;
-        conns
-            .get(&eid)
-            .filter(|conn| conn.close_reason().is_none())
-            .cloned()
+        let mut conns = self.inner.conns.lock().await;
+        let pooled = conns
+            .get_mut(&eid)
+            .filter(|pooled| pooled.conn.close_reason().is_none())?;
+        pooled.last_used = PoolInstant::now();
+        pooled.hold = Hold::Used;
+        Some(pooled.conn.clone())
+    }
+
+    /// Close the connections nothing has used for [`PoolInner::idle`], and the
+    /// connections of a probe that ended [`PoolInner::probe_hold`] ago with no
+    /// send taking them. One task for the whole pool, started with the first
+    /// connection and gone with the pool.
+    fn ensure_sweeper(&self) {
+        if self.inner.sweeping.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pool = Arc::downgrade(&self.inner);
+        let period = (self.inner.idle.min(self.inner.probe_hold) / 4).max(Duration::from_millis(1));
+        n0_future::task::spawn(async move {
+            loop {
+                n0_future::time::sleep(period).await;
+                let Some(inner) = pool.upgrade() else {
+                    return;
+                };
+                let now = PoolInstant::now();
+                inner.conns.lock().await.retain(|eid, pooled| {
+                    let idle = match pooled.hold {
+                        Hold::Probed(ended) => {
+                            now.saturating_duration_since(ended) >= inner.probe_hold
+                        }
+                        Hold::Used | Hold::Probing => {
+                            now.saturating_duration_since(pooled.last_used) >= inner.idle
+                        }
+                    };
+                    if idle {
+                        tracing::debug!(target: LOG_TARGET, %eid, "closing an idle pooled unicast connection");
+                        pooled.conn.close(IDLE.into(), b"idle");
+                    }
+                    !idle
+                });
+            }
+        });
     }
 
     /// How many times the inline-dial path was entered, for tests asserting a
@@ -327,7 +467,7 @@ impl UnicastPool {
     /// dropping the connection at the first write error.
     async fn send_batch(&self, eid: EndpointId, conn: &Connection, frames: &[Bytes]) {
         for bytes in frames {
-            if let Err(error) = send_one(conn, bytes).await {
+            if let Err(error) = self.send_marked(eid, conn, bytes).await {
                 tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
                 self.inner.conns.lock().await.remove(&eid);
                 return;
@@ -364,7 +504,7 @@ impl UnicastPool {
         if !self.inner.relay_transport && !wait_direct(&conn, PATH_SELECT_TIMEOUT).await {
             bail!("{RELAY_REFUSED}");
         }
-        if let Err(error) = send_one(&conn, &bytes).await {
+        if let Err(error) = self.send_marked(eid, &conn, &bytes).await {
             self.inner.conns.lock().await.remove(&eid);
             return Err(error);
         }
@@ -378,12 +518,64 @@ impl UnicastPool {
     /// # Errors
     /// See [`Self::dial_and_send`].
     pub(crate) async fn warm_or_dial(&self, eid: EndpointId) -> Result<Connection> {
-        let Some(endpoint) = self.inner.endpoint.clone() else {
+        if self.inner.endpoint.is_none() {
             bail!("unicast pool has no endpoint");
-        };
+        }
         if let Some(conn) = self.warm(eid).await {
             return Ok(conn);
         }
+        self.dial_pooled(eid, Hold::Used).await
+    }
+
+    /// The pooled connection that a direct-path probe uses: the one a send
+    /// already opened, left as it is, or else one dialed for the probe, which
+    /// does not count as a send. See [`Self::probe_done`].
+    ///
+    /// # Errors
+    /// See [`Self::dial_and_send`].
+    pub(crate) async fn probe_connection(&self, eid: EndpointId) -> Result<Connection> {
+        if self.inner.endpoint.is_none() {
+            bail!("unicast pool has no endpoint");
+        }
+        let existing = self
+            .inner
+            .conns
+            .lock()
+            .await
+            .get(&eid)
+            .map(|pooled| &pooled.conn)
+            .filter(|conn| conn.close_reason().is_none())
+            .cloned();
+        if let Some(conn) = existing {
+            return Ok(conn);
+        }
+        if self
+            .inner
+            .admission
+            .get()
+            .is_some_and(|table| table.evicted_recently(eid))
+        {
+            bail!("unicast probe waits: the peer evicted our connection lately");
+        }
+        self.dial_pooled(eid, Hold::Probing).await
+    }
+
+    /// The probe on `eid` has ended, whatever its verdict. A connection that only
+    /// the probe opened now closes after the probe hold, unless a send takes it
+    /// first. A connection that a send opened is left alone.
+    pub(crate) async fn probe_done(&self, eid: EndpointId) {
+        if let Some(pooled) = self.inner.conns.lock().await.get_mut(&eid)
+            && pooled.hold == Hold::Probing
+        {
+            pooled.hold = Hold::Probed(PoolInstant::now());
+        }
+    }
+
+    /// Dial `eid` and pool the connection under `hold`.
+    async fn dial_pooled(&self, eid: EndpointId, hold: Hold) -> Result<Connection> {
+        let Some(endpoint) = self.inner.endpoint.clone() else {
+            bail!("unicast pool has no endpoint");
+        };
         if self
             .inner
             .dial_failures
@@ -403,7 +595,15 @@ impl UnicastPool {
         match dial(&endpoint, addr).await {
             Ok(conn) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
-                self.inner.conns.lock().await.insert(eid, conn.clone());
+                self.inner.conns.lock().await.insert(
+                    eid,
+                    Pooled {
+                        conn: conn.clone(),
+                        last_used: PoolInstant::now(),
+                        hold,
+                    },
+                );
+                self.ensure_sweeper();
                 Ok(conn)
             }
             Err(error) => {
@@ -424,8 +624,8 @@ impl UnicastPool {
     /// dropping the map entry would leave the QUIC connection open until every
     /// clone drops.
     pub(crate) async fn forget(&self, eid: EndpointId) {
-        if let Some(conn) = self.inner.conns.lock().await.remove(&eid) {
-            conn.close(0u32.into(), b"peer left");
+        if let Some(pooled) = self.inner.conns.lock().await.remove(&eid) {
+            pooled.conn.close(0u32.into(), b"peer left");
         }
         self.inner.dial_failures.lock().await.forget(&eid);
         // A rejoin may come back at another address; its `PeerInfo` notes it.
@@ -468,15 +668,33 @@ async fn dial(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
 /// One message per unidirectional stream: open, write the whole frame, finish.
 /// No length framing is needed — the accept side reads the stream to EOF and
 /// gets exactly one serialized `Message`. The finished stream keeps flushing
-/// after it is dropped because the connection stays pooled, so there is no need
-/// to await `stopped()` (which would block the event loop on the inline
-/// unicast-only path).
-async fn send_one(conn: &Connection, bytes: &[u8]) -> Result<()> {
+/// after it is dropped because the connection stays pooled, so the sender does not
+/// await `stopped()` (which would block the event loop on the inline
+/// unicast-only path). Only the busy mark waits for it, in a task of its own.
+async fn send_one(
+    conn: &Connection,
+    bytes: &[u8],
+    busy: Option<super::admission::BusyGuard>,
+) -> Result<()> {
     let mut stream = conn.open_uni().await?;
     stream.write_all(bytes).await?;
     stream.finish()?;
+    // `finish()` returns while the frame is still in flight. The busy mark moves to a task that waits
+    // until the peer has read the stream (at most `BUSY_AFTER_FINISH`), so that the ledger does not
+    // evict the connection under a slow reader. The sender does not wait: it would block the event
+    // loop on the inline path.
+    if let Some(busy) = busy {
+        n0_future::task::spawn(async move {
+            let _ = n0_future::time::timeout(BUSY_AFTER_FINISH, stream.stopped()).await;
+            drop(busy);
+        });
+    }
     Ok(())
 }
+
+/// How long a connection stays busy after a send finished, if the peer has not read the frame. A
+/// reader that is slower than this is not protected: the connection can be evicted under its frame.
+const BUSY_AFTER_FINISH: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 mod tests {
@@ -567,6 +785,198 @@ mod tests {
         client.close().await;
     }
 
+    /// A loopback server that holds every unicast connection open, and a pool
+    /// dialed to it with the given idle timeout.
+    async fn pool_with_idle(
+        idle: Duration,
+    ) -> (
+        super::UnicastPool,
+        iroh::EndpointId,
+        iroh::protocol::Router,
+        iroh::Endpoint,
+    ) {
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let bind = || async {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, Hold)
+            .spawn();
+        let client = bind().await;
+        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::with_idle(client.clone(), false, idle);
+        (pool, server.id(), router, client)
+    }
+
+    /// Step the paused clock a second at a time, so the sweeper's timer fires
+    /// in order with the connection's own.
+    async fn advance_secs(seconds: u64) {
+        for _ in 0..seconds {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Closed by this side, not timed out by QUIC and not closed by the peer.
+    fn closed_as_idle(conn: &iroh::endpoint::Connection) -> bool {
+        matches!(
+            conn.close_reason(),
+            Some(iroh::endpoint::ConnectionError::LocallyClosed)
+        )
+    }
+
+    #[tokio::test]
+    async fn a_pooled_connection_nothing_sends_on_is_closed_after_the_idle_timeout() {
+        let (pool, server, router, client) = pool_with_idle(Duration::from_secs(8)).await;
+        let conn = pool.warm_or_dial(server).await.expect("dial");
+        tokio::time::pause();
+
+        advance_secs(6).await;
+        assert!(
+            conn.close_reason().is_none() && pool.connection(server).is_some(),
+            "inside the idle timeout the connection stays pooled"
+        );
+
+        advance_secs(6).await;
+        assert!(
+            pool.inner.conns.lock().await.is_empty(),
+            "an unused connection leaves the pool"
+        );
+        assert!(closed_as_idle(&conn), "and is closed, not just dropped");
+
+        tokio::time::resume();
+        pool.warm_or_dial(server).await.expect("a send dials again");
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_send_restarts_the_idle_timeout() {
+        let (pool, server, router, client) = pool_with_idle(Duration::from_secs(8)).await;
+        let conn = pool.warm_or_dial(server).await.expect("dial");
+        tokio::time::pause();
+
+        advance_secs(5).await;
+        assert!(
+            pool.warm(server).await.is_some(),
+            "a send takes the connection"
+        );
+        advance_secs(5).await;
+        assert!(
+            conn.close_reason().is_none() && pool.connection(server).is_some(),
+            "five seconds after a send is inside the timeout"
+        );
+
+        advance_secs(7).await;
+        assert!(closed_as_idle(&conn), "then it idles out as well");
+
+        tokio::time::resume();
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// A loopback server that holds every unicast connection open, and a pool
+    /// dialed to it with the given idle timeout and probe hold.
+    async fn pool_with_holds(
+        idle: Duration,
+        probe_hold: Duration,
+    ) -> (
+        super::UnicastPool,
+        iroh::EndpointId,
+        iroh::protocol::Router,
+        iroh::Endpoint,
+    ) {
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let bind = || async {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        };
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, Hold)
+            .spawn();
+        let client = bind().await;
+        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::with_timeouts(client.clone(), false, idle, probe_hold);
+        (pool, server.id(), router, client)
+    }
+
+    /// The connection of a direct-path probe is not a send: it counts as no use,
+    /// and is closed a fixed hold after the probe ends, long before the idle
+    /// timeout, unless a send takes it first.
+    #[tokio::test]
+    async fn a_probe_connection_is_closed_after_the_hold_unless_a_send_takes_it() {
+        let (pool, server, router, client) =
+            pool_with_holds(Duration::from_secs(80), Duration::from_secs(8)).await;
+        let conn = pool.probe_connection(server).await.expect("dial");
+        assert!(
+            pool.used_connection(server).is_none(),
+            "a probe is not a send"
+        );
+        pool.probe_done(server).await;
+        tokio::time::pause();
+
+        advance_secs(6).await;
+        assert!(
+            conn.close_reason().is_none() && pool.connection(server).is_some(),
+            "inside the hold the probe connection stays, so the graft can form on it"
+        );
+        advance_secs(6).await;
+        assert!(
+            pool.inner.conns.lock().await.is_empty(),
+            "after the hold the connection leaves the pool"
+        );
+        assert!(closed_as_idle(&conn), "and is closed, not just dropped");
+
+        tokio::time::resume();
+        let probed = pool.probe_connection(server).await.expect("probe again");
+        pool.probe_done(server).await;
+        tokio::time::pause();
+        advance_secs(5).await;
+        assert!(
+            pool.warm_or_dial(server).await.is_ok(),
+            "a send takes the probe connection"
+        );
+        assert!(pool.used_connection(server).is_some(), "and now it is used");
+        advance_secs(20).await;
+        assert!(
+            probed.close_reason().is_none(),
+            "a used connection follows the idle timeout, not the hold"
+        );
+
+        tokio::time::resume();
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
     /// A background dial that ends early — dropped with its runtime here, the
     /// same unwinding a panic in the dial gives — must still clear its
     /// in-flight entry, or every later cold send to that peer is refused.
@@ -632,5 +1042,168 @@ mod tests {
         assert!(pool.inner.conns.lock().await.is_empty());
         // Absent endpoint: nothing to drop, nothing panics.
         pool.forget(endpoint_id(2)).await;
+    }
+
+    /// A send over a pooled connection is a use of it: the ledger of the ceiling moves its
+    /// last use to the end of the send, so the connection of a peer that is being talked to
+    /// is not the least recently used.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_send_marks_its_connection_as_used_in_the_ledger() {
+        use iroh::protocol::Router;
+
+        use super::super::accept::UnicastAcceptor;
+        use super::super::admission::SignalAdmission;
+
+        let (tx, _frames) = tokio::sync::mpsc::channel(8);
+        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, UnicastAcceptor::new(tx, true))
+            .spawn();
+        let admission = SignalAdmission::new(8);
+        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .hooks(admission.connection_hook())
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::new(node.clone(), true);
+        pool.set_admission(admission.clone());
+
+        pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"))
+            .await
+            .expect("the first send");
+        let first = admission
+            .last_use(server.id())
+            .expect("the ledger holds it");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"two"))
+            .await
+            .expect("the second send");
+        let second = admission
+            .last_use(server.id())
+            .expect("the ledger holds it");
+
+        assert!(second > first, "the second send is a later use");
+        router.shutdown().await.expect("shutdown");
+        node.close().await;
+    }
+
+    /// A peer that evicted us is left alone by the proactive dial of a probe, and a send to
+    /// it dials at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_evicting_peer_is_not_probed_but_a_send_dials_it() {
+        use iroh::protocol::Router;
+
+        use super::super::accept::UnicastAcceptor;
+        use super::super::admission::SignalAdmission;
+
+        let (tx, _frames) = tokio::sync::mpsc::channel(8);
+        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, UnicastAcceptor::new(tx, true))
+            .spawn();
+        let admission = SignalAdmission::new(8);
+        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .hooks(admission.connection_hook())
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::new(node.clone(), true);
+        pool.set_admission(admission.clone());
+        admission.note_evicted(server.id());
+
+        assert!(
+            pool.probe_connection(server.id()).await.is_err(),
+            "the probe waits"
+        );
+        pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"now"))
+            .await
+            .expect("a send dials at once");
+
+        router.shutdown().await.expect("shutdown");
+        node.close().await;
+    }
+
+    /// The idle close of a pooled connection is the one backstop of the direct connections.
+    #[test]
+    fn a_pool_closes_an_idle_connection_after_the_one_backstop() {
+        assert_eq!(
+            super::UnicastPool::disconnected().inner.idle,
+            Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS)
+        );
+    }
+
+    /// **The busy mark lasts until the peer has read the frame.** `finish()` returns while the frame
+    /// is still in flight, so a mark that ended there left a connection with a slow reader open to
+    /// eviction, with its frame in the air. The mark now ends when the peer has read the stream to the
+    /// end, or after 2 s.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_send_keeps_its_connection_busy_until_the_peer_has_read_the_frame() {
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        use super::super::admission::SignalAdmission;
+
+        #[derive(Debug, Clone)]
+        struct SlowReader;
+        impl ProtocolHandler for SlowReader {
+            async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+                let mut stream = conn.accept_uni().await.map_err(AcceptError::from_err)?;
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                let _ = stream.read_to_end(1 << 20).await;
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, SlowReader)
+            .spawn();
+        let admission = SignalAdmission::new(8);
+        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .hooks(admission.connection_hook())
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::new(node.clone(), true);
+        pool.set_admission(admission.clone());
+
+        pool.dial_and_send(server.id(), bytes::Bytes::from(vec![7u8; 3000]))
+            .await
+            .expect("the send");
+        assert!(
+            admission.is_busy(server.id()),
+            "the frame is in flight: the peer has not read it"
+        );
+
+        let mut idle = false;
+        for _ in 0..60 {
+            if !admission.is_busy(server.id()) {
+                idle = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(idle, "the mark ends once the peer has read the frame");
+
+        router.shutdown().await.expect("shutdown");
+        node.close().await;
     }
 }

@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use iroh::EndpointId;
 
+use super::outbox::Resend;
 use super::pool::WarmSend;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::message::sole_addressee;
@@ -30,9 +31,22 @@ pub async fn deliver(
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> Result<()> {
+    match resolve(msg, bytes, state)? {
+        Resend::Broadcast(bytes) => broadcast(sender, bytes).await,
+        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, state).await,
+    }
+}
+
+/// The routing decision of [`deliver`], without the send: which plane carries
+/// `msg`, so that a caller that must not wait can queue it for another task.
+///
+/// # Errors
+/// The same as [`deliver`] for a message that has no path now: held for a
+/// direct path, or its addressee has no known endpoint.
+pub(crate) fn resolve(msg: &Message, bytes: Bytes, state: &EventLoopState) -> Result<Resend> {
     match route(msg, state) {
-        Route::Broadcast => broadcast(sender, bytes).await,
-        Route::Unicast(eid) => send_unicast(eid, bytes, state).await,
+        Route::Broadcast => Ok(Resend::Broadcast(bytes)),
+        Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
         Route::Held(eid) => Err(HeldForDirect { eid }.into()),
         Route::Undeliverable => {
             let addressee = sole_addressee(&msg.kind);
@@ -172,6 +186,23 @@ impl std::fmt::Display for HeldForDirect {
 
 impl std::error::Error for HeldForDirect {}
 
+/// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
+/// a send could not dial it without one. Call this when a send failed with
+/// [`HeldForDirect`]; any other error, and a peer that has an IP path, change nothing.
+pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
+    let Some(held) = error.downcast_ref::<HeldForDirect>() else {
+        return;
+    };
+    let needs_lane = state
+        .peer_endpoints
+        .values()
+        .find(|addr| addr.id == held.eid)
+        .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport));
+    if needs_lane {
+        state.want_lane_session(held.eid, crate::util::clock::Instant::now());
+    }
+}
+
 /// Whether a directed frame to `eid` is parked right now: the relay is lookup
 /// only and no direct path to the peer is proven yet. An unprobed peer is
 /// held too — the alive tick probes every known peer, so the hold is short.
@@ -292,7 +323,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, lane_for, route};
+    use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
     use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody};
@@ -337,6 +368,66 @@ mod tests {
                 body: body(),
             },
         )
+    }
+
+    // ── lane peers ────────────────────────────────────────────────────
+
+    /// A lane peer: no IP address, only a relay. On a mesh whose relay is lookup only, a frame to
+    /// it is held, and holding it is what asks for its session.
+    fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.local_udp_transport = true;
+        let bob = endpoint_id(1);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+        );
+        (state, bob)
+    }
+
+    /// A cold send to a lane peer with no session holds the frame and marks the session wanted.
+    #[test]
+    fn a_frame_held_for_a_lane_peer_marks_its_session_wanted() {
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        let now = crate::util::clock::Instant::now();
+        assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
+
+        let error = resolve(&directed_msg(), Bytes::from_static(b"hi"), &state)
+            .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(state.lane_session_wanted(bob, now), "the held frame asks");
+    }
+
+    /// A peer with an IP path is held too on a lookup-only relay, but its direct path comes
+    /// from the probe, so no session is wanted for it.
+    #[test]
+    fn a_frame_held_for_a_peer_with_an_ip_path_does_not_want_a_session() {
+        let (mut state, bob) = state_knowing_bob();
+        state.direct.remove(&bob);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
+        );
+        state.local_udp_transport = true;
+
+        let error = resolve(&directed_msg(), Bytes::from_static(b"hi"), &state)
+            .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+    }
+
+    /// On a mesh whose relay carries payload, the cold send to a lane peer is not held: it goes
+    /// over the relay, and the climb opens the session later.
+    #[test]
+    fn on_a_payload_relay_the_cold_send_to_a_lane_peer_is_not_held() {
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        state.relay_transport = true;
+
+        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
     }
 
     // ── the p2p path ──────────────────────────────────────────────────

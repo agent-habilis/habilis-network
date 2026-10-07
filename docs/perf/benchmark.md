@@ -153,6 +153,193 @@ slow devices, but on this machine the tab is half idle and the number does
 not move: the ceiling is in Chrome's network process, where SCTP and DTLS
 run, and the tab profile does not see it.
 
+## The path ladder
+
+The `ladder` cells put one cell on each rung of the path ladder, with the
+same bulk transfer and a round-trip probe. They are native only and run on
+loopback, so they measure what each transport costs and not what a real
+network adds. `cargo task benchmark --only ladder` runs them.
+
+| cell | what carries the bytes |
+|---|---|
+| ladder udp | plain iroh on loopback UDP |
+| ladder webrtc | str0m at both ends, the data channel is the only path |
+| ladder multihop (direct) | two multihop nodes with one underlay link between them |
+| ladder multihop (via third) | the same two nodes with a third member between them |
+| ladder relay | no IP transport on either side, one local relay between them |
+
+**Method.** Throughput is measured as in the cells above: one reused
+connection, one discarded warm-up round, then the timed rounds. The round
+trips follow on the same connection. One probe is one bi-stream with a
+1 KiB request and a 1 KiB echo, timed on the client from stream open to
+the last echoed byte. 50 probes are discarded and 1000 are timed. RTT p50
+and p99 are nearest-rank percentiles of the 1000.
+
+Each cell checks the path that carried it, and takes the path iroh selected,
+not any path that was open. The via-third cell also fails if the third member
+forwarded no cells, so it cannot report a direct number under its name. The
+relay is `test_relay::spawn_plain` in the same process, over plain HTTP.
+
+Apple M5, macOS 27.2, rustc 1.95.0. 8 MiB downloads, 5 timed rounds, two
+runs. Load average was 3.95 at the start of run 1 and 11.70 at the start of
+run 2, with other agents sharing the host. `Mbit/s` is the median of the
+rounds. The range is min–max across both runs.
+
+| cell | path | Mbit/s run 1 | Mbit/s run 2 | range | RTT p50 ms (run 1, 2) | RTT p99 ms (run 1, 2) |
+|---|---|---|---|---|---|---|
+| ladder udp | ip | 2176 | 2141 | 2111–2197 | 0.04, 0.04 | 0.06, 0.06 |
+| ladder webrtc | webrtc | 70 | 74 | 63–101 | 0.11, 0.11 | 0.15, 0.15 |
+| ladder multihop (direct) | multihop | 871 | 841 | 788–887 | 0.12, 0.12 | 0.16, 0.15 |
+| ladder multihop (via third) | multihop | 441 | 430 | 403–449 | 0.24, 0.25 | 0.30, 0.53 |
+| ladder relay | relay | 1813 | 1752 | 1600–1830 | 0.08, 0.08 | 0.12, 0.11 |
+
+**Reading.**
+
+- UDP is the ceiling on both measures. The webrtc cell matches the
+  webrtc-only cell above (64–104 Mbit/s), so the path ladder adds nothing
+  to it.
+- Multihop with a direct link carries 40% of the UDP throughput and adds
+  0.08 ms to the median round trip. The cause is not measured. One
+  possibility is that every packet is wrapped and carried by a second
+  QUIC connection, the underlay.
+- A third member halves multihop again (about 435 Mbit/s) and adds about
+  0.2 ms to the median round trip, against 0.08 ms for the direct link.
+  This is the cost of one forwarding member. Do not read the two numbers as
+  per-hop constants: no cell has two or more forwarding members.
+- The p99 of the via-third cell was 0.30 ms in run 1 and 0.53 ms in run 2.
+  The host was busier in run 2. This single value is not a result.
+- The relay cell is fast because the relay is on the same machine. Do not
+  read it as the speed of a real relay. Only its order against the other
+  rungs on loopback is a result.
+- The gossip rung has no cell here. It needs the gossip transport (Phase 6).
+
+## The gossip backup path
+
+`cargo task benchmark --only 'gossip backup'` measures what a gossip path costs
+the mesh while it is open but not selected, because a pair stands on IP. The
+question: does an open backup path put frames on the topic, and how many?
+
+**Method.** N members share one in-memory flood: every frame that one member sends
+reaches every other member, as a gossip broadcast does. Two of them are real iroh
+endpoints, A and B, with IP on loopback and the gossip transport beside it, and
+the path ladder ranks IP first. A dials B with the IP address and the gossip
+address. The control run gives the IP address only. After 3 s to settle, the
+pair idles for 30 s, then moves 5 timed rounds of 8 MiB over IP. The run counts
+the frames each member puts on the topic and reads, the datagrams that iroh sent
+and received on the gossip path (`Path::stats`), and the lost packets of the
+connection at both ends.
+
+Apple M5, macOS 27.2, rustc 1.95.0, the runner's `bench` build. One run. Load
+average 1.96 at the start. N = 8 and N = 32 gave the same numbers.
+
+| | gossip path open under IP | control, IP only |
+|---|---|---|
+| selected path | ip | ip |
+| gossip path open | yes | no |
+| datagrams on the gossip path in 30 s (tx, rx) | 8, 8 | none |
+| lost packets on the gossip path | 0 | none |
+| frames on the topic in 30 s | 16 | 0 |
+| frames out per second, A and B each | 0.27 | 0 |
+| frames in per second, each bystander | 0.53 | 0 |
+| bytes in per second, A and B each / each bystander | 26 / 51 | 0 |
+| frames on the topic during 40 MiB of bulk | 0 | 0 |
+| lost packets during bulk, at A and at B | 0, 0 | 0, 0 |
+| throughput, median of the rounds (min–max) | 1803 Mbit/s (1682–1864) | |
+
+**Reading.**
+
+- With IP selected, an open gossip path costs one 96-byte frame per 3.7 s in each
+  direction (66 bytes of header and a 30-byte datagram, so a QUIC probe or a
+  keepalive). It carried no payload: the bulk put 0 frames on the topic.
+- The cost of one pair does not depend on N. Every frame reaches every member, so
+  the cost for one member is the number of such pairs times 0.53 frames/s. If every
+  pair had an open backup path, that is about 15 frames/s (1.4 KB/s) per member at
+  N = 8 (28 pairs) and about 264 frames/s (25 KB/s) at N = 32 (496 pairs). These two
+  figures are arithmetic from the measured rate. They were not measured.
+- This is the traffic that `GossipHandle::allow(dst, false)` stops. A pair that a
+  higher rung carries has no use for the gossip path, so the engine blocks its
+  frames. The lookup rule alone does not remove it, because iroh also opens a
+  learned custom address as a backup path.
+
+**Limits.** One run, and one pair in the group. The flood is all-to-all and in
+memory: a real gossip topic builds a tree and adds lazy `IHAVE` messages and
+delay, so frames per member would differ. The idle window is 30 s, so a probe
+interval longer than that would not show. The lost packets here are those of the
+IP path. The inner QUIC retransmits of a pair that gossip carries come with the
+gossip-only cell.
+
+## The gossip rung
+
+`ladder gossip` measures a QUIC connection that gossip carries, over the real iroh-gossip topic (not an in-memory flood). Three members, A, B and C, join one
+topic over IP. A has the `IPv6` loopback only and C has `IPv4` only, so A and C cannot send each other an IP packet. A dials C with the gossip address alone,
+and every packet of the connection is a frame that B reads and passes on. B has both address families and holds the gossip links. `cargo task benchmark --only 'ladder
+gossip'` runs it, and it is skipped, with the reason, on a machine that cannot bind `::1`.
+
+Apple M5, macOS 27.2, rustc 1.95.0, the runner's `bench` build. One run, 8 MiB downloads, 5 timed rounds after 1 warm-up, then 50 + 1000 round trips. Load average
+2.55 at the start.
+
+| | ladder gossip |
+|---|---|
+| selected path | gossip |
+| throughput, median of the rounds (min–max) | 732 Mbit/s (670–815) |
+| round trip p50, p99 | 0.17 ms, 0.27 ms |
+| frames originated (A and C together) | 46052 |
+| frames received (all members together) | 91814 |
+| flood amplification (received over originated) | 1.99 |
+| bytes out: A, C | 3.36 MB, 57.2 MB |
+| bytes in: A, B, C | 56.8 MB, 60.5 MB, 3.36 MB |
+| frames out at C, frames in at A | 38781, 38523 |
+| lost packets of the inner QUIC connection: at A, at C | 0, 249 |
+
+**Reading.**
+
+- A connection that gossip carries moves 732 Mbit/s and answers in 0.17 ms at the median, on loopback. Beside the other rungs of the ladder table above, that is below IP (2141–2176
+  Mbit/s) and the relay (1752–1813), and above multihop through a third member (430–441). The round trip is in the range of multihop (0.12–0.25 ms). These are
+  loopback numbers: there is no network time in them, and they say what the transports cost, not what a network adds.
+- The flood costs what a flood must. Each frame reached both other members: amplification 1.99 against the expected N−1 = 2 at N = 3. B only reads and passes frames on,
+  and it received 60.5 MB, more than the 50.3 MB that A downloaded (6 transfers of 8 MiB) because the flood also carries the acknowledgements and the round-trip probes. The cost of a gossip
+  pair is paid by every member, in proportion to the bytes the pair moves.
+- Frames cost a header of 66 bytes each on frames that average 1474 bytes (C's bytes out over its frames out): 4.5%.
+- The inner connection lost 249 packets at C, the sender of the bulk, and none at A. C put 38781 frames on the topic and A read 38523: **258 fewer**, which matches the 249 lost packets within 9.
+  So in this first run the topic delivered about 0.65% fewer frames than were sent, and QUIC recovered them by retransmitting. Three more runs, below, say where they are lost.
+- The inner QUIC did not collapse under 0.4% to 1% loss on loopback. This is no proof about a real network, where the outer connection's retransmits and the inner ones can stack:
+  the concern in the design (two loss-recovery loops) is **not settled** by this run.
+
+**Limits.** The debug build of the runner. Three members, one pair. The topic's byte budget was not set, so nothing was limited.
+
+### Where the frames are lost: three more runs
+
+The report now also counts, per member, the frames that the sink queue refused (`dropped_sink_refused`), the inbound queue to iroh (`queue_full`), oversized packets, and the
+topic's `Lagged` events. Three runs of `cargo task benchmark --only 'ladder gossip' --rounds 5 --json`, same machine and build. Load average 1.96 at the start of run 1 and 8.89 at the
+start of runs 2 and 3.
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| throughput, median (min–max), Mbit/s | 712 (706–754) | 681 (656–716) | 882 (845–917) |
+| round trip p50, p99, ms | 0.16, 0.25 | 0.17, 0.25 | 0.17, 0.21 |
+| flood amplification | 1.98 | 1.99 | 1.99 |
+| frames C put on the topic, frames A read, gap | 38803, 38531, **272** | 37504, 37147, **357** | 37356, 37209, **147** |
+| frames the sink at C refused (not counted in the line above) | **161** | 0 | 0 |
+| lost packets of the inner connection at C | 422 | 357 | 147 |
+| `Lagged` events at A, at B | 4, 13 | 4, 0 | 5, 8 |
+| `queue_full`, oversized packets at any member | 0, 0 | 0, 0 | 0, 0 |
+| frames A put on the topic, frames C read | 7241, 7245 | 5811, 5815 | 5719, 5722 |
+
+**Reading.**
+
+- Every frame that did not arrive shows up as a lost packet of the inner connection: gap plus sink refusals is 433, 357 and 147 against 422, 357 and 147 lost packets. In runs 2 and 3 the two are equal.
+  QUIC retransmitted all of them, and the transfers completed.
+- The loss is at two places. **The sink queue at C** refused 161 frames, in run 1 only: a burst filled its 256 frames. **The topic's delivery to A** is the larger part: a gap of 147 to 357 frames after
+  the sink, with 4 or 5 `Lagged` events at A in every run. My inbound queue to iroh was never full and no packet was oversized, so those two are not where frames are lost.
+- The `Lagged` event is the topic saying that the receive loop did not read fast enough: the subscription holds 2048 events by default (`TOPIC_EVENTS_DEFAULT_CAP`, set with
+  `subscription_capacity` in `JoinOptions`), and the oldest are dropped when it is full. The documentation of that option says the subscriber is closed after a `Lagged` event; in these runs A kept
+  receiving after its first one, so I do not know which of the two holds in this fork.
+- This is at an offered load of about 700 Mbit/s, on a debug build where one runtime serves three endpoints. The default budget of 1 MiB/s is about 80 times lower (700 Mbit/s is about 87 MB/s). Nothing here says the
+  budget would see loss. It says what the topic does when a member is pushed far past it, and that the engine's receive path must not be slower than the reader here: the engine reads the topic in
+  its event loop, which also does other work.
+- The A to C direction (acknowledgements and probes) lost nothing: C read 4 to 3 frames **more** than A put on the topic in each run, and I did not look into those few extra frames (a count taken at two
+  different instants is the likely cause).
+
 ## What this says about removing the inner encryption
 
 - It is not what limits throughput in any cell.

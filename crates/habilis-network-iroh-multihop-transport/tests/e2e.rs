@@ -7,7 +7,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use habilis_network_iroh_multihop_transport::{MULTIHOP_TRANSPORT_ID, MultihopHandle};
+use habilis_network_iroh_multihop_transport::{
+    HandleConfig, MULTIHOP_TRANSPORT_ID, MultihopHandle, underlay_secret,
+};
 use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, TransportAddr};
@@ -30,10 +32,12 @@ impl ProtocolHandler for Echo {
     }
 }
 
-/// A plain loopback underlay endpoint: real IP on 127.0.0.1, no relay/discovery.
-async fn underlay_endpoint() -> Endpoint {
+/// A plain loopback underlay endpoint: real IP on 127.0.0.1, no relay/discovery,
+/// on the key derived from the peer's own.
+async fn underlay_endpoint(peer: &SecretKey) -> Endpoint {
     let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
     Endpoint::builder(presets::Minimal)
+        .secret_key(underlay_secret(peer))
         .relay_mode(RelayMode::Disabled)
         .bind_addr(loopback)
         .expect("valid bind addr")
@@ -51,8 +55,9 @@ struct Node {
 }
 
 async fn make_node(secret: SecretKey) -> Node {
-    let underlay = underlay_endpoint().await;
-    let handle = MultihopHandle::new(secret.public(), underlay);
+    let underlay = underlay_endpoint(&secret).await;
+    let handle = MultihopHandle::new(&secret, underlay, HandleConfig::default())
+        .expect("underlay on the derived key");
     let app = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
         .relay_mode(RelayMode::Disabled)
@@ -69,11 +74,42 @@ async fn make_node(secret: SecretKey) -> Node {
     }
 }
 
+/// Like [`make_node`], with the `WebRTC` transport registered on the same
+/// endpoint and the same key, in the order the engine installs them.
+async fn make_dual_node(
+    secret: SecretKey,
+) -> (Node, habilis_network_iroh_webrtc_transport::WebRtcHandle) {
+    let underlay = underlay_endpoint(&secret).await;
+    let handle = MultihopHandle::new(&secret, underlay, HandleConfig::default())
+        .expect("underlay on the derived key");
+    let webrtc = habilis_network_iroh_webrtc_transport::WebRtcHandle::new(
+        habilis_network_iroh_webrtc_transport::WebRtcTransport::new(secret.public()),
+    );
+    let app = Endpoint::builder(presets::Minimal)
+        .secret_key(secret.clone())
+        .relay_mode(RelayMode::Disabled)
+        .preset(handle.clone())
+        .add_custom_transport(webrtc.transport())
+        .path_selector(webrtc.path_selector())
+        .clear_ip_transports()
+        .clear_relay_transports()
+        .bind()
+        .await
+        .expect("bind app endpoint with both custom transports");
+    let node = Node {
+        app,
+        handle,
+        id: secret.public(),
+    };
+    (node, webrtc)
+}
+
 /// A pure relay: only an underlay + forwarding handle (no application endpoint).
 /// Kept alive by the returned handle. Its app id is `secret.public()`.
 async fn make_relay(secret: SecretKey) -> MultihopHandle {
-    let underlay = underlay_endpoint().await;
-    MultihopHandle::new(secret.public(), underlay)
+    let underlay = underlay_endpoint(&secret).await;
+    MultihopHandle::new(&secret, underlay, HandleConfig::default())
+        .expect("underlay on the derived key")
 }
 
 fn secret(seed: u8) -> SecretKey {
@@ -114,13 +150,13 @@ async fn connects_end_to_end_through_one_relay() {
     // real underlay dial address.
     alice
         .handle
-        .feed_topology(alice.handle.link_vector(1, vec![(relay_id, COST)]));
+        .feed_topology(alice.handle.link_vector(vec![(relay_id, COST)]));
     alice
         .handle
-        .feed_topology(relay.link_vector(1, vec![(alice.id, COST), (bob.id, COST)]));
+        .feed_topology(relay.link_vector(vec![(alice.id, COST), (bob.id, COST)]));
     alice
         .handle
-        .feed_topology(bob.handle.link_vector(1, vec![(relay_id, COST)]));
+        .feed_topology(bob.handle.link_vector(vec![(relay_id, COST)]));
 
     let echo = Router::builder(bob.app.clone())
         .accept(ECHO_ALPN, Echo)
@@ -153,16 +189,16 @@ async fn connects_end_to_end_through_two_relays() {
 
     alice
         .handle
-        .feed_topology(alice.handle.link_vector(1, vec![(r1_id, COST)]));
+        .feed_topology(alice.handle.link_vector(vec![(r1_id, COST)]));
     alice
         .handle
-        .feed_topology(r1.link_vector(1, vec![(alice.id, COST), (r2_id, COST)]));
+        .feed_topology(r1.link_vector(vec![(alice.id, COST), (r2_id, COST)]));
     alice
         .handle
-        .feed_topology(r2.link_vector(1, vec![(r1_id, COST), (bob.id, COST)]));
+        .feed_topology(r2.link_vector(vec![(r1_id, COST), (bob.id, COST)]));
     alice
         .handle
-        .feed_topology(bob.handle.link_vector(1, vec![(r2_id, COST)]));
+        .feed_topology(bob.handle.link_vector(vec![(r2_id, COST)]));
 
     let echo = Router::builder(bob.app.clone())
         .accept(ECHO_ALPN, Echo)
@@ -178,6 +214,58 @@ async fn connects_end_to_end_through_two_relays() {
 
     assert_multihop_selected(&conn);
     echo_roundtrip(&conn, b"hello across two hops").await;
+
+    conn.close(0u32.into(), b"done");
+    echo.shutdown().await.expect("shutdown echo router");
+}
+
+#[tokio::test]
+async fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
+    // The same A -> R -> B chain, with the WebRTC transport registered beside
+    // multihop on both application endpoints and one key each. No session is
+    // negotiated, so multihop must carry the connection.
+    let (alice, alice_webrtc) = make_dual_node(secret(21)).await;
+    let relay = make_relay(secret(22)).await;
+    let relay_id = secret(22).public();
+    let (bob, bob_webrtc) = make_dual_node(secret(23)).await;
+
+    assert_eq!(
+        alice.handle.app_id(),
+        alice.app.id(),
+        "one key: hop identity is the endpoint id"
+    );
+    assert_eq!(
+        alice_webrtc.transport().local_id(),
+        alice.app.id(),
+        "and so is the WebRTC address"
+    );
+
+    alice
+        .handle
+        .feed_topology(alice.handle.link_vector(vec![(relay_id, COST)]));
+    alice
+        .handle
+        .feed_topology(relay.link_vector(vec![(alice.id, COST), (bob.id, COST)]));
+    alice
+        .handle
+        .feed_topology(bob.handle.link_vector(vec![(relay_id, COST)]));
+
+    let echo = Router::builder(bob.app.clone())
+        .accept(ECHO_ALPN, Echo)
+        .spawn();
+
+    let conn = tokio::time::timeout(
+        Duration::from_secs(30),
+        alice.app.connect(bob.id, ECHO_ALPN),
+    )
+    .await
+    .expect("connect timed out")
+    .expect("connect over one relay with WebRTC registered");
+
+    assert_multihop_selected(&conn);
+    echo_roundtrip(&conn, b"hello with both transports").await;
+    assert_eq!(alice_webrtc.session_count(), 0);
+    assert_eq!(bob_webrtc.session_count(), 0);
 
     conn.close(0u32.into(), b"done");
     echo.shutdown().await.expect("shutdown echo router");

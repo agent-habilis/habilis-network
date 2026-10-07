@@ -1,0 +1,41 @@
+[package]
+name = "habilis-network-iroh-gossip-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "Gossip as an iroh custom transport: QUIC packets carried as frames on the mesh gossip topic."
+license = "MIT"
+repository = "https://github.com/agent-habilis/habilis-network"
+readme = "README.md"
+keywords = ["iroh", "transport", "p2p", "quic", "gossip"]
+categories = ["network-programming"]
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "habilis_network_iroh_gossip_transport"
+path = "src/lib.rs"
+
+[dependencies]
+iroh.workspace = true
+# `CustomAddr` is not re-exported through `iroh`: name it from iroh-base like the
+# sibling transport crates, so that the graph carries one copy of it.
+iroh-base.workspace = true
+habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util" }
+noq-udp.workspace = true
+n0-watcher.workspace = true
+tokio.workspace = true
+n0-future.workspace = true
+# The topic that the frames ride. The engine owns the `Gossip`; this crate only
+# needs the sender of the topic it is handed.
+iroh-gossip.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# The engine's message cap, which the frame size must equal (a test pins it).
+habilis-network-util = { path = "../habilis-network-util", default-features = false }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util"] }

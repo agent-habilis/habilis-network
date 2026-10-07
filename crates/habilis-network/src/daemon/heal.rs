@@ -61,6 +61,9 @@ pub(super) async fn run_heal(
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
     crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
+    // A node that came back to a mesh whose links are all up gets no link
+    // event to release on, so the heal tick checks too.
+    gossip::heal::release_rendezvous_if_due(state, ctx).await;
     let threshold = Duration::from_secs(heal_stall_threshold_secs());
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
     if hard_edge {
@@ -72,8 +75,11 @@ pub(super) async fn run_heal(
         );
         state.note_degraded();
         // The frozen-era link view is stale by definition; clearing this
-        // re-arms the regular tick's probe until a fresh NeighborUp.
+        // re-arms the regular tick's probe until a fresh NeighborUp. Every link
+        // is stale too, so a node that had let go of the rendezvous is owed
+        // one return to it.
         state.rendezvous_linked = false;
+        state.owe_rendezvous_return(Instant::now());
         // A free reading taken before the freeze is stale for the same
         // reason, across the widest gap any of these deadlines can span.
         state.forget_rendezvous_verdict();
@@ -103,6 +109,14 @@ pub(super) async fn run_heal(
         tracing::debug!(
             target: "habilis_network::gossip",
             "heal tick: rendezvous linked; idle"
+        );
+    } else if !state.rendezvous_wanted() {
+        // Enough links to others: the rendezvous was let go of on purpose, and
+        // grafting it now would undo that. A node that falls below the count
+        // comes back through the next tick.
+        tracing::debug!(
+            target: "habilis_network::gossip",
+            "heal tick: rendezvous released; idle"
         );
     } else if crate::transport::webrtc::rendezvous_graftable(state) {
         gossip::heal::tick_heal(params.id, ctx.sender).await;
@@ -224,7 +238,7 @@ pub(super) async fn try_resubscribe(
     attempts: &mut u32,
 ) -> Resubscribe {
     let mut bootstrap = Vec::new();
-    if !state.rendezvous_graft_needs_session {
+    if !state.rendezvous_graft_needs_session && state.rendezvous_wanted() {
         bootstrap.push(env.params.id);
     }
     bootstrap.extend(state.known_endpoints.iter().copied());

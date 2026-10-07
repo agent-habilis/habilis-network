@@ -22,7 +22,7 @@ pub const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 /// Close code an inbound gossip connection gets when the relay is lookup
 /// only and no direct path was selected within the deadline. Distinct from
 /// the blob lane's code so a log reader can tell the two refusals apart.
-pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = 4;
+pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = super::webrtc::close_code::GOSSIP_RELAY_REFUSED;
 
 /// Whether iroh's selected path to the remote is not the relay: a direct UDP
 /// path, or a custom transport (`WebRTC`, multihop), which is peer to peer as
@@ -41,6 +41,22 @@ pub(crate) fn selected_is_ip(conn: &Connection) -> bool {
         .iter()
         .find(iroh::endpoint::Path::is_selected)
         .is_some_and(|path| path.is_ip())
+}
+
+/// The rung of iroh's selected path on `conn`, for a test that shows a node
+/// stepping down the ladder: `ip`, `webrtc`, `multihop` or `relay`. `None`
+/// while no path is selected yet.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn selected_rung(conn: &Connection) -> Option<&'static str> {
+    use super::probe::{PathKind, selected_kind};
+
+    match selected_kind(conn) {
+        PathKind::Ip => Some("ip"),
+        PathKind::WebRtc => Some("webrtc"),
+        PathKind::Multihop => Some("multihop"),
+        PathKind::Relay => Some("relay"),
+        PathKind::None => None,
+    }
 }
 
 /// Whether payload may go out on `conn` under the mesh's transport policy.

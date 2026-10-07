@@ -2,7 +2,7 @@
 //!
 //! Implementing [`Preset`] lets a caller write
 //! `Endpoint::builder(presets::N0).preset(handle)` to register the custom
-//! transport, its address lookup, and the backup path selector together — the
+//! transport, its address lookup, and the path selector together — the
 //! same ergonomic shape iroh's own `test_transport` uses.
 
 use iroh::endpoint::Builder;

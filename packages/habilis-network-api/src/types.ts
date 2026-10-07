@@ -8,9 +8,10 @@ export type Lookup = 'mdns' | 'dht' | 'relay'
 
 /**
  * One path a mesh's payload may ride. A list needs `udp` or `webrtc`; a
- * browser has no UDP, so it needs `webrtc` or `relay`.
+ * browser has no UDP, so it needs `webrtc` or `relay`. `multihop` (native only,
+ * and it needs `udp`) reaches a peer with no direct path through other members.
  */
-export type Transport = 'udp' | 'webrtc' | 'relay'
+export type Transport = 'udp' | 'webrtc' | 'multihop' | 'relay'
 
 export interface JoinOpts {
   /**
@@ -40,8 +41,10 @@ export interface JoinOpts {
    * derived id like `transport`. Ignored when joining by id.
    */
   relayUrls?: string[]
-  /** Active-view cap. Omit for the engine default. */
+  /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
+  /** Ceiling of direct connections (C). Omit for the engine default, 64. */
+  maxDirect?: number
 }
 
 export interface CreateOpts {
@@ -67,7 +70,10 @@ export interface CreateOpts {
    * Needs `'relay'` in `lookup`, and is part of the mesh id.
    */
   relayUrls?: string[]
+  /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
+  /** Ceiling of direct connections (C). Omit for the engine default, 64. */
+  maxDirect?: number
 }
 
 /**

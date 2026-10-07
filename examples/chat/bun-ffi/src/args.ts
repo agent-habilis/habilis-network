@@ -21,13 +21,14 @@ export const USAGE = `usage: bun src/main.ts <how to reach the mesh> [options]
 
   options:
     --nick <string>       nickname (default: random word-word)
-    --transport <list>    what payload may ride: udp,webrtc (default), webrtc,
-                          or either with relay
+    --transport <list>    what payload may ride: udp,webrtc,multihop (default),
+                          webrtc, or any with relay
                           (part of the mesh id, so every member must pass the
                           same list; relay needs relay in --lookup)
     --relay-url <url>     custom relay ladder, repeatable (which relay, nothing
                           more; part of the mesh id like --transport)
-    --max-peers <n>       active-view cap
+    --max-peers <n>       active-view cap (G, default 32)
+    --max-direct <n>      ceiling of direct connections (C, default 64)
     --json                automation mode: NDJSON events out, commands in
 `
 
@@ -54,6 +55,7 @@ export function parseChatArgs(argv: string[]): ChatArgs {
       name: { type: 'string' },
       nick: { type: 'string' },
       'max-peers': { type: 'string' },
+      'max-direct': { type: 'string' },
       json: { type: 'boolean' },
     },
   })
@@ -87,9 +89,18 @@ export function parseChatArgs(argv: string[]): ChatArgs {
     }
   }
 
+  let maxDirect: number | undefined
+  if (values['max-direct'] !== undefined) {
+    maxDirect = Number(values['max-direct'])
+    if (!Number.isInteger(maxDirect) || maxDirect < 1) {
+      throw new Error('--max-direct takes a positive integer')
+    }
+  }
+
   const common = {
     ...(values.nick === undefined ? {} : { nick: values.nick }),
     ...(maxPeers === undefined ? {} : { maxPeers }),
+    ...(maxDirect === undefined ? {} : { maxDirect }),
   }
 
   let entry: Entry

@@ -130,6 +130,8 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         links_relay_only = links.relay_only,
         links_pending = links.pending,
         peak_resident_memory_mb = resident_memory::peak_resident_memory_mb().unwrap_or(0),
+        direct_units = state.webrtc_admission.direct_units(),
+        over_ceiling = state.webrtc_admission.over_ceiling(),
         idle_wakeups = idle.wakeups,
         idle_prune = idle.prune,
         idle_alive = idle.alive,
@@ -141,6 +143,8 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         idle_linkstate = idle.linkstate,
         idle_external = idle.external,
         idle_broadcasts = idle.broadcasts,
+        idle_resent = idle.resent,
+        idle_resend_dropped = idle.resend_dropped,
         "mesh census"
     );
 

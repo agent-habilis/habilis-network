@@ -66,6 +66,24 @@ pub fn antientropy_interval_secs() -> u64 {
 /// is not yet wired, so this cadence bounds convergence time.
 pub const LINKSTATE_INTERVAL_SECS: u64 = 15;
 
+/// How long a peer's link-vector stays in the routing graph without a newer one,
+/// and how old a vector may be when it arrives. Three missed advertisements: a
+/// peer that crashed, or left without a word, then leaves no edge behind.
+///
+/// The trade: a node that is degraded, or whose loop missed ticks under load, is
+/// dropped by every peer and its routes go until its next vector (it comes back
+/// with that vector). That costs a backup path for up to one interval. A longer
+/// age keeps a crashed peer's routes longer instead. A peer's clock more than
+/// this behind ours has its vectors refused, because a vector's `seq` is the
+/// sender's wall-clock time in milliseconds.
+pub const LINKSTATE_MAX_AGE_SECS: u64 = LINKSTATE_INTERVAL_SECS * 3;
+
+/// How long a next hop's underlay may stay on the relay, refused by the relay
+/// gate, before the hop stops being advertised as a link. A connection starts on
+/// the relay until a direct path opens, so the deadline must outlast a normal
+/// hole punch.
+pub const MULTIHOP_RELAY_STUCK_SECS: u64 = 20;
+
 /// Max ids advertised per digest **window**. A digest carries up to two
 /// windows: an **open-ended newest** one (`[lo, i64::MAX]`, which drives
 /// reconnect recovery — holders re-send every *newer* message the sender
@@ -400,6 +418,15 @@ pub const QUIET_CAP: usize = 1024;
 /// still maintains links independently — this only throttles *our* piling-on.
 pub const RELINK_COOLDOWN_SECS: u64 = 10;
 
+/// How long a node may hold two or more links fewer than G, and how long it waits
+/// between two fallbacks, before a graft asks with a `Join` instead of a low
+/// priority request. A low priority request evicts nobody, so a member that arrives
+/// when every other member is full gets no link from it. A `Join` evicts a random
+/// neighbor of the peer, and that peer lands at G - 1, so one fallback per 300 s per
+/// member bounds the churn to 0.2 link-ups per member per minute, and a fallback
+/// starts no chain.
+pub const STARVED_SECS: u64 = 300;
+
 /// How often an advertising `create` re-broadcasts its mesh id into
 /// the directory. Short enough that a fresh discoverer sees every live
 /// mesh within one cycle (the join-horizon only surfaces ads stamped
@@ -641,6 +668,22 @@ pub const RIVAL_RECHECK_OFFSET_SPAN_SECS: u64 = 8;
 /// [`ANTIENTROPY_INTERVAL_SECS`], so the honest cadence is never refused.
 pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = 5;
 
+/// How many members answer one chat digest.
+///
+/// Every member that holds a message the asker lacks used to answer, so one
+/// digest bought up to `ANTIENTROPY_MAX_RESEND` broadcasts from each of the N - 1
+/// others, and each broadcast reaches N - 1 links: about N^3 deliveries per
+/// digest round. Of those, all but the first copy of a message are wasted. A
+/// few answerers cover a lost answer and a holder that lacks the message, and
+/// the answerers change with every digest (see `answers_digest`), so a message
+/// that only one member holds still comes back within a few rounds.
+pub const ANTIENTROPY_ANSWERERS: usize = 3;
+
+/// How many resends the outbox of the event loop holds. A digest answer is at
+/// most `ANTIENTROPY_MAX_RESEND` messages, so this is a few answers. When it is
+/// full the resend is dropped and counted: the next digest asks again.
+pub const RESEND_OUTBOX_CAP: usize = 256;
+
 /// How many state digest answers one asker may get per channel on the unicast
 /// plane in one [`ANTIENTROPY_SERVE_COOLDOWN_SECS`] window; the same heads get
 /// an answer again only after [`FAST_ROUND_MIN_INTERVAL_MS`]. A backfilling
@@ -671,21 +714,104 @@ pub const FAST_ROUND_AHEAD_MAX: usize = 16;
 /// a peer whose heads we can never hold must not hold a place for ever.
 pub const FAST_ROUND_AHEAD_TTL_SECS: u64 = 60;
 
-/// `HyParView` **active view** capacity — the number of direct gossip neighbors
-/// (open QUIC links) each member maintains per topic. A mesh at or below this
-/// size forms a **full mesh** with nothing to shuffle, so it has **zero
-/// membership churn** (and thus none of the per-connection-churn memory leak);
-/// past it the overlay maintains a partial mesh and continuously
-/// promotes/demotes peers (the churn). Raised from iroh-gossip's default of 5
-/// to **64** so realistic agent meshes (≤ 65) stay churn-free. The ceiling is
-/// performance, not correctness: each slot is a live connection + keepalive
-/// (~0.5 MB resident per link) and a full mesh costs O(S²) broadcast
-/// amplification, so a fully-meshed node runs ~50 MB — 64 deliberately trades
-/// that heavier per-node cost for a larger churn-free mesh. This is the default
-/// for the public `--max-peers` cap; the passive (healing/shuffle) pool is
-/// derived as 2× the live view. Set `--max-peers` *small* to deliberately
+/// `HyParView` **active view** capacity (G): the number of direct gossip
+/// neighbors (open QUIC links) each member keeps per topic. A mesh of G + 1
+/// members or fewer forms a **full mesh** with nothing to shuffle, so it has
+/// **zero membership churn** (and none of the per-connection-churn memory leak).
+/// Past that the overlay is partial and keeps promoting and demoting peers.
+///
+/// The default is **32**, chosen together with D, the `WebRTC` session cap
+/// (`MAX_DIRECT_PEERS`): the memory of a node follows both, see "Choosing G and
+/// D from a memory budget" in `docs/perf/direct-peer-memory.md`. It was 64,
+/// which kept meshes of up to 65 free of churn at 50 to 100 MB per node. G is a
+/// count bound only: `HyParView` still accepts a high-priority join at a full
+/// view and drops a random member. This is the default for the public
+/// `--max-peers` cap, and `0` asks for it. The passive (healing/shuffle) pool is
+/// derived as 2x the live view. Set `--max-peers` *small* to deliberately
 /// reproduce the gossip-churn leak at any node count.
-pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 64;
+pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 32;
+
+/// How often the direct-peer slot table drops the connections that are gone and
+/// the peers that nothing holds. One timer per admission table, not one task
+/// per connection.
+pub const SLOT_SWEEP_SECS: u64 = 5;
+
+/// How many gossip links to other members make a node let go of the
+/// rendezvous. The rendezvous is where a node enters the mesh and where split
+/// islands meet again; it is not a peer to hold for ever. A node below this
+/// many links keeps it (or comes back to it); at this many it releases it, so
+/// that the rendezvous has room for the next joiner (its direct-peer slots and
+/// its gossip view are finite).
+pub const RENDEZVOUS_RELEASE_LINKS: usize = 3;
+
+/// How long a node that a peer refused at its cap leaves that peer alone, the
+/// first time. Each further refusal in a row doubles it, up to
+/// [`CAP_REFUSAL_COOLDOWN_MAX_SECS`]; a success resets it. A refusal at the
+/// rendezvous frees up fast, so the first wait is short. A refusal at a member
+/// does not: its sessions are gossip links and stay busy, so the wait grows to
+/// the size that keeps the cost of a refused round (a full candidate gathering
+/// on our side) low.
+pub const CAP_REFUSAL_COOLDOWN_SECS: u64 = 30;
+
+/// The longest a node leaves a peer alone after repeated refusals at its cap.
+pub const CAP_REFUSAL_COOLDOWN_MAX_SECS: u64 = 300;
+
+/// How long a node that comes back to the rendezvous stays, at least, before
+/// it may let go again. The beacon introduces a visitor to the members in its
+/// gossip view, and the introduction takes a few round trips; a visit shorter
+/// than that would find no one.
+pub const RENDEZVOUS_DWELL_SECS: u64 = 30;
+
+/// How long an owed return to the rendezvous lasts. A node that is refused at
+/// the rendezvous, or finds it gone, offers again for this long and then stops:
+/// the owed return is a debt with an end, not a state.
+pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
+
+/// How long the session of a lane peer stays wanted after a frame was held for it. The offer
+/// that the held frame asks for must start within this time, or the want lapses. A frame that stays
+/// parked after the want lapsed does not mark the peer again by itself: the next send to the peer
+/// does.
+pub const LANE_WANTED_SECS: u64 = 60;
+
+/// How many bytes of one QUIC stream a node buffers for a peer that sends faster than the node
+/// reads (decision D11): 8 `MiB`, far above the iroh default, and a bound all the same. It stays
+/// below the window of the connection on purpose: one stream cannot take the whole connection.
+pub const QUIC_STREAM_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
+
+/// How many bytes of all the streams of one QUIC connection together a node buffers for a peer
+/// (decision D11): 32 `MiB`. One connection cannot grow without bound, and at 100 ms of round trip
+/// the window still allows about 2.7 Gbit/s.
+pub const QUIC_CONNECTION_RECEIVE_WINDOW: u32 = 32 * 1024 * 1024;
+
+/// How many bytes a node sends to a peer before the peer acknowledges them (decision D11): 32 `MiB`.
+pub const QUIC_SEND_WINDOW: u64 = 32 * 1024 * 1024;
+
+/// How long after a `Neighbor` request a node reads "no link came up" as a refusal: the longer of
+/// the relink cooldown (10 s) and the probe deadline (15 s), plus 5 s. A link that comes up later
+/// than this is not a reply to the request.
+pub const GRAFT_REFUSED_AFTER_SECS: u64 = 20;
+
+/// The first wait before a peer that refused a `Neighbor` request is asked again. Each refusal in
+/// a row doubles it, up to [`GRAFT_BACKOFF_MAX_SECS`]. A `NeighborUp` or a new address of the peer
+/// starts it over.
+pub const GRAFT_BACKOFF_FIRST_SECS: u64 = 60;
+
+/// The longest wait before a peer that keeps refusing is asked again, 15 minutes.
+pub const GRAFT_BACKOFF_MAX_SECS: u64 = 900;
+
+/// The one idle backstop of the direct connections (decision D11). The ceiling frees a place
+/// when a newcomer needs it; this only closes what nobody used for a quarter of an hour, so
+/// that a quiet node holds nothing for ever. It is the idle close of a pooled connection and of
+/// an accepted one, and the wait before an unheld session is detached.
+pub const DIRECT_IDLE_BACKSTOP_SECS: u64 = 900;
+
+/// How long the pooled connection of a direct-path probe stays after the probe
+/// ends, when no send takes it (decision D4: direct connections are on demand).
+/// The graft that follows a proven path forms its gossip link inside this
+/// window, and iroh keeps the proven path for the peer while any connection to
+/// it is open. Longer than that, the probe connection would be a pre-warmed
+/// unicast connection for a pair that never sent.
+pub const PROBE_HOLD_SECS: u64 = 15;
 
 /// Max bytes a per-member log file grows before rotating to `<file>.1`
 /// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag

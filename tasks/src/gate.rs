@@ -135,6 +135,17 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Workspace,
         args: &["--all-features"],
     },
+    // Gate only: the e2e workflow compiles this set, so CI would catch a break
+    // late. `tasks/mesh` turns on `iroh-test-utils` for the library and nothing
+    // else. No `--all-targets` here, because that builds the dev-dependencies,
+    // and they turn on `test-fixtures` of the protocol crate. That feature adds
+    // `From<&str>` for `Nickname`, so a library that needs it compiles in every
+    // other row and fails only here.
+    Step {
+        kind: Kind::Check,
+        scope: Scope::Crate("habilis-network"),
+        args: &["--features", "iroh-test-utils"],
+    },
     Step {
         kind: Kind::Check,
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
@@ -158,6 +169,14 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmCheck,
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
+    },
+    // The multihop transport forwards through a browser too, so its crate must
+    // build for the browser by itself: the engine's own rows do not reach it
+    // while `host` is the only thing that turns it on.
+    Step {
+        kind: Kind::WasmCheck,
+        scope: Scope::Crate("habilis-network-iroh-multihop-transport"),
+        args: &[],
     },
     // The engine itself must reach the browser, not merely be avoidable from
     // it. `--no-default-features` is the portable half: no `host`, so no IPC
@@ -216,6 +235,11 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::WasmClippy,
         scope: Scope::Crate("habilis-network-iroh-webrtc-transport"),
         args: &["--features", "web,bench"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-multihop-transport"),
+        args: &[],
     },
     Step {
         kind: Kind::WasmClippy,
@@ -281,6 +305,28 @@ pub(crate) const STEPS: &[Step] = &[
         kind: Kind::Test,
         scope: Scope::Crate("habilis-network"),
         args: &["--features", "iroh-test-utils", "--all-targets", "--no-run"],
+    },
+    // The two gate cells of the send ladder matrix (`tests/send_ladder_matrix.rs`):
+    // the default list with IP blocked, and the pair that goes through a third
+    // member. Every cell is `#[ignore]`, so that no plain `cargo test` runs a cell
+    // next to another test; this row names the two and runs them one at a time,
+    // since each runs three real members. The rest belong to `cargo task matrix`
+    // and its nightly.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("habilis-network"),
+        args: &[
+            "--features",
+            "iroh-test-utils",
+            "--test",
+            "send_ladder_matrix",
+            "--",
+            "--include-ignored",
+            "--exact",
+            "udp_webrtc_multihop_ip_direct",
+            "udp_webrtc_multihop_ip_webrtc_via_third",
+            "--test-threads=1",
+        ],
     },
 ];
 

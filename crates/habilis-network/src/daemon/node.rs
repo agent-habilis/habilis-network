@@ -24,6 +24,25 @@ pub struct Node<A: NodeDriver> {
     req_tx: mpsc::Sender<A::Session>,
     quit_tx: mpsc::Sender<()>,
     task: Option<JoinHandle<anyhow::Result<()>>>,
+    /// The ports this node's endpoint is bound on, for a test that names which
+    /// nodes to cut from which. Read once at spawn: the ports do not change.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    bound_ports: Vec<u16>,
+    /// The id and bound ports of this node's multihop underlay endpoint, `None`
+    /// when multihop is off. For a test that blocks IP on the underlay.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    underlay: Option<(iroh::EndpointId, Vec<u16>)>,
+    /// What a test needs to make this node die as a process does: its sessions
+    /// and its endpoint.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    crash_handles: (
+        habilis_network_iroh_webrtc_transport::WebRtcHandle,
+        iroh::Endpoint,
+    ),
 }
 
 // `A::Session` need not be `Debug`, and the channels/handle aren't useful in a
@@ -69,6 +88,24 @@ impl<A: NodeDriver + 'static> Node<A> {
         let mesh_id = cfg.mesh.clone();
         let name = cfg.name.clone();
         let nickname = cfg.author.clone();
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        let bound_ports = cfg
+            .endpoint
+            .bound_sockets()
+            .iter()
+            .map(std::net::SocketAddr::port)
+            .collect();
+        #[cfg(all(
+            feature = "iroh-test-utils",
+            feature = "host",
+            not(target_arch = "wasm32")
+        ))]
+        let underlay = cfg
+            .multihop
+            .as_ref()
+            .map(|handle| (handle.underlay_id(), handle.underlay_ports()));
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        let crash_handles = (cfg.webrtc_handle(), cfg.endpoint.clone());
         let task = n0_future::task::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));
         Self {
             mesh_id,
@@ -77,7 +114,69 @@ impl<A: NodeDriver + 'static> Node<A> {
             req_tx,
             quit_tx,
             task: Some(task),
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            bound_ports,
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            underlay,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            crash_handles,
         }
+    }
+
+    /// Tests only: make this node die as a process does. The loop is aborted
+    /// with no `Left`, the `WebRTC` sessions are aborted with no close, so their
+    /// far ends find out when ICE consent times out (about 22 s), and the
+    /// endpoint is closed so nothing answers a later dial. Dropping the node
+    /// does only the first, and leaves its sessions answering ICE consent.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub async fn crash(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        let (webrtc, endpoint) = &self.crash_handles;
+        let _ = webrtc.abort_sessions();
+        endpoint.close().await;
+    }
+
+    /// Tests only: the ports this node's endpoint is bound on. A test that cuts
+    /// one group of nodes from another gives each node the other group's ports
+    /// (`Request::BlockIpTo`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn bound_ports(&self) -> &[u16] {
+        &self.bound_ports
+    }
+
+    /// Tests only: the id of this node's multihop underlay endpoint, or `None`
+    /// when multihop is off. The underlay has a key of its own, so a test that
+    /// matches it to a member goes through `MultihopHandle::app_id_of`.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    #[must_use]
+    pub fn underlay_id(&self) -> Option<iroh::EndpointId> {
+        self.underlay.as_ref().map(|(id, _)| *id)
+    }
+
+    /// Tests only: the ports this node's multihop underlay endpoint is bound on,
+    /// empty when multihop is off. Like [`bound_ports`](Self::bound_ports), but
+    /// for the underlay: blocking IP on it is what forces cells onto a hop.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    #[must_use]
+    pub fn underlay_ports(&self) -> &[u16] {
+        self.underlay
+            .as_ref()
+            .map_or(&[], |(_, ports)| ports.as_slice())
     }
 
     /// The resolved mesh id.

@@ -21,13 +21,18 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP, RECLAIM_WINDOW_SECS,
-    RELINK_COOLDOWN_SECS, SEEN_IDS_CAP,
+    KNOWN_ENDPOINTS_CAP, LANE_WANTED_SECS, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
+    RECLAIM_WINDOW_SECS, RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
 };
 
-/// `RELINK_COOLDOWN_SECS` as a `Duration` — the window both per-endpoint
-/// throttles (`relink`, `peerinfo`) use.
+/// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
+/// re-link throttle (`relink`) and of the `PeerInfo` flood gate.
 const RELINK_COOLDOWN: Duration = Duration::from_secs(RELINK_COOLDOWN_SECS);
+
+/// How long an author whose digest we could not read stays unreported. A build
+/// that does not know the window format sends one every round, and one line per
+/// author per window says it without filling the log.
+const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
 
 /// How we currently reach a peer: `Direct` when we hold a live gossip
 /// link to its self-advertised endpoint, else `Gossip` (relayed). Derived
@@ -177,21 +182,34 @@ pub struct EventLoopState {
     /// stops one bad node's flap from amplifying into a mesh-wide connection
     /// storm. Bounded by construction (see [`Cooldown`]).
     pub(crate) relink: Cooldown<EndpointId>,
-    /// Per-endpoint `PeerInfo` re-flood throttle. `relink` only throttles the
-    /// *inbound* re-dial in `handle_peer_info`; this throttles the *outbound*
-    /// re-flood every `NeighborUp` would otherwise trigger (`gossip::recv`).
-    /// Without it a single flapping link re-floods the whole mesh on every
-    /// up-transition — the residual amplifier behind the soak's ~7.4k-per-host
-    /// `neighbor up` storm. Kept separate from `relink` so the two throttles
-    /// stay independently reasoned (and a new neighbor still gets exactly one
-    /// re-flood).
-    pub(crate) peerinfo: Cooldown<EndpointId>,
     /// When we last flooded our `PeerInfo`, whatever triggered it. Stamped by
-    /// `broadcast_peer_info`; read by the `joined` re-flood gate.
+    /// `broadcast_peer_info`; read by the `joined` and `NeighborUp` re-flood gates.
     pub(crate) peerinfo_flooded_at: Option<Instant>,
+    /// A `NeighborUp` wanted to flood our `PeerInfo` inside the window and was
+    /// held back. The alive tick pays it once the window ends.
+    pub(crate) peerinfo_deferred: bool,
+    /// Tests only: the closes of direct connections and the reconnects soon after.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) redials: crate::transport::redial::Redials,
+    /// Since when this node holds two or more links fewer than G, with the link to
+    /// the rendezvous counted. Cleared as soon as it holds G - 1. See `note_link_count`.
+    pub(crate) below_target_since: Option<Instant>,
+    /// When a graft last fell back to a `Join` for a starved node.
+    pub(crate) join_fallback_at: Option<Instant>,
+    /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
+    pub(crate) graft_backoff: crate::transport::graft_backoff::GraftBackoff,
+    /// The lane peers that a frame is held for, and since when. Such a peer is offered a
+    /// session although nothing was sent over a connection yet.
+    lane_wanted: HashMap<EndpointId, Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
+    /// When we last reported an author whose digest we could not read.
+    digest_unreadable: Cooldown<String>,
+    /// Where a digest answer goes, so that the loop never waits to send it. The
+    /// task that drains it takes `resend_receiver` when the loop starts.
+    pub(crate) resend_outbox: crate::transport::ResendOutbox,
+    pub(crate) resend_receiver: Option<tokio::sync::mpsc::Receiver<crate::transport::Resend>>,
     /// When each asker's state or meta digest was last served, per plane. A
     /// new node sends a digest pair for every peer it sees, all with the same
     /// heads, and every holder hears each one; the plane is in the key so the
@@ -271,6 +289,31 @@ pub struct EventLoopState {
     /// drops — one rendezvous-link flap per heal tick, forever (the
     /// 2026-05-30 soak's residual flap).
     pub(crate) rendezvous_linked: bool,
+    /// Whether we let go of the rendezvous link on purpose (see
+    /// [`Self::should_release_rendezvous`]). The `NeighborDown` that follows
+    /// is then no loss, so nothing re-grafts it or arms a reclaim for it.
+    /// Cleared when the link comes back.
+    pub(crate) rendezvous_released: bool,
+    /// A return to the rendezvous is owed, until this instant, although this
+    /// node holds enough links to others. Set when a silent roster peer is
+    /// swept on a node that is not linked to it (a partition may have split the
+    /// mesh into islands, and the rendezvous is where they meet again) and on a
+    /// resume edge (every link is stale). It ends when the link comes back, or
+    /// at the deadline: an owed return is a debt with an end.
+    pub(crate) rendezvous_comeback_until: Option<Instant>,
+    /// A node that came back to the rendezvous does not let go before this
+    /// instant, so that the beacon can introduce it to the other island.
+    pub(crate) rendezvous_dwell_until: Option<Instant>,
+    /// This process co-hosts the rendezvous. Its own link to it keeps the
+    /// beacon's gossip view non-empty, which is what lets a joiner be
+    /// introduced to the mesh: if the host let go as well, a joiner arriving
+    /// after the early members had released would find an empty view and the
+    /// mesh would split into islands (the 18-node test shows it). So this
+    /// node never releases the link.
+    pub(crate) hosts_rendezvous: bool,
+    /// How many links to other members make this node release the rendezvous.
+    /// A field, not a constant, so a test can set it.
+    pub(crate) rendezvous_release_links: usize,
     /// Whether the held rendezvous `WebRTC` session has already survived one
     /// heal tick without producing a link — the arming half of the stale
     /// detach in `negotiate_rendezvous_session`.
@@ -323,13 +366,18 @@ pub struct EventLoopState {
     /// Independent of `linked_endpoints` by design (unicast can reach a
     /// non-neighbor). See [`crate::transport`].
     pub(crate) unicast_pool: crate::transport::UnicastPool,
-    /// The multi-hop transport handle, when the `--multihop` flag registered it
+    /// The multi-hop transport handle, when the mesh policy registered it
     /// on the peer endpoint. Owns the routing table (fed from received
     /// `LinkState` frames) and the underlay endpoint. `None` when multihop is off
     /// or on a non-peer (beacon/rendezvous) endpoint. See
     /// [`habilis_network_iroh_multihop_transport`].
     #[cfg(feature = "host")]
     pub(crate) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
+    /// The `WebRTC` leg of the multihop underlay: its handle, admission table and
+    /// endpoint. `None` when multihop is off. See
+    /// [`crate::transport::underlay_webrtc`].
+    #[cfg(feature = "host")]
+    pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
     /// The `WebRTC` transport handle, when one is registered on this peer's
     /// endpoint. Portable — it is the browser's only direct path, and an
     /// opportunistic extra one for a native peer. `None` on the beacon.
@@ -349,13 +397,6 @@ pub struct EventLoopState {
     /// loopback mesh, which promises to make no external network call —
     /// `IceConfig::default()` would query two public STUN servers.
     pub(crate) webrtc_ice: crate::transport::IceProfile,
-    /// Monotonic sequence for *our own* emitted link-state vectors, so peers keep
-    /// the freshest and drop reorders.
-    ///
-    /// `host`-only with the multihop transport that consumes the vectors: a
-    /// browser peer emits none, so it has no sequence to keep.
-    #[cfg(feature = "host")]
-    pub(crate) link_state_seq: u64,
     /// When `Some(deadline)` and not yet elapsed, the event loop runs
     /// a fast `beacon::ensure` burst (event-driven failover). Armed by
     /// `arm_reclaim`, mostly on `NeighborDown` — the beacon may have just
@@ -433,6 +474,11 @@ pub struct EventLoopState {
     /// `ANTIENTROPY_DIGEST_MAX_IDS`), then advances/wraps so a log larger
     /// than one digest is swept over several rounds. (State/meta reconcile by
     /// automerge heads and need no cursor.)
+    ///
+    /// A position in the log in bound order, and the log changes between rounds:
+    /// an insert before the cursor moves every later position by one, so a sweep
+    /// can skip a slice or list one twice. Each window is still right by
+    /// itself, and the next sweep covers a skipped slice, so it only delays.
     pub(crate) digest_cursor: usize,
     /// This member's signing identity (Ed25519). Shared with the
     /// send path so messages we author are signed before broadcast.
@@ -542,6 +588,11 @@ pub(crate) struct IdleCounters {
     /// driver behind `user` CPU: each one is an Ed25519 signature plus a
     /// serialization.
     pub broadcasts: u64,
+    /// Messages a digest answer put in the resend outbox.
+    pub resent: u64,
+    /// Messages a digest answer could not put there because it was full: the
+    /// next digest asks for them again.
+    pub resend_dropped: u64,
 }
 
 impl IdleCounters {
@@ -604,6 +655,10 @@ impl EventLoopState {
     /// tests can pin a deterministic instant. `secrets` is taken by value (not
     /// `&MeshSecrets`) so its `key` is dropped (zeroized) here once the
     /// per-channel keys are derived, rather than lingering in the caller.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one initializer for every field of the state"
+    )]
     pub(crate) fn new(init: StateInit, now: Instant) -> Self {
         let StateInit {
             #[cfg(feature = "host")]
@@ -618,6 +673,8 @@ impl EventLoopState {
             password: mesh_password,
             key: mesh_key,
         } = secrets;
+        let (resend_outbox, resend_receiver) =
+            crate::transport::ResendOutbox::new(crate::util::tuning::RESEND_OUTBOX_CAP);
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
@@ -644,11 +701,20 @@ impl EventLoopState {
             ),
             peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
-            peerinfo: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
+            peerinfo_deferred: false,
+            below_target_since: None,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            redials: crate::transport::redial::Redials::default(),
+            join_fallback_at: None,
+            graft_backoff: crate::transport::graft_backoff::GraftBackoff::default(),
+            lane_wanted: HashMap::new(),
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
+            digest_unreadable: Cooldown::new(UNREADABLE_DIGEST_LOG_WINDOW),
+            resend_outbox,
+            resend_receiver: Some(resend_receiver),
             state_digest_serves: crate::gossip::antientropy::ServeBudget::default(),
             fast_rounds: crate::gossip::antientropy::FastRounds::default(),
             peers: HashSet::new(),
@@ -662,6 +728,11 @@ impl EventLoopState {
             joined_at: crate::util::clock::unix_secs(),
             gossip_open: true,
             rendezvous_linked: false,
+            rendezvous_released: false,
+            rendezvous_comeback_until: None,
+            rendezvous_dwell_until: None,
+            hosts_rendezvous: false,
+            rendezvous_release_links: crate::util::tuning::RENDEZVOUS_RELEASE_LINKS,
             rendezvous_session_stale: false,
             rendezvous_offer_fallback: false,
             rendezvous_answers_jsep: true,
@@ -673,11 +744,11 @@ impl EventLoopState {
             unicast_pool: crate::transport::UnicastPool::disconnected(),
             #[cfg(feature = "host")]
             multihop: None,
+            #[cfg(feature = "host")]
+            underlay_webrtc: None,
             webrtc: None,
             webrtc_admission,
             webrtc_ice,
-            #[cfg(feature = "host")]
-            link_state_seq: 0,
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
@@ -800,19 +871,103 @@ impl EventLoopState {
         self.relink.note(peer, now);
     }
 
-    /// `true` if a `NeighborUp` for `peer` already made us re-flood our own
-    /// `PeerInfo` within the cooldown window of `now`, so the caller should
-    /// skip re-flooding again. This is what stops a flapping link from
-    /// re-broadcasting our address to the whole mesh on *every* up-transition
-    /// (see `peerinfo`); a genuinely new neighbor, having no entry, still gets
-    /// exactly one re-flood.
-    pub(crate) fn peerinfo_on_cooldown(&self, peer: EndpointId, now: Instant) -> bool {
-        self.peerinfo.on_cooldown(&peer, now)
+    /// Whether a `NeighborUp` at `now` re-floods our `PeerInfo`: once per
+    /// window since any flood, whichever neighbor brings it. A key per neighbor
+    /// let every new link flood again, and every flood is answered by a graft
+    /// from each peer that hears it. A flapping link floods once per window too.
+    pub(crate) fn neighbor_up_refloods_peerinfo(&self, now: Instant) -> bool {
+        self.joined_refloods_peerinfo(false, now)
     }
 
-    /// Record a `PeerInfo` re-flood triggered by `peer` at `now`.
-    pub(crate) fn note_peerinfo(&mut self, peer: EndpointId, now: Instant) {
-        self.peerinfo.note(peer, now);
+    /// Record how many links this node holds out of `max_peers` (G). Below G - 1 starts
+    /// the clock of a starved node, and G - 1 or more stops it.
+    pub(crate) fn note_link_count(&mut self, linked: usize, max_peers: usize, now: Instant) {
+        if linked.saturating_add(1) < max_peers {
+            self.below_target_since.get_or_insert(now);
+        } else {
+            self.below_target_since = None;
+        }
+    }
+
+    /// A frame is held for the lane peer `peer` at `now`: its session is wanted.
+    pub(crate) fn want_lane_session(&mut self, peer: EndpointId, now: Instant) {
+        let window = Duration::from_secs(LANE_WANTED_SECS);
+        self.lane_wanted
+            .retain(|_, since| now.saturating_duration_since(*since) < window);
+        self.lane_wanted.insert(peer, now);
+    }
+
+    /// Whether a frame was held for `peer` within the last `LANE_WANTED_SECS`.
+    pub(crate) fn lane_session_wanted(&self, peer: EndpointId, now: Instant) -> bool {
+        self.lane_wanted.get(&peer).is_some_and(|since| {
+            now.saturating_duration_since(*since) < Duration::from_secs(LANE_WANTED_SECS)
+        })
+    }
+
+    /// The session of `peer` attached: it is no longer wanted.
+    pub(crate) fn clear_lane_wanted(&mut self, peer: EndpointId) {
+        self.lane_wanted.remove(&peer);
+    }
+
+    /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held
+    /// two or more links fewer than G for `STARVED_SECS`, and the last fallback is
+    /// `STARVED_SECS` old. A `true` stamps the fallback.
+    pub(crate) fn starved_join_due(&mut self, now: Instant) -> bool {
+        let due = self.starved_join_ready(now);
+        if due {
+            self.join_fallback_at = Some(now);
+        }
+        due
+    }
+
+    /// [`Self::starved_join_due`] without the stamp: whether a fallback would be due at `now`.
+    pub(crate) fn starved_join_ready(&self, now: Instant) -> bool {
+        let window = Duration::from_secs(STARVED_SECS);
+        let starved = self
+            .below_target_since
+            .is_some_and(|since| now.duration_since(since) >= window);
+        let waited = self
+            .join_fallback_at
+            .is_none_or(|at| now.duration_since(at) >= window);
+        starved && waited
+    }
+
+    /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
+    /// wait runs. A starved node whose fallback is due asks every peer, because a `Join` is not
+    /// refused: those dials, one per peer once per `STARVED_SECS`, are expected.
+    pub(crate) fn graft_blocked(&self, peer: EndpointId, now: Instant) -> bool {
+        self.graft_backoff.is_blocked(&peer, now) && !self.starved_join_ready(now)
+    }
+
+    /// Read which `Neighbor` requests were refused. Every alive tick.
+    pub(crate) fn settle_graft_backoff(&mut self, now: Instant) {
+        let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
+        let linked = &self.linked_endpoints;
+        for (peer, wait) in self
+            .graft_backoff
+            .settle(now, |peer| linked.contains(peer), spread)
+        {
+            tracing::info!(target: "habilis_network::transport", %peer, wait_secs = wait.as_secs(), "no link after a Neighbor request: read as a refusal, the peer waits");
+        }
+    }
+
+    /// Remember that a `NeighborUp` was held back by the flood window.
+    ///
+    /// The flood is paid at the first alive tick after the window ends. In a burst of
+    /// new neighbors a neighbor can wait for our `PeerInfo` up to one window (10 s)
+    /// plus one alive tick (30 s), that is 40 s.
+    pub(crate) fn defer_peerinfo(&mut self) {
+        self.peerinfo_deferred = true;
+    }
+
+    /// Whether a held-back `PeerInfo` flood is due at `now`: the window since the
+    /// last flood has ended. Taking it clears the mark.
+    pub(crate) fn take_deferred_peerinfo(&mut self, now: Instant) -> bool {
+        let due = self.peerinfo_deferred && self.neighbor_up_refloods_peerinfo(now);
+        if due {
+            self.peerinfo_deferred = false;
+        }
+        due
     }
 
     /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
@@ -833,6 +988,7 @@ impl EventLoopState {
     /// connection, which outlives a gossip link but not the peer.
     pub(crate) fn forget_peer_endpoint(&mut self, nick: &str) -> Option<EndpointAddr> {
         let addr = self.peer_endpoints.remove(nick)?;
+        self.graft_backoff.reset(addr.id);
         self.proven_endpoints.forget_endpoint(addr.id);
         self.direct.remove(&addr.id);
         self.path_watchers.remove(&addr.id);
@@ -846,6 +1002,14 @@ impl EventLoopState {
     /// alive tick re-probed (about 40 s with the relink cooldown).
     pub(crate) fn unlink(&mut self, peer: EndpointId) {
         self.linked_endpoints.remove(&peer);
+        self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+    }
+
+    /// A gossip link to `peer` is up.
+    pub(crate) fn link(&mut self, peer: EndpointId) {
+        self.linked_endpoints.insert(peer);
+        self.graft_backoff.reset(peer);
+        self.webrtc_admission.set_neighbors(&self.linked_endpoints);
     }
 
     /// Open the fast `beacon::ensure` burst; the only writer of
@@ -854,12 +1018,79 @@ impl EventLoopState {
         self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
     }
 
+    /// Whether this node should hold, or come back to, the rendezvous link:
+    /// while it has fewer than [`Self::rendezvous_release_links`] links to
+    /// others, while a return is owed, and always on the node that hosts it.
+    /// Every graft and offer to the rendezvous is gated on this one answer.
+    pub(crate) fn rendezvous_wanted(&self) -> bool {
+        self.hosts_rendezvous
+            || self
+                .rendezvous_comeback_until
+                .is_some_and(|until| Instant::now() < until)
+            || self.linked_endpoints.len() < self.rendezvous_release_links
+    }
+
+    /// A return to the rendezvous is owed from now, for
+    /// [`RENDEZVOUS_COMEBACK_SECS`](crate::util::tuning::RENDEZVOUS_COMEBACK_SECS).
+    pub(crate) fn owe_rendezvous_return(&mut self, now: Instant) {
+        self.rendezvous_comeback_until =
+            Some(now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS));
+    }
+
+    /// The rendezvous link came up. If a return was owed, it is paid, and the
+    /// visit lasts its dwell time at least.
+    pub(crate) fn note_rendezvous_link_up(&mut self, now: Instant) {
+        self.rendezvous_linked = true;
+        self.rendezvous_released = false;
+        self.rendezvous_dwell_until = self
+            .rendezvous_comeback_until
+            .take()
+            .map(|_| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
+    }
+
+    /// Whether this node holds the rendezvous link, has not let go of it yet, is
+    /// not its host, has links enough to others, and has stayed as long as a
+    /// visit lasts: it lets go.
+    /// Checked wherever a link comes up and on the heal tick, because a node
+    /// that came back to a mesh whose links are all up would otherwise wait for
+    /// a link event that never comes.
+    pub(crate) fn should_release_rendezvous(&self, now: Instant) -> bool {
+        self.rendezvous_linked
+            && !self.rendezvous_released
+            && !self.hosts_rendezvous
+            && self.linked_endpoints.len() >= self.rendezvous_release_links
+            && self.rendezvous_dwell_until.is_none_or(|until| now >= until)
+    }
+
+    /// The release, once gossip has been told to leave the rendezvous
+    /// (`GossipSender::leave_peers`). The leave ends the link by itself, if
+    /// gossip held one: `Ok` from `leave_peers` only says that the command
+    /// reached the gossip actor. So this does not wait for a close to be seen:
+    /// it marks the release at once, before the `NeighborDown` that follows is
+    /// read, so that one reads as a choice.
+    pub(crate) fn mark_rendezvous_released(&mut self, local: EndpointId) {
+        self.rendezvous_released = true;
+        tracing::info!(
+            target: "habilis_network::gossip",
+            local = %local.fmt_short(),
+            links = self.linked_endpoints.len(),
+            "enough links to members: released the rendezvous"
+        );
+    }
+
     /// The rendezvous arbitration was reopened or settled, so the previous
     /// probe's free reading describes a world that is gone. Pairing it with
     /// one fresh reading claims on what is effectively a single probe, which
     /// is the rival copy the two-verdict rule exists to stop.
+    ///
+    /// The same goes for a refusal of our offers: after a failover the
+    /// rendezvous keeps its id, and the old holder's "at my cap" is not the new
+    /// holder's.
     pub(crate) fn forget_rendezvous_verdict(&mut self) {
         self.rendezvous_probe_read_free = false;
+        if let Some(rendezvous) = self.rendezvous_id {
+            self.webrtc_admission.forget_refusal(rendezvous);
+        }
     }
 
     /// A probe reported no direct path to `peer`. A peer that proved itself
@@ -1196,7 +1427,7 @@ impl EventLoopState {
         self.gossip_open
     }
 
-    /// The multi-hop transport handle, when `--multihop` registered one.
+    /// The multi-hop transport handle, when the mesh policy registered one.
     #[cfg(feature = "host")]
     #[must_use]
     pub fn multihop(&self) -> Option<&habilis_network_iroh_multihop_transport::MultihopHandle> {
@@ -1278,13 +1509,47 @@ impl EventLoopState {
         true
     }
 
+    /// The selected path of a pair: the path watcher's last report if it has one,
+    /// else any live connection of the admission table (see
+    /// [`crate::transport::probe::pair_kind`]).
+    pub(crate) fn pair_path_kind(
+        &self,
+        peer: EndpointId,
+    ) -> Option<crate::transport::probe::PathKind> {
+        crate::transport::probe::pair_kind(
+            self.path_kinds.get(&peer).copied(),
+            self.webrtc_admission.selected_kind(peer),
+        )
+    }
+
+    /// Whether to report that this author's digest could not be read: once per
+    /// author per window. The author runs a build with another digest format, or
+    /// sends garbage; either way the two never repair each other's gaps.
+    pub fn report_unreadable_digest(&mut self, pubkey: &str, now: Instant) -> bool {
+        let author = pubkey.to_owned();
+        if self.digest_unreadable.on_cooldown(&author, now) {
+            return false;
+        }
+        self.digest_unreadable.note(author, now);
+        true
+    }
+
     /// Record a peer's endpoint address, learned from its published card.
     ///
     /// The whole address, not just the id: the retry pass has to know whether a
     /// peer advertises IP, and rebuilding a bare address from the id there made
     /// every native peer look like a browser.
     pub fn note_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
+        let id = endpoint.id;
+        let changed = self
+            .peer_endpoints
+            .get(&nickname)
+            .is_some_and(|before| *before != endpoint);
         self.peer_endpoints.insert(nickname, endpoint);
+        // A peer at a new address is not the peer that refused.
+        if changed {
+            self.graft_backoff.reset(id);
+        }
     }
 
     /// Mark the gossip topic closed without a real stream end — how the
@@ -1309,6 +1574,152 @@ mod tests {
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::testing::{endpoint_id, fresh_state, nick};
+
+    /// The release rule's two answers, on a node that lets go at two links.
+    fn two_link_node() -> EventLoopState {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 2;
+        state
+    }
+
+    #[test]
+    fn a_node_below_the_release_count_wants_the_rendezvous() {
+        let mut state = two_link_node();
+        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(endpoint_id(1));
+        assert!(state.rendezvous_wanted());
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "one link is not enough"
+        );
+    }
+
+    #[test]
+    fn a_node_at_the_release_count_lets_go_and_stops_wanting_it() {
+        let mut state = two_link_node();
+        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(state.should_release_rendezvous(Instant::now()));
+
+        state.rendezvous_linked = false;
+        assert!(
+            !state.rendezvous_wanted(),
+            "enough links: no graft, no offer"
+        );
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "nothing left to let go of"
+        );
+    }
+
+    /// Gossip ends the link some time after the release, and the heal tick and
+    /// every link event ask again meanwhile. A node already released must not be
+    /// due again, or it tells gossip to leave a second time and logs it twice.
+    #[test]
+    fn a_node_that_has_released_is_not_due_again_while_the_link_is_still_up() {
+        let mut state = two_link_node();
+        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(state.should_release_rendezvous(Instant::now()));
+
+        state.mark_rendezvous_released(endpoint_id(9));
+
+        assert!(!state.should_release_rendezvous(Instant::now()));
+    }
+
+    #[test]
+    fn a_node_that_falls_below_the_count_comes_back() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        assert!(!state.rendezvous_wanted());
+
+        state.linked_endpoints.remove(&endpoint_id(2));
+
+        assert!(state.rendezvous_wanted());
+    }
+
+    #[test]
+    fn the_node_that_hosts_the_rendezvous_keeps_its_link() {
+        let mut state = two_link_node();
+        state.hosts_rendezvous = true;
+        state.rendezvous_linked = true;
+        for seed in 1..=5 {
+            state.linked_endpoints.insert(endpoint_id(seed));
+        }
+        assert!(
+            !state.should_release_rendezvous(Instant::now()),
+            "its link keeps the beacon's gossip view non-empty for a joiner"
+        );
+        assert!(state.rendezvous_wanted());
+    }
+
+    #[test]
+    fn an_owed_return_makes_a_node_with_enough_links_want_it() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.owe_rendezvous_return(Instant::now());
+        assert!(state.rendezvous_wanted());
+    }
+
+    /// A debt with an end: a node refused again and again at the rendezvous
+    /// stops offering when the return it owed expires.
+    #[test]
+    fn an_owed_return_ends_at_its_deadline() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(
+                crate::util::tuning::RENDEZVOUS_COMEBACK_SECS + 1,
+            ))
+            .expect("a past instant");
+        state.owe_rendezvous_return(long_ago);
+
+        assert!(!state.rendezvous_wanted());
+    }
+
+    /// A node that came back stays its dwell time before it lets go again, and
+    /// lets go on its own once the time has passed, with no link event to
+    /// trigger it.
+    #[test]
+    fn a_node_that_came_back_lets_go_again_after_its_dwell_time() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.owe_rendezvous_return(Instant::now());
+        let now = Instant::now();
+        state.note_rendezvous_link_up(now);
+        assert!(state.rendezvous_linked);
+        assert!(
+            !state.should_release_rendezvous(now),
+            "the visit has just begun"
+        );
+
+        let later = now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS + 1);
+
+        assert!(
+            state.should_release_rendezvous(later),
+            "the dwell time has passed and the links are enough"
+        );
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "the debt was paid by the visit"
+        );
+    }
+
+    /// A first visit has no dwell: a joiner lets go as soon as it has the links.
+    #[test]
+    fn a_first_visit_has_no_dwell_time() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.note_rendezvous_link_up(Instant::now());
+        assert!(state.should_release_rendezvous(Instant::now()));
+    }
 
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).
@@ -1662,6 +2073,31 @@ mod tests {
     /// small crafted frame bought 64 floods from every member that received it,
     /// so the cost grew with the mesh rather than with the attacker.
     #[test]
+    fn an_unreadable_digest_is_reported_once_per_author_and_window() {
+        let mut state = fresh_state();
+        let now = Instant::now();
+        assert!(
+            state.report_unreadable_digest("aa", now),
+            "the first is reported"
+        );
+        assert!(
+            !state.report_unreadable_digest("aa", now + Duration::from_secs(10)),
+            "the same author every round is one line, not one line per round"
+        );
+        assert!(
+            state.report_unreadable_digest("bb", now),
+            "another author is reported on its own"
+        );
+        assert!(
+            state.report_unreadable_digest(
+                "aa",
+                now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
+            ),
+            "the author is reported again after the window"
+        );
+    }
+
+    #[test]
     fn a_peer_is_served_one_digest_per_window() {
         let mut state = fresh_state();
         let now = Instant::now();
@@ -1747,42 +2183,74 @@ mod tests {
 
     // The residual flap amplifier the re-link cooldown did NOT cover: every
     // `NeighborUp` re-floods our own `PeerInfo` to the whole mesh, and a
-    // flapping link re-triggers `NeighborUp` on each up-transition, so without
-    // a second cooldown one bad node re-floods the mesh ~once per flap (the
-    // ~7.4k-per-host `neighbor up` storm seen in the distributed soak). The
-    // PeerInfo cooldown collapses that to once per window per endpoint while
-    // still letting a genuinely new neighbor get exactly one re-flood.
+    // flapping link re-triggers `NeighborUp` on each up-transition. Every flood
+    // is also answered by a graft from each peer that hears it, and a graft at
+    // a full view evicts a neighbor, so a window per neighbor lets the floods
+    // cascade. The window is per flood: one flapping peer, or five peers, flood
+    // once per window.
     #[test]
-    fn peerinfo_cooldown_caps_a_flapping_peer() {
-        let peer = endpoint_id(7);
+    fn neighbors_up_in_one_window_flood_peerinfo_once() {
         let start = Instant::now();
 
-        // The pre-fix `NeighborUp` arm re-flooded unconditionally when
-        // `announced`, so 100 flaps == 100 mesh-wide PeerInfo broadcasts. The
-        // gate below replays the same 100 flaps and counts what now actually
-        // re-floods.
-        let mut state = fresh_state();
-        let mut refloods = 0;
+        let mut flapping = fresh_state();
+        let mut flapping_refloods = 0;
         for index in 0..100u32 {
             let now = start + Duration::from_millis(u64::from(index) * 10);
-            if !state.peerinfo_on_cooldown(peer, now) {
-                state.note_peerinfo(peer, now);
-                refloods += 1;
+            if flapping.neighbor_up_refloods_peerinfo(now) {
+                flapping.peerinfo_flooded_at = Some(now);
+                flapping_refloods += 1;
             }
         }
         assert_eq!(
-            refloods, 1,
-            "the cooldown caps PeerInfo re-floods to one per window (was 100, one per flap)"
+            flapping_refloods, 1,
+            "a flapping peer floods once per window"
         );
 
-        // A genuinely different neighbor in the same window still gets its own
-        // re-flood (the choke targets the *flapping* endpoint, not all peers).
-        let fresh_peer = endpoint_id(8);
-        assert!(!state.peerinfo_on_cooldown(fresh_peer, start));
+        let mut state = fresh_state();
+        let mut refloods = 0;
+        for index in 0..5u64 {
+            let now = start + Duration::from_millis(index * 10);
+            if state.neighbor_up_refloods_peerinfo(now) {
+                state.peerinfo_flooded_at = Some(now);
+                refloods += 1;
+            }
+        }
+        assert_eq!(refloods, 1, "five neighbors flood once per window");
 
-        // Past the window the flapping peer may re-flood once more (no permanent silence).
+        // Past the window a neighbor up floods once more (no permanent silence).
         let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
-        assert!(!state.peerinfo_on_cooldown(peer, later));
+        assert!(state.neighbor_up_refloods_peerinfo(later));
+    }
+
+    // A neighbor that comes up inside the window of a flood does not make a
+    // flood of its own. It must not wait for another `NeighborUp`: the flood is
+    // paid once the window ends.
+    #[test]
+    fn a_held_back_neighbor_up_floods_peerinfo_when_the_window_ends() {
+        let start = Instant::now();
+        let mut state = fresh_state();
+        state.peerinfo_flooded_at = Some(start);
+
+        assert!(!state.neighbor_up_refloods_peerinfo(start + Duration::from_secs(1)));
+        state.defer_peerinfo();
+
+        assert!(!state.take_deferred_peerinfo(start + Duration::from_secs(1)));
+        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        assert!(
+            state.take_deferred_peerinfo(later),
+            "due once the window ends"
+        );
+        assert!(!state.take_deferred_peerinfo(later), "paid once");
+    }
+
+    #[test]
+    fn nothing_is_due_when_no_neighbor_up_was_held_back() {
+        let start = Instant::now();
+        let mut state = fresh_state();
+        state.peerinfo_flooded_at = Some(start);
+        assert!(
+            !state.take_deferred_peerinfo(start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1))
+        );
     }
 
     #[test]
@@ -1812,6 +2280,23 @@ mod tests {
     // A `NeighborDown` drops the gossip link, not the pooled unicast
     // connection the verdict describes. Erasing the verdict with the link
     // parked every directed frame on a flap until the alive tick re-probed.
+    /// A session to a gossip neighbor is not a unit of the ceiling, because the gossip link
+    /// holds the peer anyway. The ledger learns of a neighbor when the link comes up, and that
+    /// the peer is not one when it goes down.
+    #[test]
+    fn a_session_counts_against_the_ceiling_only_while_its_peer_is_not_a_neighbor() {
+        let mut state = fresh_state();
+        let bob = endpoint_id(1);
+        state.webrtc_admission.note_success(bob);
+        assert_eq!(state.webrtc_admission.direct_units(), 1);
+
+        state.link(bob);
+        assert_eq!(state.webrtc_admission.direct_units(), 0, "a neighbor");
+
+        state.unlink(bob);
+        assert_eq!(state.webrtc_admission.direct_units(), 1, "no longer one");
+    }
+
     #[test]
     fn unlinking_a_peer_keeps_its_path_verdict() {
         let mut state = fresh_state();
@@ -1854,6 +2339,30 @@ mod tests {
         );
         assert!(state.direct.is_empty());
         assert!(state.forget_peer_endpoint("bob").is_none());
+    }
+
+    // After a failover the rendezvous keeps its id, but a refusal from the old
+    // holder says nothing about the new one: the wait starts over.
+    #[test]
+    fn a_new_rendezvous_verdict_starts_the_refusal_wait_over() {
+        use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+
+        let mut state = fresh_state();
+        let rendezvous = endpoint_id(7);
+        state.rendezvous_id = Some(rendezvous);
+        let hub = WebRtcHandle::new(WebRtcTransport::new(endpoint_id(0)));
+        state.webrtc_admission.note_refused(rendezvous);
+        assert!(
+            state.webrtc_admission.try_admit(rendezvous, &hub).is_err(),
+            "the refusal makes us wait"
+        );
+
+        state.forget_rendezvous_verdict();
+
+        assert!(
+            state.webrtc_admission.try_admit(rendezvous, &hub).is_ok(),
+            "a new verdict ends the wait"
+        );
     }
 
     // A departed peer read as riding WebRTC was nudged on every alive tick.
@@ -1906,8 +2415,8 @@ mod tests {
             let now = start + Duration::from_millis(u64::from(index) * 100);
             let peer = peers[index as usize % peers.len()];
             // NeighborUp → PeerInfo reflood gate + (via handle_peer_info) link.
-            if !state.peerinfo_on_cooldown(peer, now) {
-                state.note_peerinfo(peer, now);
+            if state.neighbor_up_refloods_peerinfo(now) {
+                state.peerinfo_flooded_at = Some(now);
             }
             if !state.relink_on_cooldown(peer, now) {
                 state.note_relink(peer, now);
@@ -1924,11 +2433,6 @@ mod tests {
             state.relink.len() <= peers.len(),
             "relink flat: {}",
             state.relink.len()
-        );
-        assert!(
-            state.peerinfo.len() <= peers.len(),
-            "peerinfo flat: {}",
-            state.peerinfo.len()
         );
         assert!(
             state.linked_endpoints.len() <= peers.len(),

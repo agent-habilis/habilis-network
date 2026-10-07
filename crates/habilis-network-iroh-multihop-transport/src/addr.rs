@@ -44,6 +44,16 @@ pub struct RouteHop {
 pub struct Route(Vec<RouteHop>);
 
 impl Route {
+    /// The hops as short ids for a log line: the application id of each, then the id
+    /// of its underlay, which differ because the underlay has a key of its own.
+    pub(crate) fn describe(&self) -> String {
+        self.0
+            .iter()
+            .map(|hop| format!("{}/{}", hop.app_id.fmt_short(), hop.underlay.id.fmt_short()))
+            .collect::<Vec<_>>()
+            .join(">")
+    }
+
     pub(crate) fn singleton(hop: RouteHop) -> Self {
         Self(vec![hop])
     }

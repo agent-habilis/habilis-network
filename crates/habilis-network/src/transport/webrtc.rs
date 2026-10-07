@@ -80,17 +80,63 @@ const SIGNAL_EXCHANGE_DEADLINE: std::time::Duration = std::time::Duration::from_
 /// following tick rather than being skipped indefinitely.
 const SIGNAL_ROUND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// Application close code: we are at our direct-peer ceiling.
+/// The application close codes of the transport plane, in one list.
 ///
-/// Distinct from a failure so the dialer can tell "no room" from "ICE broke"
-/// and back off instead of re-offering every tick. Weakly wire-load-bearing:
-/// a peer too old to know the code just sees a closed connection and retries,
-/// which is the behaviour it had before.
-const CAP_REFUSED: u32 = 1;
-/// Application close code: the negotiation failed.
-const SIGNAL_FAILED: u32 = 2;
-/// Application close code: the negotiation ran out of time.
-const SIGNAL_ABORTED: u32 = 3;
+/// A code is wire-load-bearing only weakly: a peer too old to know it just sees
+/// a closed connection and retries, which is the behaviour it had before. But
+/// two meanings on one number would be a silent bug, so every code of the plane
+/// lives here and a test holds them apart. Each ALPN reads its own subset.
+pub(crate) mod close_code {
+    /// We are at our direct-peer ceiling.
+    ///
+    /// Distinct from a failure so the dialer can tell "no room" from "ICE broke"
+    /// and back off instead of re-offering every tick.
+    pub(crate) const CAP_REFUSED: u32 = 1;
+    /// The negotiation failed.
+    pub(crate) const SIGNAL_FAILED: u32 = 2;
+    /// The negotiation ran out of time, or the Router is shutting down.
+    pub(crate) const SIGNAL_ABORTED: u32 = 3;
+    /// A gossip connection whose path may not carry payload.
+    pub(crate) const GOSSIP_RELAY_REFUSED: u32 = 4;
+    /// A unicast connection whose path may not carry payload.
+    pub(crate) const UNICAST_RELAY_REFUSED: u32 = 5;
+    // 6 was `EVICTED` on this branch (removed in 597dedf), and builds of the PR
+    // sent it. Do not reuse it while those builds can still be in a mesh.
+    // 7 was `RENDEZVOUS_RELEASED`, sent by builds of the PR that closed the link
+    // to the rendezvous themselves; the same applies.
+    /// A unicast connection nothing sent on for the idle timeout: closed by the
+    /// pool on the dial side, by the acceptor on the other.
+    pub(crate) const IDLE: u32 = 8;
+    /// A direct connection closed because the node is at its ceiling of direct
+    /// connections and this one was the least recently used. The dialer backs off
+    /// before it dials this peer on its own again: a send still dials at once.
+    pub(crate) const EVICTED: u32 = 11;
+    // Reserved, each added with the change that sends it: 9 `NOT_A_NEIGHBOR`
+    // (now private to `underlay_webrtc.rs`), 10 `GOSSIP_ON_GOSSIP_PATH`. The
+    // next free number is 12.
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn no_two_codes_share_a_number() {
+            let all = [
+                CAP_REFUSED,
+                SIGNAL_FAILED,
+                SIGNAL_ABORTED,
+                GOSSIP_RELAY_REFUSED,
+                UNICAST_RELAY_REFUSED,
+                IDLE,
+                EVICTED,
+            ];
+            let distinct: std::collections::HashSet<_> = all.into_iter().collect();
+            assert_eq!(distinct.len(), all.len());
+        }
+    }
+}
+
+use close_code::{CAP_REFUSED, EVICTED, SIGNAL_ABORTED, SIGNAL_FAILED};
 
 /// Register `remote`'s `WebRTC` transport address after a session attach.
 ///
@@ -158,7 +204,8 @@ pub struct IceProfile {
     pub host_only: bool,
 }
 
-/// The peer refused us at its direct-peer ceiling.
+/// The peer refused us: it is at its direct-peer ceiling. We back off for a
+/// while.
 ///
 /// A distinct type rather than a message, because the caller has to tell a
 /// refusal from an ordinary failure and the two want opposite responses: a
@@ -177,7 +224,8 @@ impl std::fmt::Display for CapRefused {
 impl std::error::Error for CapRefused {}
 
 /// Whether a failed offer round was the peer refusing us at its ceiling.
-fn is_cap_refusal(error: &anyhow::Error) -> bool {
+#[must_use]
+pub fn is_cap_refusal(error: &anyhow::Error) -> bool {
     error.downcast_ref::<CapRefused>().is_some()
 }
 
@@ -209,12 +257,13 @@ async fn exchange_envelopes(
     }
 }
 
-/// Whether `error` is a peer telling us it is at its ceiling.
+/// Whether the peer closed `conn` to tell us to back off: it refused at its cap (the code of
+/// older peers), or it evicted us lately.
 fn refused_at_cap(conn: &Connection) -> bool {
     matches!(
         conn.close_reason(),
         Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
-            if close.error_code.into_inner() == u64::from(CAP_REFUSED)
+            if [u64::from(CAP_REFUSED), u64::from(EVICTED)].contains(&close.error_code.into_inner())
     )
 }
 
@@ -300,12 +349,18 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         //   here and their `Connection`s dropped with them. Before this, a peer
         //   that connected and never opened a stream left a detached task
         //   parked on `accept_bi` forever, one per connection.
+        // Glare: when the lower id offers while our own offer to it runs, ours is given up and the
+        // offer of the lower id is answered. The lower id always wins; it refuses a crossed offer
+        // of the higher id, as the lower id has always done.
+        if remote < self.local && self.admission.preempt_offer(remote) {
+            tracing::debug!(target: LOG_TARGET, %remote, "gave up our offer for the offer of the lower id");
+        }
         let guard = match self.admission.try_admit(remote, &self.handle) {
             Ok(guard) => guard,
             Err(reason) => {
                 let (code, why): (u32, &[u8]) = match reason {
-                    Refusal::AtCap => (CAP_REFUSED, b"at the direct-peer cap"),
                     Refusal::ShuttingDown => (SIGNAL_ABORTED, b"shutting down"),
+                    Refusal::Evicted => (EVICTED, b"evicted lately"),
                     Refusal::InFlight | Refusal::HaveSession | Refusal::Cooling => {
                         (SIGNAL_FAILED, b"already negotiating")
                     }
@@ -316,11 +371,13 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             }
         };
 
+        let epoch = guard.epoch();
         let handle = self.handle.clone();
         let endpoint = self.endpoint.clone();
         let local = self.local;
         let deadlines = self.deadlines;
         let ice = self.ice;
+        let admission = self.admission.clone();
         // Negotiate off the accept future, for two independent reasons. It can
         // take seconds (candidate gathering, then DTLS/SCTP), and holding the
         // Router's accept task that long would serialize inbound offers. And in
@@ -343,8 +400,16 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
             .await
             {
                 Ok(Ok(())) => {
+                    admission.note_success(remote);
+                    admission.report_answered(remote);
                     register_session_addr(&endpoint, remote);
                     conn.close(0u32.into(), b"jsep done");
+                    // A connection that we dialed before the attach moves onto the
+                    // session only after a path event of our own endpoint, and the
+                    // offerer's nudge gives us none: iroh opens a new path only
+                    // from the client side of a connection.
+                    let nudging = endpoint.clone();
+                    n0_future::task::spawn(async move { nudge_session(&nudging, remote).await });
                     tracing::debug!(target: LOG_TARGET, %remote, "webrtc session attached (answerer)");
                 }
                 // A failed negotiation is normal operation, not a fault: ICE
@@ -365,7 +430,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                 }
             }
         });
-        self.admission.track(remote, task.abort_handle());
+        self.admission.track(remote, epoch, task.abort_handle());
         Ok(())
     }
 
@@ -524,25 +589,20 @@ async fn dial_signal_round(
     Ok(())
 }
 
-/// The most direct peers one node will negotiate sessions with.
+/// The default of C, the ceiling of direct connections one node holds (64): the `WebRTC`
+/// sessions and the unicast connections together. A node sets its own with
+/// `SetupParams::max_direct`; `0` takes this value.
 ///
-/// This caps the *session* mesh, which is dense by intent — we want every peer
-/// we know about, not just our gossip neighbours. It is deliberately not the
-/// same knob as HyParView's `active_view_capacity`: that one sizes the gossip
-/// overlay and is fixed when the mesh is built, while this one is ours and can
-/// move at runtime. Each session costs a peer connection and, in a browser, up
-/// to a full ICE gathering budget — so the ceiling is real, not notional.
+/// It is deliberately not the same knob as HyParView's `active_view_capacity` (G): that one
+/// sizes the gossip overlay and is fixed when the mesh is built. Each direct connection costs
+/// memory and, in a browser, up to a full ICE gathering budget — so the ceiling is real, not
+/// notional. A newcomer past C evicts the least valuable peer, see
+/// [`super::ceiling`]; no offer is refused for it.
 ///
-/// Enforced on **both** roles, and counting rounds in flight, by
-/// [`super::admission::SignalAdmission`]. It was neither for a while: only
-/// dialers checked it, so the highest-id peer in a mesh — which by the role
-/// rule never dials — answered everyone who asked, and the header rendered
-/// counts above the ceiling.
-///
-/// Public so the CLI and the browser render the same denominator they enforce.
-/// It used to be written out three times, and the UI read a different copy from
-/// the one the engine checked.
-pub const MAX_DIRECT_PEERS: usize = 16;
+/// Public so the CLI and the browser can render a denominator. A node with its
+/// own ceiling reports it with [`super::admission::SignalAdmission::cap`], because
+/// this constant is only the default.
+pub const MAX_DIRECT_PEERS: usize = 64;
 
 /// Start a `WebRTC` negotiation with `peer`, if one is wanted and not already
 /// running. Fire-and-forget: the caller does **not** wait, and the graft
@@ -609,8 +669,40 @@ pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: bool) -> 
 /// A UDP pair already `proven` direct with no session has proved its UDP
 /// path, so a cold or idled-out pool (which reads as "UDP not selected")
 /// does not start the race again on every alive tick.
-pub(crate) fn wants_session(pair_needs_lane: bool, udp_selected: bool, proven: bool) -> bool {
+///
+/// `kind` is the selected path of the pair, if known. A pair on multihop is proven
+/// off the relay, but it has no lane of its own: a session ranks above multihop,
+/// so `proven` does not count while the pair rides it.
+pub(crate) fn wants_session(
+    pair_needs_lane: bool,
+    kind: Option<super::probe::PathKind>,
+    proven: bool,
+) -> bool {
+    let udp_selected = kind == Some(super::probe::PathKind::Ip);
+    let proven = proven
+        && !matches!(
+            kind,
+            Some(super::probe::PathKind::Multihop | super::probe::PathKind::Relay)
+        );
     pair_needs_lane || !(udp_selected || proven)
+}
+
+/// Whether this node leaves the offer of a session to its peer. The higher id waits to be
+/// dialled, so that one offer crosses per pair, unless a frame is held for the peer or the
+/// proof of a direct path is stale.
+///
+/// The proof is stale when the pair was `proven` direct and the selected path reads as the
+/// relay. Only the lower id has a path watcher (`ensure_watchers`), so a higher id that sends
+/// is the only one that can see the direct path go, and nobody else would offer. A crossing
+/// is settled in favour of the lower id (see `WebRtcSignalAcceptor::accept`).
+pub(crate) fn waits_for_the_offer(
+    local_is_higher: bool,
+    frame_held: bool,
+    kind: Option<super::probe::PathKind>,
+    proven: bool,
+) -> bool {
+    let proof_is_stale = proven && kind == Some(super::probe::PathKind::Relay);
+    local_is_higher && !frame_held && !proof_is_stale
 }
 
 /// Whether *this* node's rendezvous graft must wait for a data-channel
@@ -630,6 +722,11 @@ pub(crate) fn negotiate_session(
         // No transport registered: the beacon, or a multihop peer.
         return;
     };
+    // A cold pair stays where it is until the next send.
+    if held_back(state, &addr) {
+        tracing::debug!(target: LOG_TARGET, %peer, "no send yet; leaving this pair alone");
+        return;
+    }
     // A pair where both ends run UDP races the punch: the data channel gives
     // 6× less throughput at 36× the latency (docs/architecture.md §11), so it is worth a
     // JSEP round only while UDP has not won. Once it has, nothing is offered,
@@ -641,11 +738,9 @@ pub(crate) fn negotiate_session(
     // see the native peer's IP, skip, and the native — waiting to be dialled —
     // would never offer. The pair would silently never get a channel.
     let needs_lane = pair_needs_lane(&addr, state.local_udp_transport);
-    if !wants_session(
-        needs_lane,
-        state.unicast_pool.selected_is_ip(peer),
-        state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct),
-    ) {
+    let kind = state.pair_path_kind(peer);
+    let proven = state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct);
+    if !wants_session(needs_lane, kind, proven) {
         tracing::debug!(
             target: LOG_TARGET,
             %peer,
@@ -653,9 +748,12 @@ pub(crate) fn negotiate_session(
         );
         return;
     }
-    // The higher id waits to be dialled, so exactly one offer crosses per pair.
+    // The higher id waits to be dialled, so one offer crosses per pair. Unless a frame is held for
+    // the peer: that frame cannot wait for an offer that the lower id has no reason to make. If
+    // both offer at once, the lower id wins (see `WebRtcSignalAcceptor::accept`).
     let local = ctx.endpoint.id();
-    if local > peer {
+    let frame_held = state.lane_session_wanted(peer, crate::util::clock::Instant::now());
+    if waits_for_the_offer(local > peer, frame_held, kind, proven) {
         return;
     }
     // Every other gate — already have a session, already negotiating, at the
@@ -664,7 +762,7 @@ pub(crate) fn negotiate_session(
     // function is called in a tight loop by `retry_sessions` with nothing
     // awaited between calls, so a check that read only `session_count()` saw
     // the same zero twenty times and spawned twenty dials.
-    let guard = match state.webrtc_admission.try_admit(peer, &handle) {
+    let guard = match state.webrtc_admission.try_admit_offer(peer, &handle) {
         Ok(guard) => guard,
         Err(reason) => {
             tracing::debug!(target: LOG_TARGET, %peer, ?reason, "not negotiating");
@@ -703,13 +801,64 @@ impl ProtocolHandler for NudgeAcceptor {
 /// Make iroh re-run path selection to `peer` now. Bounded, and every outcome
 /// is ignored.
 pub(crate) async fn nudge(endpoint: &Endpoint, peer: EndpointId) {
+    nudge_addr(endpoint, EndpointAddr::new(peer)).await;
+}
+
+/// [`nudge`] for a peer whose `WebRTC` session has just attached. The dial names
+/// the session's custom address, so that iroh puts it in the path book of the
+/// remote and opens that path on a connection that it already holds. A bare-id
+/// dial finds the address only through the address lookup, and iroh does not ask
+/// the lookup again for a remote it already knows.
+pub(crate) async fn nudge_session(endpoint: &Endpoint, peer: EndpointId) {
+    let session = super::probe::NudgeAddrs {
+        session: true,
+        route: None,
+    };
+    nudge_with(endpoint, peer, &session).await;
+}
+
+/// [`nudge`] with the addresses that `addrs` names, in one dial: the session's
+/// custom address, the multihop route, or both. The one nudge path, so that what
+/// teaches iroh a `WebRTC` address teaches it a multihop route the same way.
+pub(crate) async fn nudge_with(
+    endpoint: &Endpoint,
+    peer: EndpointId,
+    addrs: &super::probe::NudgeAddrs,
+) {
+    let mut known = Vec::new();
+    if addrs.session {
+        known.push(iroh::TransportAddr::Custom(
+            habilis_network_iroh_webrtc_transport::custom_addr(peer),
+        ));
+    }
+    known.extend(addrs.route.clone());
+    nudge_addr(endpoint, EndpointAddr::from_parts(peer, known)).await;
+}
+
+async fn nudge_addr(endpoint: &Endpoint, addr: EndpointAddr) {
+    let peer = addr.id;
     if let Ok(Ok(conn)) = n0_future::time::timeout(
         super::pool::DIAL_TIMEOUT,
-        endpoint.connect(EndpointAddr::new(peer), NUDGE_ALPN),
+        endpoint.connect(addr, NUDGE_ALPN),
     )
     .await
     {
         conn.close(0u32.into(), b"nudge");
+    }
+    if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE)
+        && let Some(info) = endpoint.remote_info(peer).await
+    {
+        let kinds: Vec<String> = info
+            .addrs()
+            .map(|known| {
+                if let iroh::TransportAddr::Custom(custom) = known.addr() {
+                    format!("custom:{}", custom.id())
+                } else {
+                    format!("{:?}", known.addr())
+                }
+            })
+            .collect();
+        tracing::trace!(target: LOG_TARGET, %peer, ?kinds, "nudged; the remote knows these addresses");
     }
 }
 
@@ -751,6 +900,7 @@ fn spawn_offer_round(
     let ice = state.webrtc_ice;
     let proven = state.direct_proven.clone();
     let pool = state.unicast_pool.clone();
+    let epoch = guard.epoch();
     let task = n0_future::task::spawn(async move {
         let _guard = guard;
         if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
@@ -758,10 +908,14 @@ fn spawn_offer_round(
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
-        } else if offer == Offer::UdpRace && {
+            return;
+        }
+        // The peer took the round: it is not refusing us, so its wait starts over.
+        admission.note_success(peer);
+        if offer == Offer::UdpRace && {
             // A connection opened before the attach rides the session only
             // after a connect; the race is judged on the connection after.
-            nudge(&endpoint, peer).await;
+            nudge_session(&endpoint, peer).await;
             pool.udp_won(peer).await
         } {
             // UDP won while the round ran: the session would sit unused and hold
@@ -772,10 +926,16 @@ fn spawn_offer_round(
             if offer == Offer::Rendezvous {
                 tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached to the rendezvous");
             }
-            let _ = proven.send(crate::transport::probe::DirectOutcome { peer, direct: true });
+            let _ = proven.send(crate::transport::probe::DirectOutcome {
+                peer,
+                direct: true,
+                answered: false,
+            });
         }
     });
-    state.webrtc_admission.track(peer, task.abort_handle());
+    state
+        .webrtc_admission
+        .track(peer, epoch, task.abort_handle());
 }
 
 /// Whether the periodic heal legs may graft-dial the rendezvous at all.
@@ -797,7 +957,9 @@ fn spawn_offer_round(
 /// beacon it could not punch to in a whole heal interval is a tab, and a
 /// timer graft there is the same doomed dial.
 pub(crate) fn rendezvous_graftable(state: &crate::daemon::state::EventLoopState) -> bool {
-    !state.rendezvous_graft_needs_session && !state.rendezvous_offer_fallback
+    state.rendezvous_wanted()
+        && !state.rendezvous_graft_needs_session
+        && !state.rendezvous_offer_fallback
 }
 
 /// Offer a `WebRTC` session to the **rendezvous** itself.
@@ -820,6 +982,20 @@ pub(crate) fn negotiate_rendezvous_session(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
 ) {
+    if !state.rendezvous_wanted() {
+        // A session to the rendezvous that this node does not want. The main
+        // case is the release: gossip closes the link, and this detaches the
+        // session once the link is down. The other is a joiner whose links to
+        // members came up before its graft to the rendezvous landed. Either
+        // would hold one of the beacon's slots for ever.
+        if !state.rendezvous_linked
+            && let Some(handle) = state.webrtc.as_ref()
+            && handle.detach(&ctx.rendezvous_id)
+        {
+            tracing::debug!(target: LOG_TARGET, "detached a rendezvous session that is no longer wanted");
+        }
+        return;
+    }
     if state.relay_transport || state.rendezvous_linked {
         return;
     }
@@ -1146,6 +1322,9 @@ pub(crate) fn retry_sessions(
     if state.webrtc.is_none() {
         return;
     }
+    // First let go of what nothing uses, so that a slot frees before this pass
+    // decides who gets one.
+    detach_idle_sessions_at(state, crate::util::clock::Instant::now());
     // Collected first: `negotiate_session` needs `&mut state`, so the borrow of
     // `peer_endpoints` cannot be held across the calls.
     // The peer's own advertised address, not one rebuilt from its id: a
@@ -1168,7 +1347,7 @@ pub(crate) fn retry_sessions(
         .filter(|addr| {
             wants_session(
                 own_needs_lane || needs_webrtc_lane(addr),
-                state.unicast_pool.selected_is_ip(addr.id),
+                state.pair_path_kind(addr.id),
                 state.direct.get(&addr.id) == Some(&crate::daemon::state::DirectState::Direct),
             )
         })
@@ -1178,6 +1357,7 @@ pub(crate) fn retry_sessions(
                 .as_ref()
                 .is_some_and(|handle| handle.has_session(&addr.id))
         })
+        .filter(|addr| !held_back(state, addr))
         .cloned()
         .collect();
     // Sorted because the cap now bites here: in a mesh larger than the ceiling
@@ -1187,6 +1367,65 @@ pub(crate) fn retry_sessions(
     for addr in peers {
         negotiate_session(state, ctx, addr.id, addr);
     }
+}
+
+/// Whether the pair with `addr` waits for a send before it is offered a
+/// session (decision D4: direct connections are on demand). It does when the
+/// peer is no gossip neighbor and the pool holds no connection that a send opened,
+/// so nothing was sent to it within the idle window. A pair that needs the lane
+/// waits too (decision D11), unless a frame is held for it: its session is the only
+/// direct path it has, and that frame is the send that asks for it. A gossip
+/// neighbor keeps its session proactive, because the gossip link is always on.
+///
+/// One more pair is not held back: on a mesh whose relay is lookup only, a pair
+/// whose direct-path probe failed (`RelayOnly`). A directed frame to it is parked,
+/// never dialed, so no send ever opens a connection, and its gossip graft waits
+/// for a proven direct path. A pair behind NAT, with addresses but no punched
+/// path, would wait for ever. A session is its way out.
+fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) -> bool {
+    let probe_failed = !state.relay_transport
+        && state.direct.get(&addr.id) == Some(&crate::daemon::state::DirectState::RelayOnly);
+    let linked = state.linked_endpoints.contains(&addr.id);
+    let wanted = state.lane_session_wanted(addr.id, crate::util::clock::Instant::now());
+    // A peer that evicted us lately is left alone by every proactive dial, and the offer of a
+    // session is one. A held frame is a send, and a send dials at once.
+    let evicted_us = !linked && !wanted && state.webrtc_admission.evicted_recently(addr.id);
+    evicted_us
+        || (!linked
+            && !wanted
+            && !probe_failed
+            && state.unicast_pool.used_connection(addr.id).is_none())
+}
+
+/// Detach the sessions that nothing has held for
+/// [`DIRECT_IDLE_BACKSTOP_SECS`](crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS)
+/// (decision D11: the ceiling frees a place for a newcomer, this frees what nobody uses).
+/// A detached pair holds no pooled connection, so [`held_back`] leaves it alone until a send dials the
+/// peer.
+///
+/// The last use is the one of the ledger of the admission table. A round in flight holds a peer,
+/// and so does a live gossip connection, so a gossip neighbor never idles out. A pair detaches its
+/// session a window after its last send, plus one tick of the retry pass. A peer whose address is
+/// not known keeps its session: see [`held_back`]. Returns the peers detached.
+fn detach_idle_sessions_at(
+    state: &mut crate::daemon::state::EventLoopState,
+    now: crate::util::clock::Instant,
+) -> Vec<EndpointId> {
+    let Some(handle) = state.webrtc.clone() else {
+        return Vec::new();
+    };
+    let window = std::time::Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS);
+    let mut detached = Vec::new();
+    for peer in state.webrtc_admission.idle_sessions(now, window) {
+        let kept = state.linked_endpoints.contains(&peer)
+            || !state.peer_endpoints.values().any(|addr| addr.id == peer);
+        if kept || !handle.detach(&peer) {
+            continue;
+        }
+        tracing::debug!(target: LOG_TARGET, %peer, "detached an idle session");
+        detached.push(peer);
+    }
+    detached
 }
 
 // Host-only: two real loopback endpoints and a tokio runtime. The logic under
@@ -1207,6 +1446,7 @@ mod tests {
     use iroh::{RelayMode, SecretKey, endpoint::presets};
 
     use super::*;
+    use crate::transport::probe::PathKind;
 
     fn relay_addr() -> iroh::TransportAddr {
         iroh::TransportAddr::Relay("https://relay.example".parse().unwrap())
@@ -1237,16 +1477,19 @@ mod tests {
     #[test]
     fn a_udp_pair_races_until_udp_is_selected() {
         assert!(
-            wants_session(false, false, false),
+            wants_session(false, None, false),
             "a udp pair races the punch"
         );
-        assert!(!wants_session(false, true, false), "udp won; no round");
         assert!(
-            wants_session(true, false, false),
+            !wants_session(false, Some(PathKind::Ip), false),
+            "udp won; no round"
+        );
+        assert!(
+            wants_session(true, None, false),
             "a lane pair always negotiates"
         );
         assert!(
-            wants_session(true, true, true),
+            wants_session(true, Some(PathKind::Ip), true),
             "a lane pair's session is its only direct path"
         );
     }
@@ -1256,8 +1499,70 @@ mod tests {
     #[test]
     fn a_proven_udp_pair_is_not_raced_again() {
         assert!(
-            !wants_session(false, false, true),
-            "proven direct, no pooled connection"
+            !wants_session(false, None, true),
+            "proven direct, no live connection to read"
+        );
+        assert!(
+            !wants_session(false, Some(PathKind::WebRtc), true),
+            "proven direct, riding a session"
+        );
+    }
+
+    // The proof of a direct path is a state of the engine, and only a watcher on a
+    // pooled connection takes it back. When the admission table reads the relay as the
+    // selected path, the proof is stale: the pair offers, as one that was never proven.
+    #[test]
+    fn a_proven_pair_that_reads_as_relay_is_offered_a_session() {
+        assert!(wants_session(false, Some(PathKind::Relay), true));
+    }
+
+    // Only the lower id watches a pooled connection, so when the higher id is the one
+    // that sends, the lower id never sees the direct path go. The higher id then offers
+    // by itself, once its own reading contradicts the proof; the lower id wins a crossing.
+    #[test]
+    fn the_higher_id_offers_when_the_proof_of_a_direct_path_is_stale() {
+        assert!(
+            waits_for_the_offer(true, false, None, false),
+            "nothing to say"
+        );
+        assert!(
+            waits_for_the_offer(true, false, Some(PathKind::Ip), true),
+            "the proof holds"
+        );
+        assert!(
+            !waits_for_the_offer(true, true, None, false),
+            "a frame is held for the peer"
+        );
+        assert!(
+            !waits_for_the_offer(true, false, Some(PathKind::Relay), true),
+            "the pair reads as relay although it was proven"
+        );
+        assert!(
+            waits_for_the_offer(true, false, Some(PathKind::Relay), false),
+            "never proven: the lower id offers"
+        );
+        assert!(
+            !waits_for_the_offer(false, false, Some(PathKind::Ip), true),
+            "the lower id never waits"
+        );
+    }
+
+    // A pair that multihop carries is off the relay, so it is proven direct, but a
+    // session ranks above multihop. The pair offers whether or not a pooled
+    // connection exists: the kind comes from the watcher, or from the admission
+    // table when the pool has closed an idle connection.
+    #[test]
+    fn a_pair_on_multihop_is_offered_a_session_even_when_proven_direct() {
+        assert!(wants_session(false, Some(PathKind::Multihop), true));
+        let watched_after_the_pool_closed_it = None;
+        let read_from_the_admission_table = Some(PathKind::Multihop);
+        let kind = crate::transport::probe::pair_kind(
+            watched_after_the_pool_closed_it,
+            read_from_the_admission_table,
+        );
+        assert!(
+            wants_session(false, kind, true),
+            "an idle pair on multihop still offers"
         );
     }
 
@@ -1362,6 +1667,20 @@ mod tests {
     /// Offline: loopback only, no relay, no address lookup.
     async fn endpoint() -> (Endpoint, WebRtcHandle) {
         let key = SecretKey::generate();
+        let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .add_custom_transport(handle.transport())
+            .bind()
+            .await
+            .expect("bind loopback endpoint");
+        (endpoint, handle)
+    }
+
+    /// [`endpoint`] with the key given.
+    async fn endpoint_with(key: SecretKey) -> (Endpoint, WebRtcHandle) {
         let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
         let endpoint = Endpoint::builder(presets::Minimal)
             .secret_key(key)
@@ -1479,82 +1798,95 @@ mod tests {
         client.close().await;
     }
 
-    /// At the ceiling, the answerer refuses before doing any JSEP work, and
-    /// says *why* with a distinct close code so the dialer can back off rather
-    /// than re-offer every tick.
+    /// **A node with a ceiling of two holds two sessions, and the third offer is answered.**
     ///
-    /// A cap of zero is the cheap way to stand at the ceiling; the arithmetic
-    /// (`sessions + in-flight >= cap`) is the same at sixteen.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_offer_at_the_cap_is_refused_with_the_cap_code() {
+    /// The ceiling is the setting of the node (C). No offer is refused for it. The session
+    /// that was used least recently is detached when the third attaches, so the node keeps
+    /// two sessions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_node_with_a_ceiling_of_two_answers_a_third_offer_and_detaches_the_oldest() {
         let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(0);
+        let admission = SignalAdmission::new(2);
         let router = serve(&server, &server_hub, &admission);
 
-        let (client, _client_hub) = endpoint().await;
-        let conn = client
-            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            let (client, client_hub) = endpoint().await;
+            dial_signal_with(
+                &client,
+                server.addr(),
+                &client_hub,
+                quick(),
+                IceProfile { host_only: true },
+            )
             .await
-            .expect("dial the signal ALPN");
-
-        let reason = tokio::time::timeout(Duration::from_secs(5), conn.closed())
-            .await
-            .expect("the refusal must be prompt — no gathering should have happened");
-        match reason {
-            iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
-                assert_eq!(
-                    close.error_code.into_inner(),
-                    u64::from(CAP_REFUSED),
-                    "expected the at-cap close code"
-                );
-            }
-            other @ (iroh::endpoint::ConnectionError::VersionMismatch
-            | iroh::endpoint::ConnectionError::TransportError(_)
-            | iroh::endpoint::ConnectionError::ConnectionClosed(_)
-            | iroh::endpoint::ConnectionError::Reset
-            | iroh::endpoint::ConnectionError::TimedOut
-            | iroh::endpoint::ConnectionError::LocallyClosed
-            | iroh::endpoint::ConnectionError::CidsExhausted) => {
-                panic!("expected an application close, got {other:?}")
-            }
+            .expect("every offer attaches");
+            clients.push((client, client_hub));
         }
-        assert_eq!(server_hub.session_count(), 0);
+
+        assert!(
+            until(|| !server_hub.has_session(&clients[0].0.id())).await,
+            "the least recently used session is detached"
+        );
+        assert!(server_hub.has_session(&clients[1].0.id()));
+        assert!(server_hub.has_session(&clients[2].0.id()));
+        assert_eq!(server_hub.session_count(), 2, "the node holds two sessions");
 
         router.shutdown().await.expect("shutdown");
-        client.close().await;
+        for (client, _) in clients {
+            client.close().await;
+        }
+        server.close().await;
     }
 
-    /// **The dialer must recognise a prompt refusal, not just a timed-out one.**
-    ///
-    /// The answerer refuses at its cap by closing the connection straight away,
-    /// so the offer round fails on the *read*, not on the exchange deadline.
-    /// Only the timeout branch consulted the close code, so the refusal came
-    /// back as a plain read error and the dialer re-ran a full gathering round
-    /// against the same peer on every retry tick, forever.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_prompt_cap_refusal_is_recognised_by_the_dialer() {
+    /// **The evicted peer reads code 11 on its offer.** At a ceiling of one, the second session
+    /// evicts the first. The first peer offers again at once, and the dialer reads the refusal as the
+    /// `EVICTED` code, so it can wait instead of taking the place back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_peer_whose_session_was_evicted_reads_the_evicted_code_on_its_next_offer() {
         let (server, server_hub) = endpoint().await;
-        let admission = SignalAdmission::new(0);
+        let admission = SignalAdmission::new(1);
         let router = serve(&server, &server_hub, &admission);
 
-        let (client, client_hub) = endpoint().await;
+        let (first, first_hub) = endpoint().await;
+        let (second, second_hub) = endpoint().await;
+        for (client, hub) in [(&first, &first_hub), (&second, &second_hub)] {
+            dial_signal_with(
+                client,
+                server.addr(),
+                hub,
+                quick(),
+                IceProfile { host_only: true },
+            )
+            .await
+            .expect("an offer attaches");
+        }
+        assert!(
+            until(|| !server_hub.has_session(&first.id())).await,
+            "the first session was evicted"
+        );
+
         let error = dial_signal_with(
-            &client,
+            &first,
             server.addr(),
-            &client_hub,
+            &first_hub,
             quick(),
             IceProfile { host_only: true },
         )
         .await
-        .expect_err("a server at its cap must refuse the offer");
-
+        .expect_err("the evicted peer is refused for a minute");
         assert!(
             is_cap_refusal(&error),
-            "the dialer must read this as an at-cap refusal, got: {error:#}"
+            "the dialer reads the refusal as a code to wait on: {error:#}"
+        );
+        assert!(
+            server_hub.has_session(&second.id()),
+            "the newcomer keeps its place"
         );
 
         router.shutdown().await.expect("shutdown");
-        client.close().await;
+        first.close().await;
+        second.close().await;
         server.close().await;
     }
 
@@ -1872,6 +2204,113 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         client.close().await;
+    }
+
+    /// A pair with no UDP: the higher id (the answerer of the session round)
+    /// dials a connection over the relay, and the lower id offers a session
+    /// while that connection is still held. iroh opens a new path only from the
+    /// client side of a connection, and only on a path event of its own
+    /// endpoint. The offerer's nudge reaches the answerer's endpoint as an
+    /// inbound connect, which gives it no event for the connection it dialed, so
+    /// the answerer must nudge once after its attach. Without it the accepted
+    /// connection stays on the relay and the relay policy closes it.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_dialed_by_the_answerer_leaves_the_relay_when_the_session_attaches() {
+        use iroh::protocol::{AcceptError, ProtocolHandler};
+
+        const HOLD_ALPN: &[u8] = b"habilis-mesh/test-hold/0";
+
+        #[derive(Debug, Clone)]
+        struct Hold(tokio::sync::mpsc::Sender<bool>);
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                let direct = super::super::path::wait_direct(&conn, Duration::from_secs(12)).await;
+                let _ = self.0.send(direct).await;
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let bind = |key: SecretKey, handle: &WebRtcHandle| {
+            let relay_url = relay_url.clone();
+            let transport = handle.transport();
+            let selector = handle.path_selector();
+            async move {
+                Endpoint::builder(presets::Minimal)
+                    .secret_key(key)
+                    .relay_mode(RelayMode::custom([relay_url]))
+                    .add_custom_transport(transport)
+                    .path_selector(selector)
+                    .clear_ip_transports()
+                    .bind()
+                    .await
+                    .expect("bind endpoint with relay")
+            }
+        };
+        let (mut low_key, mut high_key) = (SecretKey::generate(), SecretKey::generate());
+        if low_key.public() > high_key.public() {
+            std::mem::swap(&mut low_key, &mut high_key);
+        }
+        let low_hub = WebRtcHandle::new(WebRtcTransport::new(low_key.public()));
+        let low = bind(low_key, &low_hub).await;
+        let high_hub = WebRtcHandle::new(WebRtcTransport::new(high_key.public()));
+        let high = bind(high_key, &high_hub).await;
+
+        let (held_tx, mut held_rx) = tokio::sync::mpsc::channel(1);
+        let low_router = Router::builder(low.clone())
+            .accept(HOLD_ALPN, Hold(held_tx))
+            .spawn();
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let high_router = Router::builder(high.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                WebRtcSignalAcceptor::new(
+                    high_hub.clone(),
+                    high.clone(),
+                    high.id(),
+                    admission,
+                    IceProfile { host_only: true },
+                ),
+            )
+            .spawn();
+
+        let low_on_relay = EndpointAddr::new(low.id()).with_relay_url(relay_url.clone());
+        let high_on_relay = EndpointAddr::new(high.id()).with_relay_url(relay_url.clone());
+        let held = high
+            .connect(low_on_relay, HOLD_ALPN)
+            .await
+            .expect("the answerer dials the offerer over the relay");
+
+        dial_signal_with(
+            &low,
+            high_on_relay,
+            &low_hub,
+            SignalDeadlines::DEFAULT,
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the offerer attaches a session");
+        register_session_addr(&low, high.id());
+        nudge(&low, high.id()).await;
+
+        let direct = tokio::time::timeout(Duration::from_secs(20), held_rx.recv())
+            .await
+            .expect("the held connection reports in time")
+            .expect("the channel is open");
+        assert!(
+            direct,
+            "the connection that the answerer dialed must leave the relay once the session is attached"
+        );
+
+        held.close(0u32.into(), b"done");
+        high_router.shutdown().await.expect("shutdown");
+        low_router.shutdown().await.expect("shutdown");
+        low.close().await;
+        high.close().await;
     }
 
     /// A relayed connection still open when the session attaches, which is
@@ -2216,6 +2655,636 @@ mod tests {
     /// gate holds it and refuses it after `PROBE_DEADLINE`, and the attach
     /// that follows does not replace it. Observed every 30 s for a whole
     /// browser-first cell.
+    /// A pair waits for a send before it is offered a session when it is no gossip neighbor
+    /// and holds no pooled connection. A pair that needs the lane waits too, unless a frame is
+    /// held for it: that frame is the send.
+    #[test]
+    fn a_cold_non_neighbor_pair_waits_for_a_send_unless_a_frame_is_held_for_a_lane_peer() {
+        let peer = crate::testing::endpoint_id(7);
+        let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
+        let lane_pair = EndpointAddr::new(peer)
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+        let mut state = crate::testing::fresh_state();
+        state.local_udp_transport = true;
+
+        assert!(held_back(&state, &ip_pair), "cold, no neighbor, an IP path");
+        assert!(
+            held_back(&state, &lane_pair),
+            "a lane pair with no held frame waits as well"
+        );
+        state.want_lane_session(peer, crate::util::clock::Instant::now());
+        assert!(
+            !held_back(&state, &lane_pair),
+            "a frame held for a lane peer opens its session"
+        );
+        state.clear_lane_wanted(peer);
+        assert!(
+            held_back(&state, &lane_pair),
+            "the want ends with the attach"
+        );
+        state.linked_endpoints.insert(peer);
+        assert!(
+            !held_back(&state, &ip_pair),
+            "a gossip neighbor is never held back"
+        );
+    }
+
+    /// A pair behind NAT has IP addresses but no direct path. On a mesh whose relay
+    /// is lookup only, a directed frame to it is parked, so nothing is ever sent and
+    /// no connection opens, and the probe that proves a direct path fails. Waiting
+    /// for a send would wait for ever. Once the probe has failed and the pair is
+    /// `RelayOnly`, a session is the way out, so the pair is no longer held back.
+    #[test]
+    fn a_pair_whose_probe_failed_on_a_lookup_only_relay_is_offered_a_session() {
+        use crate::daemon::state::DirectState;
+
+        let peer = crate::testing::endpoint_id(7);
+        let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
+        let mut state = crate::testing::fresh_state();
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+
+        for (known, held) in [
+            (None, true),
+            (Some(DirectState::Pending), true),
+            (Some(DirectState::Direct), true),
+            (Some(DirectState::RelayOnly), false),
+        ] {
+            match known {
+                Some(known) => {
+                    state.direct.insert(peer, known);
+                }
+                None => {
+                    state.direct.remove(&peer);
+                }
+            }
+            assert_eq!(
+                held_back(&state, &ip_pair),
+                held,
+                "lookup-only relay, direct state {known:?}"
+            );
+        }
+
+        // With the relay carrying payload the pair can talk without a session, so
+        // a failed probe is no reason to open one before a send.
+        state.relay_transport = true;
+        state.direct.insert(peer, DirectState::RelayOnly);
+        assert!(
+            held_back(&state, &ip_pair),
+            "the relay carries payload: wait for a send"
+        );
+    }
+
+    /// A peer that evicted our connection is not offered a session by the retry pass for a while:
+    /// the offer is a proactive dial, and it would take the place that the peer just freed. A frame
+    /// that is held for the peer still passes, because a send dials at once.
+    #[test]
+    fn a_peer_that_evicted_us_is_not_offered_a_session_unless_a_frame_is_held() {
+        use crate::daemon::state::DirectState;
+
+        let peer = crate::testing::endpoint_id(7);
+        let pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
+        let mut state = crate::testing::fresh_state();
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+        state.direct.insert(peer, DirectState::RelayOnly);
+        assert!(!held_back(&state, &pair), "a failed probe offers a session");
+
+        state.webrtc_admission.note_evicted(peer);
+        assert!(held_back(&state, &pair), "the peer evicted us lately");
+
+        state.want_lane_session(peer, crate::util::clock::Instant::now());
+        assert!(!held_back(&state, &pair), "a held frame is a send");
+    }
+
+    /// A session nothing uses is detached once the idle window has passed, and
+    /// the pair then waits for a send.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_nothing_uses_is_detached_and_its_pair_waits_for_a_send() {
+        idle_session_detaches(|id| {
+            EndpointAddr::new(id).with_ip_addr("127.0.0.1:4000".parse().expect("addr"))
+        })
+        .await;
+    }
+
+    /// The same for a lane peer: its session is no longer kept for ever. It goes at the backstop
+    /// like any other, and the pair waits for a held frame to be offered one again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lane_session_nothing_uses_is_detached_at_the_backstop() {
+        idle_session_detaches(|id| {
+            EndpointAddr::new(id)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url"))
+        })
+        .await;
+    }
+
+    async fn idle_session_detaches(bob_addr: fn(EndpointId) -> EndpointAddr) {
+        use crate::util::clock::Instant;
+
+        let (server, server_hub) = endpoint_with_lookup().await;
+        let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        let router = serve(&server, &server_hub, &admission);
+
+        let (client, client_hub) = endpoint_with_lookup().await;
+        let client_admission = SignalAdmission::new(MAX_DIRECT_PEERS);
+        // The round holds the slot as in production, and teaches the table its hub.
+        let round = client_admission
+            .try_admit(server.id(), &client_hub)
+            .expect("room");
+        dial_signal_with(
+            &client,
+            server.addr(),
+            &client_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the signal round must attach a session");
+        drop(round);
+        // Both roles tell the table of the attach, as `spawn_offer_round` does.
+        client_admission.note_success(server.id());
+        assert!(client_hub.has_session(&server.id()));
+
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(client_hub.clone());
+        state.webrtc_admission = client_admission.clone();
+        state.local_udp_transport = true;
+        state
+            .peer_endpoints
+            .insert(crate::testing::nick("bob"), bob_addr(server.id()));
+        let window = Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let start = Instant::now();
+
+        assert!(detach_idle_sessions_at(&mut state, start).is_empty());
+        assert!(
+            detach_idle_sessions_at(
+                &mut state,
+                start + window.saturating_sub(Duration::from_secs(1))
+            )
+            .is_empty()
+        );
+        assert!(client_hub.has_session(&server.id()), "not yet");
+        assert_eq!(
+            detach_idle_sessions_at(&mut state, start + window),
+            vec![server.id()]
+        );
+        assert!(!client_hub.has_session(&server.id()), "the session is gone");
+        assert!(
+            held_back(
+                &state,
+                &state.peer_endpoints.values().next().expect("bob").clone()
+            ),
+            "the pair waits for a send again"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// The retry pass offers a session to a cold pair with an IP path only after
+    /// a send: while no pooled connection exists, the pair is left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_retry_pass_offers_a_session_only_to_a_pair_that_sent() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        let (endpoint, handle) = endpoint().await;
+        // Only the lower id offers, so the peer's key must be above ours.
+        // The id of our endpoint is random: with 255 seeds, one run in 256 found no key above it.
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() > endpoint.id())
+            .expect("a key above ours");
+        let server = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("bind a loopback server");
+        let router = Router::builder(server.clone())
+            .accept(crate::transport::UNICAST_ALPN, Hold)
+            .spawn();
+        crate::lookup::add_peer_addr(&endpoint, server.addr()).expect("register the server");
+
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle);
+        state.local_udp_transport = true;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state
+            .peer_endpoints
+            .insert(crate::testing::nick("bob"), server.addr());
+
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "a cold pair is not offered a session"
+        );
+
+        state
+            .unicast_pool
+            .warm_or_dial(server.id())
+            .await
+            .expect("a send dials the peer");
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "after a send, the pair is offered a session"
+        );
+
+        // The dial to a closed signal port would hold its slot for a long deadline.
+        state.webrtc_admission.close();
+        assert!(
+            until(|| state.webrtc_admission.in_flight() == 0).await,
+            "closing the table cancels the round"
+        );
+        router.shutdown().await.expect("shutdown");
+        endpoint.close().await;
+    }
+
+    /// The retry pass offers a session to an idle lane peer only when a frame is held for it
+    /// (decision D11): without one, the pair is left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_retry_pass_offers_a_session_to_an_idle_lane_peer_only_for_a_held_frame() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        let (endpoint, handle) = endpoint().await;
+        // Only the lower id offers, so the peer's key must be above ours.
+        // The id of our endpoint is random: with 255 seeds, one run in 256 found no key above it.
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() > endpoint.id())
+            .expect("a key above ours");
+        let server = Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .expect("bind a loopback server");
+        let router = Router::builder(server.clone())
+            .accept(crate::transport::UNICAST_ALPN, Hold)
+            .spawn();
+        crate::lookup::add_peer_addr(&endpoint, server.addr()).expect("register the server");
+
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle);
+        state.local_udp_transport = true;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state.peer_endpoints.insert(
+            crate::testing::nick("bob"),
+            EndpointAddr::new(server.id())
+                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+        );
+
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "an idle lane peer is not offered a session"
+        );
+
+        state.want_lane_session(server.id(), crate::util::clock::Instant::now());
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "a frame is held for the peer: it is offered a session"
+        );
+
+        // The dial to a closed signal port would hold its slot for a long deadline.
+        state.webrtc_admission.close();
+        assert!(
+            until(|| state.webrtc_admission.in_flight() == 0).await,
+            "closing the table cancels the round"
+        );
+        router.shutdown().await.expect("shutdown");
+        endpoint.close().await;
+    }
+
+    /// **A frame held on the higher-id node opens the session.** The lower id has no reason to
+    /// offer, so the higher id offers when a frame is held for the peer, and the session attaches
+    /// on both nodes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frame_held_on_the_higher_id_node_opens_the_session() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+
+        let (endpoint, handle) = endpoint().await;
+        // Only the lower id offers unless a frame is held, and here the peer is the lower id.
+        // The id of our endpoint is random, so many seeds are tried.
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() < endpoint.id())
+            .expect("a key below ours");
+        let (server, server_hub) = endpoint_with(key).await;
+        let server_admission = SignalAdmission::new(8);
+        let router = serve(&server, &server_hub, &server_admission);
+
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle.clone());
+        state.local_udp_transport = false;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state
+            .peer_endpoints
+            .insert(crate::testing::nick("bob"), server.addr());
+
+        retry_sessions(&mut state, &ctx);
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            0,
+            "an idle lane peer is not offered a session"
+        );
+
+        state.want_lane_session(server.id(), crate::util::clock::Instant::now());
+        retry_sessions(&mut state, &ctx);
+        assert!(
+            until(|| handle.has_session(&server.id()) && server_hub.has_session(&endpoint.id()))
+                .await,
+            "a frame is held for the lower id: the higher id offers, and the session attaches"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        server.close().await;
+        endpoint.close().await;
+    }
+
+    /// **Glare.** Both nodes of a pair offer at once. The lower id wins: the higher id gives its
+    /// offer up when the offer of the lower id arrives, and answers it. The pair ends with exactly
+    /// one session, and the offer that was given up is cancelled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_crossed_pair_ends_with_one_session_and_the_lower_id_wins() {
+        let (first, first_hub) = endpoint().await;
+        let (second, second_hub) = endpoint().await;
+        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+            ((first, first_hub), (second, second_hub))
+        } else {
+            ((second, second_hub), (first, first_hub))
+        };
+        let lower_admission = SignalAdmission::new(8);
+        let higher_admission = SignalAdmission::new(8);
+        let lower_router = serve(&lower, &lower_hub, &lower_admission);
+        let higher_router = serve(&higher, &higher_hub, &higher_admission);
+
+        // The higher id has an offer to the lower id in flight that never ends on its own.
+        let offer = higher_admission
+            .try_admit_offer(lower.id(), &higher_hub)
+            .expect("the higher id offers");
+        let epoch = offer.epoch();
+        let offering = tokio::spawn(async move {
+            let _offer = offer;
+            std::future::pending::<()>().await;
+        });
+        higher_admission.track(lower.id(), epoch, offering.abort_handle());
+
+        dial_signal_with(
+            &lower,
+            higher.addr(),
+            &lower_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the offer of the lower id is answered");
+
+        assert!(
+            until(|| higher_hub.has_session(&lower.id())).await,
+            "the higher id answered"
+        );
+        assert!(lower_hub.has_session(&higher.id()));
+        assert_eq!(lower_hub.session_count(), 1);
+        assert_eq!(higher_hub.session_count(), 1);
+        assert!(
+            offering
+                .await
+                .expect_err("the offer is cancelled")
+                .is_cancelled(),
+            "the higher id gave its offer up"
+        );
+
+        higher_router.shutdown().await.expect("shutdown");
+        lower_router.shutdown().await.expect("shutdown");
+        higher.close().await;
+        lower.close().await;
+    }
+
+    /// **The answering side reports the attach.** A frame parked on the higher id of a crossed pair
+    /// is flushed when the session attaches, although the node answered and did not offer: the
+    /// answerer tells the event loop, through the table, which flushes what is held for the peer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_answering_side_reports_the_attach_to_the_event_loop() {
+        let (first, first_hub) = endpoint().await;
+        let (second, second_hub) = endpoint().await;
+        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+            ((first, first_hub), (second, second_hub))
+        } else {
+            ((second, second_hub), (first, first_hub))
+        };
+        let higher_admission = SignalAdmission::new(8);
+        let (sink, mut attached) = tokio::sync::mpsc::unbounded_channel();
+        higher_admission.set_proven_sink(sink);
+        let higher_router = serve(&higher, &higher_hub, &higher_admission);
+
+        dial_signal_with(
+            &lower,
+            higher.addr(),
+            &lower_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect("the offer of the lower id is answered");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), attached.recv())
+            .await
+            .expect("the answerer reports the attach")
+            .expect("the sink stays open");
+        assert_eq!(outcome.peer, lower.id());
+        assert!(outcome.direct && outcome.answered);
+
+        higher_router.shutdown().await.expect("shutdown");
+        higher.close().await;
+        lower.close().await;
+    }
+
+    /// The loop acts on an answered session only when a frame is held for the peer.
+    #[test]
+    fn an_answered_session_is_applied_only_when_a_frame_is_held_for_the_peer() {
+        use crate::transport::probe::DirectOutcome;
+
+        let peer = crate::testing::endpoint_id(7);
+        let now = crate::util::clock::Instant::now();
+        let mut state = crate::testing::fresh_state();
+        let answered = DirectOutcome {
+            peer,
+            direct: true,
+            answered: true,
+        };
+        let offered = DirectOutcome {
+            answered: false,
+            ..answered
+        };
+
+        assert!(
+            !answered.applies(&state, now),
+            "nothing is held for the peer"
+        );
+        assert!(
+            offered.applies(&state, now),
+            "our own verdict always applies"
+        );
+        state.want_lane_session(peer, now);
+        assert!(
+            answered.applies(&state, now),
+            "a frame is held for the peer"
+        );
+    }
+
+    /// The offer of the lower id is refused as before when the round that runs is an answer, not
+    /// an offer of the higher id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_lower_id_still_refuses_a_crossed_offer() {
+        let (first, first_hub) = endpoint().await;
+        let (second, second_hub) = endpoint().await;
+        let ((lower, lower_hub), (higher, higher_hub)) = if first.id() < second.id() {
+            ((first, first_hub), (second, second_hub))
+        } else {
+            ((second, second_hub), (first, first_hub))
+        };
+        let lower_admission = SignalAdmission::new(8);
+        let lower_router = serve(&lower, &lower_hub, &lower_admission);
+
+        // The lower id has its own offer to the higher id in flight.
+        let _offer = lower_admission
+            .try_admit_offer(higher.id(), &lower_hub)
+            .expect("the lower id offers");
+
+        let outcome = dial_signal_with(
+            &higher,
+            lower.addr(),
+            &higher_hub,
+            quick(),
+            IceProfile { host_only: true },
+        )
+        .await;
+
+        assert!(outcome.is_err(), "the lower id keeps its own offer");
+        assert_eq!(lower_hub.session_count(), 0);
+
+        lower_router.shutdown().await.expect("shutdown");
+        higher.close().await;
+        lower.close().await;
+    }
+
     #[test]
     fn an_offer_fallback_holds_the_timer_graft() {
         let mut state = crate::testing::fresh_state();

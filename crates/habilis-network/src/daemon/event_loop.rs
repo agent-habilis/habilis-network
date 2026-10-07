@@ -92,6 +92,8 @@ pub async fn run<A: NodeDriver>(
         state_file,
         #[cfg(feature = "host")]
         multihop,
+        #[cfg(feature = "host")]
+        underlay_webrtc,
         webrtc,
         webrtc_enabled,
         local_udp_transport,
@@ -177,12 +179,16 @@ pub async fn run<A: NodeDriver>(
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
     #[cfg(feature = "host")]
     {
-        state.multihop = multihop; // `--multihop`: the registered transport's handle
+        state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
+        state.underlay_webrtc = underlay_webrtc;
     }
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
     state.webrtc = webrtc_enabled.then_some(webrtc);
     state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
+    state
+        .unicast_pool
+        .set_admission(state.webrtc_admission.clone());
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;
@@ -192,6 +198,9 @@ pub async fn run<A: NodeDriver>(
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();
     state.direct_proven = direct_tx;
+    state
+        .webrtc_admission
+        .set_proven_sink(state.direct_proven.clone());
     // Path watchers report here; the loop re-races or detaches on it.
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.path_changes = path_tx;
@@ -243,6 +252,15 @@ pub async fn run<A: NodeDriver>(
     let (gossip_sender, receiver) = topic.split();
 
     let sender = MeshSender::new(gossip_sender);
+    // The task that sends the digest answers, so that the loop never waits for
+    // the gossip actor to take them.
+    if let Some(resends) = state.resend_receiver.take() {
+        n0_future::task::spawn(crate::transport::outbox::drain(
+            resends,
+            sender.clone(),
+            state.unicast_pool.clone(),
+        ));
+    }
 
     #[cfg(feature = "host")]
     let ipc_rx = spawn_ipc_rx::<A::Ipc>(
@@ -355,7 +373,7 @@ pub async fn run<A: NodeDriver>(
     .await
 }
 
-/// The alive tick: note the gap, then broadcast the keepalive presence.
+/// The alive tick: note the gap, broadcast the keepalive presence, then pay a held-back `PeerInfo` flood.
 async fn alive_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     timers::note_tick_gap(
         "alive",
@@ -364,6 +382,11 @@ async fn alive_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, ctx: &
         Duration::from_secs(ALIVE_INTERVAL_SECS),
     );
     lifecycle::heartbeat::tick_alive(state, ctx.sender, ctx.mesh, ctx.author).await;
+    // A neighbor that came up inside the window of a flood is owed our address.
+    if state.take_deferred_peerinfo(Instant::now()) {
+        gossip::broadcast_peer_info(state, ctx).await;
+        state.last_sent_at = Instant::now();
+    }
 }
 
 /// The anti-entropy tick: note the gap, advertise the chat digest, then both
@@ -412,19 +435,23 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
 }
 
 #[cfg(feature = "host")]
-async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    // Before the early return, and before our own vector goes in: a peer that has
+    // stopped advertising must not keep its edges in the graph, and a node that is
+    // not meshed yet keeps hearing vectors it will route over once it is.
+    if let Some(handle) = state.multihop.as_ref() {
+        handle.expire_stale();
+    }
     if !state.meshed || state.multihop.is_none() {
         return;
     }
-    state.link_state_seq += 1;
-    let seq = state.link_state_seq;
     let links: Vec<_> = state
         .linked_endpoints
         .iter()
         .map(|eid| (*eid, MULTIHOP_LINK_COST))
         .collect();
     let handle = state.multihop.as_ref().expect("checked above");
-    let vector = handle.link_vector(seq, links);
+    let vector = handle.link_vector(links);
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
     // source a route (`route_to(self, …)` would always be empty).
@@ -433,14 +460,12 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         return;
     };
     state.idle.broadcasts += 1;
-    // Retained locally for the same reason the vector is fed into our own
-    // routing table above: gossip never loops a broadcast back. Every tick
-    // mints a fresh `seq`, so an unretained vector is one more message our
-    // peers re-send to us on every anti-entropy round for as long as the log
-    // holds it (see `gossip::recv::retain_own_broadcast`).
+    // Not retained in the log, unlike a chat message: the next tick's vector
+    // replaces this one, and peers never log what they receive (see
+    // `is_loggable`), so a retained copy would be one that nobody else holds and
+    // that every digest asks us for again.
     let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity);
     gossip::broadcast_msg(ctx.sender, &vector_msg).await;
-    gossip::retain_own_broadcast(state, &vector_msg);
 }
 
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own
@@ -617,6 +642,10 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     }
 
     loop {
+        // Whether this process hosts the beacon is read here, once per turn,
+        // from the one place that owns it, so that no path that claims or sheds
+        // the beacon has to remember to say so.
+        state.hosts_rendezvous = rendezvous.is_some();
         tokio::select! {
             () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
                 state.idle.external += 1;
@@ -693,6 +722,12 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // hiccup) is never retried, and the pair stays relay-only for
                 // the life of the link. Observed exactly that, CLI↔browser.
                 crate::transport::webrtc::retry_sessions(&mut state, &ctx);
+                // The same for the sessions of the multihop underlay, which open
+                // only to a neighbor that has no IP path to us.
+                #[cfg(feature = "host")]
+                if let Some(underlay) = state.underlay_webrtc.clone() {
+                    crate::transport::underlay_webrtc::tick(&state, &underlay);
+                }
                 // Same cadence for the direct-path probes a lookup-only relay
                 // holds grafts on: a peer whose punch missed the deadline, or
                 // whose session attached since, gets another look.

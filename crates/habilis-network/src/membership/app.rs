@@ -130,7 +130,132 @@ pub enum Request {
         blocked: bool,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: take UDP away from this node alone, to the nodes bound on
+    /// `remote_ports` (see `Node::bound_ports`). An empty list gives it back.
+    /// Unlike [`Request::BlockUdp`] it leaves every other node's paths alone,
+    /// so a test can cut one group of nodes from another while each group
+    /// keeps its own links.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    BlockIpTo {
+        remote_ports: Vec<u16>,
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only: take one rung of the path ladder away from this node alone
+    /// (or give it back), to every remote. With [`Request::BlockIpTo`] it takes
+    /// the node down the ladder one rung at a time.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    BlockRung {
+        rung: Rung,
+        blocked: bool,
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only: take one rung of the path ladder away from this node alone (or
+    /// give it back), to the member `peer` only. [`Request::BlockRung`] takes it
+    /// from every remote. Only the `WebRTC` rung has a remote in its address, so
+    /// only that rung is cut this way.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    BlockRungTo {
+        rung: Rung,
+        peer: String,
+        blocked: bool,
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only: forget that the member `peer` is proven direct, and offer it a
+    /// `WebRTC` session now, as the path watcher does when a direct path is lost.
+    /// A test uses it to attach a session at a chosen moment instead of at the
+    /// next alive tick.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    OfferSession {
+        peer: String,
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only: the endpoint id of this node. A test that needs the order of two
+    /// ids (the lower id offers a session) reads them here.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    EndpointId {
+        reply: oneshot::Sender<iroh::EndpointId>,
+    },
+    /// Tests only: the rung of the selected path on this node's pooled
+    /// connection to the member `peer`: `ip`, `webrtc`, `multihop` or `relay`.
+    /// It opens the connection first if there is none. This is the connection
+    /// the answer is about: the gossip link is not, because the relay policy
+    /// closes a gossip link that stays on the relay.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    SelectedRung {
+        peer: String,
+        reply: oneshot::Sender<Option<&'static str>>,
+    },
+    /// Tests only: whether the multihop topology of this node has a route to the
+    /// member `peer` now. A route exists from the first link-state on.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    HasRoute {
+        peer: String,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Tests only: how many multihop cells this node has passed on for other
+    /// nodes. `0` when multihop is off.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    ForwardedCells {
+        reply: oneshot::Sender<u64>,
+    },
+    /// Tests only: how many `WebRTC` sessions the multihop underlay of this node
+    /// holds. `0` when multihop is off.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    UnderlaySessions {
+        reply: oneshot::Sender<usize>,
+    },
+    /// Tests only: how many `WebRTC` sessions of this node go to a member that is
+    /// neither a gossip neighbor nor the rendezvous. Such a session carries only what
+    /// was sent over it, so it must go after it idled for 120 s.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    SessionsToNonNeighbors {
+        reply: oneshot::Sender<usize>,
+    },
+    /// Tests only: the closes of direct connections, and how many of them were followed by
+    /// a connection to the same peer within 300 s, as `[quic closes, quic re-dials, session
+    /// closes, session re-dials, pool closes, pool re-dials]`. `quic` counts every live
+    /// connection, the gossip links too; `pool` only the pooled unicast connections that a
+    /// send used, which is what the idle close acts on. Each request samples the peers, so ask
+    /// about once per second.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    RedialCounts {
+        reply: oneshot::Sender<[u64; 6]>,
+    },
+    /// Tests only: the direct peers the ledger of the ceiling counts now, and by how many it is over
+    /// the ceiling, as `(units, over_ceiling)`.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    DirectUnits {
+        reply: oneshot::Sender<(usize, usize)>,
+    },
 }
+
+/// A rung of the path ladder, for [`Request::BlockRung`].
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use habilis_network_iroh_webrtc_transport::Rung;
 
 /// The engine seam. Every inbound `msg` is queued for the consumer instead of
 /// being written anywhere: a browser's `js_sys::Function` is neither `Send`
@@ -223,6 +348,10 @@ impl NodeDriver for MembershipApp {
     type Http = ();
     type Ipc = ();
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test-only requests share this one match, and the lint counts the lines that a cfg removes"
+    )]
     async fn handle_session(
         &mut self,
         req: Request,
@@ -261,6 +390,202 @@ impl NodeDriver for MembershipApp {
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
                 true
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::BlockIpTo {
+                remote_ports,
+                reply,
+            } => {
+                habilis_network_iroh_webrtc_transport::block_ip_to(ctx.endpoint.id(), remote_ports);
+                // iroh re-selects only on path events: nudge every peer so the
+                // new set takes effect now.
+                for addr in state.peer_endpoints.values() {
+                    let endpoint = ctx.endpoint.clone();
+                    let peer = addr.id;
+                    n0_future::task::spawn(async move {
+                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::BlockRung {
+                rung,
+                blocked,
+                reply,
+            } => {
+                habilis_network_iroh_webrtc_transport::block_rung(ctx.endpoint.id(), rung, blocked);
+                // iroh re-selects only on path events: nudge every peer so the
+                // change takes effect now.
+                for addr in state.peer_endpoints.values() {
+                    let endpoint = ctx.endpoint.clone();
+                    let peer = addr.id;
+                    n0_future::task::spawn(async move {
+                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::BlockRungTo {
+                rung,
+                peer,
+                blocked,
+                reply,
+            } => {
+                if let Some(addr) = state.peer_endpoints.get(peer.as_str()) {
+                    let remote = addr.id;
+                    habilis_network_iroh_webrtc_transport::block_rung_to(
+                        ctx.endpoint.id(),
+                        rung,
+                        remote,
+                        blocked,
+                    );
+                    let endpoint = ctx.endpoint.clone();
+                    n0_future::task::spawn(async move {
+                        crate::transport::webrtc::nudge(&endpoint, remote).await;
+                    });
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::OfferSession { peer, reply } => {
+                if let Some(addr) = state.peer_endpoints.get(peer.as_str()).cloned() {
+                    state
+                        .direct
+                        .insert(addr.id, crate::daemon::state::DirectState::RelayOnly);
+                    crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::EndpointId { reply } => {
+                let _ = reply.send(ctx.endpoint.id());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::SelectedRung { peer, reply } => {
+                let id = state.peer_endpoints.get(peer.as_str()).map(|addr| addr.id);
+                let pool = state.unicast_pool.clone();
+                // Off the event loop: a dial can take seconds.
+                n0_future::task::spawn(async move {
+                    let rung = match id {
+                        Some(id) => pool
+                            .warm_or_dial(id)
+                            .await
+                            .ok()
+                            .and_then(|conn| crate::transport::path::selected_rung(&conn)),
+                        None => None,
+                    };
+                    let _ = reply.send(rung);
+                });
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::HasRoute { peer, reply } => {
+                let has_route = state.peer_endpoints.get(peer.as_str()).is_some_and(|addr| {
+                    state
+                        .multihop()
+                        .is_some_and(|handle| handle.route_addr(addr.id).is_some())
+                });
+                let _ = reply.send(has_route);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::UnderlaySessions { reply } => {
+                let sessions = state
+                    .underlay_webrtc
+                    .as_ref()
+                    .map_or(0, |underlay| underlay.handle.session_count());
+                let _ = reply.send(sessions);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::SessionsToNonNeighbors { reply } => {
+                let sessions = state.webrtc.as_ref().map_or(0, |webrtc| {
+                    state
+                        .peer_endpoints
+                        .values()
+                        .filter(|addr| {
+                            webrtc.has_session(&addr.id)
+                                && !state.linked_endpoints.contains(&addr.id)
+                                && addr.id != ctx.rendezvous_id
+                        })
+                        .count()
+                });
+                let _ = reply.send(sessions);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::DirectUnits { reply } => {
+                let _ = reply.send((
+                    state.webrtc_admission.direct_units(),
+                    state.webrtc_admission.over_ceiling(),
+                ));
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::RedialCounts { reply } => {
+                let now = crate::util::clock::Instant::now();
+                let ids: Vec<_> = state.peer_endpoints.values().map(|addr| addr.id).collect();
+                for id in ids {
+                    let quic = state.webrtc_admission.has_live_connection(id);
+                    let session = state
+                        .webrtc
+                        .as_ref()
+                        .is_some_and(|hub| hub.has_session(&id));
+                    let pooled = state.unicast_pool.used_connection(id).is_some();
+                    state.redials.quic.observe(now, id, quic);
+                    state.redials.session.observe(now, id, session);
+                    state.redials.pool.observe(now, id, pooled);
+                }
+                let counts = [
+                    state.redials.quic.closes(),
+                    state.redials.quic.redials(),
+                    state.redials.session.closes(),
+                    state.redials.session.redials(),
+                    state.redials.pool.closes(),
+                    state.redials.pool.redials(),
+                ];
+                let _ = reply.send(counts);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::ForwardedCells { reply } => {
+                let forwarded = state.multihop().map_or(
+                    0,
+                    habilis_network_iroh_multihop_transport::MultihopHandle::forwarded_cells,
+                );
+                let _ = reply.send(forwarded);
+                false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::BlockUdp { blocked, reply } => {

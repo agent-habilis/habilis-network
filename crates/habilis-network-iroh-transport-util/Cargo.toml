@@ -19,5 +19,15 @@ workspace = true
 name = "habilis_network_iroh_transport_util"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Tests only. The tables that take one rung, or one IP port, away from one
+# node, which every path selector of this workspace reads through `blocked`.
+test-hooks = []
+
 [dependencies]
 iroh.workspace = true
+
+[dev-dependencies]
+# `CustomAddr` is not re-exported through `iroh`; a test builds one to read its id.
+iroh-base.workspace = true

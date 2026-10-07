@@ -69,7 +69,9 @@ pub async fn send_app(
         // held off a relay-only peer is parked, not failed: the proven direct
         // path flushes it (see `gossip::recv::flush_pending`).
         match crate::transport::deliver(&frame, bytes.clone(), state, ctx.sender).await {
-            Err(error) if error.is::<crate::transport::HeldForDirect>() => {}
+            Err(error) if error.is::<crate::transport::HeldForDirect>() => {
+                crate::transport::note_held(state, &error);
+            }
             outcome => return outcome,
         }
     }
@@ -265,6 +267,7 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
 /// window the `joined` re-flood gate reads.
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     state.peerinfo_flooded_at = Some(crate::util::clock::Instant::now());
+    state.peerinfo_deferred = false;
     let our_addr = ctx.endpoint.addr();
     let proof = state
         .peer_info_proof

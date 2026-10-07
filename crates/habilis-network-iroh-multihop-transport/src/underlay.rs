@@ -17,13 +17,14 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::Context;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use iroh_base::CustomAddr;
+use n0_future::time::{Duration, Instant, MissedTickBehavior};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
@@ -60,6 +61,103 @@ pub(crate) struct Delivered {
     pub(crate) packet: Vec<u8>,
 }
 
+/// How long a reading of a connection's selected path stands. The path moves
+/// rarely, and asking for it on every cell would cost more than the cell.
+const PATH_RECHECK: Duration = Duration::from_millis(250);
+
+/// Whether the connection sends on a selected path that is not the relay.
+/// Nothing selected is not trusted: the engine's own rule for payload
+/// (`payload_allowed_on`) refuses until a path is selected.
+fn selected_path_is_direct(connection: &Connection) -> bool {
+    connection
+        .paths()
+        .iter()
+        .any(|path| path.is_selected() && !matches!(path.remote_addr(), TransportAddr::Relay(_)))
+}
+
+/// The paths of a connection as text, a star on the selected one.
+fn path_list(paths: impl IntoIterator<Item = (TransportAddr, bool)>) -> String {
+    paths
+        .into_iter()
+        .map(|(addr, selected)| format!("{addr:?}{}", if selected { "*" } else { "" }))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What the relay may do for cells, set by the mesh policy.
+#[derive(Debug, Clone, Copy)]
+struct RelayRule {
+    /// Whether the relay may carry cells (the mesh's `relay_transport`).
+    allow_relay: bool,
+    /// How long a hop may stay refused before it is no longer a link.
+    stuck_after: Duration,
+}
+
+/// Keeps cells off a connection unless it sends on a selected path that is not
+/// the relay, unless the mesh lets the relay carry payload. The relay is for
+/// lookup alone: a connection starts on it until a direct path opens, and the
+/// cells of other peers' traffic must not ride it meanwhile.
+struct RelayGate {
+    allow_relay: bool,
+    reading: Option<(Instant, bool)>,
+    /// The path list at the last refusal, so that the log says it once per change.
+    last_refused_paths: Option<String>,
+}
+
+impl RelayGate {
+    fn new(allow_relay: bool) -> Self {
+        Self {
+            allow_relay,
+            reading: None,
+            last_refused_paths: None,
+        }
+    }
+
+    /// Whether a cell may cross `connection` now.
+    fn admits(&mut self, connection: &Connection) -> bool {
+        if self.allow_relay {
+            return true;
+        }
+        let now = Instant::now();
+        match self.reading {
+            Some((at, admitted)) if now.duration_since(at) < PATH_RECHECK => admitted,
+            _ => {
+                let admitted = selected_path_is_direct(connection);
+                self.reading = Some((now, admitted));
+                if !admitted {
+                    let paths = path_list(
+                        connection
+                            .paths()
+                            .iter()
+                            .map(|path| (path.remote_addr().clone(), path.is_selected())),
+                    );
+                    if self.last_refused_paths.as_deref() != Some(paths.as_str()) {
+                        tracing::debug!(%paths, "multihop underlay: no direct path is selected");
+                        self.last_refused_paths = Some(paths);
+                    }
+                }
+                admitted
+            }
+        }
+    }
+}
+
+/// How one next hop's underlay is doing under the relay rule.
+///
+/// The entry lives as long as the hop's writer: a retiring writer calls
+/// `forget`, which clears a stuck mark too. A hop that is still on the relay is
+/// then advertised again until its next writer has been refused for the
+/// deadline: one retry each time a writer dies, not a loop.
+#[derive(Debug)]
+struct HopHealth {
+    /// The hop's application id: what a link-vector names.
+    app_id: EndpointId,
+    /// Since when the gate has refused this hop without a break.
+    refused_since: Option<Instant>,
+    /// Refused for longer than the deadline: not advertised as a link.
+    stuck: bool,
+}
+
 /// The outbound writer set and its shared byte budget.
 ///
 /// Split out from [`Forwarder`] so a writer task can hold exactly what it needs
@@ -71,6 +169,10 @@ struct WriterPool {
     writers: Mutex<HashMap<EndpointId, mpsc::Sender<Cell>>>,
     /// Bytes queued across every writer.
     queued_bytes: AtomicUsize,
+    /// Cells a writer dropped because its connection was not on a direct path.
+    refused_on_relay: AtomicU64,
+    /// The relay rule's verdict per next hop, keyed like `writers`.
+    health: Mutex<HashMap<EndpointId, HopHealth>>,
 }
 
 impl WriterPool {
@@ -90,6 +192,68 @@ impl WriterPool {
     fn release(&self, cost: usize) {
         self.queued_bytes.fetch_sub(cost, Ordering::Relaxed);
     }
+
+    fn track(&self, underlay: EndpointId, app_id: EndpointId) {
+        self.health.lock().expect("health mutex poisoned").insert(
+            underlay,
+            HopHealth {
+                app_id,
+                refused_since: None,
+                stuck: false,
+            },
+        );
+    }
+
+    fn forget(&self, underlay: EndpointId) {
+        self.health
+            .lock()
+            .expect("health mutex poisoned")
+            .remove(&underlay);
+    }
+
+    /// The gate refused this hop just now. Past the deadline the hop is stuck,
+    /// said once in the log.
+    fn note_refused(&self, underlay: EndpointId, stuck_after: Duration) {
+        let mut health = self.health.lock().expect("health mutex poisoned");
+        let Some(hop) = health.get_mut(&underlay) else {
+            return;
+        };
+        let since = *hop.refused_since.get_or_insert_with(Instant::now);
+        if !hop.stuck && since.elapsed() >= stuck_after {
+            hop.stuck = true;
+            tracing::warn!(
+                hop = %underlay.fmt_short(),
+                app_id = %hop.app_id.fmt_short(),
+                "multihop underlay stays on the relay: this hop is not advertised as a link"
+            );
+        }
+    }
+
+    /// The gate admitted this hop: it is a link again.
+    fn note_admitted(&self, underlay: EndpointId) {
+        let mut health = self.health.lock().expect("health mutex poisoned");
+        let Some(hop) = health.get_mut(&underlay) else {
+            return;
+        };
+        hop.refused_since = None;
+        if std::mem::take(&mut hop.stuck) {
+            tracing::info!(
+                hop = %underlay.fmt_short(),
+                app_id = %hop.app_id.fmt_short(),
+                "multihop underlay is direct again: this hop is a link"
+            );
+        }
+    }
+
+    fn stuck_app_ids(&self) -> Vec<EndpointId> {
+        self.health
+            .lock()
+            .expect("health mutex poisoned")
+            .values()
+            .filter(|hop| hop.stuck)
+            .map(|hop| hop.app_id)
+            .collect()
+    }
 }
 
 /// Routes cells outbound to next hops and delivers terminal cells locally.
@@ -99,12 +263,22 @@ pub(crate) struct Forwarder {
     /// This node's application-layer id, the other half of the identity a cell's
     /// current hop must name.
     self_app_id: EndpointId,
+    /// The runtime that spawns the writers. `enqueue` runs inside `poll_send`, which
+    /// iroh calls from the socket's send path (`Transports::poll_send` in iroh's
+    /// `socket/transports.rs`). It is kept so that a native spawn never depends on
+    /// that caller being inside the runtime; nothing here shows that it is ever
+    /// outside. A browser has no runtime and spawns on its one thread.
+    #[cfg(not(target_arch = "wasm32"))]
     runtime: Handle,
     pool: Arc<WriterPool>,
     /// Terminal deliveries destined for the local application endpoint.
     inbound: mpsc::Sender<Delivered>,
     /// Cells refused by the gates in [`Forwarder::handle_cell`] or by a budget.
     dropped: AtomicU64,
+    /// Cells passed on to a next hop for other nodes. Our own sends are not counted.
+    forwarded: AtomicU64,
+    /// What the relay may do for cells.
+    rule: RelayRule,
 }
 
 impl Forwarder {
@@ -112,15 +286,33 @@ impl Forwarder {
         underlay: Endpoint,
         self_app_id: EndpointId,
         inbound: mpsc::Sender<Delivered>,
+        allow_relay: bool,
+        stuck_after: Duration,
     ) -> Self {
         Self {
             underlay,
             self_app_id,
+            #[cfg(not(target_arch = "wasm32"))]
             runtime: Handle::current(),
             pool: Arc::new(WriterPool::default()),
             inbound,
             dropped: AtomicU64::new(0),
+            forwarded: AtomicU64::new(0),
+            rule: RelayRule {
+                allow_relay,
+                stuck_after,
+            },
         }
+    }
+
+    /// How many cells this node passed on for other nodes.
+    pub(crate) fn forwarded_cells(&self) -> u64 {
+        self.forwarded.load(Ordering::Relaxed)
+    }
+
+    /// The application ids of the hops stuck on the relay past the deadline.
+    pub(crate) fn stuck_hops(&self) -> Vec<EndpointId> {
+        self.pool.stuck_app_ids()
     }
 
     /// Rate-limited visibility for a refused cell. Whoever is sending them sets
@@ -149,7 +341,7 @@ impl Forwarder {
             return;
         }
         // Stale or absent: (re)spawn a writer, then try once more.
-        let Some(sender) = self.spawn_writer(hop.underlay.clone()) else {
+        let Some(sender) = self.spawn_writer(hop.underlay.clone(), hop.app_id) else {
             self.pool.release(cost);
             return;
         };
@@ -214,6 +406,7 @@ impl Forwarder {
         match cell.next_hop() {
             Some(next) => {
                 let next = next.clone();
+                self.forwarded.fetch_add(1, Ordering::Relaxed);
                 self.enqueue(&next, cell.advanced());
             }
             None => self.deliver(cell),
@@ -233,7 +426,7 @@ impl Forwarder {
     /// neighbours out of the map. A refused flood instead clears itself, because
     /// each spawned writer gives up after [`DIAL_ATTEMPTS`] and removes its own
     /// entry on the way out.
-    fn spawn_writer(&self, dst: EndpointAddr) -> Option<mpsc::Sender<Cell>> {
+    fn spawn_writer(&self, dst: EndpointAddr, app_id: EndpointId) -> Option<mpsc::Sender<Cell>> {
         let (tx, rx) = mpsc::channel(WRITER_QUEUE);
         {
             let mut writers = self.pool.writers.lock().expect("writers mutex poisoned");
@@ -244,13 +437,19 @@ impl Forwarder {
             }
             writers.insert(dst.id, tx.clone());
         }
-        self.runtime.spawn(writer_task(
+        self.pool.track(dst.id, app_id);
+        let writer = writer_task(
             self.underlay.clone(),
             dst,
             rx,
             tx.clone(),
             Arc::clone(&self.pool),
-        ));
+            self.rule,
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        self.runtime.spawn(writer);
+        #[cfg(target_arch = "wasm32")]
+        n0_future::task::spawn(writer);
         Some(tx)
     }
 }
@@ -265,12 +464,14 @@ async fn writer_task(
     mut rx: mpsc::Receiver<Cell>,
     handle: mpsc::Sender<Cell>,
     pool: Arc<WriterPool>,
+    rule: RelayRule,
 ) {
-    let outcome = drain_to_hop(&underlay, &dst, &mut rx, &pool).await;
+    let outcome = drain_to_hop(&underlay, &dst, &mut rx, &pool, rule).await;
     if let Err(error) = outcome {
         tracing::debug!(hop = %dst.id.fmt_short(), %error, "multihop underlay writer stopping");
     }
     pool.retire(dst.id, &handle);
+    pool.forget(dst.id);
     // Whatever never made it onto the wire is still charged to the budget.
     rx.close();
     while let Ok(cell) = rx.try_recv() {
@@ -283,16 +484,52 @@ async fn drain_to_hop(
     dst: &EndpointAddr,
     rx: &mut mpsc::Receiver<Cell>,
     pool: &WriterPool,
+    rule: RelayRule,
 ) -> anyhow::Result<()> {
     let conn = dial_with_retry(underlay, dst)
         .await
         .context("underlay dial gave up")?;
     let mut send = conn.open_uni().await.context("open underlay uni-stream")?;
-    while let Some(cell) = rx.recv().await {
-        let cost = cell.packet.len();
-        let written = write_cell(&mut send, &cell).await;
-        pool.release(cost);
-        written.context("underlay write failed")?;
+    let mut gate = RelayGate::new(rule.allow_relay);
+    // Looks at the path once a second even when no cell comes, so a hop that was
+    // withdrawn for staying on the relay (and so carries no cells) is a link
+    // again once a direct path opens.
+    let mut recheck = n0_future::time::interval(Duration::from_secs(1));
+    recheck.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            // A connection that ended under us ends the writer. Without this arm a
+            // dead connection with no cell in flight is read by the tick below as
+            // a connection with no direct path: the hop would be marked stuck and
+            // the writer would never retire.
+            reason = conn.closed() => {
+                anyhow::bail!("underlay connection closed: {reason}");
+            }
+            next = rx.recv() => {
+                let Some(cell) = next else { break };
+                let cost = cell.packet.len();
+                if gate.admits(&conn) {
+                    pool.note_admitted(dst.id);
+                } else {
+                    // Dropped like any other loss: QUIC above retransmits, and a
+                    // direct path takes over once one opens.
+                    pool.release(cost);
+                    pool.refused_on_relay.fetch_add(1, Ordering::Relaxed);
+                    pool.note_refused(dst.id, rule.stuck_after);
+                    continue;
+                }
+                let written = write_cell(&mut send, &cell).await;
+                pool.release(cost);
+                written.context("underlay write failed")?;
+            }
+            _ = recheck.tick(), if !rule.allow_relay => {
+                if gate.admits(&conn) {
+                    pool.note_admitted(dst.id);
+                } else {
+                    pool.note_refused(dst.id, rule.stuck_after);
+                }
+            }
+        }
     }
     let _ = send.finish();
     Ok(())
@@ -305,7 +542,7 @@ async fn dial_with_retry(underlay: &Endpoint, dst: &EndpointAddr) -> Option<Conn
             Err(error) => {
                 tracing::trace!(hop = %dst.id.fmt_short(), attempt, %error, "underlay dial attempt failed");
                 // Linear backoff; adjacent hops that are momentarily busy settle fast.
-                tokio::time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
+                n0_future::time::sleep(Duration::from_millis(100 * (attempt as u64 + 1))).await;
             }
         }
     }
@@ -324,9 +561,23 @@ impl ForwardAcceptor {
         Self { forwarder }
     }
 
-    async fn read_loop(self, upstream: EndpointId, mut recv: iroh::endpoint::RecvStream) {
+    async fn read_loop(
+        self,
+        upstream: EndpointId,
+        connection: Connection,
+        gate: Arc<Mutex<RelayGate>>,
+        mut recv: iroh::endpoint::RecvStream,
+    ) {
         while let Ok(cell) = read_cell(&mut recv).await {
-            self.forwarder.handle_cell(cell, upstream);
+            let admitted = gate
+                .lock()
+                .expect("relay gate poisoned")
+                .admits(&connection);
+            if admitted {
+                self.forwarder.handle_cell(cell, upstream);
+            } else {
+                self.forwarder.note_drop("cell arrived over the relay");
+            }
         }
     }
 }
@@ -337,9 +588,15 @@ impl ProtocolHandler for ForwardAcceptor {
         // sender cannot choose, and constant across every stream on this
         // connection. Every cell that arrives here is checked against it.
         let upstream = connection.remote_id();
+        let gate = Arc::new(Mutex::new(RelayGate::new(self.forwarder.rule.allow_relay)));
         // Loop ends when the upstream hop closes the connection: normal teardown.
         while let Ok(recv) = connection.accept_uni().await {
-            tokio::spawn(self.clone().read_loop(upstream, recv));
+            n0_future::task::spawn(self.clone().read_loop(
+                upstream,
+                connection.clone(),
+                Arc::clone(&gate),
+                recv,
+            ));
         }
         Ok(())
     }
@@ -347,8 +604,9 @@ impl ProtocolHandler for ForwardAcceptor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Delivered, Duration, Forwarder, MAX_WRITERS, Ordering};
+    use super::{Arc, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, TransportAddr};
     use crate::addr::{Route, RouteHop};
+    use crate::test_support::relay_server;
     use crate::wire::Cell;
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
@@ -377,7 +635,11 @@ mod tests {
             .expect("bind underlay endpoint");
         let app_id: EndpointId = SecretKey::from_bytes(&[99; 32]).public();
         let (inbound, received) = mpsc::channel(4);
-        (Forwarder::new(underlay, app_id, inbound), app_id, received)
+        (
+            Forwarder::new(underlay, app_id, inbound, false, Duration::from_secs(20)),
+            app_id,
+            received,
+        )
     }
 
     /// This forwarder's own hop, as a legitimate route would name it.
@@ -414,6 +676,11 @@ mod tests {
         let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
         forwarder.handle_cell(subject, source.underlay.id);
         assert!(received.try_recv().is_ok());
+        assert_eq!(
+            forwarder.forwarded_cells(),
+            0,
+            "a delivery is not a forward"
+        );
     }
 
     #[tokio::test]
@@ -464,6 +731,230 @@ mod tests {
         forwarder.handle_cell(subject, source.underlay.id);
         assert!(received.try_recv().is_err(), "not ours to deliver");
         assert_eq!(live_writers(&forwarder), 1);
+        assert_eq!(forwarder.forwarded_cells(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_cell_is_not_counted_as_forwarded() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let source = stranger(1);
+        let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
+        forwarder.handle_cell(subject, source.underlay.id);
+        assert_eq!(forwarder.forwarded_cells(), 0);
+    }
+
+    /// A node whose underlay can only use the relay, as a forwarder with its
+    /// accept side running.
+    struct RelayNode {
+        forwarder: Arc<Forwarder>,
+        hop: RouteHop,
+        received: mpsc::Receiver<Delivered>,
+        _router: iroh::protocol::Router,
+    }
+
+    async fn relay_node(seed: u8, url: &iroh::RelayUrl, allow_relay: bool) -> RelayNode {
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(SecretKey::from_bytes(&[seed; 32]))
+            .relay_mode(RelayMode::custom([url.clone()]))
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("bind a relay-only underlay");
+        tokio::time::timeout(Duration::from_secs(10), underlay.online())
+            .await
+            .expect("the underlay reaches the relay");
+        let app_id: EndpointId = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]).public();
+        let (inbound, received) = mpsc::channel(8);
+        let forwarder = Arc::new(Forwarder::new(
+            underlay.clone(),
+            app_id,
+            inbound,
+            allow_relay,
+            Duration::from_millis(300),
+        ));
+        let router = iroh::protocol::Router::builder(underlay.clone())
+            .accept(
+                super::FORWARD_ALPN,
+                super::ForwardAcceptor::new(Arc::clone(&forwarder)),
+            )
+            .spawn();
+        let hop = RouteHop {
+            app_id,
+            underlay: underlay.addr(),
+        };
+        RelayNode {
+            forwarder,
+            hop,
+            received,
+            _router: router,
+        }
+    }
+
+    /// Send one cell from `from` to `to` over their underlays and say whether it
+    /// arrived within a few seconds.
+    async fn cell_arrives(from: &RelayNode, to: &mut RelayNode) -> bool {
+        let subject = Cell {
+            path: Route::new(vec![to.hop.clone()]).expect("legal route"),
+            pos: 0,
+            source: from.hop.clone(),
+            packet: vec![7, 7, 7],
+        };
+        // Retried: the first attempts can find the connection still being set up.
+        for _ in 0..6 {
+            from.forwarder.enqueue(&to.hop, subject.clone());
+            if tokio::time::timeout(Duration::from_millis(500), to.received.recv())
+                .await
+                .is_ok_and(|delivered| delivered.is_some())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn the_relay_carries_cells_when_the_mesh_lets_it() {
+        let (url, _server) = relay_server().await;
+        let from = relay_node(1, &url, true).await;
+        let mut to = relay_node(2, &url, true).await;
+        assert!(
+            cell_arrives(&from, &mut to).await,
+            "relay payload is allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cell_is_not_sent_on_a_relay_selected_path() {
+        let (url, _server) = relay_server().await;
+        let from = relay_node(3, &url, false).await;
+        let mut to = relay_node(4, &url, true).await;
+        assert!(
+            !cell_arrives(&from, &mut to).await,
+            "the sender refuses the relay"
+        );
+        assert!(
+            from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed) > 0,
+            "and counts what it refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cell_that_arrives_on_a_relay_selected_path_is_dropped() {
+        let (url, _server) = relay_server().await;
+        let from = relay_node(5, &url, true).await;
+        let mut to = relay_node(6, &url, false).await;
+        assert!(
+            !cell_arrives(&from, &mut to).await,
+            "the receiver refuses the relay"
+        );
+        assert!(to.forwarder.dropped.load(Ordering::Relaxed) > 0);
+    }
+
+    #[tokio::test]
+    async fn a_hop_that_stays_on_the_relay_becomes_stuck() {
+        let (url, _server) = relay_server().await;
+        let from = relay_node(7, &url, false).await;
+        let mut to = relay_node(8, &url, true).await;
+        assert!(!cell_arrives(&from, &mut to).await);
+        // Refused for longer than the deadline: no longer a link.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while from.forwarder.stuck_hops().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(from.forwarder.stuck_hops(), vec![to.hop.app_id]);
+    }
+
+    #[test]
+    fn the_path_list_marks_the_selected_path_with_a_star() {
+        let ip = TransportAddr::Ip("127.0.0.1:9".parse().expect("an address"));
+        let relay = TransportAddr::Relay("http://127.0.0.1:1".parse().expect("a relay url"));
+        let list = super::path_list([(relay, true), (ip, false)]);
+        assert!(list.starts_with("Relay("), "{list}");
+        assert!(list.ends_with(")* Ip(127.0.0.1:9)"), "{list}");
+    }
+
+    #[test]
+    fn a_stuck_hop_is_a_link_again_once_it_is_admitted() {
+        let (hop, app) = (stranger(11).underlay.id, stranger(12).app_id);
+        let pool = super::WriterPool::default();
+        pool.track(hop, app);
+        pool.note_refused(hop, Duration::ZERO);
+        assert_eq!(pool.stuck_app_ids(), vec![app], "refused past the deadline");
+        pool.note_admitted(hop);
+        assert!(pool.stuck_app_ids().is_empty(), "admitted: a link again");
+        pool.note_refused(hop, Duration::from_mins(1));
+        assert!(
+            pool.stuck_app_ids().is_empty(),
+            "a fresh refusal is not yet stuck"
+        );
+    }
+
+    /// A node whose underlay is on loopback, with its accept side running: the
+    /// path between two of these is direct.
+    async fn loopback_node(seed: u8, stuck_after: Duration) -> RelayNode {
+        let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(SecretKey::from_bytes(&[seed; 32]))
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr(loopback)
+            .expect("valid bind addr")
+            .bind()
+            .await
+            .expect("bind a loopback underlay");
+        let app_id: EndpointId = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]).public();
+        let (inbound, received) = mpsc::channel(8);
+        let forwarder = Arc::new(Forwarder::new(
+            underlay.clone(),
+            app_id,
+            inbound,
+            false,
+            stuck_after,
+        ));
+        let router = iroh::protocol::Router::builder(underlay.clone())
+            .accept(
+                super::FORWARD_ALPN,
+                super::ForwardAcceptor::new(Arc::clone(&forwarder)),
+            )
+            .spawn();
+        let hop = RouteHop {
+            app_id,
+            underlay: underlay.addr(),
+        };
+        RelayNode {
+            forwarder,
+            hop,
+            received,
+            _router: router,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_writer_retires_when_its_connection_closes_under_it() {
+        // A direct hop, then the far underlay goes away while no cell is in
+        // flight. The writer must see the close: a dead connection read as one
+        // with no direct path would mark the hop stuck and never end the writer.
+        let stuck_after = Duration::from_millis(300);
+        let from = loopback_node(21, stuck_after).await;
+        let mut to = loopback_node(22, stuck_after).await;
+        assert!(cell_arrives(&from, &mut to).await, "the hop is direct");
+        assert_eq!(live_writers(&from.forwarder), 1, "a writer carries it");
+
+        to.forwarder.underlay.close().await;
+
+        // Longer than the deadline and the one-second tick, twice over.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while live_writers(&from.forwarder) > 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            live_writers(&from.forwarder),
+            0,
+            "the writer retires with its connection"
+        );
+        assert!(
+            from.forwarder.stuck_hops().is_empty(),
+            "a hop whose connection closed is not stuck on the relay"
+        );
     }
 
     #[tokio::test]

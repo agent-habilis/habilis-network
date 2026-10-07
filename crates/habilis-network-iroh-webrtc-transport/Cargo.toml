@@ -68,8 +68,9 @@ bench = []
 
 # Tests only. A process-wide switch that stops the path selector from choosing
 # an IP path, so a test can take UDP away from a live connection: iroh has no
-# way to close one path.
-test-hooks = []
+# way to close one path. The tables live in `habilis-network-iroh-transport-util`,
+# which every selector of the workspace reads.
+test-hooks = ["habilis-network-iroh-transport-util/test-hooks"]
 
 [dependencies]
 # ── protocol half: always compiled, wasm-clean ───────────────────────────

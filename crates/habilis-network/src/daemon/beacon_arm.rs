@@ -181,7 +181,7 @@ pub(super) async fn maybe_reclaim(
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
             return;
         }
-        if regrafts_rendezvous(state.rendezvous_linked)
+        if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
             && crate::transport::webrtc::rendezvous_graftable(state)
         {
             tracing::info!(
@@ -202,8 +202,11 @@ pub(super) async fn maybe_reclaim(
 /// (`beacon::claim`), so our side re-grafts it like any other. That is the
 /// condition [`super::heal::run_heal`] gates its own re-graft on; this one
 /// just gets there sooner.
-fn regrafts_rendezvous(rendezvous_linked: bool) -> bool {
-    !rendezvous_linked
+///
+/// And only a node that wants the rendezvous: one with enough links to others
+/// let it go on purpose, and a graft here would undo that.
+fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool {
+    !rendezvous_linked && rendezvous_wanted
 }
 /// Whether this session's beacon is subject to the periodic rival
 /// re-check shed: any **public** co-host that had to *probe* for the
@@ -533,11 +536,15 @@ mod tests {
     #[test]
     fn a_reclaim_tick_regrafts_only_when_the_link_is_lost() {
         assert!(
-            regrafts_rendezvous(false),
+            regrafts_rendezvous(false, true),
             "link lost: the case that stalled, and the only way a beacon we hold gets linked"
         );
         assert!(
-            !regrafts_rendezvous(true),
+            !regrafts_rendezvous(false, false),
+            "a link let go of on purpose must stay let go of"
+        );
+        assert!(
+            !regrafts_rendezvous(true, true),
             "a live link must not be re-dialled — both heal legs dial GOSSIP_ALPN, and the \
              beacon adopting the new one flaps the healthy link once per tick"
         );

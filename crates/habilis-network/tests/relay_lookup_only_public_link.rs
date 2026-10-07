@@ -182,13 +182,13 @@ async fn spawn_with(
         SetupParams {
             author,
             max_peers: 16,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports,
             runtime_base: None,
             state_file: None,
             sink,
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,
@@ -212,7 +212,6 @@ async fn two_ip_peers_link_through_the_gated_rendezvous() {
         udp: true,
         relay: true,
         webrtc: false,
-        multihop: false,
     };
     let alice = spawn_with(&topic, "alice", &relay, Arc::clone(&alice_saw), ip_only).await;
     assert!(
@@ -258,7 +257,6 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
             udp: true,
             relay: true,
             webrtc: true,
-            multihop: false,
         },
     )
     .await;
@@ -275,7 +273,6 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
             udp: false,
             relay: true,
             webrtc: true,
-            multihop: false,
         },
     )
     .await;

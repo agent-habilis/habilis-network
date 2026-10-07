@@ -76,6 +76,11 @@ blob = ["host"]
 # builds unconditionally: IpcMessage is in the event loop signatures, so
 # gating it needs ipc.rs split by dependency first.)
 default = ["host", "mdns", "dht"]
+# The multihop transport: reach a peer with no direct path through other peers.
+# On under `host`, and the only way the crate is in the graph. The crate builds
+# for wasm32 (a gate row checks it), so a browser build can turn this on without
+# `host`. Nothing in the browser endpoint uses it yet.
+multihop = ["dep:habilis-network-iroh-multihop-transport"]
 # Both need real UDP sockets, so each implies `host`.
 mdns = ["host", "dep:iroh-mdns-address-lookup"]
 dht = ["host", "dep:iroh-mainline-address-lookup"]
@@ -94,7 +99,7 @@ host = [
     "habilis-network-protocol/host",
     "habilis-network-doc/host",
     "habilis-network-logging/host",
-    "dep:habilis-network-iroh-multihop-transport",
+    "multihop",
     "dep:interprocess",
     "dep:libc",
     # Base tokio is the portable floor (`sync`, `macros`, `time`, `rt`); these
@@ -127,7 +132,7 @@ web-time.workspace = true
 n0-future.workspace = true
 # The multi-hop iroh custom transport: reach a peer with no direct path by
 # relaying its QUIC packets through intermediate peers. Registered on the
-# peer endpoint (the `--multihop` flag).
+# peer endpoint (the mesh policy's `multihop`).
 habilis-network-iroh-multihop-transport = { workspace = true, optional = true }
 # Leaf crate: runtime dirs, clock, tuning dials, bounded containers, build stamp.
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["async-io"] }
@@ -190,7 +195,7 @@ iroh = { workspace = true, features = [
 iroh-gossip.workspace = true
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4", default-features = false, optional = true }
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "51e891cff102a7e0696a5a931c2e9770b0225b59", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:
 # iroh's defaults (portmapper, fast-apple-datapath, metrics) are host-only and
@@ -223,3 +228,7 @@ wasm-bindgen-test = "0.3"
 [[example]]
 name = "mesh_peer"
 required-features = ["host"]
+
+[[example]]
+name = "mesh_peer_load"
+required-features = ["host", "iroh-test-utils"]
