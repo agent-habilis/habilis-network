@@ -334,7 +334,7 @@ pub(crate) async fn on_path_change(
                 if state.direct.get(&peer) == Some(&DirectState::Direct) {
                     state.direct.insert(peer, DirectState::RelayOnly);
                 }
-                tracing::info!(target: super::LOG_TARGET, %peer, ?kind, "direct path lost; racing again");
+                tracing::info!(target: super::LOG_TARGET, %peer, ?kind, detector = "watcher", "direct path lost; racing again");
             }
             if let Some(addrs) = ladder.nudge {
                 // One dial carries what iroh may not know yet: the session's

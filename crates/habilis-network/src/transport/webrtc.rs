@@ -779,7 +779,12 @@ pub(crate) fn negotiate_session(
         state
             .direct
             .insert(peer, crate::daemon::state::DirectState::RelayOnly);
-        tracing::info!(target: LOG_TARGET, %peer, "direct proof is stale; the pair reads as relay");
+        tracing::info!(
+            target: LOG_TARGET,
+            %peer,
+            detector = "admission",
+            "direct path lost; racing again"
+        );
         // With a session already attached no offer follows (`HaveSession`): the connection
         // that reads as relay is nudged onto it. The parked frames then flush with the next
         // probe of the pair, not at once.
