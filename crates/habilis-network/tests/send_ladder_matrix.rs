@@ -52,6 +52,9 @@ const SETTLE_BELOW_A_BLOCK: Duration = Duration::from_secs(30);
 /// How long a message that must not arrive is given to arrive.
 const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
 
+/// How long a cell that expects no rung waits for the cut to take the pair off IP.
+const LEAVE_IP_DEADLINE: Duration = Duration::from_secs(30);
+
 /// Which rungs a cell takes away from alice, from the top of the ladder down.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Blocked {
@@ -505,6 +508,20 @@ async fn run(cell: Cell, name: &str) {
     for kind in cell.kinds {
         match kind {
             Kind::Unicast => {
+                if expected.is_none() {
+                    // The cut takes effect when iroh re-runs the path selection, a short
+                    // while after it. Until then the pooled connection is still on IP and
+                    // carries the message: that is a payload on a rung that may carry it,
+                    // and tells nothing about the rungs that may not.
+                    let waiting = Instant::now();
+                    while alice.rung_to("bob").await == Some("ip") {
+                        assert!(
+                            waiting.elapsed() < LEAVE_IP_DEADLINE,
+                            "{name}: the pair never left IP after the cut"
+                        );
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
                 let text = format!("matrix {name}");
                 let sent = alice.send("bob", &text).await;
                 let started = Instant::now();
