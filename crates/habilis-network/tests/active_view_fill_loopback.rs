@@ -29,6 +29,13 @@ const STABLE_FOR: Duration = Duration::from_mins(5);
 /// The active view cap of the stability test, smaller than the mesh.
 const VIEW_CAP: usize = 4;
 
+/// How long the churn test counts link changes, after the formation.
+const CHURN_WINDOW: Duration = Duration::from_mins(5);
+
+/// What a settled view may change: the alive tick fills one gap and the relink
+/// cooldown paces the rest.
+const MAX_LINK_UPS_PER_MEMBER_PER_MINUTE: f64 = 2.0;
+
 struct Member {
     membership: Membership,
     _events: UnboundedReceiver<String>,
@@ -170,6 +177,54 @@ async fn a_mesh_of_ten_links_every_member_to_every_other() {
         result.is_ok(),
         "every member must hold 9 links; (roster, linked) per member: {:?}",
         result.unwrap_err()
+    );
+
+    for member in members {
+        let _ = member.membership.node.leave().await;
+    }
+    keep.abort();
+}
+
+/// Twelve members with G = 4. A graft is a join, and a full view cannot refuse a
+/// join, so every graft evicts a neighbor and the views must not be pushed around by
+/// grafts nobody needs. After the views settle, the links may change at most twice per
+/// member per minute. The links are sampled every five seconds, so a flap shorter than
+/// that is not counted: the figure is a floor of the real churn.
+/// Takes eight minutes, so it only runs when asked for: `-- --ignored`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "eight minutes: the views are sampled"]
+async fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
+    init_logging();
+    let (members, keep) = mesh(12, VIEW_CAP).await;
+
+    let started = Instant::now();
+    let mut link_ups = 0_u32;
+    let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
+    while started.elapsed() < FILL_DEADLINE + CHURN_WINDOW {
+        let mut now = Vec::with_capacity(members.len());
+        for (index, member) in members.iter().enumerate() {
+            let links = member.linked_set().await;
+            if let Some(before) = previous.get(index) {
+                link_ups += u32::try_from(links.difference(before).count()).unwrap_or(u32::MAX);
+            }
+            now.push(links);
+        }
+        // Only the window after the formation counts.
+        if started.elapsed() >= FILL_DEADLINE {
+            previous = now;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    let minutes = CHURN_WINDOW.as_secs_f64() / 60.0;
+    let per_member_per_minute =
+        f64::from(link_ups) / f64::from(u32::try_from(members.len()).unwrap_or(1)) / minutes;
+    eprintln!(
+        "link ups in {minutes} min: {link_ups}, {per_member_per_minute:.1} per member per min"
+    );
+    assert!(
+        per_member_per_minute <= MAX_LINK_UPS_PER_MEMBER_PER_MINUTE,
+        "{per_member_per_minute:.1} link ups per member per minute after the formation, \
+         at most {MAX_LINK_UPS_PER_MEMBER_PER_MINUTE} allowed"
     );
 
     for member in members {
