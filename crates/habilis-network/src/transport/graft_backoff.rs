@@ -79,12 +79,14 @@ impl GraftBackoff {
 
     /// Read the answers: every peer that was asked at least [`GRAFT_REFUSED_AFTER_SECS`] ago and
     /// is not linked refused. `spread` is in `-1.0..=1.0` and scales the jitter of the wait.
+    /// Returns the peers that were read as refusing now, with their wait.
     pub(crate) fn settle(
         &mut self,
         now: Instant,
         is_linked: impl Fn(&EndpointId) -> bool,
         spread: f64,
-    ) {
+    ) -> Vec<(EndpointId, Duration)> {
+        let mut refused = Vec::new();
         let refused_after = Duration::from_secs(GRAFT_REFUSED_AFTER_SECS);
         let longest = Duration::from_secs(GRAFT_BACKOFF_MAX_SECS);
         for (peer, entry) in &mut self.by_peer {
@@ -98,8 +100,10 @@ impl GraftBackoff {
                 entry.until = Some(now + wait);
                 entry.step = (entry.step * 2).min(longest);
                 entry.asked_at = None;
+                refused.push((*peer, wait));
             }
         }
+        refused
     }
 
     /// Whether `peer` is left alone at `now`.

@@ -943,8 +943,12 @@ impl EventLoopState {
     pub(crate) fn settle_graft_backoff(&mut self, now: Instant) {
         let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
         let linked = &self.linked_endpoints;
-        self.graft_backoff
-            .settle(now, |peer| linked.contains(peer), spread);
+        for (peer, wait) in self
+            .graft_backoff
+            .settle(now, |peer| linked.contains(peer), spread)
+        {
+            tracing::info!(target: "habilis_network::transport", %peer, wait_secs = wait.as_secs(), "no link after a Neighbor request: read as a refusal, the peer waits");
+        }
     }
 
     /// Remember that a `NeighborUp` was held back by the flood window.

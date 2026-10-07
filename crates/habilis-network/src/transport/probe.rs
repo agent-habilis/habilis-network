@@ -538,6 +538,7 @@ pub(crate) fn graft_request(
         // A `Join` is not refused, so it ignores the backoff of the peer.
         GraftRequest::Join
     } else if paced && state.graft_backoff.is_blocked(&peer, now) {
+        tracing::debug!(target: super::LOG_TARGET, %peer, "graft skipped: the peer refused lately");
         GraftRequest::Skip
     } else {
         state.graft_backoff.asked(peer, now);
