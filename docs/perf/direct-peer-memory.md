@@ -314,4 +314,30 @@ The driver starts the creator with the transport list `udp,multihop` unless `MES
 - Memory rose on many nodes. The RSS median is 370 MB and the maximum is 6711 MB. One node went from 57 MB to 3248 MB in 15 s, peaked at 6684 MB, and fell to 73 MB after about 80 s. Fourteen other nodes peaked between 313 and 1721 MB.
 - Two repeats with a guard that stops the run at 2 GB reproduced it (a node reached 2022 MB and 2152 MB). N = 6 does not show it.
 - A heap profile of a growing node at 386 MB holds 482234 allocations, 309 MB, of 640 B each, all from `Box<[T]>::clone`. The CPU sample of the same node is in `iroh::socket::remote_map::remote_state::State::open_path_on_conn` of the iroh fork.
-- The cause is not proved. The code of the fork queues an address in `pending_open_paths` with no check for a copy when a connection has no free path id, and a timer of 333 ms opens it on every connection of the remote again. Each connection that still has no free path id queues the address again, so the queue can grow by a factor of the number of connections at every pass.
+- The cause is proved, see the next section.
+
+### The memory growth: cause, fix and result
+
+The iroh fork queued a path open for a later attempt when a connection had no free path id. The timer (333 ms) takes the whole queue and opens every address on every connection of the remote again, and each connection that still had no free path id queued the address once more, with no check for a copy. With C such connections the queue grew by a factor of C at every attempt. The log of its length on one node reads 140, 268, 524, 1036, ... 262156 entries in 5 s, and it reached 3.5 million.
+
+The fix queues an address once (iroh PR #2, `51e891c`). The same run (N = 24, G = 8, IP blocked at 60 s) with only that change: the largest queue is 13 and the largest node uses 96 MB, where it was stopped at 2091 MB before. It also happened with IP open (N = 24, G = 8, `udp,webrtc,multihop`, traffic off): 5.2 GB and 7.9 GB on one node before the fix.
+
+On the pinned build `370e91a` (N = 24, G = 8, traffic off, 240 s, guards at 2 GB per node and 8 GB in total, no alert): the largest node uses 77 MB (median 50.5 MB), 1231 MB in total, and 24 of 24 rosters are full.
+
+### Link churn at full views: cause, fix and result
+
+At N = 24 and G = 8 the links changed about 70 times per member per minute at a low load (7112 link-ups in a run of 240 s). Two causes:
+
+- A `PeerInfo` flood was allowed once per window for each neighbor, so every new link made a new flood, and every peer that heard it grafted. The window now follows the flood (`5e8bece`, `44c6ab6`).
+- A graft was a `Join`. A peer with a full view always accepts a `Join` and drops a random neighbor, so a graft at a full view moved two links. A graft now asks with low priority (`NeighborPeers` in iroh-gossip, `fb5a9b2`): a full peer refuses it and keeps its neighbors. The rendezvous still gets a `Join`.
+
+Result, same setup, three builds of one fork chain: 70 link-ups per member per minute (`370e91a`), 73 with only the fix for a stuck pending answer in the fork, and 0.8 after the first links with `fb5a9b2` (275 link-ups, 192 of them the first links). The largest node uses 68 MB, and 24 of 24 rosters are full. The mean number of links per member at the end is 7.75 of 8, and the last member to start held 6 for the whole run: every other peer was full, so its requests were refused.
+
+The test `a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation` has the numbers for N = 12 and G = 4: 2.3 (`f6c3673`, fails), 1.6 (`328b187`) and 0.0 (`fb5a9b2`) link-ups per member per minute.
+
+### Known limits
+
+- **The lane pair is never detached.** A pair that needs the `WebRTC` lane (a browser, or a node without UDP) is never held back and never detached, so such pairs hold their sessions for ever. D counts them. A mesh of browsers can fill D with sessions that carry nothing. This is not solved.
+- **D and the idle detach were not exercised at scale.** The sessions form at N = 6 (5 or 6 per node), but no run hit the cap D, and no run showed a detach of 120 s. The detach has unit tests and one test with a real connection.
+- **The last member to start can stay under-filled.** With no eviction, a member that arrives when every other member is full gets no link from its requests. The mean stays at 97 percent of G in the run above.
+- **The `PeerInfo` graft leaves one slot free** in a mesh larger than G + 1 (`peer_info_graft_below`). Its reason, a graft that evicts, is gone since the graft is a low priority request. It is kept because every measurement above was made with it.

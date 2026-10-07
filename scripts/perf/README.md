@@ -48,7 +48,7 @@ full text.
 | `MESH_TRANSPORTS` | the whole list, for example `udp,webrtc,multihop,relay`; only the creator reads it |
 | `MESH_TRAFFIC` | `off`: no directed messages. On, each node sends one per second to each roster peer |
 | `MESH_MAX_PEERS` | G, the gossip active view; `0` takes the engine default |
-| `MESH_MAX_SESSIONS` | D, the cap on WebRTC sessions; `0` takes the engine default |
+| `MESH_MAX_SESSIONS` | D, the cap on WebRTC sessions; `0` takes the engine default. D has an effect only when `webrtc` is in the list: set `MESH_TRANSPORTS=udp,webrtc,multihop` for a run of D. The default list has no `webrtc` |
 | `MESH_BLOCK_UDP_AFTER_SECS` | after this many seconds the node takes IP away from every connection of its process, once |
 | `MESH_UNDERLAY_LEG` | `off`: the multihop underlay holds no WebRTC leg (the control cell) |
 | `STAGGER` | seconds between two node starts (`run.sh`, default 0.3) |

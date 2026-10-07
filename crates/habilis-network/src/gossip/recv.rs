@@ -1285,11 +1285,15 @@ async fn greet_new_peer(message: &Message, state: &mut EventLoopState, ctx: &Han
 /// ahead. `members` counts every member of the mesh, this node included.
 ///
 /// A mesh that fits in the active view (at most G + 1 members) has room at every
-/// peer, so a graft evicts nobody and may take the view up to G. In a bigger mesh
-/// a graft meets a peer that may be full, and a full peer accepts it by evicting
-/// a random neighbor: the total of links stays the same and two links move. A
-/// `PeerInfo` is the unpaced trigger, and a link-up floods it again, so it leaves
-/// the last slot to the paced fill tick (`probe::fill_active_view`).
+/// peer and may take the view up to G. In a bigger mesh the rule leaves the last
+/// slot to the paced fill tick (`probe::fill_active_view`).
+///
+/// The rule was made for a graft that was a `Join`: a full peer accepts a `Join` by
+/// evicting a random neighbor, so a graft moved two links. A graft is a low priority
+/// request now, and a full peer refuses it, so that reason is gone. The rule stays
+/// because the measurements of the churn (0.8 link-ups per member per minute at
+/// N = 24 and G = 8) were made with it. Whether to drop it is open: it would let
+/// a `PeerInfo` fill the last slot too, and it needs a new run to show the effect.
 fn peer_info_graft_below(max_peers: usize, members: usize) -> usize {
     if members <= max_peers.saturating_add(1) {
         max_peers

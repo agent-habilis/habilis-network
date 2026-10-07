@@ -857,6 +857,10 @@ impl EventLoopState {
     }
 
     /// Remember that a `NeighborUp` was held back by the flood window.
+    ///
+    /// The flood is paid at the first alive tick after the window ends. In a burst of
+    /// new neighbors a neighbor can wait for our `PeerInfo` up to one window (10 s)
+    /// plus one alive tick (30 s), that is 40 s.
     pub(crate) fn defer_peerinfo(&mut self) {
         self.peerinfo_deferred = true;
     }
