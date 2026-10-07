@@ -302,13 +302,16 @@ How far to trust each number:
 - **The N = 24, G = 32 run is the clean run.** The load stayed low. Every node held 23 links, which is a full mesh, so no view was full. Its churn, 0.6 per member per minute, is not a reading for a full view.
 - **The N = 24, G = 8 run has full views at a load of 20.** The churn is about 93 per member per minute. The load is not low, so this does not prove the churn at a full view. For comparison, the earlier N = 8, G = 4 run has 3.1 per member per minute. The churn at a full view seems to grow with N. A run below load 5 must confirm it.
 
-### IP blocked: no session, and a memory spike
+### IP blocked
 
-One run (N = 24, G = 8, D = 8, 300 s) took IP away from every node at 60 s, with traffic on. The result is bad:
+The driver starts the creator with the transport list `udp,multihop` unless `MESH_TRANSPORT` or `MESH_TRANSPORTS` says otherwise. This list holds no `webrtc`. Two runs with IP blocked at 60 s show two different cases.
 
-- No node formed a WebRTC session in the whole second phase (`sessions` is 0 for all nodes). So this run does not exercise D, the refusal at the cap, or the idle detach.
+**With `webrtc` in the list** (`MESH_TRANSPORTS=udp,webrtc,multihop`, N = 6, G = 3, D = 8, 180 s): the sessions form. Each node holds 5 or 6 sessions, the mean links are 2.2 to 3.0, and the largest RSS is 70 MB.
+
+**Without `webrtc` in the list** (N = 24, G = 8, D = 8, 300 s): no session can form, and the run is bad.
+
 - No node had a full roster at the end (0 / 24). One node was isolated.
 - Memory rose on many nodes. The RSS median is 370 MB and the maximum is 6711 MB. One node went from 57 MB to 3248 MB in 15 s, peaked at 6684 MB, and fell to 73 MB after about 80 s. Fourteen other nodes peaked between 313 and 1721 MB.
-- The log of that node has one repeated line, about 700 times: `meshed: flushed buffered messages delivered=0 requeued=3..198 edge="peer info arrival"`. The buffer of outbound messages has a cap, so the log does not show what holds the memory.
-
-The cause of both findings is not known. The two-member NAT test did form a session with IP blocked, so the no-session result is specific to this setup or to the size of the mesh.
+- Two repeats with a guard that stops the run at 2 GB reproduced it (a node reached 2022 MB and 2152 MB). N = 6 does not show it.
+- A heap profile of a growing node at 386 MB holds 482234 allocations, 309 MB, of 640 B each, all from `Box<[T]>::clone`. The CPU sample of the same node is in `iroh::socket::remote_map::remote_state::State::open_path_on_conn` of the iroh fork.
+- The cause is not proved. The code of the fork queues an address in `pending_open_paths` with no check for a copy when a connection has no free path id, and a timer of 333 ms opens it on every connection of the remote again. Each connection that still has no free path id queues the address again, so the queue can grow by a factor of the number of connections at every pass.
