@@ -415,6 +415,17 @@ impl MultihopHandle {
     }
 }
 
+/// The path selector of an underlay endpoint, whose id is `underlay_id`: the same
+/// ladder as [`MultihopHandle::path_selector`]. The underlay has an endpoint of
+/// its own, with a key of its own, so a test that takes its IP paths away
+/// (`habilis-network-iroh-transport-util`'s tables) needs a selector that reads
+/// them. The handle does not exist yet when the underlay is built, hence a free
+/// function. For `Builder::path_selector`.
+#[must_use]
+pub fn underlay_path_selector(underlay_id: EndpointId) -> Arc<dyn PathSelector> {
+    Arc::new(MultihopLadder::new(underlay_id))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

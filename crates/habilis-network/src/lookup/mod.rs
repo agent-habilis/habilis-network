@@ -346,6 +346,8 @@ pub async fn build_endpoint(
         Endpoint::builder(presets::Minimal).relay_mode(relay::relay_mode(&lookups.relay_lookup))
     };
 
+    #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+    let underlay_id = secret_key.as_ref().map(SecretKey::public);
     if let Some(secret_key) = secret_key {
         builder = builder.secret_key(secret_key);
     }
@@ -360,6 +362,14 @@ pub async fn build_endpoint(
 
     let opts = transports.opts;
     builder = install_transports(builder, &transports);
+    // Tests only: the underlay is an endpoint of its own, and a test that takes the
+    // IP paths away from a pair (`habilis_network_iroh_webrtc_transport::block_ip_to`)
+    // needs a selector on it that reads the same tables.
+    #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+    if let Some(id) = underlay_id.filter(|_| underlay) {
+        builder = builder
+            .path_selector(habilis_network_iroh_multihop_transport::underlay_path_selector(id));
+    }
     // Data-plane exclusivity: with IP cleared, a WebRTC-only peer cannot
     // silently fall back onto a hole-punched path, so a run that *claims* to be
     // WebRTC-only can be shown to be one. The relay is left alone on purpose —
