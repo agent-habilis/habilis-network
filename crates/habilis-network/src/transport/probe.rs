@@ -531,27 +531,38 @@ pub(crate) async fn retry_direct(
     }
 }
 
-/// The member that the fill tick grafts next: the lowest id among the native
-/// members (a browser comes after every native one) that is not linked, not the
-/// rendezvous and not on its relink cooldown. `None` once the active view holds
-/// `max_peers` (G) links, or when nobody is free.
+/// The member that the fill tick grafts next, among the free ones: a member that
+/// is not linked, not the rendezvous and not on its relink cooldown. The natives
+/// come before every browser, each group ordered by id, and `pick` indexes the
+/// first group and wraps. A fixed pick would send every member below G to the
+/// same few peers, and a full peer evicts a random neighbor on each join, so the
+/// caller passes a random one. `None` once the active view holds `max_peers` (G)
+/// links, or when nobody is free.
 fn next_fill(
     state: &EventLoopState,
     max_peers: usize,
     rendezvous_id: EndpointId,
     now: Instant,
+    pick: usize,
 ) -> Option<iroh::EndpointAddr> {
     if state.linked_endpoints.len() >= max_peers {
         return None;
     }
-    state
+    let mut free: Vec<&iroh::EndpointAddr> = state
         .peer_endpoints
         .values()
         .filter(|addr| addr.id != rendezvous_id)
         .filter(|addr| !state.linked_endpoints.contains(&addr.id))
         .filter(|addr| !state.relink_on_cooldown(addr.id, now))
-        .min_by_key(|addr| (needs_webrtc_lane(addr), addr.id))
-        .cloned()
+        .collect();
+    free.sort_unstable_by_key(|addr| (needs_webrtc_lane(addr), addr.id));
+    let first_group = free.first().map_or(0, |first| {
+        free.iter()
+            .take_while(|addr| needs_webrtc_lane(addr) == needs_webrtc_lane(first))
+            .count()
+    });
+    free.get(pick.checked_rem(first_group)?)
+        .map(|addr| (*addr).clone())
 }
 
 /// Graft one member toward G: the gossip active view is a target, not only a
@@ -560,7 +571,8 @@ fn next_fill(
 /// takes the next member.
 async fn fill_active_view(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let now = Instant::now();
-    let Some(addr) = next_fill(state, ctx.max_peers, ctx.rendezvous_id, now) else {
+    let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+    let Some(addr) = next_fill(state, ctx.max_peers, ctx.rendezvous_id, now, pick) else {
         return;
     };
     state.note_relink(addr.id, now);
@@ -934,7 +946,7 @@ mod tests {
         let mut free = [ids[3], ids[4]];
         free.sort_unstable();
 
-        let next = super::next_fill(&state, 8, rendezvous, now).map(|addr| addr.id);
+        let next = super::next_fill(&state, 8, rendezvous, now, 0).map(|addr| addr.id);
         assert_eq!(
             next,
             Some(free[0]),
@@ -942,7 +954,7 @@ mod tests {
              the cooling or the rendezvous"
         );
         assert_eq!(
-            super::next_fill(&state, 1, rendezvous, now).map(|addr| addr.id),
+            super::next_fill(&state, 1, rendezvous, now, 0).map(|addr| addr.id),
             None,
             "a full view grafts nobody"
         );
@@ -1012,13 +1024,39 @@ mod tests {
 
         super::retry_direct(&mut state, &ctx, false).await;
         assert_eq!(tried(&state), 1, "one member per tick");
-        assert!(
-            state.relink_on_cooldown(ordered[0], crate::util::clock::Instant::now()),
-            "the first in the fixed order"
-        );
         super::retry_direct(&mut state, &ctx, false).await;
         assert_eq!(tried(&state), 2, "the next tick takes the next member");
         endpoint.close().await;
+    }
+
+    // Every member below G picks from the same free natives. Always taking the
+    // lowest id sends all of them to the same few peers, and a full peer evicts a
+    // random neighbor on each join. The pick spreads them: it indexes the free
+    // natives in their fixed order, and wraps.
+    #[test]
+    fn the_fill_tick_spreads_its_picks_over_the_free_natives() {
+        use iroh::TransportAddr;
+        let mut state = fresh_state();
+        let rendezvous = endpoint_id(1);
+        let ids: Vec<_> = (2u8..=5).map(endpoint_id).collect();
+        for (index, id) in ids.iter().enumerate() {
+            state.peer_endpoints.insert(
+                nick(&format!("peer{index}")),
+                EndpointAddr::from_parts(
+                    *id,
+                    [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
+                ),
+            );
+        }
+        let mut ordered = ids.clone();
+        ordered.sort_unstable();
+        let now = crate::util::clock::Instant::now();
+        let pick = |pick| super::next_fill(&state, 8, rendezvous, now, pick).map(|addr| addr.id);
+
+        assert_eq!(pick(0), Some(ordered[0]));
+        assert_eq!(pick(1), Some(ordered[1]));
+        assert_eq!(pick(3), Some(ordered[3]));
+        assert_eq!(pick(4), Some(ordered[0]), "the pick wraps");
     }
 
     #[test]
