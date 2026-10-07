@@ -187,8 +187,8 @@ impl UnicastPool {
 
     /// [`send_one`], marked busy in the ledger for as long as it runs.
     async fn send_marked(&self, eid: EndpointId, conn: &Connection, bytes: &[u8]) -> Result<()> {
-        let _busy = self.inner.admission.get().map(|table| table.busy(eid));
-        send_one(conn, bytes).await
+        let busy = self.inner.admission.get().map(|table| table.busy(eid));
+        send_one(conn, bytes, busy).await
     }
 
     /// A detached pool with no endpoint — every operation is a no-op. The
@@ -668,15 +668,32 @@ async fn dial(endpoint: &Endpoint, addr: EndpointAddr) -> Result<Connection> {
 /// One message per unidirectional stream: open, write the whole frame, finish.
 /// No length framing is needed — the accept side reads the stream to EOF and
 /// gets exactly one serialized `Message`. The finished stream keeps flushing
-/// after it is dropped because the connection stays pooled, so there is no need
-/// to await `stopped()` (which would block the event loop on the inline
-/// unicast-only path).
-async fn send_one(conn: &Connection, bytes: &[u8]) -> Result<()> {
+/// after it is dropped because the connection stays pooled, so the sender does not
+/// await `stopped()` (which would block the event loop on the inline
+/// unicast-only path). Only the busy mark waits for it, in a task of its own.
+async fn send_one(
+    conn: &Connection,
+    bytes: &[u8],
+    busy: Option<super::admission::BusyGuard>,
+) -> Result<()> {
     let mut stream = conn.open_uni().await?;
     stream.write_all(bytes).await?;
     stream.finish()?;
+    // `finish()` returns while the frame is still in flight. The busy mark moves to a task that waits
+    // until the peer has read the stream (at most `BUSY_AFTER_FINISH`), so that the ledger does not
+    // evict the connection under a slow reader. The sender does not wait: it would block the event
+    // loop on the inline path.
+    if let Some(busy) = busy {
+        n0_future::task::spawn(async move {
+            let _ = n0_future::time::timeout(BUSY_AFTER_FINISH, stream.stopped()).await;
+            drop(busy);
+        });
+    }
     Ok(())
 }
+
+/// How long a connection stays busy after a send finished, if the peer has not read the frame.
+const BUSY_AFTER_FINISH: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
 mod tests {
@@ -1124,5 +1141,68 @@ mod tests {
             super::UnicastPool::disconnected().inner.idle,
             Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS)
         );
+    }
+
+    /// **The busy mark lasts until the peer has read the frame.** `finish()` returns while the frame
+    /// is still in flight, so a mark that ended there left a connection with a slow reader open to
+    /// eviction, with its frame in the air. The mark now ends when the peer has read the stream to the
+    /// end, or after 2 s.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_send_keeps_its_connection_busy_until_the_peer_has_read_the_frame() {
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        use super::super::admission::SignalAdmission;
+
+        #[derive(Debug, Clone)]
+        struct SlowReader;
+        impl ProtocolHandler for SlowReader {
+            async fn accept(&self, conn: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+                let mut stream = conn.accept_uni().await.map_err(AcceptError::from_err)?;
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                let _ = stream.read_to_end(1 << 20).await;
+                conn.closed().await;
+                Ok(())
+            }
+        }
+
+        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, SlowReader)
+            .spawn();
+        let admission = SignalAdmission::new(8);
+        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .hooks(admission.connection_hook())
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::new(node.clone(), true);
+        pool.set_admission(admission.clone());
+
+        pool.dial_and_send(server.id(), bytes::Bytes::from(vec![7u8; 3000]))
+            .await
+            .expect("the send");
+        assert!(
+            admission.is_busy(server.id()),
+            "the frame is in flight: the peer has not read it"
+        );
+
+        let mut idle = false;
+        for _ in 0..60 {
+            if !admission.is_busy(server.id()) {
+                idle = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(idle, "the mark ends once the peer has read the frame");
+
+        router.shutdown().await.expect("shutdown");
+        node.close().await;
     }
 }

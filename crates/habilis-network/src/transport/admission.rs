@@ -751,6 +751,15 @@ impl SignalAdmission {
         self.lock().ceiling.last_use(peer)
     }
 
+    /// Whether a send or a stream is in flight on `peer`, for a test.
+    #[cfg(test)]
+    pub(crate) fn is_busy(&self, peer: EndpointId) -> bool {
+        self.lock()
+            .ceiling
+            .unused_for(peer, Instant::now())
+            .is_none()
+    }
+
     /// Note an eviction by `peer`, for a test that does not run the eviction.
     #[cfg(test)]
     pub(crate) fn note_evicted(&self, peer: EndpointId) {
