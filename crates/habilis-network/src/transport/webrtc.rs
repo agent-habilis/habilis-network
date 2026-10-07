@@ -683,6 +683,62 @@ pub(crate) fn wants_session(
     pair_needs_lane || !(udp_selected || proven)
 }
 
+/// Detach the session of `peer` when UDP is selected again for a pair that does not need the
+/// lane. Only the lower id has a path watcher, and only on a pooled connection that a send
+/// opened (decision D4), so a pair that only gossips has no one to report UDP's return. The
+/// reading of the admission table is the sign. Returns whether a session was detached.
+fn detach_session_under_udp(
+    state: &mut crate::daemon::state::EventLoopState,
+    peer: EndpointId,
+    needs_lane: bool,
+) -> bool {
+    let Some(handle) = state.webrtc.clone() else {
+        return false;
+    };
+    if needs_lane
+        || state.pair_path_kind(peer) != Some(super::probe::PathKind::Ip)
+        || !handle.detach(&peer)
+    {
+        return false;
+    }
+    tracing::info!(
+        target: LOG_TARGET,
+        %peer,
+        detector = "admission",
+        "udp selected again; webrtc session detached"
+    );
+    super::probe::mark_proven(state, peer);
+    true
+}
+
+/// [`detach_session_under_udp`] for every session holder, on the fast ticker: the alive tick
+/// (30 s) would leave a session under a selected UDP path for that long.
+pub(crate) async fn detach_sessions_under_udp(
+    state: &mut crate::daemon::state::EventLoopState,
+    ctx: &crate::daemon::ctx::HandlerCtx<'_>,
+) {
+    let Some(handle) = state.webrtc.clone() else {
+        return;
+    };
+    if handle.session_count() == 0 {
+        return;
+    }
+    let holders: Vec<(EndpointId, bool)> = state
+        .peer_endpoints
+        .values()
+        .filter(|addr| addr.id != ctx.rendezvous_id && handle.has_session(&addr.id))
+        .map(|addr| (addr.id, pair_needs_lane(addr, state.local_udp_transport)))
+        .collect();
+    for (peer, needs_lane) in holders {
+        if detach_session_under_udp(state, peer, needs_lane)
+            && state.meshed
+            && !state.pending_outbound.is_empty()
+        {
+            crate::gossip::flush_pending(state, ctx, "direct path back").await;
+        }
+    }
+}
+
 /// Whether the proof of a direct path is stale: the pair was `proven` direct, and its selected
 /// path now reads as the relay or as multihop, both below a session. Only a path watcher takes
 /// a proof back, and only the lower id has one, so the reading of the admission table is the
@@ -749,6 +805,9 @@ pub(crate) fn negotiate_session(
     let proven = state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct);
     if !wants_session(needs_lane, kind, proven) {
         if kind == Some(super::probe::PathKind::Ip) {
+            if detach_session_under_udp(state, peer, needs_lane) {
+                return;
+            }
             tracing::debug!(
                 target: LOG_TARGET,
                 %peer,
@@ -3437,6 +3496,93 @@ mod tests {
             state.direct.get(&bob),
             Some(&DirectState::Direct),
             "a session carries the pair: the reading of one connection does not take the proof back"
+        );
+
+        router.shutdown().await.expect("shutdown");
+        server.close().await;
+        endpoint.close().await;
+    }
+
+    /// **UDP returns on a pair that only gossips.** Such a pair has no path watcher, so the session
+    /// that the race attached would stay until the backstop. The reading of the admission table
+    /// detaches it, on the fast ticker: a relay reading keeps it, an IP reading drops it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_is_detached_once_udp_is_selected_again() {
+        use crate::daemon::state::DirectState;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::transport::probe::PathKind;
+
+        let (endpoint, handle) = endpoint().await;
+        let key = (1u16..=u16::MAX)
+            .map(|seed| {
+                let mut bytes = [0u8; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                SecretKey::from_bytes(&bytes)
+            })
+            .find(|key| key.public() < endpoint.id())
+            .expect("a key below ours");
+        let (server, server_hub) = endpoint_with(key).await;
+        let server_admission = SignalAdmission::new(8);
+        let router = serve(&server, &server_hub, &server_admission);
+
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle.clone());
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        state
+            .peer_endpoints
+            .insert(crate::testing::nick("bob"), server.addr());
+        let bob = server.id();
+
+        state.want_lane_session(bob, crate::util::clock::Instant::now());
+        state.direct.insert(bob, DirectState::RelayOnly);
+        state.path_kinds.insert(bob, PathKind::Relay);
+        retry_sessions(&mut state, &ctx);
+        assert!(
+            until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
+            "the session attaches"
+        );
+
+        state.path_kinds.insert(bob, PathKind::Relay);
+        detach_sessions_under_udp(&mut state, &ctx).await;
+        assert!(
+            handle.has_session(&bob),
+            "the pair still reads as the relay"
+        );
+
+        state.path_kinds.insert(bob, PathKind::Ip);
+        detach_sessions_under_udp(&mut state, &ctx).await;
+        assert!(!handle.has_session(&bob), "UDP is selected again");
+        assert_eq!(
+            state.direct.get(&bob),
+            Some(&DirectState::Direct),
+            "the pair is proven direct again"
         );
 
         router.shutdown().await.expect("shutdown");
