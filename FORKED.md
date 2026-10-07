@@ -397,13 +397,15 @@ Current revs: `iroh`/`iroh-base`/`iroh-dns` →
 `agent-habilis/iroh` `2b4bdd45cb6d7e7ab213fea418cffa8c735b93de` (mapped_addrs
 eviction + relay teardown, **plus** the netwatch/portmapper repoint, **plus**
 PR #1: a custom-transport path that is learned while another custom path is
-selected is opened too, and only a pair selected on IP skips it, so a `WebRTC`
+selected is opened too, and a pair selected on IP skips it until it leaves IP, so a `WebRTC`
 session that comes up after multihop was selected can be selected over it,
 **plus** PR #2: a path open that failed for lack of a free path id is queued
 once, not once per connection at every retry; the queue doubled at each 333 ms
 retry and took gigabytes in a mesh of 24, **plus** a custom address learned while IP is
 selected is queued again when the selected path leaves IP, so a `WebRTC` session that
-attached while the pair was on IP can be opened after the IP path is lost);
+attached while the pair was on IP can be opened after the IP path is lost. Cost: once a
+pair has left IP, its custom path stays open on every connection of the pair, also after IP
+returns; each custom address keeps one more path id and its keep-alive while the connections live);
 `iroh-gossip` → `5744f360a00c5cd033cfa992e0ed17c6672c43e8` (branch `feat/neighbor-peers`, PR #5 in the fork, not merged: `NeighborPeers`, a low priority request for a link, and a fix for a stuck pending Neighbor request, on top of `b379de6`, branch `chore/iroh-51e891c`, PR #4 in the fork, not merged: the `iroh` pin above on top of `eca06e4`, branch `leave-peers`, PR #2 in the fork, not merged, with its own `iroh` and `iroh-base` at the rev above: `leave_peers`, a tombstone for a peer that left on purpose, and the TimeBoundCache expiry-heap fix on top of fork main `5d57f94`; the workspace uses `GossipSender::leave_peers` to let go of the rendezvous; two fixes in the gossip actor: it never waits for a full connection queue (`e12580e`), and it splits the overflow rule by message kind, so data is dropped and counted while any other message disconnects the peer (`eca06e4`)); `iroh-mdns-address-lookup` and `iroh-mainline-address-lookup` →
 `agent-habilis/iroh-address-lookups` `6fe268a06f1ea5938e5952ef7eca2658180bd3eb` (branch `chore/iroh-51e891c`, PR #4 in the fork, not
 merged: its `iroh`, `iroh-base` and `iroh-dns` at the rev above, on top of `69c8102`, PR #3); `net-tools` →
