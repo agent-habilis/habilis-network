@@ -80,22 +80,38 @@ pub fn rung_of(path: &PathSelectionData<'_>, custom: impl Fn(u64) -> Rung) -> Ru
     }
 }
 
-/// The best path of the highest rung that has a usable one: the lowest RTT
-/// inside the rung (see [`best_of`]). `usable` lets a caller drop a path, as a
-/// test does to take one rung away from one node.
+/// The rung a node stands on: the highest rung that is `allowed` and has an
+/// `available` path, or `None`. Pure. The ladder lives here and nowhere else:
+/// both selectors choose through it, and a test that asks where a node should
+/// stand asks it too.
+#[must_use]
+pub fn expected_rung(
+    allowed: impl Fn(Rung) -> bool,
+    available: impl Fn(Rung) -> bool,
+) -> Option<Rung> {
+    Rung::LADDER
+        .into_iter()
+        .find(|&rung| allowed(rung) && available(rung))
+}
+
+/// The best path of the rung that [`expected_rung`] picks among the rungs that
+/// have a usable path: the lowest RTT inside the rung (see [`best_of`]).
+/// `usable` lets a caller drop a path, as a test does to take one rung away
+/// from one node. It adds no ladder of its own.
 #[must_use]
 pub fn climb<'a>(
     paths: &'a [PathSelectionData<'a>],
     custom: impl Fn(u64) -> Rung,
     usable: impl Fn(Rung, &PathSelectionData<'_>) -> bool,
 ) -> Option<&'a PathSelectionData<'a>> {
-    Rung::LADDER.into_iter().find_map(|rung| {
-        best_of(
-            paths
-                .iter()
-                .filter(|path| rung_of(path, &custom) == rung && usable(rung, path)),
-        )
-    })
+    let usable_on = |rung: Rung, path: &PathSelectionData<'_>| {
+        rung_of(path, &custom) == rung && usable(rung, path)
+    };
+    let rung = expected_rung(
+        |_| true,
+        |rung| paths.iter().any(|path| usable_on(rung, path)),
+    )?;
+    best_of(paths.iter().filter(|path| usable_on(rung, path)))
 }
 
 /// Undo a transmit's GSO batching: one QUIC datagram per element.
@@ -137,6 +153,50 @@ mod tests {
         assert!(Rung::Ip < Rung::WebRtc);
         assert!(Rung::WebRtc < Rung::Multihop, "multihop is below WebRTC");
         assert!(Rung::Multihop < Rung::Relay, "the relay is the last rung");
+    }
+
+    /// The pure ladder: over every set of allowed rungs and every set of
+    /// available ones, the node stands on the best rung in both.
+    #[test]
+    fn the_expected_rung_is_the_best_rung_that_is_allowed_and_available() {
+        let set = |mask: u8| move |rung: Rung| mask >> (rung as u8) & 1 == 1;
+        for allowed in 0..32u8 {
+            for available in 0..32u8 {
+                let expected = Rung::LADDER
+                    .into_iter()
+                    .filter(|&rung| set(allowed)(rung) && set(available)(rung))
+                    .min();
+                assert_eq!(
+                    expected_rung(set(allowed), set(available)),
+                    expected,
+                    "allowed {allowed:#07b}, available {available:#07b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_expected_rung_reads_as_the_ladder_does() {
+        let all = |_: Rung| true;
+        let only = |rungs: &'static [Rung]| move |rung: Rung| rungs.contains(&rung);
+        assert_eq!(
+            expected_rung(all, only(&[Rung::Relay, Rung::Ip])),
+            Some(Rung::Ip)
+        );
+        assert_eq!(
+            expected_rung(all, only(&[Rung::Relay, Rung::Multihop])),
+            Some(Rung::Multihop)
+        );
+        // A rung that policy does not allow is passed over, however good.
+        assert_eq!(
+            expected_rung(
+                only(&[Rung::Multihop, Rung::Relay]),
+                only(&[Rung::Ip, Rung::WebRtc, Rung::Relay])
+            ),
+            Some(Rung::Relay)
+        );
+        assert_eq!(expected_rung(all, |_| false), None);
+        assert_eq!(expected_rung(|_| false, all), None);
     }
 
     /// The property the three copies disagreed on.
