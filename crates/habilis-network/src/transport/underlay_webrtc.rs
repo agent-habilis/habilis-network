@@ -166,6 +166,20 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
     let kept = kept_underlays(&neighbors, |member| state.pair_path_kind(member));
     let held = underlay.handle.live_peer_ids();
     let Plan { dial, detach } = plan(underlay.endpoint.id(), &wanted, &kept, &held);
+    tracing::debug!(
+        target: LOG_TARGET,
+        linked = state.linked_endpoints.len(),
+        kinds = ?neighbors
+            .iter()
+            .map(|(member, _)| (member.fmt_short().to_string(), state.pair_path_kind(*member)))
+            .collect::<Vec<_>>(),
+        wanted = wanted.len(),
+        kept = kept.len(),
+        held = held.len(),
+        dial = dial.len(),
+        detach = detach.len(),
+        "underlay tick"
+    );
 
     for peer in &wanted {
         if !held.contains(peer) && !dial.contains(peer) {
