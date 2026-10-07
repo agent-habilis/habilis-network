@@ -277,6 +277,38 @@ With C = 0, B = 128 gives G = 85 for D = 0 and G = 79 for D = 32. B = 64 gives G
 
 ### What this section does not measure
 
-- The number of live plain connections under load, the number of sessions over time, and the refusals per peer. Phase 2 measures them with the committed harness at N = 66, G = 32 and D = 32. The harness is not committed yet.
+- The number of live plain connections under load. The harness census has no count of them.
+- Sessions over time and refusals at the cap of D. No run formed a WebRTC session (see the next section).
 - A full mesh above N = 33. No earlier run formed one.
 - The cost of a session of the multihop underlay. See the section on those sessions above.
+
+## Phase 2 measurement with the committed harness
+
+The runs use `scripts/perf/` and the example `mesh_peer_load` from commit `b6b2d4a`, in a release build. Each node is one process, all on one host with 10 cores, with a local relay. G = 32 and D = 32 unless the table says otherwise. Each run is 240 s with traffic on, which is one directed message per second to every peer. The load column is the median 1-minute load of the host during the run.
+
+| Run | Load | Full rosters | RSS median / max (MB) | Link ups / downs | Ups per member per min |
+| -- | -- | -- | -- | -- | -- |
+| N = 48, three runs | 217, 237, 220 | 48 / 48 each | 113 / 251, 112 / 268, 121 / 276 | 43585 / 42120, 40833 / 39381, 47549 / 46131 | about 216, 202, 236 |
+| N = 48, traffic off | 192 | 48 / 48 | 113 / 234 | 34837 / 33378 | about 173 |
+| N = 66 | 120 | 37 / 66 | 138 / 234 | 3506 / 1899 | not valid |
+| N = 24, G = 32 | 5.3 | 24 / 24 | 46 / 69 | 611 / 58 | about 0.6 after the formation |
+| N = 24, G = 8 | 20 | 24 / 24 | 59.5 / 85 | 9362 / 9194 | about 93 |
+
+How far to trust each number:
+
+- **The N = 48 and N = 66 runs ran on a starved host.** The load was 190 to 250 on 10 cores, with 48 to 66 processes, a Time Machine backup and the Tailscale network extension. Trust only the roster result (every node had a full roster, no node was isolated, no stall). Do not trust the link counts and the link churn: a node that misses keepalives drops links.
+- **The N = 48 RSS is an upper reading.** The median is 113 MB, above the formula (about 78 MB). Starved nodes can hold more buffered data. The N = 24 run at low load reads 46 MB, below the formula (64 MB).
+- **The N = 66 run is not valid.** Only 37 of 66 nodes had a full roster, with 395 stalls and a longest stall of 111 s. It does not measure the mesh.
+- **The N = 24, G = 32 run is the clean run.** The load stayed low. Every node held 23 links, which is a full mesh, so no view was full. Its churn, 0.6 per member per minute, is not a reading for a full view.
+- **The N = 24, G = 8 run has full views at a load of 20.** The churn is about 93 per member per minute. The load is not low, so this does not prove the churn at a full view. For comparison, the earlier N = 8, G = 4 run has 3.1 per member per minute. The churn at a full view seems to grow with N. A run below load 5 must confirm it.
+
+### IP blocked: no session, and a memory spike
+
+One run (N = 24, G = 8, D = 8, 300 s) took IP away from every node at 60 s, with traffic on. The result is bad:
+
+- No node formed a WebRTC session in the whole second phase (`sessions` is 0 for all nodes). So this run does not exercise D, the refusal at the cap, or the idle detach.
+- No node had a full roster at the end (0 / 24). One node was isolated.
+- Memory rose on many nodes. The RSS median is 370 MB and the maximum is 6711 MB. One node went from 57 MB to 3248 MB in 15 s, peaked at 6684 MB, and fell to 73 MB after about 80 s. Fourteen other nodes peaked between 313 and 1721 MB.
+- The log of that node has one repeated line, about 700 times: `meshed: flushed buffered messages delivered=0 requeued=3..198 edge="peer info arrival"`. The buffer of outbound messages has a cap, so the log does not show what holds the memory.
+
+The cause of both findings is not known. The two-member NAT test did form a session with IP blocked, so the no-session result is specific to this setup or to the size of the mesh.
