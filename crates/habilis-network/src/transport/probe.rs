@@ -60,13 +60,12 @@ pub(crate) enum PathAction {
 const NO_PATH_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A watcher's report: `kind` is now the selected path to `peer`, on the
-/// pooled connection `conn_id`. `None` for a watcher whose dial failed; it
-/// only clears the watch so the next alive tick tries again.
+/// pooled connection `conn_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PathChange {
     pub(crate) peer: EndpointId,
     pub(crate) kind: PathKind,
-    pub(crate) conn_id: Option<usize>,
+    pub(crate) conn_id: usize,
 }
 
 fn path_list(conn: &Connection) -> Vec<String> {
@@ -105,8 +104,15 @@ pub(crate) fn selected_kind(conn: &Connection) -> PathKind {
 /// on both ends, on a node running `WebRTC`, where this node offers (the lower
 /// id). Only the offerer can race again, and its detach reaches the answerer
 /// as a close. Selection is per remote in iroh, so the pooled connection
-/// answers for the gossip link too; a peer with none gets one dialed, since a
-/// pair linked through gossip may never have sent unicast.
+/// answers for the gossip link too.
+///
+/// Direct connections are on demand (decision D4): the watcher follows the
+/// pooled connection that a send opened, and dials none of its own. A pair that
+/// was never sent to, or whose connection the pool closed for want of a send,
+/// has nothing to watch and stays where it is until the next send. A gossip
+/// link on such a pair is not watched either: a direct path that it loses is
+/// found by the relay policy on the link, and the peer is probed again from the
+/// alive tick.
 pub(crate) fn ensure_watchers(
     state: &mut EventLoopState,
     local: EndpointId,
@@ -124,47 +130,26 @@ pub(crate) fn ensure_watchers(
         .map(|addr| addr.id)
         .collect();
     for peer in peers {
-        let warm = state.unicast_pool.connection(peer);
-        // The pool closed this connection because nothing sent on it. Dialing it
-        // back here would hold it up for ever, so the idle timeout would never
-        // close it. A send dials it again, and the next tick watches it. Until
-        // then nobody watches the pair: a `WebRTC` session to a peer that has UDP
-        // too is not detached when UDP returns, and keeps its direct-peer slot.
-        if warm.is_none() && state.unicast_pool.idled_out(peer) {
+        let Some(conn) = state.unicast_pool.connection(peer) else {
+            // Nothing to watch: the pair was never sent to, or the pool closed
+            // its connection, and the watcher went with it. The last path kind it
+            // reported must go too, or every alive tick connects to the peer
+            // again to nudge it.
             state.path_watchers.remove(&peer);
             state.path_kinds.remove(&peer);
             continue;
+        };
+        if state.path_watchers.get(&peer) == Some(&Some(conn.stable_id())) {
+            continue;
         }
-        let watched = state.path_watchers.get(&peer).copied();
-        match (&warm, watched) {
-            // Dialing, or already watching this connection.
-            (None, Some(None)) => continue,
-            (Some(conn), Some(Some(id))) if conn.stable_id() == id => continue,
-            _ => {}
-        }
-        state
-            .path_watchers
-            .insert(peer, warm.as_ref().map(Connection::stable_id));
+        state.path_watchers.insert(peer, Some(conn.stable_id()));
         tracing::debug!(target: super::LOG_TARGET, %peer, "watching the selected path");
         let tx = state.path_changes.clone();
-        let pool = state.unicast_pool.clone();
         n0_future::task::spawn(async move {
-            let dialed = match warm {
-                Some(conn) => Ok(conn),
-                None => pool.warm_or_dial(peer).await,
-            };
-            let Ok(conn) = dialed else {
-                let _ = tx.send(PathChange {
-                    peer,
-                    kind: PathKind::None,
-                    conn_id: None,
-                });
-                return;
-            };
             // iroh punches UDP again only on the client side of a
             // connection; a server-side one would never see UDP return.
             debug_assert!(conn.side().is_client(), "a watched connection is ours");
-            let conn_id = Some(conn.stable_id());
+            let conn_id = conn.stable_id();
             // Subscribe first, then read: a path selected before the
             // subscription is reported by the first read, not missed.
             let mut events = conn.path_events();
@@ -294,17 +279,8 @@ pub(crate) async fn on_path_change(
         kind,
         conn_id,
     } = change;
-    match (state.path_watchers.get(&peer).copied(), conn_id) {
-        // The dial for this watch failed: let the next tick try again.
-        (Some(None), None) => {
-            state.path_watchers.remove(&peer);
-            return;
-        }
-        // The watch was dialing: this is its connection.
-        (Some(None), Some(id)) => {
-            state.path_watchers.insert(peer, Some(id));
-        }
-        (Some(Some(watched)), Some(id)) if watched == id => {}
+    match state.path_watchers.get(&peer) {
+        Some(Some(watched)) if *watched == conn_id => {}
         // A replaced connection's watcher.
         _ => return,
     }
@@ -587,7 +563,7 @@ mod tests {
     // dropped with it. The last path kind it reported must go too, or every
     // alive tick connects to the peer again to nudge it.
     #[test]
-    fn an_idled_out_webrtc_peer_is_no_longer_nudged() {
+    fn a_webrtc_peer_with_no_pooled_connection_is_no_longer_nudged() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
 
         let mut state = fresh_state();
@@ -604,12 +580,11 @@ mod tests {
         state.path_kinds.insert(peer, PathKind::WebRtc);
         assert_eq!(webrtc_riders(&state), vec![peer], "it rides a session");
 
-        state.unicast_pool.mark_idled_out(peer);
         ensure_watchers(&mut state, local, rendezvous);
 
         assert!(
             webrtc_riders(&state).is_empty(),
-            "an idled-out peer must not be nudged on every tick"
+            "a peer with no pooled connection must not be nudged on every tick"
         );
     }
 
@@ -780,32 +755,99 @@ mod tests {
         assert_eq!(state.direct.get(&bob), Some(&DirectState::Direct));
     }
 
-    // The rendezvous serves no unicast: a watcher's dial to it always failed,
-    // and each alive tick tried again.
+    // Direct connections are on demand (decision D4): the watcher follows a
+    // pooled connection that a send opened, and dials none of its own. A pair
+    // that was never sent to has nothing to watch, and stays where it is.
     #[tokio::test]
-    async fn the_rendezvous_is_not_watched() {
+    async fn a_peer_nothing_was_sent_to_is_not_dialed_to_be_watched() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
         use iroh::TransportAddr;
         let mut state = fresh_state();
-        // The watcher only follows higher ids: sort, so `local` is the lowest.
         let mut ids = [endpoint_id(1), endpoint_id(2), endpoint_id(3)];
         ids.sort_unstable();
         let [local, rendezvous, bob] = ids;
         state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(local)));
         state.local_udp_transport = true;
-        let with_udp = |id| {
+        state.peer_endpoints.insert(
+            nick("bob"),
             EndpointAddr::from_parts(
-                id,
+                bob,
                 [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
-            )
-        };
-        state
-            .peer_endpoints
-            .insert(nick("beacon"), with_udp(rendezvous));
-        state.peer_endpoints.insert(nick("bob"), with_udp(bob));
+            ),
+        );
         ensure_watchers(&mut state, local, rendezvous);
-        assert!(state.path_watchers.contains_key(&bob), "a peer is watched");
-        assert!(!state.path_watchers.contains_key(&rendezvous));
+        assert!(
+            !state.path_watchers.contains_key(&bob),
+            "no pooled connection, nothing to watch, and no dial to make one"
+        );
+    }
+
+    // The rendezvous serves no unicast: it is never watched, even when a
+    // connection to it exists. A peer with a pooled connection is watched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_rendezvous_is_not_watched() {
+        use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+        use iroh::endpoint::Connection;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+        use iroh::{RelayMode, SecretKey, endpoint::presets};
+
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let bind = |key: Option<SecretKey>| async move {
+            let mut builder = iroh::Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .clear_address_lookup();
+            if let Some(key) = key {
+                builder = builder.secret_key(key);
+            }
+            builder.bind().await.expect("bind a loopback endpoint")
+        };
+        let client = bind(None).await;
+        // The watcher only follows higher ids: take both keys above the client's.
+        let mut keys = (1u8..=255)
+            .map(|seed| SecretKey::from_bytes(&[seed; 32]))
+            .filter(|key| key.public() > client.id());
+        let bob = bind(keys.next()).await;
+        let beacon = bind(keys.next()).await;
+        let routers: Vec<Router> = [&bob, &beacon]
+            .into_iter()
+            .map(|server| {
+                Router::builder(server.clone())
+                    .accept(crate::transport::UNICAST_ALPN, Hold)
+                    .spawn()
+            })
+            .collect();
+        let mut state = fresh_state();
+        state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(client.id())));
+        state.local_udp_transport = true;
+        state.unicast_pool = crate::transport::UnicastPool::new(client.clone(), false);
+        for (name, server) in [("bob", &bob), ("beacon", &beacon)] {
+            crate::lookup::add_peer_addr(&client, server.addr()).expect("register");
+            state.peer_endpoints.insert(nick(name), server.addr());
+            state
+                .unicast_pool
+                .warm_or_dial(server.id())
+                .await
+                .expect("a send dials the peer");
+        }
+
+        ensure_watchers(&mut state, client.id(), beacon.id());
+
+        assert!(
+            state.path_watchers.contains_key(&bob.id()),
+            "a peer with a pooled connection is watched"
+        );
+        assert!(!state.path_watchers.contains_key(&beacon.id()));
+        for router in routers {
+            router.shutdown().await.expect("shutdown");
+        }
+        client.close().await;
     }
 
     #[test]
