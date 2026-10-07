@@ -50,6 +50,22 @@ pub(crate) fn plan(local: EndpointId, wanted: &[EndpointId], held: &[EndpointId]
     Plan { dial, detach }
 }
 
+/// The neighbors that need a session on the underlay: those whose application
+/// path is `WebRTC`. `neighbors` pairs each gossip neighbor with its underlay
+/// address, and `kind_of` gives the selected path of the application pair.
+/// A neighbor that left the list, or whose path climbed to IP, is not wanted, so
+/// `plan` detaches its session.
+fn wanted_underlays(
+    neighbors: &[(EndpointId, iroh::EndpointAddr)],
+    kind_of: impl Fn(EndpointId) -> Option<super::probe::PathKind>,
+) -> Vec<iroh::EndpointAddr> {
+    neighbors
+        .iter()
+        .filter(|(member, _)| kind_of(*member) == Some(super::probe::PathKind::WebRtc))
+        .map(|(_, addr)| addr.clone())
+        .collect()
+}
+
 /// The underlay ids that may open a session with us now: the underlay ids of our
 /// gossip neighbors. The event loop refreshes it on each tick.
 #[derive(Debug, Clone, Default)]
@@ -109,11 +125,7 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
         .allowed
         .replace(neighbors.iter().map(|(_, addr)| addr.id).collect());
 
-    let wanted_addrs: Vec<&iroh::EndpointAddr> = neighbors
-        .iter()
-        .filter(|(member, _)| state.pair_path_kind(*member) == Some(super::probe::PathKind::WebRtc))
-        .map(|(_, addr)| addr)
-        .collect();
+    let wanted_addrs = wanted_underlays(&neighbors, |member| state.pair_path_kind(member));
     let wanted: Vec<EndpointId> = wanted_addrs.iter().map(|addr| addr.id).collect();
     let held = underlay.handle.live_peer_ids();
     let Plan { dial, detach } = plan(underlay.endpoint.id(), &wanted, &held);
@@ -139,7 +151,7 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
             underlay.handle.clone(),
             underlay.admission.clone(),
         );
-        let addr = (*addr).clone();
+        let addr = addr.clone();
         let ice = state.webrtc_ice;
         let task = n0_future::task::spawn(async move {
             let _guard = guard;
@@ -170,7 +182,16 @@ pub(crate) struct UnderlayWebRtc {
 mod tests {
     use iroh::{EndpointId, SecretKey};
 
-    use super::{Plan, plan};
+    use iroh::EndpointAddr;
+    use iroh::endpoint::presets;
+    use iroh::protocol::Router;
+    use iroh::{Endpoint, RelayMode};
+
+    use super::{Allowed, Plan, UnderlaySignalGate, plan, wanted_underlays};
+    use crate::transport::probe::PathKind;
+    use crate::transport::{
+        IceProfile, MESH_WEBRTC_SIGNAL_ALPN, SignalAdmission, WebRtcSignalAcceptor,
+    };
 
     fn id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
@@ -220,5 +241,145 @@ mod tests {
                 detach: vec![high]
             }
         );
+    }
+
+    fn neighbor_kinds(
+        walking: EndpointId,
+        on_ip: EndpointId,
+        on_relay: EndpointId,
+    ) -> impl Fn(EndpointId) -> Option<PathKind> {
+        move |member| {
+            if member == walking {
+                Some(PathKind::WebRtc)
+            } else if member == on_ip {
+                Some(PathKind::Ip)
+            } else if member == on_relay {
+                Some(PathKind::Relay)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_neighbor_whose_application_path_is_webrtc_is_wanted() {
+        let (webrtc, ip, relay, unknown) = (id(11), id(12), id(13), id(14));
+        let neighbors: Vec<(EndpointId, EndpointAddr)> = [webrtc, ip, relay, unknown]
+            .into_iter()
+            .map(|member| (member, EndpointAddr::new(id(member.as_bytes()[0] ^ 0x55))))
+            .collect();
+        let wanted = wanted_underlays(&neighbors, neighbor_kinds(webrtc, ip, relay));
+        assert_eq!(wanted, vec![neighbors[0].1.clone()]);
+    }
+
+    #[test]
+    fn a_session_is_detached_when_the_neighbor_climbs_to_ip_or_leaves() {
+        let (low, high) = ordered();
+        let (member, other) = (id(31), id(32));
+        let neighbor = vec![(member, EndpointAddr::new(high))];
+
+        // On WebRTC the neighbor is wanted, and its session stays.
+        let wanted: Vec<EndpointId> =
+            wanted_underlays(&neighbor, neighbor_kinds(member, other, other))
+                .iter()
+                .map(|addr| addr.id)
+                .collect();
+        assert_eq!(plan(low, &wanted, &[high]), Plan::default());
+
+        // Its path climbs to IP: no longer wanted, the session goes.
+        let wanted: Vec<EndpointId> =
+            wanted_underlays(&neighbor, neighbor_kinds(other, member, other))
+                .iter()
+                .map(|addr| addr.id)
+                .collect();
+        assert_eq!(
+            plan(low, &wanted, &[high]),
+            Plan {
+                dial: vec![],
+                detach: vec![high]
+            }
+        );
+
+        // It leaves the gossip view: the same.
+        let wanted: Vec<EndpointId> = wanted_underlays(&[], neighbor_kinds(member, other, other))
+            .iter()
+            .map(|addr| addr.id)
+            .collect();
+        assert_eq!(
+            plan(low, &wanted, &[high]),
+            Plan {
+                dial: vec![],
+                detach: vec![high]
+            }
+        );
+    }
+
+    async fn loopback_endpoint() -> Endpoint {
+        Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr(
+                "127.0.0.1:0"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("loopback"),
+            )
+            .expect("valid bind addr")
+            .bind()
+            .await
+            .expect("bind a loopback endpoint")
+    }
+
+    /// The code that the gate closes a connection with when the dialer is not a
+    /// neighbor.
+    fn closed_with(reason: &iroh::endpoint::ConnectionError) -> Option<u64> {
+        match reason {
+            iroh::endpoint::ConnectionError::ApplicationClosed(close) => {
+                Some(close.error_code.into_inner())
+            }
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_gate_refuses_a_signal_from_an_endpoint_that_is_not_a_neighbor() {
+        let server = loopback_endpoint().await;
+        let allowed = Allowed::default();
+        let acceptor = WebRtcSignalAcceptor::new(
+            crate::lookup::new_webrtc_handle(server.id()),
+            server.clone(),
+            server.id(),
+            SignalAdmission::new(4),
+            IceProfile { host_only: true },
+        );
+        let router = Router::builder(server.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                UnderlaySignalGate::new(acceptor, allowed.clone()),
+            )
+            .spawn();
+        let client = loopback_endpoint().await;
+
+        let refused = client
+            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+            .await
+            .expect("the connection opens");
+        let reason = tokio::time::timeout(std::time::Duration::from_secs(5), refused.closed())
+            .await
+            .expect("the gate closes the connection of a stranger");
+        assert_eq!(closed_with(&reason), Some(9), "{reason:?}");
+
+        // Once the client is a neighbor, the gate hands the connection to the
+        // acceptor, which waits for an offer and does not close it.
+        allowed.replace([client.id()].into_iter().collect());
+        let accepted = client
+            .connect(server.addr(), MESH_WEBRTC_SIGNAL_ALPN)
+            .await
+            .expect("the connection opens");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(700), accepted.closed())
+                .await
+                .is_err(),
+            "a neighbor is not turned away"
+        );
+        router.shutdown().await.expect("the router stops");
     }
 }

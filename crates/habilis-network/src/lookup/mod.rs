@@ -1013,6 +1013,37 @@ mod tests {
         endpoint.close().await;
     }
 
+    // The underlay gets a `WebRTC` leg only when it is asked for, and only when
+    // this instance has `WebRTC` on. Its table takes the cap it is given (G).
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn the_underlay_leg_takes_the_cap_it_is_given_and_needs_webrtc_on() {
+        let build = |opts: TransportOpts, cap: Option<usize>| async move {
+            super::build_peer_multihop_with(&LookupOpts::loopback(), opts, None, false, cap)
+                .await
+                .expect("a multihop peer binds")
+        };
+
+        let (_endpoint, handle, _webrtc, leg) = build(TransportOpts::default(), Some(5)).await;
+        let leg = leg.expect("a leg when a cap is given");
+        assert_eq!(leg.admission.cap(), 5, "the table has the cap of G");
+        assert_eq!(
+            leg.endpoint.id(),
+            handle.underlay_id(),
+            "the leg is on the underlay"
+        );
+        assert_eq!(leg.handle.session_count(), 0);
+
+        let (_, _, _, none) = build(TransportOpts::default(), None).await;
+        assert!(none.is_none(), "no cap, no leg");
+        let off = TransportOpts {
+            webrtc: false,
+            ..TransportOpts::default()
+        };
+        let (_, _, _, none) = build(off, Some(5)).await;
+        assert!(none.is_none(), "WebRTC off, no leg");
+    }
+
     // One identity per peer: the application endpoint (UDP and relay), the
     // WebRTC address and the multihop hop identity share one key. The underlay
     // has a key of its own (see `build_peer_multihop`).
