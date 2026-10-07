@@ -398,3 +398,75 @@ The formula above holds with C in place of D for the sessions and connections. O
 - The memory of one busy connection, with the flood run at K = 1, 4 and 11 peers, and how near to 32 MiB it gets.
 - The rate of evictions per member per minute at N = 24 with C = 8, and the share of pooled closes that are followed by a re-dial with C = 64.
 - A mesh of two nodes with real `WebRTC` sessions at the ceiling is tested only with loopback sessions in the unit tests.
+
+## D11 gate runs, 2026-10-07
+
+One host (a Mac shared with other work), release build of `mesh_peer_load`, native processes. The load is the 1-min load average of the host at the start of the run, and the reading is the only control: the host was busy with Spotlight and `spindump` before 12:25, which is not our load. Nothing of this is a result at scale: N is 12 or 24.
+
+| Run | HEAD | N | G | C | Time | Load1 at start |
+| -- | -- | -- | -- | -- | -- | -- |
+| Gate loopback (2 tests) | 48cfd2b | 4 and 2 | default | 2 and default | 12:22-12:25 | 4.3 |
+| Flood, 6 runs | 48cfd2b | 12 | 8 | 64 | 12:25-12:42, 150 s each | 1.5 to 12.7 |
+| Bursty | 48cfd2b | 24 | 8 | 64 | 12:44-12:59, 900 s | 1.8 |
+| Bursty | 48cfd2b | 24 | 8 | 8 | 12:59-13:15, 900 s | 1.6 |
+| Session flood K = 4 | 48cfd2b | 12 | 8 | 64 | 13:15-13:25, 600 s | 3.1 |
+| Lane test, before the fix | 7fd7356 | 2 | default | default | 12:42-12:44, 3 runs | 1.6 to 2.7 |
+| Lane test, after the fix | 3d2eb45 | 2 | default | default | 13:32-13:35, 3 runs | 4.2 |
+
+### The ceiling at C = 2 (loopback test)
+
+`a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts`: alice, with C = 2, sends in rotation to three peers, three rounds. Every frame arrived. After each send the ledger of alice counted 2 direct units, and `over_ceiling` was 0 at the end. Passed in about 70 s.
+
+### Flood: the cost of one busy connection
+
+Every node floods frames of 3000 bytes to its first K roster peers from second 30. RSS in MB, from the per-second guard log of the 12 nodes. The idle node is 32 to 35 MB. The guards (2000 MB per node, 8 GB in all) never fired.
+
+| Path | K | Peak of any node | Median of nodes, highest reading |
+| -- | -- | -- | -- |
+| quic (UDP open) | 1 | 54 | 39 |
+| quic | 4 | 79 | 48 |
+| quic | 11 | 46 | 35 |
+| session (UDP cut at 20 s) | 1 | 52 | 40 |
+| session | 4 | 90 | 44 |
+| session | 11 | 54 | 42 |
+
+The run of session K = 4 was repeated for 600 s. Its top node (n4) read 56, 57, 57, 54, 41, 41, 41, 42 and 42 MB at one-minute marks, with 1, 3, 4, 2, 2, 1, 1, 0 and 1 live direct units. It peaked at 57 MB, stayed there for about 4 minutes, and fell back to 41 MB: no growth, so no sign of a leak. 57 minus the 35 MB of an idle node is about 22 MB for at most 4 live units, about 5 MB for each, far under the bound of 64 MiB for one connection. The peak of 90 MB of the 150 s run did not come back, and its cause is not known.
+
+### Bursty at N = 24
+
+Every 60 to 240 s, a node sends one message to each of 3 to 5 random peers. Closes and re-dials are per node per hour, from the counters of the per-second line.
+
+| | C = 64 | C = 8 | Before D11 (earlier runs) |
+| -- | -- | -- | -- |
+| Nodes with a full roster | 24 of 24 | 24 of 24 | |
+| Direct units, highest on any node / mean | 22 / 12.8 | 8 / 6.3 | |
+| `over_ceiling`, highest | 0 | 0 | |
+| Evictions, all nodes | 0 | 585 | |
+| Evictions per member per minute | 0 | 1.6 (busiest node 2.7) | |
+| Pooled closes / re-dials / share | 0.0 / 0.0 / 0.00 | 64.8 / 14.4 / 0.22 | share 0.26 |
+| Session closes / share of re-dials | 2.6 / 0.00 | 3.1 / 0.05 | share 0.25 |
+| QUIC closes, gossip links included / share | 90.8 / 0.68 | 257.7 / 0.72 | 167.7 / 0.56 and 349.2 / 0.81 |
+| Gossip link-ups and link-downs | 280 and 89 | 275 and 84 | 302 and 113, and 284 and 93 |
+| RSS, median / highest node (MB) | 47 / 78 | 47 / 75 | |
+| Load1, median / highest | 3.0 / 6.4 | 3.7 / 14.6 | |
+
+### The lane pair (webrtc-only mesh, every pair needs the lane)
+
+`a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms`, from the roster to a frame in each direction.
+
+| Build | Result | Time from the roster |
+| -- | -- | -- |
+| 48cfd2b | failed after 120 s: no member link formed | |
+| 7fd7356 | 3 of 3 passed | 28.4, 28.1, 28.1 s |
+| 3d2eb45 | 3 of 3 passed | 2.0, 2.4, 2.3 s |
+
+At 48cfd2b an unmeshed node parked a frame without asking for the session of its peer, and a node is meshed only by its first member link, which a lane pair makes with a session. At 7fd7356 the frame asked, but the offer waited for the next 30 s tick of the retry pass. At 3d2eb45 the offer goes out when the frame is parked.
+
+### What these runs do not show
+
+- **One RSS for each node.** Every node floods and receives at once, and the example prints one RSS for the node. The sender and the receiver cannot be told apart.
+- **The idle backstop.** The bursty runs last 900 s, which is the backstop. A pooled close for idleness could not happen in that window. Pooled closes of 0 at C = 64 say that nothing thrashed, not that the backstop works. The backstop has unit tests with a paused clock.
+- **Gossip link churn.** Link-ups and link-downs are the same as in the runs before D11. Per the review of trade-march (97f7c1f4) they are mostly the formation of the mesh. They were not split by time here.
+- **Different commits.** The older runs in the last column are labelled by their folder, and are not from one commit.
+- **The workflows.** The nightly (`cargo task matrix`) has not run on CI.
+
