@@ -20,7 +20,9 @@
 //! (`MeshConfig::resolve`); a test below keeps the two in step, so an invalid
 //! list is never built. A cell is left out where blocking a rung that the list
 //! does not have changes nothing, and `via_third` is set only where it changes
-//! the path: with `IpWebRtc` blocked and `multihop` in the list. `target_full`
+//! the path: with `IpWebRtc` blocked and `multihop` in the list but not `relay`,
+//! since a selector block cannot take away a path that iroh has selected, and a hop
+//! cannot be forced when the relay may carry payload. `target_full`
 //! (a receiver at the cap of `WebRTC` sessions) has no cells until Phase 2.
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
@@ -91,21 +93,17 @@ enum Cut {
     WebRtcBobToAlice,
     /// The `WebRTC` rung between the two underlays, in both directions.
     WebRtcUnderlays,
-    /// The relay rung between the two underlays, in both directions. With the relay
-    /// allowed for payload the relay gate is off, so the direct underlay edge would
-    /// otherwise stay alive over the relay and carol would forward nothing.
-    RelayUnderlays,
     /// The whole multihop rung of alice's application endpoint.
     MultihopAlice,
 }
 
 impl Cell {
     /// What the cell cuts, in order. A cell that goes through a third member cuts
-    /// the direct underlay edge on every rung that could carry it: IP, the `WebRTC`
-    /// session that an underlay may open to a neighbor of its own (the lower
-    /// underlay id offers one), and, when the list lets the relay carry payload, the
-    /// relay between the two underlays. Left open, that edge stays or revives and
-    /// carol forwards nothing.
+    /// the direct underlay edge on every rung that could carry it: IP, and the
+    /// `WebRTC` session that an underlay may open to a neighbor of its own (the
+    /// lower underlay id offers one). Left open, that edge revives and carol
+    /// forwards nothing. The list of such a cell has no relay: see
+    /// `no_cell_through_a_third_member_has_the_relay_in_its_list`.
     fn cuts(self) -> Vec<Cut> {
         let mut cuts = Vec::new();
         if self.blocked >= Blocked::Ip {
@@ -123,9 +121,6 @@ impl Cell {
                 Cut::WebRtcUnderlays,
                 Cut::WebRtcBobToAlice,
             ]);
-            if self.has(Transport::Relay) {
-                cuts.push(Cut::RelayUnderlays);
-            }
         }
         cuts
     }
@@ -438,7 +433,6 @@ async fn apply(cut: Cut, alice: &Member, bob: &Member) {
         Cut::WebRtcAlice => alice.block_rung(Rung::WebRtc, true).await,
         Cut::WebRtcBobToAlice => bob.block_rung_to(Rung::WebRtc, "alice").await,
         Cut::WebRtcUnderlays => block_underlay_rung(Rung::WebRtc, underlays),
-        Cut::RelayUnderlays => block_underlay_rung(Rung::Relay, underlays),
         Cut::MultihopAlice => alice.block_rung(Rung::Multihop, true).await,
     }
 }
@@ -633,8 +627,6 @@ cells! {
     #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_relay_ip_webrtc_multihop_direct { Udp, Multihop, Relay } IpWebRtcMultihop false;
     #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_multihop_relay_ip_webrtc_via_third { Udp, Multihop, Relay } IpWebRtc true;
-    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_none_direct { Udp, WebRtc, Multihop, Relay } None false;
     #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_ip_direct { Udp, WebRtc, Multihop, Relay } Ip false;
@@ -642,8 +634,6 @@ cells! {
     udp_webrtc_multihop_relay_ip_webrtc_direct { Udp, WebRtc, Multihop, Relay } IpWebRtc false;
     #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop, Relay } IpWebRtcMultihop false;
-    #[ignore = "run by cargo task matrix and by the gate row"]
-    udp_webrtc_multihop_relay_ip_webrtc_via_third { Udp, WebRtc, Multihop, Relay } IpWebRtc true;
 }
 
 /// The matrix covers exactly the lists that the protocol accepts: every valid
@@ -684,10 +674,21 @@ fn a_cell_through_a_third_member_cuts_the_underlay_edge_on_every_rung() {
         ] {
             assert_eq!(cuts.contains(&cut), cell.via_third, "{name}: {cut:?}");
         }
-        assert_eq!(
-            cuts.contains(&Cut::RelayUnderlays),
-            cell.via_third && cell.has(Transport::Relay),
-            "{name}: the relay between the underlays"
+    }
+}
+
+/// A selector block cannot take away a path that iroh has already selected (an
+/// empty selection keeps the current one), so with the relay allowed for payload
+/// the direct edge between the two underlays stays alive over the relay or over
+/// the path it had, and carol forwards nothing. The hop is proved by the cells
+/// without the relay; a via-third cell with the relay would only repeat the direct
+/// cell with a longer wait.
+#[test]
+fn no_cell_through_a_third_member_has_the_relay_in_its_list() {
+    for (name, cell) in CELLS {
+        assert!(
+            !(cell.via_third && cell.has(Transport::Relay)),
+            "{name}: a hop cannot be forced when the relay may carry payload"
         );
     }
 }
