@@ -203,6 +203,8 @@ struct Inner {
     /// Since when each peer with a session has had nothing on it: no live
     /// connection and no round in flight. See [`Self::take_idle`].
     idle_since: HashMap<EndpointId, Instant>,
+    /// The direct connections of the node against the ceiling, see [`super::ceiling`].
+    ceiling: super::ceiling::Ceiling,
 }
 
 impl std::fmt::Debug for Inner {
@@ -258,6 +260,27 @@ impl Inner {
         idle
     }
 
+    /// The live unicast connections of the peers that `evictions` names, and the end of
+    /// their units in the ledger: the caller closes them once it has dropped the lock.
+    fn take_victims(&mut self, evictions: &super::ceiling::Admission) -> Vec<Connection> {
+        let mut victims = Vec::new();
+        for peer in &evictions.evict {
+            self.ceiling.unregister_quic(*peer);
+            let Some(slot) = self.slots.get(peer) else {
+                continue;
+            };
+            victims.extend(
+                slot.conns
+                    .iter()
+                    .filter_map(WeakConnectionHandle::upgrade)
+                    .filter(|conn| {
+                        conn.close_reason().is_none() && conn.alpn() == super::UNICAST_ALPN
+                    }),
+            );
+        }
+        victims
+    }
+
     /// Drop the connections that are gone, and the slots nothing holds.
     fn sample(&mut self) {
         for slot in self.slots.values_mut() {
@@ -299,6 +322,7 @@ impl SignalAdmission {
                 closed: false,
                 observing: false,
                 idle_since: HashMap::new(),
+                ceiling: super::ceiling::Ceiling::new(cap),
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
@@ -525,11 +549,29 @@ impl SignalAdmission {
             return;
         }
         inner.slot(peer).conns.push(handle);
+        let evictions = if conn.alpn() == super::UNICAST_ALPN {
+            inner.ceiling.register_quic(peer, Instant::now())
+        } else {
+            super::ceiling::Admission::default()
+        };
+        let victims = inner.take_victims(&evictions);
         if !inner.sampler_running {
             inner.sampler_running = true;
             spawn_sampler(
                 Arc::downgrade(&self.inner),
                 Duration::from_secs(tuning::SLOT_SWEEP_SECS),
+            );
+        }
+        drop(inner);
+        for victim in victims {
+            tracing::info!(
+                target: super::LOG_TARGET,
+                peer = %victim.remote_id().fmt_short(),
+                "evicting a direct connection at the ceiling"
+            );
+            victim.close(
+                super::webrtc::close_code::EVICTED.into(),
+                b"evicted at capacity",
             );
         }
     }
@@ -992,5 +1034,89 @@ mod tests {
         );
         router.shutdown().await.expect("shutdown");
         client.close().await;
+    }
+
+    /// **The ceiling of direct connections.** A node whose ceiling is 4 dials five peers over
+    /// the unicast protocol. The fifth connection is admitted, and the least recently used
+    /// one is closed with the `EVICTED` code, which the peer reads.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used() {
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+        use super::super::webrtc::close_code::EVICTED;
+
+        #[derive(Debug, Clone)]
+        struct Report(
+            EndpointId,
+            tokio::sync::mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
+        );
+        impl ProtocolHandler for Report {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                let reason = conn.closed().await;
+                let _ = self.1.send((self.0, reason));
+                Ok(())
+            }
+        }
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let bind = |hook: Option<ConnectionHook>| {
+            let relay_url = relay_url.clone();
+            async move {
+                let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                    .relay_mode(iroh::RelayMode::custom([relay_url]))
+                    .clear_ip_transports();
+                if let Some(hook) = hook {
+                    builder = builder.hooks(hook);
+                }
+                builder.bind().await.expect("bind an endpoint on the relay")
+            }
+        };
+        let admission = SignalAdmission::new(4);
+        let node = bind(Some(admission.connection_hook())).await;
+        let (reports, mut closed) = tokio::sync::mpsc::unbounded_channel();
+        let mut servers = Vec::new();
+        let mut conns = Vec::new();
+        for _ in 0..5 {
+            let server = bind(None).await;
+            let router = Router::builder(server.clone())
+                .accept(
+                    super::super::UNICAST_ALPN,
+                    Report(server.id(), reports.clone()),
+                )
+                .spawn();
+            let relayed = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+            conns.push(
+                node.connect(relayed, super::super::UNICAST_ALPN)
+                    .await
+                    .expect("dial over the relay"),
+            );
+            servers.push((server, router));
+        }
+        let first = servers[0].0.id();
+
+        let (peer, reason) = tokio::time::timeout(Duration::from_secs(10), closed.recv())
+            .await
+            .expect("a connection must be evicted")
+            .expect("the channel is open");
+        assert_eq!(peer, first, "the least recently used goes");
+        let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason else {
+            panic!("expected the EVICTED code, got {reason:?}");
+        };
+        assert_eq!(close.error_code.into_inner(), u64::from(EVICTED));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), closed.recv())
+                .await
+                .is_err(),
+            "exactly one eviction"
+        );
+        for conn in &conns[1..] {
+            assert!(conn.close_reason().is_none(), "the others stay open");
+        }
+        for (_, router) in servers {
+            router.shutdown().await.expect("shutdown");
+        }
+        node.close().await;
     }
 }
