@@ -189,6 +189,16 @@ pub enum Request {
     ForwardedCells {
         reply: oneshot::Sender<u64>,
     },
+    /// Tests only: how many `WebRTC` sessions the multihop underlay of this node
+    /// holds. `0` when multihop is off.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    UnderlaySessions {
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 /// A rung of the path ladder, for [`Request::BlockRung`].
@@ -407,6 +417,19 @@ impl NodeDriver for MembershipApp {
                         .is_some_and(|handle| handle.route_addr(addr.id).is_some())
                 });
                 let _ = reply.send(has_route);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::UnderlaySessions { reply } => {
+                let sessions = state
+                    .underlay_webrtc
+                    .as_ref()
+                    .map_or(0, |underlay| underlay.handle.session_count());
+                let _ = reply.send(sessions);
                 false
             }
             #[cfg(all(
