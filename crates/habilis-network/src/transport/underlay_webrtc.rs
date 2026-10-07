@@ -31,10 +31,19 @@ pub(crate) struct Plan {
 }
 
 /// Decide the sessions of the underlay. `wanted` are the underlay ids of the
-/// neighbors whose application path is `WebRTC`, `held` are those with a live
-/// session, and `local` is our own underlay id. The lower id dials, so exactly
-/// one offer crosses per pair.
-pub(crate) fn plan(local: EndpointId, wanted: &[EndpointId], held: &[EndpointId]) -> Plan {
+/// neighbors whose application path is `WebRTC`, and `kept` those whose session
+/// stays, that is every neighbor that is not on IP; `held` are the ids with a live
+/// session, and `local` is our own underlay id. The lower id dials, so exactly one
+/// offer crosses per pair. A session goes only when its neighbor is no longer one
+/// or when the pair climbed to IP: an application path that is not read for the
+/// moment (an idle connection of the pool closed, say) does not end it, since the
+/// session carries the edge of a route that other members use.
+pub(crate) fn plan(
+    local: EndpointId,
+    wanted: &[EndpointId],
+    kept: &[EndpointId],
+    held: &[EndpointId],
+) -> Plan {
     let mut dial: Vec<EndpointId> = wanted
         .iter()
         .copied()
@@ -45,7 +54,7 @@ pub(crate) fn plan(local: EndpointId, wanted: &[EndpointId], held: &[EndpointId]
     let detach = held
         .iter()
         .copied()
-        .filter(|peer| !wanted.contains(peer))
+        .filter(|peer| !kept.contains(peer))
         .collect();
     Plan { dial, detach }
 }
@@ -63,6 +72,19 @@ fn wanted_underlays(
         .iter()
         .filter(|(member, _)| kind_of(*member) == Some(super::probe::PathKind::WebRtc))
         .map(|(_, addr)| addr.clone())
+        .collect()
+}
+
+/// The neighbors whose session stays: all of them except those whose application
+/// path is on IP, where the underlay reaches the neighbor over IP already.
+fn kept_underlays(
+    neighbors: &[(EndpointId, iroh::EndpointAddr)],
+    kind_of: impl Fn(EndpointId) -> Option<super::probe::PathKind>,
+) -> Vec<EndpointId> {
+    neighbors
+        .iter()
+        .filter(|(member, _)| kind_of(*member) != Some(super::probe::PathKind::Ip))
+        .map(|(_, addr)| addr.id)
         .collect()
 }
 
@@ -127,12 +149,13 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
 
     let wanted_addrs = wanted_underlays(&neighbors, |member| state.pair_path_kind(member));
     let wanted: Vec<EndpointId> = wanted_addrs.iter().map(|addr| addr.id).collect();
+    let kept = kept_underlays(&neighbors, |member| state.pair_path_kind(member));
     let held = underlay.handle.live_peer_ids();
-    let Plan { dial, detach } = plan(underlay.endpoint.id(), &wanted, &held);
+    let Plan { dial, detach } = plan(underlay.endpoint.id(), &wanted, &kept, &held);
 
     for peer in detach {
         if underlay.handle.detach(&peer) {
-            tracing::debug!(target: LOG_TARGET, %peer, "underlay session detached: no neighbor needs it");
+            tracing::debug!(target: LOG_TARGET, %peer, "underlay session detached: its neighbor left, or the pair is on IP");
         }
     }
     for peer in dial {
@@ -187,7 +210,7 @@ mod tests {
     use iroh::protocol::Router;
     use iroh::{Endpoint, RelayMode};
 
-    use super::{Allowed, Plan, UnderlaySignalGate, plan, wanted_underlays};
+    use super::{Allowed, Plan, UnderlaySignalGate, kept_underlays, plan, wanted_underlays};
     use crate::transport::probe::PathKind;
     use crate::transport::{
         IceProfile, MESH_WEBRTC_SIGNAL_ALPN, SignalAdmission, WebRtcSignalAcceptor,
@@ -211,7 +234,7 @@ mod tests {
     fn the_lower_id_dials_a_wanted_neighbor_with_no_session() {
         let (low, high) = ordered();
         assert_eq!(
-            plan(low, &[high], &[]),
+            plan(low, &[high], &[high], &[]),
             Plan {
                 dial: vec![high],
                 detach: vec![]
@@ -222,25 +245,31 @@ mod tests {
     #[test]
     fn the_higher_id_waits_to_be_dialed() {
         let (low, high) = ordered();
-        assert_eq!(plan(high, &[low], &[]), Plan::default());
+        assert_eq!(plan(high, &[low], &[low], &[]), Plan::default());
     }
 
     #[test]
     fn a_neighbor_that_has_a_session_is_not_dialed_again() {
         let (low, high) = ordered();
-        assert_eq!(plan(low, &[high], &[high]), Plan::default());
+        assert_eq!(plan(low, &[high], &[high], &[high]), Plan::default());
     }
 
     #[test]
-    fn a_session_with_a_peer_that_is_no_longer_wanted_is_detached() {
+    fn a_session_with_a_peer_that_is_not_kept_is_detached() {
         let (low, high) = ordered();
         assert_eq!(
-            plan(low, &[], &[high]),
+            plan(low, &[], &[], &[high]),
             Plan {
                 dial: vec![],
                 detach: vec![high]
             }
         );
+    }
+
+    #[test]
+    fn a_session_with_a_kept_peer_stays_even_when_it_is_not_wanted() {
+        let (low, high) = ordered();
+        assert_eq!(plan(low, &[], &[high], &[high]), Plan::default());
     }
 
     fn neighbor_kinds(
@@ -272,46 +301,42 @@ mod tests {
         assert_eq!(wanted, vec![neighbors[0].1.clone()]);
     }
 
+    /// A neighbor whose path is not read for the moment (an idle connection of the
+    /// pool closed), or is on another rung, keeps its session. It goes only when
+    /// the neighbor leaves the view or the pair climbs to IP.
     #[test]
-    fn a_session_is_detached_when_the_neighbor_climbs_to_ip_or_leaves() {
+    fn a_session_is_detached_only_when_the_neighbor_climbs_to_ip_or_leaves() {
         let (low, high) = ordered();
         let (member, other) = (id(31), id(32));
         let neighbor = vec![(member, EndpointAddr::new(high))];
+        let kept_with =
+            |kind_of: &dyn Fn(EndpointId) -> Option<PathKind>| kept_underlays(&neighbor, kind_of);
 
-        // On WebRTC the neighbor is wanted, and its session stays.
-        let wanted_on_webrtc: Vec<EndpointId> =
-            wanted_underlays(&neighbor, neighbor_kinds(member, other, other))
-                .iter()
-                .map(|addr| addr.id)
-                .collect();
-        assert_eq!(plan(low, &wanted_on_webrtc, &[high]), Plan::default());
+        let on_webrtc = kept_with(&neighbor_kinds(member, other, other));
+        assert_eq!(plan(low, &[], &on_webrtc, &[high]), Plan::default());
+        let unread = kept_with(&neighbor_kinds(other, other, other));
+        assert_eq!(plan(low, &[], &unread, &[high]), Plan::default(), "unread");
+        let on_relay = kept_with(&neighbor_kinds(other, other, member));
+        assert_eq!(plan(low, &[], &on_relay, &[high]), Plan::default(), "relay");
 
-        // Its path climbs to IP: no longer wanted, the session goes.
-        let wanted_on_ip: Vec<EndpointId> =
-            wanted_underlays(&neighbor, neighbor_kinds(other, member, other))
-                .iter()
-                .map(|addr| addr.id)
-                .collect();
+        let on_ip = kept_with(&neighbor_kinds(other, member, other));
         assert_eq!(
-            plan(low, &wanted_on_ip, &[high]),
+            plan(low, &[], &on_ip, &[high]),
             Plan {
                 dial: vec![],
                 detach: vec![high]
-            }
+            },
+            "the pair climbed to IP"
         );
 
-        // It leaves the gossip view: the same.
-        let wanted_after_leaving: Vec<EndpointId> =
-            wanted_underlays(&[], neighbor_kinds(member, other, other))
-                .iter()
-                .map(|addr| addr.id)
-                .collect();
+        let left = kept_underlays(&[], neighbor_kinds(member, other, other));
         assert_eq!(
-            plan(low, &wanted_after_leaving, &[high]),
+            plan(low, &[], &left, &[high]),
             Plan {
                 dial: vec![],
                 detach: vec![high]
-            }
+            },
+            "the neighbor left the view"
         );
     }
 
