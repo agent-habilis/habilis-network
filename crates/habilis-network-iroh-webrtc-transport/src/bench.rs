@@ -276,7 +276,7 @@ pub async fn exchange(
     Ok(direction.bytes_for(bulk))
 }
 
-/// Bytes of one round-trip probe: a 1 KiB request and a 1 KiB echo.
+/// Bytes of one round-trip probe: a 1 `KiB` request and a 1 `KiB` echo.
 pub const RTT_PROBE_BYTES: usize = 1024;
 
 /// Round-trip time of `rounds` probes after `warmup` discarded ones, over an
