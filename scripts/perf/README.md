@@ -65,8 +65,9 @@ t 123 phase 1 peers 47 links 32 sessions 0 underlay 0 rss_mb 91 idle_sessions 0
 
 `peers` is the roster, `links` the gossip neighbors, `sessions` the WebRTC sessions of
 the app endpoint, `underlay` those of the multihop underlay, and `rss_mb` the current
-resident memory. `qclose` and `sclose` count the closes of plain QUIC connections and of
-WebRTC sessions, and `qredial` and `sredial` the closes that were followed by a connection to
+resident memory. `qclose`, `pclose` and `sclose` count the closes of every QUIC connection
+(the gossip links too), of the pooled unicast connections that a send used, and of WebRTC
+sessions, and `qredial`, `predial` and `sredial` the closes that were followed by a connection to
 the same peer within 300 s: `python3 scripts/perf/redial_report.py <run folder>` prints them
 per node per hour, and the share of closes that were followed by a re-dial. `idle_sessions` counts the WebRTC sessions to members that are not gossip
 neighbors. `phase` is 2 once the node has taken IP away.

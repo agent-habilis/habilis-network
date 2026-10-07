@@ -223,15 +223,17 @@ pub enum Request {
     },
     /// Tests only: the closes of direct connections, and how many of them were followed by
     /// a connection to the same peer within 300 s, as `[quic closes, quic re-dials, session
-    /// closes, session re-dials]`. Each request samples the peers, so ask about once per
-    /// second.
+    /// closes, session re-dials, pool closes, pool re-dials]`. `quic` counts every live
+    /// connection, the gossip links too; `pool` only the pooled unicast connections that a
+    /// send used, which is what the idle close acts on. Each request samples the peers, so ask
+    /// about once per second.
     #[cfg(all(
         feature = "iroh-test-utils",
         feature = "host",
         not(target_arch = "wasm32")
     ))]
     RedialCounts {
-        reply: oneshot::Sender<[u64; 4]>,
+        reply: oneshot::Sender<[u64; 6]>,
     },
 }
 
@@ -523,14 +525,18 @@ impl NodeDriver for MembershipApp {
                         .webrtc
                         .as_ref()
                         .is_some_and(|hub| hub.has_session(&id));
+                    let pooled = state.unicast_pool.used_connection(id).is_some();
                     state.redials.quic.observe(now, id, quic);
                     state.redials.session.observe(now, id, session);
+                    state.redials.pool.observe(now, id, pooled);
                 }
                 let counts = [
                     state.redials.quic.closes(),
                     state.redials.quic.redials(),
                     state.redials.session.closes(),
                     state.redials.session.redials(),
+                    state.redials.pool.closes(),
+                    state.redials.pool.redials(),
                 ];
                 let _ = reply.send(counts);
                 false

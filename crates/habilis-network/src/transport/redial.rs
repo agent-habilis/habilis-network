@@ -52,10 +52,12 @@ impl Track {
     }
 }
 
-/// The two tracks of a node.
+/// The three tracks of a node: every live QUIC connection (the gossip links too), the pooled
+/// unicast connections that a send used, and the `WebRTC` sessions.
 #[derive(Debug, Default)]
 pub(crate) struct Redials {
     pub(crate) quic: Track,
+    pub(crate) pool: Track,
     pub(crate) session: Track,
 }
 

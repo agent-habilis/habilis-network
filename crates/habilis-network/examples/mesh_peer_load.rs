@@ -31,7 +31,9 @@
 //! sessions> underlay <underlay WebRTC sessions> rss_mb <current resident memory>
 //! idle_sessions <app WebRTC sessions to members that are not neighbors> qclose <closes of
 //! plain QUIC connections> qredial <of them followed by a connection to the same peer within
-//! 300 s> sclose <closes of WebRTC sessions> sredial <of them followed by one within 300 s>`.
+//! 300 s> sclose <closes of WebRTC sessions> sredial <of them followed by one within 300 s>
+//! pclose <closes of the pooled unicast connections that a send used> predial <of them followed
+//! by one within 300 s>`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -244,12 +246,12 @@ async fn main() -> anyhow::Result<()> {
                 count(&sender, |reply| Request::SessionsToNonNeighbors { reply }).await;
             let (reply, answer) = oneshot::channel();
             let redials = if sender.send(Request::RedialCounts { reply }).await.is_ok() {
-                answer.await.unwrap_or([0; 4])
+                answer.await.unwrap_or([0; 6])
             } else {
-                [0; 4]
+                [0; 6]
             };
             println!(
-                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions} qclose {} qredial {} sclose {} sredial {}",
+                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions} qclose {} qredial {} sclose {} sredial {} pclose {} predial {}",
                 if blocked { 2 } else { 1 },
                 nicks.len(),
                 webrtc.session_count(),
@@ -258,6 +260,8 @@ async fn main() -> anyhow::Result<()> {
                 redials[1],
                 redials[2],
                 redials[3],
+                redials[4],
+                redials[5],
             );
         }
         anyhow::Ok(())
