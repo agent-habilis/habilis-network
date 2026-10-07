@@ -38,15 +38,24 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![
+        Self::create_with(
+            nick,
+            relay,
+            vec![
                 Transport::Udp,
                 Transport::WebRtc,
                 Transport::Multihop,
                 Transport::Relay,
             ],
+        )
+        .await
+    }
+
+    async fn create_with(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
+        Self::open(&membership::Opts {
+            nick: Some(nick.to_owned()),
+            lookup: vec![Lookup::Relay],
+            transport,
             relay_urls: vec![relay.to_string()],
             ..membership::Opts::default()
         })
@@ -120,6 +129,14 @@ impl Member {
             .await
             .ok()
             .flatten()
+    }
+
+    /// The multihop cells that this member has forwarded for others.
+    async fn forwarded_cells(&self) -> u64 {
+        self.membership
+            .request(|reply| Request::ForwardedCells { reply })
+            .await
+            .expect("the loop answers")
     }
 
     /// Whether this member's multihop topology has a route to `peer` now.
@@ -306,6 +323,68 @@ async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     alice
         .expect_rung("bob", "multihop", "WebRTC lost before any route")
         .await;
+
+    for member in [alice, bob, carol] {
+        let _ = member.membership.node.leave().await;
+    }
+}
+
+/// Take every IP path between `first` and `second` away from both, on the application
+/// endpoint and on the multihop underlay. The underlay is an endpoint of its
+/// own: left alone, the direct link between the two underlays is the shortest
+/// route, and no member would forward a cell.
+async fn cut_ip_between(first: &Member, second: &Member) {
+    first.block_ip_to(second.ports()).await;
+    second.block_ip_to(first.ports()).await;
+    for (from, to) in [(first, second), (second, first)] {
+        let underlay = from.membership.node.underlay_id().expect("multihop is on");
+        habilis_network_iroh_webrtc_transport::block_ip_to(
+            underlay,
+            to.membership.node.underlay_ports().iter().copied(),
+        );
+    }
+}
+
+/// With IP and `WebRTC` gone between alice and bob, the pair is carried by the
+/// multihop rung through carol, the only member that can reach both. The proof is
+/// carol's count of forwarded cells: a selected multihop rung alone does not show
+/// a hop, since the direct link between the two underlays is a route too.
+///
+/// The list is `udp,webrtc,multihop`, with no relay for payload, so the relay
+/// gate keeps cells off the relay and the only way left is the hop. The edge
+/// between alice and bob ages out of the topology after the stuck time of 20 s
+/// plus one link-state of 15 s, which is why the waits are long.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_multihop_rung_forwards_through_a_third_member() {
+    init_logging();
+    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+    let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
+    let alice = Member::create_with("alice", &relay, list).await;
+    let bob = Member::join("bob", &alice).await;
+    let carol = Member::join("carol", &alice).await;
+    assert!(
+        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+        "the three members never formed a mesh"
+    );
+    alice.expect_rung("bob", "ip", "nothing blocked").await;
+
+    cut_ip_between(&alice, &bob).await;
+    alice.block_rung(Rung::WebRtc, true).await;
+    alice
+        .expect_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
+        .await;
+
+    let started = Instant::now();
+    while carol.forwarded_cells().await == 0 {
+        assert!(
+            started.elapsed() < STEP_DEADLINE,
+            "alice reached bob on the multihop rung, but carol forwarded no cell: \
+             the pair used a link that is not a hop"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
     for member in [alice, bob, carol] {
         let _ = member.membership.node.leave().await;
