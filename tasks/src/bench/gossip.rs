@@ -10,12 +10,15 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use habilis_network_iroh_gossip_transport::iroh_gossip::net::{GOSSIP_ALPN, Gossip};
+use habilis_network_iroh_gossip_transport::iroh_gossip::proto::TopicId;
 use habilis_network_iroh_gossip_transport::memory::MemoryHub;
 use habilis_network_iroh_gossip_transport::{
-    GOSSIP_TRANSPORT_ID, GossipHandle, Stats, gossip_addr,
+    GOSSIP_TRANSPORT_ID, GossipHandle, ReceiveLoop, Stats, gossip_addr, spawn_receive_loop,
 };
 use habilis_network_iroh_multihop_transport::underlay_path_selector;
-use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench};
+use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench, rtt_samples};
+use habilis_network_iroh_webrtc_transport::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Connection, presets};
 use habilis_network_iroh_webrtc_transport::iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use habilis_network_iroh_webrtc_transport::iroh::{
@@ -24,8 +27,8 @@ use habilis_network_iroh_webrtc_transport::iroh::{
 use serde_json::{Value, json};
 
 use super::Args;
-use super::native::{rounds_on, selected_path};
-use super::run::{Measured, Outcome, Sample};
+use super::native::{RTT_ROUNDS, RTT_WARMUP, rounds_on, selected_path};
+use super::run::{Measured, Outcome, Rtt, Sample, TRANSFER_TIMEOUT};
 
 /// Group sizes of a real run, and the time one group idles. A test uses one small
 /// group and a short idle: the idle is the wait, not the work.
@@ -101,6 +104,198 @@ impl Tap {
             .as_ref()
             .map_or(0, |connection| connection.stats().lost_packets)
     }
+}
+
+/// The ladder's gossip cell: a QUIC connection from A to C, which have no IP path
+/// to each other, carried by the real gossip flood through B. Throughput and round
+/// trips on the selected path, and what the flood costs each member.
+pub(crate) async fn ladder_gossip(args: &Args) -> Outcome {
+    if std::net::UdpSocket::bind("[::1]:0").is_err() {
+        return Outcome::Skipped(
+            "the IPv6 loopback cannot be bound: A and C need it to have no IP path to each other"
+                .to_owned(),
+        );
+    }
+    Box::pin(three_member_flood(args)).await.into()
+}
+
+/// A, B and C on one gossip topic over IP, where A has `IPv6` loopback only and C
+/// `IPv4` only, so they cannot send each other an IP packet. A dials C with the gossip
+/// address alone: every packet of the connection is a frame that B reads and passes on.
+/// The three members, their endpoints, the topic and the receive loops.
+struct Flood {
+    handles: Vec<GossipHandle>,
+    endpoints: Vec<Endpoint>,
+    /// C's bulk server, keeping its connection for the server-side statistics.
+    tap: Tap,
+    /// Kept alive for the whole run.
+    routers: Vec<Router>,
+    readers: Vec<ReceiveLoop>,
+}
+
+/// Bind the three endpoints, join the topic and attach every handle to it.
+async fn start_flood() -> Result<Flood, String> {
+    let topic = TopicId::from_bytes([42u8; 32]);
+    let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
+    let handles: Vec<GossipHandle> = keys
+        .iter()
+        .map(|key| GossipHandle::new(key.public()))
+        .collect();
+    let lookups = [
+        MemoryLookup::new(),
+        MemoryLookup::new(),
+        MemoryLookup::new(),
+    ];
+    let mut endpoints = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        let binds: &[&str] = match index {
+            0 => &["[::1]:0"],
+            1 => &["127.0.0.1:0", "[::1]:0"],
+            _ => &["127.0.0.1:0"],
+        };
+        let mut builder = Endpoint::builder(presets::Minimal)
+            .secret_key(key.clone())
+            .relay_mode(RelayMode::Disabled)
+            .clear_ip_transports()
+            .add_custom_transport(handles[index].custom_transport())
+            .path_selector(underlay_path_selector(key.public()))
+            .address_lookup(lookups[index].clone());
+        for bind in binds {
+            builder = builder
+                .bind_addr(
+                    bind.parse::<SocketAddr>()
+                        .expect("a literal loopback address"),
+                )
+                .map_err(|error| format!("bind address refused: {error:#}"))?;
+        }
+        endpoints.push(
+            builder
+                .bind()
+                .await
+                .map_err(|error| format!("bind failed: {error:#}"))?,
+        );
+    }
+    // The gossip links: A and C each know B, and B knows both.
+    lookups[0].add_endpoint_info(endpoints[1].addr());
+    lookups[2].add_endpoint_info(endpoints[1].addr());
+    lookups[1].add_endpoint_info(endpoints[0].addr());
+    lookups[1].add_endpoint_info(endpoints[2].addr());
+
+    let tap = Tap {
+        inner: Bench,
+        served: Arc::default(),
+    };
+    let mut gossips = Vec::new();
+    let mut routers = Vec::new();
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let mut router = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
+        if index == 2 {
+            router = router.accept(BENCH_ALPN, tap.clone());
+        }
+        routers.push(router.spawn());
+        gossips.push(gossip);
+    }
+    // B joins first: A and C bootstrap on it, and wait for it to be there.
+    let mut readers = Vec::new();
+    for index in [1usize, 0, 2] {
+        let joined = if index == 1 {
+            gossips[1].subscribe(topic, vec![]).await
+        } else {
+            tokio::time::timeout(
+                Duration::from_secs(20),
+                gossips[index].subscribe_and_join(topic, vec![endpoints[1].id()]),
+            )
+            .await
+            .map_err(|_| "joining the topic timed out".to_owned())?
+        };
+        let (sender, receiver) = joined
+            .map_err(|error| format!("joining the topic failed: {error:#}"))?
+            .split();
+        handles[index].attach_gossip(sender);
+        readers.push(spawn_receive_loop(receiver, handles[index].clone()));
+    }
+    Ok(Flood {
+        handles,
+        endpoints,
+        tap,
+        routers,
+        readers,
+    })
+}
+
+async fn three_member_flood(args: &Args) -> Result<Measured, String> {
+    let Flood {
+        handles,
+        endpoints,
+        tap,
+        routers: _routers,
+        readers,
+    } = start_flood().await?;
+    let to_carol = EndpointAddr::from_parts(
+        endpoints[2].id(),
+        [TransportAddr::Custom(gossip_addr(endpoints[2].id()))],
+    );
+    let connection = tokio::time::timeout(
+        Duration::from_secs(30),
+        endpoints[0].connect(to_carol, BENCH_ALPN),
+    )
+    .await
+    .map_err(|_| "connecting over gossip timed out".to_owned())?
+    .map_err(|error| format!("connect over gossip failed: {error:#}"))?;
+
+    let all =
+        |list: &[GossipHandle]| -> Vec<Stats> { list.iter().map(GossipHandle::stats).collect() };
+    let before = all(&handles);
+    let client_lost_before = connection.stats().lost_packets;
+    let server_lost_before = tap.lost_packets();
+    let samples = rounds_on(&connection, args, selected_path).await?;
+    let round_trips = tokio::time::timeout(
+        TRANSFER_TIMEOUT,
+        rtt_samples(&connection, RTT_WARMUP, RTT_ROUNDS),
+    )
+    .await
+    .map_err(|_| format!("the round trips stalled past {TRANSFER_TIMEOUT:?}"))?
+    .map_err(|error| format!("round trips failed: {error:#}"))?;
+    let after = all(&handles);
+    let lost_packets_a = connection
+        .stats()
+        .lost_packets
+        .saturating_sub(client_lost_before);
+    let lost_packets_c = tap.lost_packets().saturating_sub(server_lost_before);
+    connection.close(0u32.into(), b"done");
+    for reader in readers {
+        reader.abort();
+    }
+
+    let originated = sum_frames_out(&after) - sum_frames_out(&before);
+    let received: u64 = after
+        .iter()
+        .zip(&before)
+        .map(|(now, then)| now.frames_in - then.frames_in)
+        .sum();
+    let member = |index: usize| {
+        let (then, now) = (before[index], after[index]);
+        json!({
+            "frames_out": now.frames_out - then.frames_out,
+            "bytes_out": now.bytes_out - then.bytes_out,
+            "frames_in": now.frames_in - then.frames_in,
+            "bytes_in": now.bytes_in - then.bytes_in,
+            "queued": now.queued - then.queued,
+            "not_for_us": now.not_for_us - then.not_for_us,
+        })
+    };
+    let mut measured = Measured::from_samples(0.0, samples)?;
+    measured.rtt = Rtt::from_samples(&round_trips);
+    measured.extra = Some(json!({
+        "members": { "a": member(0), "b": member(1), "c": member(2) },
+        "frames_originated": originated,
+        "frames_received": received,
+        "flood_amplification": float(received) / float(originated.max(1)),
+        "lost_packets_a": lost_packets_a,
+        "lost_packets_c": lost_packets_c,
+    }));
+    Ok(measured)
 }
 
 /// An endpoint with IP on loopback and gossip beside it, ranked IP first.
@@ -266,7 +461,7 @@ async fn run_group(
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Outcome, ladder_gossip_backup};
+    use super::{Args, Outcome, ladder_gossip, ladder_gossip_backup};
     use crate::bench::Direction;
 
     fn small_args() -> Args {
@@ -303,5 +498,30 @@ mod tests {
         // Both ends of the inner connection report their lost packets in the bulk.
         assert!(with_path["bulk"]["lost_packets_a"].is_u64(), "{with_path}");
         assert!(with_path["bulk"]["lost_packets_b"].is_u64(), "{with_path}");
+    }
+
+    /// The gossip cell: a transfer and the round trips over the real flood, on the
+    /// gossip path, and the cost of the flood at the member between the two ends.
+    /// Skipped, with a log line, where the `IPv6` loopback cannot bind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_gossip_cell_measures_a_quic_transfer_over_the_real_flood() {
+        let measured = match ladder_gossip(&small_args()).await {
+            Outcome::Ok(measured) => measured,
+            Outcome::Skipped(reason) => {
+                eprintln!("SKIPPED: {reason}");
+                return;
+            }
+            Outcome::Failed(reason) => panic!("the gossip cell failed: {reason}"),
+        };
+
+        assert_eq!(measured.path, "gossip", "the selected path");
+        assert!(measured.rtt.is_some(), "round trips over gossip");
+        let extra = measured.extra.expect("the flood numbers");
+        assert!(
+            extra["members"]["b"]["frames_in"].as_u64().unwrap_or(0) > 0,
+            "the member between the ends read the flood: {extra}"
+        );
+        assert!(extra["flood_amplification"].is_f64(), "{extra}");
+        assert!(extra["lost_packets_a"].is_u64() && extra["lost_packets_c"].is_u64());
     }
 }

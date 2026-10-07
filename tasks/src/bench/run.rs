@@ -37,6 +37,7 @@ impl Cell {
             | Self::LadderUdp
             | Self::GossipBackupPath => "ip",
             Self::LadderMultihopDirect | Self::LadderMultihopThird => "multihop",
+            Self::LadderGossip => "gossip",
             Self::LadderRelay => "relay",
             Self::RawChromeChrome | Self::RawChromeChromeDatagram => "data-channel",
         }
@@ -54,6 +55,7 @@ impl Cell {
                 | Self::LadderMultihopThird
                 | Self::LadderRelay
                 | Self::GossipBackupPath
+                | Self::LadderGossip
         )
     }
 }
@@ -468,6 +470,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             Cell::LadderMultihopThird => runtime.block_on(multihop::ladder_multihop_third(args)),
             Cell::LadderRelay => runtime.block_on(native::ladder_relay(args)),
             Cell::GossipBackupPath => runtime.block_on(gossip::ladder_gossip_backup(args)),
+            Cell::LadderGossip => runtime.block_on(gossip::ladder_gossip(args)),
         };
         let row = Row { cell, outcome };
         let line = format!("{}  {}", row.cell.label(), row.headline());

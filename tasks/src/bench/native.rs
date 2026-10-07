@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use habilis_network_iroh_gossip_transport::GOSSIP_TRANSPORT_ID;
 use habilis_network_iroh_multihop_transport::MULTIHOP_TRANSPORT_ID;
 use habilis_network_iroh_webrtc_transport::bench::{
     BENCH_ALPN, Bench, exchange, on_webrtc, rtt_samples,
@@ -113,9 +114,9 @@ pub(super) async fn rounds_on(
 
 /// Probes sent and dropped before the timed ones: the first round trips pay
 /// for the congestion window and for path setup.
-const RTT_WARMUP: usize = 50;
+pub(super) const RTT_WARMUP: usize = 50;
 /// Timed round trips per ladder cell.
-const RTT_ROUNDS: usize = 1000;
+pub(super) const RTT_ROUNDS: usize = 1000;
 
 /// The selected path of `connection`, named the way a cell expects it. The
 /// selected path, not any path: a cell that claims a rung must have used it.
@@ -133,6 +134,7 @@ pub(crate) fn selected_path(connection: &Connection) -> String {
             TransportAddr::Relay(_) => "relay",
             TransportAddr::Custom(addr) if addr.id() == WEBRTC_TRANSPORT_ID => "webrtc",
             TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID => "multihop",
+            TransportAddr::Custom(addr) if addr.id() == GOSSIP_TRANSPORT_ID => "gossip",
             _ => "other",
         })
         .to_owned()

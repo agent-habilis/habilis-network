@@ -104,9 +104,12 @@ pub(crate) enum Cell {
     LadderRelay,
     /// One pair on IP with the gossip path open under it: the flood it costs.
     GossipBackupPath,
+    /// The ladder's gossip rung: a QUIC connection between two members with no IP
+    /// path, carried by the real gossip flood through a third member.
+    LadderGossip,
 }
 
-const CELLS: [Cell; 15] = [
+const CELLS: [Cell; 16] = [
     Cell::HabilisNetworkChromeChrome,
     Cell::HabilisNetworkChromeNative,
     Cell::HabilisNetworkSafariNative,
@@ -122,6 +125,7 @@ const CELLS: [Cell; 15] = [
     Cell::LadderMultihopThird,
     Cell::LadderRelay,
     Cell::GossipBackupPath,
+    Cell::LadderGossip,
 ];
 
 impl Cell {
@@ -142,6 +146,7 @@ impl Cell {
             Self::LadderMultihopThird => "ladder multihop (via third)",
             Self::LadderRelay => "ladder relay",
             Self::GossipBackupPath => "gossip backup path",
+            Self::LadderGossip => "ladder gossip",
         }
     }
 }
