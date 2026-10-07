@@ -7,6 +7,10 @@
 //! [`GRAFT_REFUSED_AFTER_SECS`] was refused, and the peer is left alone for a wait that doubles
 //! with each refusal in a row.
 //!
+//! Every graft is held by it, the `PeerInfo` graft too: a request that goes out during the wait
+//! would otherwise end in silence again and double the step by itself. A starved node still asks
+//! every peer when its fallback is due, once per `STARVED_SECS`: those asks are expected.
+//!
 //! The backoff is one-sided on purpose. A peer that frees a slot asks us itself, so a wait of
 //! 15 minutes is not a risk to liveness. It is kept apart from the refusals of session offers
 //! (`RefusalBackoff` in `admission.rs`) and from the eviction backoff (`EvictionBackoff` in
@@ -48,15 +52,29 @@ pub(crate) struct GraftBackoff {
 
 impl GraftBackoff {
     /// A `Neighbor` request went out to `peer` at `now`.
+    ///
+    /// A request during the wait is not recorded: its silence is no new refusal, and it must not
+    /// double the step. A peer that was quiet for longer than the longest wait starts again at the
+    /// first wait.
     pub(crate) fn asked(&mut self, peer: EndpointId, now: Instant) {
-        self.by_peer
-            .entry(peer)
-            .and_modify(|entry| entry.asked_at = Some(now))
-            .or_insert(Entry {
-                asked_at: Some(now),
-                until: None,
-                step: Duration::from_secs(GRAFT_BACKOFF_FIRST_SECS),
-            });
+        let first = Duration::from_secs(GRAFT_BACKOFF_FIRST_SECS);
+        let longest = Duration::from_secs(GRAFT_BACKOFF_MAX_SECS);
+        let entry = self.by_peer.entry(peer).or_insert(Entry {
+            asked_at: None,
+            until: None,
+            step: first,
+        });
+        if entry.until.is_some_and(|until| now < until) {
+            return;
+        }
+        if entry
+            .until
+            .is_some_and(|until| now.saturating_duration_since(until) >= longest)
+        {
+            entry.step = first;
+            entry.until = None;
+        }
+        entry.asked_at = Some(now);
     }
 
     /// Read the answers: every peer that was asked at least [`GRAFT_REFUSED_AFTER_SECS`] ago and
@@ -224,6 +242,45 @@ mod tests {
                 "spread {spread}"
             );
         }
+    }
+
+    /// A request that goes out during the wait is not a new ask: its silence must not double the
+    /// step, or an unlimited caller would extend the wait it should respect.
+    #[test]
+    fn an_ask_during_the_wait_does_not_extend_it() {
+        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let mut backoff = GraftBackoff::default();
+        backoff.asked(peer, start);
+        backoff.settle(at(start, 21), unlinked, 0.0);
+        backoff.asked(peer, at(start, 30));
+        backoff.settle(at(start, 60), unlinked, 0.0);
+        backoff.asked(peer, at(start, 21 + 61));
+        backoff.settle(at(start, 21 + 61 + 21), unlinked, 0.0);
+        assert!(
+            backoff.is_blocked(&peer, at(start, 21 + 61 + 21 + 100)),
+            "the second wait is 120 s"
+        );
+        assert!(!backoff.is_blocked(&peer, at(start, 21 + 61 + 21 + 121)));
+    }
+
+    /// A peer that was quiet for longer than the longest wait starts again at the first wait.
+    #[test]
+    fn a_step_decays_after_a_quiet_time_longer_than_the_longest_wait() {
+        let (start, peer) = (Instant::now(), endpoint_id(1));
+        let mut backoff = GraftBackoff::default();
+        let mut now = start;
+        for _ in 0..4 {
+            backoff.asked(peer, now);
+            now = at(now, 21);
+            backoff.settle(now, unlinked, 0.0);
+            now = at(now, 500);
+        }
+        // The wait of 480 s ended long ago.
+        now = at(now, GRAFT_BACKOFF_MAX_SECS + 1);
+        backoff.asked(peer, now);
+        backoff.settle(at(now, 21), unlinked, 0.0);
+        assert!(backoff.is_blocked(&peer, at(now, 21 + 59)));
+        assert!(!backoff.is_blocked(&peer, at(now, 21 + 61)), "back to 60 s");
     }
 
     /// A refusal is read once: the same silence does not extend the wait.

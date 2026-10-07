@@ -932,9 +932,9 @@ impl EventLoopState {
         starved && waited
     }
 
-    /// Whether a paced graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
+    /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
     /// wait runs. A starved node whose fallback is due asks every peer, because a `Join` is not
-    /// refused.
+    /// refused: those dials, one per peer once per `STARVED_SECS`, are expected.
     pub(crate) fn graft_blocked(&self, peer: EndpointId, now: Instant) -> bool {
         self.graft_backoff.is_blocked(&peer, now) && !self.starved_join_ready(now)
     }

@@ -1410,6 +1410,7 @@ async fn handle_peer_info(
             < peer_info_graft_below(ctx.max_peers, state.peer_endpoints.len() + 1)
         && !state.linked_endpoints.contains(&peer_id)
         && !state.relink_on_cooldown(peer_id, now)
+        && !state.graft_blocked(peer_id, now)
     {
         state.note_relink(peer_id, now);
         let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
