@@ -185,6 +185,9 @@ pub struct EventLoopState {
     /// When we last flooded our `PeerInfo`, whatever triggered it. Stamped by
     /// `broadcast_peer_info`; read by the `joined` and `NeighborUp` re-flood gates.
     pub(crate) peerinfo_flooded_at: Option<Instant>,
+    /// A `NeighborUp` wanted to flood our `PeerInfo` inside the window and was
+    /// held back. The alive tick pays it once the window ends.
+    pub(crate) peerinfo_deferred: bool,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
     digest_serves: Cooldown<String>,
@@ -682,6 +685,7 @@ impl EventLoopState {
             peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
+            peerinfo_deferred: false,
             digest_serves: Cooldown::new(Duration::from_secs(
                 habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
             )),
@@ -850,6 +854,21 @@ impl EventLoopState {
     /// from each peer that hears it. A flapping link floods once per window too.
     pub(crate) fn neighbor_up_refloods_peerinfo(&self, now: Instant) -> bool {
         self.joined_refloods_peerinfo(false, now)
+    }
+
+    /// Remember that a `NeighborUp` was held back by the flood window.
+    pub(crate) fn defer_peerinfo(&mut self) {
+        self.peerinfo_deferred = true;
+    }
+
+    /// Whether a held-back `PeerInfo` flood is due at `now`: the window since the
+    /// last flood has ended. Taking it clears the mark.
+    pub(crate) fn take_deferred_peerinfo(&mut self, now: Instant) -> bool {
+        let due = self.peerinfo_deferred && self.neighbor_up_refloods_peerinfo(now);
+        if due {
+            self.peerinfo_deferred = false;
+        }
+        due
     }
 
     /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
@@ -2084,6 +2103,37 @@ mod tests {
         // Past the window a neighbor up floods once more (no permanent silence).
         let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
         assert!(state.neighbor_up_refloods_peerinfo(later));
+    }
+
+    // A neighbor that comes up inside the window of a flood does not make a
+    // flood of its own. It must not wait for another `NeighborUp`: the flood is
+    // paid once the window ends.
+    #[test]
+    fn a_held_back_neighbor_up_floods_peerinfo_when_the_window_ends() {
+        let start = Instant::now();
+        let mut state = fresh_state();
+        state.peerinfo_flooded_at = Some(start);
+
+        assert!(!state.neighbor_up_refloods_peerinfo(start + Duration::from_secs(1)));
+        state.defer_peerinfo();
+
+        assert!(!state.take_deferred_peerinfo(start + Duration::from_secs(1)));
+        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        assert!(
+            state.take_deferred_peerinfo(later),
+            "due once the window ends"
+        );
+        assert!(!state.take_deferred_peerinfo(later), "paid once");
+    }
+
+    #[test]
+    fn nothing_is_due_when_no_neighbor_up_was_held_back() {
+        let start = Instant::now();
+        let mut state = fresh_state();
+        state.peerinfo_flooded_at = Some(start);
+        assert!(
+            !state.take_deferred_peerinfo(start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1))
+        );
     }
 
     #[test]

@@ -66,7 +66,8 @@ pub(crate) async fn handle_gossip_event(
                     broadcast_peer_info(state, ctx).await;
                     state.last_sent_at = now;
                 } else {
-                    tracing::debug!(target: "habilis_network::gossip", endpoint_id = %node_id, "skipped PeerInfo re-flood (cooldown)");
+                    state.defer_peerinfo();
+                    tracing::debug!(target: "habilis_network::gossip", endpoint_id = %node_id, "held back the PeerInfo re-flood (window)");
                 }
             } else {
                 announce_arrival(state, ctx).await;

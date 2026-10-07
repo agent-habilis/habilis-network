@@ -367,7 +367,7 @@ pub async fn run<A: NodeDriver>(
     .await
 }
 
-/// The alive tick: note the gap, then broadcast the keepalive presence.
+/// The alive tick: note the gap, broadcast the keepalive presence, then pay a held-back `PeerInfo` flood.
 async fn alive_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     timers::note_tick_gap(
         "alive",
@@ -376,6 +376,11 @@ async fn alive_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, ctx: &
         Duration::from_secs(ALIVE_INTERVAL_SECS),
     );
     lifecycle::heartbeat::tick_alive(state, ctx.sender, ctx.mesh, ctx.author).await;
+    // A neighbor that came up inside the window of a flood is owed our address.
+    if state.take_deferred_peerinfo(Instant::now()) {
+        gossip::broadcast_peer_info(state, ctx).await;
+        state.last_sent_at = Instant::now();
+    }
 }
 
 /// The anti-entropy tick: note the gap, advertise the chat digest, then both

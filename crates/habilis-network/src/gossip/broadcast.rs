@@ -265,6 +265,7 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
 /// window the `joined` re-flood gate reads.
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     state.peerinfo_flooded_at = Some(crate::util::clock::Instant::now());
+    state.peerinfo_deferred = false;
     let our_addr = ctx.endpoint.addr();
     let proof = state
         .peer_info_proof
