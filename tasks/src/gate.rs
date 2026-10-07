@@ -308,8 +308,10 @@ pub(crate) const STEPS: &[Step] = &[
     },
     // The two gate cells of the send ladder matrix (`tests/send_ladder_matrix.rs`):
     // the default list with IP blocked, and the pair that goes through a third
-    // member. One at a time, since each cell runs three real members. The other
-    // cells are `#[ignore]` and belong to `cargo task matrix` and its nightly.
+    // member. Every cell is `#[ignore]`, so that no plain `cargo test` runs a cell
+    // next to another test; this row names the two and runs them one at a time,
+    // since each runs three real members. The rest belong to `cargo task matrix`
+    // and its nightly.
     Step {
         kind: Kind::Test,
         scope: Scope::Crate("habilis-network"),
@@ -319,6 +321,10 @@ pub(crate) const STEPS: &[Step] = &[
             "--test",
             "send_ladder_matrix",
             "--",
+            "--include-ignored",
+            "--exact",
+            "udp_webrtc_multihop_ip_direct",
+            "udp_webrtc_multihop_ip_webrtc_via_third",
             "--test-threads=1",
         ],
     },

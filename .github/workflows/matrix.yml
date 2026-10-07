@@ -3,8 +3,9 @@ name: Matrix
 # The send ladder matrix, every cell: transport list, blocked rungs and a third
 # member (crates/habilis-network/tests/send_ladder_matrix.rs). Each cell stands up
 # three real members on a local relay and waits for the pair to settle, so a full
-# run takes tens of minutes and runs on a schedule, not on every change. The two
-# gate cells run in ci.yml's `cargo test --workspace` and in `cargo task ci`.
+# run takes tens of minutes and runs on a schedule, not on every change. Every
+# cell is `#[ignore]`, so no other workflow runs one; `cargo task ci` runs two of
+# them by name, one at a time.
 
 on:
   schedule:

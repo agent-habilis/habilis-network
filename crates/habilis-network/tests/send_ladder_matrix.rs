@@ -8,10 +8,13 @@
 //! - a directed message from alice arrives at bob, or, when no rung is left that
 //!   may carry payload, does not.
 //!
-//! Two cells run in the gate (`cargo task ci`): the default list with IP blocked
-//! and the cell that goes through carol. The others are `#[ignore]`, for
-//! `cargo task matrix`, which runs them all with `--include-ignored
-//! --test-threads=1` (the nightly workflow does the same).
+//! Every cell is `#[ignore]`, so that a plain `cargo test` never runs one next to
+//! another test: each stands up three real members, and the cells must run one at
+//! a time. The gate row of `cargo task ci` names two of them, the default list with
+//! IP blocked and the cell that goes through carol, and runs them with
+//! `--include-ignored --exact --test-threads=1`. `cargo task matrix` runs all of
+//! them with `--include-ignored --test-threads=1`, and the nightly workflow runs
+//! that task.
 //!
 //! The lists are the valid ones of the 16 subsets of `udp,webrtc,multihop,relay`
 //! (`MeshConfig::resolve`); a test below keeps the two in step, so an invalid
@@ -38,9 +41,11 @@ const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
 /// its list allows: nothing can be above it.
 const SETTLE_AT_THE_TOP: Duration = Duration::from_secs(5);
 /// The same for a cell whose list allows a rung above the expected one, which the
-/// cell blocked. The pair leaves the relay for such a rung only on the next alive
-/// tick (15 s) and after a JSEP round (about 5 s), so a lower rung that is read
-/// for less than that proves nothing: the engine may still be about to climb.
+/// cell blocked. The pair leaves the relay for such a rung when the probe that goes
+/// every second makes the engine open a session (`negotiate_session`) and the ICE
+/// round, about 5 s, is done. That took more than 10 s in the runs that I made, with
+/// a probe each second, so a lower rung that is read for less than 30 s proves
+/// nothing: the engine may still be about to climb.
 const SETTLE_BELOW_A_BLOCK: Duration = Duration::from_secs(30);
 /// How long a message that must not arrive is given to arrive.
 const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
@@ -73,7 +78,50 @@ struct Cell {
     target_full: bool,
 }
 
+/// One cut that a cell makes between alice and bob before it settles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cut {
+    /// IP between the two application endpoints.
+    IpApp,
+    /// IP between the two multihop underlays.
+    IpUnderlays,
+    /// The whole `WebRTC` rung of alice's application endpoint.
+    WebRtcAlice,
+    /// The `WebRTC` rung of bob's application endpoint toward alice.
+    WebRtcBobToAlice,
+    /// The `WebRTC` rung between the two underlays, in both directions.
+    WebRtcUnderlays,
+    /// The whole multihop rung of alice's application endpoint.
+    MultihopAlice,
+}
+
 impl Cell {
+    /// What the cell cuts, in order. A cell that goes through a third member cuts
+    /// the direct underlay edge on every rung that could carry it: IP, and the
+    /// `WebRTC` session that an underlay may open to a neighbor of its own, which
+    /// the lower underlay id offers. Left open, that edge revives and carol
+    /// forwards nothing.
+    fn cuts(self) -> Vec<Cut> {
+        let mut cuts = Vec::new();
+        if self.blocked >= Blocked::Ip {
+            cuts.push(Cut::IpApp);
+        }
+        if self.blocked >= Blocked::IpWebRtc {
+            cuts.push(Cut::WebRtcAlice);
+        }
+        if self.blocked >= Blocked::IpWebRtcMultihop {
+            cuts.push(Cut::MultihopAlice);
+        }
+        if self.via_third {
+            cuts.extend([
+                Cut::IpUnderlays,
+                Cut::WebRtcUnderlays,
+                Cut::WebRtcBobToAlice,
+            ]);
+        }
+        cuts
+    }
+
     fn has(self, transport: Transport) -> bool {
         self.transports.contains(&transport)
     }
@@ -204,6 +252,18 @@ impl Member {
             .expect("the loop answers");
     }
 
+    async fn block_rung_to(&self, rung: Rung, peer: &str) {
+        self.membership
+            .request(|reply| Request::BlockRungTo {
+                rung,
+                peer: peer.to_owned(),
+                blocked: true,
+                reply,
+            })
+            .await
+            .expect("the loop answers");
+    }
+
     async fn forwarded_cells(&self) -> u64 {
         self.membership
             .request(|reply| Request::ForwardedCells { reply })
@@ -320,22 +380,41 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
     }
 }
 
-/// Take every IP path between `first` and `second` away from both on the
-/// application endpoint, and, when `underlay` is set, on the multihop underlay
-/// too. The underlay is an endpoint of its own: left alone, the direct link
-/// between the two underlays is a route, and no member would forward a cell.
-async fn cut_ip_between(first: &Member, second: &Member, underlay: bool) {
-    first.block_ip_to(second.ports()).await;
-    second.block_ip_to(first.ports()).await;
-    if !underlay {
-        return;
-    }
-    for (from, to) in [(first, second), (second, first)] {
-        let id = from.membership.node.underlay_id().expect("multihop is on");
-        habilis_network_iroh_webrtc_transport::block_ip_to(
-            id,
-            to.membership.node.underlay_ports().iter().copied(),
-        );
+/// Make one cut of a cell between alice and bob. The underlay is an endpoint of
+/// its own, with its own id and ports: left alone, the direct link between the two
+/// underlays is a route, and no member would forward a cell.
+async fn apply(cut: Cut, alice: &Member, bob: &Member) {
+    let underlays = [(alice, bob), (bob, alice)].map(|(from, to)| {
+        (
+            from.membership.node.underlay_id(),
+            to.membership.node.underlay_id(),
+            to.membership.node.underlay_ports().to_vec(),
+        )
+    });
+    match cut {
+        Cut::IpApp => {
+            alice.block_ip_to(bob.ports()).await;
+            bob.block_ip_to(alice.ports()).await;
+        }
+        Cut::IpUnderlays => {
+            for (from, _, ports) in underlays {
+                let from = from.expect("multihop is on");
+                habilis_network_iroh_webrtc_transport::block_ip_to(from, ports);
+            }
+        }
+        Cut::WebRtcAlice => alice.block_rung(Rung::WebRtc, true).await,
+        Cut::WebRtcBobToAlice => bob.block_rung_to(Rung::WebRtc, "alice").await,
+        Cut::WebRtcUnderlays => {
+            for (from, to, _) in underlays {
+                habilis_network_iroh_webrtc_transport::block_rung_to(
+                    from.expect("multihop is on"),
+                    Rung::WebRtc,
+                    to.expect("multihop is on"),
+                    true,
+                );
+            }
+        }
+        Cut::MultihopAlice => alice.block_rung(Rung::Multihop, true).await,
     }
 }
 
@@ -359,14 +438,8 @@ async fn run(cell: Cell, name: &str) {
         alice.expect_rung("bob", "ip", name).await;
     }
 
-    if cell.blocked >= Blocked::Ip {
-        cut_ip_between(&alice, &bob, cell.via_third).await;
-    }
-    if cell.blocked >= Blocked::IpWebRtc {
-        alice.block_rung(Rung::WebRtc, true).await;
-    }
-    if cell.blocked >= Blocked::IpWebRtcMultihop {
-        alice.block_rung(Rung::Multihop, true).await;
+    for cut in cell.cuts() {
+        apply(cut, &alice, &bob).await;
     }
 
     let expected = cell.expected();
@@ -401,6 +474,13 @@ async fn run(cell: Cell, name: &str) {
                         );
                         tokio::time::sleep(Duration::from_millis(250)).await;
                     }
+                    // The message did not move the pair: it is still where it settled.
+                    let after = alice.rung_to("bob").await;
+                    assert_eq!(
+                        after,
+                        expected.map(rung_name),
+                        "{name}: the rung changed after the message arrived"
+                    );
                 } else {
                     // No rung may carry payload: a refusal, or silence, and never
                     // a delivery over the relay.
@@ -451,67 +531,69 @@ macro_rules! cells {
 }
 
 cells! {
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_none_direct { Udp } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_ip_direct { Udp } Ip false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     webrtc_none_direct { WebRtc } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     webrtc_ip_webrtc_direct { WebRtc } IpWebRtc false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_none_direct { Udp, WebRtc } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_ip_direct { Udp, WebRtc } Ip false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_ip_webrtc_direct { Udp, WebRtc } IpWebRtc false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_none_direct { Udp, Multihop } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_ip_direct { Udp, Multihop } Ip false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_ip_webrtc_multihop_direct { Udp, Multihop } IpWebRtcMultihop false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_ip_webrtc_via_third { Udp, Multihop } IpWebRtc true;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_relay_none_direct { Udp, Relay } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_relay_ip_direct { Udp, Relay } Ip false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     webrtc_relay_none_direct { WebRtc, Relay } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     webrtc_relay_ip_webrtc_direct { WebRtc, Relay } IpWebRtc false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_none_direct { Udp, WebRtc, Multihop } None false;
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_ip_direct { Udp, WebRtc, Multihop } Ip false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_ip_webrtc_direct { Udp, WebRtc, Multihop } IpWebRtc false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop } IpWebRtcMultihop false;
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_ip_webrtc_via_third { Udp, WebRtc, Multihop } IpWebRtc true;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_relay_none_direct { Udp, WebRtc, Relay } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_relay_ip_direct { Udp, WebRtc, Relay } Ip false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_relay_ip_webrtc_direct { Udp, WebRtc, Relay } IpWebRtc false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_relay_none_direct { Udp, Multihop, Relay } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_relay_ip_direct { Udp, Multihop, Relay } Ip false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_relay_ip_webrtc_multihop_direct { Udp, Multihop, Relay } IpWebRtcMultihop false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_multihop_relay_ip_webrtc_via_third { Udp, Multihop, Relay } IpWebRtc true;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_none_direct { Udp, WebRtc, Multihop, Relay } None false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_ip_direct { Udp, WebRtc, Multihop, Relay } Ip false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_ip_webrtc_direct { Udp, WebRtc, Multihop, Relay } IpWebRtc false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop, Relay } IpWebRtcMultihop false;
-    #[ignore = "nightly: cargo task matrix"]
+    #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_ip_webrtc_via_third { Udp, WebRtc, Multihop, Relay } IpWebRtc true;
 }
 
@@ -536,6 +618,23 @@ fn the_cells_cover_every_valid_transport_list_and_no_other() {
             .collect();
         let valid = MeshConfig::resolve(&[Lookup::Relay], None, &list).is_ok();
         assert_eq!(in_cells(&list), valid, "the transport list {list:?}");
+    }
+}
+
+/// The cuts of a cell that goes through a third member close every rung of the
+/// direct underlay edge; the cells that do not go through one leave the
+/// underlays alone.
+#[test]
+fn a_cell_through_a_third_member_cuts_the_underlay_edge_on_every_rung() {
+    for (name, cell) in CELLS {
+        let cuts = cell.cuts();
+        for cut in [
+            Cut::IpUnderlays,
+            Cut::WebRtcUnderlays,
+            Cut::WebRtcBobToAlice,
+        ] {
+            assert_eq!(cuts.contains(&cut), cell.via_third, "{name}: {cut:?}");
+        }
     }
 }
 

@@ -1,10 +1,11 @@
 //! `cargo task matrix` — every cell of the send ladder matrix, one at a time.
 //!
 //! The matrix is `crates/habilis-network/tests/send_ladder_matrix.rs`: one test per
-//! cell of transport list, blocked rungs and path of the third member. Two cells
-//! run in the gate (a row of [`crate::gate::STEPS`]); the rest are `#[ignore]`
-//! because each stands up three real members, so a full run takes a while. This
-//! task runs them all, and the nightly workflow runs this task.
+//! cell of transport list, blocked rungs and path of the third member. Every cell
+//! is `#[ignore]`, because each stands up three real members and must not run next
+//! to another test, so a full run takes a while. The gate runs two of them by name
+//! (a row of [`crate::gate::STEPS`]). This task runs them all, and the nightly
+//! workflow runs this task.
 //!
 //! One test thread: the cells share the process-wide block tables, and a cell
 //! that takes IP away from a node must not meet another cell on the same host.
