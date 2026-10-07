@@ -5,6 +5,7 @@
 //! over a sink that the caller attaches after the endpoint exists.
 
 mod addr;
+mod budget;
 mod counters;
 pub mod frame;
 mod lookup;
@@ -13,6 +14,7 @@ mod sink;
 mod transport;
 
 pub use addr::{gossip_addr, parse_gossip_addr};
+pub use budget::DEFAULT_BUDGET_BYTES_PER_SEC;
 pub use counters::Stats;
 pub use frame::{DecodeError, EncodeError, Frame};
 pub use habilis_network_iroh_transport_util::GOSSIP_TRANSPORT_ID;

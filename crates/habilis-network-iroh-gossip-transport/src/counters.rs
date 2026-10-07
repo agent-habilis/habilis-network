@@ -28,6 +28,11 @@ pub struct Stats {
     /// Datagrams to a destination that the engine does not allow: a higher rung
     /// carries that pair.
     pub dropped_not_allowed: u64,
+    /// Datagrams over the byte budget, to a destination with a connection.
+    pub dropped_budget: u64,
+    /// Frames sent without a charge on the budget, because the destination has
+    /// no established connection: a handshake.
+    pub exempt_frames: u64,
 }
 
 #[derive(Debug, Default)]
@@ -45,6 +50,8 @@ pub(crate) struct Counters {
     dropped_empty: AtomicU64,
     dropped_sink_refused: AtomicU64,
     dropped_not_allowed: AtomicU64,
+    dropped_budget: AtomicU64,
+    exempt_frames: AtomicU64,
 }
 
 impl Counters {
@@ -64,6 +71,8 @@ impl Counters {
             dropped_empty: read(&self.dropped_empty),
             dropped_sink_refused: read(&self.dropped_sink_refused),
             dropped_not_allowed: read(&self.dropped_not_allowed),
+            dropped_budget: read(&self.dropped_budget),
+            exempt_frames: read(&self.exempt_frames),
         }
     }
 
@@ -113,6 +122,14 @@ impl Counters {
 
     pub(crate) fn dropped_not_allowed(&self) {
         bump(&self.dropped_not_allowed, 1);
+    }
+
+    pub(crate) fn dropped_budget(&self) {
+        bump(&self.dropped_budget, 1);
+    }
+
+    pub(crate) fn exempt(&self) {
+        bump(&self.exempt_frames, 1);
     }
 }
 

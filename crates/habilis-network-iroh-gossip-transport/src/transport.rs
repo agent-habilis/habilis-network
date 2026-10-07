@@ -18,8 +18,10 @@ use iroh::endpoint::transports::{
     CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
 };
 use iroh_base::CustomAddr;
+use n0_future::time::Instant;
 use tokio::sync::mpsc;
 
+use crate::budget::Budget;
 use crate::counters::{Counters, Stats};
 use crate::frame::{self, EncodeError};
 use crate::{gossip_addr, parse_gossip_addr};
@@ -69,6 +71,11 @@ pub(crate) struct Shared {
     pub(crate) attached: AtomicBool,
     /// Destinations that the engine stopped, because a higher rung carries them.
     blocked: Mutex<HashSet<EndpointId>>,
+    /// The byte budget of this node, if one is set.
+    budget: Mutex<Option<Budget>>,
+    /// Destinations that have an established connection. A frame to any other
+    /// destination is a handshake and is not charged to the budget.
+    established: Mutex<HashSet<EndpointId>>,
     counters: Counters,
 }
 
@@ -90,8 +97,22 @@ impl Shared {
             return self.counters.dropped_no_sink();
         };
         let bytes = frame.len();
+        // A frame to a destination with a connection is charged to the budget. A
+        // frame to any other is a handshake and passes: a new pair must not be
+        // starved by a bulk flow that has used the budget up.
+        let charged = locked(&self.established).contains(&dst);
+        let mut budgeted = false;
+        if let Some(budget) = locked(&self.budget).as_mut() {
+            budgeted = true;
+            if charged && !budget.take(Instant::now(), bytes as u64) {
+                return self.counters.dropped_budget();
+            }
+        }
         if sink.try_send(frame) {
             self.counters.sent(bytes);
+            if budgeted && !charged {
+                self.counters.exempt();
+            }
         } else {
             self.counters.dropped_sink_refused();
         }
@@ -116,6 +137,8 @@ impl GossipHandle {
             sink: Mutex::new(None),
             attached: AtomicBool::new(false),
             blocked: Mutex::new(HashSet::new()),
+            budget: Mutex::new(None),
+            established: Mutex::new(HashSet::new()),
             counters: Counters::default(),
         });
         let (inbound, receiver) = mpsc::channel(INBOUND_CAP);
@@ -162,6 +185,25 @@ impl GossipHandle {
             blocked.remove(&dst);
         } else {
             blocked.insert(dst);
+        }
+    }
+
+    /// Limit the bytes per second that this node puts on the topic, or lift the
+    /// limit with `None`. See [`crate::DEFAULT_BUDGET_BYTES_PER_SEC`].
+    pub fn set_budget(&self, bytes_per_sec: Option<u64>) {
+        *locked(&self.shared.budget) = bytes_per_sec.map(|rate| Budget::new(rate, Instant::now()));
+    }
+
+    /// Tell the handle whether `dst` has an established connection. Frames to a
+    /// destination that has none are handshakes: they are not charged to the
+    /// budget, so a new pair is not starved by a bulk flow. The engine calls this
+    /// from where it knows the connections.
+    pub fn set_established(&self, dst: EndpointId, established: bool) {
+        let mut destinations = locked(&self.shared.established);
+        if established {
+            destinations.insert(dst);
+        } else {
+            destinations.remove(&dst);
         }
     }
 
@@ -723,5 +765,52 @@ mod tests {
         echo_once(&connection, b"found by id").await;
         connection.close(0u32.into(), b"done");
         router.shutdown().await.expect("shutdown");
+    }
+
+    /// A frame to a destination with an established connection is charged to the
+    /// budget and dropped when the budget is out. A frame to any other destination
+    /// is a handshake: it is sent, and counted as exempt.
+    #[test]
+    fn an_established_destination_is_charged_and_a_handshake_is_exempt() {
+        let handle = GossipHandle::new(secret(1).public());
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(recorder.clone());
+        let (bob, carol) = (secret(2).public(), secret(3).public());
+        handle.set_budget(Some(1000));
+        handle.set_established(bob, true);
+
+        // A 100-byte datagram is a 166-byte frame: six fit in 1000 bytes.
+        for _ in 0..8 {
+            handle.shared.send_datagram(bob, &[1u8; 100]);
+        }
+        assert_eq!(locked(&recorder.0).len(), 6, "six frames fit the burst");
+        assert_eq!(handle.stats().dropped_budget, 2);
+
+        // Carol has no connection: her handshake passes with the budget spent.
+        handle.shared.send_datagram(carol, &[1u8; 100]);
+        assert_eq!(locked(&recorder.0).len(), 7, "the handshake passed");
+        assert_eq!(handle.stats().exempt_frames, 1);
+
+        // Once she has a connection, her frames are charged and refused.
+        handle.set_established(carol, true);
+        handle.shared.send_datagram(carol, &[1u8; 100]);
+        assert_eq!(locked(&recorder.0).len(), 7, "charged, and refused");
+        assert_eq!(handle.stats().dropped_budget, 3);
+    }
+
+    #[test]
+    fn without_a_budget_nothing_is_dropped_for_bytes() {
+        let handle = GossipHandle::new(secret(1).public());
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(recorder.clone());
+        let bob = secret(2).public();
+        handle.set_established(bob, true);
+
+        for _ in 0..100 {
+            handle.shared.send_datagram(bob, &[1u8; 1000]);
+        }
+
+        assert_eq!(locked(&recorder.0).len(), 100);
+        assert_eq!(handle.stats().dropped_budget, 0);
     }
 }
