@@ -286,6 +286,23 @@ pub fn install_transports(
     builder
 }
 
+/// The memory windows of a QUIC connection, on every endpoint of the engine, the multihop underlay
+/// and the blob endpoint included (decision D11). They are generous on purpose: the count of direct
+/// connections is the real limit, and these only keep one connection from growing without bound.
+/// Keep-alive, idle timeout, multipath, stream counts and datagrams stay at the iroh defaults.
+fn quic_limits() -> iroh::endpoint::QuicTransportConfig {
+    use crate::util::tuning::{
+        QUIC_CONNECTION_RECEIVE_WINDOW, QUIC_SEND_WINDOW, QUIC_STREAM_RECEIVE_WINDOW,
+    };
+    use iroh::endpoint::{QuicTransportConfig, VarInt};
+
+    QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(QUIC_STREAM_RECEIVE_WINDOW))
+        .receive_window(VarInt::from_u32(QUIC_CONNECTION_RECEIVE_WINDOW))
+        .send_window(QUIC_SEND_WINDOW)
+        .build()
+}
+
 /// # Errors
 /// Returns an error if the inputs are invalid or the operation fails.
 #[cfg_attr(
@@ -401,14 +418,15 @@ pub async fn build_endpoint(
         );
     }
 
-    // Transport config is intentionally left at iroh's defaults: iroh tunes
+    // Transport config is left at iroh's defaults, but for the memory windows: iroh tunes
     // keep-alive / idle (and the per-path multipath settings) for its
     // holepunching, and its own docs warn that adjusting them "may cause
     // suboptimal usage". A prior aggressive 10s idle / 5s keep-alive override
     // fought that tuning — marginal / distant links falsely idle-timed-out,
     // HyParView refilled from passive, and the resulting NeighborDown/Up churn
-    // drove a per-connection memory leak. So we set nothing here. Decision D11 caps the number of
-    // direct connections, not the memory of one.
+    // drove a per-connection memory leak. So we set only the memory windows of a connection
+    // (decision D11), never the keep-alive, the idle timeout or the multipath settings.
+    builder = builder.transport_config(quic_limits());
 
     // For the private rendezvous endpoint this returns `AddrInUse`
     // when another member already holds the deterministic port — the
@@ -1036,6 +1054,169 @@ mod tests {
     // it is not exercised here; presence-allowlist resolution is
     // unit-tested in `protocol::mesh`, and the relay ladder logic in
     // [`super::relay`].
+
+    /// **A receiver that never reads grants the generous stream window.** Every endpoint of the
+    /// engine sets the QUIC windows of decision D11: 8 `MiB` for a stream, far above the iroh default
+    /// of about 1.2 `MiB`, and still a bound for a peer that sends faster than the node reads.
+    ///
+    /// The sender is a plain iroh endpoint whose own buffer is capped at 64 `KiB`. It cannot get
+    /// more than that ahead of what the receiver has taken in, so the bytes that its writes
+    /// accept, less its own buffer, are what the receiver granted. Nobody reads at the receiver.
+    #[cfg(feature = "host")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_receiver_that_never_reads_grants_the_generous_stream_window() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use crate::util::tuning::QUIC_STREAM_RECEIVE_WINDOW;
+
+        const ALPN: &[u8] = b"habilis-test/flood/0";
+        const SENDER_BUFFER: usize = 64 * 1024;
+        let receiver = super::build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            vec![ALPN.to_vec()],
+            super::TransportHandles::default(),
+        )
+        .await
+        .expect("bind the receiver");
+        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .send_window(SENDER_BUFFER as u64)
+                    .build(),
+            )
+            .bind()
+            .await
+            .expect("bind the sender");
+
+        let receiving = tokio::spawn({
+            let receiver = receiver.clone();
+            async move {
+                let incoming = receiver.accept().await.expect("an incoming connection");
+                let conn = incoming.await.expect("the handshake");
+                let stream = conn.accept_uni().await.expect("a stream");
+                // Nothing is read: the connection and the stream stay open and unread.
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                drop((conn, stream));
+            }
+        });
+        let conn = sender
+            .connect(receiver.addr(), ALPN)
+            .await
+            .expect("connect to the receiver");
+        let mut stream = conn.open_uni().await.expect("open a stream");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let writing = tokio::spawn({
+            let accepted = Arc::clone(&accepted);
+            async move {
+                let chunk = vec![0u8; 16 * 1024];
+                while stream.write_all(&chunk).await.is_ok() {
+                    accepted.fetch_add(chunk.len(), Ordering::Relaxed);
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let taken_in = accepted
+            .load(Ordering::Relaxed)
+            .saturating_sub(SENDER_BUFFER);
+        writing.abort();
+        receiving.abort();
+
+        let window = usize::try_from(QUIC_STREAM_RECEIVE_WINDOW).expect("a window fits usize");
+        assert!(
+            taken_in > 4 * 1024 * 1024 && taken_in <= window + 64 * 1024,
+            "the receiver took in {taken_in} bytes of a stream nobody read; the window is {window}"
+        );
+        sender.close().await;
+        receiver.close().await;
+    }
+
+    /// **Many streams that nobody reads still fit in the connection window.** Sixteen streams
+    /// at 256 `KiB` each could hold 4 `MiB`; the window of the connection (decision D11) holds the
+    /// receiver to 1 `MiB` for all of them together. Counted at the sender, as in
+    /// `a_receiver_that_never_reads_buffers_at_most_the_stream_window`.
+    #[cfg(feature = "host")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streams_that_nobody_reads_fit_in_the_connection_window() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use crate::util::tuning::QUIC_CONNECTION_RECEIVE_WINDOW;
+
+        const ALPN: &[u8] = b"habilis-test/flood/1";
+        const SENDER_BUFFER: usize = 64 * 1024;
+        const STREAMS: usize = 40;
+        let receiver = super::build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            vec![ALPN.to_vec()],
+            super::TransportHandles::default(),
+        )
+        .await
+        .expect("bind the receiver");
+        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .send_window(SENDER_BUFFER as u64)
+                    .build(),
+            )
+            .bind()
+            .await
+            .expect("bind the sender");
+
+        let receiving = tokio::spawn({
+            let receiver = receiver.clone();
+            async move {
+                let incoming = receiver.accept().await.expect("an incoming connection");
+                let conn = incoming.await.expect("the handshake");
+                let mut streams = Vec::new();
+                while let Ok(stream) = conn.accept_uni().await {
+                    streams.push(stream);
+                }
+            }
+        });
+        let conn = sender
+            .connect(receiver.addr(), ALPN)
+            .await
+            .expect("connect to the receiver");
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let mut writers = Vec::new();
+        for _ in 0..STREAMS {
+            let mut stream = conn.open_uni().await.expect("open a stream");
+            let accepted = Arc::clone(&accepted);
+            writers.push(tokio::spawn(async move {
+                let chunk = vec![0u8; 16 * 1024];
+                while stream.write_all(&chunk).await.is_ok() {
+                    accepted.fetch_add(chunk.len(), Ordering::Relaxed);
+                }
+            }));
+        }
+
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let taken_in = accepted
+            .load(Ordering::Relaxed)
+            .saturating_sub(SENDER_BUFFER);
+        for writer in writers {
+            writer.abort();
+        }
+        receiving.abort();
+
+        let window = usize::try_from(QUIC_CONNECTION_RECEIVE_WINDOW).expect("a window fits usize");
+        assert!(
+            taken_in <= window + 64 * 1024,
+            "the receiver took in {taken_in} bytes of {STREAMS} streams nobody read; the connection window is {window}"
+        );
+        sender.close().await;
+        receiver.close().await;
+    }
 
     #[tokio::test]
     async fn loopback_all_off_binds() {

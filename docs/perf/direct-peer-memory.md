@@ -344,7 +344,7 @@ The test `a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation` has 
 
 ## The ceiling C of direct connections (decision D11)
 
-D11 replaces the cap D with one ceiling C. A node never refuses an offer or a connection because of C. It evicts the least valuable peer when a newcomer needs the place. The numbers in this section are design values and test results. The memory of a node with C in place is **not measured yet**: it needs a run on a free host.
+D11 replaces the cap D with one ceiling C. A node never refuses an offer or a connection because of C. It evicts the least valuable peer when a newcomer needs the place. The numbers in this section are design values and test results. The memory of a node with C in place and the generous windows is **not measured yet**: it needs a run on a free host.
 
 ### What C counts
 
@@ -373,9 +373,17 @@ A pair that needs the lane has no direct path without a session. On a mesh whose
 
 The underlay keeps its own ledger with G as its ceiling. Before D11, that table refused the session after the G-th. Now it evicts at G. The leg opens a session only to a gossip neighbor, so its count stays at G or less, and the ledger does not act. Test: `a_ledger_with_g_as_its_ceiling_never_evicts_while_the_sessions_stay_within_g`.
 
-### No limit on the memory of one connection
+### Generous windows of one connection
 
-D11 caps the number of direct connections only. A connection may use as much memory as it needs, and every endpoint keeps the iroh defaults for windows and streams. RAM is bounded by the count C and by time: the 900 s backstop closes what nobody used. The flood mode of the harness (`MESH_FLOOD_PEERS`) stays, and it measures what one connection costs.
+The count C is the real limit. Every endpoint of the engine, the multihop underlay and the blob endpoint included, also sets three generous windows (`build_endpoint`), so that one connection cannot grow without bound:
+
+| Window | Value |
+| -- | -- |
+| One stream, receive | 8 MiB |
+| All the streams of a connection, receive | 32 MiB |
+| Send, bytes not yet acknowledged | 32 MiB |
+
+The stream counts, the datagram buffer, the keep-alive, the idle timeout and the multipath settings stay at the iroh defaults. The iroh default is about 1.2 MiB for a stream. A window allows one window per round trip, so 32 MiB at 100 ms is about 2.7 Gbit/s: no practical cap on speed. The worst case for memory is C x 32 MiB, which is 2 GiB at C = 64. A real node stays far below it, because a connection fills a window only when its reader is slower than the sender. Two tests show the windows: a receiver that never reads takes in about 8 MiB of a stream, and 40 unread streams take in at most 32 MiB together. The flood mode of the harness (`MESH_FLOOD_PEERS`) measures what one connection costs.
 
 ### Keep-alive cost
 
@@ -383,10 +391,10 @@ iroh sends a heartbeat on each connection every 5 s. At C = 64 and G = 32, that 
 
 ### RAM after D11
 
-The formula above (G x 1.1 for the gossip links, a cost per session or connection) holds with C in place of D. There is no per-connection worst case in this document. The flood run reads the cost of one busy connection, and it is not done yet.
+The formula above holds with C in place of D for the sessions and connections. One connection can add up to 32 MiB in the worst case (see the windows above). The cost of a busy connection is not measured: the flood run does it, and it is not done yet.
 
 ### Not measured yet
 
-- The memory of one busy connection, with the flood run at K = 1, 4 and 11 peers.
+- The memory of one busy connection, with the flood run at K = 1, 4 and 11 peers, and how near to 32 MiB it gets.
 - The rate of evictions per member per minute at N = 24 with C = 8, and the share of pooled closes that are followed by a re-dial with C = 64.
 - A mesh of two nodes with real `WebRTC` sessions at the ceiling is tested only with loopback sessions in the unit tests.

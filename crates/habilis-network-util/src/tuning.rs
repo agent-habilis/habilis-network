@@ -773,6 +773,18 @@ pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 /// does.
 pub const LANE_WANTED_SECS: u64 = 60;
 
+/// How many bytes of one QUIC stream a node buffers for a peer that sends faster than the node
+/// reads (decision D11): 8 `MiB`, far above the iroh default, and a bound all the same.
+pub const QUIC_STREAM_RECEIVE_WINDOW: u32 = 8 * 1024 * 1024;
+
+/// How many bytes of all the streams of one QUIC connection together a node buffers for a peer
+/// (decision D11): 32 `MiB`. One connection cannot grow without bound, and at 100 ms of round trip
+/// the window still allows about 2.7 Gbit/s.
+pub const QUIC_CONNECTION_RECEIVE_WINDOW: u32 = 32 * 1024 * 1024;
+
+/// How many bytes a node sends to a peer before the peer acknowledges them (decision D11): 32 `MiB`.
+pub const QUIC_SEND_WINDOW: u64 = 32 * 1024 * 1024;
+
 /// How long after a `Neighbor` request a node reads "no link came up" as a refusal: the longer of
 /// the relink cooldown (10 s) and the probe deadline (15 s), plus 5 s. A link that comes up later
 /// than this is not a reply to the request.
