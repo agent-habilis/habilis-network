@@ -272,6 +272,17 @@ impl Member {
             .expect("the loop answers");
     }
 
+    /// Whether this member's multihop topology has a route to `peer` now.
+    async fn has_route(&self, peer: &str) -> bool {
+        self.membership
+            .request(|reply| Request::HasRoute {
+                peer: peer.to_owned(),
+                reply,
+            })
+            .await
+            .expect("the loop answers")
+    }
+
     async fn forwarded_cells(&self) -> u64 {
         self.membership
             .request(|reply| Request::ForwardedCells { reply })
@@ -462,13 +473,37 @@ async fn run(cell: Cell, name: &str) {
             .settle_on("bob", rung_name(rung), cell.settle(rung), name)
             .await;
         if cell.via_third && rung == Rung::Multihop {
+            // The rung can be selected while the route is still stale, and a cell
+            // goes only when something is sent: traffic goes on, so that cells take
+            // the route through carol once it is there.
             let started = Instant::now();
+            let mut probes = 0_u32;
+            let mut last = None;
             while carol.forwarded_cells().await == 0 {
+                // One line each time the picture changes, for the run log: when the
+                // route to bob appeared in alice's topology, and what she rides.
+                let seen = (alice.has_route("bob").await, alice.rung_to("bob").await);
+                if last != Some(seen) {
+                    eprintln!(
+                        "DIAG {name}: after {:?} and {probes} probes: has_route={} rung={:?}",
+                        started.elapsed(),
+                        seen.0,
+                        seen.1
+                    );
+                    last = Some(seen);
+                }
                 assert!(
                     started.elapsed() < STEP_DEADLINE,
-                    "{name}: the multihop rung is selected, but carol forwarded no cell"
+                    "{name}: the multihop rung is selected, but carol forwarded no cell \
+                     after {probes} probes (alice has a route to bob: {}, her rung: {:?})",
+                    alice.has_route("bob").await,
+                    alice.rung_to("bob").await
                 );
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                probes += 1;
+                let _ = alice
+                    .send("bob", &format!("forward probe {name} {probes}"))
+                    .await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     }
