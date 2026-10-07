@@ -86,25 +86,42 @@ pub(crate) async fn wait_ip(conn: &Connection, deadline: Duration) -> bool {
     wait_selected(conn, deadline, selected_is_ip).await
 }
 
+/// How a wait for a selected path ended.
+#[derive(Debug, PartialEq, Eq)]
+enum PathWait {
+    Selected,
+    /// The connection closed first: the other end gave up, which is not a refusal.
+    Closed,
+    TimedOut,
+}
+
 async fn wait_selected(
     conn: &Connection,
     deadline: Duration,
     selected: fn(&Connection) -> bool,
 ) -> bool {
+    wait_selected_outcome(conn, deadline, selected).await == PathWait::Selected
+}
+
+async fn wait_selected_outcome(
+    conn: &Connection,
+    deadline: Duration,
+    selected: fn(&Connection) -> bool,
+) -> PathWait {
     let mut events = conn.path_events();
     let proven = async {
         loop {
             if selected(conn) {
-                return true;
+                return PathWait::Selected;
             }
             if events.next().await.is_none() {
-                return false;
+                return PathWait::Closed;
             }
         }
     };
     n0_future::time::timeout(deadline, proven)
         .await
-        .unwrap_or(false)
+        .unwrap_or(PathWait::TimedOut)
 }
 
 /// The hold every inbound lane applies before reading a byte: with the relay
@@ -118,9 +135,21 @@ pub async fn refuse_unless_direct(
     deadline: Duration,
     close_code: u32,
 ) -> bool {
-    if relay_transport || wait_direct(conn, deadline).await {
-        tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "payload path admitted");
-        return true;
+    let outcome = if relay_transport {
+        PathWait::Selected
+    } else {
+        wait_selected_outcome(conn, deadline, selected_is_direct).await
+    };
+    match outcome {
+        PathWait::Selected => {
+            tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "payload path admitted");
+            return true;
+        }
+        PathWait::Closed => {
+            tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "dialer closed before a path was selected");
+            return false;
+        }
+        PathWait::TimedOut => {}
     }
     // The paths iroh held at refusal time, because "which paths existed and
     // which was selected" is the whole diagnosis when a link that should
@@ -160,4 +189,80 @@ pub(crate) async fn refuse_relayed(
         return Ok(());
     }
     anyhow::bail!("{RELAY_REFUSED}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use iroh::{Endpoint, RelayMode, endpoint::presets};
+
+    use super::{Connection, PathWait, wait_selected_outcome};
+
+    const ALPN: &[u8] = b"test/path-wait";
+
+    async fn loopback_endpoint() -> Endpoint {
+        Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().expect("loopback"))
+            .expect("valid bind addr")
+            .bind()
+            .await
+            .expect("bind a loopback endpoint")
+    }
+
+    /// A connection between two loopback endpoints: the dialer's end and the accepted end. The
+    /// endpoints come back too: a dropped endpoint closes its connections.
+    async fn connected() -> (Endpoint, Endpoint, Connection, Connection) {
+        let server = loopback_endpoint().await;
+        let client = loopback_endpoint().await;
+        let accepting = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .accept()
+                    .await
+                    .expect("an incoming connection")
+                    .await
+                    .expect("the connection is accepted")
+            })
+        };
+        let dialed = client
+            .connect(server.addr(), ALPN)
+            .await
+            .expect("the dial succeeds");
+        (client, server, dialed, accepting.await.expect("the accept task ends"))
+    }
+
+    #[tokio::test]
+    async fn a_dialer_that_closes_while_the_wait_runs_is_not_a_timeout() {
+        let (_client, _server, dialed, accepted) = connected().await;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            dialed.close(0u32.into(), b"gave up");
+        });
+
+        let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| false).await;
+
+        assert_eq!(outcome, PathWait::Closed);
+    }
+
+    #[tokio::test]
+    async fn a_wait_with_no_path_and_no_close_times_out() {
+        let (_client, _server, _dialed, accepted) = connected().await;
+
+        let outcome = wait_selected_outcome(&accepted, Duration::from_millis(300), |_| false).await;
+
+        assert_eq!(outcome, PathWait::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn a_selected_path_ends_the_wait_at_once() {
+        let (_client, _server, _dialed, accepted) = connected().await;
+
+        let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| true).await;
+
+        assert_eq!(outcome, PathWait::Selected);
+    }
 }
