@@ -197,7 +197,15 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
         let task = n0_future::task::spawn(async move {
             let _guard = guard;
             match Box::pin(super::webrtc::dial_signal(&endpoint, addr, &handle, ice)).await {
-                Ok(()) => admission.note_success(peer),
+                Ok(()) => {
+                    admission.note_success(peer);
+                    // The acceptor of the other side nudges when it takes the
+                    // session; the dialer must too. An underlay connection that
+                    // was dialed before the session learns the address of the
+                    // session only from a dial that names it, and iroh does not
+                    // ask the lookup again for a remote it already knows.
+                    super::webrtc::nudge_session(&endpoint, peer).await;
+                }
                 Err(error) => {
                     if super::webrtc::is_cap_refusal(&error) {
                         admission.note_refused(peer);
