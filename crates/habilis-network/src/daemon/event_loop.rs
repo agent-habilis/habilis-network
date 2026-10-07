@@ -186,6 +186,9 @@ pub async fn run<A: NodeDriver>(
     // every pair to iroh's own paths.
     state.webrtc = webrtc_enabled.then_some(webrtc);
     state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
+    state
+        .unicast_pool
+        .set_admission(state.webrtc_admission.clone());
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;

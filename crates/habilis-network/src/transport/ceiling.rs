@@ -95,6 +95,12 @@ impl Ceiling {
         }
     }
 
+    /// When `peer` was last used, for a test.
+    #[cfg(test)]
+    pub(crate) fn last_use(&self, peer: EndpointId) -> Option<Instant> {
+        self.entries.get(&peer).and_then(|entry| entry.last_use)
+    }
+
     /// The units that count against the ceiling now.
     pub(crate) fn units(&self) -> usize {
         self.entries

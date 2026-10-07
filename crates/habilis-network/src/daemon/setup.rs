@@ -773,7 +773,12 @@ fn build_overlay(
     let (gossip, router) = build_mesh(
         endpoint.clone(),
         build.max_peers,
-        Some(build.unicast_acceptor.clone()),
+        Some(
+            build
+                .unicast_acceptor
+                .clone()
+                .with_admission(admission.clone()),
+        ),
         build
             .transports
             .webrtc

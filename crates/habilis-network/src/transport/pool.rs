@@ -115,6 +115,9 @@ struct PoolInner {
     /// path is the relay is refused; the connection stays pooled, since iroh
     /// may still punch a direct path on it.
     relay_transport: bool,
+    /// The table whose ceiling the connections of this pool count against. Set once the
+    /// table exists, which is after the pool.
+    admission: std::sync::OnceLock<super::admission::SignalAdmission>,
 }
 
 /// What [`UnicastPool::send_if_warm`] did with the frame.
@@ -171,8 +174,21 @@ impl UnicastPool {
                 dialing: std::sync::Mutex::new(HashSet::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
                 relay_transport,
+                admission: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Report the sends of this pool to `admission`, so that a connection with a send in
+    /// flight is never evicted at the ceiling and a used one is not the least recently used.
+    pub(crate) fn set_admission(&self, admission: super::admission::SignalAdmission) {
+        let _ = self.inner.admission.set(admission);
+    }
+
+    /// [`send_one`], marked busy in the ledger for as long as it runs.
+    async fn send_marked(&self, eid: EndpointId, conn: &Connection, bytes: &[u8]) -> Result<()> {
+        let _busy = self.inner.admission.get().map(|table| table.busy(eid));
+        send_one(conn, bytes).await
     }
 
     /// A detached pool with no endpoint — every operation is a no-op. The
@@ -192,6 +208,7 @@ impl UnicastPool {
                 dialing: std::sync::Mutex::new(HashSet::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
                 relay_transport: false,
+                admission: std::sync::OnceLock::new(),
             }),
         }
     }
@@ -216,7 +233,7 @@ impl UnicastPool {
         }
         let pool = self.clone();
         n0_future::task::spawn(async move {
-            let Err(error) = send_one(&conn, &bytes).await else {
+            let Err(error) = pool.send_marked(eid, &conn, &bytes).await else {
                 return;
             };
             tracing::debug!(target: LOG_TARGET, %error, "unicast send failed; dropping connection and redialing");
@@ -450,7 +467,7 @@ impl UnicastPool {
     /// dropping the connection at the first write error.
     async fn send_batch(&self, eid: EndpointId, conn: &Connection, frames: &[Bytes]) {
         for bytes in frames {
-            if let Err(error) = send_one(conn, bytes).await {
+            if let Err(error) = self.send_marked(eid, conn, bytes).await {
                 tracing::debug!(target: LOG_TARGET, %eid, %error, "batch cut short; dropping the connection");
                 self.inner.conns.lock().await.remove(&eid);
                 return;
@@ -487,7 +504,7 @@ impl UnicastPool {
         if !self.inner.relay_transport && !wait_direct(&conn, PATH_SELECT_TIMEOUT).await {
             bail!("{RELAY_REFUSED}");
         }
-        if let Err(error) = send_one(&conn, &bytes).await {
+        if let Err(error) = self.send_marked(eid, &conn, &bytes).await {
             self.inner.conns.lock().await.remove(&eid);
             return Err(error);
         }
@@ -999,5 +1016,54 @@ mod tests {
         assert!(pool.inner.conns.lock().await.is_empty());
         // Absent endpoint: nothing to drop, nothing panics.
         pool.forget(endpoint_id(2)).await;
+    }
+
+    /// A send over a pooled connection is a use of it: the ledger of the ceiling moves its
+    /// last use to the end of the send, so the connection of a peer that is being talked to
+    /// is not the least recently used.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_send_marks_its_connection_as_used_in_the_ledger() {
+        use iroh::protocol::Router;
+
+        use super::super::accept::UnicastAcceptor;
+        use super::super::admission::SignalAdmission;
+
+        let (tx, _frames) = tokio::sync::mpsc::channel(8);
+        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let router = Router::builder(server.clone())
+            .accept(super::super::UNICAST_ALPN, UnicastAcceptor::new(tx, true))
+            .spawn();
+        let admission = SignalAdmission::new(8);
+        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .hooks(admission.connection_hook())
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        let pool = super::UnicastPool::new(node.clone(), true);
+        pool.set_admission(admission.clone());
+
+        pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"one"))
+            .await
+            .expect("the first send");
+        let first = admission
+            .last_use(server.id())
+            .expect("the ledger holds it");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        pool.dial_and_send(server.id(), bytes::Bytes::from_static(b"two"))
+            .await
+            .expect("the second send");
+        let second = admission
+            .last_use(server.id())
+            .expect("the ledger holds it");
+
+        assert!(second > first, "the second send is a later use");
+        router.shutdown().await.expect("shutdown");
+        node.close().await;
     }
 }

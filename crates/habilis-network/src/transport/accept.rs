@@ -31,9 +31,18 @@ pub(crate) struct UnicastAcceptor {
     /// closed. The dialing pool closes its own end after half this time, so the
     /// acceptor's timeout is a backstop for a dialer that is gone.
     idle: Duration,
+    /// The table whose ceiling the accepted connections count against: a stream that is being
+    /// read marks its connection busy.
+    admission: Option<super::admission::SignalAdmission>,
 }
 
 impl UnicastAcceptor {
+    /// Report the streams of this acceptor to `admission`.
+    pub(crate) fn with_admission(mut self, admission: super::admission::SignalAdmission) -> Self {
+        self.admission = Some(admission);
+        self
+    }
+
     pub(crate) fn new(tx: mpsc::Sender<Bytes>, relay_transport: bool) -> Self {
         Self::with_idle(
             tx,
@@ -53,6 +62,7 @@ impl UnicastAcceptor {
             tx,
             relay_transport,
             idle,
+            admission: None,
         }
     }
 }
@@ -97,7 +107,13 @@ impl ProtocolHandler for UnicastAcceptor {
         // for the idle timeout.
         loop {
             match n0_future::time::timeout(self.idle, conn.accept_uni()).await {
-                Ok(Ok(mut recv)) => self.handle_frame(recv.read_to_end(MAX_UNICAST_FRAME).await),
+                Ok(Ok(mut recv)) => {
+                    let _busy = self
+                        .admission
+                        .as_ref()
+                        .map(|table| table.busy(conn.remote_id()));
+                    self.handle_frame(recv.read_to_end(MAX_UNICAST_FRAME).await);
+                }
                 Ok(Err(_closed)) => break,
                 Err(_idle) => {
                     tracing::debug!(target: LOG_TARGET, "closing an idle accepted unicast connection");

@@ -576,8 +576,52 @@ impl SignalAdmission {
         }
     }
 
+    /// A send or a stream is in flight on the connection of `peer`: the ledger does not
+    /// evict it until the guard is dropped.
+    pub(crate) fn busy(&self, peer: EndpointId) -> BusyGuard {
+        self.lock().ceiling.busy_begin(peer);
+        BusyGuard {
+            admission: self.clone(),
+            peer,
+        }
+    }
+
+    /// When the ledger last saw `peer` used, for a test.
+    #[cfg(test)]
+    pub(crate) fn last_use(&self, peer: EndpointId) -> Option<Instant> {
+        self.lock().ceiling.last_use(peer)
+    }
+
+    /// How many peers the node holds a direct connection to, against the ceiling.
+    pub(crate) fn direct_units(&self) -> usize {
+        self.lock().ceiling.units()
+    }
+
+    /// How many direct connections the node is over its ceiling by, because every other
+    /// candidate was busy when a newcomer came.
+    pub(crate) fn over_ceiling(&self) -> usize {
+        self.lock().ceiling.over_ceiling()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().expect("signal admission poisoned")
+    }
+}
+
+/// Marks a connection busy for as long as it lives.
+#[derive(Debug)]
+#[must_use = "dropping the guard ends the busy mark"]
+pub(crate) struct BusyGuard {
+    admission: SignalAdmission,
+    peer: EndpointId,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.admission
+            .lock()
+            .ceiling
+            .busy_end(self.peer, Instant::now());
     }
 }
 
@@ -1036,87 +1080,188 @@ mod tests {
         client.close().await;
     }
 
+    /// A node with an admission table at ceiling `cap`, and servers that report how
+    /// each of its connections ended.
+    #[cfg(feature = "iroh-test-utils")]
+    struct Fixture {
+        admission: SignalAdmission,
+        node: iroh::Endpoint,
+        relay_url: iroh::RelayUrl,
+        _relay_server: Box<dyn std::any::Any + Send>,
+        reports: tokio::sync::mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
+        closed: tokio::sync::mpsc::UnboundedReceiver<(EndpointId, iroh::endpoint::ConnectionError)>,
+        servers: Vec<(iroh::Endpoint, iroh::protocol::Router)>,
+    }
+
+    #[cfg(feature = "iroh-test-utils")]
+    impl Fixture {
+        async fn new(cap: usize) -> Self {
+            let (relay_url, relay_server) = crate::lookup::test_relay::spawn_plain()
+                .await
+                .expect("local relay");
+            let admission = SignalAdmission::new(cap);
+            let (reports, closed) = tokio::sync::mpsc::unbounded_channel();
+            let mut fixture = Self {
+                node: Self::bind(&relay_url, Some(admission.connection_hook())).await,
+                admission,
+                relay_url,
+                _relay_server: Box::new(relay_server),
+                reports,
+                closed,
+                servers: Vec::new(),
+            };
+            fixture.servers.clear();
+            fixture
+        }
+
+        async fn bind(relay_url: &iroh::RelayUrl, hook: Option<ConnectionHook>) -> iroh::Endpoint {
+            let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::custom([relay_url.clone()]))
+                .clear_ip_transports();
+            if let Some(hook) = hook {
+                builder = builder.hooks(hook);
+            }
+            builder.bind().await.expect("bind an endpoint on the relay")
+        }
+
+        /// The node dials a new server on the unicast protocol.
+        async fn dial(&mut self) -> (EndpointId, Connection) {
+            use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+
+            #[derive(Debug, Clone)]
+            struct Report(
+                EndpointId,
+                tokio::sync::mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
+            );
+            impl ProtocolHandler for Report {
+                async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                    let reason = conn.closed().await;
+                    let _ = self.1.send((self.0, reason));
+                    Ok(())
+                }
+            }
+            let server = Self::bind(&self.relay_url, None).await;
+            let id = server.id();
+            let router = Router::builder(server.clone())
+                .accept(super::super::UNICAST_ALPN, Report(id, self.reports.clone()))
+                .spawn();
+            let relayed = iroh::EndpointAddr::new(id).with_relay_url(self.relay_url.clone());
+            let conn = self
+                .node
+                .connect(relayed, super::super::UNICAST_ALPN)
+                .await
+                .expect("dial over the relay");
+            self.servers.push((server, router));
+            (id, conn)
+        }
+
+        /// The next connection that a server saw close, within `within`.
+        async fn next_closed(
+            &mut self,
+            within: Duration,
+        ) -> Option<(EndpointId, iroh::endpoint::ConnectionError)> {
+            tokio::time::timeout(within, self.closed.recv())
+                .await
+                .ok()
+                .flatten()
+        }
+
+        async fn shutdown(self) {
+            for (_, router) in self.servers {
+                router.shutdown().await.expect("shutdown");
+            }
+            self.node.close().await;
+        }
+    }
+
     /// **The ceiling of direct connections.** A node whose ceiling is 4 dials five peers over
     /// the unicast protocol. The fifth connection is admitted, and the least recently used
     /// one is closed with the `EVICTED` code, which the peer reads.
     #[cfg(feature = "iroh-test-utils")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used() {
-        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-
         use super::super::webrtc::close_code::EVICTED;
 
-        #[derive(Debug, Clone)]
-        struct Report(
-            EndpointId,
-            tokio::sync::mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
-        );
-        impl ProtocolHandler for Report {
-            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                let reason = conn.closed().await;
-                let _ = self.1.send((self.0, reason));
-                Ok(())
-            }
-        }
-        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
-        let bind = |hook: Option<ConnectionHook>| {
-            let relay_url = relay_url.clone();
-            async move {
-                let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-                    .relay_mode(iroh::RelayMode::custom([relay_url]))
-                    .clear_ip_transports();
-                if let Some(hook) = hook {
-                    builder = builder.hooks(hook);
-                }
-                builder.bind().await.expect("bind an endpoint on the relay")
-            }
-        };
-        let admission = SignalAdmission::new(4);
-        let node = bind(Some(admission.connection_hook())).await;
-        let (reports, mut closed) = tokio::sync::mpsc::unbounded_channel();
-        let mut servers = Vec::new();
+        let mut fixture = Fixture::new(4).await;
         let mut conns = Vec::new();
         for _ in 0..5 {
-            let server = bind(None).await;
-            let router = Router::builder(server.clone())
-                .accept(
-                    super::super::UNICAST_ALPN,
-                    Report(server.id(), reports.clone()),
-                )
-                .spawn();
-            let relayed = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
-            conns.push(
-                node.connect(relayed, super::super::UNICAST_ALPN)
-                    .await
-                    .expect("dial over the relay"),
-            );
-            servers.push((server, router));
+            conns.push(fixture.dial().await);
         }
-        let first = servers[0].0.id();
+        let first = conns[0].0;
 
-        let (peer, reason) = tokio::time::timeout(Duration::from_secs(10), closed.recv())
+        let (peer, reason) = fixture
+            .next_closed(Duration::from_secs(10))
             .await
-            .expect("a connection must be evicted")
-            .expect("the channel is open");
+            .expect("a connection must be evicted");
         assert_eq!(peer, first, "the least recently used goes");
         let iroh::endpoint::ConnectionError::ApplicationClosed(close) = &reason else {
             panic!("expected the EVICTED code, got {reason:?}");
         };
         assert_eq!(close.error_code.into_inner(), u64::from(EVICTED));
         assert!(
-            tokio::time::timeout(Duration::from_millis(500), closed.recv())
+            fixture
+                .next_closed(Duration::from_millis(500))
                 .await
-                .is_err(),
+                .is_none(),
             "exactly one eviction"
         );
-        for conn in &conns[1..] {
+        for (_, conn) in &conns[1..] {
             assert!(conn.close_reason().is_none(), "the others stay open");
         }
-        for (_, router) in servers {
-            router.shutdown().await.expect("shutdown");
-        }
-        node.close().await;
+        fixture.shutdown().await;
+    }
+
+    /// A connection with a send in flight is never evicted: the next least recently used
+    /// one goes instead.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_busy_connection_is_not_evicted() {
+        let mut fixture = Fixture::new(2).await;
+        let (first, first_conn) = fixture.dial().await;
+        let (second, _second_conn) = fixture.dial().await;
+        let _busy = fixture.admission.busy(first);
+
+        let _third = fixture.dial().await;
+
+        let (peer, _) = fixture
+            .next_closed(Duration::from_secs(10))
+            .await
+            .expect("a connection must be evicted");
+        assert_eq!(peer, second, "the busy first connection is skipped");
+        assert!(
+            first_conn.close_reason().is_none(),
+            "the busy one stays open"
+        );
+        fixture.shutdown().await;
+    }
+
+    /// When every candidate is busy the newcomer is still admitted: the count is over the
+    /// ceiling by the busy connections, the gauge says so, and nothing is evicted. When the
+    /// sends end, the next admission evicts again.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling() {
+        let mut fixture = Fixture::new(1).await;
+        let (first, _first_conn) = fixture.dial().await;
+        let busy = fixture.admission.busy(first);
+
+        let (_second, _second_conn) = fixture.dial().await;
+
+        assert!(
+            fixture
+                .next_closed(Duration::from_millis(1500))
+                .await
+                .is_none(),
+            "nobody is evicted while the only candidate is busy"
+        );
+        assert_eq!(fixture.admission.over_ceiling(), 1);
+
+        drop(busy);
+        let _third = fixture.dial().await;
+        assert!(
+            fixture.next_closed(Duration::from_secs(10)).await.is_some(),
+            "once the send has ended an admission evicts again"
+        );
+        fixture.shutdown().await;
     }
 }
