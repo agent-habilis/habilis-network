@@ -236,9 +236,10 @@ pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, ctx: &HandlerCtx<'
 ///
 /// The alive tick calls this with `only_changed` false, as the backstop: every pair that has
 /// something to carry is dialed. A link-state vector that changed the topology calls it with
-/// `only_changed` true, so that a route that comes in between two ticks is dialed at once, and
-/// a route that was dialed already is not dialed again. No in-flight guard, by design: each dial
-/// is bounded by `DIAL_TIMEOUT`.
+/// `only_changed` true, so that a route that comes in between two ticks is dialed at once. The
+/// guard is on the route, not on the dial: a route that a link-state event dialed already is not
+/// dialed again by another event, and the alive tick dials it as the backstop. No in-flight guard,
+/// by design: each dial is bounded by `DIAL_TIMEOUT`.
 pub(crate) fn nudge_routable_relay_pairs(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
@@ -285,18 +286,23 @@ fn forget_route_unless_relay(
 /// Pure: the dials of one pass over the pairs that read as the relay, as `(peer, has a session,
 /// route)`. A pair is dialed when it has a session address or a route to carry. With
 /// `only_changed` a pair is dialed only for a route that differs from the one dialed for it last,
-/// and a pair with no route is not dialed at all. `route_dialed` remembers the route of each dial.
+/// and a pair with no route is not dialed at all. `route_dialed` remembers the route of each dial,
+/// and keeps it only for the pairs of this pass: a pair that left the relay (it climbed, or it
+/// is gone) is forgotten, so that a pair that falls back with the same route is dialed again.
 pub(crate) fn plan_relay_dials(
     pairs: impl IntoIterator<Item = (EndpointId, bool, Option<iroh::TransportAddr>)>,
     route_dialed: &mut HashMap<EndpointId, iroh::TransportAddr>,
     only_changed: bool,
 ) -> Vec<(EndpointId, NudgeAddrs)> {
+    let pairs: Vec<_> = pairs.into_iter().collect();
+    route_dialed.retain(|peer, _| pairs.iter().any(|(on_relay, ..)| on_relay == peer));
     let mut dials = Vec::new();
     for (peer, has_session, route) in pairs {
         let Some(addrs) = step(PathKind::Relay, has_session, route.clone()).nudge else {
             continue;
         };
-        if only_changed && (route.is_none() || route_dialed.get(&peer) == route.as_ref()) {
+        let already_dialed = route.is_some() && route_dialed.get(&peer) == route.as_ref();
+        if only_changed && (route.is_none() || already_dialed) {
             continue;
         }
         if let Some(route) = route {
@@ -1440,6 +1446,45 @@ mod tests {
         assert!(
             plan_relay_dials([(bob, false, None)], &mut dialed, false).is_empty(),
             "no session and no route: nothing to carry"
+        );
+    }
+
+    // A pair that climbed (it reads IP in the next pass, so it is not among the pairs) and falls back
+    // to the relay with the same route is dialed again; a pair that is gone is forgotten too. The
+    // forget in on_path_change reaches only the pairs that are watched.
+    #[test]
+    fn a_pair_that_left_the_relay_and_fell_back_is_dialed_again_for_the_same_route() {
+        use super::plan_relay_dials;
+        use iroh::TransportAddr;
+        use std::collections::HashMap;
+
+        let route = TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"));
+        let (bob, carol) = (endpoint_id(2), endpoint_id(3));
+        let mut dialed = HashMap::new();
+
+        let first = plan_relay_dials(
+            [
+                (bob, false, Some(route.clone())),
+                (carol, false, Some(route.clone())),
+            ],
+            &mut dialed,
+            true,
+        );
+        assert_eq!(first.len(), 2, "both pairs are dialed for their route");
+
+        // Bob climbed: he is not among the pairs of this pass. Carol is gone from the roster.
+        let none = plan_relay_dials([], &mut dialed, true);
+        assert!(none.is_empty());
+        assert!(
+            dialed.is_empty(),
+            "the pairs that left the relay are forgotten"
+        );
+
+        let again = plan_relay_dials([(bob, false, Some(route))], &mut dialed, true);
+        assert_eq!(
+            again.len(),
+            1,
+            "bob fell back to the relay with the same route: dialed again"
         );
     }
 

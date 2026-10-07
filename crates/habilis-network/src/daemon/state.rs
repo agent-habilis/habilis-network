@@ -163,7 +163,8 @@ pub struct EventLoopState {
     /// tick's nudge of peers riding `WebRTC`.
     pub(crate) path_kinds: HashMap<EndpointId, crate::transport::probe::PathKind>,
     /// The multihop route that was last dialed for each pair on the relay, so that a route that
-    /// arrives between two alive ticks is dialed once, and a route that was dialed is not again.
+    /// arrives between two alive ticks is dialed once, and a route that was dialed is not dialed
+    /// again by a link-state event (the alive tick dials it as the backstop).
     pub(crate) route_dialed: HashMap<EndpointId, iroh::TransportAddr>,
     /// Re-bridge memory: every peer `EndpointId` we've ever linked to,
     /// kept *across* `NeighborDown` (unlike `linked_endpoints`). When a
