@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(closed_with(&reason), Some(9), "{reason:?}");
         let logged = String::from_utf8_lossy(&logs.0.lock().expect("log buffer")).into_owned();
         assert!(
-            logged.contains("not a neighbor") && logged.contains(&client.id().to_string()),
+            logged.contains("underlay signal refused") && logged.contains(&client.id().to_string()),
             "the refusal names the peer and the reason: {logged}"
         );
 
