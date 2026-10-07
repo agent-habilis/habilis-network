@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
-use iroh_gossip::api::GossipSender;
+use iroh_gossip::api::{Event, GossipReceiver, GossipSender};
+use n0_future::StreamExt as _;
 use tokio::sync::mpsc;
 
-use crate::FrameSink;
+use crate::{FrameSink, GossipHandle};
 
 /// Frames waiting for the topic's sender. A full queue refuses the frame: QUIC
 /// treats that as loss.
@@ -44,6 +45,25 @@ impl GossipSink {
     }
 }
 
+/// The task of [`spawn_receive_loop`]. `abort()` stops it.
+pub type ReceiveLoop = n0_future::task::JoinHandle<()>;
+
+/// Read a topic and hand every message to `handle`, until the topic ends.
+///
+/// For a topic that carries **only** transport frames, as a test or a benchmark does.
+/// On the mesh topic the engine splits the frames from the mesh messages before
+/// it hands anything to a handle (design doc, section 2.5): this loop does not.
+#[must_use]
+pub fn spawn_receive_loop(mut receiver: GossipReceiver, handle: GossipHandle) -> ReceiveLoop {
+    n0_future::task::spawn(async move {
+        while let Some(Ok(event)) = receiver.next().await {
+            if let Event::Received(message) = event {
+                let _ = handle.deliver(&message.content);
+            }
+        }
+    })
+}
+
 impl FrameSink for GossipSink {
     fn try_send(&self, frame: Bytes) -> bool {
         self.queue.try_send(frame).is_ok()
@@ -62,10 +82,8 @@ mod tests {
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
     use iroh::{Endpoint, RelayMode, SecretKey};
-    use iroh_gossip::api::Event;
     use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
     use iroh_gossip::proto::TopicId;
-    use n0_future::StreamExt;
 
     use crate::{GossipHandle, frame};
 
@@ -120,22 +138,13 @@ mod tests {
             .subscribe(topic, vec![])
             .await
             .expect("bob joins");
-        let (_bob_sender, mut bob_receiver) = bob_topic.split();
+        let (_bob_sender, bob_receiver) = bob_topic.split();
         let alice_topic = alice_gossip
             .subscribe_and_join(topic, vec![bob_endpoint.id()])
             .await
             .expect("alice joins");
         let (alice_sender, _alice_receiver) = alice_topic.split();
-        let reader = {
-            let bob_handle = bob_handle.clone();
-            tokio::spawn(async move {
-                while let Some(Ok(event)) = bob_receiver.next().await {
-                    if let Event::Received(message) = event {
-                        let _ = bob_handle.deliver(&message.content);
-                    }
-                }
-            })
-        };
+        let reader = super::spawn_receive_loop(bob_receiver, bob_handle.clone());
 
         alice_handle.attach_gossip(alice_sender);
         alice_handle
@@ -271,16 +280,9 @@ mod tests {
                 .expect("join timed out")
                 .expect("join")
             };
-            let (sender, mut receiver) = topic_handle.split();
+            let (sender, receiver) = topic_handle.split();
             handle.attach_gossip(sender);
-            let handle = handle.clone();
-            readers.push(tokio::spawn(async move {
-                while let Some(Ok(event)) = receiver.next().await {
-                    if let Event::Received(message) = event {
-                        let _ = handle.deliver(&message.content);
-                    }
-                }
-            }));
+            readers.push(super::spawn_receive_loop(receiver, handle.clone()));
         }
 
         let to_carol = iroh::EndpointAddr::from_parts(
