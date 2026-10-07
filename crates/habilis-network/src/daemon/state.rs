@@ -162,6 +162,9 @@ pub struct EventLoopState {
     /// The last selected path kind each watcher reported, for the alive
     /// tick's nudge of peers riding `WebRTC`.
     pub(crate) path_kinds: HashMap<EndpointId, crate::transport::probe::PathKind>,
+    /// The multihop route that was last dialed for each pair on the relay, so that a route that
+    /// arrives between two alive ticks is dialed once, and a route that was dialed is not again.
+    pub(crate) route_dialed: HashMap<EndpointId, iroh::TransportAddr>,
     /// Re-bridge memory: every peer `EndpointId` we've ever linked to,
     /// kept *across* `NeighborDown` (unlike `linked_endpoints`). When a
     /// node loses all links because the rendezvous/relay is unreachable,
@@ -699,6 +702,7 @@ impl EventLoopState {
             path_changes: tokio::sync::mpsc::unbounded_channel().0,
             path_watchers: HashMap::new(),
             path_kinds: HashMap::new(),
+            route_dialed: HashMap::new(),
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
             proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints::new(
                 KNOWN_ENDPOINTS_CAP,

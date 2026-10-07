@@ -11,6 +11,8 @@
 //! peer that never proves a direct path stays `RelayOnly`, retried on the
 //! alive tick, and is never grafted through the relay.
 
+use std::collections::HashMap;
+
 use futures_util::StreamExt as _;
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
@@ -218,41 +220,91 @@ pub(crate) fn mark_proven(state: &mut EventLoopState, peer: EndpointId) -> bool 
 /// a connect, and each one makes iroh try the UDP punch again and re-run path
 /// selection; without it iroh retries every 60 s. When UDP answers, the
 /// watcher sees it selected and the session is detached.
-pub(crate) fn nudge_webrtc_riders(state: &EventLoopState, ctx: &HandlerCtx<'_>) {
+pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     for peer in webrtc_riders(state) {
         let endpoint = ctx.endpoint.clone();
         n0_future::task::spawn(async move {
             super::webrtc::nudge(&endpoint, peer).await;
         });
     }
-    // A pair on the relay that the topology can now route: dial with the route.
-    // The watcher does this when the path is lost, but a route learned later
-    // (link-state comes every 15 s) is then missing, and nothing else runs a
-    // lookup for a pair that already has a session or no offer to make.
-    // No in-flight guard in both loops, by design: each dial is bounded by `DIAL_TIMEOUT`.
-    for addr in state
+    nudge_routable_relay_pairs(state, ctx, false);
+}
+
+/// A pair on the relay that the topology can now route: dial with the route. The watcher does
+/// this when the path is lost, but a route learned later is then missing, and nothing else runs
+/// a lookup for a pair that already has a session or no offer to make.
+///
+/// The alive tick calls this with `only_changed` false, as the backstop: every pair that has
+/// something to carry is dialed. A link-state vector that changed the topology calls it with
+/// `only_changed` true, so that a route that comes in between two ticks is dialed at once, and
+/// a route that was dialed already is not dialed again. No in-flight guard, by design: each dial
+/// is bounded by `DIAL_TIMEOUT`.
+pub(crate) fn nudge_routable_relay_pairs(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    only_changed: bool,
+) {
+    let pairs: Vec<(EndpointId, bool, Option<iroh::TransportAddr>)> = state
         .peer_endpoints
         .values()
         .filter(|addr| addr.id != ctx.rendezvous_id)
-    {
-        let kind = pair_kind(
-            state.path_kinds.get(&addr.id).copied(),
-            state.webrtc_admission.selected_kind(addr.id),
-        );
-        if kind != Some(PathKind::Relay) {
+        .filter(|addr| {
+            pair_kind(
+                state.path_kinds.get(&addr.id).copied(),
+                state.webrtc_admission.selected_kind(addr.id),
+            ) == Some(PathKind::Relay)
+        })
+        .map(|addr| {
+            let has_session = state
+                .webrtc
+                .as_ref()
+                .is_some_and(|handle| handle.has_session(&addr.id));
+            (addr.id, has_session, route_to(state, addr.id))
+        })
+        .collect();
+    for (peer, addrs) in plan_relay_dials(pairs, &mut state.route_dialed, only_changed) {
+        let endpoint = ctx.endpoint.clone();
+        n0_future::task::spawn(async move {
+            super::webrtc::nudge_with(&endpoint, peer, &addrs).await;
+        });
+    }
+}
+
+/// Pure: the route dialed for a pair is only kept while the pair reads as the relay: a pair that
+/// fell back to the relay later gets its route dialed again.
+fn forget_route_unless_relay(
+    route_dialed: &mut HashMap<EndpointId, iroh::TransportAddr>,
+    peer: EndpointId,
+    kind: PathKind,
+) {
+    if kind != PathKind::Relay {
+        route_dialed.remove(&peer);
+    }
+}
+
+/// Pure: the dials of one pass over the pairs that read as the relay, as `(peer, has a session,
+/// route)`. A pair is dialed when it has a session address or a route to carry. With
+/// `only_changed` a pair is dialed only for a route that differs from the one dialed for it last,
+/// and a pair with no route is not dialed at all. `route_dialed` remembers the route of each dial.
+pub(crate) fn plan_relay_dials(
+    pairs: impl IntoIterator<Item = (EndpointId, bool, Option<iroh::TransportAddr>)>,
+    route_dialed: &mut HashMap<EndpointId, iroh::TransportAddr>,
+    only_changed: bool,
+) -> Vec<(EndpointId, NudgeAddrs)> {
+    let mut dials = Vec::new();
+    for (peer, has_session, route) in pairs {
+        let Some(addrs) = step(PathKind::Relay, has_session, route.clone()).nudge else {
+            continue;
+        };
+        if only_changed && (route.is_none() || route_dialed.get(&peer) == route.as_ref()) {
             continue;
         }
-        let has_session = state
-            .webrtc
-            .as_ref()
-            .is_some_and(|handle| handle.has_session(&addr.id));
-        if let Some(addrs) = step(PathKind::Relay, has_session, route_to(state, addr.id)).nudge {
-            let (endpoint, peer) = (ctx.endpoint.clone(), addr.id);
-            n0_future::task::spawn(async move {
-                super::webrtc::nudge_with(&endpoint, peer, &addrs).await;
-            });
+        if let Some(route) = route {
+            route_dialed.insert(peer, route);
         }
+        dials.push((peer, addrs));
     }
+    dials
 }
 
 /// The multihop route to `peer` that the topology has now, as a dialable
@@ -303,6 +355,7 @@ pub(crate) async fn on_path_change(
     }
     tracing::debug!(target: super::LOG_TARGET, %peer, ?kind, "selected path changed");
     state.path_kinds.insert(peer, kind);
+    forget_route_unless_relay(&mut state.route_dialed, peer, kind);
     // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
     // session now, not at the alive tick.
     #[cfg(feature = "host")]
@@ -1333,6 +1386,78 @@ mod tests {
             "the watcher's report comes first"
         );
         assert_eq!(pair_kind(None, None), None);
+    }
+
+    // A route that arrives between two alive ticks is dialed at once, and only once: the climb of a
+    // pair to multihop waited for the next tick because nothing dialed when the topology changed.
+    #[test]
+    fn a_new_route_is_dialed_once_and_a_changed_route_again() {
+        use super::plan_relay_dials;
+        use iroh::TransportAddr;
+        use std::collections::HashMap;
+
+        let route =
+            |port: u16| TransportAddr::Ip(format!("127.0.0.1:{port}").parse().expect("addr"));
+        let bob = endpoint_id(2);
+        let mut dialed = HashMap::new();
+
+        let first = plan_relay_dials([(bob, false, Some(route(1)))], &mut dialed, true);
+        assert_eq!(first.len(), 1, "a new route is dialed");
+        assert_eq!(first[0].0, bob);
+        assert_eq!(first[0].1.route, Some(route(1)), "with the route");
+
+        let same = plan_relay_dials([(bob, false, Some(route(1)))], &mut dialed, true);
+        assert!(same.is_empty(), "the same route is not dialed again");
+
+        let changed = plan_relay_dials([(bob, false, Some(route(2)))], &mut dialed, true);
+        assert_eq!(changed.len(), 1, "a changed route is dialed");
+        assert_eq!(changed[0].1.route, Some(route(2)));
+
+        let tick = plan_relay_dials([(bob, false, Some(route(2)))], &mut dialed, false);
+        assert_eq!(
+            tick.len(),
+            1,
+            "the alive tick is the backstop: it dials the same route again"
+        );
+    }
+
+    // A pair with a session and no route has something to carry (the session address), which the
+    // alive tick dials; a link-state vector says nothing about it, so it does not.
+    #[test]
+    fn a_pair_with_a_session_and_no_route_is_dialed_by_the_tick_only() {
+        use super::plan_relay_dials;
+        use std::collections::HashMap;
+
+        let bob = endpoint_id(2);
+        let mut dialed = HashMap::new();
+        assert!(
+            plan_relay_dials([(bob, true, None)], &mut dialed, true).is_empty(),
+            "an event with no route dials nothing"
+        );
+        let tick = plan_relay_dials([(bob, true, None)], &mut dialed, false);
+        assert_eq!(tick.len(), 1, "the tick nudges the session onto its path");
+        assert!(tick[0].1.session);
+        assert!(
+            plan_relay_dials([(bob, false, None)], &mut dialed, false).is_empty(),
+            "no session and no route: nothing to carry"
+        );
+    }
+
+    // The route that was dialed is forgotten once the pair leaves the relay, so a pair that falls back
+    // to the relay later is dialed with its route again.
+    #[test]
+    fn the_dialed_route_is_forgotten_once_the_pair_reads_ip() {
+        use super::forget_route_unless_relay;
+        use iroh::TransportAddr;
+        use std::collections::HashMap;
+
+        let bob = endpoint_id(2);
+        let mut dialed =
+            HashMap::from([(bob, TransportAddr::Ip("127.0.0.1:1".parse().expect("addr")))]);
+        forget_route_unless_relay(&mut dialed, bob, PathKind::Relay);
+        assert!(dialed.contains_key(&bob), "still on the relay: kept");
+        forget_route_unless_relay(&mut dialed, bob, PathKind::Ip);
+        assert!(!dialed.contains_key(&bob), "the pair reads IP: forgotten");
     }
 
     // iroh selects a path per connection: a gossip link that is still on the relay can sit beside a

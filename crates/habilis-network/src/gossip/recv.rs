@@ -627,7 +627,9 @@ async fn dispatch_infra(
             return ControlFlow::Break(());
         }
         MessageKind::LinkState => {
-            handle_link_state(message, state);
+            if handle_link_state(message, state) {
+                crate::transport::probe::nudge_routable_relay_pairs(state, ctx, true);
+            }
             return ControlFlow::Break(());
         }
         MessageKind::Presence { subtype } => {
@@ -653,17 +655,18 @@ async fn dispatch_infra(
 /// author's own measured links + underlay address (`body` = a serialized
 /// `LinkVector`) supersede the last vector we held for that origin. Dropped
 /// silently when the multihop transport is off or the body is malformed —
-/// plumbing like the digests, never logged or surfaced.
-fn handle_link_state(message: &Message, state: &mut EventLoopState) {
+/// plumbing like the digests, never logged or surfaced. Returns whether the topology changed.
+fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
     #[cfg(not(feature = "host"))]
     {
         // No multihop transport off-host: nothing consumes a routing table.
         let _ = (message, state);
+        false
     }
     #[cfg(feature = "host")]
     {
         let Some(handle) = state.multihop.as_ref() else {
-            return; // multihop off: nothing consumes the routing table
+            return false; // multihop off: nothing consumes the routing table
         };
         match serde_json::from_str::<habilis_network_iroh_multihop_transport::LinkVector>(
             message.body.as_str(),
@@ -684,7 +687,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
                         author = %message.author,
                         "dropping multihop link-state: its origin is not the endpoint bound to its author"
                     );
-                    return;
+                    return false;
                 }
                 let updated = handle.feed_topology(vector);
                 tracing::debug!(target: "habilis_network::gossip",
@@ -698,6 +701,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
                 if updated {
                     crate::transport::underlay_webrtc::tick_now(state);
                 }
+                updated
             }
             Err(error) => {
                 tracing::debug!(target: "habilis_network::gossip",
@@ -705,6 +709,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
                     %error,
                     "dropping malformed multihop link-state"
                 );
+                false
             }
         }
     }

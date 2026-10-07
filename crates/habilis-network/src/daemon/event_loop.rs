@@ -455,7 +455,11 @@ pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
     // source a route (`route_to(self, …)` would always be empty).
-    handle.feed_topology(vector.clone());
+    let updated = handle.feed_topology(vector.clone());
+    // Our own links changed the topology: a route may exist now that did not at the last tick.
+    if updated {
+        crate::transport::probe::nudge_routable_relay_pairs(state, ctx, true);
+    }
     let Some(body) = gossip::json_body(&vector) else {
         return;
     };
@@ -733,7 +737,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // whose session attached since, gets another look.
                 crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
                 crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
-                crate::transport::probe::nudge_webrtc_riders(&state, &ctx);
+                crate::transport::probe::nudge_webrtc_riders(&mut state, &ctx);
             }
             _ = intervals.sweep.tick() => {
                 state.idle.sweep += 1;
