@@ -354,7 +354,7 @@ A peer is one unit when the node holds a unicast QUIC connection to it, or a `We
 
 The ledger is a pure type, `Ceiling` (`crates/habilis-network/src/transport/ceiling.rs`). The admission table (`SignalAdmission`) holds one, and every QUIC connection of the endpoint reaches it through the connection hook. Its rules:
 
-1. **An eviction is triggered only by an admission.** A unit that is added, or a peer that stops being a neighbor, can evict. A timer never evicts, except the backstop below. A node at C with no newcomer is quiet. Test: `a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used` ends with exactly one eviction and no other.
+1. **An eviction is triggered only by an admission.** A unit that is added, or a peer that stops being a neighbor, can evict. A timer never evicts, except the backstop below. The refusal of the offer of a peer that was evicted lately is not an eviction. A node at C with no newcomer is quiet. Test: `a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used` ends with exactly one eviction and no other.
 2. **The order of the victims.** A peer that was idle for 30 s or more goes first, the least recently used first. A peer younger than 60 s goes last. A peer with a send or a stream in flight is never a victim.
 3. **If every candidate is busy, the newcomer is admitted** and the count is over C by the number of busy units. The gauge `over_ceiling` in the census line says so. Test: `when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling`.
 4. **A batch down to 90 percent of C** (rounded up) runs with an admission, at most once in 5 s, so that the next admissions do not each evict.

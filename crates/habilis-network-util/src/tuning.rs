@@ -768,7 +768,9 @@ pub const RENDEZVOUS_DWELL_SECS: u64 = 30;
 pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
 
 /// How long the session of a lane peer stays wanted after a frame was held for it. The offer
-/// that the held frame asks for must start within this time, or the want lapses.
+/// that the held frame asks for must start within this time, or the want lapses. A frame that stays
+/// parked after the want lapsed does not mark the peer again by itself: the next send to the peer
+/// does.
 pub const LANE_WANTED_SECS: u64 = 60;
 
 /// How many bytes of one QUIC stream a node buffers for a peer that sends faster than the node
@@ -789,8 +791,9 @@ pub const QUIC_SEND_WINDOW: u64 = 1024 * 1024;
 pub const QUIC_MAX_UNI_STREAMS: u32 = 32;
 pub const QUIC_MAX_BIDI_STREAMS: u32 = 4;
 
-/// How many bytes of datagrams a node buffers for a peer, the most that the multihop and the
-/// `WebRTC` paths can queue in the receiver of one connection (decision D11).
+/// How many bytes of QUIC datagrams a node buffers for a peer (decision D11). The engine sends no QUIC
+/// datagrams today, so this is a reserve bound, not a measured need: it keeps a peer that does send
+/// them from growing the buffer.
 pub const QUIC_DATAGRAM_BUFFER: usize = 64 * 1024;
 
 /// How long after a `Neighbor` request a node reads "no link came up" as a refusal: the longer of

@@ -582,7 +582,11 @@ impl SignalAdmission {
 
     /// The peer offers a session while this node's own offer to it runs: give ours up, so that the
     /// peer's offer is answered. Returns whether an offer was given up. A round that answers is
-    /// never given up, and the guard of the round that was given up releases nothing later.
+    /// never given up.
+    ///
+    /// Each round has an epoch, and a guard releases the slot only if its round still holds it.
+    /// Without it, the guard of the round that was given up would drop later, and release the slot of
+    /// the answer that took its place, so that a third round could start beside the answer.
     pub(crate) fn preempt_offer(&self, peer: EndpointId) -> bool {
         let mut inner = self.lock();
         let Some(slot) = inner

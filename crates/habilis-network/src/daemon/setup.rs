@@ -1148,7 +1148,7 @@ mod tests {
         }
     }
 
-    // G and D come from the caller, and `0` takes the default. Every option set
+    // G and C come from the caller, and `0` takes the default. Every option set
     // (`Opts`, the C struct, the browser object) ends in `setup_mesh`, so this is
     // the one place that has to hold.
     #[tokio::test]
@@ -1156,7 +1156,7 @@ mod tests {
         use crate::transport::MAX_DIRECT_PEERS;
         use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 
-        for (max_peers, max_direct, want_g, want_d) in [
+        for (max_peers, max_direct, want_g, want_c) in [
             (0, 0, GOSSIP_ACTIVE_VIEW_CAPACITY, MAX_DIRECT_PEERS),
             (5, 3, 5, 3),
         ] {
@@ -1182,7 +1182,7 @@ mod tests {
             .await
             .expect("a loopback mesh sets up");
             assert_eq!(config.max_peers, want_g, "G for {max_peers}");
-            assert_eq!(config.webrtc_admission.cap(), want_d, "D for {max_direct}");
+            assert_eq!(config.webrtc_admission.cap(), want_c, "C for {max_direct}");
             config.router.shutdown().await.expect("the router stops");
         }
     }

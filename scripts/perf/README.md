@@ -51,7 +51,7 @@ full text.
 | `MESH_MAX_DIRECT` | C, the ceiling of direct connections (WebRTC sessions and unicast connections together); `0` takes the engine default, 64. A newcomer past C evicts the least valuable peer |
 | `MESH_TRAFFIC_UNTIL_SECS` | the directed messages stop after this many seconds. With `MESH_BLOCK_UDP_AFTER_SECS` and `MESH_TRANSPORTS=udp,webrtc,multihop` this is the run of the idle detach |
 | `MESH_TRAFFIC_BURSTY` | `1`: instead of a message per second to every peer, every 60 to 240 s (random) one message to each of 3 to 5 random peers. A connection then idles, and is needed again |
-| `MESH_FLOOD_PEERS` | K: from second 30 on, messages of 3000 bytes to the first K roster peers as fast as the node accepts them. The RSS against K is the worst case of one connection (with `MESH_TRAFFIC=off`) |
+| `MESH_FLOOD_PEERS` | K: from second 30 on, messages of 3000 bytes to the first K roster peers as fast as the node accepts them. The RSS against K is the worst case of one connection (with `MESH_TRAFFIC=off`). Read the RSS of the sender and of the receiver: the flood fills the send buffer of the sender as well as the receive window of the receiver |
 | `MESH_BLOCK_UDP_AFTER_SECS` | after this many seconds the node takes IP away from every connection of its process, once |
 | `MESH_UNDERLAY_LEG` | `off`: the multihop underlay holds no WebRTC leg (the control cell) |
 | `STAGGER` | seconds between two node starts (`run.sh`, default 0.3) |
