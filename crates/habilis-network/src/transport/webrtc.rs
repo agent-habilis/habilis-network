@@ -774,9 +774,9 @@ pub(crate) fn negotiate_session(
     }
     // A pair that reads as the relay is not direct, whatever the proof says: take the proof back,
     // so that a frame is parked for the session and not refused on the relay. Not while a session
-    // is attached: the reading comes from the first connection of the peer, and a gossip link that
-    // is still on the relay can read so while the session already carries the pair. Then the
-    // connection that reads as relay is nudged onto the session, and the proof stands.
+    // is attached: a session carries the pair whatever one connection reads (a connection opened
+    // before the attach reads the relay until a path event moves it), so the connection that reads
+    // as relay is nudged onto the session, and the proof stands.
     let reads_as_relay =
         proof_is_stale(kind, proven) && kind == Some(super::probe::PathKind::Relay);
     let has_session = handle.has_session(&peer);
@@ -3358,9 +3358,9 @@ mod tests {
         endpoint.close().await;
     }
 
-    /// The reading of the admission table comes from the first connection of the peer with a
-    /// selected path, so a gossip link that is still on the relay can read `Relay` while a session
-    /// already carries the pair. With a session attached the proof stands: no demotion, no offer.
+    /// A session carries the pair whatever one connection reads: a connection opened before the
+    /// attach reads `Relay` until a path event moves it. With a session attached the proof stands:
+    /// no demotion, no offer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_keeps_its_proof_when_a_connection_reads_as_relay() {
         use crate::daemon::state::DirectState;

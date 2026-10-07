@@ -444,7 +444,9 @@ impl SignalAdmission {
     /// (see [`best_kind`](super::probe::best_kind)): a link that is still on the relay
     /// can sit beside one that is already direct. A pair that only gossips has no pooled
     /// connection, and this is how the engine sees it. `None` if the peer has no live
-    /// connection with a selected path.
+    /// connection with a selected path. On the underlay a peer that has a relay link beside a
+    /// session now reads as the session (`[Relay, WebRtc]` reads `WebRtc`), where the first
+    /// connection used to decide.
     pub(crate) fn selected_kind(&self, peer: EndpointId) -> Option<super::probe::PathKind> {
         let handles: Vec<WeakConnectionHandle> = self.lock().slots.get(&peer)?.conns.clone();
         super::probe::best_kind(

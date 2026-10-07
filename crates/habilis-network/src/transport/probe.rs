@@ -414,7 +414,8 @@ pub(crate) fn step(kind: PathKind, has_session: bool, route: Option<iroh::Transp
 /// the order of the ladder (IP, a session, multihop, the relay), and `None` when no connection has
 /// a selected path yet. iroh selects a path per connection, and a link that is still on the relay
 /// can sit beside a connection that is already direct: the first reading must not speak for the
-/// pair.
+/// pair. The order is the ladder's: do not reorder it (`path_action` relies on `[WebRtc, Ip]`
+/// reading IP).
 pub(crate) fn best_kind(kinds: impl IntoIterator<Item = PathKind>) -> Option<PathKind> {
     let rank = |kind: &PathKind| match kind {
         PathKind::Ip => 0,
@@ -656,19 +657,23 @@ pub(crate) async fn retry_direct(
     }
 }
 
-/// Graft again the proven peers whose last link went down about a second ago (see
-/// [`EventLoopState::plan_regraft_on_last_link_loss`]). The reclaim ticker calls this, because
+/// Graft again the proven peers whose link went down about a second ago (see
+/// [`EventLoopState::plan_regraft_on_link_loss`]). The reclaim ticker calls this, because
 /// the heal tick would leave the pair apart for 10 to 15 s.
 pub(crate) async fn regraft_due(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     for peer in state.take_regrafts_due(Instant::now()) {
-        let Some(addr) = state.peer_endpoints.values().find(|addr| addr.id == peer).cloned()
+        let Some(addr) = state
+            .peer_endpoints
+            .values()
+            .find(|addr| addr.id == peer)
+            .cloned()
         else {
             continue;
         };
         state.note_relink(peer, Instant::now());
         let _ = crate::lookup::add_peer_addr(ctx.endpoint, addr.clone());
         state.unicast_pool.note_addr(&addr);
-        tracing::debug!(target: super::LOG_TARGET, %peer, "the last link went down: grafting the proven peer again");
+        tracing::debug!(target: super::LOG_TARGET, %peer, "the link went down: grafting the proven peer again");
         if ensure_direct(state, ctx, peer, &addr) {
             graft_proven(state, ctx, peer).await;
         }
@@ -1312,6 +1317,11 @@ mod tests {
             best_kind([PathKind::Relay, PathKind::Ip]),
             Some(PathKind::Ip),
             "a connection on UDP beats a link on the relay, whichever comes first"
+        );
+        assert_eq!(
+            best_kind([PathKind::WebRtc, PathKind::Ip]),
+            Some(PathKind::Ip),
+            "UDP ranks above a session: a session beside UDP is the one to detach"
         );
         assert_eq!(
             best_kind([PathKind::Relay, PathKind::Multihop, PathKind::WebRtc]),
