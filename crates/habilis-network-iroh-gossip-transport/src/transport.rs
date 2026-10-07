@@ -1,0 +1,503 @@
+//! The iroh custom transport: the three traits, and the handle that owns them.
+//!
+//! The transport exists before the endpoint, and the gossip topic after it, so a
+//! handle is made without a sink and the engine attaches one once the topic is
+//! joined. Before that, the path is not valid and a packet is dropped, which QUIC
+//! treats as loss.
+
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+use bytes::Bytes;
+use iroh::EndpointId;
+use iroh::endpoint::transports::{
+    CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
+};
+use iroh_base::CustomAddr;
+use tokio::sync::mpsc;
+
+use crate::frame::{self, EncodeError};
+use crate::{gossip_addr, parse_gossip_addr};
+
+/// The guard of `mutex`. A poisoned lock holds data with no invariant to break
+/// (a sink slot, a queue end), so it is used as it is and not turned into a panic.
+pub(crate) fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Packets waiting for iroh to read them.
+const INBOUND_CAP: usize = 256;
+
+/// Where a frame goes: the mesh gossip topic, once the engine has joined it.
+/// It never blocks. `false` means the frame was not accepted.
+pub trait FrameSink: std::fmt::Debug + Send + Sync + 'static {
+    fn try_send(&self, frame: Bytes) -> bool;
+}
+
+/// What became of a frame that arrived from the topic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Queued for iroh.
+    Queued,
+    /// Addressed to another member.
+    NotForUs,
+    /// Not a frame this build reads.
+    Malformed,
+    /// iroh is not reading fast enough, or has stopped.
+    QueueFull,
+}
+
+/// A packet from another member, on its way to iroh.
+#[derive(Debug)]
+struct Packet {
+    remote: CustomAddr,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct Shared {
+    app_id: EndpointId,
+    local_addr: CustomAddr,
+    sink: Mutex<Option<Arc<dyn FrameSink>>>,
+    attached: AtomicBool,
+}
+
+impl Shared {
+    /// One QUIC datagram to `dst`: framed and handed to the sink. A datagram that
+    /// does not fit a frame, or that has no sink to go to, is dropped and the call
+    /// still succeeds, as a NIC drops what it cannot carry. QUIC recovers.
+    fn send_datagram(&self, dst: EndpointId, datagram: &[u8]) {
+        let frame = match frame::encode(dst, self.app_id, datagram) {
+            Ok(frame) => frame,
+            Err(EncodeError::Empty | EncodeError::TooLarge { .. }) => return,
+        };
+        let sink = locked(&self.sink).clone();
+        if let Some(sink) = sink {
+            sink.try_send(frame);
+        }
+    }
+}
+
+/// A handle to a gossip transport. Clone-cheap. Register `custom_transport()` on
+/// the endpoint builder, and `attach` a sink once the topic is joined.
+#[derive(Debug, Clone)]
+pub struct GossipHandle {
+    shared: Arc<Shared>,
+    inbound: mpsc::Sender<Packet>,
+    transport: Arc<GossipTransport>,
+}
+
+impl GossipHandle {
+    #[must_use]
+    pub fn new(app_id: EndpointId) -> Self {
+        let shared = Arc::new(Shared {
+            app_id,
+            local_addr: gossip_addr(app_id),
+            sink: Mutex::new(None),
+            attached: AtomicBool::new(false),
+        });
+        let (inbound, receiver) = mpsc::channel(INBOUND_CAP);
+        let transport = Arc::new(GossipTransport {
+            shared: Arc::clone(&shared),
+            inbound: Mutex::new(Some(receiver)),
+        });
+        Self {
+            shared,
+            inbound,
+            transport,
+        }
+    }
+
+    #[must_use]
+    pub fn app_id(&self) -> EndpointId {
+        self.shared.app_id
+    }
+
+    /// The transport, for `Builder::add_custom_transport`.
+    #[must_use]
+    pub fn custom_transport(&self) -> Arc<dyn CustomTransport> {
+        Arc::clone(&self.transport) as Arc<dyn CustomTransport>
+    }
+
+    /// Send frames to `sink` from now on, and make the path valid.
+    pub fn attach(&self, sink: Arc<dyn FrameSink>) {
+        *locked(&self.shared.sink) = Some(sink);
+        self.shared.attached.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop sending. The path is not valid again until the next `attach`.
+    pub fn detach(&self) {
+        self.shared.attached.store(false, Ordering::SeqCst);
+        *locked(&self.shared.sink) = None;
+    }
+
+    /// A frame from the topic. Never blocks: the engine's receive loop calls this.
+    #[must_use]
+    pub fn deliver(&self, frame: &[u8]) -> Delivery {
+        let Ok(frame) = frame::decode(frame) else {
+            return Delivery::Malformed;
+        };
+        if frame.dst != self.shared.app_id {
+            return Delivery::NotForUs;
+        }
+        let packet = Packet {
+            remote: gossip_addr(frame.src),
+            bytes: frame.datagram.to_vec(),
+        };
+        match self.inbound.try_send(packet) {
+            Ok(()) => Delivery::Queued,
+            Err(_) => Delivery::QueueFull,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GossipTransport {
+    shared: Arc<Shared>,
+    /// Taken by the single `bind` call. `None` afterwards.
+    inbound: Mutex<Option<mpsc::Receiver<Packet>>>,
+}
+
+impl CustomTransport for GossipTransport {
+    fn bind(&self) -> io::Result<Box<dyn CustomEndpoint>> {
+        let inbound = locked(&self.inbound)
+            .take()
+            .ok_or_else(|| io::Error::other("gossip transport already bound"))?;
+        let local = n0_watcher::Watchable::new(vec![self.shared.local_addr.clone()]);
+        Ok(Box::new(GossipEndpoint {
+            shared: Arc::clone(&self.shared),
+            inbound,
+            local,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct GossipEndpoint {
+    shared: Arc<Shared>,
+    inbound: mpsc::Receiver<Packet>,
+    local: n0_watcher::Watchable<Vec<CustomAddr>>,
+}
+
+impl CustomEndpoint for GossipEndpoint {
+    fn watch_local_addrs(&self) -> n0_watcher::Direct<Vec<CustomAddr>> {
+        self.local.watch()
+    }
+
+    fn create_sender(&self) -> Arc<dyn CustomSender> {
+        Arc::new(GossipSender {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
+    fn poll_recv(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &mut [io::IoSliceMut<'_>],
+        metas: &mut [noq_udp::RecvMeta],
+        recv_infos: &mut [RecvInfo],
+    ) -> Poll<io::Result<usize>> {
+        let cap = bufs.len().min(metas.len()).min(recv_infos.len());
+        if cap == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        loop {
+            let mut batch = Vec::with_capacity(cap);
+            match self.inbound.poll_recv_many(cx, &mut batch, cap) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(0) => {
+                    return Poll::Ready(Err(io::Error::other("gossip inbound closed")));
+                }
+                Poll::Ready(_) => {}
+            }
+            let mut count = 0;
+            for packet in batch {
+                let len = packet.bytes.len();
+                if bufs[count].len() < len {
+                    // Larger than the buffer iroh handed us: dropped, as a NIC
+                    // drops a jumbo frame on a path with a smaller MTU.
+                    continue;
+                }
+                bufs[count][..len].copy_from_slice(&packet.bytes);
+                recv_infos[count] =
+                    RecvInfo::new(packet.remote, Some(self.shared.local_addr.clone()));
+                metas[count].len = len;
+                metas[count].stride = len;
+                count += 1;
+            }
+            if count > 0 {
+                return Poll::Ready(Ok(count));
+            }
+            // Everything dequeued was too large. Poll the queue again: that
+            // either finds more or returns `Pending` with this task's waker
+            // registered, so there is no busy loop and no manual wake.
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GossipSender {
+    shared: Arc<Shared>,
+}
+
+impl CustomSender for GossipSender {
+    /// Valid only for a gossip address, and only while a sink is attached: a path
+    /// that cannot carry a packet must not be selected.
+    fn is_valid_send_addr(&self, addr: &CustomAddr) -> bool {
+        parse_gossip_addr(addr).is_some() && self.shared.attached.load(Ordering::SeqCst)
+    }
+
+    fn poll_send(
+        &self,
+        _cx: &mut Context<'_>,
+        dst: &CustomAddr,
+        _src: Option<&CustomAddr>,
+        transmit: &Transmit<'_>,
+    ) -> Poll<io::Result<()>> {
+        let Some(dst) = parse_gossip_addr(dst) else {
+            return Poll::Ready(Err(io::Error::other("not a gossip address")));
+        };
+        // A GSO batch is several datagrams; each is one QUIC packet and one frame.
+        for datagram in habilis_network_iroh_transport_util::datagrams(transmit) {
+            self.shared.send_datagram(dst, datagram);
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Wake;
+    use std::time::Duration;
+
+    use iroh::endpoint::presets;
+    use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
+
+    use super::*;
+    use crate::memory::MemoryHub;
+    use crate::{GOSSIP_TRANSPORT_ID, frame};
+
+    const ECHO_ALPN: &[u8] = b"habilis-network-gossip/test-echo/0";
+
+    fn secret(seed: u8) -> SecretKey {
+        SecretKey::from_bytes(&[seed; 32])
+    }
+
+    /// A sink that keeps what it is given.
+    #[derive(Debug, Default)]
+    struct Recorder(Mutex<Vec<Bytes>>);
+
+    impl FrameSink for Recorder {
+        fn try_send(&self, frame: Bytes) -> bool {
+            locked(&self.0).push(frame);
+            true
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct Echo;
+
+    impl ProtocolHandler for Echo {
+        async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
+            // One echo per stream, until the client closes the connection.
+            while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                tokio::io::copy(&mut recv, &mut send).await?;
+                send.finish()?;
+            }
+            Ok(())
+        }
+    }
+
+    /// An endpoint whose only transport is gossip.
+    async fn endpoint(secret: SecretKey, handle: &GossipHandle) -> Endpoint {
+        Endpoint::builder(presets::Minimal)
+            .secret_key(secret)
+            .relay_mode(RelayMode::Disabled)
+            .add_custom_transport(handle.custom_transport())
+            .clear_ip_transports()
+            .clear_relay_transports()
+            .bind()
+            .await
+            .expect("bind an endpoint with gossip only")
+    }
+
+    fn dial(id: EndpointId) -> EndpointAddr {
+        EndpointAddr::from_parts(id, [TransportAddr::Custom(gossip_addr(id))])
+    }
+
+    async fn echo_once(connection: &iroh::endpoint::Connection, message: &[u8]) {
+        let (mut send, mut recv) = connection.open_bi().await.expect("open a stream");
+        send.write_all(message).await.expect("write");
+        send.finish().expect("finish");
+        let echoed = tokio::time::timeout(Duration::from_secs(10), recv.read_to_end(1024))
+            .await
+            .expect("the echo timed out")
+            .expect("read the echo");
+        assert_eq!(echoed, message);
+    }
+
+    /// Two nodes with gossip as the only transport, joined by an in-memory flood.
+    async fn pair() -> (
+        MemoryHub,
+        (Endpoint, GossipHandle),
+        (Endpoint, GossipHandle),
+        Router,
+    ) {
+        let hub = MemoryHub::new();
+        let alice_handle = GossipHandle::new(secret(1).public());
+        let bob_handle = GossipHandle::new(secret(2).public());
+        hub.join(&alice_handle);
+        hub.join(&bob_handle);
+        let alice = endpoint(secret(1), &alice_handle).await;
+        let bob = endpoint(secret(2), &bob_handle).await;
+        let router = Router::builder(bob.clone()).accept(ECHO_ALPN, Echo).spawn();
+        (hub, (alice, alice_handle), (bob, bob_handle), router)
+    }
+
+    #[tokio::test]
+    async fn a_quic_echo_completes_with_gossip_as_the_only_transport() {
+        let (_hub, (alice, _), (bob, _), router) = pair().await;
+
+        let connection = tokio::time::timeout(
+            Duration::from_secs(10),
+            alice.connect(dial(bob.id()), ECHO_ALPN),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("connect over gossip");
+
+        echo_once(&connection, b"hello over gossip").await;
+        let selected_is_gossip = connection.paths().iter().any(|path| {
+            path.is_selected()
+                && matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == GOSSIP_TRANSPORT_ID)
+        });
+        assert!(selected_is_gossip, "the selected path is not gossip");
+        connection.close(0u32.into(), b"done");
+        router.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn a_path_is_not_valid_until_a_sink_is_attached() {
+        let handle = GossipHandle::new(secret(1).public());
+        let endpoint = handle.transport.bind().expect("bind");
+        let sender = endpoint.create_sender();
+        let to_bob = gossip_addr(secret(2).public());
+
+        assert!(!sender.is_valid_send_addr(&to_bob), "before attach");
+        handle.attach(Arc::new(Recorder::default()));
+        assert!(sender.is_valid_send_addr(&to_bob), "after attach");
+        handle.detach();
+        assert!(!sender.is_valid_send_addr(&to_bob), "after detach");
+    }
+
+    /// The guard is on the frame, and the frame holds 3774 bytes of datagram.
+    #[test]
+    fn a_datagram_over_the_frame_budget_is_dropped_by_the_sender() {
+        let handle = GossipHandle::new(secret(1).public());
+        let recorder = Arc::new(Recorder::default());
+        handle.attach(recorder.clone());
+        let bob = secret(2).public();
+
+        handle
+            .shared
+            .send_datagram(bob, &vec![1u8; frame::MAX_DATAGRAM_LEN + 1]);
+        assert!(locked(&recorder.0).is_empty(), "3775 bytes");
+        handle
+            .shared
+            .send_datagram(bob, &vec![1u8; frame::MAX_DATAGRAM_LEN]);
+        assert_eq!(locked(&recorder.0).len(), 1, "3774 bytes");
+    }
+
+    #[derive(Default)]
+    struct CountingWaker(AtomicUsize);
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// An empty queue returns `Pending` and wakes nobody; a delivered frame wakes
+    /// the task once and is then read. A busy loop would show as wakes with no push.
+    #[test]
+    fn an_empty_queue_is_pending_and_a_delivery_wakes_the_task() {
+        let me = secret(1).public();
+        let handle = GossipHandle::new(me);
+        let mut endpoint = handle.transport.bind().expect("bind");
+        let waker = Arc::new(CountingWaker::default());
+        let std_waker = std::task::Waker::from(Arc::clone(&waker));
+        let mut cx = Context::from_waker(&std_waker);
+        let mut storage = [0u8; 2048];
+        let mut bufs = [io::IoSliceMut::new(&mut storage)];
+        let mut metas = [noq_udp::RecvMeta::default()];
+        let mut infos = [RecvInfo::new(gossip_addr(me), None)];
+
+        let first = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(first.is_pending(), "an empty queue");
+        assert_eq!(
+            waker.0.load(Ordering::SeqCst),
+            0,
+            "woken with nothing queued"
+        );
+
+        let from_bob = frame::encode(me, secret(2).public(), &[5u8; 100]).expect("a frame");
+        assert_eq!(handle.deliver(&from_bob), Delivery::Queued);
+        assert_eq!(waker.0.load(Ordering::SeqCst), 1, "one wake per delivery");
+
+        let second = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);
+        assert!(matches!(second, Poll::Ready(Ok(1))), "{second:?}");
+        assert_eq!(metas[0].len, 100);
+    }
+
+    #[test]
+    fn a_frame_for_another_member_or_a_bad_frame_is_not_queued() {
+        let handle = GossipHandle::new(secret(1).public());
+        let for_carol = frame::encode(secret(3).public(), secret(2).public(), &[1]).expect("frame");
+
+        assert_eq!(handle.deliver(&for_carol), Delivery::NotForUs);
+        assert_eq!(handle.deliver(b"{\"kind\":\"chat\"}"), Delivery::Malformed);
+    }
+
+    /// A frame with a forged source arrives for a connection that exists. It must
+    /// not move the connection or stop it: QUIC authenticates every packet. This
+    /// test was green on its first run; it stays as a guard.
+    #[tokio::test]
+    async fn a_forged_source_does_not_move_or_break_an_established_connection() {
+        let (hub, (alice, alice_handle), (bob, _), router) = pair().await;
+        let connection = alice
+            .connect(dial(bob.id()), ECHO_ALPN)
+            .await
+            .expect("connect over gossip");
+        echo_once(&connection, b"before").await;
+
+        let real = hub.sent().into_iter().next().expect("a frame was sent");
+        let real = frame::decode(&real).expect("a frame");
+        let forged = frame::encode(alice_handle.app_id(), secret(9).public(), real.datagram)
+            .expect("a frame");
+        for _ in 0..5 {
+            let _ = alice_handle.deliver(&forged);
+        }
+
+        echo_once(&connection, b"after").await;
+        assert!(connection.close_reason().is_none(), "the connection closed");
+        let selected: Vec<_> = connection
+            .paths()
+            .iter()
+            .filter(iroh::endpoint::Path::is_selected)
+            .map(|path| path.remote_addr().clone())
+            .collect();
+        assert_eq!(
+            selected,
+            [TransportAddr::Custom(gossip_addr(bob.id()))],
+            "the selected path moved"
+        );
+        connection.close(0u32.into(), b"done");
+        router.shutdown().await.expect("shutdown");
+    }
+}

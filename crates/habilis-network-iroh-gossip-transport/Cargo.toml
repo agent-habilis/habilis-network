@@ -20,7 +20,16 @@ name = "habilis_network_iroh_gossip_transport"
 path = "src/lib.rs"
 
 [dependencies]
-# The id type of a frame's two ends. Named from iroh-base like the sibling
-# transport crates, so that the graph carries one copy of it.
+iroh.workspace = true
+# `CustomAddr` is not re-exported through `iroh`: name it from iroh-base like the
+# sibling transport crates, so that the graph carries one copy of it.
 iroh-base.workspace = true
+habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util" }
+noq-udp.workspace = true
+n0-watcher.workspace = true
+tokio.workspace = true
 bytes.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "io-util"] }
