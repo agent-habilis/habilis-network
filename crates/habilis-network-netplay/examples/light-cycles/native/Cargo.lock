@@ -2273,7 +2273,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=b379de62649167985f9931897a4891e0ae2f4d29#b379de62649167985f9931897a4891e0ae2f4d29"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=1ca691bceb43b78dccff3424480703771435362d#1ca691bceb43b78dccff3424480703771435362d"
 dependencies = [
  "blake3",
  "bytes",

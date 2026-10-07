@@ -480,6 +480,37 @@ pub(crate) async fn on_outcome(
     }
 }
 
+/// How a graft asks for a link.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GraftRequest {
+    /// Always accepted: a peer with a full view drops a neighbor to make room.
+    Join,
+    /// Low priority: a peer with a full view refuses and keeps its neighbors.
+    Neighbor,
+}
+
+/// The request that grafts `peer`. The rendezvous gets a `Join`, because a low
+/// priority request to a peer that holds a tombstone for us is refused for ever.
+/// Every other graft only fills a view, and must not make a full one drop a neighbor.
+pub(crate) fn graft_request(peer: EndpointId, rendezvous_id: EndpointId) -> GraftRequest {
+    if peer == rendezvous_id {
+        GraftRequest::Join
+    } else {
+        GraftRequest::Neighbor
+    }
+}
+
+/// Ask gossip for the link to `peer`, in the way [`graft_request`] says.
+pub(crate) async fn request_graft(
+    ctx: &HandlerCtx<'_>,
+    peer: EndpointId,
+) -> Result<(), iroh_gossip::api::ApiError> {
+    match graft_request(peer, ctx.rendezvous_id) {
+        GraftRequest::Join => ctx.sender.join_peers(vec![peer]).await,
+        GraftRequest::Neighbor => ctx.sender.neighbor_peers(vec![peer]).await,
+    }
+}
+
 /// Record `peer` as `Direct`, graft it if it is not linked already and there
 /// is room, and flush any frame parked for it.
 pub(crate) async fn graft_proven(
@@ -496,7 +527,7 @@ pub(crate) async fn graft_proven(
     }
     if !state.linked_endpoints.contains(&peer) && state.linked_endpoints.len() < ctx.max_peers {
         state.note_relink(peer, Instant::now());
-        if let Err(error) = ctx.sender.join_peers(vec![peer]).await {
+        if let Err(error) = request_graft(ctx, peer).await {
             tracing::warn!(target: super::LOG_TARGET, %peer, %error, "graft request failed");
         }
     }
@@ -619,9 +650,25 @@ fn retry_candidates(
 mod tests {
     use iroh::EndpointAddr;
 
-    use super::{PathKind, ensure_watchers, may_graft, retry_candidates, webrtc_riders};
+    use super::{
+        GraftRequest, PathKind, ensure_watchers, graft_request, may_graft, retry_candidates,
+        webrtc_riders,
+    };
     use crate::daemon::state::EventLoopState;
     use crate::testing::{endpoint_id, fresh_state, nick};
+
+    // A graft that only fills a view must not make a full view drop a neighbor, so it asks
+    // with low priority. The rendezvous may hold a tombstone for this node, which refuses a
+    // low priority request for ever, so it is asked with a `Join`.
+    #[test]
+    fn a_graft_asks_with_low_priority_except_for_the_rendezvous() {
+        let rendezvous = endpoint_id(3);
+        assert_eq!(
+            graft_request(endpoint_id(4), rendezvous),
+            GraftRequest::Neighbor
+        );
+        assert_eq!(graft_request(rendezvous, rendezvous), GraftRequest::Join);
+    }
 
     // The pool closes a connection that nothing sent on, and the watcher is
     // dropped with it. The last path kind it reported must go too, or every

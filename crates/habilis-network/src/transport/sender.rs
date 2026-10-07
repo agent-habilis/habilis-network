@@ -41,6 +41,12 @@ impl MeshSender {
         self.current().join_peers(peers).await
     }
 
+    /// Ask `peers` for a link with low priority: a peer with a full view refuses
+    /// and keeps its neighbors, where a [`Self::join_peers`] evicts one.
+    pub(crate) async fn neighbor_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {
+        self.current().neighbor_peers(peers).await
+    }
+
     /// Leave `peers` on purpose: gossip tells each that we are not coming back,
     /// so it does not dial us to refill its view, and closes the link itself.
     pub(crate) async fn leave_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {
