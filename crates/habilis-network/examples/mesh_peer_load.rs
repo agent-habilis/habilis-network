@@ -20,6 +20,8 @@
 //!   the run of the idle detach: sessions to members that are not neighbors must go.
 //! - `MESH_TRAFFIC_BURSTY=1`: instead of a message per second to every peer, every 60 to 240 s
 //!   (random) one message to each of 3 to 5 random peers.
+//! - `MESH_FLOOD_PEERS=K`: from the second 30 on, the node sends messages of 3000 bytes to its first
+//!   K roster peers as fast as it can. The RSS against K is the worst case of one connection.
 //! - `MESH_BLOCK_UDP_AFTER_SECS=60`: after that many seconds the node takes IP away
 //!   from every connection of the process, once. This is the second phase of the
 //!   underlay measurement: the app endpoint and the underlay fall back to `WebRTC`.
@@ -125,6 +127,35 @@ async fn send_to<'a>(
     Ok(())
 }
 
+/// The worst-case load of one connection: `body` bytes per message to each of the `peers` first
+/// roster peers, as fast as the node accepts them, until the process ends. The messages are as big as
+/// the engine allows in one frame.
+async fn flood(
+    sender: mpsc::Sender<Request>,
+    nicks: Vec<String>,
+    peers: usize,
+) -> anyhow::Result<()> {
+    let body = "x".repeat(3000);
+    let targets: Vec<String> = nicks.into_iter().take(peers).collect();
+    loop {
+        for nick in &targets {
+            let (reply, _) = oneshot::channel();
+            if sender
+                .send(Request::Send {
+                    to: Nickname::new(nick.clone()).ok(),
+                    body: msg_body(&body)?,
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 /// The traffic of this second. Steady: one message to every roster peer. Bursty: every 60 to
 /// 240 s, at random, one message to each of 3 to 5 random peers, so a connection is idle for
 /// a while, and then needed again.
@@ -165,6 +196,8 @@ async fn main() -> anyhow::Result<()> {
     let block_udp_after = Some(env_number("MESH_BLOCK_UDP_AFTER_SECS")).filter(|secs| *secs > 0);
     let traffic_until = Some(env_number("MESH_TRAFFIC_UNTIL_SECS")).filter(|secs| *secs > 0);
     let bursty = std::env::var("MESH_TRAFFIC_BURSTY").as_deref() == Ok("1");
+    let flood_peers = usize::try_from(env_number("MESH_FLOOD_PEERS")).unwrap_or(0);
+    let mut flooding = false;
     if std::env::var("MESH_UNDERLAY_LEG").as_deref() == Ok("off") {
         habilis_network::net::set_underlay_leg_off(true);
     }
@@ -238,6 +271,10 @@ async fn main() -> anyhow::Result<()> {
             let Some((nicks, links)) = roster(&sender).await else {
                 break;
             };
+            if flood_peers > 0 && !flooding && elapsed >= 30 && nicks.len() >= flood_peers {
+                flooding = true;
+                tokio::spawn(flood(sender.clone(), nicks.clone(), flood_peers));
+            }
             if traffic && traffic_until.is_none_or(|until| elapsed < until) {
                 talk(&sender, &nicks, bursty, elapsed, &mut next_burst).await?;
             }
