@@ -1272,6 +1272,23 @@ async fn greet_new_peer(message: &Message, state: &mut EventLoopState, ctx: &Han
     }
 }
 
+/// The number of links below which a graft that a `PeerInfo` triggers may go
+/// ahead. `members` counts every member of the mesh, this node included.
+///
+/// A mesh that fits in the active view (at most G + 1 members) has room at every
+/// peer, so a graft evicts nobody and may take the view up to G. In a bigger mesh
+/// a graft meets a peer that may be full, and a full peer accepts it by evicting
+/// a random neighbor: the total of links stays the same and two links move. A
+/// `PeerInfo` is the unpaced trigger, and a link-up floods it again, so it leaves
+/// the last slot to the paced fill tick (`probe::fill_active_view`).
+fn peer_info_graft_below(max_peers: usize, members: usize) -> usize {
+    if members <= max_peers.saturating_add(1) {
+        max_peers
+    } else {
+        max_peers.saturating_sub(1).max(1)
+    }
+}
+
 async fn handle_peer_info(
     message: &Message,
     content: Bytes,
@@ -1376,7 +1393,8 @@ async fn handle_peer_info(
     // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
     // rendezvous here, which returned above.
     if !defer_first_dial
-        && state.linked_endpoints.len() < ctx.max_peers
+        && state.linked_endpoints.len()
+            < peer_info_graft_below(ctx.max_peers, state.peer_endpoints.len() + 1)
         && !state.linked_endpoints.contains(&peer_id)
         && !state.relink_on_cooldown(peer_id, now)
     {
@@ -2141,6 +2159,71 @@ mod first_contact_tests {
         assert!(
             state.direct.contains_key(&lower),
             "once the cooldown ends, this side dials after all"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// In a mesh of more than G + 1 members a graft meets a peer that may be full,
+    /// and a full peer accepts it by evicting a random neighbor, so the links
+    /// move and none is gained. A `PeerInfo` is the unpaced trigger, and it
+    /// is re-flooded on every link-up, so it feeds a loop of grafts and
+    /// evictions. It therefore leaves one slot free in such a mesh; the paced
+    /// fill tick takes the last one. A mesh that fits in the view has room
+    /// everywhere, so there it still grafts up to G.
+    #[tokio::test]
+    async fn a_peer_info_leaves_one_slot_free_in_a_mesh_larger_than_g_plus_one() {
+        use crate::protocol::message::MessageBody;
+        use crate::protocol::peer_addr::endpoint_addr_to_json;
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let max_peers = ctx.max_peers;
+        // Higher than ours, so the first-sighting tie-break does not defer it.
+        let newcomer = loop {
+            let id = iroh::SecretKey::generate().public();
+            if id > node.endpoint.id() {
+                break id;
+            }
+        };
+        let body =
+            MessageBody::new(endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string())
+                .expect("an address body");
+        let peer_info = Message::new_peer_info(&node.mesh, &nick("newcomer"), body)
+            .signed(&Identity::generate());
+        let crowd = |state: &mut EventLoopState, members: usize| {
+            for index in 0..members {
+                let id = iroh::SecretKey::generate().public();
+                state
+                    .peer_endpoints
+                    .insert(nick(&format!("member{index}")), iroh::EndpointAddr::new(id));
+            }
+        };
+        let fill_view = |state: &mut EventLoopState, links: usize| {
+            for _ in 0..links {
+                state
+                    .linked_endpoints
+                    .insert(iroh::SecretKey::generate().public());
+            }
+        };
+
+        // More than G + 1 members, one link short of G: the last slot waits.
+        let mut crowded = fresh_state();
+        crowd(&mut crowded, max_peers + 2);
+        fill_view(&mut crowded, max_peers - 1);
+        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut crowded, &ctx).await;
+        assert!(
+            !crowded.direct.contains_key(&newcomer),
+            "a mesh larger than G + 1 leaves the last slot to the fill tick"
+        );
+
+        // A mesh that fits in the view has room everywhere: it grafts up to G.
+        let mut small = fresh_state();
+        crowd(&mut small, 3);
+        fill_view(&mut small, 2);
+        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut small, &ctx).await;
+        assert!(
+            small.direct.contains_key(&newcomer),
+            "a mesh that fits in the view grafts"
         );
         node.endpoint.close().await;
     }
