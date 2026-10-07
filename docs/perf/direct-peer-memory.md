@@ -360,7 +360,9 @@ The ledger is a pure type, `Ceiling` (`crates/habilis-network/src/transport/ceil
 4. **A batch down to 90 percent of C** (rounded up) runs with an admission, at most once in 5 s, so that the next admissions do not each evict.
 5. **The backstop.** A connection or a session that nobody used for 900 s closes. It is the one idle timeout of the direct connections.
 
-An eviction closes the unicast connections of the victim with the close code `EVICTED` (11) and detaches its session. The victim reads the code and does not dial the evictor again by itself for 60 s (with a jitter of 20 percent). A send to the evictor dials at once.
+**A busy sender.** A node that sends to more than C peers in rotation makes each target evict one of its own idle units for every send, and the sender pays one dial per send. The rules of the order protect the hot connections: the victims are idle ones, and a unit younger than 60 s goes last. Only members of the mesh pass the admission gate, so a stranger from outside cannot cause an eviction. A misbehaving member can, and it pays for it with its own dials.
+
+An eviction closes the unicast connections of the victim with the close code `EVICTED` (11) and detaches its session. The victim reads the code and, for 60 s (with a jitter of 20 percent), makes no proactive dial to the evictor: no direct-path probe and no offer of a session. A send to the evictor dials at once, and a frame held for a lane peer counts as a send. The path nudge is not held, because it opens no unicast connection and takes no unit.
 
 ### Lane peers
 

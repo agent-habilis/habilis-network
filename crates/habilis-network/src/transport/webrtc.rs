@@ -1357,10 +1357,16 @@ pub(crate) fn retry_sessions(
 fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) -> bool {
     let probe_failed = !state.relay_transport
         && state.direct.get(&addr.id) == Some(&crate::daemon::state::DirectState::RelayOnly);
-    !state.linked_endpoints.contains(&addr.id)
-        && !probe_failed
-        && state.unicast_pool.used_connection(addr.id).is_none()
-        && !state.lane_session_wanted(addr.id, crate::util::clock::Instant::now())
+    let linked = state.linked_endpoints.contains(&addr.id);
+    let wanted = state.lane_session_wanted(addr.id, crate::util::clock::Instant::now());
+    // A peer that evicted us lately is left alone by every proactive dial, and the offer of a
+    // session is one. A held frame is a send, and a send dials at once.
+    let evicted_us = !linked && !wanted && state.webrtc_admission.evicted_recently(addr.id);
+    evicted_us
+        || (!linked
+            && !wanted
+            && !probe_failed
+            && state.unicast_pool.used_connection(addr.id).is_none())
 }
 
 /// Detach the sessions that nothing has held for
@@ -2613,6 +2619,28 @@ mod tests {
             held_back(&state, &ip_pair),
             "the relay carries payload: wait for a send"
         );
+    }
+
+    /// A peer that evicted our connection is not offered a session by the retry pass for a while:
+    /// the offer is a proactive dial, and it would take the place that the peer just freed. A frame
+    /// that is held for the peer still passes, because a send dials at once.
+    #[test]
+    fn a_peer_that_evicted_us_is_not_offered_a_session_unless_a_frame_is_held() {
+        use crate::daemon::state::DirectState;
+
+        let peer = crate::testing::endpoint_id(7);
+        let pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
+        let mut state = crate::testing::fresh_state();
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+        state.direct.insert(peer, DirectState::RelayOnly);
+        assert!(!held_back(&state, &pair), "a failed probe offers a session");
+
+        state.webrtc_admission.note_evicted(peer);
+        assert!(held_back(&state, &pair), "the peer evicted us lately");
+
+        state.want_lane_session(peer, crate::util::clock::Instant::now());
+        assert!(!held_back(&state, &pair), "a held frame is a send");
     }
 
     /// A session nothing uses is detached once the idle window has passed, and
