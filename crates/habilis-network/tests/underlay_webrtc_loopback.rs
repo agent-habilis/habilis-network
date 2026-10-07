@@ -20,10 +20,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// that offers the underlay session, then for a second ICE round.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 
-/// How long the direct link of two underlays that have lost their paths takes to
-/// leave the topology: the stuck time of 20 s, one link-state of 15 s, and a margin.
-const LINK_AGES_OUT: Duration = Duration::from_secs(40);
-
 /// How long a message may take over a route that is already up.
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -304,16 +300,40 @@ async fn cut_application_ip_from_alice(alice: &Member, bob: &Member, carol: &Mem
     carol.block_ip_to(alice.ports()).await;
 }
 
-/// IP: alice to carol and alice to bob, on the underlay of each member.
-fn cut_underlay_ip_from_alice(alice: &Member, bob: &Member, carol: &Member) {
-    habilis_network_iroh_webrtc_transport::block_ip_to(
-        alice.underlay_id(),
-        bob.underlay_ports()
-            .into_iter()
-            .chain(carol.underlay_ports()),
-    );
+/// IP: alice to bob, and with `with_carol` alice to carol too, on the underlay of
+/// each member. Carol and bob keep it to each other.
+fn cut_underlay_ip_from_alice(alice: &Member, bob: &Member, carol: &Member, with_carol: bool) {
+    let mut from_alice = bob.underlay_ports();
+    if with_carol {
+        from_alice.extend(carol.underlay_ports());
+        habilis_network_iroh_webrtc_transport::block_ip_to(
+            carol.underlay_id(),
+            alice.underlay_ports(),
+        );
+    }
+    habilis_network_iroh_webrtc_transport::block_ip_to(alice.underlay_id(), from_alice);
     habilis_network_iroh_webrtc_transport::block_ip_to(bob.underlay_id(), alice.underlay_ports());
-    habilis_network_iroh_webrtc_transport::block_ip_to(carol.underlay_id(), alice.underlay_ports());
+}
+
+/// `WebRTC` between alice and bob, both ways, on the application endpoints and on
+/// the underlays, from the shared tables: the direct link between the two is
+/// impossible, whatever the topology still holds. A session of the underlays
+/// between them would be a one-hop route, correct on its own, so the test forbids it.
+async fn cut_webrtc_between_alice_and_bob(alice: &Member, bob: &Member) {
+    alice.block_rung_to(Rung::WebRtc, "bob", true).await;
+    bob.block_rung_to(Rung::WebRtc, "alice", true).await;
+    habilis_network_iroh_webrtc_transport::block_rung_to(
+        alice.underlay_id(),
+        Rung::WebRtc,
+        bob.underlay_id(),
+        true,
+    );
+    habilis_network_iroh_webrtc_transport::block_rung_to(
+        bob.underlay_id(),
+        Rung::WebRtc,
+        alice.underlay_id(),
+        true,
+    );
 }
 
 /// The same mesh of three, with IP cut on the application endpoints only: the
@@ -346,11 +366,15 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
         .expect("local relay");
     let (alice, mut bob, carol) = three_members(&relay).await;
     let run_started = Instant::now();
-    // First the application pair loses IP, with the underlays on IP: sessions open
-    // on demand, from a send that a payload path carries, and a pair with no such
-    // path (the relay is lookup only here) would never be offered one. Here the
-    // underlay IP still carries the multihop rung, so alice gets her sessions to
-    // carol, on the application endpoint and on the underlay.
+
+    // The direct link of alice and bob is impossible from the start: no IP between
+    // their application endpoints or their underlays, and no WebRTC between them
+    // on either. Alice and carol lose IP on the application endpoints only: their
+    // pair rides WebRTC, with the underlays still on IP, so that sessions open
+    // (on demand, from a send that a payload path carries; a pair with no such
+    // path would never be offered one).
+    cut_webrtc_between_alice_and_bob(&alice, &bob).await;
+    cut_underlay_ip_from_alice(&alice, &bob, &carol, false);
     cut_application_ip_from_alice(&alice, &bob, &carol).await;
     alice
         .wait_for_rung("carol", "webrtc", "alice to carol")
@@ -367,25 +391,9 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
         run_started.elapsed()
     );
 
-    // Then the underlays lose IP too, and alice and bob lose WebRTC to each other
-    // only, on both endpoints. Alice keeps her WebRTC session to carol, and
-    // carol and bob keep IP: the only way from alice to bob is carol.
-    cut_underlay_ip_from_alice(&alice, &bob, &carol);
-    alice.block_rung_to(Rung::WebRtc, "bob", true).await;
-    bob.block_rung_to(Rung::WebRtc, "alice", true).await;
-    habilis_network_iroh_webrtc_transport::block_rung_to(
-        alice.underlay_id(),
-        Rung::WebRtc,
-        bob.underlay_id(),
-        true,
-    );
-    habilis_network_iroh_webrtc_transport::block_rung_to(
-        bob.underlay_id(),
-        Rung::WebRtc,
-        alice.underlay_id(),
-        true,
-    );
-
+    // Then the underlay of alice and carol loses IP too: the edge between them is
+    // the WebRTC session, and the only way from alice to bob is carol.
+    cut_underlay_ip_from_alice(&alice, &bob, &carol, true);
     alice
         .wait_for_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
         .await;
@@ -394,10 +402,8 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
         run_started.elapsed()
     );
 
-    // The multihop rung can be selected while the route is still the direct link
-    // between the two underlays, which has no path left and ages out of the
-    // topology. Traffic goes on, so that cells take the route through carol once it
-    // is the shortest.
+    // The multihop rung can be selected while the route is still stale. Traffic
+    // goes on, so that cells take the route through carol.
     let started = Instant::now();
     let mut probes = 0_u32;
     while carol.forwarded_cells().await == 0 {
@@ -408,17 +414,6 @@ async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member(
         );
         probes += 1;
         let _ = alice.send("bob", &format!("forward probe {probes}")).await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    // The direct link between the underlays of alice and bob ages out of the
-    // topology after the stuck time of 20 s plus one link-state of 15 s, and the
-    // block of its WebRTC session is read by the selector at its next path event.
-    // Until then a cell can still cross it, and carol forwards nothing for it. So
-    // traffic goes on for that long before the payload is sent.
-    let settle_until = Instant::now() + LINK_AGES_OUT;
-    while Instant::now() < settle_until {
-        let _ = alice.send("bob", "settle probe").await;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
