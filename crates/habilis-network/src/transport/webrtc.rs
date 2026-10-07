@@ -774,11 +774,19 @@ pub(crate) fn negotiate_session(
     }
     // A pair that reads as the relay is not direct, whatever the proof says: take the proof back,
     // so that a frame is parked for the session and not refused on the relay.
-    if proof_is_stale(kind, proven) && kind == Some(super::probe::PathKind::Relay) {
+    let demoted = proof_is_stale(kind, proven) && kind == Some(super::probe::PathKind::Relay);
+    if demoted {
         state
             .direct
             .insert(peer, crate::daemon::state::DirectState::RelayOnly);
         tracing::info!(target: LOG_TARGET, %peer, "direct proof is stale; the pair reads as relay");
+        // With a session already attached no offer follows (`HaveSession`): the connection
+        // that reads as relay is nudged onto it. The parked frames then flush with the next
+        // probe of the pair, not at once.
+        if handle.has_session(&peer) {
+            let endpoint = ctx.endpoint.clone();
+            n0_future::task::spawn(async move { nudge_session(&endpoint, peer).await });
+        }
     }
     // Every other gate — already have a session, already negotiating, at the
     // cap, cooling off after a refusal — is one synchronous decision under one
@@ -796,6 +804,8 @@ pub(crate) fn negotiate_session(
 
     let offer = if needs_lane {
         Offer::Lane
+    } else if demoted {
+        Offer::AfterLoss
     } else {
         Offer::UdpRace
     };
@@ -899,6 +909,10 @@ enum Offer {
     /// no unicast at all. The check holds the admission slot for up to 8 s
     /// after the round (a 3 s dial, then 5 s for UDP to be selected).
     UdpRace,
+    /// A pair with UDP on both ends whose direct path is known dead (its proof was stale and
+    /// was taken back): nothing to judge, so the frames parked for it flush at once. The
+    /// connection that was open before the attach is nudged onto the session, as in the race.
+    AfterLoss,
 }
 
 /// The shared tail of every offer: hold the admission slot in a spawned
@@ -936,12 +950,12 @@ fn spawn_offer_round(
         }
         // The peer took the round: it is not refusing us, so its wait starts over.
         admission.note_success(peer);
-        if offer == Offer::UdpRace && {
-            // A connection opened before the attach rides the session only
-            // after a connect; the race is judged on the connection after.
+        // A connection opened before the attach rides the session only after a connect.
+        if matches!(offer, Offer::UdpRace | Offer::AfterLoss) {
             nudge_session(&endpoint, peer).await;
-            pool.udp_won(peer).await
-        } {
+        }
+        // The race is judged on the connection after the nudge.
+        if offer == Offer::UdpRace && pool.udp_won(peer).await {
             // UDP won while the round ran: the session would sit unused and hold
             // one of the direct-peer slots.
             let _ = handle.detach(&peer);
