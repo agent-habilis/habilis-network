@@ -19,6 +19,8 @@ use crate::TaskOutcome;
 use crate::util::output;
 
 #[cfg(feature = "bench")]
+mod gossip;
+#[cfg(feature = "bench")]
 mod multihop;
 #[cfg(feature = "bench")]
 mod native;
@@ -100,9 +102,11 @@ pub(crate) enum Cell {
     LadderMultihopThird,
     /// The ladder's relay rung: no IP transport, a local relay between.
     LadderRelay,
+    /// One pair on IP with the gossip path open under it: the flood it costs.
+    GossipBackupPath,
 }
 
-const CELLS: [Cell; 14] = [
+const CELLS: [Cell; 15] = [
     Cell::HabilisNetworkChromeChrome,
     Cell::HabilisNetworkChromeNative,
     Cell::HabilisNetworkSafariNative,
@@ -117,6 +121,7 @@ const CELLS: [Cell; 14] = [
     Cell::LadderMultihopDirect,
     Cell::LadderMultihopThird,
     Cell::LadderRelay,
+    Cell::GossipBackupPath,
 ];
 
 impl Cell {
@@ -136,6 +141,7 @@ impl Cell {
             Self::LadderMultihopDirect => "ladder multihop (direct)",
             Self::LadderMultihopThird => "ladder multihop (via third)",
             Self::LadderRelay => "ladder relay",
+            Self::GossipBackupPath => "gossip backup path",
         }
     }
 }

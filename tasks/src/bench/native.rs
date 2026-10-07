@@ -85,7 +85,7 @@ async fn rounds(
 
 /// The transfers of [`rounds`] over a connection that is already open, with
 /// `path` naming what carried each one.
-async fn rounds_on(
+pub(super) async fn rounds_on(
     connection: &Connection,
     args: &Args,
     path: impl Fn(&Connection) -> String,

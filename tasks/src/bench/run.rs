@@ -11,7 +11,7 @@ use crate::util::wasm;
 use crate::util::{output, repo_root};
 
 use super::web::Engine::{Chrome, Safari};
-use super::{Args, Cell, Direction, multihop, native, serve, wanted, web};
+use super::{Args, Cell, Direction, gossip, multihop, native, serve, wanted, web};
 
 impl Direction {
     pub(crate) fn protocol(self) -> bench::Direction {
@@ -32,7 +32,10 @@ impl Cell {
             | Self::HabilisNetworkSafariChrome
             | Self::HabilisNetworkNativeNativeWebRtc
             | Self::LadderWebRtc => "webrtc",
-            Self::HabilisNetworkNativeNative | Self::IrohNativeNative | Self::LadderUdp => "ip",
+            Self::HabilisNetworkNativeNative
+            | Self::IrohNativeNative
+            | Self::LadderUdp
+            | Self::GossipBackupPath => "ip",
             Self::LadderMultihopDirect | Self::LadderMultihopThird => "multihop",
             Self::LadderRelay => "relay",
             Self::RawChromeChrome | Self::RawChromeChromeDatagram => "data-channel",
@@ -50,6 +53,7 @@ impl Cell {
                 | Self::LadderMultihopDirect
                 | Self::LadderMultihopThird
                 | Self::LadderRelay
+                | Self::GossipBackupPath
         )
     }
 }
@@ -104,6 +108,8 @@ pub(crate) struct Measured {
     pub(crate) rounds: Vec<Sample>,
     /// `None` for the cells that measure throughput only.
     pub(crate) rtt: Option<Rtt>,
+    /// Numbers of a cell that measures more than a rate, kept in the JSON.
+    pub(crate) extra: Option<serde_json::Value>,
 }
 
 impl Measured {
@@ -131,6 +137,7 @@ impl Measured {
             path,
             rounds,
             rtt: None,
+            extra: None,
         })
     }
 }
@@ -328,6 +335,10 @@ impl Row {
             Outcome::Ok(measured) => measured.rtt.as_ref(),
             Outcome::Skipped(_) | Outcome::Failed(_) => None,
         };
+        let extra = match &self.outcome {
+            Outcome::Ok(measured) => measured.extra.clone(),
+            Outcome::Skipped(_) | Outcome::Failed(_) => None,
+        };
         let (status, detail, samples, path, negotiate_ms) = match &self.outcome {
             Outcome::Ok(measured) => (
                 if self.passed() { "ok" } else { "wrong-path" },
@@ -360,6 +371,7 @@ impl Row {
             "negotiate_ms": negotiate_ms,
             "rtt_p50_ms": rtt.as_ref().map(|rtt| rtt.p50_ms),
             "rtt_p99_ms": rtt.as_ref().map(|rtt| rtt.p99_ms),
+            "extra": extra,
             "rounds": samples,
         })
     }
@@ -455,6 +467,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             Cell::LadderMultihopDirect => runtime.block_on(multihop::ladder_multihop_direct(args)),
             Cell::LadderMultihopThird => runtime.block_on(multihop::ladder_multihop_third(args)),
             Cell::LadderRelay => runtime.block_on(native::ladder_relay(args)),
+            Cell::GossipBackupPath => runtime.block_on(gossip::ladder_gossip_backup(args)),
         };
         let row = Row { cell, outcome };
         let line = format!("{}  {}", row.cell.label(), row.headline());
@@ -528,6 +541,7 @@ mod tests {
                 path: "ip".to_owned(),
             }],
             rtt,
+            extra: None,
         }
     }
 
