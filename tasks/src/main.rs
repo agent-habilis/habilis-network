@@ -24,6 +24,7 @@ mod dev;
 mod e2e;
 mod ffi;
 mod gate;
+mod matrix;
 mod scope;
 mod util;
 mod wasm;
@@ -97,6 +98,11 @@ enum Task {
     /// (browser↔browser, browser↔native, native↔native) against plain iroh
     /// and a bare data channel.
     Benchmark(bench::Args),
+    /// Run every cell of the send ladder matrix, one at a time: transport list,
+    /// blocked rungs and a third member, each with the rung it must settle on and
+    /// a message that must arrive. The gate runs two of them; the rest are the
+    /// nightly's.
+    Matrix,
     /// Remove build artifacts.
     Clean,
 }
@@ -135,6 +141,7 @@ fn dispatch(sh: &Shell, task: Task) -> TaskOutcome {
         Task::BuildWasm => wasm::build_peer(sh),
         Task::E2e(args) => e2e::run(&args),
         Task::Benchmark(args) => bench::run(&args),
+        Task::Matrix => matrix::run(sh),
         Task::Clean => dev::clean(sh),
     }
 }

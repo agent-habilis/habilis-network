@@ -306,6 +306,22 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("habilis-network"),
         args: &["--features", "iroh-test-utils", "--all-targets", "--no-run"],
     },
+    // The two gate cells of the send ladder matrix (`tests/send_ladder_matrix.rs`):
+    // the default list with IP blocked, and the pair that goes through a third
+    // member. One at a time, since each cell runs three real members. The other
+    // cells are `#[ignore]` and belong to `cargo task matrix` and its nightly.
+    Step {
+        kind: Kind::Test,
+        scope: Scope::Crate("habilis-network"),
+        args: &[
+            "--features",
+            "iroh-test-utils",
+            "--test",
+            "send_ladder_matrix",
+            "--",
+            "--test-threads=1",
+        ],
+    },
 ];
 
 /// The rows of `kind` that survive a `-p` filter, in table order.

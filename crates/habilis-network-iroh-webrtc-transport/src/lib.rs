@@ -76,7 +76,7 @@ mod liveness;
 #[cfg(any(feature = "native", feature = "web"))]
 mod selector;
 #[cfg(feature = "test-hooks")]
-pub use habilis_network_iroh_transport_util::Rung;
+pub use habilis_network_iroh_transport_util::{Rung, expected_rung};
 #[cfg(feature = "test-hooks")]
 pub use selector::{block_ip_paths, block_ip_to, block_rung, block_rung_to};
 mod signaling;
