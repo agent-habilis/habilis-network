@@ -579,8 +579,7 @@ pub(crate) async fn graft_proven(
     ctx: &HandlerCtx<'_>,
     peer: EndpointId,
 ) {
-    state.direct.insert(peer, DirectState::Direct);
-    state.clear_lane_wanted(peer);
+    state.note_path_proven(peer);
     // A session to the rendezvous that attached after this node let go of it
     // must not graft it again: every graft of the rendezvous waits for
     // `rendezvous_wanted`.
@@ -934,6 +933,31 @@ mod tests {
         );
         state.note_peer_endpoint(nick("peer"), addr(4001));
         assert!(!state.graft_blocked(peer, later), "a new address");
+    }
+
+    /// A proven path is new information: the peer that refused a `Neighbor` request before it
+    /// is asked again, so the graft that follows the proof is not skipped.
+    #[test]
+    fn a_proven_path_ends_the_backoff() {
+        use std::time::Duration;
+        let mut state = fresh_state();
+        let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
+        let start = crate::util::clock::Instant::now();
+        let later = start + Duration::from_secs(crate::util::tuning::GRAFT_REFUSED_AFTER_SECS + 1);
+        let _ = graft_request(&mut state, peer, rendezvous, 8, start, false);
+        state.settle_graft_backoff(later);
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 8, later, true),
+            GraftRequest::Skip,
+            "refused: the paced graft is skipped"
+        );
+
+        state.note_path_proven(peer);
+        assert_eq!(
+            graft_request(&mut state, peer, rendezvous, 8, later, true),
+            GraftRequest::Neighbor,
+            "the proof ends the wait"
+        );
     }
 
     #[test]

@@ -912,6 +912,14 @@ impl EventLoopState {
         self.lane_wanted.remove(&peer);
     }
 
+    /// A direct path to `peer` is proven. This is new information, so a refusal of the peer
+    /// before it no longer holds the graft that follows.
+    pub(crate) fn note_path_proven(&mut self, peer: EndpointId) {
+        self.direct.insert(peer, DirectState::Direct);
+        self.clear_lane_wanted(peer);
+        self.graft_backoff.reset(peer);
+    }
+
     /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held
     /// two or more links fewer than G for `STARVED_SECS`, and the last fallback is
     /// `STARVED_SECS` old. A `true` stamps the fallback.
