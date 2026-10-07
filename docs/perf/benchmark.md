@@ -213,6 +213,61 @@ rounds. The range is min–max across both runs.
   rungs on loopback is a result.
 - The gossip rung has no cell here. It needs the gossip transport (Phase 6).
 
+## The gossip backup path
+
+`cargo task benchmark --only 'gossip backup'` measures what a gossip path costs
+the mesh while it is open but not selected, because a pair stands on IP. The
+question: does an open backup path put frames on the topic, and how many?
+
+**Method.** N members share one in-memory flood: every frame that one member sends
+reaches every other member, as a gossip broadcast does. Two of them are real iroh
+endpoints, A and B, with IP on loopback and the gossip transport beside it, and
+the path ladder ranks IP first. A dials B with the IP address and the gossip
+address. The control run gives the IP address only. After 3 s to settle, the
+pair idles for 30 s, then moves 5 timed rounds of 8 MiB over IP. The run counts
+the frames each member puts on the topic and reads, the datagrams that iroh sent
+and received on the gossip path (`Path::stats`), and the lost packets of the
+connection at both ends.
+
+Apple M5, macOS 27.2, rustc 1.95.0, the runner's `bench` build. One run. Load
+average 1.96 at the start. N = 8 and N = 32 gave the same numbers.
+
+| | gossip path open under IP | control, IP only |
+|---|---|---|
+| selected path | ip | ip |
+| gossip path open | yes | no |
+| datagrams on the gossip path in 30 s (tx, rx) | 8, 8 | none |
+| lost packets on the gossip path | 0 | none |
+| frames on the topic in 30 s | 16 | 0 |
+| frames out per second, A and B each | 0.27 | 0 |
+| frames in per second, each bystander | 0.53 | 0 |
+| bytes in per second, A and B each / each bystander | 26 / 51 | 0 |
+| frames on the topic during 40 MiB of bulk | 0 | 0 |
+| lost packets during bulk, at A and at B | 0, 0 | 0, 0 |
+| throughput, median of the rounds (min–max) | 1803 Mbit/s (1682–1864) | |
+
+**Reading.**
+
+- With IP selected, an open gossip path costs one 96-byte frame per 3.7 s in each
+  direction (66 bytes of header and a 30-byte datagram, so a QUIC probe or a
+  keepalive). It carried no payload: the bulk put 0 frames on the topic.
+- The cost of one pair does not depend on N. Every frame reaches every member, so
+  the cost for one member is the number of such pairs times 0.53 frames/s. If every
+  pair had an open backup path, that is about 15 frames/s (1.4 KB/s) per member at
+  N = 8 (28 pairs) and about 264 frames/s (25 KB/s) at N = 32 (496 pairs). These two
+  figures are arithmetic from the measured rate. They were not measured.
+- This is the traffic that `GossipHandle::allow(dst, false)` stops. A pair that a
+  higher rung carries has no use for the gossip path, so the engine blocks its
+  frames. The lookup rule alone does not remove it, because iroh also opens a
+  learned custom address as a backup path.
+
+**Limits.** One run, and one pair in the group. The flood is all-to-all and in
+memory: a real gossip topic builds a tree and adds lazy `IHAVE` messages and
+delay, so frames per member would differ. The idle window is 30 s, so a probe
+interval longer than that would not show. The lost packets here are those of the
+IP path. The inner QUIC retransmits of a pair that gossip carries come with the
+gossip-only cell.
+
 ## What this says about removing the inner encryption
 
 - It is not what limits throughput in any cell.
