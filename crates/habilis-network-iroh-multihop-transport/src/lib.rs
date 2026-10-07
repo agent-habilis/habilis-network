@@ -290,6 +290,25 @@ impl MultihopHandle {
         self.inner.forwarder.stuck_hops()
     }
 
+    /// The id of this node's underlay endpoint: the key derived by
+    /// [`underlay_secret`], not the application endpoint's.
+    #[must_use]
+    pub fn underlay_id(&self) -> EndpointId {
+        self.inner.underlay.id()
+    }
+
+    /// The ports this node's underlay endpoint is bound on, for a test that
+    /// blocks IP between underlays.
+    #[must_use]
+    pub fn underlay_ports(&self) -> Vec<u16> {
+        self.inner
+            .underlay
+            .bound_sockets()
+            .iter()
+            .map(std::net::SocketAddr::port)
+            .collect()
+    }
+
     /// How many cells this node passed on for other nodes. Cells it sends for
     /// itself, and cells that end here, are not counted.
     #[must_use]
