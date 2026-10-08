@@ -517,6 +517,16 @@ Each node broadcasts a link vector, and every node folds the freshest vectors in
 Route computation is a local Dijkstra run.
 A route is a **source route**: the sender packs the full hop list into the address.
 
+Every node advertises one cost for the links that leave it, `HandleConfig::link_cost`: 10 for a native node.
+A browser advertises ten times more (`HandleConfig::for_browser`, 100), so a route avoids a browser as a hop.
+The graph is directed: the link into a node carries the cost of its neighbor, and the links out of it carry its own cost.
+A browser therefore costs once as a hop in the middle of a route, and nothing as the source or the destination of a route.
+A route has at most 8 hops, so the longest native route costs 80, and one browser hop costs at least 110 (10 into the browser, 100 out of it).
+A native route wins whenever one exists, and a route through a browser is used when no native route does.
+The cost is part of the signed vector, so another node cannot change it, but a node can advertise any cost for itself.
+The rule holds while all native links cost the same.
+With measured costs it must be shown again, and the test `a_route_through_a_browser_costs_more_than_any_native_route` fails when a constant breaks it.
+
 ```mermaid
 flowchart LR
     A["A (source)"] -->|"cell: path=[B,C], pos=0"| B["B (relay)"]
