@@ -93,7 +93,8 @@ impl Route {
     }
 
     /// Decode a multihop [`CustomAddr`] back into a route. Returns `None` for a
-    /// wrong transport id or malformed bytes.
+    /// wrong transport id or malformed bytes. The `underlay_id` of a decoded hop is an
+    /// id to resolve, not an address: the forwarder looks up the address in its topology.
     pub(crate) fn decode(addr: &CustomAddr) -> Option<Self> {
         if addr.id() != MULTIHOP_TRANSPORT_ID {
             return None;

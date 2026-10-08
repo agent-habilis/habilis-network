@@ -343,7 +343,7 @@ pub(crate) struct Forwarder {
     /// Where the dial address of a next hop comes from: a route names a hop by two ids,
     /// and the address is the one that the hop signed in its link vector.
     topology: Arc<RwLock<Topology>>,
-    /// Hops that a writer was spawned for without an address in the topology.
+    /// Hops that a writer was spawned for with no vector in the topology: a hop without a vector.
     unresolved_hops: AtomicU64,
 }
 
@@ -374,15 +374,15 @@ impl Forwarder {
         }
     }
 
-    /// How many writers were spawned for a hop that is not in the topology.
+    /// How many writers were spawned for a hop without a vector in the topology.
     #[cfg(test)]
     pub(crate) fn unresolved_hops(&self) -> u64 {
         self.unresolved_hops.load(Ordering::Relaxed)
     }
 
     /// The address to dial for `hop`: the one that its node signed in its link vector, if the
-    /// vector names the same underlay endpoint as the hop. A hop that the topology does not
-    /// know is dialed by its id alone, and counted: it may still be reachable by what iroh
+    /// vector names the same underlay endpoint as the hop. A hop without a vector is dialed
+    /// by its id alone, never at an address that a cell carries, and counted: it may still be reachable by what iroh
     /// knows of the id, and if it is not, the cells are lost like any other.
     fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
         let known = self
@@ -398,7 +398,7 @@ impl Forwarder {
                     total,
                     hop = %hop.underlay_id.fmt_short(),
                     app_id = %hop.app_id.fmt_short(),
-                    "multihop forwarder: hop not in the topology, dialing it by id"
+                    "multihop forwarder: hop without a vector, dialing it by id"
                 );
             }
             EndpointAddr::new(hop.underlay_id)
