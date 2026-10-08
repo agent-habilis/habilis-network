@@ -603,6 +603,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     } = loop_state;
 
     log_daemon_start(&author);
+    let slot_freed = state.webrtc_admission.slot_freed();
 
     // The surfaced-events ring (`poll`/`fetch` history) lives app-side, fed by
     // the tap the caller attached to `output` before handing it in (both this
@@ -696,6 +697,11 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::on_outcome(outcome, &mut state, &ctx).await;
                 crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
+            }
+            () = slot_freed.notified() => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                crate::transport::probe::top_up_lane_offers(&mut state, &ctx).await;
             }
             Some(change) = path_rx.recv() => {
                 state.idle.external += 1;

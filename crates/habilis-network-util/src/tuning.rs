@@ -439,9 +439,10 @@ pub const RELINK_COOLDOWN_SECS: u64 = 10;
 /// fork keeps one of the two links.
 pub const REGRAFT_AFTER_MS: u64 = 1000;
 
-/// How many offered session rounds a node holds in flight for a lane. A browser pays an ICE
+/// How many session rounds a node holds in flight when it offers a lane session. The rounds that
+/// it answers count too: the budget is the rounds of the admission table. A browser pays an ICE
 /// gathering budget per round, and at formation a node would start one round per member. The
-/// members left out of a pass are picked by the next one, and by the end of a round.
+/// members left out of a pass are picked by the next one, and by the end of any round.
 pub const LANE_OFFERS_IN_FLIGHT: usize = 4;
 
 /// How long a node may hold two or more links fewer than G, and how long it waits

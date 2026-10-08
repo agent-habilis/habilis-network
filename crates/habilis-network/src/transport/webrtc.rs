@@ -1483,7 +1483,7 @@ pub(crate) fn retry_sessions(
     let (lane, rest): (Vec<_>, Vec<_>) = peers
         .into_iter()
         .partition(|addr| own_needs_lane || needs_webrtc_lane(addr));
-    let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+    let pick = super::probe::lane_pick();
     let lane = super::probe::plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick);
     for addr in rest.into_iter().chain(lane) {
         negotiate_session(state, ctx, addr.id, addr);
@@ -3671,6 +3671,94 @@ mod tests {
         );
 
         // The dials to a closed signal port would hold their slots for a long deadline.
+        state.webrtc_admission.close();
+        endpoint.close().await;
+    }
+
+    /// **A freed slot is filled.** With the budget spent, the top-up offers nothing. When one
+    /// round ends, it offers to exactly one more of the members that were left out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_top_up_fills_the_slot_that_a_round_freed() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
+
+        let (endpoint, handle) = endpoint().await;
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(99),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle);
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
+        for (index, id) in members.iter().enumerate() {
+            let addr = EndpointAddr::new(*id)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+            state
+                .peer_endpoints
+                .insert(crate::testing::nick(&format!("member{index}")), addr);
+        }
+
+        crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
+        let touched = |state: &crate::daemon::state::EventLoopState| {
+            members
+                .iter()
+                .filter(|id| state.direct.contains_key(*id))
+                .count()
+        };
+        assert_eq!(touched(&state), LANE_OFFERS_IN_FLIGHT, "the first pass");
+
+        crate::transport::probe::top_up_lane_offers(&mut state, &ctx).await;
+        assert_eq!(
+            touched(&state),
+            LANE_OFFERS_IN_FLIGHT,
+            "the budget is spent: the top-up offers nothing"
+        );
+
+        // One round ends: its slot is free.
+        let offered = *members
+            .iter()
+            .find(|id| state.direct.contains_key(*id))
+            .expect("an offered member");
+        assert!(
+            state.webrtc_admission.preempt_offer(offered),
+            "a round to end"
+        );
+        crate::transport::probe::top_up_lane_offers(&mut state, &ctx).await;
+        assert_eq!(
+            touched(&state),
+            LANE_OFFERS_IN_FLIGHT + 1,
+            "one more member is offered"
+        );
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            LANE_OFFERS_IN_FLIGHT,
+            "the budget is spent again"
+        );
+
         state.webrtc_admission.close();
         endpoint.close().await;
     }

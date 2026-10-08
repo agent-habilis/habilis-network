@@ -152,6 +152,45 @@ mod tests {
             .expect("the callback ran");
     }
 
+    /// The watch holds the connection weakly: when the gossip layer drops the last handle,
+    /// the task ends and releases its callback, and nothing is closed.
+    #[tokio::test]
+    async fn the_watch_ends_when_the_last_handle_of_the_connection_is_dropped() {
+        let loopback = |key: SecretKey| async move {
+            Endpoint::builder(presets::Minimal)
+                .secret_key(key)
+                .relay_mode(RelayMode::Disabled)
+                .bind_addr(
+                    "127.0.0.1:0"
+                        .parse::<std::net::SocketAddr>()
+                        .expect("loopback"),
+                )
+                .expect("bind address")
+                .bind()
+                .await
+                .expect("bind")
+        };
+        let (alice, bob) = (loopback(secret(5)).await, loopback(secret(6)).await);
+        let (tx, _rx) = oneshot::channel();
+        let _router = Router::builder(bob.clone())
+            .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
+            .spawn();
+        let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
+        let (alive, alive_rx) = oneshot::channel::<()>();
+        // The task owns the callback, and the callback owns `alive`: the receiver
+        // fails once the task has ended and dropped it without calling it.
+        watch_recursion(&connection, CODE, move || {
+            let _ = alive.send(());
+        });
+
+        drop(connection);
+
+        let ended = tokio::time::timeout(Duration::from_secs(5), alive_rx)
+            .await
+            .expect("the watch task did not end");
+        assert!(ended.is_err(), "the callback ran: {ended:?}");
+    }
+
     /// A connection on IP is left alone.
     #[tokio::test]
     async fn a_connection_on_ip_is_left_open() {

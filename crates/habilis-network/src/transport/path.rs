@@ -40,12 +40,13 @@ pub(crate) fn gossip_recursion_closes() -> u64 {
 /// Close `conn` with [`GOSSIP_RECURSION_REFUSED_CODE`] once its selected path is the gossip
 /// rung, now or after a path change. Unconditional: it reads no mesh policy.
 pub(crate) fn watch_gossip_recursion(conn: &Connection) {
+    let remote = conn.remote_id();
     habilis_network_iroh_gossip_transport::watch_recursion(
         conn,
         GOSSIP_RECURSION_REFUSED_CODE,
-        || {
+        move || {
             GOSSIP_RECURSION_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!(target: LOG_TARGET, "gossip connection closed: its path is the gossip rung");
+            tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is the gossip rung");
         },
     );
 }

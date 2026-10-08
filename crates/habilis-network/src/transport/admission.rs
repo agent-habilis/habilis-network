@@ -385,6 +385,9 @@ pub struct SignalAdmission {
     /// gossip connections that this node dialed (see [`ConnectionHook`]). Set once
     /// the router, which knows the mesh policy, is built.
     watch_dialed_gossip: Arc<AtomicBool>,
+    /// Woken when a round ends, offered or answered, so that the event loop can offer the
+    /// sessions that the budget kept back (see [`Self::slot_freed`]).
+    freed: Arc<tokio::sync::Notify>,
 }
 
 impl SignalAdmission {
@@ -405,6 +408,7 @@ impl SignalAdmission {
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
+            freed: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -697,11 +701,24 @@ impl SignalAdmission {
             .is_some_and(|slot| slot.round.is_some())
     }
 
+    /// Woken once, with a stored permit, after any round ended: several ends in a row wake it
+    /// once, and the pass that follows spends the whole budget that they freed. The end of a
+    /// round that failed counts as much as one that attached, and no `DirectOutcome` is sent for
+    /// it, because a verdict of `direct: false` would mark a lane peer relay-only.
+    pub(crate) fn slot_freed(&self) -> Arc<tokio::sync::Notify> {
+        self.freed.clone()
+    }
+
     fn release(&self, peer: EndpointId, epoch: u64) {
-        if let Some(slot) = self.lock().slots.get_mut(&peer)
-            && slot.epoch == epoch
-        {
-            slot.round = None;
+        let ended = self
+            .lock()
+            .slots
+            .get_mut(&peer)
+            .filter(|slot| slot.epoch == epoch)
+            .map(|slot| slot.round = None)
+            .is_some();
+        if ended {
+            self.freed.notify_one();
         }
     }
 
@@ -887,7 +904,8 @@ impl EndpointHooks for ConnectionHook {
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
         self.admission.note_connection(conn);
         // A gossip connection on the gossip rung would carry the gossip that its frames need:
-        // both ends close it, whatever the mesh policy says.
+        // both ends close it, whatever the mesh policy says, and before the relay watch, which is
+        // policy-gated.
         if conn.alpn() == iroh_gossip::net::GOSSIP_ALPN {
             super::path::watch_gossip_recursion(conn);
         }
@@ -942,6 +960,31 @@ mod tests {
 
     fn peer(byte: u8) -> EndpointId {
         iroh::SecretKey::from_bytes(&[byte; 32]).public()
+    }
+
+    /// The end of a round wakes the waiter of `slot_freed`, however the round ended, and a round
+    /// that was given up for the offer of the peer does not: its guard no longer holds the slot.
+    #[tokio::test]
+    async fn the_end_of_a_round_wakes_the_waiter_of_slot_freed() {
+        let admission = SignalAdmission::new(4);
+        let freed = admission.slot_freed();
+        let guard = admission
+            .try_admit_offer(peer(1), &hub())
+            .expect("a free slot");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), freed.notified())
+                .await
+                .is_err(),
+            "a round in flight wakes nobody"
+        );
+
+        drop(guard);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), freed.notified())
+                .await
+                .is_ok(),
+            "the end of the round wakes the waiter"
+        );
     }
 
     /// An empty hub: `has_session` is always false and `session_count` is 0, so

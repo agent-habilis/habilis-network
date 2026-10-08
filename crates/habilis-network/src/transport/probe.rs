@@ -600,7 +600,6 @@ pub(crate) async fn on_outcome(
     let DirectOutcome { peer, direct, .. } = outcome;
     if direct {
         graft_proven(state, ctx, peer).await;
-        top_up_lane_offers(state, ctx).await;
     } else if state.demote_unproven(peer) {
         tracing::info!(target: super::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
     } else {
@@ -734,7 +733,7 @@ pub(crate) async fn retry_direct(
     for addr in rest {
         retry_one(state, ctx, addr, distrust_links).await;
     }
-    let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+    let pick = lane_pick();
     for addr in plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick) {
         retry_one(state, ctx, addr, distrust_links).await;
     }
@@ -765,6 +764,11 @@ pub(crate) fn plan_lane_offers(
     ordered
 }
 
+/// The random start of a pass over the lane members.
+pub(crate) fn lane_pick() -> usize {
+    usize::try_from(rand::random::<u32>()).unwrap_or(0)
+}
+
 /// The candidates of a retry pass that need an offered session: a lane pair, and no session yet.
 fn is_lane_offer(state: &EventLoopState, ctx: &HandlerCtx<'_>, addr: &iroh::EndpointAddr) -> bool {
     (needs_webrtc_lane(addr) || needs_webrtc_lane(&ctx.endpoint.addr()))
@@ -790,7 +794,10 @@ async fn retry_one(
 }
 
 /// Offer a session to the lane members that a pass left out, as far as the rounds in flight
-/// allow. The end of a round calls this, so that the next members do not wait for the alive tick.
+/// allow. The event loop calls this when a round ends, whatever its end (see
+/// [`SignalAdmission::slot_freed`](super::admission::SignalAdmission::slot_freed)), so that the
+/// next members do not wait for the alive tick. The members are not served in a fair order: the
+/// random start spreads the load, and nothing more is promised.
 pub(crate) async fn top_up_lane_offers(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     if state.relay_transport || state.webrtc.is_none() {
         return;
@@ -799,7 +806,7 @@ pub(crate) async fn top_up_lane_offers(state: &mut EventLoopState, ctx: &Handler
         .into_iter()
         .filter(|addr| is_lane_offer(state, ctx, addr))
         .collect();
-    let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+    let pick = lane_pick();
     for addr in plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick) {
         retry_one(state, ctx, addr, false).await;
     }
