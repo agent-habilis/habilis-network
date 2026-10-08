@@ -66,6 +66,19 @@ fn test_ping_round_trip() {
     assert_eq!(parsed.body.as_str(), "");
 }
 
+/// A browser builds and signs a link-state advertisement as a native node does: the builder
+/// needs no operating system, so it must exist with the `host` feature off.
+#[test]
+fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
+    let identity = crate::identity::Identity::generate();
+    let msg = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
+        .signed(&identity);
+    assert!(msg.verify_signature());
+    let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
+    assert_eq!(parsed.kind, MessageKind::LinkState);
+    assert_eq!(parsed.body.as_str(), "{}");
+}
+
 #[test]
 fn test_pong_round_trip() {
     let target = nick("pinger-here");

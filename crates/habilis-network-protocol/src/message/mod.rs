@@ -612,9 +612,8 @@ impl Message {
     /// A multihop link-state advertisement; `vector_json` is a serialized
     /// `habilis_network_iroh_multihop_transport::LinkVector`.
     ///
-    /// `host`-only with the transport that mints the vectors. The *kind* stays
-    /// portable — a browser still receives and ignores a peer's advertisement.
-    #[cfg(feature = "host")]
+    /// Portable: it only builds a `Message`, so a browser that mints vectors builds
+    /// the advertisement as a native node does.
     #[must_use]
     pub fn new_link_state(mesh: &MeshId, author: &Nickname, vector_json: MessageBody) -> Self {
         Self::new(mesh, author, MessageKind::LinkState, vector_json)
