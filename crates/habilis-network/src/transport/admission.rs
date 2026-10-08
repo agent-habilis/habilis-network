@@ -1803,9 +1803,11 @@ mod tests {
         fixture.shutdown().await;
     }
 
-    /// A gossip connection whose selected path is the gossip rung is closed by the hook, at both
-    /// ends, with the code of the recursion rule. The rule reads no mesh policy: here the dialed
-    /// gossip watch is off, which is its default.
+    /// A gossip connection whose selected path is the gossip rung is closed by the hook, with the
+    /// code of the recursion rule, and the other end reads that code. Only the dialer has the hook:
+    /// with a hook at both ends each end can close before it reads the close of the other, and
+    /// then both read `LocallyClosed`. The rule reads no mesh policy: here the dialed gossip watch
+    /// is off, which is its default.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
         use habilis_network_iroh_gossip_transport::memory::MemoryHub;
@@ -1837,20 +1839,21 @@ mod tests {
         );
         hub.join(&alice_handle);
         hub.join(&bob_handle);
-        let bind = |key: SecretKey, handle: GossipHandle, admission: SignalAdmission| async move {
-            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let bind = |key: SecretKey, handle: GossipHandle, admission: Option<SignalAdmission>| async move {
+            let builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
                 .secret_key(key)
                 .relay_mode(RelayMode::Disabled)
                 .add_custom_transport(handle.custom_transport())
                 .clear_ip_transports()
-                .clear_relay_transports()
-                .hooks(admission.connection_hook())
-                .bind()
-                .await
-                .expect("bind a gossip-only endpoint")
+                .clear_relay_transports();
+            let builder = match admission {
+                Some(admission) => builder.hooks(admission.connection_hook()),
+                None => builder,
+            };
+            builder.bind().await.expect("bind a gossip-only endpoint")
         };
-        let alice = bind(alice_key, alice_handle, SignalAdmission::new(8)).await;
-        let bob = bind(bob_key, bob_handle, SignalAdmission::new(8)).await;
+        let alice = bind(alice_key, alice_handle, Some(SignalAdmission::new(8))).await;
+        let bob = bind(bob_key, bob_handle, None).await;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let _router = Router::builder(bob.clone())
             .accept(
@@ -1875,19 +1878,14 @@ mod tests {
             .await
             .expect("the accepted end was not closed")
             .expect("the probe reported");
-        // Both ends run the rule: the end that closes first reads `LocallyClosed`, and the other
-        // end reads the code.
         let code = u64::from(super::super::path::GOSSIP_RECURSION_REFUSED_CODE);
-        let with_code = |end: &ConnectionError| matches!(end, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == code);
-        let ends = [at_alice, at_bob];
         assert!(
-            ends.iter()
-                .all(|end| with_code(end) || matches!(end, ConnectionError::LocallyClosed)),
-            "{ends:?}"
+            matches!(at_alice, ConnectionError::LocallyClosed),
+            "the dialer closed itself: {at_alice:?}"
         );
         assert!(
-            ends.iter().any(with_code),
-            "one end reads the code: {ends:?}"
+            matches!(&at_bob, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == code),
+            "the accepted end reads the code: {at_bob:?}"
         );
         assert!(
             crate::transport::path::gossip_recursion_closes() > before,
