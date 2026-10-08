@@ -394,7 +394,7 @@ puts two `iroh_base` versions in the graph, which makes types from
 iroh-gossip and the address-lookup crates fail to unify (E0308).
 
 Current revs: `iroh`/`iroh-base`/`iroh-dns` →
-`agent-habilis/iroh` `2b4bdd45cb6d7e7ab213fea418cffa8c735b93de` (mapped_addrs
+`agent-habilis/iroh` `8a248273eaa368073d3c755b6fd788420b004bed` (mapped_addrs
 eviction + relay teardown, **plus** the netwatch/portmapper repoint, **plus**
 PR #1: a custom-transport path that is learned while another custom path is
 selected is opened too, and a pair selected on IP skips it until it leaves IP, so a `WebRTC`
@@ -403,11 +403,11 @@ session that comes up after multihop was selected can be selected over it,
 once, not once per connection at every retry; the queue doubled at each 333 ms
 retry and took gigabytes in a mesh of 24, **plus** a custom address learned while IP is
 selected is queued again when the selected path leaves IP, so a `WebRTC` session that
-attached while the pair was on IP can be opened after the IP path is lost. Cost: once a
+attached while the pair was on IP can be opened after the IP path is lost, **plus** the `selector-test-utils` feature (a test-only API: public `for_test` constructors and `PathSelection::selected_for_test`, so that a path selector outside iroh can be unit-tested; no change of behaviour). Cost: once a
 pair has left IP, its custom path stays open on every connection of the pair, also after IP
 returns; each custom address keeps one more path id and its keep-alive while the connections live);
-`iroh-gossip` → `2f4d40374e66943fa60865e0266f992fe87fa4bb` (branch `feat/neighbor-peers`, PR #5 in the fork, not merged: `NeighborPeers`, a low priority request for a link, and a fix for a stuck pending Neighbor request, and a fix for two dials that cross: both sides keep the connection that the lower endpoint id dialed (each side kept the one that the other closed, and both reported the peer down), where a replaced connection and the loser keep reading for 2 s before they close, so that a Neighbor request on them is not lost, the rule holds only for 5 s after a connection became active, and a request made with `RequestNeighbors` stops being pending after 20 s, on top of `b379de6`, branch `chore/iroh-51e891c`, PR #4 in the fork, not merged: the `iroh` pin above on top of `eca06e4`, branch `leave-peers`, PR #2 in the fork, not merged, with its own `iroh` and `iroh-base` at the rev above: `leave_peers`, a tombstone for a peer that left on purpose, and the TimeBoundCache expiry-heap fix on top of fork main `5d57f94`; the workspace uses `GossipSender::leave_peers` to let go of the rendezvous; two fixes in the gossip actor: it never waits for a full connection queue (`e12580e`), and it splits the overflow rule by message kind, so data is dropped and counted while any other message disconnects the peer (`eca06e4`)); `iroh-mdns-address-lookup` and `iroh-mainline-address-lookup` →
-`agent-habilis/iroh-address-lookups` `6fe268a06f1ea5938e5952ef7eca2658180bd3eb` (branch `chore/iroh-51e891c`, PR #4 in the fork, not
+`iroh-gossip` → `a9fcab9a0e6981aee40fd1fcb85dfdcdf5ce063b` (branch `feat/neighbor-peers`, PR #5 in the fork, not merged: `NeighborPeers`, a low priority request for a link, and a fix for a stuck pending Neighbor request, and a fix for two dials that cross: both sides keep the connection that the lower endpoint id dialed (each side kept the one that the other closed, and both reported the peer down), where a replaced connection and the loser keep reading for 2 s before they close, so that a Neighbor request on them is not lost, the rule holds only for 5 s after a connection became active, and a request made with `RequestNeighbors` stops being pending after 20 s, on top of `b379de6`, branch `chore/iroh-51e891c`, PR #4 in the fork, not merged: the `iroh` pin above on top of `eca06e4`, branch `leave-peers`, PR #2 in the fork, not merged, with its own `iroh` and `iroh-base` at the rev above: `leave_peers`, a tombstone for a peer that left on purpose, and the TimeBoundCache expiry-heap fix on top of fork main `5d57f94`; the workspace uses `GossipSender::leave_peers` to let go of the rendezvous; two fixes in the gossip actor: it never waits for a full connection queue (`e12580e`), and it splits the overflow rule by message kind, so data is dropped and counted while any other message disconnects the peer (`eca06e4`)); `iroh-mdns-address-lookup` and `iroh-mainline-address-lookup` →
+`agent-habilis/iroh-address-lookups` `7aed69e506ea1a688333dcbe2ba760226803108b` (branch `chore/iroh-51e891c`, PR #4 in the fork, not
 merged: its `iroh`, `iroh-base` and `iroh-dns` at the rev above, on top of `69c8102`, PR #3); `net-tools` →
 `e02960255ef2f5b2ba4aa3d4cf195e0b8673f370`.
 
