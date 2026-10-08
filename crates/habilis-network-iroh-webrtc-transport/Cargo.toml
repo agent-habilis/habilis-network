@@ -131,7 +131,10 @@ web-sys = { workspace = true, optional = true, features = [
 ] }
 
 [dev-dependencies]
-tokio.workspace = true
+# `process` and `io-util` for the `session_cost` example, which drives a peer process over pipes.
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "io-util", "io-std"] }
+serde_json.workspace = true
+habilis-network-util = { path = "../habilis-network-util" }
 n0-error = "1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # The browser test's timers and its concurrent JSEP join. Already in the
@@ -176,3 +179,8 @@ required-features = ["web", "bench"]
 [[test]]
 name = "browser_matrix"
 required-features = ["web", "bench"]
+
+# The cost of one WebRTC session in the process that holds it; see the header of the example.
+[[example]]
+name = "session_cost"
+required-features = ["native"]
