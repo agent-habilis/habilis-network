@@ -407,3 +407,26 @@ async fn a_hash_minted_by_a_bind_for_node_carries_its_relay() {
         minted.addr
     );
 }
+
+/// Gossip-only mesh: a stream is one direct lane between two endpoints that never join a mesh,
+/// so it cannot ride the gossip rung. A node that asks for `gossip` or `multihop` is refused
+/// at bind, with the reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_node_refuses_the_gossip_and_multihop_transports() {
+    for (transport, reason) in [
+        (Transport::Gossip, "a stream has no gossip"),
+        (Transport::Multihop, "a stream has no multihop"),
+    ] {
+        let opts = StreamOpts {
+            transport: vec![Transport::Udp, transport],
+            ..StreamOpts::default()
+        };
+        let error = StreamNode::bind(&opts)
+            .await
+            .expect_err("the transport must be refused");
+        assert!(
+            format!("{error:#}").contains(reason),
+            "{transport:?}: {error:#}"
+        );
+    }
+}
