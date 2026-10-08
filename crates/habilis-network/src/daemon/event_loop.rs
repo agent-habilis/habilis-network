@@ -11,7 +11,6 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use futures_util::StreamExt;
 use iroh::{Endpoint, EndpointId, RelayUrl};
 use iroh_gossip::api::GossipReceiver;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -250,6 +249,10 @@ pub async fn run<A: NodeDriver>(
     state.arm_reclaim(Instant::now());
 
     let (gossip_sender, receiver) = topic.split();
+    if let Some(handle) = &state.gossip_handle {
+        handle.attach_gossip(gossip_sender.clone());
+    }
+    let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
 
     let sender = MeshSender::new(gossip_sender);
     // The task that sends the digest answers, so that the loop never waits for
@@ -491,7 +494,7 @@ fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn N
 /// (clippy `too_many_lines`) without an `#[allow]`.
 struct EventLoop<A: NodeDriver> {
     sender: MeshSender,
-    receiver: GossipReceiver,
+    receiver: gossip::split::MeshReceiver<GossipReceiver>,
     /// The gossip frontend, kept so the loop can re-subscribe the topic
     /// after the stream terminally ends (see the heal arm) — without it
     /// a closed subscription (e.g. lag-evicted by the actor) would

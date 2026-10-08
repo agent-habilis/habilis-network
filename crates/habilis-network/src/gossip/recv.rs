@@ -302,9 +302,17 @@ pub(crate) async fn drain_dead_receiver(
     let mut recovered = 0usize;
     loop {
         match receiver.next().now_or_never() {
-            Some(Some(Ok(Event::Received(incoming)))) => {
-                ingest(incoming.content, state, app, ctx).await;
-                recovered += 1;
+            Some(Some(item @ Ok(Event::Received(_)))) => {
+                // A buffered frame goes to the transport, as in the split: it is not a message.
+                if super::split::route(&item, state.gossip_handle.as_ref())
+                    != super::split::Route::Data
+                {
+                    continue;
+                }
+                if let Ok(Event::Received(incoming)) = item {
+                    ingest(incoming.content, state, app, ctx).await;
+                    recovered += 1;
+                }
             }
             // Skip stale membership events / errors; stop on a terminal
             // `None` (the stream's actual end) or an empty buffer.

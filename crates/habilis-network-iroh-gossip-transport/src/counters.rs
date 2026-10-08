@@ -36,6 +36,9 @@ pub struct Stats {
     /// Times the topic told this member that it missed messages, because the
     /// receive loop was not reading fast enough (`Event::Lagged`).
     pub topic_lagged: u64,
+    /// Mesh messages that the engine's split dropped because its queue to the event loop was
+    /// full: the newest goes, and anti-entropy repairs it. Not a lag of the topic.
+    pub forward_dropped: u64,
     /// Frames sent without a charge on the budget, because the destination has
     /// no established connection: a handshake.
     pub exempt_frames: u64,
@@ -60,6 +63,7 @@ pub(crate) struct Counters {
     dropped_oversized_in: AtomicU64,
     exempt_frames: AtomicU64,
     topic_lagged: AtomicU64,
+    forward_dropped: AtomicU64,
 }
 
 impl Counters {
@@ -83,6 +87,7 @@ impl Counters {
             dropped_oversized_in: read(&self.dropped_oversized_in),
             exempt_frames: read(&self.exempt_frames),
             topic_lagged: read(&self.topic_lagged),
+            forward_dropped: read(&self.forward_dropped),
         }
     }
 
@@ -144,6 +149,10 @@ impl Counters {
 
     pub(crate) fn lagged(&self) {
         bump(&self.topic_lagged, 1);
+    }
+
+    pub(crate) fn forward_dropped(&self) {
+        bump(&self.forward_dropped, 1);
     }
 
     pub(crate) fn exempt(&self) {

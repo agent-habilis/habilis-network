@@ -900,7 +900,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     let (gossip, router, webrtc_admission, webrtc_ice) =
         build_overlay(build, &mesh, &endpoint, &webrtc, admission);
     // Creator has no peers yet — bootstrap is empty.
-    let topic = gossip.subscribe(topic_id, vec![]).await?;
+    let topic = crate::gossip::split::subscribe_mesh(&gossip, topic_id, []).await?;
 
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     register_rendezvous(&endpoint, &rdv);
@@ -989,7 +989,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         build.transports.udp,
     );
     let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
-    let topic = gossip.subscribe(topic_id, bootstrap).await?;
+    let topic = crate::gossip::split::subscribe_mesh(&gossip, topic_id, bootstrap).await?;
 
     // `ready` is emitted by `run`, once the IPC socket accepts — not here.
     lifecycle::log_ready(

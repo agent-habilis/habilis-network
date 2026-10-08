@@ -227,6 +227,12 @@ impl GossipHandle {
         self.shared.counters.lagged();
     }
 
+    /// The engine's split dropped a mesh message because its queue to the event loop was
+    /// full (see [`Stats::forward_dropped`](crate::Stats)).
+    pub fn note_forward_dropped(&self) {
+        self.shared.counters.forward_dropped();
+    }
+
     /// What this handle has counted so far.
     #[must_use]
     pub fn stats(&self) -> Stats {

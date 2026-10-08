@@ -18,6 +18,7 @@ use super::setup;
 use super::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
+use crate::gossip::split::MeshReceiver;
 use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::tuning::{RESUBSCRIBE_MAX_ATTEMPTS, heal_stall_threshold_secs};
@@ -152,7 +153,7 @@ pub(super) async fn run_heal(
 /// Outcome of one resubscribe attempt (the heal arm drives one per
 /// tick while the gossip stream is down).
 pub(super) enum Resubscribe {
-    Restored(GossipSender, GossipReceiver),
+    Restored(GossipSender, MeshReceiver<GossipReceiver>),
     Pending,
     Fatal,
 }
@@ -171,7 +172,7 @@ pub(super) struct ResubscribeEnv<'a> {
 /// increments.
 pub(super) struct GossipLink<'a> {
     pub(super) sender: &'a mut MeshSender,
-    pub(super) receiver: &'a mut GossipReceiver,
+    pub(super) receiver: &'a mut MeshReceiver<GossipReceiver>,
     pub(super) attempts: &'a mut u32,
 }
 /// One heal-tick turn while the gossip stream is down: attempt the
@@ -193,15 +194,19 @@ pub(super) async fn resubscribe_tick(
 ) -> Result<()> {
     match try_resubscribe(env, state, link.attempts).await {
         Resubscribe::Restored(new_sender, new_receiver) => {
-            let mut dead_receiver = std::mem::replace(link.receiver, new_receiver);
+            let dead_receiver = std::mem::replace(link.receiver, new_receiver);
+            if let Some(handle) = &state.gossip_handle {
+                handle.attach_gossip(new_sender.clone());
+            }
             link.sender.replace_gossip(new_sender);
             state.gossip_open = true;
             // The dead subscription's link view is void; the fresh one
             // emits its own NeighborUps (and re-arms the probe gate).
             state.rendezvous_linked = false;
             let ctx = env.parts.ctx(link.sender);
-            gossip::drain_dead_receiver(&mut dead_receiver, state, app, &ctx).await;
-            drop(dead_receiver);
+            if let Some(mut dead_receiver) = dead_receiver.into_dead().await {
+                gossip::drain_dead_receiver(&mut dead_receiver, state, app, &ctx).await;
+            }
             gossip::heal::recover_from_starvation(state, &ctx).await;
         }
         Resubscribe::Pending => {}
@@ -242,7 +247,7 @@ pub(super) async fn try_resubscribe(
         bootstrap.push(env.params.id);
     }
     bootstrap.extend(state.known_endpoints.iter().copied());
-    match env.gossip.subscribe(env.params.topic_id, bootstrap).await {
+    match gossip::split::subscribe_mesh(env.gossip, env.params.topic_id, bootstrap).await {
         Ok(topic) => {
             *attempts = 0;
             tracing::warn!(
@@ -253,6 +258,7 @@ pub(super) async fn try_resubscribe(
                 "gossip stream restored; rejoining the mesh".to_owned(),
             ));
             let (sender, receiver) = topic.split();
+            let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
             Resubscribe::Restored(sender, receiver)
         }
         Err(error) => {

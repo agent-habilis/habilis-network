@@ -14,6 +14,7 @@ mod broadcast;
 pub(crate) mod event;
 pub(crate) mod heal;
 mod recv;
+pub(crate) mod split;
 
 use iroh::endpoint::TransportAddrUsage;
 use iroh::{Endpoint, EndpointId, RelayUrl, TransportAddr};

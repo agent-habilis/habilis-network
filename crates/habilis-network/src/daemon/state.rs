@@ -151,6 +151,9 @@ pub struct EventLoopState {
     /// the real loop installs its channel.
     pub(crate) direct_proven:
         tokio::sync::mpsc::UnboundedSender<crate::transport::probe::DirectOutcome>,
+    /// The gossip transport, when the engine installs one (Phase 6, step 10). The split of the
+    /// mesh topic hands it the frames, and counts a lag on it.
+    pub(crate) gossip_handle: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
     /// Where a path watcher reports a change of the selected path to a peer
     /// the race covers (`transport::probe::on_path_change`).
     pub(crate) path_changes:
@@ -700,6 +703,7 @@ impl EventLoopState {
             direct: HashMap::new(),
             relay_transport: false,
             direct_proven: tokio::sync::mpsc::unbounded_channel().0,
+            gossip_handle: None,
             path_changes: tokio::sync::mpsc::unbounded_channel().0,
             path_watchers: HashMap::new(),
             path_kinds: HashMap::new(),
