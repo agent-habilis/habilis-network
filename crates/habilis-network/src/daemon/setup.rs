@@ -1292,6 +1292,7 @@ mod tests {
             crate::lookup::TransportHandles {
                 multihop: Some(handle.clone()),
                 webrtc: Some(webrtc.clone()),
+                gossip: None,
                 admission: Some(admission.clone()),
                 underlay: false,
                 opts: crate::lookup::TransportOpts::default(),

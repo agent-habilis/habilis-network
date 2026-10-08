@@ -211,6 +211,19 @@ impl GossipHandle {
         }
     }
 
+    /// Whether frames to `dst` are allowed: the last call of [`Self::allow`], and true for a
+    /// destination that was never named.
+    #[must_use]
+    pub fn is_allowed(&self, dst: EndpointId) -> bool {
+        !locked(&self.shared.blocked).contains(&dst)
+    }
+
+    /// Whether `dst` was last told to be established, by [`Self::set_established`].
+    #[must_use]
+    pub fn is_established(&self, dst: EndpointId) -> bool {
+        locked(&self.shared.established).contains(&dst)
+    }
+
     /// Limit the bytes per second that this node puts on the topic, or lift the
     /// limit with `None`. See [`crate::DEFAULT_BUDGET_BYTES_PER_SEC`].
     pub fn set_budget(&self, bytes_per_sec: Option<u64>) {

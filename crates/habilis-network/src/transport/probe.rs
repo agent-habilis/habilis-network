@@ -243,7 +243,7 @@ pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, ctx: &HandlerCtx<'
     nudge_routable_relay_pairs(state, ctx, false);
 }
 
-/// A pair on the relay that the topology can now route: dial with the route. The watcher does
+/// A pair on the relay, or on gossip, that the topology can now route: dial with the route. The watcher does
 /// this when the path is lost, but a route learned later is then missing, and nothing else runs
 /// a lookup for a pair that already has a session or no offer to make.
 ///
@@ -258,25 +258,27 @@ pub(crate) fn nudge_routable_relay_pairs(
     ctx: &HandlerCtx<'_>,
     only_changed: bool,
 ) {
-    let pairs: Vec<(EndpointId, bool, Option<iroh::TransportAddr>)> = state
+    let pairs: Vec<PairToClimb> = state
         .peer_endpoints
         .values()
         .filter(|addr| addr.id != ctx.rendezvous_id)
-        .filter(|addr| {
-            pair_kind(
+        .filter_map(|addr| {
+            let kind = pair_kind(
                 state.path_kinds.get(&addr.id).copied(),
                 state.webrtc_admission.selected_kind(addr.id),
-            ) == Some(PathKind::Relay)
-        })
-        .map(|addr| {
-            let has_session = state
-                .webrtc
-                .as_ref()
-                .is_some_and(|handle| handle.has_session(&addr.id));
-            (addr.id, has_session, route_to(state, addr.id))
+            )?;
+            // The relay and gossip are the two rungs that a route can still climb from.
+            matches!(kind, PathKind::Relay | PathKind::Gossip).then(|| {
+                let has_session = state
+                    .webrtc
+                    .as_ref()
+                    .is_some_and(|handle| handle.has_session(&addr.id));
+                (addr.id, kind, has_session, route_to(state, addr.id))
+            })
         })
         .collect();
-    for (peer, addrs) in plan_relay_dials(pairs, &mut state.route_dialed, only_changed) {
+    let gossip_on = state.gossip_handle.is_some();
+    for (peer, addrs) in plan_relay_dials(pairs, &mut state.route_dialed, only_changed, gossip_on) {
         tracing::debug!(
             target: super::LOG_TARGET,
             %peer,
@@ -295,32 +297,43 @@ pub(crate) fn nudge_routable_relay_pairs(
 /// Pure: the route dialed for a pair is only kept while the pair reads as the relay: a pair that
 /// fell back to the relay later gets its route dialed again. The planner's `retain` is the rule;
 /// this forgets a watched pair at the report, one pass earlier.
-fn forget_route_unless_relay(
+fn forget_route_unless_climbing(
     route_dialed: &mut HashMap<EndpointId, iroh::TransportAddr>,
     peer: EndpointId,
     kind: PathKind,
 ) {
-    if kind != PathKind::Relay {
+    if !matches!(kind, PathKind::Relay | PathKind::Gossip) {
         route_dialed.remove(&peer);
     }
 }
 
-/// Pure: the dials of one pass over the pairs that read as the relay, as `(peer, has a session,
-/// route)`. A pair is dialed when it has a session address or a route to carry. With
+/// A pair that a route can still climb from: the peer, the kind of its selected path (the relay or
+/// gossip), whether it has a session, and the route that the topology has for it.
+pub(crate) type PairToClimb = (EndpointId, PathKind, bool, Option<iroh::TransportAddr>);
+
+/// Pure: the dials of one pass over the pairs that read as the relay or as gossip, as `(peer,
+/// kind, has a session, route)`. A pair is dialed when it has a session address or a route to carry. With
 /// `only_changed` a pair is dialed only for a route that differs from the one dialed for it last,
 /// and a pair with no route is not dialed at all. `route_dialed` remembers the route of each dial,
 /// and keeps it only for the pairs of this pass: a pair that left the relay (it climbed, or it
 /// is gone) is forgotten, so that a pair that falls back with the same route is dialed again.
 pub(crate) fn plan_relay_dials(
-    pairs: impl IntoIterator<Item = (EndpointId, bool, Option<iroh::TransportAddr>)>,
+    pairs: impl IntoIterator<Item = PairToClimb>,
     route_dialed: &mut HashMap<EndpointId, iroh::TransportAddr>,
     only_changed: bool,
+    gossip_on: bool,
 ) -> Vec<(EndpointId, NudgeAddrs)> {
     let pairs: Vec<_> = pairs.into_iter().collect();
-    route_dialed.retain(|peer, _| pairs.iter().any(|(on_relay, ..)| on_relay == peer));
+    route_dialed.retain(|peer, _| pairs.iter().any(|(climbing, ..)| climbing == peer));
     let mut dials = Vec::new();
-    for (peer, has_session, route) in pairs {
-        let Some(addrs) = step(PathKind::Relay, has_session, route.clone(), false).nudge else {
+    for (peer, kind, has_session, route) in pairs {
+        let input = StepInput {
+            kind,
+            has_session,
+            route: route.clone(),
+            gossip_on,
+        };
+        let Some(addrs) = step(input).nudge else {
             continue;
         };
         let already_dialed = route.is_some() && route_dialed.get(&peer) == route.as_ref();
@@ -383,16 +396,25 @@ pub(crate) async fn on_path_change(
     }
     tracing::debug!(target: super::LOG_TARGET, %peer, ?kind, "selected path changed");
     state.path_kinds.insert(peer, kind);
-    forget_route_unless_relay(&mut state.route_dialed, peer, kind);
+    forget_route_unless_climbing(&mut state.route_dialed, peer, kind);
     // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
     // session now, not at the alive tick.
     #[cfg(feature = "multihop")]
     crate::transport::underlay_webrtc::tick_now(state);
+    // The fast path of the gossip drop rule for a watched pair: the table reads the pair from
+    // all of its connections, so that this path and the sweep never disagree on what to tell
+    // the gossip transport.
+    state.webrtc_admission.sync_gossip();
     let Some(handle) = state.webrtc.clone() else {
         return;
     };
     let has_session = handle.has_session(&peer);
-    let ladder = step(kind, has_session, route_to(state, peer), false);
+    let ladder = step(StepInput {
+        kind,
+        has_session,
+        route: route_to(state, peer),
+        gossip_on: state.gossip_handle.is_some(),
+    });
     let action = ladder.action;
     match action {
         PathAction::Proven | PathAction::Detach => {
@@ -464,6 +486,17 @@ pub(crate) struct NudgeAddrs {
     pub(crate) gossip: bool,
 }
 
+/// What [`step`] reads, by name: the kind of the selected path, whether the pair has a session,
+/// the multihop route that the topology has now (`None` if it has none), and whether the mesh
+/// has gossip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StepInput {
+    pub(crate) kind: PathKind,
+    pub(crate) has_session: bool,
+    pub(crate) route: Option<iroh::TransportAddr>,
+    pub(crate) gossip_on: bool,
+}
+
 /// The answer to a pair whose selected path is `kind`: the race action and what
 /// to dial to help iroh climb the ladder. Pure; the one place that decides both.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,16 +514,17 @@ pub(crate) struct Step {
 /// is never learned later without one. A pair with a session needs the session
 /// address in a dial to move its connection onto the session's path. A pair
 /// already on multihop needs no route.
-pub(crate) fn step(
-    kind: PathKind,
-    has_session: bool,
-    route: Option<iroh::TransportAddr>,
-    gossip_on: bool,
-) -> Step {
+pub(crate) fn step(input: StepInput) -> Step {
+    let StepInput {
+        kind,
+        has_session,
+        route,
+        gossip_on,
+    } = input;
     let action = path_action(kind, has_session);
     let route = match kind {
-        PathKind::Relay | PathKind::None => route,
-        PathKind::Ip | PathKind::WebRtc | PathKind::Multihop | PathKind::Gossip => None,
+        PathKind::Relay | PathKind::None | PathKind::Gossip => route,
+        PathKind::Ip | PathKind::WebRtc | PathKind::Multihop => None,
     };
     let gossip = gossip_on && matches!(kind, PathKind::Relay | PathKind::None) && route.is_none();
     let climbing = matches!(
@@ -506,14 +540,7 @@ pub(crate) fn step(
 }
 
 /// Pure: whether the gossip transport may carry frames to a pair whose selected path is `kind`.
-/// The engine calls it from a path change in step 10, in the commit that installs the transport.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "its caller lands with the install of the transport"
-    )
-)]
+/// The admission table calls it on the best path of each peer (see `gossip_view`).
 pub(crate) fn allow_for(kind: PathKind) -> bool {
     !matches!(kind, PathKind::Ip | PathKind::WebRtc | PathKind::Multihop)
 }
@@ -1001,8 +1028,8 @@ mod tests {
     use iroh::EndpointAddr;
 
     use super::{
-        GraftRequest, PathKind, ensure_watchers, graft_request, may_graft, retry_candidates,
-        retry_candidates_at, webrtc_riders,
+        GraftRequest, PathKind, StepInput, ensure_watchers, graft_request, may_graft,
+        retry_candidates, retry_candidates_at, webrtc_riders,
     };
     use crate::daemon::state::EventLoopState;
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -1520,10 +1547,20 @@ mod tests {
             super::path_action(PathKind::Multihop, false),
             PathAction::Rerace
         );
-        let without_session = step(PathKind::Multihop, false, Some(a_route()), false);
+        let without_session = step(StepInput {
+            kind: PathKind::Multihop,
+            has_session: false,
+            route: Some(a_route()),
+            gossip_on: false,
+        });
         assert_eq!(without_session.action, PathAction::Rerace);
         assert_eq!(without_session.nudge, None, "the offer's attach nudges");
-        let with_session = step(PathKind::Multihop, true, Some(a_route()), false);
+        let with_session = step(StepInput {
+            kind: PathKind::Multihop,
+            has_session: true,
+            route: Some(a_route()),
+            gossip_on: false,
+        });
         assert_eq!(
             with_session.nudge,
             Some(NudgeAddrs {
@@ -1541,13 +1578,23 @@ mod tests {
     #[test]
     fn a_pair_on_the_relay_is_nudged_with_the_route_the_topology_has() {
         use super::{NudgeAddrs, PathAction, step};
-        let nothing = step(PathKind::Relay, false, None, false);
+        let nothing = step(StepInput {
+            kind: PathKind::Relay,
+            has_session: false,
+            route: None,
+            gossip_on: false,
+        });
         assert_eq!(nothing.action, PathAction::Rerace);
         assert_eq!(
             nothing.nudge, None,
             "no route and no session: nothing to teach"
         );
-        let route_only = step(PathKind::Relay, false, Some(a_route()), false);
+        let route_only = step(StepInput {
+            kind: PathKind::Relay,
+            has_session: false,
+            route: Some(a_route()),
+            gossip_on: false,
+        });
         assert_eq!(
             route_only.nudge,
             Some(NudgeAddrs {
@@ -1556,7 +1603,12 @@ mod tests {
                 gossip: false
             })
         );
-        let both = step(PathKind::Relay, true, Some(a_route()), false);
+        let both = step(StepInput {
+            kind: PathKind::Relay,
+            has_session: true,
+            route: Some(a_route()),
+            gossip_on: false,
+        });
         assert_eq!(
             both.nudge,
             Some(NudgeAddrs {
@@ -1566,7 +1618,12 @@ mod tests {
             }),
             "one dial carries both addresses"
         );
-        let session_only = step(PathKind::Relay, true, None, false);
+        let session_only = step(StepInput {
+            kind: PathKind::Relay,
+            has_session: true,
+            route: None,
+            gossip_on: false,
+        });
         assert_eq!(
             session_only.nudge,
             Some(NudgeAddrs {
@@ -1585,7 +1642,12 @@ mod tests {
             (PathKind::Ip, true, PathAction::Detach),
             (PathKind::WebRtc, true, PathAction::Proven),
         ] {
-            let decided = step(kind, has_session, Some(a_route()), false);
+            let decided = step(StepInput {
+                kind,
+                has_session,
+                route: Some(a_route()),
+                gossip_on: false,
+            });
             assert_eq!(decided.action, action);
             assert_eq!(decided.nudge, None, "{kind:?} needs no dial");
         }
@@ -1626,9 +1688,11 @@ mod tests {
     }
 
     // A pair on gossip is off the relay but has no lane, like a pair on multihop: it races for
-    // one, and it has no route to learn.
+    // one. It has a rung to climb, like a pair on the relay, so it learns the multihop route
+    // from a dial: with via-third paths gossip is selected first, and would never climb. It
+    // already has the gossip address.
     #[test]
-    fn a_pair_on_gossip_races_for_a_lane_and_is_nudged_with_a_session_only() {
+    fn a_pair_on_gossip_races_for_a_lane_and_is_nudged_with_the_route_and_the_session() {
         use super::{NudgeAddrs, PathAction, step};
         assert_eq!(
             super::path_action(PathKind::Gossip, false),
@@ -1638,19 +1702,58 @@ mod tests {
             super::path_action(PathKind::Gossip, true),
             PathAction::Rerace
         );
-        let without_session = step(PathKind::Gossip, false, Some(a_route()), true);
-        assert_eq!(without_session.action, PathAction::Rerace);
-        assert_eq!(without_session.nudge, None);
-        let with_session = step(PathKind::Gossip, true, Some(a_route()), true);
+        let nudge = |has_session: bool, route: Option<iroh::TransportAddr>| {
+            step(StepInput {
+                kind: PathKind::Gossip,
+                has_session,
+                route,
+                gossip_on: true,
+            })
+        };
+        assert_eq!(nudge(false, None).nudge, None, "nothing to teach");
         assert_eq!(
-            with_session.nudge,
+            nudge(false, Some(a_route())).nudge,
             Some(NudgeAddrs {
-                session: true,
-                route: None,
+                session: false,
+                route: Some(a_route()),
                 gossip: false
             }),
-            "a pair on gossip already has the gossip address"
+            "the route, and no gossip address: the pair is on it"
         );
+        assert_eq!(
+            nudge(true, Some(a_route())).nudge,
+            Some(NudgeAddrs {
+                session: true,
+                route: Some(a_route()),
+                gossip: false
+            }),
+            "one dial carries the session and the route"
+        );
+        assert_eq!(nudge(false, Some(a_route())).action, PathAction::Rerace);
+    }
+
+    // The pass over the pairs that can climb includes a pair on gossip, with its own kind, and
+    // forgets the route of a pair that climbed.
+    #[test]
+    fn a_pair_on_gossip_is_dialed_for_its_route_and_forgotten_when_it_climbs() {
+        use super::{forget_route_unless_climbing, plan_relay_dials};
+        use std::collections::HashMap;
+
+        let bob = endpoint_id(2);
+        let mut dialed = HashMap::new();
+        let dials = plan_relay_dials(
+            [(bob, PathKind::Gossip, false, Some(a_route()))],
+            &mut dialed,
+            true,
+            true,
+        );
+        assert_eq!(dials.len(), 1, "a route to carry");
+        assert_eq!(dials[0].1.route, Some(a_route()));
+        assert!(!dials[0].1.gossip, "the pair is on gossip already");
+        forget_route_unless_climbing(&mut dialed, bob, PathKind::Gossip);
+        assert!(dialed.contains_key(&bob), "still climbing");
+        forget_route_unless_climbing(&mut dialed, bob, PathKind::Multihop);
+        assert!(!dialed.contains_key(&bob), "it climbed");
     }
 
     // The gossip address is handed out by the selected path, not by the addresses that are
@@ -1664,14 +1767,36 @@ mod tests {
             gossip: true,
         });
         for kind in [PathKind::Relay, PathKind::None] {
-            assert_eq!(step(kind, false, None, true).nudge, gossip_only, "{kind:?}");
             assert_eq!(
-                step(kind, false, None, false).nudge,
+                step(StepInput {
+                    kind,
+                    has_session: false,
+                    route: None,
+                    gossip_on: true
+                })
+                .nudge,
+                gossip_only,
+                "{kind:?}"
+            );
+            assert_eq!(
+                step(StepInput {
+                    kind,
+                    has_session: false,
+                    route: None,
+                    gossip_on: false
+                })
+                .nudge,
                 None,
                 "{kind:?} with gossip off"
             );
             assert_eq!(
-                step(kind, false, Some(a_route()), true).nudge,
+                step(StepInput {
+                    kind,
+                    has_session: false,
+                    route: Some(a_route()),
+                    gossip_on: true
+                })
+                .nudge,
                 Some(NudgeAddrs {
                     session: false,
                     route: Some(a_route()),
@@ -1681,7 +1806,13 @@ mod tests {
             );
         }
         assert_eq!(
-            step(PathKind::Relay, true, None, true).nudge,
+            step(StepInput {
+                kind: PathKind::Relay,
+                has_session: true,
+                route: None,
+                gossip_on: true
+            })
+            .nudge,
             Some(NudgeAddrs {
                 session: true,
                 route: None,
@@ -1696,9 +1827,14 @@ mod tests {
             PathKind::Gossip,
         ] {
             assert!(
-                !step(kind, true, None, true)
-                    .nudge
-                    .is_some_and(|addrs| addrs.gossip),
+                !step(StepInput {
+                    kind,
+                    has_session: true,
+                    route: None,
+                    gossip_on: true
+                })
+                .nudge
+                .is_some_and(|addrs| addrs.gossip),
                 "{kind:?} gets no gossip address"
             );
         }
@@ -1827,19 +1963,39 @@ mod tests {
         let bob = endpoint_id(2);
         let mut dialed = HashMap::new();
 
-        let first = plan_relay_dials([(bob, false, Some(route(1)))], &mut dialed, true);
+        let first = plan_relay_dials(
+            [(bob, PathKind::Relay, false, Some(route(1)))],
+            &mut dialed,
+            true,
+            false,
+        );
         assert_eq!(first.len(), 1, "a new route is dialed");
         assert_eq!(first[0].0, bob);
         assert_eq!(first[0].1.route, Some(route(1)), "with the route");
 
-        let same = plan_relay_dials([(bob, false, Some(route(1)))], &mut dialed, true);
+        let same = plan_relay_dials(
+            [(bob, PathKind::Relay, false, Some(route(1)))],
+            &mut dialed,
+            true,
+            false,
+        );
         assert!(same.is_empty(), "the same route is not dialed again");
 
-        let changed = plan_relay_dials([(bob, false, Some(route(2)))], &mut dialed, true);
+        let changed = plan_relay_dials(
+            [(bob, PathKind::Relay, false, Some(route(2)))],
+            &mut dialed,
+            true,
+            false,
+        );
         assert_eq!(changed.len(), 1, "a changed route is dialed");
         assert_eq!(changed[0].1.route, Some(route(2)));
 
-        let tick = plan_relay_dials([(bob, false, Some(route(2)))], &mut dialed, false);
+        let tick = plan_relay_dials(
+            [(bob, PathKind::Relay, false, Some(route(2)))],
+            &mut dialed,
+            false,
+            false,
+        );
         assert_eq!(
             tick.len(),
             1,
@@ -1857,14 +2013,31 @@ mod tests {
         let bob = endpoint_id(2);
         let mut dialed = HashMap::new();
         assert!(
-            plan_relay_dials([(bob, true, None)], &mut dialed, true).is_empty(),
+            plan_relay_dials(
+                [(bob, PathKind::Relay, true, None)],
+                &mut dialed,
+                true,
+                false
+            )
+            .is_empty(),
             "an event with no route dials nothing"
         );
-        let tick = plan_relay_dials([(bob, true, None)], &mut dialed, false);
+        let tick = plan_relay_dials(
+            [(bob, PathKind::Relay, true, None)],
+            &mut dialed,
+            false,
+            false,
+        );
         assert_eq!(tick.len(), 1, "the tick nudges the session onto its path");
         assert!(tick[0].1.session);
         assert!(
-            plan_relay_dials([(bob, false, None)], &mut dialed, false).is_empty(),
+            plan_relay_dials(
+                [(bob, PathKind::Relay, false, None)],
+                &mut dialed,
+                false,
+                false
+            )
+            .is_empty(),
             "no session and no route: nothing to carry"
         );
     }
@@ -1884,23 +2057,29 @@ mod tests {
 
         let first = plan_relay_dials(
             [
-                (bob, false, Some(route.clone())),
-                (carol, false, Some(route.clone())),
+                (bob, PathKind::Relay, false, Some(route.clone())),
+                (carol, PathKind::Relay, false, Some(route.clone())),
             ],
             &mut dialed,
             true,
+            false,
         );
         assert_eq!(first.len(), 2, "both pairs are dialed for their route");
 
         // Bob climbed: he is not among the pairs of this pass. Carol is gone from the roster.
-        let none = plan_relay_dials([], &mut dialed, true);
+        let none = plan_relay_dials([], &mut dialed, true, false);
         assert!(none.is_empty());
         assert!(
             dialed.is_empty(),
             "the pairs that left the relay are forgotten"
         );
 
-        let again = plan_relay_dials([(bob, false, Some(route))], &mut dialed, true);
+        let again = plan_relay_dials(
+            [(bob, PathKind::Relay, false, Some(route))],
+            &mut dialed,
+            true,
+            false,
+        );
         assert_eq!(
             again.len(),
             1,
@@ -1912,16 +2091,16 @@ mod tests {
     // to the relay later is dialed with its route again.
     #[test]
     fn the_dialed_route_is_forgotten_once_the_pair_reads_ip() {
-        use super::forget_route_unless_relay;
+        use super::forget_route_unless_climbing;
         use iroh::TransportAddr;
         use std::collections::HashMap;
 
         let bob = endpoint_id(2);
         let mut dialed =
             HashMap::from([(bob, TransportAddr::Ip("127.0.0.1:1".parse().expect("addr")))]);
-        forget_route_unless_relay(&mut dialed, bob, PathKind::Relay);
+        forget_route_unless_climbing(&mut dialed, bob, PathKind::Relay);
         assert!(dialed.contains_key(&bob), "still on the relay: kept");
-        forget_route_unless_relay(&mut dialed, bob, PathKind::Ip);
+        forget_route_unless_climbing(&mut dialed, bob, PathKind::Ip);
         assert!(!dialed.contains_key(&bob), "the pair reads IP: forgotten");
     }
 

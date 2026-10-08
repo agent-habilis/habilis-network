@@ -142,6 +142,7 @@ async fn spawn(
                 udp: false,
                 relay: true,
                 webrtc: false,
+                gossip: false,
             },
             runtime_base: None,
             state_file: None,

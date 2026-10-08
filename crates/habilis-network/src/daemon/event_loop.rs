@@ -184,6 +184,10 @@ pub async fn run<A: NodeDriver>(
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
     state.webrtc = webrtc_enabled.then_some(webrtc);
+    // The gossip transport of the member endpoint, when the mesh has gossip: the admission table
+    // made it with the endpoint and keeps it, to tell it which peers are established and which
+    // pairs a higher rung carries.
+    state.gossip_handle = state.webrtc_admission.gossip_handle();
     state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
     state
         .unicast_pool

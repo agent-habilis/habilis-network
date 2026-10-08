@@ -243,6 +243,10 @@ struct Inner {
     evicted_by: super::ceiling::EvictionBackoff,
     /// Where an answered session is reported to the event loop, set once the loop has its channel.
     proven_sink: Option<tokio::sync::mpsc::UnboundedSender<super::probe::DirectOutcome>>,
+    /// The gossip transport of the endpoint, when the mesh has `gossip`. The table sees every
+    /// connection, so it tells the handle which peers are established and which pairs a higher
+    /// rung carries (see [`Inner::sync_gossip`]).
+    gossip: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
     /// The peers that we evicted. A peer whose session we detach has no connection to read the code
     /// on, so we refuse its offer for the same minute instead.
     we_evicted: super::ceiling::EvictionBackoff,
@@ -347,6 +351,30 @@ impl Inner {
         }
     }
 
+    /// Tell the gossip transport what the table sees, for every peer with a slot: a peer with a
+    /// live connection is established, and frames go to a peer only when no higher rung carries
+    /// the pair (see [`gossip_view`]). Called when a connection is noted and on every sweep, so
+    /// both ids of a pair get it, not only the lower one that has a path watcher. A peer without
+    /// a live connection is established no more, and allowed again: a destination that was never
+    /// named is allowed, so that a handshake to a new peer is not dropped.
+    fn sync_gossip(&self) {
+        let Some(gossip) = &self.gossip else {
+            return;
+        };
+        for (peer, slot) in &self.slots {
+            let kinds: Vec<super::probe::PathKind> = slot
+                .conns
+                .iter()
+                .filter_map(WeakConnectionHandle::upgrade)
+                .filter(|conn| conn.close_reason().is_none())
+                .map(|conn| super::probe::selected_kind(&conn))
+                .collect();
+            let (established, allowed) = gossip_view(&kinds);
+            gossip.set_established(*peer, established);
+            gossip.allow(*peer, allowed);
+        }
+    }
+
     /// Drop the connections that are gone, and the slots nothing holds.
     fn sample(&mut self) {
         for slot in self.slots.values_mut() {
@@ -356,6 +384,7 @@ impl Inner {
                     .is_some_and(|conn| conn.close_reason().is_none())
             });
         }
+        self.sync_gossip();
         for peer in self.ceiling.quic_peers() {
             self.drop_quic_without_connection(peer);
         }
@@ -405,6 +434,7 @@ impl SignalAdmission {
                 evicted_by: super::ceiling::EvictionBackoff::default(),
                 we_evicted: super::ceiling::EvictionBackoff::default(),
                 proven_sink: None,
+                gossip: None,
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
@@ -737,6 +767,7 @@ impl SignalAdmission {
             return;
         }
         inner.slot(peer).conns.push(handle);
+        inner.sync_gossip();
         let evictions = if conn.alpn() == super::UNICAST_ALPN {
             inner.ceiling.register_quic(peer, Instant::now())
         } else {
@@ -822,6 +853,24 @@ impl SignalAdmission {
         victims.end();
     }
 
+    /// The gossip transport of this endpoint, kept by the table so that it can tell the transport
+    /// which peers are established and which pairs a higher rung carries.
+    pub(crate) fn set_gossip(&self, handle: habilis_network_iroh_gossip_transport::GossipHandle) {
+        self.lock().gossip = Some(handle);
+    }
+
+    /// The gossip transport that [`set_gossip`](Self::set_gossip) set, if the mesh has gossip.
+    pub(crate) fn gossip_handle(
+        &self,
+    ) -> Option<habilis_network_iroh_gossip_transport::GossipHandle> {
+        self.lock().gossip.clone()
+    }
+
+    /// [`Inner::sync_gossip`], now. The sweep and every new connection do it too.
+    pub(crate) fn sync_gossip(&self) {
+        self.lock().sync_gossip();
+    }
+
     /// The event loop's channel for the sessions that this node answered.
     pub(crate) fn set_proven_sink(
         &self,
@@ -873,6 +922,19 @@ impl Drop for BusyGuard {
             .ceiling
             .busy_end(self.peer, Instant::now());
     }
+}
+
+/// Pure: what the table tells the gossip transport about a peer whose live connections read as
+/// `kinds`: whether it is established (any live connection, on any protocol) and whether frames
+/// may go to it (no higher rung carries the pair: see
+/// [`allow_for`](super::probe::allow_for), read on the best of the connections). A peer with no
+/// connection is not established and is allowed.
+///
+/// Two ends of one pair may disagree for one sweep, and a multihop path that is dead stays
+/// selected until noq abandons it (15 s), so gossip is blocked for that long.
+fn gossip_view(kinds: &[super::probe::PathKind]) -> (bool, bool) {
+    let best = super::probe::best_kind(kinds.iter().copied());
+    (!kinds.is_empty(), best.is_none_or(super::probe::allow_for))
 }
 
 /// One timer for the whole table, ending with it.
@@ -1891,5 +1953,164 @@ mod tests {
             crate::transport::path::gossip_recursion_closes() > before,
             "the close is counted"
         );
+    }
+
+    /// What the table tells the gossip transport about a peer: established when it has a live
+    /// connection, allowed unless a higher rung carries the pair, on the best of its connections.
+    #[test]
+    fn the_table_tells_the_gossip_transport_what_it_sees() {
+        use super::super::probe::PathKind::{self, Gossip, Ip, Multihop, Relay, WebRtc};
+        assert_eq!(
+            gossip_view(&[]),
+            (false, true),
+            "no connection: a handshake"
+        );
+        assert_eq!(gossip_view(&[Relay]), (true, true));
+        assert_eq!(gossip_view(&[Gossip]), (true, true));
+        assert_eq!(
+            gossip_view(&[PathKind::None]),
+            (true, true),
+            "no path selected yet"
+        );
+        assert_eq!(gossip_view(&[Ip]), (true, false));
+        assert_eq!(gossip_view(&[WebRtc]), (true, false));
+        assert_eq!(gossip_view(&[Multihop, Gossip]), (true, false));
+        assert_eq!(
+            gossip_view(&[Relay, Ip]),
+            (true, false),
+            "the best connection stands for the pair"
+        );
+    }
+
+    /// An endpoint with a loopback UDP socket and the gossip transport, whose connections are
+    /// reported to its own table, which keeps the gossip handle.
+    async fn ip_and_gossip_node(
+        seed: u8,
+        hub: &habilis_network_iroh_gossip_transport::memory::MemoryHub,
+        with_ip: bool,
+    ) -> (
+        iroh::Endpoint,
+        SignalAdmission,
+        habilis_network_iroh_gossip_transport::GossipHandle,
+    ) {
+        use habilis_network_iroh_gossip_transport::GossipHandle;
+        use iroh::{RelayMode, SecretKey};
+
+        let key = SecretKey::from_bytes(&[seed; 32]);
+        let handle = GossipHandle::new(key.public());
+        hub.join(&handle);
+        let admission = SignalAdmission::new(8);
+        admission.set_gossip(handle.clone());
+        let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(key)
+            .relay_mode(RelayMode::Disabled)
+            .add_custom_transport(handle.custom_transport())
+            .path_selector(handle.path_selector())
+            .hooks(admission.connection_hook());
+        builder = if with_ip {
+            builder
+                .bind_addr(
+                    "127.0.0.1:0"
+                        .parse::<std::net::SocketAddr>()
+                        .expect("loopback"),
+                )
+                .expect("bind address")
+        } else {
+            builder.clear_ip_transports().clear_relay_transports()
+        };
+        (builder.bind().await.expect("bind"), admission, handle)
+    }
+
+    /// Accepts and holds every connection on the test ALPN.
+    #[derive(Debug, Clone)]
+    struct HoldConnections;
+
+    impl iroh::protocol::ProtocolHandler for HoldConnections {
+        async fn accept(&self, connection: Connection) -> Result<(), iroh::protocol::AcceptError> {
+            connection.closed().await;
+            Ok(())
+        }
+    }
+
+    const GOSSIP_TEST_ALPN: &[u8] = b"habilis-network/test-gossip-view/0";
+
+    /// A pair that rides IP is blocked for gossip at BOTH ends, the dialer and the acceptor, and
+    /// both are established: neither end needs a path watcher, which only the lower id has.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
+        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use iroh::{EndpointAddr, TransportAddr};
+
+        let hub = MemoryHub::new();
+        let (alice, alice_table, alice_handle) = ip_and_gossip_node(41, &hub, true).await;
+        let (bob, bob_table, bob_handle) = ip_and_gossip_node(42, &hub, true).await;
+        let _router = iroh::protocol::Router::builder(bob.clone())
+            .accept(GOSSIP_TEST_ALPN, HoldConnections)
+            .spawn();
+        let both = bob
+            .addr()
+            .addrs
+            .into_iter()
+            .chain([TransportAddr::Custom(gossip_addr(bob.id()))]);
+        let _connection = alice
+            .connect(EndpointAddr::from_parts(bob.id(), both), GOSSIP_TEST_ALPN)
+            .await
+            .expect("connect");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            alice_table.sync_gossip();
+            bob_table.sync_gossip();
+            if !alice_handle.is_allowed(bob.id()) && !bob_handle.is_allowed(alice.id()) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a pair on IP is blocked at both ends"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(alice_handle.is_established(bob.id()), "the dialer");
+        assert!(bob_handle.is_established(alice.id()), "the acceptor");
+        let sent = alice_handle.stats().frames_out + bob_handle.stats().frames_out;
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(
+            alice_handle.stats().frames_out + bob_handle.stats().frames_out,
+            sent,
+            "a pair on IP puts no frame on the topic"
+        );
+    }
+
+    /// A pair that only gossip carries is not blocked, and a peer whose connection is gone is
+    /// established no more, and allowed again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
+        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use iroh::{EndpointAddr, TransportAddr};
+
+        let hub = MemoryHub::new();
+        let (alice, alice_table, alice_handle) = ip_and_gossip_node(43, &hub, false).await;
+        let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(44, &hub, false).await;
+        let _router = iroh::protocol::Router::builder(bob.clone())
+            .accept(GOSSIP_TEST_ALPN, HoldConnections)
+            .spawn();
+        let connection = alice
+            .connect(
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
+                GOSSIP_TEST_ALPN,
+            )
+            .await
+            .expect("connect over gossip");
+
+        alice_table.sync_gossip();
+        assert!(alice_handle.is_established(bob.id()));
+        assert!(alice_handle.is_allowed(bob.id()), "gossip carries the pair");
+
+        alice_handle.allow(bob.id(), false);
+        connection.close(0u32.into(), b"done");
+        connection.closed().await;
+        alice_table.lock().sample();
+        assert!(!alice_handle.is_established(bob.id()), "no connection left");
+        assert!(alice_handle.is_allowed(bob.id()), "allowed again");
     }
 }

@@ -104,6 +104,10 @@ pub struct TransportHandles {
     /// QUIC over a `WebRTC` data channel. The browser's only way onto the
     /// mesh, and an opportunistic extra path for a native peer.
     pub webrtc: Option<habilis_network_iroh_webrtc_transport::WebRtcHandle>,
+    /// Gossip as a path: QUIC packets carried as frames on the mesh topic, below every
+    /// direct path and above the relay. On the member endpoint only: the beacon, the
+    /// blob endpoint and the multihop underlay never carry it.
+    pub gossip: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
     /// The table that decides who holds a direct-peer slot. When set, the
     /// endpoint reports every connection to it, so that it can drop the ones
     /// that are gone.
@@ -124,7 +128,7 @@ impl TransportHandles {
         if self.multihop.is_some() {
             return false;
         }
-        self.webrtc.is_none()
+        self.webrtc.is_none() && self.gossip.is_none()
     }
 }
 
@@ -140,6 +144,10 @@ impl TransportHandles {
 ///
 /// `Default` is "everything this target has".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one independent on/off per path this node may carry data on"
+)]
 pub struct TransportOpts {
     /// QUIC on direct and hole-punched UDP paths, plus the address lookups
     /// that find them. Cleared by a WebRTC-only instance.
@@ -157,6 +165,10 @@ pub struct TransportOpts {
     /// on the endpoint, no offer is answered and none is made — so a pair
     /// with IP cleared too has the relay as its only path.
     pub webrtc: bool,
+    /// Gossip as a path: the mesh's own topic carries the QUIC packets of a pair that has no
+    /// other path. Off by default, and set only by [`Self::within`]: it is a choice of the
+    /// mesh, which every member makes the same way, and not a limit of this node.
+    pub gossip: bool,
 }
 
 impl Default for TransportOpts {
@@ -165,6 +177,7 @@ impl Default for TransportOpts {
             udp: true,
             relay: true,
             webrtc: true,
+            gossip: false,
         }
     }
 }
@@ -204,6 +217,7 @@ impl TransportOpts {
             udp: false,
             relay: true,
             webrtc: true,
+            gossip: false,
         }
     }
 }
@@ -217,6 +231,8 @@ impl TransportOpts {
         Self {
             udp: self.udp && policy.udp && !cfg!(target_arch = "wasm32"),
             webrtc: self.webrtc && policy.webrtc,
+            // Set, not narrowed: the mesh decides, and it needs a direct path to ride.
+            gossip: policy.gossip && (policy.udp || policy.webrtc) && !cfg!(target_arch = "wasm32"),
             ..self
         }
     }
@@ -257,9 +273,14 @@ pub fn install_transports(
     // multihop path. The handle's app id must match this endpoint's key — the
     // caller (`build_peer_multihop`) pins the same secret.
     #[cfg(feature = "multihop")]
+    let mut selector_set = false;
+    #[cfg(feature = "multihop")]
     if let Some(handle) = transports.multihop.clone() {
         builder = builder.preset(handle);
+        selector_set = true;
     }
+    #[cfg(not(feature = "multihop"))]
+    let mut selector_set = false;
     // WebRTC is additive: it joins IP and relay as another candidate path
     // rather than replacing them. Two native peers are better served by iroh's
     // own hole-punching; this is the browser's only path, and a fallback for
@@ -273,11 +294,24 @@ pub fn install_transports(
             // multihop, relay), whichever one is installed. Do not "tidy" this
             // above the preset.
             builder = builder.path_selector(handle.path_selector());
+            selector_set = true;
         } else if cfg!(feature = "iroh-test-utils") {
             // Tests only: a mesh whose list leaves out `webrtc` still takes the
             // selector, without the transport, so that a test can take IP paths
             // away from one node to others (`Request::BlockIpTo`). Without it
             // such a node uses iroh's own selector, which the hook cannot reach.
+            builder = builder.path_selector(handle.path_selector());
+            selector_set = true;
+        }
+    }
+    // Gossip is the lowest custom rung, and the member endpoint only. The selector of the
+    // multihop or the `WebRTC` transport already ranks it; with neither, iroh's default
+    // would put gossip above IP, so the ladder of the gossip handle is the selector.
+    if let Some(handle) = transports.gossip.clone() {
+        builder = builder
+            .add_custom_transport(handle.custom_transport())
+            .address_lookup(handle.address_lookup());
+        if !selector_set {
             builder = builder.path_selector(handle.path_selector());
         }
     }
@@ -644,6 +678,7 @@ pub(crate) async fn build_peer_webrtc_with(
 )> {
     let secret = mint_secret();
     let handle = new_webrtc_handle(secret.public());
+    let gossip = new_gossip_handle(opts, secret.public(), admission);
     let endpoint = build_endpoint(
         lookups,
         Some(secret),
@@ -653,6 +688,7 @@ pub(crate) async fn build_peer_webrtc_with(
             #[cfg(feature = "multihop")]
             multihop: None,
             webrtc: Some(handle.clone()),
+            gossip: gossip.clone(),
             admission: admission.cloned(),
             underlay: false,
             opts,
@@ -665,6 +701,28 @@ pub(crate) async fn build_peer_webrtc_with(
         "the WebRTC transport must advertise this endpoint's identity"
     );
     Ok((endpoint, handle))
+}
+
+/// The gossip handle of a member endpoint, made from the key that the endpoint will bind, when
+/// `opts` has gossip. The budget is set here: the crate's default is none, and the engine never
+/// runs without one. The admission table keeps the handle: the table sees the connections, so
+/// it is what tells the handle which peers are established and which pairs a higher rung
+/// carries, and the event loop reads the handle back from it.
+fn new_gossip_handle(
+    opts: TransportOpts,
+    local: iroh::EndpointId,
+    admission: Option<&crate::transport::SignalAdmission>,
+) -> Option<habilis_network_iroh_gossip_transport::GossipHandle> {
+    opts.gossip.then(|| {
+        let handle = habilis_network_iroh_gossip_transport::GossipHandle::new(local);
+        handle.set_budget(Some(
+            habilis_network_iroh_gossip_transport::DEFAULT_BUDGET_BYTES_PER_SEC,
+        ));
+        if let Some(admission) = admission {
+            admission.set_gossip(handle.clone());
+        }
+        handle
+    })
 }
 
 /// Build the target's `WebRtcHandle`. The constructors differ — str0m natively,
@@ -786,6 +844,7 @@ pub(crate) async fn build_peer_multihop_with(
 )> {
     let secret = mint_secret();
     let webrtc = new_webrtc_handle(secret.public());
+    let gossip = new_gossip_handle(opts, secret.public(), admission);
     let underlay_secret = habilis_network_iroh_multihop_transport::underlay_secret(&secret);
     // The `WebRTC` leg of the underlay: the handle and the table are made before
     // the endpoint, because the endpoint takes the transport and reports its
@@ -857,6 +916,7 @@ pub(crate) async fn build_peer_multihop_with(
         TransportHandles {
             multihop: Some(handle.clone()),
             webrtc: Some(webrtc.clone()),
+            gossip: gossip.clone(),
             admission: admission.cloned(),
             underlay: false,
             opts,
@@ -1226,6 +1286,161 @@ mod tests {
             .await
             .expect("loopback endpoint must bind");
         endpoint.close().await;
+    }
+
+    // A handles value with only gossip is a member endpoint: it must not read as a beacon.
+    #[test]
+    fn a_handles_value_with_only_gossip_is_not_empty() {
+        let handle = habilis_network_iroh_gossip_transport::GossipHandle::new(
+            iroh::SecretKey::from_bytes(&[51; 32]).public(),
+        );
+        assert!(super::TransportHandles::default().is_empty());
+        let only_gossip = super::TransportHandles {
+            gossip: Some(handle),
+            ..super::TransportHandles::default()
+        };
+        assert!(!only_gossip.is_empty());
+    }
+
+    // Gossip is a choice of the mesh: the opts follow the policy, and it needs a direct path.
+    #[test]
+    fn the_mesh_policy_decides_gossip_for_the_opts() {
+        let policy = |gossip: bool, udp: bool, webrtc: bool| TransportPolicy {
+            gossip,
+            udp,
+            webrtc,
+            ..TransportPolicy::default()
+        };
+        let within = |mesh: TransportPolicy| TransportOpts::default().within(&mesh).gossip;
+        assert!(!TransportOpts::default().gossip, "off until the mesh asks");
+        assert!(within(policy(true, true, true)));
+        assert!(within(policy(true, false, true)), "webrtc is a direct path");
+        assert!(!within(policy(false, true, true)));
+        assert!(
+            !within(policy(true, false, false)),
+            "no direct path to ride"
+        );
+    }
+
+    // The gossip transport is on the member endpoint and nowhere else: not on the multihop
+    // underlay. iroh does not list the address of a custom transport in `Endpoint::addr` (the
+    // `WebRTC` one is not there either), so the reading is the admission table, which keeps the
+    // handle that the member endpoint was built with: the member's table has it, and the
+    // underlay's does not. The member of a mesh without gossip has none. A beacon is built from
+    // `TransportHandles::default()`, which has no gossip, and from opts that never name it.
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn only_the_member_endpoint_has_the_gossip_handle() {
+        let build = |gossip: bool| async move {
+            let opts = TransportOpts {
+                gossip,
+                ..TransportOpts::default()
+            };
+            let table = crate::transport::SignalAdmission::new(8);
+            let (_endpoint, _handle, _webrtc, leg) = super::build_peer_multihop_with(
+                &LookupOpts::loopback(),
+                opts,
+                Some(&table),
+                false,
+                Some(5),
+            )
+            .await
+            .expect("a multihop peer binds");
+            (table, leg.expect("a leg when a cap is given"))
+        };
+
+        let (member_table, leg) = build(true).await;
+        assert!(
+            member_table.gossip_handle().is_some(),
+            "the member endpoint has the handle"
+        );
+        assert!(
+            leg.admission.gossip_handle().is_none(),
+            "the multihop underlay does not"
+        );
+        let (table_without, _leg) = build(false).await;
+        assert!(
+            table_without.gossip_handle().is_none(),
+            "a mesh without gossip has none"
+        );
+        assert!(super::TransportHandles::default().gossip.is_none());
+    }
+
+    // The list `udp,gossip` has no WebRTC and no multihop, so no other selector is installed: the
+    // member still gets the gossip handle (the admission table keeps it), the gossip address,
+    // and the ladder of the gossip handle, which keeps IP above gossip.
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use std::time::Duration;
+
+        use iroh::protocol::{AcceptError, ProtocolHandler};
+
+        const ALPN: &[u8] = b"habilis-network/test-udp-gossip-list/0";
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(
+                &self,
+                connection: iroh::endpoint::Connection,
+            ) -> Result<(), AcceptError> {
+                connection.closed().await;
+                Ok(())
+            }
+        }
+        let opts = TransportOpts {
+            webrtc: false,
+            gossip: true,
+            ..TransportOpts::default()
+        };
+        let hub = habilis_network_iroh_gossip_transport::memory::MemoryHub::new();
+        let mut members = Vec::new();
+        for _ in 0..2 {
+            let table = crate::transport::SignalAdmission::new(8);
+            let (endpoint, _webrtc) =
+                super::build_peer_webrtc_with(&LookupOpts::loopback(), opts, Some(&table))
+                    .await
+                    .expect("a member binds");
+            let handle = table
+                .gossip_handle()
+                .expect("the table keeps the gossip handle");
+            hub.join(&handle);
+            members.push(endpoint);
+        }
+        let (alice, bob) = (members.remove(0), members.remove(0));
+        let _router = iroh::protocol::Router::builder(bob.clone())
+            .accept(ALPN, Hold)
+            .spawn();
+        let both = bob
+            .addr()
+            .addrs
+            .into_iter()
+            .chain([iroh::TransportAddr::Custom(gossip_addr(bob.id()))]);
+        let connection = alice
+            .connect(iroh::EndpointAddr::from_parts(bob.id(), both), ALPN)
+            .await
+            .expect("connect");
+
+        let paths_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while connection.paths().len() < 2 && tokio::time::Instant::now() < paths_deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(connection.paths().len() >= 2, "IP and gossip are both open");
+        let selected_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while connection
+            .paths()
+            .iter()
+            .find(iroh::endpoint::Path::is_selected)
+            .is_none()
+            && tokio::time::Instant::now() < selected_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            crate::transport::path::selected_is_ip(&connection),
+            "IP is above gossip: the ladder of the gossip handle is the selector"
+        );
     }
 
     // The underlay gets a `WebRTC` leg only when it is asked for, and only when

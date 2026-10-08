@@ -212,6 +212,7 @@ async fn two_ip_peers_link_through_the_gated_rendezvous() {
         udp: true,
         relay: true,
         webrtc: false,
+        gossip: false,
     };
     let alice = spawn_with(&topic, "alice", &relay, Arc::clone(&alice_saw), ip_only).await;
     assert!(
@@ -257,6 +258,7 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
             udp: true,
             relay: true,
             webrtc: true,
+            gossip: false,
         },
     )
     .await;
@@ -273,6 +275,7 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
             udp: false,
             relay: true,
             webrtc: true,
+            gossip: false,
         },
     )
     .await;
