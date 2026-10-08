@@ -110,6 +110,7 @@ pub(crate) fn selected_kind(conn: &Connection) -> PathKind {
             } else if let iroh::TransportAddr::Custom(addr) = path.remote_addr() {
                 custom_kind(addr.id())
             } else {
+                // A kind of address that iroh does not have today.
                 PathKind::Multihop
             }
         })

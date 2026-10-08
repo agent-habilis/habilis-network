@@ -750,9 +750,9 @@ pub(crate) async fn detach_sessions_under_udp(
 }
 
 /// Whether the proof of a direct path is stale: the pair was `proven` direct, and its selected
-/// path now reads as the relay, as multihop or as gossip, all below a session. Only a path watcher takes
-/// a proof back, and only the lower id has one, so the reading of the admission table is the
-/// only sign of the loss that a pair can have.
+/// path now reads as the relay, as multihop or as gossip, all below a session. Only a path
+/// watcher takes a proof back, and only the lower id has one, so the reading of the admission
+/// table is the only sign of the loss that a pair can have.
 fn proof_is_stale(kind: Option<super::probe::PathKind>, proven: bool) -> bool {
     proven
         && matches!(
