@@ -88,7 +88,9 @@ fn direct_for_writer(paths: &[(TransportAddr, bool)]) -> bool {
 /// round prunes its redundant IP paths, the accepting end chooses no path of its
 /// own on this connection: its IP path is open but not selected, and the
 /// relay path too. The cells then arrive on the path that the dialler selected,
-/// so the selected path here says nothing about them.
+/// so the selected path here says nothing about them. The cost: a cell that really
+/// came over the relay is admitted while an IP path is also open. The dialler's
+/// writer gate refuses relay cells, and iroh shows no path per datagram.
 fn direct_for_inbound(paths: &[(TransportAddr, bool)]) -> bool {
     paths
         .iter()
@@ -162,7 +164,16 @@ impl RelayGate {
                 if !admitted {
                     let paths = path_list(paths);
                     if self.last_refused_paths.as_deref() != Some(paths.as_str()) {
-                        tracing::debug!(%paths, "multihop underlay: no direct path is selected");
+                        match self.role {
+                            GateRole::Writer => tracing::debug!(
+                                %paths,
+                                "multihop underlay: no direct path is selected"
+                            ),
+                            GateRole::Inbound => tracing::debug!(
+                                %paths,
+                                "multihop underlay: no open path is not the relay"
+                            ),
+                        }
                         self.last_refused_paths = Some(paths);
                     }
                 }
@@ -1046,6 +1057,11 @@ mod tests {
             "a cell that came over IP is not a cell over the relay"
         );
         assert_eq!(to.forwarder.dropped.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            from.forwarder.pool.refused_on_relay.load(Ordering::Relaxed),
+            0,
+            "and the writer did not refuse the relay on the way"
+        );
     }
 
     #[tokio::test]
