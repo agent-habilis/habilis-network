@@ -160,6 +160,16 @@ pub enum Request {
         blocked: bool,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: refuse every `WebRTC` session with the member `peer`, on the application
+    /// endpoint and on the underlay, offered or answered, and end the ones that exist (or lift
+    /// the refusal). It keeps a pair from forming a direct session, so that its traffic has to
+    /// take the multihop route through a third member.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    DenyPeer {
+        peer: String,
+        denied: bool,
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: ping every member and answer with the round trip time in
     /// milliseconds of each one that answered within the ping window. A test uses it to
     /// show that a pair answers over the one path it has.
@@ -478,6 +488,31 @@ impl NodeDriver for MembershipApp {
                     n0_future::task::spawn(async move {
                         crate::transport::webrtc::nudge(&endpoint, remote).await;
                     });
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::DenyPeer {
+                peer,
+                denied,
+                reply,
+            } => {
+                if let Some(addr) = state.peer_endpoints.get(peer.as_str()) {
+                    let member = addr.id;
+                    state.webrtc_admission.deny(member, denied);
+                    if denied
+                        && let Some(handle) = state.webrtc.as_ref()
+                        && handle.detach(&member)
+                    {
+                        tracing::debug!(
+                            target: "habilis_network::transport",
+                            peer = %member,
+                            "session detached: a test denied the peer"
+                        );
+                    }
+                    #[cfg(feature = "multihop")]
+                    crate::transport::underlay_webrtc::tick_now(state);
                 }
                 let _ = reply.send(());
                 false

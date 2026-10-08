@@ -81,6 +81,18 @@ fn wanted_underlays(
         .collect()
 }
 
+/// The neighbors that a test did not deny. A denied member gets no underlay session: it is not
+/// offered one, it is not allowed to open one, and one that exists is detached.
+fn undenied(
+    neighbors: Vec<(EndpointId, iroh::EndpointAddr)>,
+    is_denied: impl Fn(EndpointId) -> bool,
+) -> Vec<(EndpointId, iroh::EndpointAddr)> {
+    neighbors
+        .into_iter()
+        .filter(|(member, _)| !is_denied(*member))
+        .collect()
+}
+
 /// The neighbors whose session stays: all of them except those whose application
 /// path is on IP, where the underlay reaches the neighbor over IP already.
 fn kept_underlays(
@@ -161,6 +173,7 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
             neighbors.push((*member, addr));
         }
     }
+    let neighbors = undenied(neighbors, |member| state.webrtc_admission.is_denied(member));
     underlay
         .allowed
         .replace(neighbors.iter().map(|(_, addr)| addr.id).collect());
@@ -258,7 +271,9 @@ mod tests {
     use iroh::protocol::Router;
     use iroh::{Endpoint, RelayMode};
 
-    use super::{Allowed, Plan, UnderlaySignalGate, kept_underlays, plan, wanted_underlays};
+    use super::{
+        Allowed, Plan, UnderlaySignalGate, kept_underlays, plan, undenied, wanted_underlays,
+    };
     use crate::transport::probe::PathKind;
     use crate::transport::{
         IceProfile, MESH_WEBRTC_SIGNAL_ALPN, SignalAdmission, WebRtcSignalAcceptor,
@@ -362,6 +377,17 @@ mod tests {
         let wanted = wanted_underlays(&neighbors, false, neighbor_kinds(webrtc, ip, relay));
         let all: Vec<EndpointAddr> = neighbors.iter().map(|(_, addr)| addr.clone()).collect();
         assert_eq!(wanted, all);
+    }
+
+    #[test]
+    fn a_denied_member_is_not_a_neighbor_of_the_underlay() {
+        let (kept, denied) = (id(21), id(22));
+        let neighbors: Vec<(EndpointId, EndpointAddr)> = [kept, denied]
+            .into_iter()
+            .map(|member| (member, EndpointAddr::new(id(member.as_bytes()[0] ^ 0x55))))
+            .collect();
+        let left = undenied(neighbors.clone(), |member| member == denied);
+        assert_eq!(left, vec![neighbors[0].clone()]);
     }
 
     /// A neighbor whose path is not read for the moment (an idle connection of the

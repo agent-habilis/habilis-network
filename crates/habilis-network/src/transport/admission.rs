@@ -56,7 +56,7 @@
 //! id, and the acceptor admits *before* it spawns, so N connections from one
 //! peer produce one task and N-1 immediate closes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -137,6 +137,8 @@ pub(crate) enum Refusal {
     Evicted,
     /// The Router is shutting down.
     ShuttingDown,
+    /// A test denied this peer: no round with it, offered or answered.
+    Denied,
 }
 
 /// What the table needs from a `WebRTC` hub. A trait so a test can stand in
@@ -250,6 +252,8 @@ struct Inner {
     /// The peers that we evicted. A peer whose session we detach has no connection to read the code
     /// on, so we refuse its offer for the same minute instead.
     we_evicted: super::ceiling::EvictionBackoff,
+    /// The peers that a test denied (see [`SignalAdmission::deny`]).
+    denied: HashSet<EndpointId>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -433,6 +437,7 @@ impl SignalAdmission {
                 ceiling: super::ceiling::Ceiling::new(cap),
                 evicted_by: super::ceiling::EvictionBackoff::default(),
                 we_evicted: super::ceiling::EvictionBackoff::default(),
+                denied: HashSet::new(),
                 proven_sink: None,
                 gossip: None,
             })),
@@ -576,6 +581,9 @@ impl SignalAdmission {
         let mut inner = self.lock();
         if inner.closed {
             return Err(Refusal::ShuttingDown);
+        }
+        if inner.denied.contains(&peer) {
+            return Err(Refusal::Denied);
         }
         if inner
             .slots
@@ -838,6 +846,24 @@ impl SignalAdmission {
         self.lock().evicted_by.note(peer, Instant::now(), 0.0);
     }
 
+    /// Tests only: refuse every round with `peer`, the ones this node offers and the ones it
+    /// answers, or lift the refusal. A test uses it to keep two members from forming a direct
+    /// session, so that their traffic has to take the multihop route.
+    #[cfg(any(test, feature = "iroh-test-utils"))]
+    pub(crate) fn deny(&self, peer: EndpointId, denied: bool) {
+        let mut inner = self.lock();
+        if denied {
+            inner.denied.insert(peer);
+        } else {
+            inner.denied.remove(&peer);
+        }
+    }
+
+    /// Whether a test denied `peer`.
+    pub(crate) fn is_denied(&self, peer: EndpointId) -> bool {
+        self.lock().denied.contains(&peer)
+    }
+
     /// Whether `peer` evicted our connection lately, so that no proactive dial goes to it.
     pub(crate) fn evicted_recently(&self, peer: EndpointId) -> bool {
         self.lock().evicted_by.holds(&peer, Instant::now())
@@ -845,7 +871,7 @@ impl SignalAdmission {
 
     /// The gossip neighbors changed. A session counts only while its peer is not one, so a
     /// peer that stops being a neighbor can take the ceiling over.
-    pub(crate) fn set_neighbors(&self, neighbors: &std::collections::HashSet<EndpointId>) {
+    pub(crate) fn set_neighbors(&self, neighbors: &HashSet<EndpointId>) {
         let mut inner = self.lock();
         let evictions = inner.ceiling.set_neighbors(neighbors, Instant::now());
         let victims = inner.take_victims(&evictions);
@@ -1054,6 +1080,33 @@ mod tests {
     /// these tests exercise the admission logic and nothing else.
     fn hub() -> WebRtcHandle {
         WebRtcHandle::new(WebRtcTransport::new(peer(0)))
+    }
+
+    #[test]
+    fn a_denied_peer_is_admitted_in_neither_role() {
+        let admission = SignalAdmission::new(16);
+        let hub = hub();
+        admission.deny(peer(1), true);
+        assert!(matches!(
+            admission.try_admit(peer(1), &hub),
+            Err(Refusal::Denied)
+        ));
+        assert!(matches!(
+            admission.try_admit_offer(peer(1), &hub),
+            Err(Refusal::Denied)
+        ));
+        assert!(admission.is_denied(peer(1)));
+    }
+
+    #[test]
+    fn a_deny_leaves_the_other_peers_alone_and_can_be_lifted() {
+        let admission = SignalAdmission::new(16);
+        let hub = hub();
+        admission.deny(peer(1), true);
+        assert!(admission.try_admit(peer(2), &hub).is_ok());
+        admission.deny(peer(1), false);
+        assert!(!admission.is_denied(peer(1)));
+        assert!(admission.try_admit(peer(1), &hub).is_ok());
     }
 
     #[test]

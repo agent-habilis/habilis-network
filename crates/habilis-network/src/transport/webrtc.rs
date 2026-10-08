@@ -368,6 +368,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                 let (code, why): (u32, &[u8]) = match reason {
                     Refusal::ShuttingDown => (SIGNAL_ABORTED, b"shutting down"),
                     Refusal::Evicted => (EVICTED, b"evicted lately"),
+                    Refusal::Denied => (SIGNAL_ABORTED, b"denied"),
                     Refusal::InFlight | Refusal::HaveSession | Refusal::Cooling => {
                         (SIGNAL_FAILED, b"already negotiating")
                     }
