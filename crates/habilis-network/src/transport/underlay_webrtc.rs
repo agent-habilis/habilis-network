@@ -15,13 +15,8 @@ use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId};
 
+use super::webrtc::close_code::NOT_A_NEIGHBOR;
 use super::{LOG_TARGET, SignalAdmission, WebRtcSignalAcceptor};
-
-/// The close code of a signal from an endpoint that is not a neighbor of ours.
-/// The codes of `webrtc::close_code` stop at 8. This one moves into that module
-/// with the code of the gossip rung (Phase 6 step 7), so that its test of
-/// distinct numbers covers it too.
-const NOT_A_NEIGHBOR: u32 = 9;
 
 /// What one tick does with the sessions of the underlay.
 #[derive(Debug, Default, PartialEq, Eq)]

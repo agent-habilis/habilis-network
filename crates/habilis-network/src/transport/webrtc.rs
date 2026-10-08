@@ -107,13 +107,14 @@ pub(crate) mod close_code {
     /// A unicast connection nothing sent on for the idle timeout: closed by the
     /// pool on the dial side, by the acceptor on the other.
     pub(crate) const IDLE: u32 = 8;
+    /// A signal from an endpoint that is not a neighbor of the underlay.
+    pub(crate) const NOT_A_NEIGHBOR: u32 = 9;
     /// A direct connection closed because the node is at its ceiling of direct
     /// connections and this one was the least recently used. The dialer backs off
     /// before it dials this peer on its own again: a send still dials at once.
     pub(crate) const EVICTED: u32 = 11;
-    // Reserved, each added with the change that sends it: 9 `NOT_A_NEIGHBOR`
-    // (now private to `underlay_webrtc.rs`), 10 `GOSSIP_ON_GOSSIP_PATH`. The
-    // next free number is 12.
+    // Reserved, added with the change that sends it: 10 `GOSSIP_ON_GOSSIP_PATH`.
+    // The next free number is 12.
 
     #[cfg(test)]
     mod tests {
@@ -128,6 +129,7 @@ pub(crate) mod close_code {
                 GOSSIP_RELAY_REFUSED,
                 UNICAST_RELAY_REFUSED,
                 IDLE,
+                NOT_A_NEIGHBOR,
                 EVICTED,
             ];
             let distinct: std::collections::HashSet<_> = all.into_iter().collect();
