@@ -107,7 +107,9 @@ pub(crate) mod close_code {
     /// A unicast connection nothing sent on for the idle timeout: closed by the
     /// pool on the dial side, by the acceptor on the other.
     pub(crate) const IDLE: u32 = 8;
-    /// A signal from an endpoint that is not a neighbor of the underlay.
+    /// A signal from an endpoint that is not a neighbor of the underlay. Its only sender is the
+    /// host-only `underlay_webrtc`.
+    #[cfg(any(feature = "host", test))]
     pub(crate) const NOT_A_NEIGHBOR: u32 = 9;
     /// A direct connection closed because the node is at its ceiling of direct
     /// connections and this one was the least recently used. The dialer backs off
