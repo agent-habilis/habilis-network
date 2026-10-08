@@ -298,8 +298,8 @@ fn truncated_bytes_rejected() {
 #[test]
 fn a_mesh_id_carries_the_transport_policy_for_every_list() {
     use super::lookup::Lookup;
-    use super::transport::Transport::{Multihop, Relay, Udp, WebRtc};
-    let lists: [&[super::transport::Transport]; 8] = [
+    use super::transport::Transport::{Gossip, Multihop, Relay, Udp, WebRtc};
+    let lists: [&[super::transport::Transport]; 10] = [
         &[],
         &[Udp],
         &[WebRtc],
@@ -308,6 +308,8 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
         &[Udp, WebRtc, Multihop],
         &[Udp, Multihop, Relay],
         &[Udp, WebRtc, Multihop, Relay],
+        &[Udp, Gossip],
+        &[Udp, WebRtc, Multihop, Gossip],
     ];
     let mut seen: Vec<(TransportPolicy, String)> = Vec::new();
     for list in lists {

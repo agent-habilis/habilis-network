@@ -236,8 +236,11 @@ pub(super) const TRANSPORT_MULTIHOP: u8 = 0b0100;
 /// only. In the mesh id rather than per node, because one relaying member
 /// would undo the saving for everyone it links.
 pub(super) const TRANSPORT_RELAY: u8 = 0b1000;
+/// Gossip as a path ([`TransportPolicy::gossip`]). Written after the relay's bit, so an id that
+/// an older build made reads as gossip off and keeps its bytes.
+pub(super) const TRANSPORT_GOSSIP: u8 = 0b1_0000;
 pub(super) const KNOWN_TRANSPORT_BITS: u8 =
-    TRANSPORT_UDP | TRANSPORT_WEBRTC | TRANSPORT_MULTIHOP | TRANSPORT_RELAY;
+    TRANSPORT_UDP | TRANSPORT_WEBRTC | TRANSPORT_MULTIHOP | TRANSPORT_RELAY | TRANSPORT_GOSSIP;
 
 const KNOWN_FEATURES: u8 = FEATURE_PASSWORD | FEATURE_INVITE_ONLY;
 
@@ -974,6 +977,7 @@ mod lookup_tests {
     fn udp_webrtc_and_multihop_are_on_by_default() {
         let default = TransportPolicy::default();
         assert!(default.udp && default.webrtc && default.multihop && !default.relay_transport);
+        assert!(!default.gossip, "gossip is off until the engine uses it");
         assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111, 0b0111]);
         let decoded = MeshConfig::from_bytes(&[0b0111, 0b0111]).unwrap().transport;
         assert_eq!(decoded, default);
@@ -1065,12 +1069,52 @@ mod lookup_tests {
         "a transport list needs a direct path: name `udp`, `webrtc`, or both";
     const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp` or `webrtc`";
 
+    /// The gossip bit is the fifth: an id that an older build made has it clear, reads as gossip
+    /// off, and keeps its bytes, so its id and its topic do not move.
+    #[test]
+    fn the_gossip_bit_is_the_fifth_and_an_older_id_reads_as_gossip_off() {
+        let with_gossip = MeshConfig {
+            transport: TransportPolicy {
+                gossip: true,
+                ..TransportPolicy::default()
+            },
+            ..MeshConfig::public_preset()
+        };
+        let bytes = with_gossip.to_bytes();
+        assert_eq!(bytes, vec![0b0111, 0b1_0111]);
+        assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), with_gossip);
+        assert_ne!(
+            bytes,
+            MeshConfig::public_preset().to_bytes(),
+            "gossip on derives another id and another topic"
+        );
+        let older = [0b0111, 0b0111];
+        let decoded = MeshConfig::from_bytes(&older).unwrap();
+        assert!(!decoded.transport.gossip);
+        assert_eq!(decoded.to_bytes(), older, "an older id keeps its bytes");
+    }
+
+    /// A decoded id passes `validate` and not `from_transports`: gossip with no `udp` or `webrtc`
+    /// is refused the same way, whatever else the byte names.
+    #[test]
+    fn an_id_with_gossip_and_no_direct_path_is_refused() {
+        let gossip_only = MeshConfig::from_bytes(&[0b0111, super::TRANSPORT_GOSSIP])
+            .unwrap_err()
+            .to_string();
+        assert!(gossip_only.contains("needs a direct path"), "{gossip_only}");
+        let with_multihop =
+            MeshConfig::from_bytes(&[0b0111, super::TRANSPORT_GOSSIP | super::TRANSPORT_MULTIHOP])
+                .unwrap_err()
+                .to_string();
+        assert_eq!(with_multihop, MULTIHOP_ALONE);
+    }
+
     /// Every subset of the four transports, each with its result: `Ok`, or the
     /// exact error. A relay lookup is on, so the relay rules do not speak here.
     #[test]
     fn every_subset_of_the_transports_resolves_or_names_its_error() {
-        use Transport::{Multihop, Relay, Udp, WebRtc};
-        let rows: [(&[Transport], Result<(), &str>); 16] = [
+        use Transport::{Gossip, Multihop, Relay, Udp, WebRtc};
+        let rows: [(&[Transport], Result<(), &str>); 32] = [
             (&[], Ok(())),
             (&[Udp], Ok(())),
             (&[WebRtc], Ok(())),
@@ -1087,9 +1131,26 @@ mod lookup_tests {
             (&[Udp, Multihop, Relay], Ok(())),
             (&[WebRtc, Multihop, Relay], Ok(())),
             (&[Udp, WebRtc, Multihop, Relay], Ok(())),
+            // Gossip rides the links of a direct path: it adds nothing on its own.
+            (&[Gossip], Err(NEEDS_A_DIRECT_PATH)),
+            (&[Udp, Gossip], Ok(())),
+            (&[WebRtc, Gossip], Ok(())),
+            (&[Multihop, Gossip], Err(MULTIHOP_ALONE)),
+            (&[Relay, Gossip], Err(NEEDS_A_DIRECT_PATH)),
+            (&[Udp, WebRtc, Gossip], Ok(())),
+            (&[Udp, Multihop, Gossip], Ok(())),
+            (&[Udp, Relay, Gossip], Ok(())),
+            (&[WebRtc, Multihop, Gossip], Ok(())),
+            (&[WebRtc, Relay, Gossip], Ok(())),
+            (&[Multihop, Relay, Gossip], Err(MULTIHOP_ALONE)),
+            (&[Udp, WebRtc, Multihop, Gossip], Ok(())),
+            (&[Udp, WebRtc, Relay, Gossip], Ok(())),
+            (&[Udp, Multihop, Relay, Gossip], Ok(())),
+            (&[WebRtc, Multihop, Relay, Gossip], Ok(())),
+            (&[Udp, WebRtc, Multihop, Relay, Gossip], Ok(())),
         ];
         let mask = |list: &[Transport]| {
-            [Udp, WebRtc, Multihop, Relay]
+            [Udp, WebRtc, Multihop, Gossip, Relay]
                 .iter()
                 .enumerate()
                 .filter(|(_, transport)| list.contains(transport))
@@ -1097,7 +1158,7 @@ mod lookup_tests {
         };
         let covered: std::collections::HashSet<u8> =
             rows.iter().map(|(list, _)| mask(list)).collect();
-        assert_eq!(covered.len(), 16, "the table names every subset once");
+        assert_eq!(covered.len(), 32, "the table names every subset once");
         for (list, expected) in rows {
             let got = MeshConfig::resolve(&[Lookup::Relay], None, list)
                 .map(|_| ())
@@ -1142,7 +1203,8 @@ mod lookup_tests {
 
     #[test]
     fn a_policy_byte_with_an_unknown_bit_asks_for_an_upgrade() {
-        let error = MeshConfig::from_bytes(&[0b0111, 0b1_0111])
+        // Bit 4 is gossip now: the next one is the first unknown.
+        let error = MeshConfig::from_bytes(&[0b0111, 0b10_0111])
             .unwrap_err()
             .to_string();
         assert!(error.contains("upgrade"), "{error}");
@@ -1262,6 +1324,8 @@ mod choice_tests {
             "multihop".parse::<Transport>().unwrap(),
             Transport::Multihop
         );
+        assert_eq!("gossip".parse::<Transport>().unwrap(), Transport::Gossip);
+        assert_eq!(Transport::Gossip.to_string(), "gossip");
         for (name, lookup) in [
             ("mdns", Lookup::Mdns),
             ("dht", Lookup::Dht),
@@ -1289,7 +1353,7 @@ mod choice_tests {
         let transport_error = "tcp".parse::<Transport>().unwrap_err().to_string();
         assert!(
             transport_error.contains("tcp")
-                && transport_error.contains("udp, webrtc, multihop, relay"),
+                && transport_error.contains("udp, webrtc, multihop, gossip, relay"),
             "{transport_error}"
         );
     }

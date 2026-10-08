@@ -453,7 +453,7 @@ An id of version 1, minted before the policy had its own byte, is refused with a
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport udp,webrtc,multihop,relay`, `transport: ['udp', 'webrtc', 'multihop', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` needs one of the two next to it, and `udp,webrtc,multihop` is the default.
+`transport` (`--transport udp,webrtc,multihop,gossip,relay`, `transport: ['udp', 'webrtc', 'multihop', 'gossip', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` and `gossip` need one of the two next to them, and `udp,webrtc,multihop` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.
@@ -524,8 +524,8 @@ A browser therefore costs once as a hop in the middle of a route, and nothing as
 A route has at most 8 hops, so the longest native route costs 80, and one browser hop costs at least 110 (10 into the browser, 100 out of it).
 A native route wins whenever one exists, and a route through a browser is used when no native route does.
 The cost is part of the signed vector, so another node cannot change it, but a node can advertise any cost for itself.
-The rule holds while all native links cost the same.
-With measured costs it must be shown again, and the test `a_route_through_a_browser_costs_more_than_any_native_route` fails when a constant breaks it.
+The rule holds while all native links cost the same, and the test `a_route_through_a_browser_costs_more_than_any_native_route` fails when a constant breaks it.
+With measured costs that differ, the guard becomes a relation on the measured floor: one browser hop at its lowest measured cost must exceed a native route of 8 hops at its highest.
 
 ```mermaid
 flowchart LR

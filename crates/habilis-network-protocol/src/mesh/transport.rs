@@ -27,6 +27,9 @@ pub enum Transport {
     /// Source-routed multi-hop: reach a peer with no direct path through other
     /// members. It forwards over a direct path, so the list names `udp` or `webrtc` next to it.
     Multihop,
+    /// Reach a peer with no other path through the frames of the mesh's own gossip topic. It
+    /// rides the links that other paths carry, so the list names `udp` or `webrtc` next to it.
+    Gossip,
     /// Let payload also fall back to the relay when no direct path exists.
     Relay,
 }
@@ -37,7 +40,7 @@ pub enum Transport {
 pub(super) const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp` or `webrtc`";
 
 impl Transport {
-    const NAMES: &[&str] = &["udp", "webrtc", "multihop", "relay"];
+    const NAMES: &[&str] = &["udp", "webrtc", "multihop", "gossip", "relay"];
 
     /// The name the list spells this transport by.
     #[must_use]
@@ -46,6 +49,7 @@ impl Transport {
             Self::Udp => "udp",
             Self::WebRtc => "webrtc",
             Self::Multihop => "multihop",
+            Self::Gossip => "gossip",
             Self::Relay => "relay",
         }
     }
@@ -59,6 +63,7 @@ impl FromStr for Transport {
             "udp" => Ok(Self::Udp),
             "webrtc" => Ok(Self::WebRtc),
             "multihop" => Ok(Self::Multihop),
+            "gossip" => Ok(Self::Gossip),
             "relay" => Ok(Self::Relay),
             other => Err(ChoiceError::new("transport", other, Self::NAMES)),
         }
@@ -91,6 +96,9 @@ pub struct TransportPolicy {
     /// is reached through other members. Native only; a browser ignores it, as
     /// it ignores `udp`. Needs `udp`, because its underlay is a UDP endpoint.
     pub multihop: bool,
+    /// Gossip as a path: a peer with no other path is reached through the frames of the mesh's
+    /// gossip topic. It rides the links of the direct paths, so it needs `udp` or `webrtc`.
+    pub gossip: bool,
     /// Whether the iroh relay may carry payload. Off by default: the relay is
     /// kept for lookup alone — the bootstrap dial, JSEP signalling and the
     /// NAT-traversal frames of a freshly opened connection still cross it —
@@ -104,12 +112,13 @@ pub struct TransportPolicy {
 
 impl Default for TransportPolicy {
     /// `udp,webrtc,multihop`: every direct path and multi-hop, the relay for
-    /// lookup alone.
+    /// lookup alone. Gossip is off until the engine uses it.
     fn default() -> Self {
         Self {
             udp: true,
             webrtc: true,
             multihop: true,
+            gossip: false,
             relay_transport: false,
         }
     }
@@ -130,6 +139,7 @@ impl TransportPolicy {
             udp: transports.contains(&Transport::Udp),
             webrtc: transports.contains(&Transport::WebRtc),
             multihop: transports.contains(&Transport::Multihop),
+            gossip: transports.contains(&Transport::Gossip),
             relay_transport: transports.contains(&Transport::Relay),
         };
         if policy.multihop_has_no_direct_path() {
@@ -162,6 +172,9 @@ impl TransportPolicy {
         if self.multihop {
             byte |= super::lookup::TRANSPORT_MULTIHOP;
         }
+        if self.gossip {
+            byte |= super::lookup::TRANSPORT_GOSSIP;
+        }
         if self.relay_transport {
             byte |= super::lookup::TRANSPORT_RELAY;
         }
@@ -180,6 +193,7 @@ impl TransportPolicy {
             udp: byte & super::lookup::TRANSPORT_UDP != 0,
             webrtc: byte & super::lookup::TRANSPORT_WEBRTC != 0,
             multihop: byte & super::lookup::TRANSPORT_MULTIHOP != 0,
+            gossip: byte & super::lookup::TRANSPORT_GOSSIP != 0,
             relay_transport: byte & super::lookup::TRANSPORT_RELAY != 0,
         })
     }

@@ -134,6 +134,7 @@ impl StreamHash {
                 webrtc: flags & NO_WEBRTC_BIT == 0,
                 // A stream is one direct lane: its node has no multi-hop.
                 multihop: false,
+                gossip: false,
                 relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
             },
             id,
@@ -183,6 +184,7 @@ mod tests {
             udp,
             webrtc,
             multihop: false,
+            gossip: false,
             relay_transport,
         }
     }

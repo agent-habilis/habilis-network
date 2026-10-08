@@ -10,9 +10,10 @@ export type Lookup = 'mdns' | 'dht' | 'relay'
  * One path a mesh's payload may ride. A list needs `udp` or `webrtc`; a
  * browser has no UDP, so it needs `webrtc` or `relay`. `multihop` (native only,
  * and it needs `udp` or `webrtc` next to it) reaches a peer with no direct path
- * through other members.
+ * through other members. `gossip` (it needs the same) reaches a peer with no
+ * other path through the frames of the mesh's gossip topic.
  */
-export type Transport = 'udp' | 'webrtc' | 'multihop' | 'relay'
+export type Transport = 'udp' | 'webrtc' | 'multihop' | 'gossip' | 'relay'
 
 export interface JoinOpts {
   /**

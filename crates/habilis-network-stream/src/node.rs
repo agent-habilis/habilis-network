@@ -40,8 +40,8 @@ pub struct StreamOpts {
     /// loopback node.
     pub lookup: Vec<Lookup>,
     /// What may carry bytes: any of `udp`, `webrtc`, `relay`, with `udp` or
-    /// `webrtc` among them. Empty ⇒ `udp,webrtc`. `multihop` is refused: a
-    /// stream is one direct lane.
+    /// `webrtc` among them. Empty ⇒ `udp,webrtc`. `multihop` and `gossip` are refused: a
+    /// stream is one direct lane, and its node never joins a gossip mesh.
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Empty is the default ladder.
     pub relay_urls: Vec<String>,
@@ -74,6 +74,10 @@ impl StreamNode {
         anyhow::ensure!(
             !opts.transport.contains(&Transport::Multihop),
             "a stream has no multihop: it is one direct lane"
+        );
+        anyhow::ensure!(
+            !opts.transport.contains(&Transport::Gossip),
+            "a stream has no gossip: its node never joins a gossip mesh"
         );
         // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
         let list = if opts.transport.is_empty() {
@@ -261,6 +265,22 @@ mod tests {
             .expect_err("multihop is refused");
         assert!(
             refused.to_string().contains("no multihop"),
+            "the error names the reason: {refused}"
+        );
+    }
+
+    // A stream node never joins a gossip mesh: a list that names `gossip` is refused too.
+    #[tokio::test]
+    async fn a_stream_node_refuses_gossip() {
+        let opts = StreamOpts {
+            transport: vec![Transport::Udp, Transport::Gossip],
+            ..StreamOpts::default()
+        };
+        let refused = StreamNode::bind(&opts)
+            .await
+            .expect_err("gossip is refused");
+        assert!(
+            refused.to_string().contains("no gossip"),
             "the error names the reason: {refused}"
         );
     }
