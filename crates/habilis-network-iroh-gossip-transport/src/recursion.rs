@@ -176,16 +176,16 @@ mod tests {
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
-        let (alive, alive_rx) = oneshot::channel::<()>();
-        // The task owns the callback, and the callback owns `alive`: the receiver
+        let (callback_ran, watch_ended) = oneshot::channel::<()>();
+        // The task owns the callback, and the callback owns `callback_ran`: `watch_ended`
         // fails once the task has ended and dropped it without calling it.
         watch_recursion(&connection, CODE, move || {
-            let _ = alive.send(());
+            let _ = callback_ran.send(());
         });
 
         drop(connection);
 
-        let ended = tokio::time::timeout(Duration::from_secs(5), alive_rx)
+        let ended = tokio::time::timeout(Duration::from_secs(5), watch_ended)
             .await
             .expect("the watch task did not end");
         assert!(ended.is_err(), "the callback ran: {ended:?}");
