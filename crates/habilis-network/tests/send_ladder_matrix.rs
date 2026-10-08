@@ -55,8 +55,8 @@ const SETTLE_BELOW_A_BLOCK: Duration = Duration::from_secs(30);
 /// How long a message that must not arrive is given to arrive.
 const REFUSAL_WINDOW: Duration = Duration::from_secs(8);
 
-/// How long a cell that expects no rung waits for the cut to take the pair off IP.
-const LEAVE_IP_DEADLINE: Duration = Duration::from_secs(30);
+/// How long a cell that expects no rung waits for the cut to take the pair off the path it had.
+const LEAVE_DIRECT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Which rungs a cell takes away from alice, from the top of the ladder down.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -616,14 +616,18 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
             Kind::Unicast => {
                 if expected.is_none() {
                     // The cut takes effect when iroh re-runs the path selection, a short
-                    // while after it. Until then the pooled connection is still on IP and
+                    // while after it. Until then the pooled connection is still on the path
+                    // it had before the cut (IP, or WebRTC when the list has no `udp`) and
                     // carries the message: that is a payload on a rung that may carry it,
                     // and tells nothing about the rungs that may not.
                     let waiting = Instant::now();
-                    while alice.rung_to("bob").await == Some("ip") {
+                    while matches!(
+                        alice.rung_to("bob").await,
+                        Some("ip" | "webrtc" | "multihop" | "gossip")
+                    ) {
                         assert!(
-                            waiting.elapsed() < LEAVE_IP_DEADLINE,
-                            "{name}: the pair never left IP after the cut"
+                            waiting.elapsed() < LEAVE_DIRECT_DEADLINE,
+                            "{name}: the pair never left its path after the cut"
                         );
                         tokio::time::sleep(Duration::from_millis(250)).await;
                     }
@@ -989,7 +993,7 @@ async fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
     let waiting = Instant::now();
     while alice.rung_to("bob").await == Some("ip") {
         assert!(
-            waiting.elapsed() < LEAVE_IP_DEADLINE,
+            waiting.elapsed() < LEAVE_DIRECT_DEADLINE,
             "{NAME}: the pair never left IP after the cut"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
