@@ -92,9 +92,9 @@ pub struct EventLoopConfig {
     pub(crate) topic: GossipTopic,
     /// The gossip frontend the topic was subscribed on. Held by the
     /// event loop so it can **re-subscribe** after the topic stream
-    /// terminally ends — iroh-gossip closes a lagging subscriber and
-    /// its docs say to re-open it; without this handle the daemon
-    /// would stay permanently deaf (review finding H1).
+    /// terminally ends (for example when the actor drops the
+    /// subscription; a lag does not end it); without this handle the
+    /// daemon would stay permanently deaf (review finding H1).
     pub(crate) gossip: iroh_gossip::net::Gossip,
     pub(crate) author: Nickname,
     /// This member's signing identity (Ed25519), minted in `setup_mesh`.

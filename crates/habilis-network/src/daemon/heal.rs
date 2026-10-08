@@ -229,9 +229,10 @@ pub(super) async fn resubscribe_tick(
     }
     Ok(())
 }
-/// Re-open the gossip topic after its stream terminally ended. The
-/// designed-for remedy, not a workaround: iroh-gossip closes a lagging
-/// subscriber outright and its docs instruct "close and re-open".
+/// Re-open the gossip topic after its stream terminally ended, for example
+/// when the actor dropped the subscription. A lag does not end the stream:
+/// the topic reports it and keeps the subscription (the split counts it),
+/// whatever the docs of iroh-gossip say about closing a lagging subscriber.
 /// Bootstrap is the rendezvous plus every remembered peer so the fresh
 /// subscription re-grafts without waiting for lookups. `Fatal` after
 /// `RESUBSCRIBE_MAX_ATTEMPTS` consecutive failures: a subscribe error
