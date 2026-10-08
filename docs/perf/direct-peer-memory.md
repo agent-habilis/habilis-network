@@ -228,7 +228,7 @@ The multihop underlay is an endpoint of its own, and it can hold WebRTC sessions
 
 An underlay session and an application session are the same object: a session made by `offer_with` and `answer_with` and attached to a `WebRtcTransport`. The example `session_cost` (crates/habilis-network-iroh-webrtc-transport/examples) measures that object alone. It uses no endpoint, no relay and no gossip. Two processes hold the two ends, so each reading counts one end. The driver is `scripts/perf/session_cost.sh`.
 
-`session_cost` reports MiB (1 MiB is 1.05 MB). The figures below are in MiB. The rest of this document uses MB, and the 5 percent difference is far under the error of the other figures.
+`session_cost` reports MiB (1 MiB is 1.05 MB). Every figure in this section is in MiB. The rest of this document uses MB.
 
 | Reading | Offerer | Answerer |
 | -- | -- | -- |
@@ -238,18 +238,19 @@ An underlay session and an application session are the same object: a session ma
 | Fixed part of the line (intercept) | 0.22 | 0.22 |
 | Noise floor (spread of the K = 0 runs) | 0.009 | 0.009 |
 
-The line is `memory = 0.22 + 0.075 x K`, in MB. The cost is sub-linear. In the raw readings, 1 session costs 0.23 to 0.39 in all, 8 sessions cost 1.06 to 1.19, and 32 sessions cost 2.45 to 2.59. So the first session costs about 0.27, a node with 8 sessions pays about 0.14 for each, and a node with 32 pays about 0.08 for each. Both ends cost the same. The standard error is 5 percent of the slope.
+The line is `memory = 0.22 + 0.075 x K`, in MiB. The cost is sub-linear. In the raw readings, 1 session costs 0.23 to 0.39 in all, 8 sessions cost 1.06 to 1.19, and 32 sessions cost 2.45 to 2.59. So the first session costs about 0.27, a node with 8 sessions pays about 0.14 for each, and a node with 32 pays about 0.08 for each. Both ends cost the same. The standard error is 6 to 7 percent of the slope after the open, and up to 12 percent after the hold and after the close.
 
 Read these limits with the figures:
 
 - The sessions are idle. No datagram crosses them. A session under traffic fills buffers, and that cost is not measured here.
 - Only the session object is measured. The QUIC connection that rides on it is not. An underlay already holds a QUIC connection to the neighbor on IP or on the relay, so a session adds this cost and a small entry to that connection. The size of that entry is not measured.
-- Memory is not given back when the sessions close. The reading after the close equals the reading after the open, within the error.
+- Memory is not given back when the sessions close. The reading after the close equals the reading after the open, within the error. Two offerer rows did return memory: K = 32 in round 1 (load 6.42), about 0.5 MiB, and K = 8 in round 3, -1.5 MiB during the hold.
+- One machine, and one process pair at a time. The resident memory steps by 16 KiB, which explains the spread of the K = 1 readings.
 - Native code, a release build, macOS (Apple silicon), host candidates only. A browser session and a session with STUN are not measured.
 - 24 runs: three rounds of K = 0, 1, 8, 32 for each end, in turn, one fresh process pair per run. None failed. Two runs started with a load average of 4 or more (4.65 and 6.42, the limit was 4), and their readings lie inside the range of the others.
-- A first matrix of 24 runs gave no result (the standard error was 23 to 27 percent of the slope). Its cause was a flaw of the method, now removed: a closed warm-up session gave back part of its memory after the baseline reading. The K = 0 runs drifted by -1.01 and -0.50 MB over the hold. After the fix they drift by 0.00 to 0.03.
+- A first matrix of 24 runs gave no result (the standard error was 23 to 27 percent of the slope). Its cause was a flaw of the method, now removed: a closed warm-up session gave back part of its memory after the baseline reading. The K = 0 runs drifted by -1.01 and -0.50 MiB over the hold. After the fix they drift by 0.00 to 0.05.
 
-The planning value for the multihop underlay is now 0.075 MB for each idle session, and 0.22 MB once for the node. At the planned G = 32, a node with 32 underlay sessions adds about 2.6 MB. The value 0.2 MB of one session of D stays as the ceiling for a session in use, because it comes from a run with traffic. The assumption of 0.2 MB (0.19 MiB) for an idle underlay session was about 2.5 times too high.
+The planning value for the multihop underlay is now 0.075 MiB for each idle session, and 0.22 MiB once for the node. At the planned G = 32, a node with 32 underlay sessions adds about 2.6 MiB. The value 0.2 MB of one session of D stays as the ceiling for a session in use, because it comes from a run with traffic. The assumption of 0.2 MB (0.19 MiB) for an idle underlay session was about 2.5 times too high.
 
 ### The formula
 
