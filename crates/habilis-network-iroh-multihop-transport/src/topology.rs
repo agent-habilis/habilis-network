@@ -721,4 +721,133 @@ mod tests {
         assert_eq!(routes.len(), 2, "both diamond arms");
         assert_ne!(routes[0].hops()[0].app_id, routes[1].hops()[0].app_id);
     }
+
+    /// What a link costs to a native node (the cost that the host advertises), and what a browser
+    /// advertises for its own links (decision D5: a route avoids a browser as a hop). The cost is
+    /// data in the signed vector: nothing in the route search knows what a browser is.
+    const NATIVE_COST: u32 = 10;
+    const BROWSER_COST: u32 = 100;
+
+    /// The application ids of the hops of the best route from `src` to `dst`.
+    fn best_route(store: &Topology, src: EndpointId, dst: EndpointId) -> Option<Vec<EndpointId>> {
+        store
+            .route_to(src, dst, 1)
+            .first()
+            .map(|route| route.hops().iter().map(|hop| hop.app_id).collect())
+    }
+
+    /// The cost of the cheapest path from `src` to `dst`.
+    fn best_cost(store: &Topology, src: EndpointId, dst: EndpointId) -> Option<u32> {
+        store
+            .graph()
+            .shortest_path(src, dst)
+            .map(|path| path.cost.0)
+    }
+
+    /// `src` reaches `dst` by three native hops (`n1`, `n2`, `dst`), or by one browser hop (`tab`)
+    /// whose own links cost `tab_cost`.
+    fn native_and_browser_routes(tab_cost: u32) -> (Topology, [EndpointId; 5]) {
+        let [src, n1, n2, dst, tab] = [1, 2, 3, 4, 5].map(eid);
+        let mut store = Topology::default();
+        for (origin, links) in [
+            (src, vec![(n1, NATIVE_COST), (tab, NATIVE_COST)]),
+            (n1, vec![(n2, NATIVE_COST)]),
+            (n2, vec![(dst, NATIVE_COST)]),
+            (tab, vec![(dst, tab_cost)]),
+            (dst, vec![]),
+        ] {
+            assert!(ingest(&mut store, vector(origin, 1, &links)));
+        }
+        (store, [src, n1, n2, dst, tab])
+    }
+
+    #[test]
+    fn a_three_hop_native_path_beats_a_one_hop_browser_path() {
+        let (store, [src, n1, n2, dst, tab]) = native_and_browser_routes(BROWSER_COST);
+        assert_eq!(best_route(&store, src, dst), Some(vec![n1, n2, dst]));
+        assert_eq!(best_cost(&store, src, dst), Some(3 * NATIVE_COST));
+        let both = store.route_to(src, dst, 2);
+        assert_eq!(both.len(), 2, "the browser route is still a route");
+        assert_eq!(both[1].hops()[0].app_id, tab);
+
+        // The cost is what decides: a tab that advertises the native cost wins by its length.
+        let (cheap_tab, [from, _, _, to, cheap]) = native_and_browser_routes(NATIVE_COST);
+        assert_eq!(best_route(&cheap_tab, from, to), Some(vec![cheap, to]));
+    }
+
+    #[test]
+    fn without_the_native_route_the_route_goes_through_the_browser() {
+        let [alice, bob, carol, tab] = [1, 2, 3, 4].map(eid);
+        let mut store = Topology::default();
+        for (origin, links) in [
+            (alice, vec![(carol, NATIVE_COST), (tab, NATIVE_COST)]),
+            (carol, vec![(bob, NATIVE_COST)]),
+            (tab, vec![(bob, BROWSER_COST)]),
+            (bob, vec![]),
+        ] {
+            assert!(ingest(&mut store, vector(origin, 1, &links)));
+        }
+        assert_eq!(best_route(&store, alice, bob), Some(vec![carol, bob]));
+
+        assert!(store.remove(carol), "carol leaves: her vector is gone");
+        assert_eq!(best_route(&store, alice, bob), Some(vec![tab, bob]));
+        assert_eq!(
+            best_cost(&store, alice, bob),
+            Some(NATIVE_COST + BROWSER_COST),
+            "the browser hop costs its in-edge and its out-edge"
+        );
+    }
+
+    #[test]
+    fn a_browser_pays_nothing_as_a_destination_or_as_a_source() {
+        let [src, hop, dst, other] = [1, 2, 3, 4].map(eid);
+        // As a destination: the last edge into it is advertised by its predecessor.
+        for (name, last_cost) in [("native", NATIVE_COST), ("browser", BROWSER_COST)] {
+            let mut store = Topology::default();
+            for (origin, links) in [
+                (src, vec![(dst, NATIVE_COST)]),
+                (dst, vec![(src, last_cost)]),
+            ] {
+                assert!(ingest(&mut store, vector(origin, 1, &links)));
+            }
+            assert_eq!(
+                best_cost(&store, src, dst),
+                Some(NATIVE_COST),
+                "{name} destination"
+            );
+        }
+        // As a source: every route starts with one of its own edges, so the choice is the same
+        // whatever those edges cost.
+        for (name, cost) in [("native", NATIVE_COST), ("browser", BROWSER_COST)] {
+            let mut store = Topology::default();
+            for (origin, links) in [
+                (src, vec![(hop, cost), (other, cost)]),
+                (hop, vec![(dst, NATIVE_COST)]),
+                (other, vec![(hop, NATIVE_COST), (dst, 3 * NATIVE_COST)]),
+                (dst, vec![]),
+            ] {
+                assert!(ingest(&mut store, vector(origin, 1, &links)));
+            }
+            assert_eq!(
+                best_route(&store, src, dst),
+                Some(vec![hop, dst]),
+                "{name} source"
+            );
+        }
+    }
+
+    /// The cost of a browser's links is inside its signature: another node cannot make a browser
+    /// look native, nor a native look like a browser.
+    #[test]
+    fn a_changed_cost_is_refused() {
+        let [tab, dst] = [1, 2].map(eid);
+        let mut store = Topology::default();
+        let mut cheaper = vector(tab, 1, &[(dst, BROWSER_COST)]);
+        cheaper.links[0].1 = crate::metric::LinkMetric(NATIVE_COST);
+        assert!(!ingest(&mut store, cheaper), "a lowered cost");
+        let mut dearer = vector(tab, 1, &[(dst, NATIVE_COST)]);
+        dearer.links[0].1 = crate::metric::LinkMetric(BROWSER_COST);
+        assert!(!ingest(&mut store, dearer), "a raised cost");
+        assert!(ingest(&mut store, vector(tab, 1, &[(dst, BROWSER_COST)])));
+    }
 }

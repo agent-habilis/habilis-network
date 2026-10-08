@@ -929,6 +929,21 @@ mod tests {
         (handle, hops)
     }
 
+    /// Decision D5: a route through a browser costs more than any native route. A route through a
+    /// browser has at least two links, one into it (the cost of its neighbor) and one out of it
+    /// (its own); a native route has at most `MAX_ROUTE_HOPS` links. Whoever changes a constant
+    /// here sees this fail, and with measured costs the relation must be shown again.
+    #[test]
+    fn a_route_through_a_browser_costs_more_than_any_native_route() {
+        let native = u64::from(HandleConfig::default().link_cost);
+        let browser = u64::from(HandleConfig::for_browser().link_cost);
+        let longest_native = native * u64::try_from(crate::addr::MAX_ROUTE_HOPS).expect("small");
+        assert!(
+            native + browser > longest_native,
+            "one browser hop ({native} + {browser}) must cost more than the longest native route ({longest_native})"
+        );
+    }
+
     #[tokio::test]
     async fn a_native_route_is_chosen_over_a_shorter_route_through_a_browser() {
         let (handle, [(a1, _), _, _, (dst, _)]) = handle_with_a_native_and_a_browser_route().await;
