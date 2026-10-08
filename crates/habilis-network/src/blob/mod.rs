@@ -169,47 +169,47 @@ mod tests {
         ))
     }
 
-    /// The gossip transport lives on the member endpoint. A blob endpoint, on either side, has
-    /// no custom transport, so a blob fetch cannot ride the gossip rung. The control is an
-    /// endpoint that does hold one custom transport (`WebRTC`): if it showed no custom address
-    /// either, this test would prove nothing.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_blob_endpoint_has_no_custom_transport() {
-        use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
+    /// The gossip transport lives on the member endpoint. `Endpoint::addr` does not list a
+    /// custom transport, so the reading is what the builders install: the blob server passes
+    /// `TransportHandles::default()` and no admission table, and the consumer goes through
+    /// `build_peer_endpoint`, which passes the same. Neither can hold a gossip handle, so a
+    /// blob fetch cannot ride the gossip rung. The source check keeps the two call sites as
+    /// they are; a change to either one fails here and asks for a new decision.
+    #[test]
+    fn a_blob_endpoint_is_built_with_no_custom_transport() {
+        let defaults = crate::lookup::TransportHandles::default();
+        assert!(defaults.gossip.is_none() && defaults.webrtc.is_none());
 
-        let has_custom = |addr: iroh::EndpointAddr| {
-            addr.addrs
-                .iter()
-                .any(|addr| matches!(addr, iroh::TransportAddr::Custom(_)))
-        };
-
-        let (control, _handle) =
-            build_peer_webrtc(&LookupOpts::loopback(), TransportOpts::default())
-                .await
-                .expect("control endpoint");
+        let server = include_str!("produce.rs");
+        let start = server
+            .find("async fn start_with_limits")
+            .expect("the server builder");
+        let built = &server[start..];
+        let call = &built[built.find("build_endpoint(").expect("the server builds")..];
+        let args: String = call[..call.find(".await?").expect("the call ends")]
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
         assert!(
-            has_custom(control.addr()),
-            "the control shows no custom address, so the check below is empty"
+            args.contains("&lookups,None,None,")
+                && args.ends_with("crate::lookup::TransportHandles::default(),)"),
+            "the blob server must pass no admission table and no handle: {args}"
         );
-        control.close().await;
 
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .expect("start producer");
+        let consumer = include_str!("consume.rs");
         assert!(
-            !has_custom(server.addr()),
-            "the blob server holds a custom transport"
+            consumer.contains("build_peer_endpoint(&ticket.lookups)"),
+            "the blob consumer must build its endpoint with the peer builder"
         );
-        server.shutdown().await;
-
-        let consumer = build_peer_endpoint(&LookupOpts::loopback())
-            .await
-            .expect("consumer endpoint");
+        let lookup = include_str!("../lookup/mod.rs");
+        let peer = &lookup[lookup
+            .find("pub async fn build_peer_endpoint")
+            .expect("the peer builder")..];
         assert!(
-            !has_custom(consumer.addr()),
-            "the blob consumer holds a custom transport"
+            peer[..peer.find("\n}").expect("the builder ends")]
+                .contains("TransportHandles::default()"),
+            "the peer builder must pass no handle"
         );
-        consumer.close().await;
     }
 
     /// Start a loopback producer serving `payload`, fetch it back over a second
