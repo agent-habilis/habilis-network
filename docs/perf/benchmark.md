@@ -346,7 +346,7 @@ The engine reads the mesh topic in a task of its own (`gossip/split.rs`): a fram
 the control events go on a queue that never drops. This measures what the split changes, on real iroh-gossip. The run is the ignored test `real_gossip_split_run`
 (`cargo test --release -p habilis-network --lib -- --ignored real_gossip_split_run --nocapture`).
 
-**Method.** Two members on loopback. A sends unique 3840-byte frames, as fast as the topic takes them or at a set rate, for 30 s. B reads the topic, and B's event loop is busy for 80 ms of every
+**Method.** Two members on loopback. A sends unique frames of 3840 bytes (header included; a rate counts whole frames), as fast as the topic takes them or at a set rate, for 30 s. B reads the topic, and B's event loop is busy for 80 ms of every
 100 ms (it blocks a worker). *Inline* is the old shape: one reader does both. *Splitter* is the new one. Release build, load average 2.4 to 3.9 before each run, 4 worker threads.
 
 **Paced sweep** (two runs per cell; `Lagged` events at B, and the frames B read of the frames A sent):
@@ -355,17 +355,17 @@ the control events go on a queue that never drops. This measures what the split 
 |---|---|---|---|
 | 1 MiB/s (8192 frames) | 0, 0 | 0, 0 | 0, 0 |
 | 16 MiB/s (131k frames) | 0, 0 | 0, 0 | 0, 0 |
-| 64 MiB/s (524k frames) | 9 and 15 (lost 1.9k and 3.7k) | 6 and 0 (lost 319 and 0) | 0 and 1 (lost 0 and 54) |
+| 64 MiB/s (524k frames) | 9 and 15 (lost 2.2k and 3.7k) | 6 and 0 (lost 319 and 0) | 0 and 1 (lost 0 and 54) |
 | 128 MiB/s (1.05M frames) | 309 and 319 (**lost 22% and 23%**) | 8 and 10 (lost 0.1% and 0.4%) | 10 and 8 (lost 0.1%) |
 
-**Unthrottled** (A sends 450 to 600 MB/s): inline 381 to 437 `Lagged` events and about 84% of the frames lost; splitter 320 to 437 events and about 50% lost, at every capacity from 2048 to 32768
+**Unthrottled** (A sends 450 to 600 MB/s): inline 381 to 437 `Lagged` events and about 84% of the frames lost; splitter 320 to 424 events and 52% to 55% lost, at every capacity from 2048 to 32768
 (three runs each). The queue does not matter there: A offers about 135k frames/s and the splitter drains about 63k/s, so any queue fills.
 
-**Mesh messages beside the frames** (20000 of them at once, unthrottled): the data queue peaked at 5985 (cap 8192) and 3583 (cap 16384), and dropped none.
+**Mesh messages beside the frames** (20000 of them at once, unthrottled; one run per capacity): the data queue peaked at 5985 (cap 8192) and 3583 (cap 16384), and dropped none.
 
 **Reading.**
 
-- Without a busy loop the topic does not lag below about 16 MiB/s with the old shape, and below about 64 MiB/s with the split. At 128 MiB/s the split cuts the `Lagged` events by a factor of 30 to 40 and the lost
+- With the busy loop, the topic does not lag below about 16 MiB/s in the old shape, and below about 64 MiB/s with the split. At 128 MiB/s the split cuts the `Lagged` events by a factor of 30 to 40 and the lost
   frames from about 22% to 0.1% to 0.4%.
 - The capacity of the subscription (2048 against 8192) made no difference we can measure at 64 or 128 MiB/s. What remains at 128 MiB/s is a few `Lagged` events of 150 to 400 frames each, when the topic
   delivers a burst faster than the splitter task is scheduled. So the engine keeps iroh's default of 2048: at most 8 MB of queued events, where 8192 would allow 31 MB.
