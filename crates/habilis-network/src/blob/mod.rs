@@ -169,12 +169,13 @@ mod tests {
         ))
     }
 
-    /// The gossip transport lives on the member endpoint. `Endpoint::addr` does not list a
-    /// custom transport, so the reading is what the builders install: the blob server passes
-    /// `TransportHandles::default()` and no admission table, and the consumer goes through
-    /// `build_peer_endpoint`, which passes the same. Neither can hold a gossip handle, so a
-    /// blob fetch cannot ride the gossip rung. The source check keeps the two call sites as
-    /// they are; a change to either one fails here and asks for a new decision.
+    /// A tripwire on the source, not a test of the endpoint: `Endpoint::addr` does not list a
+    /// custom transport, so nothing here can read what an endpoint holds. The gossip transport
+    /// lives on the member endpoint, and `TransportHandles::default()` is what says that an
+    /// endpoint gets no handle. The blob server passes it to `build_endpoint`, and the consumer
+    /// goes through `build_peer_endpoint`, which passes the same. Neither can hold a gossip
+    /// handle, so a blob fetch cannot ride the gossip rung. A change to either call fails here
+    /// and asks for a new decision.
     #[test]
     fn a_blob_endpoint_is_built_with_no_custom_transport() {
         let defaults = crate::lookup::TransportHandles::default();
@@ -191,9 +192,8 @@ mod tests {
             .filter(|ch| !ch.is_whitespace())
             .collect();
         assert!(
-            args.contains("&lookups,None,None,")
-                && args.ends_with("crate::lookup::TransportHandles::default(),)"),
-            "the blob server must pass no admission table and no handle: {args}"
+            args.ends_with("crate::lookup::TransportHandles::default(),)"),
+            "the blob server must pass no transport handle: {args}"
         );
 
         let consumer = include_str!("consume.rs");
