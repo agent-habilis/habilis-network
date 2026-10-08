@@ -284,11 +284,13 @@ async fn three_member_flood(args: &Args) -> Result<Measured, String> {
             "queued": now.queued - then.queued,
             "not_for_us": now.not_for_us - then.not_for_us,
             // Where a frame can be lost: this member's sink queue refusing it, the
-            // inbound queue to iroh, an oversized packet, and the topic's own queue.
+            // inbound queue to iroh, an oversized packet, the topic's own queue, and the queue of
+            // the engine's split to its event loop.
             "dropped_sink_refused": now.dropped_sink_refused - then.dropped_sink_refused,
             "queue_full": now.queue_full - then.queue_full,
             "dropped_oversized_in": now.dropped_oversized_in - then.dropped_oversized_in,
             "topic_lagged": now.topic_lagged - then.topic_lagged,
+            "forward_dropped": now.forward_dropped - then.forward_dropped,
         })
     };
     let mut measured = Measured::from_samples(0.0, samples)?;
@@ -536,6 +538,7 @@ mod tests {
                 "{member}: {counts}"
             );
             assert!(counts["topic_lagged"].is_u64(), "{member}: {counts}");
+            assert!(counts["forward_dropped"].is_u64(), "{member}: {counts}");
         }
         assert!(extra["lost_packets_a"].is_u64() && extra["lost_packets_c"].is_u64());
     }
