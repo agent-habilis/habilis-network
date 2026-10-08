@@ -133,6 +133,7 @@ Each cost comes from full-mesh rows only (N up to 33 on UDP, N up to 17 on WebRT
 | Multihop underlay, idle, per node | UDP directed with and without multihop, N = 17 and 33 | 1.5 to 3 in total |
 | WebRTC stack, fixed | WebRTC minus UDP, N = 2 | 3 to 4 in total |
 | WebRTC session, per added session | WebRTC minus UDP, N = 2 to 17, net of the fixed stack | about 0.2 |
+| WebRTC session, idle, session object only | `session_cost`, K = 0 to 32, one end per process (see the section on underlay sessions) | 0.075 per session, 0.22 once |
 
 About the multihop row: in a full direct mesh no cell goes through a relay hop. The row is the idle cost. The cost of forwarding is not measured. The maximum of 126 MB in the N = 65 multihop run comes from one run, and I have no explanation for it.
 
@@ -223,7 +224,32 @@ G bounds a count. It does not refuse a member. The iroh-gossip fork (`src/proto/
 
 The multihop underlay is an endpoint of its own, and it can hold WebRTC sessions too. A node opens one to a gossip neighbor only when its application path to that neighbor is WebRTC, that is, when the pair has no IP path. Where IP works, the underlay reaches the neighbor over IP, and the node opens no session. These sessions count in G, not in D. The underlay keeps its own table of sessions, with a cap of G, and a session exists only to a gossip neighbor. So a node holds at most D + G WebRTC sessions. In practice only neighbors that have no IP path add to the count.
 
-This document has no reading with underlay sessions. As a planning value, take the cost of one underlay session as the cost of one session of D (0.2 MB). That is an assumption, and a measurement must confirm it.
+#### Measured cost of one idle session
+
+An underlay session and an application session are the same object: a session made by `offer_with` and `answer_with` and attached to a `WebRtcTransport`. The example `session_cost` (crates/habilis-network-iroh-webrtc-transport/examples) measures that object alone. It uses no endpoint, no relay and no gossip. Two processes hold the two ends, so each reading counts one end. The driver is `scripts/perf/session_cost.sh`.
+
+`session_cost` reports MiB (1 MiB is 1.05 MB). The figures below are in MiB. The rest of this document uses MB, and the 5 percent difference is far under the error of the other figures.
+
+| Reading | Offerer | Answerer |
+| -- | -- | -- |
+| Per session, slope after K = 0, 1, 8, 32 sessions open | 0.075 +/- 0.004 | 0.074 +/- 0.005 |
+| Per session, after a hold of 30 s | 0.077 +/- 0.009 | 0.074 +/- 0.005 |
+| Per session, after closing them | 0.071 +/- 0.008 | 0.075 +/- 0.005 |
+| Fixed part of the line (intercept) | 0.22 | 0.22 |
+| Noise floor (spread of the K = 0 runs) | 0.009 | 0.009 |
+
+The line is `memory = 0.22 + 0.075 x K`, in MB. The cost is sub-linear. In the raw readings, 1 session costs 0.23 to 0.39 in all, 8 sessions cost 1.06 to 1.19, and 32 sessions cost 2.45 to 2.59. So the first session costs about 0.27, a node with 8 sessions pays about 0.14 for each, and a node with 32 pays about 0.08 for each. Both ends cost the same. The standard error is 5 percent of the slope.
+
+Read these limits with the figures:
+
+- The sessions are idle. No datagram crosses them. A session under traffic fills buffers, and that cost is not measured here.
+- Only the session object is measured. The QUIC connection that rides on it is not. An underlay already holds a QUIC connection to the neighbor on IP or on the relay, so a session adds this cost and a small entry to that connection. The size of that entry is not measured.
+- Memory is not given back when the sessions close. The reading after the close equals the reading after the open, within the error.
+- Native code, a release build, macOS (Apple silicon), host candidates only. A browser session and a session with STUN are not measured.
+- 24 runs: three rounds of K = 0, 1, 8, 32 for each end, in turn, one fresh process pair per run. None failed. Two runs started with a load average of 4 or more (4.65 and 6.42, the limit was 4), and their readings lie inside the range of the others.
+- A first matrix of 24 runs gave no result (the standard error was 23 to 27 percent of the slope). Its cause was a flaw of the method, now removed: a closed warm-up session gave back part of its memory after the baseline reading. The K = 0 runs drifted by -1.01 and -0.50 MB over the hold. After the fix they drift by 0.00 to 0.03.
+
+The planning value for the multihop underlay is now 0.075 MB for each idle session, and 0.22 MB once for the node. At the planned G = 32, a node with 32 underlay sessions adds about 2.6 MB. The value 0.2 MB of one session of D stays as the ceiling for a session in use, because it comes from a run with traffic. The assumption of 0.2 MB for an idle underlay session was 2.7 times too high.
 
 ### The formula
 
@@ -280,7 +306,7 @@ With C = 0, B = 128 gives G = 85 for D = 0 and G = 79 for D = 32. B = 64 gives G
 - The number of live plain connections under load. The harness census has no count of them.
 - Sessions over time and refusals at the cap of D. No run formed a WebRTC session (see the next section).
 - A full mesh above N = 33. No earlier run formed one.
-- The cost of a session of the multihop underlay. See the section on those sessions above.
+- The cost of a session of the multihop underlay under traffic, and of the QUIC connection on it. The idle session object is measured: see the section on those sessions above.
 
 ## Phase 2 measurement with the committed harness
 
