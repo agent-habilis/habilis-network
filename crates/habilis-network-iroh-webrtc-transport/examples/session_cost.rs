@@ -404,12 +404,12 @@ fn run_fit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A number only if the noise floor and the standard error of the slope are both below 10
-/// percent of what they are measured against.
+/// A number only if the slope is positive, and the noise floor and the standard error of the
+/// slope are both below 10 percent of what they are measured against.
 fn verdict(floor: Option<f64>, effect: Option<(f64, Option<f64>)>) -> &'static str {
     match (floor, effect) {
         (Some(floor), Some((slope, Some(error))))
-            if floor < 0.10 * (slope * 32.0).abs() && error < 0.10 * slope.abs() =>
+            if slope > 0.0 && floor < 0.10 * slope * 32.0 && error < 0.10 * slope =>
         {
             "a result: the noise floor is below 10 percent of the effect at k = 32 and the standard error is below 10 percent of the slope"
         }
@@ -519,5 +519,12 @@ mod tests {
         assert!(verdict(None, Some((0.2, Some(0.01)))).starts_with("NO RESULT"));
         assert!(verdict(Some(0.5), Some((0.2, None))).starts_with("NO RESULT"));
         assert!(verdict(Some(0.5), None).starts_with("NO RESULT"));
+    }
+
+    #[test]
+    fn a_negative_slope_is_never_a_result() {
+        // A session that frees memory is a flaw of the run, not a cost, however small the noise.
+        assert!(verdict(Some(0.5), Some((-0.2, Some(0.01)))).starts_with("NO RESULT"));
+        assert!(verdict(Some(0.0), Some((0.0, Some(0.0)))).starts_with("NO RESULT"));
     }
 }
