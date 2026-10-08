@@ -104,7 +104,7 @@ pub(crate) async fn handle_gossip_event(
                 state.link(node_id);
                 // A new neighbor: the underlay may owe it a session, and may take
                 // its signal.
-                #[cfg(feature = "host")]
+                #[cfg(feature = "multihop")]
                 crate::transport::underlay_webrtc::tick_now(state);
                 if state.relay_transport {
                     state.observe_path(node_id, conn);
@@ -666,13 +666,13 @@ async fn dispatch_infra(
 /// silently when the multihop transport is off or the body is malformed —
 /// plumbing like the digests, never logged or surfaced. Returns whether the topology changed.
 fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
-    #[cfg(not(feature = "host"))]
+    #[cfg(not(feature = "multihop"))]
     {
         // No multihop transport off-host: nothing consumes a routing table.
         let _ = (message, state);
         false
     }
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     {
         let Some(handle) = state.multihop.as_ref() else {
             return false; // multihop off: nothing consumes the routing table
@@ -706,7 +706,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
                 );
                 // The vector holds the underlay address of its origin, which a
                 // neighbor needs before the underlay can offer it a session.
-                #[cfg(feature = "host")]
+                #[cfg(feature = "multihop")]
                 if updated {
                     crate::transport::underlay_webrtc::tick_now(state);
                 }

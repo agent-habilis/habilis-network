@@ -158,7 +158,7 @@ pub(crate) async fn handle_presence(
             state.unicast_pool.forget(endpoint_id.id).await;
             // Its advertised links go too, or routes keep running through a peer
             // that said goodbye until its vector ages out.
-            #[cfg(feature = "host")]
+            #[cfg(feature = "multihop")]
             if let Some(handle) = state.multihop.as_ref() {
                 handle.remove_origin(endpoint_id.id);
             }

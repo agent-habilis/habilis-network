@@ -5,7 +5,7 @@
 //! needs an `Endpoint` reaches in here and accepts the coupling.
 
 pub use crate::gossip::conn_path;
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 pub use crate::lookup::multihop_handle_config;
 #[cfg(all(
     feature = "host",

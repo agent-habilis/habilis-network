@@ -171,12 +171,12 @@ pub struct EventLoopConfig {
     /// `MultihopHandle` is not in the wasm dependency table at all. The *field*
     /// has to disappear rather than just hold `None` — its type does not exist
     /// there.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     pub(crate) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     /// The `WebRTC` leg of the multihop underlay; `run()` moves it into
     /// `EventLoopState::underlay_webrtc`. `None` when multihop is off, and on an
     /// injected endpoint, whose underlay the caller built.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
     /// This peer's `WebRTC` transport handle. Portable: it is the browser's
     /// only direct path onto the mesh, and an extra candidate path for a native

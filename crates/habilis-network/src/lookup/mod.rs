@@ -98,7 +98,7 @@ pub(crate) use relay::{
 pub struct TransportHandles {
     /// Source-routed multi-hop: reach a peer with no direct path by relaying
     /// through intermediate peers. Host-only — it forwards real UDP packets.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     pub multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     /// QUIC over a `WebRTC` data channel. The browser's only way onto the
     /// mesh, and an opportunistic extra path for a native peer.
@@ -119,7 +119,7 @@ impl TransportHandles {
     /// True when no custom transport is registered.
     #[must_use]
     fn is_empty(&self) -> bool {
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         if self.multihop.is_some() {
             return false;
         }
@@ -255,7 +255,7 @@ pub fn install_transports(
     // path selector) so a `connect` to a peer with no direct path rides the
     // multihop path. The handle's app id must match this endpoint's key — the
     // caller (`build_peer_multihop`) pins the same secret.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     if let Some(handle) = transports.multihop.clone() {
         builder = builder.preset(handle);
     }
@@ -484,7 +484,7 @@ pub struct InjectedMultihop {
     pub relay_payload: bool,
 }
 
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 impl From<&habilis_network_iroh_multihop_transport::MultihopHandle> for InjectedMultihop {
     fn from(handle: &habilis_network_iroh_multihop_transport::MultihopHandle) -> Self {
         Self {
@@ -497,7 +497,7 @@ impl From<&habilis_network_iroh_multihop_transport::MultihopHandle> for Injected
 /// The multi-hop handle configuration this engine uses for a mesh: whether the
 /// relay may carry cells is the mesh's `relay` rule, the other numbers are the
 /// engine's. A caller that builds its own handle to inject uses this.
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 #[must_use]
 pub fn multihop_handle_config(
     relay_payload: bool,
@@ -649,7 +649,7 @@ pub(crate) async fn build_peer_webrtc_with(
         None,
         Vec::new(),
         TransportHandles {
-            #[cfg(feature = "host")]
+            #[cfg(feature = "multihop")]
             multihop: None,
             webrtc: Some(handle.clone()),
             admission: admission.cloned(),

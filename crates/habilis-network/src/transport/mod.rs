@@ -38,7 +38,7 @@ pub(crate) mod redial;
 // the backend behind it differs.
 pub(crate) mod webrtc;
 // The `WebRTC` leg of the multihop underlay: host-only, like the multihop transport.
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 pub(crate) mod underlay_webrtc;
 
 /// Messages flowing from the IPC listener to the event loop, generic over the

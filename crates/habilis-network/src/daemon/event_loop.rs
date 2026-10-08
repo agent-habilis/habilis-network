@@ -89,9 +89,9 @@ pub async fn run<A: NodeDriver>(
         cohost,
         runtime_base,
         state_file,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         multihop,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         underlay_webrtc,
         webrtc,
         webrtc_enabled,
@@ -176,7 +176,7 @@ pub async fn run<A: NodeDriver>(
         started,
     );
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     {
         state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
         state.underlay_webrtc = underlay_webrtc;
@@ -418,26 +418,26 @@ async fn antientropy_arm(
 
 /// Default per-link routing cost we advertise for our own neighbours until live
 /// telemetry (RTT / delivery) is wired into the multihop metric.
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 const MULTIHOP_LINK_COST: u32 = 10;
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
 /// neighbour, carrying our underlay dial address) so every peer keeps a fresh
 /// routing graph for the multihop transport. No-op until meshed, or when the
 /// multihop transport is off — a vector with no consumer helps no one.
-/// Off a host the multihop transport does not exist, so the tick has nothing to
-/// broadcast. A no-op stub rather than a `cfg` at the `select!` arm, so the loop
-/// body reads the same on both targets.
-#[cfg(not(feature = "host"))]
+/// Without the `multihop` feature the transport does not exist, so the tick has nothing
+/// to broadcast. A no-op stub rather than a `cfg` at the `select!` arm, so the loop
+/// body reads the same with and without the feature.
+#[cfg(not(feature = "multihop"))]
 #[expect(
     clippy::unused_async,
-    reason = "the `host` body awaits; the signatures must match so the select! arm reads the same on both targets"
+    reason = "the `multihop` body awaits; the signatures must match so the select! arm reads the same with and without the feature"
 )]
 async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let _ = (state, ctx);
 }
 
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     // Before the early return, and before our own vector goes in: a peer that has
     // stopped advertising must not keep its edges in the graph, and a node that is
@@ -746,7 +746,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 crate::transport::webrtc::retry_sessions(&mut state, &ctx);
                 // The same for the sessions of the multihop underlay, which open
                 // only to a neighbor that has no IP path to us.
-                #[cfg(feature = "host")]
+                #[cfg(feature = "multihop")]
                 if let Some(underlay) = state.underlay_webrtc.clone() {
                     crate::transport::underlay_webrtc::tick(&state, &underlay);
                 }
@@ -970,7 +970,7 @@ pub(crate) fn route_wake_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
 
 /// The wake of the multihop handle, which rings when its relay rule starts to refuse a
 /// hop and when it admits one that it refused.
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 fn route_wake_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
     state.multihop.as_ref().map_or_else(
         || std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -979,7 +979,7 @@ fn route_wake_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> 
 }
 
 /// Off a host there is no multihop transport: the wake never rings.
-#[cfg(not(feature = "host"))]
+#[cfg(not(feature = "multihop"))]
 fn route_wake_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
     std::sync::Arc::new(tokio::sync::Notify::new())
 }

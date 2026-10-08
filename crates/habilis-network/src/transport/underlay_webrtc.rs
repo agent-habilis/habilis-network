@@ -110,6 +110,13 @@ pub(crate) struct UnderlaySignalGate {
 }
 
 impl UnderlaySignalGate {
+    #[cfg_attr(
+        not(feature = "host"),
+        expect(
+            dead_code,
+            reason = "the underlay is built by `build_peer_multihop_with`, which is native: a browser build gets it in a later step"
+        )
+    )]
     pub(crate) fn new(inner: WebRtcSignalAcceptor, allowed: Allowed) -> Self {
         Self { inner, allowed }
     }

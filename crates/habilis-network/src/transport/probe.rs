@@ -336,7 +336,7 @@ pub(crate) fn plan_relay_dials(
 
 /// The multihop route to `peer` that the topology has now, as a dialable
 /// address. `None` off a host, or without a route.
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 fn route_to(state: &EventLoopState, peer: EndpointId) -> Option<iroh::TransportAddr> {
     state
         .multihop
@@ -345,7 +345,7 @@ fn route_to(state: &EventLoopState, peer: EndpointId) -> Option<iroh::TransportA
         .map(iroh::TransportAddr::Custom)
 }
 
-#[cfg(not(feature = "host"))]
+#[cfg(not(feature = "multihop"))]
 fn route_to(_state: &EventLoopState, _peer: EndpointId) -> Option<iroh::TransportAddr> {
     None
 }
@@ -385,7 +385,7 @@ pub(crate) async fn on_path_change(
     forget_route_unless_relay(&mut state.route_dialed, peer, kind);
     // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
     // session now, not at the alive tick.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     crate::transport::underlay_webrtc::tick_now(state);
     let Some(handle) = state.webrtc.clone() else {
         return;

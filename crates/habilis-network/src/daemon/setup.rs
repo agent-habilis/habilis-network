@@ -202,6 +202,18 @@ fn unicast_inbox(
     )
 }
 
+/// The multihop handle that `build_member_endpoint` returns: the real one when the `multihop`
+/// feature is on, a placeholder that is always `None` when it is off.
+#[cfg(all(feature = "multihop", not(feature = "host")))]
+type MultihopSlot = Option<habilis_network_iroh_multihop_transport::MultihopHandle>;
+#[cfg(all(not(feature = "multihop"), not(feature = "host")))]
+type MultihopSlot = Option<()>;
+/// The `WebRTC` leg of the multihop underlay that `build_member_endpoint` returns, likewise.
+#[cfg(all(feature = "multihop", not(feature = "host")))]
+type UnderlaySlot = Option<crate::transport::underlay_webrtc::UnderlayWebRtc>;
+#[cfg(all(not(feature = "multihop"), not(feature = "host")))]
+type UnderlaySlot = Option<()>;
+
 /// Build this member's peer endpoint, registering the multi-hop transport
 /// (and standing up its underlay) when the mesh policy has `multihop`. The
 /// multi-hop and `WebRTC` transports share the one endpoint and its one key.
@@ -273,18 +285,19 @@ async fn build_member_endpoint(
     }
 }
 
-/// Off a host there is no multihop transport to register — it forwards real UDP
-/// packets — so the endpoint is always the plain peer one, whatever the mesh
-/// policy says about `multihop`.
+/// Off a host the endpoint is always the plain peer one, whatever the mesh policy says
+/// about `multihop`: the underlay of the multihop transport is built by
+/// `build_peer_multihop_with`, which is native. A browser build that takes part in
+/// multihop builds it here in a later step.
 #[cfg(not(feature = "host"))]
 async fn build_member_endpoint(
     build: &SetupBuild<'_>,
 ) -> Result<(
     Endpoint,
-    Option<()>,
+    MultihopSlot,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
     crate::transport::SignalAdmission,
-    Option<()>,
+    UnderlaySlot,
 )> {
     if let Some(injected) = build.injected.as_ref() {
         crate::lookup::check_injected_identity(
@@ -331,7 +344,7 @@ pub struct InjectedEndpoint {
     /// The multi-hop handle the endpoint was built with. `None` leaves this
     /// node without multi-hop, whatever the mesh policy allows: a transport
     /// cannot be added to an endpoint that is already bound.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     pub multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     /// The admission table the endpoint's connection hook reports to: the one
     /// [`install_transports`](crate::net::install_transports) was given. The
@@ -540,11 +553,11 @@ struct Assembled {
     /// into `EventLoopState` so the link-state tick can feed its routing table.
     /// Host-only: the transport forwards real UDP packets, so off a host the
     /// field's own type does not exist.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     /// The `WebRTC` leg of the multihop underlay, threaded into `EventLoopState`
     /// for the alive tick that opens its sessions. `None` when multihop is off.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
     /// This peer's `WebRTC` transport handle, threaded into `EventLoopState` so
     /// the session manager can negotiate with peers as it learns of them, and
@@ -661,9 +674,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         mesh_password,
         mesh_key,
         mint_mesh,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
             multihop: multihop_handle,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         underlay_webrtc,
         webrtc,
         webrtc_admission,
@@ -724,9 +737,9 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         cohost: cohost_override.unwrap_or(cohost),
         runtime_base,
         state_file,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         multihop: multihop_handle,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         underlay_webrtc,
         webrtc,
         webrtc_enabled: transports.webrtc,
@@ -820,10 +833,10 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     rand::rng().fill_bytes(&mut seed);
 
     #[cfg_attr(
-        not(feature = "host"),
+        not(feature = "multihop"),
         expect(
             unused_variables,
-            reason = "no multihop handle off a host — see `build_member_endpoint`"
+            reason = "no multihop handle without the `multihop` feature — see `build_member_endpoint`"
         )
     )]
     let (endpoint, multihop, webrtc, admission, underlay_webrtc) =
@@ -917,9 +930,9 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         mesh_password,
         mesh_key,
         mint_mesh,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         multihop,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         underlay_webrtc,
         webrtc,
         webrtc_admission,
@@ -957,10 +970,10 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     let topic_id = iroh_gossip::proto::TopicId::from_bytes(mesh.topic_id().to_bytes());
 
     #[cfg_attr(
-        not(feature = "host"),
+        not(feature = "multihop"),
         expect(
             unused_variables,
-            reason = "no multihop handle off a host — see `build_member_endpoint`"
+            reason = "no multihop handle without the `multihop` feature — see `build_member_endpoint`"
         )
     )]
     let (endpoint, multihop, webrtc, admission, underlay_webrtc) =
@@ -1019,9 +1032,9 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         // A joiner holds no issuer key, so it can never mint — even after
         // redeeming an invite-only mesh.
         mint_mesh: None,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         multihop,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         underlay_webrtc,
         webrtc,
         webrtc_admission,

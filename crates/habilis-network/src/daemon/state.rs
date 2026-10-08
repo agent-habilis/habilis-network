@@ -382,12 +382,12 @@ pub struct EventLoopState {
     /// `LinkState` frames) and the underlay endpoint. `None` when multihop is off
     /// or on a non-peer (beacon/rendezvous) endpoint. See
     /// [`habilis_network_iroh_multihop_transport`].
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     pub(crate) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     /// The `WebRTC` leg of the multihop underlay: its handle, admission table and
     /// endpoint. `None` when multihop is off. See
     /// [`crate::transport::underlay_webrtc`].
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
     /// The `WebRTC` transport handle, when one is registered on this peer's
     /// endpoint. Portable — it is the browser's only direct path, and an
@@ -757,9 +757,9 @@ impl EventLoopState {
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
-            #[cfg(feature = "host")]
+            #[cfg(feature = "multihop")]
             multihop: None,
-            #[cfg(feature = "host")]
+            #[cfg(feature = "multihop")]
             underlay_webrtc: None,
             webrtc: None,
             webrtc_admission,
@@ -1522,7 +1522,7 @@ impl EventLoopState {
     }
 
     /// The multi-hop transport handle, when the mesh policy registered one.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     #[must_use]
     pub fn multihop(&self) -> Option<&habilis_network_iroh_multihop_transport::MultihopHandle> {
         self.multihop.as_ref()
@@ -1662,6 +1662,12 @@ impl EventLoopState {
         &mut self.pending_outbound
     }
 }
+
+/// A build with the `multihop` feature and no `host` (a browser) holds the multihop handle in its
+/// state, as a host build does. This item does not compile without it.
+#[cfg(all(feature = "multihop", not(feature = "host")))]
+const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport::MultihopHandle> =
+    EventLoopState::multihop;
 
 #[cfg(test)]
 mod tests {
