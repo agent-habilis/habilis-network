@@ -892,6 +892,12 @@ pub(crate) async fn build_peer_multihop_with(
             underlay: true,
             webrtc: underlay_leg.as_ref().map(|(handle, _)| handle.clone()),
             admission: underlay_leg.as_ref().map(|(_, table)| table.clone()),
+            // The underlay has IP sockets only when the node does: a node run without `udp`
+            // has no IP on any of its endpoints, and its underlay rides WebRTC and the relay.
+            opts: TransportOpts {
+                udp: opts.udp,
+                ..TransportOpts::default()
+            },
             ..TransportHandles::default()
         },
     )

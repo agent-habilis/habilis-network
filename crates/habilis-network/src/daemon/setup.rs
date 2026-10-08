@@ -287,7 +287,8 @@ async fn build_member_endpoint(
 
 /// Off a host (a browser): the multihop transport is built when the mesh policy has it and the
 /// node has a direct path (`build.multihop`), with the link cost of a browser, so that routes
-/// avoid it as a hop; otherwise the endpoint is the plain peer one.
+/// avoid it as a hop; otherwise the endpoint is the plain peer one. The underlay has no IP
+/// sockets, and rides WebRTC and the relay.
 #[cfg(not(feature = "host"))]
 async fn build_member_endpoint(
     build: &SetupBuild<'_>,
@@ -1229,6 +1230,50 @@ mod tests {
             }
             config.router.shutdown().await.expect("the router stops");
         }
+    }
+
+    // A node run without `udp` has no IP on any of its endpoints. Its underlay rides WebRTC and
+    // the relay: it has no IP socket, and it has the WebRTC leg that carries its cells.
+    #[tokio::test]
+    async fn the_underlay_of_a_member_without_udp_has_no_ip_socket_and_has_a_webrtc_leg() {
+        let opts = crate::membership::Opts {
+            transport: vec![Transport::WebRtc, Transport::Multihop],
+            lookup: vec![crate::protocol::mesh::Lookup::Relay],
+            ..crate::membership::Opts::default()
+        };
+        let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+        let config = super::setup_mesh(
+            kind,
+            super::SetupParams {
+                author,
+                max_peers: 8,
+                max_direct: 0,
+                runtime_base: None,
+                state_file: None,
+                sink: std::sync::Arc::new(crate::embed::SilentSink),
+                endpoint: None,
+                protocols: Vec::new(),
+                transports: crate::lookup::TransportOpts {
+                    udp: false,
+                    ..crate::lookup::TransportOpts::default()
+                },
+                per_peer_gate: None,
+                cohost: None,
+                live_count: None,
+            },
+        )
+        .await
+        .expect("a mesh sets up");
+        let leg = config
+            .underlay_webrtc
+            .as_ref()
+            .expect("the underlay has a WebRTC leg");
+        assert!(
+            leg.endpoint.bound_sockets().is_empty(),
+            "the underlay has no IP socket: {:?}",
+            leg.endpoint.bound_sockets()
+        );
+        config.router.shutdown().await.expect("the router stops");
     }
 
     // G and C come from the caller, and `0` takes the default. Every option set
