@@ -116,6 +116,17 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// The nicknames that answered one ping round.
+    async fn ping(&self) -> Vec<String> {
+        self.membership
+            .request(|reply| Request::Ping { reply })
+            .await
+            .expect("the loop answers")
+            .into_iter()
+            .map(|(nick, _)| nick.as_str().to_owned())
+            .collect()
+    }
+
     fn saw_msg(&mut self, text: &str) -> bool {
         while let Ok(msg) = self.membership.inbound.try_recv() {
             self.seen_msgs.push(msg);
@@ -288,6 +299,39 @@ async fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung
         fixture.alice.rung_to("carol").await,
         Some("gossip"),
         "{NAME}: the pair is still on the gossip rung after the exchange"
+    );
+    fixture.leave().await;
+}
+
+/// Every member answers a ping, and carol answers alice, whose only path to her is the gossip
+/// rung. The pong goes out over a warm unicast connection or not at all, so the answer shows
+/// that this connection runs on the gossip rung. The pair stays on that rung after the round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn a_ping_is_answered_across_a_pair_with_no_other_path_on_the_gossip_rung() {
+    const NAME: &str = "gossip_only_auto_pong";
+    if skipped(NAME) {
+        return;
+    }
+    let fixture = Fixture::stand_up(NAME).await;
+
+    let answered = fixture.alice.ping().await;
+    for peer in ["bob", "carol", "dave"] {
+        assert!(
+            answered.iter().any(|nick| nick == peer),
+            "{NAME}: {peer} never answered alice's ping: {answered:?}"
+        );
+    }
+    let answered = fixture.carol.ping().await;
+    assert!(
+        answered.iter().any(|nick| nick == "alice"),
+        "{NAME}: alice never answered carol's ping on the gossip rung: {answered:?}"
+    );
+
+    assert_eq!(
+        fixture.alice.rung_to("carol").await,
+        Some("gossip"),
+        "{NAME}: the pair is still on the gossip rung after the round"
     );
     fixture.leave().await;
 }

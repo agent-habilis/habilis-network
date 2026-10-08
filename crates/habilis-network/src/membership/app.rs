@@ -160,6 +160,13 @@ pub enum Request {
         blocked: bool,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: ping every member and answer with the round trip time in
+    /// milliseconds of each one that answered within the ping window. A test uses it to
+    /// show that a pair answers over the one path it has.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    Ping {
+        reply: oneshot::Sender<Vec<(Nickname, u64)>>,
+    },
     /// Tests only: forget that the member `peer` is proven direct, and offer it a
     /// `WebRTC` session now, as the path watcher does when a direct path is lost.
     /// A test uses it to attach a session at a chosen moment instead of at the
@@ -408,6 +415,22 @@ impl NodeDriver for MembershipApp {
                 }
                 let _ = reply.send(());
                 false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::Ping { reply } => {
+                let now = tokio::time::Instant::now();
+                state.arm_ping_round(crate::embed::PingRound {
+                    t1: now,
+                    deadline: now + Duration::from_secs(crate::util::tuning::ping_window_secs()),
+                    pongs: std::collections::HashMap::new(),
+                    resp: Some(reply),
+                });
+                crate::ops::broadcast_msg(
+                    ctx.sender,
+                    &Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity),
+                )
+                .await;
+                true
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::BlockRung {
