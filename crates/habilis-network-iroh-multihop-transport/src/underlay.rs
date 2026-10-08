@@ -65,14 +65,43 @@ pub(crate) struct Delivered {
 /// rarely, and asking for it on every cell would cost more than the cell.
 const PATH_RECHECK: Duration = Duration::from_millis(250);
 
-/// Whether the connection sends on a selected path that is not the relay.
-/// Nothing selected is not trusted: the engine's own rule for payload
-/// (`payload_allowed_on`) refuses until a path is selected.
-fn selected_path_is_direct(connection: &Connection) -> bool {
+/// The open paths of a connection, each with whether it is the selected one.
+fn paths_of(connection: &Connection) -> Vec<(TransportAddr, bool)> {
     connection
         .paths()
         .iter()
-        .any(|path| path.is_selected() && !matches!(path.remote_addr(), TransportAddr::Relay(_)))
+        .map(|path| (path.remote_addr().clone(), path.is_selected()))
+        .collect()
+}
+
+/// Whether a writer sends on a selected path that is not the relay.
+/// Nothing selected is not trusted: the engine's own rule for payload
+/// (`payload_allowed_on`) refuses until a path is selected.
+fn direct_for_writer(paths: &[(TransportAddr, bool)]) -> bool {
+    paths
+        .iter()
+        .any(|(addr, selected)| *selected && !matches!(addr, TransportAddr::Relay(_)))
+}
+
+/// Whether a connection that we accepted has an open path that is not the relay.
+/// iroh opens paths only from the dialling end. After the dialler's hole-punch
+/// round prunes its redundant IP paths, the accepting end chooses no path of its
+/// own on this connection: its IP path is open but not selected, and the
+/// relay path too. The cells then arrive on the path that the dialler selected,
+/// so the selected path here says nothing about them.
+fn direct_for_inbound(paths: &[(TransportAddr, bool)]) -> bool {
+    paths
+        .iter()
+        .any(|(addr, _)| !matches!(addr, TransportAddr::Relay(_)))
+}
+
+/// Which end of a connection a gate stands on.
+#[derive(Debug, Clone, Copy)]
+enum GateRole {
+    /// The end that dialled and writes the cells.
+    Writer,
+    /// The end that accepted the connection and reads the cells.
+    Inbound,
 }
 
 /// The paths of a connection as text, a star on the selected one.
@@ -99,15 +128,17 @@ struct RelayRule {
 /// cells of other peers' traffic must not ride it meanwhile.
 struct RelayGate {
     allow_relay: bool,
+    role: GateRole,
     reading: Option<(Instant, bool)>,
     /// The path list at the last refusal, so that the log says it once per change.
     last_refused_paths: Option<String>,
 }
 
 impl RelayGate {
-    fn new(allow_relay: bool) -> Self {
+    fn new(allow_relay: bool, role: GateRole) -> Self {
         Self {
             allow_relay,
+            role,
             reading: None,
             last_refused_paths: None,
         }
@@ -122,15 +153,14 @@ impl RelayGate {
         match self.reading {
             Some((at, admitted)) if now.duration_since(at) < PATH_RECHECK => admitted,
             _ => {
-                let admitted = selected_path_is_direct(connection);
+                let paths = paths_of(connection);
+                let admitted = match self.role {
+                    GateRole::Writer => direct_for_writer(&paths),
+                    GateRole::Inbound => direct_for_inbound(&paths),
+                };
                 self.reading = Some((now, admitted));
                 if !admitted {
-                    let paths = path_list(
-                        connection
-                            .paths()
-                            .iter()
-                            .map(|path| (path.remote_addr().clone(), path.is_selected())),
-                    );
+                    let paths = path_list(paths);
                     if self.last_refused_paths.as_deref() != Some(paths.as_str()) {
                         tracing::debug!(%paths, "multihop underlay: no direct path is selected");
                         self.last_refused_paths = Some(paths);
@@ -318,10 +348,31 @@ impl Forwarder {
     /// Rate-limited visibility for a refused cell. Whoever is sending them sets
     /// the rate, so logging every one hands them a second amplifier.
     fn note_drop(&self, reason: &str) {
-        let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        if total == 1 || total.is_multiple_of(256) {
+        if let Some(total) = self.count_drop() {
             tracing::warn!(total, reason, "multihop forwarder refusing cells");
         }
+    }
+
+    /// The refusal of a cell that came in over `connection` from `hop`, with what
+    /// the log needs to tell whose path it was: the hop, this node, and the paths.
+    fn note_inbound_refusal(&self, hop: EndpointId, connection: &Connection) {
+        if let Some(total) = self.count_drop() {
+            tracing::warn!(
+                total,
+                reason = "cell arrived over the relay",
+                hop = %hop.fmt_short(),
+                node = %self.underlay.id().fmt_short(),
+                paths = %path_list(paths_of(connection)),
+                "multihop forwarder refusing cells"
+            );
+        }
+    }
+
+    /// Count a refused cell. The total when it is to be logged: the first, then
+    /// every 256th.
+    fn count_drop(&self) -> Option<u64> {
+        let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        (total == 1 || total.is_multiple_of(256)).then_some(total)
     }
 
     /// Hand a cell to the writer for `hop`, spawning one if none is live. Never
@@ -490,7 +541,7 @@ async fn drain_to_hop(
         .await
         .context("underlay dial gave up")?;
     let mut send = conn.open_uni().await.context("open underlay uni-stream")?;
-    let mut gate = RelayGate::new(rule.allow_relay);
+    let mut gate = RelayGate::new(rule.allow_relay, GateRole::Writer);
     // Looks at the path once a second even when no cell comes, so a hop that was
     // withdrawn for staying on the relay (and so carries no cells) is a link
     // again once a direct path opens.
@@ -576,7 +627,7 @@ impl ForwardAcceptor {
             if admitted {
                 self.forwarder.handle_cell(cell, upstream);
             } else {
-                self.forwarder.note_drop("cell arrived over the relay");
+                self.forwarder.note_inbound_refusal(upstream, &connection);
             }
         }
     }
@@ -588,7 +639,10 @@ impl ProtocolHandler for ForwardAcceptor {
         // sender cannot choose, and constant across every stream on this
         // connection. Every cell that arrives here is checked against it.
         let upstream = connection.remote_id();
-        let gate = Arc::new(Mutex::new(RelayGate::new(self.forwarder.rule.allow_relay)));
+        let gate = Arc::new(Mutex::new(RelayGate::new(
+            self.forwarder.rule.allow_relay,
+            GateRole::Inbound,
+        )));
         // Loop ends when the upstream hop closes the connection: normal teardown.
         while let Ok(recv) = connection.accept_uni().await {
             n0_future::task::spawn(self.clone().read_loop(
@@ -609,6 +663,7 @@ mod tests {
     use crate::test_support::relay_server;
     use crate::wire::Cell;
     use iroh::endpoint::presets;
+    use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
     use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
     use std::net::SocketAddr;
     use tokio::sync::mpsc;
@@ -892,15 +947,25 @@ mod tests {
     /// A node whose underlay is on loopback, with its accept side running: the
     /// path between two of these is direct.
     async fn loopback_node(seed: u8, stuck_after: Duration) -> RelayNode {
+        loopback_node_with(seed, stuck_after, None).await
+    }
+
+    /// A [`loopback_node`] whose underlay chooses its paths with `selector`.
+    async fn loopback_node_with(
+        seed: u8,
+        stuck_after: Duration,
+        selector: Option<Arc<dyn PathSelector>>,
+    ) -> RelayNode {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
-        let underlay = Endpoint::builder(presets::Minimal)
+        let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&[seed; 32]))
             .relay_mode(RelayMode::Disabled)
             .bind_addr(loopback)
-            .expect("valid bind addr")
-            .bind()
-            .await
-            .expect("bind a loopback underlay");
+            .expect("valid bind addr");
+        if let Some(selector) = selector {
+            builder = builder.path_selector(selector);
+        }
+        let underlay = builder.bind().await.expect("bind a loopback underlay");
         let app_id: EndpointId = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]).public();
         let (inbound, received) = mpsc::channel(8);
         let forwarder = Arc::new(Forwarder::new(
@@ -926,6 +991,61 @@ mod tests {
             received,
             _router: router,
         }
+    }
+
+    /// A selector that never selects a path. iroh opens paths only from the dialling
+    /// end, so on the accepting end the chosen path can be none of those open.
+    #[derive(Debug)]
+    struct NeverSelects;
+
+    impl PathSelector for NeverSelects {
+        fn select(&self, _ctx: &PathSelectionContext<'_>) -> PathSelection {
+            PathSelection::none()
+        }
+    }
+
+    fn ip(port: u16) -> TransportAddr {
+        TransportAddr::Ip(SocketAddr::from(([127, 0, 0, 1], port)))
+    }
+
+    fn relay() -> TransportAddr {
+        TransportAddr::Relay("http://127.0.0.1:1".parse().expect("a relay url"))
+    }
+
+    #[test]
+    fn an_accepted_connection_is_direct_when_any_open_path_is_not_the_relay() {
+        use super::{direct_for_inbound, direct_for_writer};
+        assert!(
+            direct_for_inbound(&[(ip(9), false), (relay(), false)]),
+            "an IP path in backup beside the relay in backup"
+        );
+        assert!(direct_for_inbound(&[(ip(9), true), (relay(), false)]));
+        assert!(
+            !direct_for_inbound(&[(relay(), false)]),
+            "only the relay is open"
+        );
+        assert!(
+            !direct_for_inbound(&[(relay(), true)]),
+            "only the relay, selected"
+        );
+        assert!(!direct_for_inbound(&[]), "no path is open");
+        // The writer keeps the stricter rule: it sends on the selected path.
+        assert!(!direct_for_writer(&[(ip(9), false), (relay(), false)]));
+        assert!(direct_for_writer(&[(ip(9), true), (relay(), false)]));
+    }
+
+    #[tokio::test]
+    async fn a_cell_arrives_when_the_accepting_end_selected_no_path() {
+        // The dialling end sends on a selected IP path. The accepting end opened no
+        // path of its own and selects none, but its connection has the IP path open.
+        let stuck_after = Duration::from_millis(300);
+        let from = loopback_node(31, stuck_after).await;
+        let mut to = loopback_node_with(32, stuck_after, Some(Arc::new(NeverSelects))).await;
+        assert!(
+            cell_arrives(&from, &mut to).await,
+            "a cell that came over IP is not a cell over the relay"
+        );
+        assert_eq!(to.forwarder.dropped.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
