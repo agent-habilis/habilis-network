@@ -10,6 +10,11 @@
 //! session_cost fit < lines-of-measure-output
 //! ```
 //!
+//! The sessions are IDLE: no datagram crosses them and no QUIC connection rides on them, so the
+//! slope is the idle floor of a session. The send path of the transport cannot be driven from
+//! here (`Transmit` has no public constructor), so a reading under traffic needs real iroh
+//! endpoints on top of the sessions, which this example does not do.
+//!
 //! `measure` starts a peer process (this binary, `peer`), opens one throw-away session to take
 //! the start-up cost of the libraries out of the slope, reads the resident memory, opens `k`
 //! sessions, reads it again after `settle` seconds, once more after `hold` seconds with the
@@ -190,7 +195,26 @@ async fn settled(settle: u64) -> u64 {
     median(&readings)
 }
 
+/// The load average of the last minute, `None` where it cannot be read.
+fn load1() -> Option<f64> {
+    if let Ok(text) = std::fs::read_to_string("/proc/loadavg") {
+        return text.split_whitespace().next()?.parse().ok();
+    }
+    let output = std::process::Command::new("sysctl")
+        .args(["-n", "vm.loadavg"])
+        .output()
+        .ok()?;
+    String::from_utf8(output.stdout)
+        .ok()?
+        .split_whitespace()
+        .find_map(|word| word.parse().ok())
+}
+
 async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        current_resident_memory_bytes().is_some(),
+        "the resident memory of this process cannot be read on this platform"
+    );
     let mut child = Command::new(std::env::current_exe()?)
         .arg("peer")
         .stdin(std::process::Stdio::piped())
@@ -255,6 +279,9 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
             "rk": after_open,
             "rk_hold": after_hold,
             "r_close": after_close,
+            "load1": load1(),
+            "settle": settle,
+            "hold": hold,
         })
     );
     Ok(())
@@ -302,6 +329,11 @@ async fn reply(out: &mut tokio::io::Stdout, message: &Msg) -> anyhow::Result<()>
     Ok(())
 }
 
+/// A number of a JSON row, `None` if the field is missing or is not a number.
+fn field(row: &serde_json::Value, name: &str) -> Option<f64> {
+    row[name].as_f64()
+}
+
 /// Reads the lines of `measure` from stdin and prints the slope per role and per reading.
 fn run_fit() -> anyhow::Result<()> {
     let mut rows: Vec<serde_json::Value> = Vec::new();
@@ -311,6 +343,7 @@ fn run_fit() -> anyhow::Result<()> {
             rows.push(serde_json::from_str(&line)?);
         }
     }
+    println!("cost of an IDLE session: no traffic, no QUIC connection on top (the idle floor)");
     for role in ["offerer", "answerer"] {
         let of_role: Vec<&serde_json::Value> =
             rows.iter().filter(|row| row["role"] == role).collect();
@@ -318,43 +351,47 @@ fn run_fit() -> anyhow::Result<()> {
             continue;
         }
         println!("{role}: {} runs", of_role.len());
-        let mut verdict_slope = None;
-        for (field, label) in [
+        let mut effect = None;
+        for (name, label) in [
             ("rk", "after open"),
             ("rk_hold", "after hold"),
             ("r_close", "after close"),
         ] {
-            let points: Vec<(f64, f64)> = of_role
-                .iter()
-                .map(|row| {
-                    let count = row["k"].as_f64().unwrap_or(0.0);
-                    let grown =
-                        row[field].as_f64().unwrap_or(0.0) - row["r0"].as_f64().unwrap_or(0.0);
-                    (count, grown / MIB)
-                })
-                .collect();
+            let mut skipped = 0_usize;
+            let mut points: Vec<(f64, f64)> = Vec::new();
+            for row in &of_role {
+                match (field(row, "k"), field(row, "r0"), field(row, name)) {
+                    (Some(count), Some(before), Some(after)) => {
+                        points.push((count, (after - before) / MIB));
+                    }
+                    _ => skipped += 1,
+                }
+            }
+            let note = if skipped > 0 {
+                format!(" ({skipped} rows skipped: a field is missing)")
+            } else {
+                String::new()
+            };
             match fit(&points) {
                 Some(line) => {
                     println!(
-                        "  {label:11}: {:+.3} MiB per session, standard error {}, intercept {:+.2} MiB",
+                        "  {label:11}: {:+.3} MiB per session, standard error {}, intercept {:+.2} MiB{note}",
                         line.slope,
                         line.slope_stderr
                             .map_or_else(|| "n/a".to_owned(), |error| format!("{error:.3}")),
                         line.intercept
                     );
-                    if field == "rk" {
-                        verdict_slope = Some(line.slope);
+                    if name == "rk" {
+                        effect = Some((line.slope, line.slope_stderr));
                     }
                 }
-                None => println!("  {label:11}: no fit (needs two different values of k)"),
+                None => println!("  {label:11}: no fit (needs two different values of k){note}"),
             }
         }
         let noise: Vec<f64> = of_role
             .iter()
-            .filter(|row| row["k"] == 0)
-            .map(|row| {
-                (row["rk"].as_f64().unwrap_or(0.0) - row["r0"].as_f64().unwrap_or(0.0)) / MIB
-            })
+            .filter(|row| field(row, "k") == Some(0.0))
+            .filter_map(|row| Some((field(row, "rk")? - field(row, "r0")?) / MIB))
             .collect();
         let floor = std_dev(&noise);
         println!(
@@ -362,16 +399,24 @@ fn run_fit() -> anyhow::Result<()> {
             noise.len(),
             floor.map_or_else(|| "n/a".to_owned(), |value| format!("{value:.3}"))
         );
-        match (floor, verdict_slope) {
-            (Some(floor), Some(slope)) if floor < 0.10 * (slope * 32.0).abs() => {
-                println!("  verdict: the noise floor is below 10 percent of the effect at k = 32");
-            }
-            _ => println!(
-                "  verdict: NO RESULT (the noise floor is not below 10 percent of the effect at k = 32)"
-            ),
-        }
+        println!("  verdict: {}", verdict(floor, effect));
     }
     Ok(())
+}
+
+/// A number only if the noise floor and the standard error of the slope are both below 10
+/// percent of what they are measured against.
+fn verdict(floor: Option<f64>, effect: Option<(f64, Option<f64>)>) -> &'static str {
+    match (floor, effect) {
+        (Some(floor), Some((slope, Some(error))))
+            if floor < 0.10 * (slope * 32.0).abs() && error < 0.10 * slope.abs() =>
+        {
+            "a result: the noise floor is below 10 percent of the effect at k = 32 and the standard error is below 10 percent of the slope"
+        }
+        _ => {
+            "NO RESULT: the noise floor must be below 10 percent of the effect at k = 32 AND the standard error below 10 percent of the slope"
+        }
+    }
 }
 
 fn argument(args: &[String], name: &str) -> Option<String> {
@@ -406,7 +451,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit, median, std_dev};
+    use super::{fit, median, std_dev, verdict};
 
     #[test]
     fn the_median_of_an_odd_set_is_its_middle_value() {
@@ -460,5 +505,19 @@ mod tests {
         let spread = std_dev(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]).expect("a spread");
         assert!((spread - 2.138_089_935).abs() < 1e-6, "{spread}");
         assert_eq!(std_dev(&[1.0]), None);
+    }
+
+    #[test]
+    fn a_verdict_needs_both_the_noise_floor_and_the_standard_error_to_be_small() {
+        // The effect at k = 32 is 6.4 MiB (slope 0.2). A floor of 0.5 and an error of 0.01 pass.
+        assert!(verdict(Some(0.5), Some((0.2, Some(0.01)))).starts_with("a result"));
+        // A floor of 1.0 is over 10 percent of 6.4.
+        assert!(verdict(Some(1.0), Some((0.2, Some(0.01)))).starts_with("NO RESULT"));
+        // An error of 0.05 is over 10 percent of the slope.
+        assert!(verdict(Some(0.5), Some((0.2, Some(0.05)))).starts_with("NO RESULT"));
+        // Nothing to compare: no result.
+        assert!(verdict(None, Some((0.2, Some(0.01)))).starts_with("NO RESULT"));
+        assert!(verdict(Some(0.5), Some((0.2, None))).starts_with("NO RESULT"));
+        assert!(verdict(Some(0.5), None).starts_with("NO RESULT"));
     }
 }
