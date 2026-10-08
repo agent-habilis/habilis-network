@@ -254,8 +254,10 @@ fn skipped(name: &str) -> bool {
 /// A directed message from alice reaches carol, who has no other path to her, and the reply
 /// from carol reaches alice: the rung is gossip both ways. The design lists "unicast" and
 /// "directed" as two features; here they are one API, a payload on the pooled unicast connection
-/// to the peer, so this one test covers both. A broadcast does not use the transports, so it is
-/// not in this list.
+/// to the peer, so this one test covers both. A request and its response are two such frames:
+/// the engine routes a directed frame with a correlation id as it routes a message
+/// (`transport/send.rs`, `directed_rpc_and_pong_also_take_unicast`), and the waiter is the
+/// application's. A broadcast does not use the transports, so it is not in this list.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by cargo task matrix"]
 async fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung() {
@@ -314,6 +316,9 @@ async fn a_ping_is_answered_across_a_pair_with_no_other_path_on_the_gossip_rung(
         return;
     }
     let fixture = Fixture::stand_up(NAME).await;
+    // The pong goes out over a warm unicast connection or not at all, and only alice has sent
+    // to carol so far: carol warms her side the way production does, by sending.
+    fixture.carol.settle_on("alice", "gossip", NAME).await;
 
     let answered = fixture.alice.ping().await;
     for peer in ["bob", "carol", "dave"] {
@@ -322,10 +327,10 @@ async fn a_ping_is_answered_across_a_pair_with_no_other_path_on_the_gossip_rung(
             "{NAME}: {peer} never answered alice's ping: {answered:?}"
         );
     }
-    let answered = fixture.carol.ping().await;
+    let answered_by_alice = fixture.carol.ping().await;
     assert!(
-        answered.iter().any(|nick| nick == "alice"),
-        "{NAME}: alice never answered carol's ping on the gossip rung: {answered:?}"
+        answered_by_alice.iter().any(|nick| nick == "alice"),
+        "{NAME}: alice never answered carol's ping on the gossip rung: {answered_by_alice:?}"
     );
 
     assert_eq!(

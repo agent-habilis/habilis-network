@@ -100,10 +100,17 @@ enum Cut {
     WebRtcAlice,
     /// The `WebRTC` rung of bob's application endpoint toward alice.
     WebRtcBobToAlice,
+    /// The whole `WebRTC` rung of bob's application endpoint. A gossip cell needs it for the
+    /// reason in `MultihopBob`.
+    WebRtcBob,
     /// The `WebRTC` rung between the two underlays, in both directions.
     WebRtcUnderlays,
     /// The whole multihop rung of alice's application endpoint.
     MultihopAlice,
+    /// The whole multihop rung of bob's application endpoint. A gossip cell needs it: with only
+    /// alice cut, bob keeps the rung, alice's gossip path gets no return traffic and iroh
+    /// drops it, so the pair flaps between gossip and the relay.
+    MultihopBob,
     /// The gossip rung of alice. The block table is per node and rung, not per remote, so bob
     /// is cut too: see `GossipBob`.
     GossipAlice,
@@ -125,9 +132,15 @@ impl Cell {
         }
         if self.blocked >= Blocked::IpWebRtc {
             cuts.push(Cut::WebRtcAlice);
+            if self.has(Transport::Gossip) && !self.via_third {
+                cuts.push(Cut::WebRtcBob);
+            }
         }
         if self.blocked >= Blocked::IpWebRtcMultihop {
             cuts.push(Cut::MultihopAlice);
+            if self.has(Transport::Gossip) {
+                cuts.push(Cut::MultihopBob);
+            }
         }
         if self.blocked >= Blocked::IpWebRtcMultihopGossip {
             cuts.extend([Cut::GossipAlice, Cut::GossipBob]);
@@ -481,8 +494,10 @@ async fn apply(cut: Cut, alice: &Member, bob: &Member) {
         }
         Cut::WebRtcAlice => alice.block_rung(Rung::WebRtc, true).await,
         Cut::WebRtcBobToAlice => bob.block_rung_to(Rung::WebRtc, "alice").await,
+        Cut::WebRtcBob => bob.block_rung(Rung::WebRtc, true).await,
         Cut::WebRtcUnderlays => block_underlay_rung(Rung::WebRtc, underlays),
         Cut::MultihopAlice => alice.block_rung(Rung::Multihop, true).await,
+        Cut::MultihopBob => bob.block_rung(Rung::Multihop, true).await,
         Cut::GossipAlice => alice.block_rung(Rung::Gossip, true).await,
         Cut::GossipBob => bob.block_rung(Rung::Gossip, true).await,
     }
@@ -978,7 +993,7 @@ async fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
     let refusal = alice
         .send("bob", &text)
         .await
-        .expect_err("the send must fail, not park");
+        .expect_err("the send must fail, with either refusal");
     assert!(
         refusal.contains(LOOKUP_ONLY),
         "{NAME}: the error must give the reason, got: {refusal}"
