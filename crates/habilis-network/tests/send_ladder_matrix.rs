@@ -100,16 +100,16 @@ enum Cut {
     WebRtcAlice,
     /// The `WebRTC` rung of bob's application endpoint toward alice.
     WebRtcBobToAlice,
-    /// The whole `WebRTC` rung of bob's application endpoint. A gossip cell needs it for the
-    /// reason in `MultihopBob`.
+    /// The whole `WebRTC` rung of bob's application endpoint. Every cell that cuts alice's rung
+    /// cuts bob's too (a cell through a third member cuts `WebRtcBobToAlice` instead).
     WebRtcBob,
     /// The `WebRTC` rung between the two underlays, in both directions.
     WebRtcUnderlays,
     /// The whole multihop rung of alice's application endpoint.
     MultihopAlice,
-    /// The whole multihop rung of bob's application endpoint. A gossip cell needs it: with only
-    /// alice cut, bob keeps the rung, alice's gossip path gets no return traffic and iroh
-    /// drops it, so the pair flaps between gossip and the relay.
+    /// The whole multihop rung of bob's application endpoint. With only alice cut, bob keeps the
+    /// rung and alice's path gets no return traffic, and iroh drops it: the pair flaps. A
+    /// selection block at one end exists only in our test hooks, so every cell cuts both ends.
     MultihopBob,
     /// The gossip rung of alice. The block table is per node and rung, not per remote, so bob
     /// is cut too: see `GossipBob`.
@@ -132,15 +132,12 @@ impl Cell {
         }
         if self.blocked >= Blocked::IpWebRtc {
             cuts.push(Cut::WebRtcAlice);
-            if self.has(Transport::Gossip) && !self.via_third {
+            if !self.via_third {
                 cuts.push(Cut::WebRtcBob);
             }
         }
         if self.blocked >= Blocked::IpWebRtcMultihop {
-            cuts.push(Cut::MultihopAlice);
-            if self.has(Transport::Gossip) {
-                cuts.push(Cut::MultihopBob);
-            }
+            cuts.extend([Cut::MultihopAlice, Cut::MultihopBob]);
         }
         if self.blocked >= Blocked::IpWebRtcMultihopGossip {
             cuts.extend([Cut::GossipAlice, Cut::GossipBob]);
@@ -1091,6 +1088,30 @@ fn no_cell_through_a_third_member_has_the_relay_in_its_list() {
             "{name}: a hop cannot be forced when the relay may carry payload"
         );
     }
+}
+
+/// A selection block at one end exists only in our test hooks: no production fault takes a rung
+/// from one side of a pair and leaves it to the other. So a cell that takes `WebRTC` or multihop
+/// from alice takes it from bob too (user decision, 2026-10-08: "All one-ended cells"). A cell
+/// through a third member already cuts bob toward alice (`WebRtcBobToAlice`).
+#[test]
+fn no_cell_cuts_the_webrtc_or_multihop_rung_at_one_end_only() {
+    let mut one_ended = Vec::new();
+    for (name, cell) in CELLS {
+        let cuts = cell.cuts();
+        if cuts.contains(&Cut::WebRtcAlice) && !cell.via_third && !cuts.contains(&Cut::WebRtcBob) {
+            one_ended.push(format!("{name}: WebRTC at alice only"));
+        }
+        if cuts.contains(&Cut::MultihopAlice) && !cuts.contains(&Cut::MultihopBob) {
+            one_ended.push(format!("{name}: multihop at alice only"));
+        }
+    }
+    assert!(
+        one_ended.is_empty(),
+        "{} cells cut one end only:\n{}",
+        one_ended.len(),
+        one_ended.join("\n")
+    );
 }
 
 #[test]
