@@ -1886,10 +1886,34 @@ mod tests {
     /// The windows of a digest tile the log. A message that sorts between two
     /// windows, and that the node lacks, is asked for within a few rounds even
     /// when nothing else changes and no window moves.
-    /// A node that joined in the second of its first message must still ask for a message of
-    /// that second with a smaller id key: the floor lowers `lo` to `joined_at` only when it is
-    /// earlier than the first message, and `(second, key)` of that message leaves the smaller keys
-    /// of the same second out of every window.
+    #[test]
+    fn a_message_between_two_windows_is_asked_for() {
+        let mut all = scrambled_messages(12);
+        all.sort_by_key(|message| (message.timestamp, message.dedup_key()));
+        let mut holder = MessageLog::new(1000);
+        let mut node = fresh_state();
+        node.joined_at = 1_699_999_999;
+        for (index, message) in all.iter().enumerate() {
+            holder.push(message.clone());
+            if index != ANTIENTROPY_DIGEST_WINDOW_IDS {
+                node.message_log.push(message.clone());
+            }
+        }
+        let lost = all[ANTIENTROPY_DIGEST_WINDOW_IDS].dedup_key();
+        let budget = crate::util::tuning::antientropy_max_resend();
+        let asked = (0..12).any(|_| {
+            answer_within_budget(&mut node, &holder, budget)
+                .iter()
+                .any(|message| message.dedup_key() == lost)
+        });
+        assert!(
+            asked,
+            "the message between the first two windows never came back"
+        );
+    }
+
+    /// A node that joined in the second of its first message asks for every message of that
+    /// second, whatever its id key: the window must not start at the key of that first message.
     #[test]
     fn a_message_of_the_second_a_node_joined_in_is_asked_for_whatever_its_key() {
         let second = 1_700_000_000;
@@ -1938,32 +1962,6 @@ mod tests {
                 .iter()
                 .any(|message| message.dedup_key() == smaller.dedup_key()),
             "the holder never offered the message of the same second with the smaller key"
-        );
-    }
-
-    #[test]
-    fn a_message_between_two_windows_is_asked_for() {
-        let mut all = scrambled_messages(12);
-        all.sort_by_key(|message| (message.timestamp, message.dedup_key()));
-        let mut holder = MessageLog::new(1000);
-        let mut node = fresh_state();
-        node.joined_at = 1_699_999_999;
-        for (index, message) in all.iter().enumerate() {
-            holder.push(message.clone());
-            if index != ANTIENTROPY_DIGEST_WINDOW_IDS {
-                node.message_log.push(message.clone());
-            }
-        }
-        let lost = all[ANTIENTROPY_DIGEST_WINDOW_IDS].dedup_key();
-        let budget = crate::util::tuning::antientropy_max_resend();
-        let asked = (0..12).any(|_| {
-            answer_within_budget(&mut node, &holder, budget)
-                .iter()
-                .any(|message| message.dedup_key() == lost)
-        });
-        assert!(
-            asked,
-            "the message between the first two windows never came back"
         );
     }
 

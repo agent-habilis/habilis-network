@@ -379,16 +379,6 @@ published to a registry; pin it with
   with the gossip relay-refused code. The accept gate checked the path only once, so a
   path lost later left a link up on the relay with nothing to say that no
   payload may ride it.
-- A node no longer misses a message of the second in which it joined. The
-  window of an anti-entropy digest that holds the oldest message of the log
-  reached back to `joined_at` only when `joined_at` was earlier than that
-  message. A node that joined in the second of its first message kept that
-  message as the lower bound, and a message of the same second with a smaller
-  id key lay below every window, so no holder offered it, at the first link or
-  at any later tick. About half of the broadcasts that a joiner sent in the
-  second of the join of a peer never reached that peer. The window now starts
-  at the first key of the earlier of `joined_at` and the second of its first
-  message.
 
 ### Removed
 
