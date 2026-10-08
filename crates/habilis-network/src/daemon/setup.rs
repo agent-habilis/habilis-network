@@ -7,7 +7,7 @@ use rand::RngCore;
 use tokio::sync::{mpsc, watch};
 
 use crate::gossip::event::{NodeEvent, NodeSink};
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 use crate::lookup::build_peer_multihop_with;
 use crate::lookup::{
     StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
@@ -269,7 +269,7 @@ async fn build_member_endpoint(
             build.lookups,
             build.transports,
             Some(&admission),
-            build.relay_transport,
+            crate::lookup::multihop_handle_config(build.relay_transport),
             crate::lookup::underlay_cap(build.max_peers),
         )
         .await?;
@@ -285,10 +285,9 @@ async fn build_member_endpoint(
     }
 }
 
-/// Off a host the endpoint is always the plain peer one, whatever the mesh policy says
-/// about `multihop`: the underlay of the multihop transport is built by
-/// `build_peer_multihop_with`, which is native, so the multihop slot of the result is
-/// always `None`. Building it for a browser is the job of a later step.
+/// Off a host (a browser): the multihop transport is built when the mesh policy has it and the
+/// node has a direct path (`build.multihop`), with the link cost of a browser, so that routes
+/// avoid it as a hop; otherwise the endpoint is the plain peer one.
 #[cfg(not(feature = "host"))]
 async fn build_member_endpoint(
     build: &SetupBuild<'_>,
@@ -317,6 +316,18 @@ async fn build_member_endpoint(
         ));
     }
     let admission = crate::transport::SignalAdmission::new(build.max_direct);
+    #[cfg(feature = "multihop")]
+    if build.multihop {
+        let (endpoint, handle, webrtc, underlay_webrtc) = build_peer_multihop_with(
+            build.lookups,
+            build.transports,
+            Some(&admission),
+            crate::lookup::browser_handle_config(build.relay_transport),
+            crate::lookup::underlay_cap(build.max_peers),
+        )
+        .await?;
+        return Ok((endpoint, Some(handle), webrtc, admission, underlay_webrtc));
+    }
     let (endpoint, webrtc) =
         crate::lookup::build_peer_webrtc_with(build.lookups, build.transports, Some(&admission))
             .await?;
@@ -489,10 +500,10 @@ struct SetupBuild<'a> {
     /// The mesh policy's `multihop`: register the multi-hop transport on the
     /// peer endpoint.
     #[cfg_attr(
-        not(feature = "host"),
+        not(feature = "multihop"),
         expect(
             dead_code,
-            reason = "accepted and ignored off a host — see `build_member_endpoint`"
+            reason = "accepted and ignored without the `multihop` feature — see `build_member_endpoint`"
         )
     )]
     multihop: bool,
@@ -1213,6 +1224,9 @@ mod tests {
             .await
             .expect("a mesh sets up");
             assert_eq!(config.multihop.is_some(), expected, "{transports:?}");
+            if let Some(handle) = config.multihop.as_ref() {
+                assert_eq!(handle.link_cost(), 10, "{transports:?}");
+            }
             config.router.shutdown().await.expect("the router stops");
         }
     }
@@ -1398,5 +1412,49 @@ mod tests {
             !errors.contains("Endpoint dropped without calling"),
             "the startup rung probe's endpoint reached its drop open:\n{errors}"
         );
+    }
+}
+
+// The browser build of `build_member_endpoint` is the one that runs without `host`. A native test
+// binary built without `host` runs it, with no IP on the node, as a browser would.
+#[cfg(all(test, feature = "multihop", not(feature = "host")))]
+mod browser_tests {
+    use crate::protocol::mesh::{Lookup, Transport};
+
+    #[tokio::test]
+    async fn a_browser_member_has_a_multihop_handle_with_the_link_cost_of_a_browser() {
+        let opts = crate::membership::Opts {
+            transport: vec![Transport::WebRtc, Transport::Multihop],
+            lookup: vec![Lookup::Relay],
+            ..crate::membership::Opts::default()
+        };
+        let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+        let config = super::setup_mesh(
+            kind,
+            super::SetupParams {
+                author,
+                max_peers: 8,
+                max_direct: 0,
+                runtime_base: None,
+                state_file: None,
+                sink: std::sync::Arc::new(crate::embed::SilentSink),
+                endpoint: None,
+                protocols: Vec::new(),
+                transports: crate::lookup::TransportOpts {
+                    udp: false,
+                    ..crate::lookup::TransportOpts::default()
+                },
+                per_peer_gate: None,
+                cohost: None,
+                live_count: None,
+            },
+        )
+        .await
+        .expect("a mesh sets up");
+        assert_eq!(
+            config.multihop.as_ref().expect("a multihop handle").link_cost(),
+            100
+        );
+        config.router.shutdown().await.expect("the router stops");
     }
 }

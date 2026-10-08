@@ -545,6 +545,28 @@ pub fn multihop_handle_config(
     }
 }
 
+/// [`multihop_handle_config`] for a browser: the same numbers, and the link cost of
+/// `HandleConfig::for_browser`, so that routes avoid a browser as a hop. Chosen by the browser
+/// build of `build_member_endpoint`, and not by the target: a native member made to look like a
+/// browser can use it too.
+#[cfg(feature = "multihop")]
+#[cfg_attr(
+    all(feature = "host", not(test)),
+    expect(
+        dead_code,
+        reason = "the browser build of `build_member_endpoint` is its caller"
+    )
+)]
+#[must_use]
+pub(crate) fn browser_handle_config(
+    relay_payload: bool,
+) -> habilis_network_iroh_multihop_transport::HandleConfig {
+    habilis_network_iroh_multihop_transport::HandleConfig {
+        link_cost: habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost,
+        ..multihop_handle_config(relay_payload)
+    }
+}
+
 /// Assert a caller-supplied endpoint and hub agree on identity.
 ///
 /// The `WebRTC` transport advertises `custom_addr(local_id)` as the address peers
@@ -785,8 +807,14 @@ pub(crate) async fn build_peer_multihop(
     habilis_network_iroh_multihop_transport::MultihopHandle,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
 )> {
-    let (endpoint, handle, webrtc, _underlay_webrtc) =
-        build_peer_multihop_with(lookups, opts, admission, relay_payload, None).await?;
+    let (endpoint, handle, webrtc, _underlay_webrtc) = build_peer_multihop_with(
+        lookups,
+        opts,
+        admission,
+        multihop_handle_config(relay_payload),
+        None,
+    )
+    .await?;
     Ok((endpoint, handle, webrtc))
 }
 
@@ -794,7 +822,7 @@ pub(crate) async fn build_peer_multihop(
 /// underlay, which gives a harness the control cell of a measurement of what the
 /// leg costs. A flag of the process, like `block_ip_paths`: set it before the node
 /// starts.
-#[cfg(all(feature = "host", feature = "iroh-test-utils"))]
+#[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
 static UNDERLAY_LEG_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Tests only: see [`UNDERLAY_LEG_OFF`].
@@ -805,7 +833,7 @@ pub fn set_underlay_leg_off(off: bool) {
 
 /// The cap of the `WebRTC` leg of the underlay for a node with `max_peers` (G):
 /// `Some(G)`, or `None` while a test switched the leg off.
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 #[cfg_attr(
     not(feature = "iroh-test-utils"),
     expect(
@@ -829,12 +857,12 @@ pub(crate) fn underlay_cap(max_peers: usize) -> Option<usize> {
 ///
 /// # Errors
 /// Returns an error if either endpoint fails to bind.
-#[cfg(feature = "host")]
+#[cfg(feature = "multihop")]
 pub(crate) async fn build_peer_multihop_with(
     lookups: &LookupOpts,
     opts: TransportOpts,
     admission: Option<&crate::transport::SignalAdmission>,
-    relay_payload: bool,
+    handle_config: habilis_network_iroh_multihop_transport::HandleConfig,
     underlay_cap: Option<usize>,
 ) -> Result<(
     Endpoint,
@@ -905,7 +933,7 @@ pub(crate) async fn build_peer_multihop_with(
     let handle = habilis_network_iroh_multihop_transport::MultihopHandle::with_protocols(
         &secret,
         underlay,
-        multihop_handle_config(relay_payload),
+        handle_config,
         protocols,
     )?;
     let endpoint = build_endpoint(
@@ -1341,7 +1369,7 @@ mod tests {
                 &LookupOpts::loopback(),
                 opts,
                 Some(&table),
-                false,
+                super::multihop_handle_config(false),
                 Some(5),
             )
             .await
@@ -1445,13 +1473,36 @@ mod tests {
 
     // The underlay gets a `WebRTC` leg only when it is asked for, and only when
     // this instance has `WebRTC` on. Its table takes the cap it is given (G).
+    // A browser advertises its links at ten times the cost; every other number is the engine's.
+    #[cfg(feature = "multihop")]
+    #[test]
+    fn the_handle_config_of_a_browser_differs_from_the_engine_s_in_the_link_cost_only() {
+        let native = super::multihop_handle_config(true);
+        let browser = super::browser_handle_config(true);
+        assert_eq!(native.link_cost, 10);
+        assert_eq!(browser.link_cost, 100);
+        assert_eq!(
+            habilis_network_iroh_multihop_transport::HandleConfig {
+                link_cost: native.link_cost,
+                ..browser
+            },
+            native
+        );
+    }
+
     #[cfg(feature = "host")]
     #[tokio::test]
     async fn the_underlay_leg_takes_the_cap_it_is_given_and_needs_webrtc_on() {
         let build = |opts: TransportOpts, cap: Option<usize>| async move {
-            super::build_peer_multihop_with(&LookupOpts::loopback(), opts, None, false, cap)
-                .await
-                .expect("a multihop peer binds")
+            super::build_peer_multihop_with(
+                &LookupOpts::loopback(),
+                opts,
+                None,
+                super::multihop_handle_config(false),
+                cap,
+            )
+            .await
+            .expect("a multihop peer binds")
         };
 
         let (_endpoint, handle, _webrtc, leg) = build(TransportOpts::default(), Some(5)).await;
