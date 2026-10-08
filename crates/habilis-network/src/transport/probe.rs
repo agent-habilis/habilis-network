@@ -264,6 +264,14 @@ pub(crate) fn nudge_routable_relay_pairs(
         })
         .collect();
     for (peer, addrs) in plan_relay_dials(pairs, &mut state.route_dialed, only_changed) {
+        tracing::debug!(
+            target: super::LOG_TARGET,
+            %peer,
+            only_changed,
+            session = addrs.session,
+            route = addrs.route.is_some(),
+            "dialing a pair on the relay"
+        );
         let endpoint = ctx.endpoint.clone();
         n0_future::task::spawn(async move {
             super::webrtc::nudge_with(&endpoint, peer, &addrs).await;
@@ -272,7 +280,8 @@ pub(crate) fn nudge_routable_relay_pairs(
 }
 
 /// Pure: the route dialed for a pair is only kept while the pair reads as the relay: a pair that
-/// fell back to the relay later gets its route dialed again.
+/// fell back to the relay later gets its route dialed again. The planner's `retain` is the rule;
+/// this forgets a watched pair at the report, one pass earlier.
 fn forget_route_unless_relay(
     route_dialed: &mut HashMap<EndpointId, iroh::TransportAddr>,
     peer: EndpointId,

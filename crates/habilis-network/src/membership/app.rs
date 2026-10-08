@@ -474,11 +474,20 @@ impl NodeDriver for MembershipApp {
                 // Off the event loop: a dial can take seconds.
                 n0_future::task::spawn(async move {
                     let rung = match id {
-                        Some(id) => pool
-                            .warm_or_dial(id)
-                            .await
-                            .ok()
-                            .and_then(|conn| crate::transport::path::selected_rung(&conn)),
+                        Some(id) => pool.warm_or_dial(id).await.ok().and_then(|conn| {
+                            let rung = crate::transport::path::selected_rung(&conn);
+                            // The same stable id twice is one connection read twice: a test that
+                            // waits for a rung can see whether the connection it reads is the one
+                            // that climbed.
+                            tracing::debug!(
+                                target: "habilis_network::transport",
+                                peer = %id,
+                                conn = conn.stable_id(),
+                                ?rung,
+                                "the rung read for a test"
+                            );
+                            rung
+                        }),
                         None => None,
                     };
                     let _ = reply.send(rung);
