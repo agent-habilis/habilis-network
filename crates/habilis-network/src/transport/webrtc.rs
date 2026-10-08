@@ -750,14 +750,18 @@ pub(crate) async fn detach_sessions_under_udp(
 }
 
 /// Whether the proof of a direct path is stale: the pair was `proven` direct, and its selected
-/// path now reads as the relay or as multihop, both below a session. Only a path watcher takes
+/// path now reads as the relay, as multihop or as gossip, all below a session. Only a path watcher takes
 /// a proof back, and only the lower id has one, so the reading of the admission table is the
 /// only sign of the loss that a pair can have.
 fn proof_is_stale(kind: Option<super::probe::PathKind>, proven: bool) -> bool {
     proven
         && matches!(
             kind,
-            Some(super::probe::PathKind::Multihop | super::probe::PathKind::Relay)
+            Some(
+                super::probe::PathKind::Multihop
+                    | super::probe::PathKind::Gossip
+                    | super::probe::PathKind::Relay
+            )
         )
 }
 
@@ -924,6 +928,7 @@ pub(crate) async fn nudge_session(endpoint: &Endpoint, peer: EndpointId) {
     let session = super::probe::NudgeAddrs {
         session: true,
         route: None,
+        gossip: false,
     };
     nudge_with(endpoint, peer, &session).await;
 }
@@ -936,13 +941,7 @@ pub(crate) async fn nudge_with(
     peer: EndpointId,
     addrs: &super::probe::NudgeAddrs,
 ) {
-    let mut known = Vec::new();
-    if addrs.session {
-        known.push(iroh::TransportAddr::Custom(
-            habilis_network_iroh_webrtc_transport::custom_addr(peer),
-        ));
-    }
-    known.extend(addrs.route.clone());
+    let known = super::probe::nudge_known(peer, addrs);
     nudge_addr(endpoint, EndpointAddr::from_parts(peer, known)).await;
 }
 
@@ -1668,6 +1667,14 @@ mod tests {
             !waits_for_the_offer(false, false, Some(PathKind::Ip), true),
             "the lower id never waits"
         );
+    }
+
+    // A pair on gossip is below a session as a pair on multihop is: its proof of a direct path is
+    // stale, and it asks for a session.
+    #[test]
+    fn a_pair_on_gossip_is_offered_a_session_even_when_proven_direct() {
+        assert!(proof_is_stale(Some(PathKind::Gossip), true));
+        assert!(wants_session(false, Some(PathKind::Gossip), true));
     }
 
     // A pair that multihop carries is off the relay, so it is proven direct, but a

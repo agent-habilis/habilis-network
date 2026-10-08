@@ -81,6 +81,7 @@ pub(crate) fn selected_rung(conn: &Connection) -> Option<&'static str> {
         PathKind::Ip => Some("ip"),
         PathKind::WebRtc => Some("webrtc"),
         PathKind::Multihop => Some("multihop"),
+        PathKind::Gossip => Some("gossip"),
         PathKind::Relay => Some("relay"),
         PathKind::None => None,
     }

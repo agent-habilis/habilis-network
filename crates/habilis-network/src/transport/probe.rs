@@ -51,6 +51,9 @@ pub(crate) enum PathKind {
     /// pair on it has no lane of its own: an IP path or a `WebRTC` session ranks
     /// above it.
     Multihop,
+    /// The gossip rung: frames of the mesh topic carry the pair's QUIC. It is not on the relay
+    /// either, and it ranks below multihop and above the relay.
+    Gossip,
     Relay,
     None,
 }
@@ -104,14 +107,23 @@ pub(crate) fn selected_kind(conn: &Connection) -> PathKind {
                 PathKind::Ip
             } else if path.is_relay() {
                 PathKind::Relay
-            } else if matches!(path.remote_addr(), iroh::TransportAddr::Custom(addr)
-                if addr.id() == habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID)
-            {
-                PathKind::WebRtc
+            } else if let iroh::TransportAddr::Custom(addr) = path.remote_addr() {
+                custom_kind(addr.id())
             } else {
                 PathKind::Multihop
             }
         })
+}
+
+/// Pure: the kind of a custom path by the id of its transport.
+pub(crate) fn custom_kind(id: u64) -> PathKind {
+    if id == habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID {
+        PathKind::WebRtc
+    } else if id == habilis_network_iroh_gossip_transport::GOSSIP_TRANSPORT_ID {
+        PathKind::Gossip
+    } else {
+        PathKind::Multihop
+    }
 }
 
 /// Start a path watcher for every raced peer not yet watched: a peer with UDP
@@ -307,7 +319,7 @@ pub(crate) fn plan_relay_dials(
     route_dialed.retain(|peer, _| pairs.iter().any(|(on_relay, ..)| on_relay == peer));
     let mut dials = Vec::new();
     for (peer, has_session, route) in pairs {
-        let Some(addrs) = step(PathKind::Relay, has_session, route.clone()).nudge else {
+        let Some(addrs) = step(PathKind::Relay, has_session, route.clone(), false).nudge else {
             continue;
         };
         let already_dialed = route.is_some() && route_dialed.get(&peer) == route.as_ref();
@@ -379,7 +391,7 @@ pub(crate) async fn on_path_change(
         return;
     };
     let has_session = handle.has_session(&peer);
-    let ladder = step(kind, has_session, route_to(state, peer));
+    let ladder = step(kind, has_session, route_to(state, peer), false);
     let action = ladder.action;
     match action {
         PathAction::Proven | PathAction::Detach => {
@@ -392,12 +404,12 @@ pub(crate) async fn on_path_change(
             }
         }
         PathAction::Rerace => {
-            if kind == PathKind::Multihop {
+            if matches!(kind, PathKind::Multihop | PathKind::Gossip) {
                 // Off the relay, so frames may flow; but the pair has no lane yet.
                 if mark_proven(state, peer) {
-                    crate::gossip::flush_pending(state, ctx, "multihop path").await;
+                    crate::gossip::flush_pending(state, ctx, "path off the relay").await;
                 }
-                tracing::info!(target: super::LOG_TARGET, %peer, "pair is on multihop; racing for a lane");
+                tracing::info!(target: super::LOG_TARGET, %peer, ?kind, "pair is off the relay; racing for a lane");
             } else {
                 if state.direct.get(&peer) == Some(&DirectState::Direct) {
                     state.direct.insert(peer, DirectState::RelayOnly);
@@ -431,8 +443,10 @@ pub(crate) async fn on_path_change(
 pub(crate) fn path_action(selected: PathKind, has_session: bool) -> PathAction {
     match selected {
         PathKind::Ip if has_session => PathAction::Detach,
-        // A pair on multihop is off the relay but has no lane: race for one.
-        PathKind::Relay | PathKind::None | PathKind::Multihop => PathAction::Rerace,
+        // A pair on multihop or on gossip is off the relay but has no lane: race for one.
+        PathKind::Relay | PathKind::None | PathKind::Multihop | PathKind::Gossip => {
+            PathAction::Rerace
+        }
         PathKind::Ip | PathKind::WebRtc => PathAction::Proven,
     }
 }
@@ -445,6 +459,8 @@ pub(crate) struct NudgeAddrs {
     pub(crate) session: bool,
     /// The multihop route to the peer, from the topology.
     pub(crate) route: Option<iroh::TransportAddr>,
+    /// The gossip address of the peer.
+    pub(crate) gossip: bool,
 }
 
 /// The answer to a pair whose selected path is `kind`: the race action and what
@@ -464,18 +480,58 @@ pub(crate) struct Step {
 /// is never learned later without one. A pair with a session needs the session
 /// address in a dial to move its connection onto the session's path. A pair
 /// already on multihop needs no route.
-pub(crate) fn step(kind: PathKind, has_session: bool, route: Option<iroh::TransportAddr>) -> Step {
+pub(crate) fn step(
+    kind: PathKind,
+    has_session: bool,
+    route: Option<iroh::TransportAddr>,
+    gossip_on: bool,
+) -> Step {
     let action = path_action(kind, has_session);
     let route = match kind {
         PathKind::Relay | PathKind::None => route,
-        PathKind::Ip | PathKind::WebRtc | PathKind::Multihop => None,
+        PathKind::Ip | PathKind::WebRtc | PathKind::Multihop | PathKind::Gossip => None,
     };
-    let climbing = matches!(kind, PathKind::Relay | PathKind::None | PathKind::Multihop);
-    let nudge = (climbing && (has_session || route.is_some())).then_some(NudgeAddrs {
+    let gossip = gossip_on && matches!(kind, PathKind::Relay | PathKind::None) && route.is_none();
+    let climbing = matches!(
+        kind,
+        PathKind::Relay | PathKind::None | PathKind::Multihop | PathKind::Gossip
+    );
+    let nudge = (climbing && (has_session || route.is_some() || gossip)).then_some(NudgeAddrs {
         session: has_session,
         route,
+        gossip,
     });
     Step { action, nudge }
+}
+
+/// Pure: whether the gossip transport may carry frames to a pair whose selected path is `kind`.
+/// The engine calls it from a path change in step 10, in the commit that installs the transport.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "its caller lands with the install of the transport"
+    )
+)]
+pub(crate) fn allow_for(kind: PathKind) -> bool {
+    !matches!(kind, PathKind::Ip | PathKind::WebRtc | PathKind::Multihop)
+}
+
+/// Pure: the addresses that a nudge dial names for `peer`.
+pub(crate) fn nudge_known(peer: EndpointId, addrs: &NudgeAddrs) -> Vec<iroh::TransportAddr> {
+    let mut known = Vec::new();
+    if addrs.session {
+        known.push(iroh::TransportAddr::Custom(
+            habilis_network_iroh_webrtc_transport::custom_addr(peer),
+        ));
+    }
+    known.extend(addrs.route.clone());
+    if addrs.gossip {
+        known.push(iroh::TransportAddr::Custom(
+            habilis_network_iroh_gossip_transport::gossip_addr(peer),
+        ));
+    }
+    known
 }
 
 /// Pure: the kind that stands for a peer whose connections read as `kinds`: the best of them, in
@@ -489,8 +545,9 @@ pub(crate) fn best_kind(kinds: impl IntoIterator<Item = PathKind>) -> Option<Pat
         PathKind::Ip => 0,
         PathKind::WebRtc => 1,
         PathKind::Multihop => 2,
-        PathKind::Relay => 3,
-        PathKind::None => 4,
+        PathKind::Gossip => 3,
+        PathKind::Relay => 4,
+        PathKind::None => 5,
     };
     kinds
         .into_iter()
@@ -1462,15 +1519,16 @@ mod tests {
             super::path_action(PathKind::Multihop, false),
             PathAction::Rerace
         );
-        let without_session = step(PathKind::Multihop, false, Some(a_route()));
+        let without_session = step(PathKind::Multihop, false, Some(a_route()), false);
         assert_eq!(without_session.action, PathAction::Rerace);
         assert_eq!(without_session.nudge, None, "the offer's attach nudges");
-        let with_session = step(PathKind::Multihop, true, Some(a_route()));
+        let with_session = step(PathKind::Multihop, true, Some(a_route()), false);
         assert_eq!(
             with_session.nudge,
             Some(NudgeAddrs {
                 session: true,
-                route: None
+                route: None,
+                gossip: false
             }),
             "the session's address moves the connection onto the session"
         );
@@ -1482,35 +1540,38 @@ mod tests {
     #[test]
     fn a_pair_on_the_relay_is_nudged_with_the_route_the_topology_has() {
         use super::{NudgeAddrs, PathAction, step};
-        let nothing = step(PathKind::Relay, false, None);
+        let nothing = step(PathKind::Relay, false, None, false);
         assert_eq!(nothing.action, PathAction::Rerace);
         assert_eq!(
             nothing.nudge, None,
             "no route and no session: nothing to teach"
         );
-        let route_only = step(PathKind::Relay, false, Some(a_route()));
+        let route_only = step(PathKind::Relay, false, Some(a_route()), false);
         assert_eq!(
             route_only.nudge,
             Some(NudgeAddrs {
                 session: false,
-                route: Some(a_route())
+                route: Some(a_route()),
+                gossip: false
             })
         );
-        let both = step(PathKind::Relay, true, Some(a_route()));
+        let both = step(PathKind::Relay, true, Some(a_route()), false);
         assert_eq!(
             both.nudge,
             Some(NudgeAddrs {
                 session: true,
-                route: Some(a_route())
+                route: Some(a_route()),
+                gossip: false
             }),
             "one dial carries both addresses"
         );
-        let session_only = step(PathKind::Relay, true, None);
+        let session_only = step(PathKind::Relay, true, None, false);
         assert_eq!(
             session_only.nudge,
             Some(NudgeAddrs {
                 session: true,
-                route: None
+                route: None,
+                gossip: false
             })
         );
     }
@@ -1523,10 +1584,211 @@ mod tests {
             (PathKind::Ip, true, PathAction::Detach),
             (PathKind::WebRtc, true, PathAction::Proven),
         ] {
-            let decided = step(kind, has_session, Some(a_route()));
+            let decided = step(kind, has_session, Some(a_route()), false);
             assert_eq!(decided.action, action);
             assert_eq!(decided.nudge, None, "{kind:?} needs no dial");
         }
+    }
+
+    // The gossip rung is a kind of its own: a pair on it is not a multihop pair, whichever
+    // transport id the custom address has.
+    #[test]
+    fn a_custom_path_is_classed_by_the_id_of_its_transport() {
+        use super::custom_kind;
+        use habilis_network_iroh_gossip_transport::GOSSIP_TRANSPORT_ID;
+        use habilis_network_iroh_webrtc_transport::WEBRTC_TRANSPORT_ID;
+        assert_eq!(custom_kind(GOSSIP_TRANSPORT_ID), PathKind::Gossip);
+        // The multihop crate is optional here: any other id is read as multihop.
+        assert_eq!(custom_kind(0x6d68), PathKind::Multihop);
+        assert_eq!(custom_kind(WEBRTC_TRANSPORT_ID), PathKind::WebRtc);
+    }
+
+    // The ladder of the engine: gossip is below multihop and above the relay.
+    #[test]
+    fn gossip_ranks_below_multihop_and_above_the_relay() {
+        assert_eq!(
+            super::best_kind([PathKind::Relay, PathKind::Gossip]),
+            Some(PathKind::Gossip)
+        );
+        assert_eq!(
+            super::best_kind([PathKind::Gossip, PathKind::Multihop]),
+            Some(PathKind::Multihop)
+        );
+        assert_eq!(
+            super::best_kind([PathKind::Gossip, PathKind::Ip]),
+            Some(PathKind::Ip)
+        );
+        assert_eq!(
+            super::best_kind([PathKind::Gossip, PathKind::None]),
+            Some(PathKind::Gossip)
+        );
+    }
+
+    // A pair on gossip is off the relay but has no lane, like a pair on multihop: it races for
+    // one, and it has no route to learn.
+    #[test]
+    fn a_pair_on_gossip_races_for_a_lane_and_is_nudged_with_a_session_only() {
+        use super::{NudgeAddrs, PathAction, step};
+        assert_eq!(
+            super::path_action(PathKind::Gossip, false),
+            PathAction::Rerace
+        );
+        assert_eq!(
+            super::path_action(PathKind::Gossip, true),
+            PathAction::Rerace
+        );
+        let without_session = step(PathKind::Gossip, false, Some(a_route()), true);
+        assert_eq!(without_session.action, PathAction::Rerace);
+        assert_eq!(without_session.nudge, None);
+        let with_session = step(PathKind::Gossip, true, Some(a_route()), true);
+        assert_eq!(
+            with_session.nudge,
+            Some(NudgeAddrs {
+                session: true,
+                route: None,
+                gossip: false
+            }),
+            "a pair on gossip already has the gossip address"
+        );
+    }
+
+    // The gossip address is handed out by the selected path, not by the addresses that are
+    // known: only a pair on the relay or on no path, with no route, and with gossip on.
+    #[test]
+    fn the_gossip_address_goes_only_to_a_pair_on_the_relay_with_no_route() {
+        use super::{NudgeAddrs, step};
+        let gossip_only = Some(NudgeAddrs {
+            session: false,
+            route: None,
+            gossip: true,
+        });
+        for kind in [PathKind::Relay, PathKind::None] {
+            assert_eq!(step(kind, false, None, true).nudge, gossip_only, "{kind:?}");
+            assert_eq!(
+                step(kind, false, None, false).nudge,
+                None,
+                "{kind:?} with gossip off"
+            );
+            assert_eq!(
+                step(kind, false, Some(a_route()), true).nudge,
+                Some(NudgeAddrs {
+                    session: false,
+                    route: Some(a_route()),
+                    gossip: false
+                }),
+                "{kind:?}: a route is preferred to the gossip address"
+            );
+        }
+        assert_eq!(
+            step(PathKind::Relay, true, None, true).nudge,
+            Some(NudgeAddrs {
+                session: true,
+                route: None,
+                gossip: true
+            }),
+            "one dial carries the session and the gossip address"
+        );
+        for kind in [
+            PathKind::Ip,
+            PathKind::WebRtc,
+            PathKind::Multihop,
+            PathKind::Gossip,
+        ] {
+            assert!(
+                !step(kind, true, None, true)
+                    .nudge
+                    .is_some_and(|addrs| addrs.gossip),
+                "{kind:?} gets no gossip address"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nudge_dials_the_gossip_address_of_the_peer_when_it_names_it() {
+        use super::{NudgeAddrs, nudge_known};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        let peer = endpoint_id(9);
+        let gossip = iroh::TransportAddr::Custom(gossip_addr(peer));
+        let with = NudgeAddrs {
+            session: false,
+            route: None,
+            gossip: true,
+        };
+        assert_eq!(nudge_known(peer, &with), vec![gossip]);
+        let without = NudgeAddrs {
+            gossip: false,
+            ..with
+        };
+        assert!(nudge_known(peer, &without).is_empty());
+    }
+
+    // The drop rule: frames go only to a pair that no higher rung carries.
+    #[test]
+    fn the_gossip_transport_is_allowed_only_for_a_pair_that_no_higher_rung_carries() {
+        use super::allow_for;
+        for kind in [PathKind::Ip, PathKind::WebRtc, PathKind::Multihop] {
+            assert!(!allow_for(kind), "{kind:?}");
+        }
+        for kind in [PathKind::Relay, PathKind::None, PathKind::Gossip] {
+            assert!(allow_for(kind), "{kind:?}");
+        }
+    }
+
+    // The real `selected_kind`, on a real connection whose only transport is gossip.
+    #[tokio::test]
+    async fn a_connection_on_the_gossip_path_reads_as_the_gossip_kind() {
+        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
+        use iroh::endpoint::{Connection, presets};
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+        use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
+
+        const ALPN: &[u8] = b"habilis-network/test-gossip-kind/0";
+        #[derive(Debug, Clone)]
+        struct Hold;
+        impl ProtocolHandler for Hold {
+            async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+                connection.closed().await;
+                Ok(())
+            }
+        }
+        let (alice_key, bob_key) = (
+            SecretKey::from_bytes(&[21; 32]),
+            SecretKey::from_bytes(&[22; 32]),
+        );
+        let hub = MemoryHub::new();
+        let (alice_handle, bob_handle) = (
+            GossipHandle::new(alice_key.public()),
+            GossipHandle::new(bob_key.public()),
+        );
+        hub.join(&alice_handle);
+        hub.join(&bob_handle);
+        let bind = |key: SecretKey, handle: GossipHandle| async move {
+            Endpoint::builder(presets::Minimal)
+                .secret_key(key)
+                .relay_mode(RelayMode::Disabled)
+                .add_custom_transport(handle.custom_transport())
+                .clear_ip_transports()
+                .clear_relay_transports()
+                .bind()
+                .await
+                .expect("bind a gossip-only endpoint")
+        };
+        let (alice, bob) = (
+            bind(alice_key, alice_handle).await,
+            bind(bob_key, bob_handle).await,
+        );
+        let _router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
+
+        let connection = alice
+            .connect(
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
+                ALPN,
+            )
+            .await
+            .expect("connect over the gossip path");
+
+        assert_eq!(super::selected_kind(&connection), PathKind::Gossip);
     }
 
     // The watcher is dropped when the pool idles a connection out, but the gossip
