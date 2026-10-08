@@ -249,7 +249,7 @@ Read these limits with the figures:
 - 24 runs: three rounds of K = 0, 1, 8, 32 for each end, in turn, one fresh process pair per run. None failed. Two runs started with a load average of 4 or more (4.65 and 6.42, the limit was 4), and their readings lie inside the range of the others.
 - A first matrix of 24 runs gave no result (the standard error was 23 to 27 percent of the slope). Its cause was a flaw of the method, now removed: a closed warm-up session gave back part of its memory after the baseline reading. The K = 0 runs drifted by -1.01 and -0.50 MB over the hold. After the fix they drift by 0.00 to 0.03.
 
-The planning value for the multihop underlay is now 0.075 MB for each idle session, and 0.22 MB once for the node. At the planned G = 32, a node with 32 underlay sessions adds about 2.6 MB. The value 0.2 MB of one session of D stays as the ceiling for a session in use, because it comes from a run with traffic. The assumption of 0.2 MB for an idle underlay session was 2.7 times too high.
+The planning value for the multihop underlay is now 0.075 MB for each idle session, and 0.22 MB once for the node. At the planned G = 32, a node with 32 underlay sessions adds about 2.6 MB. The value 0.2 MB of one session of D stays as the ceiling for a session in use, because it comes from a run with traffic. The assumption of 0.2 MB (0.19 MiB) for an idle underlay session was about 2.5 times too high.
 
 ### The formula
 
