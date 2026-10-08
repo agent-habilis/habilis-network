@@ -600,6 +600,7 @@ pub(crate) async fn on_outcome(
     let DirectOutcome { peer, direct, .. } = outcome;
     if direct {
         graft_proven(state, ctx, peer).await;
+        top_up_lane_offers(state, ctx).await;
     } else if state.demote_unproven(peer) {
         tracing::info!(target: super::LOG_TARGET, %peer, "no direct path within the probe deadline; peer stays relay-only");
     } else {
@@ -724,13 +725,83 @@ pub(crate) async fn retry_direct(
         fill_active_view(state, ctx).await;
         return;
     }
-    for addr in retry_candidates(state, ctx.rendezvous_id, ctx.max_peers, distrust_links) {
-        if distrust_links {
-            state.direct.remove(&addr.id);
+    // The lane offers are paced: a browser pays an ICE gathering budget per round. The members
+    // left out are not touched, so that no `Pending` mark hides them from the next pass.
+    let (lane, rest): (Vec<_>, Vec<_>) =
+        retry_candidates(state, ctx.rendezvous_id, ctx.max_peers, distrust_links)
+            .into_iter()
+            .partition(|addr| is_lane_offer(state, ctx, addr));
+    for addr in rest {
+        retry_one(state, ctx, addr, distrust_links).await;
+    }
+    let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+    for addr in plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick) {
+        retry_one(state, ctx, addr, distrust_links).await;
+    }
+}
+
+/// The members of `lane` that a pass offers a session to: at most
+/// [`LANE_OFFERS_IN_FLIGHT`](crate::util::tuning::LANE_OFFERS_IN_FLIGHT) less the `in_flight`
+/// rounds. The natives come before every browser and each group is ordered by id, as in
+/// [`next_fill`]; `pick` is the random start in each group, so that the members of a mesh do not
+/// all offer to the same few. The others are left as they are: no mark, no want.
+pub(crate) fn plan_lane_offers(
+    lane: Vec<iroh::EndpointAddr>,
+    in_flight: usize,
+    pick: usize,
+) -> Vec<iroh::EndpointAddr> {
+    let budget = crate::util::tuning::LANE_OFFERS_IN_FLIGHT.saturating_sub(in_flight);
+    let (mut browsers, mut natives): (Vec<_>, Vec<_>) =
+        lane.into_iter().partition(needs_webrtc_lane);
+    let mut ordered = Vec::new();
+    for group in [&mut natives, &mut browsers] {
+        group.sort_unstable_by_key(|addr| addr.id);
+        if let Some(start) = pick.checked_rem(group.len()) {
+            group.rotate_left(start);
         }
-        if ensure_direct(state, ctx, addr.id, &addr) {
-            graft_proven(state, ctx, addr.id).await;
-        }
+        ordered.append(group);
+    }
+    ordered.truncate(budget);
+    ordered
+}
+
+/// The candidates of a retry pass that need an offered session: a lane pair, and no session yet.
+fn is_lane_offer(state: &EventLoopState, ctx: &HandlerCtx<'_>, addr: &iroh::EndpointAddr) -> bool {
+    (needs_webrtc_lane(addr) || needs_webrtc_lane(&ctx.endpoint.addr()))
+        && !state
+            .webrtc
+            .as_ref()
+            .is_some_and(|handle| handle.has_session(&addr.id))
+}
+
+/// One member of a retry pass: `ensure_direct`, and the graft if the path is proven.
+async fn retry_one(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    addr: iroh::EndpointAddr,
+    distrust_links: bool,
+) {
+    if distrust_links {
+        state.direct.remove(&addr.id);
+    }
+    if ensure_direct(state, ctx, addr.id, &addr) {
+        graft_proven(state, ctx, addr.id).await;
+    }
+}
+
+/// Offer a session to the lane members that a pass left out, as far as the rounds in flight
+/// allow. The end of a round calls this, so that the next members do not wait for the alive tick.
+pub(crate) async fn top_up_lane_offers(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    if state.relay_transport || state.webrtc.is_none() {
+        return;
+    }
+    let lane: Vec<_> = retry_candidates(state, ctx.rendezvous_id, ctx.max_peers, false)
+        .into_iter()
+        .filter(|addr| is_lane_offer(state, ctx, addr))
+        .collect();
+    let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+    for addr in plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick) {
+        retry_one(state, ctx, addr, false).await;
     }
 }
 
@@ -1143,6 +1214,76 @@ mod tests {
         assert!(any_not_ip([Ip, WebRtc]), "one rides the session");
         assert!(any_not_ip([Ip, Relay]), "one is still on the relay");
         assert!(any_not_ip([Multihop, Ip]), "one rides a route");
+    }
+
+    fn native_shaped(seed: u8) -> EndpointAddr {
+        EndpointAddr::new(endpoint_id(seed)).with_ip_addr("127.0.0.1:4000".parse().expect("addr"))
+    }
+
+    fn browser_shaped(seed: u8) -> EndpointAddr {
+        EndpointAddr::new(endpoint_id(seed))
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"))
+    }
+
+    /// A pass offers a session to at most `LANE_OFFERS_IN_FLIGHT` less the rounds in flight.
+    #[test]
+    fn a_pass_starts_at_most_the_budget_of_lane_offers() {
+        use super::plan_lane_offers;
+        use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
+
+        let lane: Vec<EndpointAddr> = (1..=12).map(browser_shaped).collect();
+        let planned = |in_flight: usize| plan_lane_offers(lane.clone(), in_flight, 0).len();
+
+        assert_eq!(
+            planned(0),
+            LANE_OFFERS_IN_FLIGHT,
+            "twelve members, none in flight"
+        );
+        assert_eq!(planned(3), LANE_OFFERS_IN_FLIGHT - 3, "three rounds run");
+        assert_eq!(planned(LANE_OFFERS_IN_FLIGHT), 0, "the budget is spent");
+        assert_eq!(
+            planned(LANE_OFFERS_IN_FLIGHT + 5),
+            0,
+            "more rounds than the budget"
+        );
+        let few: Vec<EndpointAddr> = (1..=2).map(browser_shaped).collect();
+        assert_eq!(
+            plan_lane_offers(few, 0, 0).len(),
+            2,
+            "fewer members than the budget"
+        );
+    }
+
+    /// The natives come before the browsers, each group by id, from a random start.
+    #[test]
+    fn the_lane_offers_go_to_natives_first_from_a_random_start() {
+        use super::plan_lane_offers;
+
+        let natives: Vec<EndpointAddr> = (1..=6).map(native_shaped).collect();
+        let browsers: Vec<EndpointAddr> = (11..=16).map(browser_shaped).collect();
+        let mut lane = browsers.clone();
+        lane.extend(natives.clone());
+        let mut native_ids: Vec<_> = natives.iter().map(|addr| addr.id).collect();
+        native_ids.sort_unstable();
+
+        for pick in 0..native_ids.len() {
+            let ids: Vec<_> = plan_lane_offers(lane.clone(), 0, pick)
+                .iter()
+                .map(|addr| addr.id)
+                .collect();
+            let expected: Vec<_> = (0..4)
+                .map(|offset| native_ids[(pick + offset) % 6])
+                .collect();
+            assert_eq!(ids, expected, "four natives from the start {pick}");
+        }
+        let all: Vec<_> = plan_lane_offers(lane.clone(), 0, 0)
+            .iter()
+            .map(|addr| addr.id)
+            .collect();
+        assert!(
+            all.iter().all(|id| native_ids.contains(id)),
+            "no browser while natives wait"
+        );
     }
 
     #[test]

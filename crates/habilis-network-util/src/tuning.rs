@@ -439,6 +439,11 @@ pub const RELINK_COOLDOWN_SECS: u64 = 10;
 /// fork keeps one of the two links.
 pub const REGRAFT_AFTER_MS: u64 = 1000;
 
+/// How many offered session rounds a node holds in flight for a lane. A browser pays an ICE
+/// gathering budget per round, and at formation a node would start one round per member. The
+/// members left out of a pass are picked by the next one, and by the end of a round.
+pub const LANE_OFFERS_IN_FLIGHT: usize = 4;
+
 /// How long a node may hold two or more links fewer than G, and how long it waits
 /// between two fallbacks, before a graft asks with a `Join` instead of a low
 /// priority request. A low priority request evicts nobody, so a member that arrives

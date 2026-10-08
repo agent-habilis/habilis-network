@@ -1473,7 +1473,14 @@ pub(crate) fn retry_sessions(
     // this pass decides *which* peers get direct sessions, and `HashMap`
     // iteration order would make that differ run to run on one machine.
     peers.sort_unstable_by_key(|addr| addr.id);
-    for addr in peers {
+    // The lane offers are paced like those of `retry_direct`: one helper decides how many a
+    // pass starts and which, so that the two passes do not add up to a round per member.
+    let (lane, rest): (Vec<_>, Vec<_>) = peers
+        .into_iter()
+        .partition(|addr| own_needs_lane || needs_webrtc_lane(addr));
+    let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+    let lane = super::probe::plan_lane_offers(lane, state.webrtc_admission.in_flight(), pick);
+    for addr in rest.into_iter().chain(lane) {
         negotiate_session(state, ctx, addr.id, addr);
     }
 }
@@ -3591,6 +3598,75 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         server.close().await;
+        endpoint.close().await;
+    }
+
+    /// **A pass paces the lane offers.** Six lane members, none linked: the pass offers a session
+    /// to `LANE_OFFERS_IN_FLIGHT` of them. The others are not touched: no `Pending` mark, so the
+    /// next pass picks them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retry_pass_offers_to_the_budget_of_lane_members_and_leaves_the_others_alone() {
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
+
+        let (endpoint, handle) = endpoint().await;
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = crate::transport::MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let author = crate::testing::nick("alice");
+        let sink = crate::gossip::event::SilentSink;
+        let ctx = crate::daemon::ctx::HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: crate::testing::endpoint_id(99),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let mut state = crate::testing::fresh_state();
+        state.webrtc = Some(handle);
+        state.local_udp_transport = true;
+        state.relay_transport = false;
+        state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
+        let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
+        for (index, id) in members.iter().enumerate() {
+            let addr = EndpointAddr::new(*id)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+            state
+                .peer_endpoints
+                .insert(crate::testing::nick(&format!("member{index}")), addr);
+        }
+
+        crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
+
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            LANE_OFFERS_IN_FLIGHT,
+            "the budget of rounds, not one per member"
+        );
+        let touched = members
+            .iter()
+            .filter(|id| state.direct.contains_key(*id))
+            .count();
+        assert_eq!(
+            touched, LANE_OFFERS_IN_FLIGHT,
+            "the members left out have no mark"
+        );
+
+        // The dials to a closed signal port would hold their slots for a long deadline.
+        state.webrtc_admission.close();
         endpoint.close().await;
     }
 
