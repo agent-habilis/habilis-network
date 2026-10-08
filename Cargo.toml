@@ -50,6 +50,8 @@ version = "0.6.0"
 # workspace entries below like every other member, so it builds against the fork
 # without naming it.
 habilis-network-iroh-multihop-transport = { path = "crates/habilis-network-iroh-multihop-transport" }
+# Gossip as a custom transport. A member like the multihop crate, and it builds for wasm32.
+habilis-network-iroh-gossip-transport = { path = "crates/habilis-network-iroh-gossip-transport" }
 # The *floor*, not the union: `rt-multi-thread`, `fs`, `signal`, `net` and
 # `process` have no wasm32 equivalent, and `net` drags in `mio`, which refuses
 # to build there at all. The engine adds them back under its `host` feature;

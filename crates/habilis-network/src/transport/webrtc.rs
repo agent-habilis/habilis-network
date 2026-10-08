@@ -113,7 +113,9 @@ pub(crate) mod close_code {
     /// connections and this one was the least recently used. The dialer backs off
     /// before it dials this peer on its own again: a send still dials at once.
     pub(crate) const EVICTED: u32 = 11;
-    // Reserved, added with the change that sends it: 10 `GOSSIP_ON_GOSSIP_PATH`.
+    /// A gossip connection whose selected path is the gossip rung: gossip would carry the
+    /// frames that gossip needs to carry itself.
+    pub(crate) const GOSSIP_ON_GOSSIP_PATH: u32 = 10;
     // The next free number is 12.
 
     #[cfg(test)]
@@ -130,6 +132,7 @@ pub(crate) mod close_code {
                 UNICAST_RELAY_REFUSED,
                 IDLE,
                 NOT_A_NEIGHBOR,
+                GOSSIP_ON_GOSSIP_PATH,
                 EVICTED,
             ];
             let distinct: std::collections::HashSet<_> = all.into_iter().collect();

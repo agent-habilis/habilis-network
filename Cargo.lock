@@ -1736,6 +1736,7 @@ dependencies = [
  "divan",
  "futures-util",
  "habilis-network-doc",
+ "habilis-network-iroh-gossip-transport",
  "habilis-network-iroh-multihop-transport",
  "habilis-network-iroh-webrtc-transport",
  "habilis-network-logging",

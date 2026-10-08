@@ -886,6 +886,11 @@ pub struct ConnectionHook {
 impl EndpointHooks for ConnectionHook {
     async fn after_handshake<'a>(&'a self, conn: &'a Connection) -> AfterHandshakeOutcome {
         self.admission.note_connection(conn);
+        // A gossip connection on the gossip rung would carry the gossip that its frames need:
+        // both ends close it, whatever the mesh policy says.
+        if conn.alpn() == iroh_gossip::net::GOSSIP_ALPN {
+            super::path::watch_gossip_recursion(conn);
+        }
         // The accept side watches the gossip connections it holds
         // (`DirectOnlyGossip::accept`). iroh-gossip dials its own, so the
         // watch for those starts here, with the same rule.
@@ -1752,5 +1757,97 @@ mod tests {
             "once the send has ended an admission evicts again"
         );
         fixture.shutdown().await;
+    }
+
+    /// A gossip connection whose selected path is the gossip rung is closed by the hook, at both
+    /// ends, with the code of the recursion rule. The rule reads no mesh policy: here the dialed
+    /// gossip watch is off, which is its default.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
+        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
+        use iroh::endpoint::ConnectionError;
+        use iroh::protocol::{AcceptError, ProtocolHandler, Router};
+        use iroh::{EndpointAddr, RelayMode, SecretKey, TransportAddr};
+
+        #[derive(Debug, Clone)]
+        struct Report(Arc<Mutex<Option<tokio::sync::oneshot::Sender<ConnectionError>>>>);
+        impl ProtocolHandler for Report {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                let reason = conn.closed().await;
+                if let Some(tx) = self.0.lock().expect("report lock").take() {
+                    let _ = tx.send(reason);
+                }
+                Ok(())
+            }
+        }
+
+        let (alice_key, bob_key) = (
+            SecretKey::from_bytes(&[11; 32]),
+            SecretKey::from_bytes(&[12; 32]),
+        );
+        let hub = MemoryHub::new();
+        let (alice_handle, bob_handle) = (
+            GossipHandle::new(alice_key.public()),
+            GossipHandle::new(bob_key.public()),
+        );
+        hub.join(&alice_handle);
+        hub.join(&bob_handle);
+        let bind = |key: SecretKey, handle: GossipHandle, admission: SignalAdmission| async move {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .secret_key(key)
+                .relay_mode(RelayMode::Disabled)
+                .add_custom_transport(handle.custom_transport())
+                .clear_ip_transports()
+                .clear_relay_transports()
+                .hooks(admission.connection_hook())
+                .bind()
+                .await
+                .expect("bind a gossip-only endpoint")
+        };
+        let alice = bind(alice_key, alice_handle, SignalAdmission::new(8)).await;
+        let bob = bind(bob_key, bob_handle, SignalAdmission::new(8)).await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _router = Router::builder(bob.clone())
+            .accept(
+                iroh_gossip::net::GOSSIP_ALPN,
+                Report(Arc::new(Mutex::new(Some(tx)))),
+            )
+            .spawn();
+        let before = crate::transport::path::gossip_recursion_closes();
+
+        let connection = alice
+            .connect(
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
+                iroh_gossip::net::GOSSIP_ALPN,
+            )
+            .await
+            .expect("connect over the gossip path");
+
+        let at_alice = tokio::time::timeout(Duration::from_secs(5), connection.closed())
+            .await
+            .expect("the dialed end was not closed");
+        let at_bob = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("the accepted end was not closed")
+            .expect("the probe reported");
+        // Both ends run the rule: the end that closes first reads `LocallyClosed`, and the other
+        // end reads the code.
+        let code = u64::from(super::super::path::GOSSIP_RECURSION_REFUSED_CODE);
+        let with_code = |end: &ConnectionError| matches!(end, ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == code);
+        let ends = [at_alice, at_bob];
+        assert!(
+            ends.iter()
+                .all(|end| with_code(end) || matches!(end, ConnectionError::LocallyClosed)),
+            "{ends:?}"
+        );
+        assert!(
+            ends.iter().any(with_code),
+            "one end reads the code: {ends:?}"
+        );
+        assert!(
+            crate::transport::path::gossip_recursion_closes() > before,
+            "the close is counted"
+        );
     }
 }

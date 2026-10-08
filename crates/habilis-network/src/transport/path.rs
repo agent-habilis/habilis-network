@@ -24,6 +24,32 @@ pub const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 /// the blob lane's code so a log reader can tell the two refusals apart.
 pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = super::webrtc::close_code::GOSSIP_RELAY_REFUSED;
 
+/// Close code of a gossip connection whose selected path is the gossip rung. Such a
+/// connection would carry, inside gossip frames, the gossip that the frames need.
+pub(crate) const GOSSIP_RECURSION_REFUSED_CODE: u32 =
+    super::webrtc::close_code::GOSSIP_ON_GOSSIP_PATH;
+
+static GOSSIP_RECURSION_CLOSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many gossip connections the recursion rule closed since the process started: a total,
+/// not a delta. A count that grows without bound is a pair that dials again after each close.
+pub(crate) fn gossip_recursion_closes() -> u64 {
+    GOSSIP_RECURSION_CLOSES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Close `conn` with [`GOSSIP_RECURSION_REFUSED_CODE`] once its selected path is the gossip
+/// rung, now or after a path change. Unconditional: it reads no mesh policy.
+pub(crate) fn watch_gossip_recursion(conn: &Connection) {
+    habilis_network_iroh_gossip_transport::watch_recursion(
+        conn,
+        GOSSIP_RECURSION_REFUSED_CODE,
+        || {
+            GOSSIP_RECURSION_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(target: LOG_TARGET, "gossip connection closed: its path is the gossip rung");
+        },
+    );
+}
+
 /// Whether iroh's selected path to the remote is not the relay: a direct UDP
 /// path, or a custom transport (`WebRTC`, multihop), which is peer to peer as
 /// far as the relay is concerned. `false` while no path is selected yet.
