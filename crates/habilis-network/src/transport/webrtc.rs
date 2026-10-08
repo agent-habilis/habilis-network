@@ -3725,10 +3725,10 @@ mod tests {
         }
 
         crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
-        let touched = |state: &crate::daemon::state::EventLoopState| {
+        let touched = |node: &crate::daemon::state::EventLoopState| {
             members
                 .iter()
-                .filter(|id| state.direct.contains_key(*id))
+                .filter(|id| node.direct.contains_key(*id))
                 .count()
         };
         assert_eq!(touched(&state), LANE_OFFERS_IN_FLIGHT, "the first pass");

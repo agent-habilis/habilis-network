@@ -702,9 +702,10 @@ impl SignalAdmission {
     }
 
     /// Woken once, with a stored permit, after any round ended: several ends in a row wake it
-    /// once, and the pass that follows spends the whole budget that they freed. The end of a
-    /// round that failed counts as much as one that attached, and no `DirectOutcome` is sent for
-    /// it, because a verdict of `direct: false` would mark a lane peer relay-only.
+    /// once, and the pass that follows spends the whole budget that they freed, so one wake is
+    /// enough. The end of a round that failed counts as much as one that attached, and no
+    /// `DirectOutcome` is sent for it, because a verdict of `direct: false` would mark a lane peer
+    /// relay-only.
     pub(crate) fn slot_freed(&self) -> Arc<tokio::sync::Notify> {
         self.freed.clone()
     }
