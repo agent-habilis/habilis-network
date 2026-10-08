@@ -106,11 +106,20 @@ mod tests {
             ladder.select_at(start, &first).selected_for_test(),
             Some(&gossip)
         );
-        let later =
+        let growing =
             PathSelectionContext::for_test(None, vec![entry(&gossip, 6), entry(&relay, 23)]);
         assert_eq!(
             ladder
-                .select_at(start + Duration::from_secs(10), &later)
+                .select_at(start + Duration::from_secs(10), &growing)
+                .selected_for_test(),
+            Some(&gossip),
+            "one growing window is not yet life"
+        );
+        let later =
+            PathSelectionContext::for_test(None, vec![entry(&gossip, 6), entry(&relay, 43)]);
+        assert_eq!(
+            ladder
+                .select_at(start + Duration::from_secs(20), &later)
                 .selected_for_test(),
             Some(&relay)
         );
