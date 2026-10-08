@@ -363,18 +363,14 @@ async fn a_ping_is_answered_across_a_pair_with_no_other_path_on_the_gossip_rung(
     fixture.leave().await;
 }
 
-/// The most gossip connections that the recursion rule may close in `CHURN_WINDOW` for a pair
-/// that has only the gossip rung. The rule closes a gossip link whose path is the gossip rung, so
-/// the engine must not graft such a pair: `request_graft` refuses it. With the bound at 0 the
-/// engine grafted the pair again about every 10 s (3, 2 and 3 closes in 30 s). A guard in
-/// `graft_proven` alone left the `PeerInfo` graft: 2, 0, 0, 2, 0, 2, 1 and 1 closes. With the
-/// guard in `request_graft`, six runs gave 0.
-const CHURN_BOUND: u64 = 0;
 const CHURN_WINDOW: Duration = Duration::from_secs(30);
 
 /// A pair with only the gossip rung does not churn: while the pair is read for `CHURN_WINDOW`
-/// (a probe goes every second, as production sends), the count of closes of the recursion rule
-/// stays within `CHURN_BOUND`.
+/// (a probe goes every second, as production sends), the recursion rule closes no gossip link.
+/// The rule closes a gossip link whose path is the gossip rung, so the engine must not graft such
+/// a pair: `request_graft` refuses it. Without the guard the engine grafted the pair again about
+/// every 10 s (3, 2 and 3 closes in 30 s). A guard in `graft_proven` alone left the `PeerInfo`
+/// graft: 2, 0, 0, 2, 0, 2, 1 and 1 closes. With the guard in `request_graft`, six runs gave 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by cargo task matrix"]
 async fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
@@ -396,10 +392,9 @@ async fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
     }
     let closes = fixture.alice.recursion_closes().await - before;
     eprintln!("DIAG {NAME}: {closes} closes of the recursion rule in {CHURN_WINDOW:?}");
-    assert!(
-        closes <= CHURN_BOUND,
-        "{NAME}: the recursion rule closed {closes} gossip links in {CHURN_WINDOW:?}, \
-         more than the bound {CHURN_BOUND}: the pair loops"
+    assert_eq!(
+        closes, 0,
+        "{NAME}: the recursion rule closed {closes} gossip links in {CHURN_WINDOW:?}: the pair loops"
     );
     assert_eq!(
         fixture.alice.rung_to("carol").await,
