@@ -852,6 +852,22 @@ cells! {
     udp_webrtc_multihop_relay_ip_webrtc_direct { Udp, WebRtc, Multihop, Relay } IpWebRtc false;
     #[ignore = "run by cargo task matrix and by the gate row"]
     udp_webrtc_multihop_relay_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop, Relay } IpWebRtcMultihop false;
+    // The lists without `udp` that D8 made valid: a member with `webrtc` and `multihop` reaches
+    // its peer on WebRTC, then on multihop (its underlay still has UDP until Phase 4c step 3).
+    #[ignore = "run by cargo task matrix"]
+    webrtc_multihop_none_direct { WebRtc, Multihop } None false;
+    #[ignore = "run by cargo task matrix"]
+    webrtc_multihop_ip_webrtc_direct { WebRtc, Multihop } IpWebRtc false;
+    #[ignore = "run by cargo task matrix"]
+    webrtc_multihop_ip_webrtc_multihop_direct { WebRtc, Multihop } IpWebRtcMultihop false;
+    #[ignore = "run by cargo task matrix"]
+    webrtc_multihop_ip_webrtc_via_third { WebRtc, Multihop } IpWebRtc true;
+    #[ignore = "run by cargo task matrix"]
+    webrtc_multihop_relay_none_direct { WebRtc, Multihop, Relay } None false;
+    #[ignore = "run by cargo task matrix"]
+    webrtc_multihop_relay_ip_webrtc_direct { WebRtc, Multihop, Relay } IpWebRtc false;
+    #[ignore = "run by cargo task matrix"]
+    webrtc_multihop_relay_ip_webrtc_multihop_direct { WebRtc, Multihop, Relay } IpWebRtcMultihop false;
 }
 
 /// The matrix covers exactly the lists that the protocol accepts: every valid
