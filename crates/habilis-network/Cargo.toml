@@ -175,6 +175,8 @@ interprocess = { version = "2", features = ["tokio"], optional = true }
 [dev-dependencies]
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["test-fixtures", "async-io"] }
 habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false, features = ["test-fixtures"] }
+# `MultihopHandle::refuse_hop_for_test`: the event loop's test makes the gate refuse a hop.
+habilis-network-iroh-multihop-transport = { workspace = true, features = ["test-hooks"] }
 
 # The WebRTC lane is not optional: it is the browser's only way onto the mesh.
 # Only the backend differs by target — str0m natively, the platform's own

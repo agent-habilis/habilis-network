@@ -607,6 +607,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
 
     log_daemon_start(&author);
     let slot_freed = state.webrtc_admission.slot_freed();
+    let route_wake = route_wake_of(&state);
 
     // The surfaced-events ring (`poll`/`fetch` history) lives app-side, fed by
     // the tap the caller attached to `output` before handing it in (both this
@@ -705,6 +706,14 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::top_up_lane_offers(&mut state, &ctx).await;
+            }
+            // The gate of the multihop underlay began to refuse a hop, or admitted one that
+            // it refused: the best first hop to a pair on the relay can be another now, and
+            // waiting for the stuck deadline and a link-state tick would cost 20 s or more.
+            () = route_wake.notified() => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                route_wake_arm(&mut state, &ctx);
             }
             Some(change) = path_rx.recv() => {
                 state.idle.external += 1;
@@ -952,6 +961,29 @@ async fn sleep_until_opt(deadline: Option<TokioInstant>) {
     }
 }
 
+/// The route-wake arm: the gate of the multihop underlay began to refuse a hop, or admitted
+/// one that it refused, so the best first hop to a pair on the relay can be another now.
+/// The pass dials the pairs whose route changed.
+pub(crate) fn route_wake_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    crate::transport::probe::nudge_routable_relay_pairs(state, ctx, true);
+}
+
+/// The wake of the multihop handle, which rings when its relay rule starts to refuse a
+/// hop and when it admits one that it refused.
+#[cfg(feature = "host")]
+fn route_wake_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+    state.multihop.as_ref().map_or_else(
+        || std::sync::Arc::new(tokio::sync::Notify::new()),
+        habilis_network_iroh_multihop_transport::MultihopHandle::route_wake,
+    )
+}
+
+/// Off a host there is no multihop transport: the wake never rings.
+#[cfg(not(feature = "host"))]
+fn route_wake_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+    std::sync::Arc::new(tokio::sync::Notify::new())
+}
+
 /// Build and emit the `ping_report` for the elapsed round, then clear
 /// it. RTT is each pong's local arrival minus the probe broadcast time.
 fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
@@ -1143,3 +1175,71 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {}
+
+#[cfg(all(test, feature = "host"))]
+mod route_wake_tests {
+    use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
+    use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
+
+    use super::route_wake_arm;
+    use crate::testing::{LaneNode, nick};
+    use crate::transport::probe::{PathKind, nudge_routable_relay_pairs};
+
+    async fn multihop_handle() -> MultihopHandle {
+        let secret = SecretKey::generate();
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(&secret))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay");
+        MultihopHandle::new(&secret, underlay, HandleConfig::default()).expect("a handle")
+    }
+
+    /// A pair on the relay has the direct route dialed. The gate then refuses the
+    /// destination as a first hop: the wake makes the pass dial the route through a
+    /// third member within the same turn, without waiting for the stuck deadline and a
+    /// link-state tick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third()
+    {
+        let node = LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        let (me, via, dst) = (
+            multihop_handle().await,
+            multihop_handle().await,
+            multihop_handle().await,
+        );
+        assert!(me.feed_topology(via.link_vector(vec![(dst.app_id(), 1)])));
+        assert!(me.feed_topology(dst.link_vector(vec![])));
+        assert!(me.feed_topology(me.link_vector(vec![(dst.app_id(), 1), (via.app_id(), 1)])));
+        state.multihop = Some(me.clone());
+        state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id()));
+        state.path_kinds.insert(dst.app_id(), PathKind::Relay);
+
+        nudge_routable_relay_pairs(&mut state, &ctx, true);
+        let direct = state
+            .route_dialed
+            .get(&dst.app_id())
+            .cloned()
+            .expect("the direct route is dialed");
+
+        me.refuse_hop_for_test(dst.app_id());
+        route_wake_arm(&mut state, &ctx);
+
+        let dialed = state
+            .route_dialed
+            .get(&dst.app_id())
+            .cloned()
+            .expect("a route is dialed");
+        assert_ne!(dialed, direct, "the route through the third is dialed");
+        assert_eq!(
+            Some(dialed),
+            me.route_addr(dst.app_id()).map(TransportAddr::Custom),
+            "and it is the route that the handle chooses now"
+        );
+        state.webrtc_admission.close();
+        node.endpoint.close().await;
+    }
+}
