@@ -252,7 +252,8 @@ struct Inner {
     /// The peers that we evicted. A peer whose session we detach has no connection to read the code
     /// on, so we refuse its offer for the same minute instead.
     we_evicted: super::ceiling::EvictionBackoff,
-    /// The peers that a test denied (see [`SignalAdmission::deny`]).
+    /// The peers that a test denied (see [`SignalAdmission::deny`]). Empty in a product build:
+    /// only `deny` fills it.
     denied: HashSet<EndpointId>,
 }
 
@@ -848,7 +849,8 @@ impl SignalAdmission {
 
     /// Tests only: refuse every round with `peer`, the ones this node offers and the ones it
     /// answers, or lift the refusal. A test uses it to keep two members from forming a direct
-    /// session, so that their traffic has to take the multihop route.
+    /// session, so that their traffic has to take the multihop route. A test that keeps a pair
+    /// apart denies each member on the other's node: the refusal is one-sided.
     #[cfg(any(test, feature = "iroh-test-utils"))]
     pub(crate) fn deny(&self, peer: EndpointId, denied: bool) {
         let mut inner = self.lock();
@@ -1098,6 +1100,8 @@ mod tests {
         assert!(admission.is_denied(peer(1)));
     }
 
+    /// A guard, not a red test: it cannot fail on a stub that denies nothing. It keeps `deny` from
+    /// denying more than the peer it names, and `deny(false)` from leaving the peer denied.
     #[test]
     fn a_deny_leaves_the_other_peers_alone_and_can_be_lifted() {
         let admission = SignalAdmission::new(16);
