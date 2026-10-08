@@ -14,7 +14,7 @@
 //! only after the cell proves it belongs here, since `FORWARD_ALPN` accepts a
 //! connection from anyone and an unchecked relay is an amplifying reflector.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -48,6 +48,10 @@ const MAX_WRITERS: usize = 64;
 /// Total bytes queued across every writer. Without it the per-hop queue depth is
 /// the only bound, and it multiplies by the writer count instead of capping it.
 const FORWARD_QUEUE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Hops without a vector that get a warning of their own. The ids come off the wire, so the set
+/// that remembers them has a ceiling.
+const UNRESOLVED_SEEN_CAP: usize = 128;
 
 /// Dial attempts before a writer task gives up on an unreachable next hop.
 const DIAL_ATTEMPTS: usize = 4;
@@ -345,6 +349,8 @@ pub(crate) struct Forwarder {
     topology: Arc<RwLock<Topology>>,
     /// Hops that a writer was spawned for with no vector in the topology: a hop without a vector.
     unresolved_hops: AtomicU64,
+    /// The hops that were warned about, one line each: see [`UNRESOLVED_SEEN_CAP`].
+    unresolved_seen: Mutex<HashSet<EndpointId>>,
 }
 
 impl Forwarder {
@@ -371,6 +377,7 @@ impl Forwarder {
             },
             topology,
             unresolved_hops: AtomicU64::new(0),
+            unresolved_seen: Mutex::new(HashSet::new()),
         }
     }
 
@@ -393,7 +400,7 @@ impl Forwarder {
             .filter(|addr| addr.id == hop.underlay_id);
         known.unwrap_or_else(|| {
             let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
-            if total == 1 || total.is_multiple_of(256) {
+            if self.first_without_vector(hop.underlay_id, total) {
                 tracing::warn!(
                     total,
                     hop = %hop.underlay_id.fmt_short(),
@@ -403,6 +410,24 @@ impl Forwarder {
             }
             EndpointAddr::new(hop.underlay_id)
         })
+    }
+
+    /// Whether a warning is due for the hop `underlay_id`, found without a vector for the
+    /// `total`-th time: one per distinct hop. The ids come off the wire, so the set that
+    /// remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`] hops the rule is one warning in 256.
+    fn first_without_vector(&self, underlay_id: EndpointId, total: u64) -> bool {
+        let mut seen = self
+            .unresolved_seen
+            .lock()
+            .expect("unresolved set poisoned");
+        if seen.contains(&underlay_id) {
+            return false;
+        }
+        if seen.len() < UNRESOLVED_SEEN_CAP {
+            seen.insert(underlay_id);
+            return true;
+        }
+        total.is_multiple_of(256)
     }
 
     /// How many cells this node passed on for other nodes.
@@ -751,6 +776,7 @@ impl ProtocolHandler for ForwardAcceptor {
 mod tests {
     use super::{
         Arc, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, RwLock, TransportAddr,
+        UNRESOLVED_SEEN_CAP,
     };
     use crate::addr::{Route, RouteHop};
     use crate::test_support::relay_server;
@@ -1110,6 +1136,29 @@ mod tests {
             "no address is made up"
         );
         assert_eq!(forwarder.unresolved_hops(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_hop_without_a_vector_is_warned_about_once_each() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let (one, other) = (stranger(130).underlay_id, stranger(131).underlay_id);
+        assert!(forwarder.first_without_vector(one, 1), "the first hop");
+        assert!(
+            !forwarder.first_without_vector(one, 2),
+            "the same hop again"
+        );
+        assert!(forwarder.first_without_vector(other, 3), "another hop");
+        // Past the ceiling the rule is one warning in 256.
+        for seed in 0..u8::try_from(UNRESOLVED_SEEN_CAP).expect("fits") {
+            let id = SecretKey::from_bytes(&[seed.wrapping_add(1); 32]).public();
+            forwarder.first_without_vector(id, 4);
+        }
+        let beyond = stranger(200).underlay_id;
+        assert!(
+            !forwarder.first_without_vector(beyond, 5),
+            "past the ceiling"
+        );
+        assert!(forwarder.first_without_vector(beyond, 256), "one in 256");
     }
 
     #[tokio::test]

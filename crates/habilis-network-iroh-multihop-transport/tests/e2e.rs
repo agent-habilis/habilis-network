@@ -214,6 +214,9 @@ async fn connects_end_to_end_through_one_relay() {
     echo.shutdown().await.expect("shutdown echo router");
 }
 
+/// Two paths for one route would exist from the first reply, since the way back is the
+/// route that bob builds from the first cell. So the count is read right after the first
+/// round trip, with no wait for a path to idle out (15 s).
 #[tokio::test]
 async fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
     // Cells go both ways over A -> R -> B. A hop is named by ids, so the route that A dials and

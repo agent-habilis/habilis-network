@@ -15,6 +15,10 @@
 //! - A computed [`Route`] is packed into a [`CustomAddr`](iroh_base::CustomAddr)
 //!   and travels with the connection; the address lookup resolves a target
 //!   endpoint id to one.
+//! - A route names each hop by two ids and carries no address. A forwarder dials
+//!   a hop only at the address of the vector that the hop signed. So one route
+//!   is the same bytes at both ends, and one iroh path; and a relay never dials
+//!   an address that a cell carries.
 //! - [`MultihopHandle`] owns a dedicated **underlay** iroh endpoint that carries
 //!   packets hop-by-hop, and wires the transport onto an application endpoint via
 //!   its [`Preset`](iroh::endpoint::presets::Preset) impl.

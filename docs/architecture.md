@@ -530,6 +530,10 @@ The only decision a relay makes is "forward to the next hop" or "deliver".
 QUIC runs end to end, so relays forward opaque, already-encrypted packets.
 The transport owns a dedicated underlay endpoint, because the application endpoint cannot recursively carry itself.
 The reverse route derives from the forward route, so a reply needs no fresh lookup.
+A hop in a route is two ids, the application endpoint and its underlay endpoint, and no address.
+A forwarder dials a hop only at the address of the vector that the hop signed.
+iroh names a path by the bytes of its address, so an address inside the route would make one route two paths as soon as the two ends hold different versions of it.
+A relay also never dials an address that a cell carries.
 
 ### 9.4 Byte streams
 
