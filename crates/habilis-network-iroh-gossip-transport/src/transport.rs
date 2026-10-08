@@ -189,6 +189,15 @@ impl GossipHandle {
         }
     }
 
+    /// The path selector that keeps gossip below every direct path and above the relay, for
+    /// `Builder::path_selector`. Install it wherever [`Self::custom_transport`] is registered
+    /// and no other selector is: iroh's default treats a custom transport as primary, and the
+    /// mesh topic would carry the bytes of a pair that has an IP path.
+    #[must_use]
+    pub fn path_selector(&self) -> Arc<dyn iroh::endpoint::transports::PathSelector> {
+        Arc::new(crate::selector::GossipLadder::new(self.app_id()))
+    }
+
     /// Allow frames to `dst`, or stop them. The engine calls this when the selected
     /// path of a pair changes: a pair that a higher rung carries has no use for the
     /// flood. A destination that was never named is allowed, so that a handshake to

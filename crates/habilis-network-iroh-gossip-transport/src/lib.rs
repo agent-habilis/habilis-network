@@ -11,6 +11,7 @@ pub mod frame;
 mod lookup;
 pub mod memory;
 mod recursion;
+mod selector;
 mod sink;
 mod transport;
 
