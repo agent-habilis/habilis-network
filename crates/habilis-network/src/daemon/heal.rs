@@ -204,6 +204,7 @@ pub(super) async fn resubscribe_tick(
             // emits its own NeighborUps (and re-arms the probe gate).
             state.rendezvous_linked = false;
             let ctx = env.parts.ctx(link.sender);
+            // Nothing in the normal path: the guard for a splitter that ended early.
             if let Some(mut dead_receiver) = dead_receiver.into_dead() {
                 gossip::drain_dead_receiver(&mut dead_receiver, state, app, &ctx).await;
             }
