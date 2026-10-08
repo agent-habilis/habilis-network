@@ -90,6 +90,10 @@ const UNDERLAY_KEY_DOMAIN: &str = "habilis-network-iroh-multihop-transport under
 /// Terminal-delivery queue depth into the local transport's `poll_recv`.
 const INBOUND_CAP: usize = 256;
 
+/// How many node-disjoint routes [`MultihopHandle::route_addr`] weighs, shortest
+/// first, to find one whose first hop the gate does not refuse.
+const FIRST_HOP_CHOICES: usize = 4;
+
 /// How a [`MultihopHandle`] behaves. The mesh policy and the caller decide it;
 /// an endpoint that is injected into a mesh must be built with the values that
 /// mesh's policy implies (see `check_injected_identity` in the engine).
@@ -262,17 +266,30 @@ impl MultihopHandle {
     /// not while a non-relay path is selected. The address is one fixed route:
     /// see the note on `MultihopLookup`.
     ///
+    /// A route whose first hop the gate refuses now gives way to the next one, the
+    /// shortest of those that do not. The link vector waits for the stuck deadline
+    /// before it drops that hop; our own choice of a first hop does not. When every
+    /// first hop is refused, the shortest route stays.
+    ///
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
     #[must_use]
     pub fn route_addr(&self, dst: EndpointId) -> Option<iroh_base::CustomAddr> {
-        self.inner
+        let refusing = self.inner.forwarder.refusing_hops();
+        let mut routes = self
+            .inner
             .topology
             .read()
             .expect("topology lock poisoned")
-            .route_to(self.inner.self_id, dst, 1)
-            .into_iter()
-            .next()
+            .route_to(self.inner.self_id, dst, FIRST_HOP_CHOICES);
+        let live = routes.iter().position(|route| {
+            route
+                .hops()
+                .first()
+                .is_some_and(|hop| !refusing.contains(&hop.app_id))
+        });
+        (!routes.is_empty())
+            .then(|| routes.swap_remove(live.unwrap_or(0)))
             .inspect(|route| {
                 tracing::debug!(target: "habilis_lookup", me = %self.inner.self_id.fmt_short(), remote = %dst.fmt_short(), hops = %route.describe(), "multihop route chosen (route_addr)");
             })
@@ -472,7 +489,7 @@ mod tests {
     use std::time::Duration;
 
     use iroh::endpoint::presets;
-    use iroh::{Endpoint, RelayMode, SecretKey};
+    use iroh::{Endpoint, EndpointId, RelayMode, SecretKey};
 
     use super::{HandleConfig, MultihopHandle, underlay_secret};
     use crate::addr::{Route, RouteHop};
@@ -735,6 +752,82 @@ mod tests {
             ..HandleConfig::default()
         };
         MultihopHandle::new(secret, underlay, config).expect("underlay on the derived key")
+    }
+
+    /// A handle on a loopback underlay that knows two node-disjoint routes to
+    /// `dst`: a short one, `short -> dst`, and a long one, `long_a -> long_b -> dst`.
+    /// Returns the handle and the hops, each as `(app id, underlay id)`.
+    async fn handle_with_two_routes() -> (MultihopHandle, [(EndpointId, EndpointId); 4]) {
+        let me = SecretKey::from_bytes(&[61; 32]);
+        let handle =
+            MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
+                .expect("underlay on the derived key");
+        let nodes = [62_u8, 63, 64, 65].map(|seed| SecretKey::from_bytes(&[seed; 32]));
+        let [short, long_a, long_b, dst] = nodes.each_ref().map(SecretKey::public);
+        let advertise = |node: &SecretKey, links: Vec<(EndpointId, u32)>| {
+            let underlay = iroh::EndpointAddr::new(underlay_secret(node).public());
+            handle.feed_topology(crate::LinkVector::signed(
+                node,
+                crate::topology::wall_clock_ms(),
+                underlay,
+                links,
+            ));
+        };
+        advertise(&nodes[0], vec![(dst, 1)]);
+        advertise(&nodes[1], vec![(long_b, 1)]);
+        advertise(&nodes[2], vec![(dst, 1)]);
+        advertise(&nodes[3], vec![]);
+        assert!(handle.feed_topology(handle.link_vector(vec![(short, 1), (long_a, 1)])));
+        let hops = nodes.map(|node| (node.public(), underlay_secret(&node).public()));
+        (handle, hops)
+    }
+
+    fn first_hop_of(handle: &MultihopHandle, dst: EndpointId) -> EndpointId {
+        let addr = handle.route_addr(dst).expect("a route to dst");
+        Route::decode(&addr).expect("a route").hops()[0].app_id
+    }
+
+    #[tokio::test]
+    async fn the_shorter_route_is_chosen_while_its_first_hop_is_not_refused() {
+        let (handle, [(short, _), _, _, (dst, _)]) = handle_with_two_routes().await;
+        assert_eq!(first_hop_of(&handle, dst), short);
+    }
+
+    #[tokio::test]
+    async fn a_route_whose_first_hop_is_refused_now_gives_way_to_the_longer_one() {
+        let (handle, [(short, short_underlay), (long_a, _), _, (dst, _)]) =
+            handle_with_two_routes().await;
+        handle
+            .inner
+            .forwarder
+            .refuse_hop_for_test(short_underlay, short);
+        assert!(
+            handle.stuck_hops().is_empty(),
+            "refused now, not past the deadline: the link vector still names the hop"
+        );
+        assert_eq!(first_hop_of(&handle, dst), long_a);
+    }
+
+    #[tokio::test]
+    async fn the_shorter_route_is_kept_when_every_first_hop_is_refused() {
+        let (
+            handle,
+            [
+                (short, short_underlay),
+                (long_a, long_underlay),
+                _,
+                (dst, _),
+            ],
+        ) = handle_with_two_routes().await;
+        handle
+            .inner
+            .forwarder
+            .refuse_hop_for_test(short_underlay, short);
+        handle
+            .inner
+            .forwarder
+            .refuse_hop_for_test(long_underlay, long_a);
+        assert_eq!(first_hop_of(&handle, dst), short);
     }
 
     #[tokio::test]

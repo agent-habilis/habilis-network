@@ -286,6 +286,17 @@ impl WriterPool {
         }
     }
 
+    /// The hops that the gate refuses now, stuck or not.
+    fn refusing_app_ids(&self) -> Vec<EndpointId> {
+        self.health
+            .lock()
+            .expect("health mutex poisoned")
+            .values()
+            .filter(|hop| hop.refused_since.is_some())
+            .map(|hop| hop.app_id)
+            .collect()
+    }
+
     fn stuck_app_ids(&self) -> Vec<EndpointId> {
         self.health
             .lock()
@@ -354,6 +365,19 @@ impl Forwarder {
     /// The application ids of the hops stuck on the relay past the deadline.
     pub(crate) fn stuck_hops(&self) -> Vec<EndpointId> {
         self.pool.stuck_app_ids()
+    }
+
+    /// The application ids of the hops that the gate refuses now, stuck or not.
+    pub(crate) fn refusing_hops(&self) -> Vec<EndpointId> {
+        self.pool.refusing_app_ids()
+    }
+
+    /// Mark a hop as refused now, without the deadline having passed, as a test of
+    /// the choice of a route needs it.
+    #[cfg(test)]
+    pub(crate) fn refuse_hop_for_test(&self, underlay: EndpointId, app_id: EndpointId) {
+        self.pool.track(underlay, app_id);
+        self.pool.note_refused(underlay, Duration::from_mins(1));
     }
 
     /// Rate-limited visibility for a refused cell. Whoever is sending them sets
