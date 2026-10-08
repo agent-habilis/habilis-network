@@ -214,6 +214,9 @@ struct WriterPool {
     refused_on_relay: AtomicU64,
     /// The relay rule's verdict per next hop, keyed like `writers`.
     health: Mutex<HashMap<EndpointId, HopHealth>>,
+    /// Woken when the gate starts to refuse a hop, and when it admits one that it
+    /// refused: the moments at which the best first hop to a peer can change.
+    route_wake: Arc<tokio::sync::Notify>,
 }
 
 impl WriterPool {
@@ -259,6 +262,9 @@ impl WriterPool {
         let Some(hop) = health.get_mut(&underlay) else {
             return;
         };
+        if hop.refused_since.is_none() {
+            self.route_wake.notify_one();
+        }
         let since = *hop.refused_since.get_or_insert_with(Instant::now);
         if !hop.stuck && since.elapsed() >= stuck_after {
             hop.stuck = true;
@@ -276,7 +282,9 @@ impl WriterPool {
         let Some(hop) = health.get_mut(&underlay) else {
             return;
         };
-        hop.refused_since = None;
+        if hop.refused_since.take().is_some() {
+            self.route_wake.notify_one();
+        }
         if std::mem::take(&mut hop.stuck) {
             tracing::info!(
                 hop = %underlay.fmt_short(),
@@ -365,6 +373,12 @@ impl Forwarder {
     /// The application ids of the hops stuck on the relay past the deadline.
     pub(crate) fn stuck_hops(&self) -> Vec<EndpointId> {
         self.pool.stuck_app_ids()
+    }
+
+    /// Woken when the gate starts to refuse a hop, and when it admits one that it
+    /// refused.
+    pub(crate) fn route_wake(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.pool.route_wake)
     }
 
     /// The application ids of the hops that the gate refuses now, stuck or not.
@@ -961,6 +975,35 @@ mod tests {
         let list = super::path_list([(relay, true), (ip, false)]);
         assert!(list.starts_with("Relay("), "{list}");
         assert!(list.ends_with(")* Ip(127.0.0.1:9)"), "{list}");
+    }
+
+    /// Whether `wake` holds a wake-up now.
+    async fn woke(wake: &tokio::sync::Notify) -> bool {
+        tokio::time::timeout(Duration::from_millis(20), wake.notified())
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn the_pool_wakes_at_the_first_refusal_of_a_hop_and_at_its_recovery() {
+        let (hop, app) = (stranger(13).underlay.id, stranger(14).app_id);
+        let pool = super::WriterPool::default();
+        let wake = Arc::clone(&pool.route_wake);
+        pool.track(hop, app);
+        assert!(!woke(&wake).await, "a hop that was never refused");
+        pool.note_admitted(hop);
+        assert!(!woke(&wake).await, "an admitted hop that was not refused");
+
+        pool.note_refused(hop, Duration::from_mins(1));
+        assert!(woke(&wake).await, "the first refusal");
+        pool.note_refused(hop, Duration::from_mins(1));
+        pool.note_refused(hop, Duration::from_mins(1));
+        assert!(!woke(&wake).await, "a refusal that goes on is not news");
+
+        pool.note_admitted(hop);
+        assert!(woke(&wake).await, "the recovery of a refused hop");
+        pool.note_admitted(hop);
+        assert!(!woke(&wake).await, "an admitted hop that stays admitted");
     }
 
     #[test]

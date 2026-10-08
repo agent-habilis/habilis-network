@@ -295,21 +295,41 @@ impl Topology {
     pub fn route_to(&self, src: EndpointId, dst: EndpointId, max_paths: usize) -> Vec<Route> {
         self.graph()
             .disjoint_paths(src, dst, max_paths)
-            .into_iter()
-            .filter_map(|path| {
-                let hops = path
-                    .hops
-                    .iter()
-                    .map(|hop| {
-                        self.underlay_of(*hop).map(|underlay| RouteHop {
-                            app_id: *hop,
-                            underlay,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                Route::new(hops)
-            })
+            .iter()
+            .filter_map(|path| self.route_of(path))
             .collect()
+    }
+
+    /// The shortest [`Route`] from `src` to `dst` that does not start with a hop in
+    /// `refused`, with the same filter on underlay addresses as [`Self::route_to`].
+    /// The destination can be a refused first hop: a direct link is skipped too.
+    #[must_use]
+    pub fn route_to_avoiding_first_hops(
+        &self,
+        src: EndpointId,
+        dst: EndpointId,
+        refused: &std::collections::HashSet<EndpointId>,
+    ) -> Option<Route> {
+        let path = self
+            .graph()
+            .shortest_path_avoiding_first_hops(src, dst, refused)?;
+        self.route_of(&path)
+    }
+
+    /// `path` as a dialable [`Route`], or `None` if a hop has not advertised its
+    /// underlay address yet (we can't dial a hop we can't reach).
+    fn route_of(&self, path: &crate::graph::Path) -> Option<Route> {
+        let hops = path
+            .hops
+            .iter()
+            .map(|hop| {
+                self.underlay_of(*hop).map(|underlay| RouteHop {
+                    app_id: *hop,
+                    underlay,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Route::new(hops)
     }
 
     /// A JSON-serializable snapshot of the routing graph from `self_id`'s point

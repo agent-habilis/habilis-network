@@ -65,7 +65,7 @@ pub use metric::LinkMetric;
 pub use topology::{LinkVector, Topology, TopologyEdge, TopologyView};
 
 use crate::addr::Route as RouteInner;
-use crate::lookup::MultihopLookup;
+use crate::lookup::{MultihopLookup, RouteChooser};
 use crate::selector::MultihopLadder;
 use crate::transport::{MultihopTransport, Shared};
 use crate::underlay::{ForwardAcceptor, Forwarder};
@@ -89,10 +89,6 @@ const UNDERLAY_KEY_DOMAIN: &str = "habilis-network-iroh-multihop-transport under
 
 /// Terminal-delivery queue depth into the local transport's `poll_recv`.
 const INBOUND_CAP: usize = 256;
-
-/// How many node-disjoint routes [`MultihopHandle::route_addr`] weighs, shortest
-/// first, to find one whose first hop the gate does not refuse.
-const FIRST_HOP_CHOICES: usize = 4;
 
 /// How a [`MultihopHandle`] behaves. The mesh policy and the caller decide it;
 /// an endpoint that is injected into a mesh must be built with the values that
@@ -145,6 +141,8 @@ struct HandleInner {
     last_seq: AtomicU64,
     forwarder: Arc<Forwarder>,
     topology: Arc<RwLock<Topology>>,
+    /// Picks the route to a destination, for `route_addr` and for the lookup.
+    chooser: RouteChooser,
     self_id: EndpointId,
     underlay: Endpoint,
     transport: Arc<MultihopTransport>,
@@ -228,13 +226,17 @@ impl MultihopHandle {
         }
         let router = router.spawn();
 
+        let topology = Arc::new(RwLock::new(Topology::with_max_age(config.vector_max_age)));
+        let chooser = RouteChooser::new(app_id, Arc::clone(&topology), Arc::clone(&forwarder));
+
         Ok(Self {
             inner: Arc::new(HandleInner {
                 secret: secret.clone(),
                 config,
                 last_seq: AtomicU64::new(0),
                 forwarder: Arc::clone(&forwarder),
-                topology: Arc::new(RwLock::new(Topology::with_max_age(config.vector_max_age))),
+                topology,
+                chooser,
                 self_id: app_id,
                 underlay,
                 transport,
@@ -266,34 +268,28 @@ impl MultihopHandle {
     /// not while a non-relay path is selected. The address is one fixed route:
     /// see the note on `MultihopLookup`.
     ///
-    /// A route whose first hop the gate refuses now gives way to the next one, the
-    /// shortest of those that do not. The link vector waits for the stuck deadline
-    /// before it drops that hop; our own choice of a first hop does not. When every
-    /// first hop is refused, the shortest route stays.
+    /// A route whose first hop the gate refuses now gives way to the shortest one
+    /// that starts elsewhere, also when the first hop is `dst` itself. The link
+    /// vector waits for the stuck deadline before it drops that hop; our own
+    /// choice of a first hop does not. When every first hop is refused, the
+    /// shortest route stays. The address lookup chooses the same way.
     ///
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
     #[must_use]
     pub fn route_addr(&self, dst: EndpointId) -> Option<iroh_base::CustomAddr> {
-        let refusing = self.inner.forwarder.refusing_hops();
-        let mut routes = self
-            .inner
-            .topology
-            .read()
-            .expect("topology lock poisoned")
-            .route_to(self.inner.self_id, dst, FIRST_HOP_CHOICES);
-        let live = routes.iter().position(|route| {
-            route
-                .hops()
-                .first()
-                .is_some_and(|hop| !refusing.contains(&hop.app_id))
-        });
-        (!routes.is_empty())
-            .then(|| routes.swap_remove(live.unwrap_or(0)))
-            .inspect(|route| {
-                tracing::debug!(target: "habilis_lookup", me = %self.inner.self_id.fmt_short(), remote = %dst.fmt_short(), hops = %route.describe(), "multihop route chosen (route_addr)");
-            })
-            .map(|route| route.encode())
+        let chosen = self.inner.chooser.choose(dst)?;
+        tracing::debug!(target: "habilis_lookup", me = %self.inner.self_id.fmt_short(), remote = %dst.fmt_short(), first_hop_skipped = chosen.skipped, hops = %chosen.route.describe(), "multihop route chosen (route_addr)");
+        Some(chosen.route.encode())
+    }
+
+    /// Woken when the relay rule starts to refuse a hop, and when it admits one
+    /// that it refused: the moments at which the best route to a peer can change,
+    /// well before the stuck deadline and the next link-state tick. A holder that
+    /// dials by [`route_addr`](Self::route_addr) can choose again then.
+    #[must_use]
+    pub fn route_wake(&self) -> Arc<tokio::sync::Notify> {
+        self.inner.forwarder.route_wake()
     }
 
     /// Drop an origin's advertised links (e.g. a peer that left the mesh).
@@ -462,7 +458,7 @@ impl MultihopHandle {
     /// address, for `Builder::address_lookup`.
     #[must_use]
     pub fn address_lookup(&self) -> impl AddressLookup + use<> {
-        MultihopLookup::new(self.inner.self_id, Arc::clone(&self.inner.topology))
+        MultihopLookup::new(self.inner.chooser.clone())
     }
 
     /// The path selector: a direct path, then multihop, then the relay. For
@@ -806,6 +802,85 @@ mod tests {
             "refused now, not past the deadline: the link vector still names the hop"
         );
         assert_eq!(first_hop_of(&handle, dst), long_a);
+    }
+
+    #[tokio::test]
+    async fn a_direct_route_whose_destination_is_refused_gives_way_to_a_route_through_a_third() {
+        // The shape of a cell through a third member: the shortest route is the
+        // direct edge, and its first hop is the destination itself. It has no
+        // interior hop, so a search for disjoint routes stops after it.
+        let me = SecretKey::from_bytes(&[71; 32]);
+        let handle =
+            MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
+                .expect("underlay on the derived key");
+        let (via, dst) = (
+            SecretKey::from_bytes(&[72; 32]),
+            SecretKey::from_bytes(&[73; 32]),
+        );
+        let advertise = |node: &SecretKey, links: Vec<(EndpointId, u32)>| {
+            handle.feed_topology(crate::LinkVector::signed(
+                node,
+                crate::topology::wall_clock_ms(),
+                iroh::EndpointAddr::new(underlay_secret(node).public()),
+                links,
+            ));
+        };
+        advertise(&via, vec![(dst.public(), 1)]);
+        advertise(&dst, vec![]);
+        assert!(
+            handle.feed_topology(handle.link_vector(vec![(dst.public(), 1), (via.public(), 1)]))
+        );
+        assert_eq!(first_hop_of(&handle, dst.public()), dst.public(), "direct");
+
+        handle
+            .inner
+            .forwarder
+            .refuse_hop_for_test(underlay_secret(&dst).public(), dst.public());
+        let addr = handle.route_addr(dst.public()).expect("a route to dst");
+        let hops: Vec<EndpointId> = Route::decode(&addr)
+            .expect("a route")
+            .hops()
+            .iter()
+            .map(|hop| hop.app_id)
+            .collect();
+        assert_eq!(hops, vec![via.public(), dst.public()]);
+    }
+
+    #[tokio::test]
+    async fn the_address_lookup_chooses_the_route_like_route_addr() {
+        use iroh::address_lookup::AddressLookup as _;
+        use n0_future::StreamExt as _;
+        let (handle, [(short, short_underlay), (long_a, _), _, (dst, _)]) =
+            handle_with_two_routes().await;
+        let first_hop_resolved = || async {
+            let mut answers = handle
+                .address_lookup()
+                .resolve(dst)
+                .expect("the lookup answers");
+            let item = answers.next().await.expect("an item").expect("no error");
+            let custom = item
+                .endpoint_info()
+                .addrs()
+                .find(|addr| addr.is_custom())
+                .map(|addr| {
+                    let iroh::TransportAddr::Custom(custom) = addr else {
+                        unreachable!("is_custom was true");
+                    };
+                    custom.clone()
+                })
+                .expect("a custom address");
+            Route::decode(&custom).expect("a route").hops()[0].app_id
+        };
+        assert_eq!(first_hop_resolved().await, short);
+        handle
+            .inner
+            .forwarder
+            .refuse_hop_for_test(short_underlay, short);
+        assert_eq!(
+            first_hop_resolved().await,
+            long_a,
+            "iroh is not handed the refused first hop"
+        );
     }
 
     #[tokio::test]

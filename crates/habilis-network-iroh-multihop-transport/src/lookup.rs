@@ -6,6 +6,7 @@
 //! packets ride that route. Because the route is self-contained, no hop needs a
 //! separate lookup — the destination even derives its reply route from the cell.
 
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use iroh::EndpointId;
@@ -14,7 +15,9 @@ use iroh::address_lookup::{AddressLookup, Error, Item};
 use iroh::endpoint_info::{EndpointData, EndpointInfo};
 use n0_future::{boxed::BoxStream, stream};
 
+use crate::addr::Route;
 use crate::topology::Topology;
+use crate::underlay::Forwarder;
 
 /// Provenance tag iroh attaches to items this lookup produces.
 const PROVENANCE: &str = "iroh-multihop";
@@ -29,13 +32,71 @@ const PROVENANCE: &str = "iroh-multihop";
 /// answers only if the topology has a route at that moment.
 #[derive(Debug)]
 pub(crate) struct MultihopLookup {
-    self_id: EndpointId,
-    topology: Arc<RwLock<Topology>>,
+    chooser: RouteChooser,
 }
 
 impl MultihopLookup {
-    pub(crate) fn new(self_id: EndpointId, topology: Arc<RwLock<Topology>>) -> Self {
-        Self { self_id, topology }
+    pub(crate) fn new(chooser: RouteChooser) -> Self {
+        Self { chooser }
+    }
+}
+
+/// A route that [`RouteChooser::choose`] picked.
+#[derive(Debug)]
+pub(crate) struct Chosen {
+    pub(crate) route: Route,
+    /// Whether the shortest route was left for another, because the gate refuses
+    /// its first hop.
+    pub(crate) skipped: bool,
+}
+
+/// The one place that picks the route to a destination, for the lookup that iroh
+/// asks and for the dial that carries the route itself.
+///
+/// It takes the shortest route, unless the gate refuses its first hop now. Then
+/// it takes the shortest one that starts elsewhere, and when there is none, the
+/// shortest again. The link vector that other nodes see drops a hop only after
+/// the stuck deadline; our own choice of a first hop reads the live gate.
+#[derive(Debug, Clone)]
+pub(crate) struct RouteChooser {
+    self_id: EndpointId,
+    topology: Arc<RwLock<Topology>>,
+    forwarder: Arc<Forwarder>,
+}
+
+impl RouteChooser {
+    pub(crate) fn new(
+        self_id: EndpointId,
+        topology: Arc<RwLock<Topology>>,
+        forwarder: Arc<Forwarder>,
+    ) -> Self {
+        Self {
+            self_id,
+            topology,
+            forwarder,
+        }
+    }
+
+    pub(crate) fn choose(&self, dst: EndpointId) -> Option<Chosen> {
+        let refused: HashSet<EndpointId> = self.forwarder.refusing_hops().into_iter().collect();
+        let topology = self.topology.read().expect("topology lock poisoned");
+        let shortest = topology.route_to(self.self_id, dst, 1).into_iter().next();
+        let first_is_refused = shortest
+            .as_ref()
+            .and_then(|route| route.hops().first())
+            .is_some_and(|hop| refused.contains(&hop.app_id));
+        if first_is_refused
+            && let Some(route) = topology.route_to_avoiding_first_hops(self.self_id, dst, &refused)
+        {
+            return Some(Chosen {
+                route,
+                skipped: true,
+            });
+        }
+        shortest.map(|route| Chosen {
+            route,
+            skipped: false,
+        })
     }
 }
 
@@ -50,15 +111,9 @@ impl AddressLookup for MultihopLookup {
         // discarded alternate on every dial. `max_paths` stays on the handle
         // for the failover consumer that will want it; until one exists, the
         // resolver pays for exactly what it uses.
-        let route = self
-            .topology
-            .read()
-            .expect("topology lock poisoned")
-            .route_to(self.self_id, endpoint_id, 1)
-            .into_iter()
-            .next();
-        tracing::debug!(target: "habilis_lookup", me = %self.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = route.is_some(), hops = %route.as_ref().map_or_else(String::new, crate::addr::Route::describe), "multihop lookup");
-        let route = route?;
+        let chosen = self.chooser.choose(endpoint_id);
+        tracing::debug!(target: "habilis_lookup", me = %self.chooser.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = chosen.is_some(), first_hop_skipped = chosen.as_ref().is_some_and(|chosen| chosen.skipped), hops = %chosen.as_ref().map_or_else(String::new, |chosen| chosen.route.describe()), "multihop lookup");
+        let route = chosen?.route;
         let info = EndpointInfo::from_parts(
             endpoint_id,
             EndpointData::from_iter([TransportAddr::Custom(route.encode())]),
