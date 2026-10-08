@@ -861,7 +861,9 @@ impl SignalAdmission {
         }
     }
 
-    /// Whether a test denied `peer`.
+    /// Whether a test denied `peer`. The underlay tick reads it, so it exists where the
+    /// underlay does.
+    #[cfg(any(feature = "multihop", test))]
     pub(crate) fn is_denied(&self, peer: EndpointId) -> bool {
         self.lock().denied.contains(&peer)
     }
