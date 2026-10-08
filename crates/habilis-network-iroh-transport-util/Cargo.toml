@@ -27,7 +27,11 @@ test-hooks = []
 
 [dependencies]
 iroh.workspace = true
+# `Instant` that also runs in a browser, where the std one panics.
+n0-future.workspace = true
 
 [dev-dependencies]
+# The constructors of synthetic paths, for the tests of the liveness rule.
+iroh = { workspace = true, features = ["selector-test-utils"] }
 # `CustomAddr` is not re-exported through `iroh`; a test builds one to read its id.
 iroh-base.workspace = true

@@ -45,6 +45,7 @@ native = [
     "dep:rand",
     "dep:bytes",
     "dep:iroh",
+    "dep:n0-future",
     "dep:habilis-network-iroh-transport-util",
     "dep:noq-udp",
     "dep:n0-watcher",
@@ -57,6 +58,7 @@ web = [
     "dep:web-sys",
     "dep:futures",
     "dep:iroh",
+    "dep:n0-future",
     "dep:habilis-network-iroh-transport-util",
     "dep:noq-udp",
     "dep:n0-watcher",
@@ -88,6 +90,8 @@ tracing.workspace = true
 # `unstable-custom-transports` gates the CustomTransport/CustomEndpoint/
 # CustomSender traits both backends implement; the workspace entry turns it on.
 iroh = { workspace = true, optional = true }
+# The clock of the path selector: `Instant` that also runs in a browser.
+n0-future = { workspace = true, optional = true }
 habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util", optional = true }
 # `RecvMeta` appears in the `CustomEndpoint::poll_recv` signature.
 noq-udp = { workspace = true, optional = true }
@@ -131,6 +135,8 @@ web-sys = { workspace = true, optional = true, features = [
 ] }
 
 [dev-dependencies]
+# The constructors of synthetic paths, for the tests of the path selector.
+iroh = { workspace = true, features = ["selector-test-utils"] }
 # `process` and `io-util` for the `session_cost` example, which drives a peer process over pipes.
 tokio = { workspace = true, features = ["rt-multi-thread", "process", "io-util", "io-std"] }
 serde_json.workspace = true
