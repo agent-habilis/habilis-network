@@ -978,7 +978,7 @@ fn route_wake_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> 
     )
 }
 
-/// Off a host there is no multihop transport: the wake never rings.
+/// Without the `multihop` feature there is no multihop transport: the wake never rings.
 #[cfg(not(feature = "multihop"))]
 fn route_wake_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
     std::sync::Arc::new(tokio::sync::Notify::new())

@@ -287,8 +287,8 @@ async fn build_member_endpoint(
 
 /// Off a host the endpoint is always the plain peer one, whatever the mesh policy says
 /// about `multihop`: the underlay of the multihop transport is built by
-/// `build_peer_multihop_with`, which is native. A browser build that takes part in
-/// multihop builds it here in a later step.
+/// `build_peer_multihop_with`, which is native, so the multihop slot of the result is
+/// always `None`. Building it for a browser is the job of a later step.
 #[cfg(not(feature = "host"))]
 async fn build_member_endpoint(
     build: &SetupBuild<'_>,
@@ -551,8 +551,8 @@ struct Assembled {
     mint_mesh: Option<Mesh>,
     /// The multi-hop transport handle when the mesh policy has `multihop`, threaded
     /// into `EventLoopState` so the link-state tick can feed its routing table.
-    /// Host-only: the transport forwards real UDP packets, so off a host the
-    /// field's own type does not exist.
+    /// Present with the `multihop` feature; the native underlay builder that fills
+    /// it, `build_peer_multihop_with`, is host-only.
     #[cfg(feature = "multihop")]
     multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     /// The `WebRTC` leg of the multihop underlay, threaded into `EventLoopState`
@@ -630,9 +630,10 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
     let lookups = mesh_config.lookups.clone();
     let relay_transport = mesh_config.transport.relay_transport;
     let transports = member_transports(&lookups, transports, mesh_config.transport)?;
-    // The mesh policy's `multihop`, on a node that has UDP: the underlay is a UDP
-    // endpoint, so a node run with IP cleared has none.
-    let multihop = mesh_config.transport.multihop && transports.udp;
+    // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
+    // forward over: UDP, or a WebRTC data channel when IP is cleared. With neither there is
+    // no direct path, and no handle.
+    let multihop = mesh_config.transport.multihop && (transports.udp || transports.webrtc);
 
     // The off-loop rung channel: the backgrounded startup probe and the
     // beacon's liveness self-monitor publish a chosen rung here; the
@@ -1157,6 +1158,59 @@ mod tests {
             .await
             .expect("a loopback mesh sets up");
             assert_eq!(config.multihop.is_some(), expected, "{list:?}");
+            config.router.shutdown().await.expect("the router stops");
+        }
+    }
+
+    // A node without UDP takes part in multihop when the policy has it: the rule is that
+    // a direct path exists, `udp` or `webrtc`, and not `udp` alone. With neither, the
+    // underlay has no direct path to forward over, and there is no handle.
+    #[tokio::test]
+    async fn a_member_without_udp_gets_a_multihop_handle_when_it_has_webrtc() {
+        for (transports, expected) in [
+            (
+                crate::lookup::TransportOpts {
+                    udp: false,
+                    ..crate::lookup::TransportOpts::default()
+                },
+                true,
+            ),
+            (
+                crate::lookup::TransportOpts {
+                    udp: false,
+                    webrtc: false,
+                    ..crate::lookup::TransportOpts::default()
+                },
+                false,
+            ),
+        ] {
+            // A node without UDP needs the relay: it carries the offers of its data channels.
+            let opts = crate::membership::Opts {
+                transport: vec![Transport::WebRtc, Transport::Multihop],
+                lookup: vec![crate::protocol::mesh::Lookup::Relay],
+                ..crate::membership::Opts::default()
+            };
+            let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+            let config = super::setup_mesh(
+                kind,
+                super::SetupParams {
+                    author,
+                    max_peers: 8,
+                    max_direct: 0,
+                    runtime_base: None,
+                    state_file: None,
+                    sink: std::sync::Arc::new(crate::embed::SilentSink),
+                    endpoint: None,
+                    protocols: Vec::new(),
+                    transports,
+                    per_peer_gate: None,
+                    cohost: None,
+                    live_count: None,
+                },
+            )
+            .await
+            .expect("a mesh sets up");
+            assert_eq!(config.multihop.is_some(), expected, "{transports:?}");
             config.router.shutdown().await.expect("the router stops");
         }
     }

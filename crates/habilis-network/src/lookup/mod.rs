@@ -97,7 +97,8 @@ pub(crate) use relay::{
 #[derive(Debug, Default)]
 pub struct TransportHandles {
     /// Source-routed multi-hop: reach a peer with no direct path by relaying
-    /// through intermediate peers. Host-only — it forwards real UDP packets.
+    /// through intermediate peers. Built with the `multihop` feature; the native
+    /// underlay builder, `build_peer_multihop_with`, is host-only.
     #[cfg(feature = "multihop")]
     pub multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     /// QUIC over a `WebRTC` data channel. The browser's only way onto the

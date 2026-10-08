@@ -37,7 +37,7 @@ pub(crate) mod redial;
 // a browser peer negotiates with a CLI peer over the same envelope, and only
 // the backend behind it differs.
 pub(crate) mod webrtc;
-// The `WebRTC` leg of the multihop underlay: host-only, like the multihop transport.
+// The `WebRTC` leg of the multihop underlay: built with the `multihop` feature.
 #[cfg(feature = "multihop")]
 pub(crate) mod underlay_webrtc;
 
