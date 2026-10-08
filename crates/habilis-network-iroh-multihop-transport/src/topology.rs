@@ -722,11 +722,13 @@ mod tests {
         assert_ne!(routes[0].hops()[0].app_id, routes[1].hops()[0].app_id);
     }
 
-    /// What a link costs to a native node (the cost that the host advertises), and what a browser
-    /// advertises for its own links (decision D5: a route avoids a browser as a hop). The cost is
-    /// data in the signed vector: nothing in the route search knows what a browser is.
-    const NATIVE_COST: u32 = 10;
-    const BROWSER_COST: u32 = 100;
+    /// What a link costs to a native node, and what a browser advertises for its own links
+    /// (decision D5: a route avoids a browser as a hop). They are the values of
+    /// `HandleConfig::default()` and `HandleConfig::for_browser()`, and the guard in `lib.rs`
+    /// pins the relation between them. The cost is data in the signed vector: nothing in the
+    /// route search knows what a browser is.
+    const NATIVE_COST: u32 = crate::DEFAULT_LINK_COST;
+    const BROWSER_COST: u32 = crate::DEFAULT_LINK_COST * crate::BROWSER_HOP_FACTOR;
 
     /// The application ids of the hops of the best route from `src` to `dst`.
     fn best_route(store: &Topology, src: EndpointId, dst: EndpointId) -> Option<Vec<EndpointId>> {
@@ -799,9 +801,9 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_pays_nothing_as_a_destination_or_as_a_source() {
-        let [src, hop, dst, other] = [1, 2, 3, 4].map(eid);
-        // As a destination: the last edge into it is advertised by its predecessor.
+    fn a_browser_pays_nothing_as_a_destination() {
+        let [src, dst] = [1, 2].map(eid);
+        // The last edge into it is advertised by its predecessor.
         for (name, last_cost) in [("native", NATIVE_COST), ("browser", BROWSER_COST)] {
             let mut store = Topology::default();
             for (origin, links) in [
@@ -816,7 +818,12 @@ mod tests {
                 "{name} destination"
             );
         }
-        // As a source: every route starts with one of its own edges, so the choice is the same
+    }
+
+    #[test]
+    fn the_cost_of_a_source_changes_no_choice() {
+        let [src, hop, dst, other] = [1, 2, 3, 4].map(eid);
+        // Every route starts with one of the edges of the source, so the choice is the same
         // whatever those edges cost.
         for (name, cost) in [("native", NATIVE_COST), ("browser", BROWSER_COST)] {
             let mut store = Topology::default();
