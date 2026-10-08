@@ -94,6 +94,13 @@ const UNDERLAY_KEY_DOMAIN: &str = "habilis-network-iroh-multihop-transport under
 /// Terminal-delivery queue depth into the local transport's `poll_recv`.
 const INBOUND_CAP: usize = 256;
 
+/// The cost that a node advertises for each of its own links: a native node's.
+pub const DEFAULT_LINK_COST: u32 = 10;
+
+/// How many times more a browser advertises for each link that leaves it, so that a route
+/// through a browser costs more than a native one. A proposal, not a measured number.
+pub const BROWSER_HOP_FACTOR: u32 = 10;
+
 /// How a [`MultihopHandle`] behaves. The mesh policy and the caller decide it;
 /// an endpoint that is injected into a mesh must be built with the values that
 /// mesh's policy implies (see `check_injected_identity` in the engine).
@@ -110,6 +117,13 @@ pub struct HandleConfig {
     /// How long a hop's underlay may stay on the relay, refused by the gate,
     /// before it stops being advertised as a link.
     pub relay_stuck_after: Duration,
+    /// The cost that this node advertises for each link that leaves it. The routing graph is
+    /// directed: the links that leave a node carry the cost that the node advertises, and the
+    /// links that enter it carry the cost of its neighbors. A node with a high cost is
+    /// therefore paid for once as a hop in the middle of a route, and not as a destination.
+    /// It must stay finite: the graph drops a link of infinite cost. See
+    /// [`for_browser`](Self::for_browser).
+    pub link_cost: u32,
 }
 
 impl Default for HandleConfig {
@@ -118,6 +132,22 @@ impl Default for HandleConfig {
             relay_payload: false,
             vector_max_age: topology::DEFAULT_VECTOR_MAX_AGE,
             relay_stuck_after: Duration::from_secs(20),
+            link_cost: DEFAULT_LINK_COST,
+        }
+    }
+}
+
+impl HandleConfig {
+    /// The config of a browser: the default, with a link cost [`BROWSER_HOP_FACTOR`] times
+    /// higher, so that routes avoid a browser as a hop and use it only when nothing else
+    /// reaches the destination. A native route of up to ten hops costs less than a route through
+    /// a browser; routes are at most 8 hops, so in practice a native route wins whenever one
+    /// exists. The cost is self-asserted, like every advertised metric.
+    #[must_use]
+    pub fn for_browser() -> Self {
+        Self {
+            link_cost: DEFAULT_LINK_COST * BROWSER_HOP_FACTOR,
+            ..Self::default()
         }
     }
 }
@@ -330,6 +360,13 @@ impl MultihopHandle {
     #[must_use]
     pub fn app_id(&self) -> EndpointId {
         self.inner.self_id
+    }
+
+    /// The cost that this handle advertises for each link that leaves it
+    /// ([`HandleConfig::link_cost`]).
+    #[must_use]
+    pub fn link_cost(&self) -> u32 {
+        self.inner.config.link_cost
     }
 
     /// Whether this handle lets the relay carry cells. A mesh whose policy has no
@@ -863,6 +900,64 @@ mod tests {
         assert_eq!(hops, vec![via.public(), dst.public()]);
     }
 
+    /// A handle that knows a native route to `dst` of three hops (`a1`, `a2`, `dst`) and a route
+    /// of two hops through a browser (`tab`), whose own links cost ten times a native link
+    /// (decision D5). Returns the handle and the hops as `(app id, underlay id)`.
+    async fn handle_with_a_native_and_a_browser_route()
+    -> (MultihopHandle, [(EndpointId, EndpointId); 4]) {
+        let me = SecretKey::from_bytes(&[91; 32]);
+        let handle =
+            MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
+                .expect("underlay on the derived key");
+        let nodes = [92_u8, 93, 94, 95].map(|seed| SecretKey::from_bytes(&[seed; 32]));
+        let [a1, a2, tab, dst] = nodes.each_ref().map(SecretKey::public);
+        let advertise = |node: &SecretKey, links: Vec<(EndpointId, u32)>| {
+            let underlay = iroh::EndpointAddr::new(underlay_secret(node).public());
+            handle.feed_topology(crate::LinkVector::signed(
+                node,
+                crate::topology::wall_clock_ms(),
+                underlay,
+                links,
+            ));
+        };
+        advertise(&nodes[0], vec![(a2, 10)]);
+        advertise(&nodes[1], vec![(dst, 10)]);
+        advertise(&nodes[2], vec![(dst, 100)]);
+        advertise(&nodes[3], vec![]);
+        assert!(handle.feed_topology(handle.link_vector(vec![(a1, 10), (tab, 10)])));
+        let hops = nodes.map(|node| (node.public(), underlay_secret(&node).public()));
+        (handle, hops)
+    }
+
+    #[tokio::test]
+    async fn a_native_route_is_chosen_over_a_shorter_route_through_a_browser() {
+        let (handle, [(a1, _), _, _, (dst, _)]) = handle_with_a_native_and_a_browser_route().await;
+        assert_eq!(first_hop_of(&handle, dst), a1);
+    }
+
+    #[tokio::test]
+    async fn the_browser_route_is_chosen_when_the_only_native_first_hop_is_refused() {
+        let (handle, [(a1, a1_underlay), _, (tab, _), (dst, _)]) =
+            handle_with_a_native_and_a_browser_route().await;
+        handle.inner.forwarder.refuse_hop_for_test(a1_underlay, a1);
+        assert_eq!(
+            first_hop_of(&handle, dst),
+            tab,
+            "the browser is the way out"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_browser_first_hop_does_not_change_the_native_route() {
+        let (handle, [(a1, _), _, (tab, tab_underlay), (dst, _)]) =
+            handle_with_a_native_and_a_browser_route().await;
+        handle
+            .inner
+            .forwarder
+            .refuse_hop_for_test(tab_underlay, tab);
+        assert_eq!(first_hop_of(&handle, dst), a1);
+    }
+
     #[tokio::test]
     async fn the_address_lookup_chooses_the_route_like_route_addr() {
         use iroh::address_lookup::AddressLookup as _;
@@ -953,6 +1048,42 @@ mod tests {
             dialed.encode(),
             "the way back from a cell is not the route that Bob dials: two iroh paths for one route"
         );
+    }
+
+    #[test]
+    fn a_browser_advertises_its_links_at_ten_times_the_cost_of_a_native_node() {
+        assert_eq!(HandleConfig::default().link_cost, 10);
+        assert_eq!(HandleConfig::for_browser().link_cost, 100);
+        // The cost is the only difference.
+        assert_eq!(
+            HandleConfig {
+                link_cost: HandleConfig::default().link_cost,
+                ..HandleConfig::for_browser()
+            },
+            HandleConfig::default()
+        );
+        // It stays finite: the graph drops a link of infinite cost, and with it the browser as a hop.
+        assert!(crate::metric::LinkMetric(HandleConfig::for_browser().link_cost).is_usable());
+    }
+
+    #[tokio::test]
+    async fn a_handle_reports_the_link_cost_of_its_config() {
+        let secret = SecretKey::from_bytes(&[91; 32]);
+        let native = MultihopHandle::new(
+            &secret,
+            loopback_underlay(&secret).await,
+            HandleConfig::default(),
+        )
+        .expect("a handle");
+        assert_eq!(native.link_cost(), 10);
+        let other = SecretKey::from_bytes(&[92; 32]);
+        let browser = MultihopHandle::new(
+            &other,
+            loopback_underlay(&other).await,
+            HandleConfig::for_browser(),
+        )
+        .expect("a handle");
+        assert_eq!(browser.link_cost(), 100);
     }
 
     #[tokio::test]
