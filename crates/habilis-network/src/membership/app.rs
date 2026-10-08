@@ -167,6 +167,14 @@ pub enum Request {
     Ping {
         reply: oneshot::Sender<Vec<(Nickname, u64)>>,
     },
+    /// Tests only: how many gossip connections the recursion rule has closed since the process
+    /// started (the census field `gossip_recursion_closes_total`): a total, shared by every
+    /// member of the process. A pair that cannot leave the gossip path closes and dials again,
+    /// so a count that grows without a bound is that loop.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    GossipRecursionCloses {
+        reply: oneshot::Sender<u64>,
+    },
     /// Tests only: forget that the member `peer` is proven direct, and offer it a
     /// `WebRTC` session now, as the path watcher does when a direct path is lost.
     /// A test uses it to attach a session at a chosen moment instead of at the
@@ -483,6 +491,11 @@ impl NodeDriver for MembershipApp {
                     crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
                 }
                 let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::GossipRecursionCloses { reply } => {
+                let _ = reply.send(crate::transport::path::gossip_recursion_closes());
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

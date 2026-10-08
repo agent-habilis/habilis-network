@@ -127,6 +127,14 @@ impl Member {
             .collect()
     }
 
+    /// How many gossip connections the recursion rule has closed in this process so far.
+    async fn recursion_closes(&self) -> u64 {
+        self.membership
+            .request(|reply| Request::GossipRecursionCloses { reply })
+            .await
+            .expect("the loop answers")
+    }
+
     fn saw_msg(&mut self, text: &str) -> bool {
         while let Ok(msg) = self.membership.inbound.try_recv() {
             self.seen_msgs.push(msg);
@@ -337,6 +345,52 @@ async fn a_ping_is_answered_across_a_pair_with_no_other_path_on_the_gossip_rung(
         fixture.alice.rung_to("carol").await,
         Some("gossip"),
         "{NAME}: the pair is still on the gossip rung after the round"
+    );
+    fixture.leave().await;
+}
+
+/// The most gossip connections that the recursion rule may close in `CHURN_WINDOW` for a pair
+/// that has only the gossip rung. The rule closes a gossip link whose path is the gossip rung,
+/// and the gossip layer may dial it again: a pair that cannot leave that path would close and
+/// dial in a loop. First measurement on the host, three runs of this test with the bound at 0:
+/// 3, 2 and 3 closes in 30 s (one in about 10 s, a link dialed again, not a hot loop). The bound is
+/// twice the highest: a pair that closes at that rate is bounded, and a loop would pass it.
+const CHURN_BOUND: u64 = 6;
+const CHURN_WINDOW: Duration = Duration::from_secs(30);
+
+/// A pair with only the gossip rung does not churn: while the pair is read for `CHURN_WINDOW`
+/// (a probe goes every second, as production sends), the count of closes of the recursion rule
+/// stays within `CHURN_BOUND`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
+    const NAME: &str = "gossip_only_churn";
+    if skipped(NAME) {
+        return;
+    }
+    let fixture = Fixture::stand_up(NAME).await;
+    let before = fixture.alice.recursion_closes().await;
+    let started = Instant::now();
+    let mut probes = 0_u32;
+    while started.elapsed() < CHURN_WINDOW {
+        probes += 1;
+        let _ = fixture
+            .alice
+            .send("carol", &format!("churn probe {NAME} {probes}"))
+            .await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let closes = fixture.alice.recursion_closes().await - before;
+    eprintln!("DIAG {NAME}: {closes} closes of the recursion rule in {CHURN_WINDOW:?}");
+    assert!(
+        closes <= CHURN_BOUND,
+        "{NAME}: the recursion rule closed {closes} gossip links in {CHURN_WINDOW:?}, \
+         more than the bound {CHURN_BOUND}: the pair loops"
+    );
+    assert_eq!(
+        fixture.alice.rung_to("carol").await,
+        Some("gossip"),
+        "{NAME}: the pair is on the gossip rung at the end"
     );
     fixture.leave().await;
 }
