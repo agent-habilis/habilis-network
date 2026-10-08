@@ -420,15 +420,12 @@ async fn antientropy_arm(
     .await;
 }
 
-/// Default per-link routing cost we advertise for our own neighbours until live
-/// telemetry (RTT / delivery) is wired into the multihop metric.
-#[cfg(feature = "multihop")]
-const MULTIHOP_LINK_COST: u32 = 10;
-
 /// The multihop link-state tick: re-broadcast our own links (one per direct
 /// neighbour, carrying our underlay dial address) so every peer keeps a fresh
-/// routing graph for the multihop transport. No-op until meshed, or when the
-/// multihop transport is off — a vector with no consumer helps no one.
+/// routing graph for the multihop transport. Each link carries the cost of the handle
+/// (`HandleConfig::link_cost`; a browser's is higher), until live telemetry (RTT, delivery) is
+/// wired into the metric. No-op until meshed, or when the multihop transport is off — a vector
+/// with no consumer helps no one — and while the underlay has no address a neighbor could dial.
 /// Without the `multihop` feature the transport does not exist, so the tick has nothing
 /// to broadcast. A no-op stub rather than a `cfg` at the `select!` arm, so the loop
 /// body reads the same with and without the feature.
@@ -452,12 +449,17 @@ pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'
     if !state.meshed || state.multihop.is_none() {
         return;
     }
+    let handle = state.multihop.as_ref().expect("checked above");
+    // A vector names the address of our underlay, and a neighbor dials that address. An
+    // underlay with no IP and no relay yet has none: wait for the next tick.
+    if handle.underlay_addr().addrs.is_empty() {
+        return;
+    }
     let links: Vec<_> = state
         .linked_endpoints
         .iter()
-        .map(|eid| (*eid, MULTIHOP_LINK_COST))
+        .map(|eid| (*eid, handle.link_cost()))
         .collect();
-    let handle = state.multihop.as_ref().expect("checked above");
     let vector = handle.link_vector(links);
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
@@ -1185,7 +1187,7 @@ mod route_wake_tests {
     use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
     use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
 
-    use super::route_wake_arm;
+    use super::{linkstate_arm, route_wake_arm};
     use crate::testing::{LaneNode, nick};
     use crate::transport::probe::{PathKind, nudge_routable_relay_pairs};
 
@@ -1198,6 +1200,90 @@ mod route_wake_tests {
             .await
             .expect("bind an underlay");
         MultihopHandle::new(&secret, underlay, HandleConfig::default()).expect("a handle")
+    }
+
+    /// One link-state tick of a meshed node with one linked peer, on a handle with `underlay` and
+    /// `config`; what the node holds in its own routing view afterwards: the metric of each link
+    /// that leaves it.
+    async fn own_links_after_a_tick(
+        underlay: Endpoint,
+        secret: &SecretKey,
+        config: HandleConfig,
+    ) -> Vec<u32> {
+        let node = LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        let me = MultihopHandle::new(secret, underlay, config).expect("a handle");
+        state.multihop = Some(me.clone());
+        state.meshed = true;
+        state
+            .linked_endpoints
+            .insert(SecretKey::generate().public());
+        linkstate_arm(&mut state, &ctx).await;
+        let own = me.app_id().to_string();
+        let costs = me
+            .topology_view()
+            .edges
+            .iter()
+            .filter(|edge| edge.from == own)
+            .map(|edge| edge.metric)
+            .collect();
+        state.webrtc_admission.close();
+        node.endpoint.close().await;
+        costs
+    }
+
+    async fn loopback_underlay(secret: &SecretKey) -> Endpoint {
+        Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(secret))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay")
+    }
+
+    /// The cost on the links that a node advertises is the one of its handle, so that a browser
+    /// (a handle made with `for_browser`) costs more as a hop in the middle of a route.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_link_state_arm_advertises_the_link_cost_of_its_handle() {
+        for (config, expected) in [
+            (HandleConfig::default(), 10),
+            (HandleConfig::for_browser(), 100),
+        ] {
+            let secret = SecretKey::generate();
+            let underlay = loopback_underlay(&secret).await;
+            assert_eq!(
+                own_links_after_a_tick(underlay, &secret, config).await,
+                vec![expected],
+                "{config:?}"
+            );
+        }
+    }
+
+    /// A vector names the address of the underlay, and a neighbor dials that address. An
+    /// underlay with no IP and no relay yet has none: a vector that names it points nowhere, so
+    /// the tick says nothing until the underlay has one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_link_state_arm_says_nothing_while_the_underlay_has_no_address() {
+        // A browser underlay: no IP socket, and a relay that it has not reached yet, so it
+        // binds and has no address. (An endpoint with neither does not bind at all.) The relay
+        // here is a listener that never answers.
+        let (_silent, relay) = crate::testing::silent_relay_rung();
+        let secret = SecretKey::generate();
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(&secret))
+            .relay_mode(iroh::RelayMode::custom([relay]))
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("bind an underlay with no address yet");
+        assert!(underlay.addr().addrs.is_empty(), "the premise: no address");
+        assert!(
+            own_links_after_a_tick(underlay, &secret, HandleConfig::default())
+                .await
+                .is_empty(),
+            "no link of ours is advertised"
+        );
     }
 
     /// A pair on the relay has the direct route dialed. The gate then refuses the

@@ -1164,7 +1164,9 @@ mod tests {
 
     // A node without UDP takes part in multihop when the policy has it: the rule is that
     // a direct path exists, `udp` or `webrtc`, and not `udp` alone. With neither, the
-    // underlay has no direct path to forward over, and there is no handle.
+    // underlay has no direct path to forward over, and there is no handle. A node may run with
+    // fewer transports than the policy names, which is how a list with `webrtc` and `multihop`
+    // meets a node that has no `udp`.
     #[tokio::test]
     async fn a_member_without_udp_gets_a_multihop_handle_when_it_has_webrtc() {
         for (transports, expected) in [
