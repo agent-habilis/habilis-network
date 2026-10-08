@@ -121,7 +121,12 @@ pub(crate) async fn tick_heal_hard(
 ///
 /// [`EventLoopState::known_endpoints`]: crate::daemon::state::EventLoopState::known_endpoints
 pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    let peers: Vec<EndpointId> = state.known_endpoints.iter().copied().collect();
+    let peers: Vec<EndpointId> = state
+        .known_endpoints
+        .iter()
+        .copied()
+        .filter(|peer| !state.rides_gossip_rung(*peer))
+        .collect();
     // `info`, not `debug`: this fires only on the isolation signal (rare,
     // event-driven), and a re-bridge attempt is part of the always-on
     // connectivity story we keep at `info` for post-incident diagnosis —

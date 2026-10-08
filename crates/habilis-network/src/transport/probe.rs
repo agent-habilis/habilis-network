@@ -746,6 +746,10 @@ pub(crate) async fn request_graft(
     peer: EndpointId,
     paced: bool,
 ) -> Result<(), iroh_gossip::api::ApiError> {
+    if peer != ctx.rendezvous_id && state.rides_gossip_rung(peer) {
+        tracing::debug!(target: super::LOG_TARGET, %peer, "graft skipped: the pair rides the gossip rung");
+        return Ok(());
+    }
     match graft_request(
         state,
         peer,

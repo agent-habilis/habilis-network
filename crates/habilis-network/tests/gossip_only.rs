@@ -364,12 +364,12 @@ async fn a_ping_is_answered_across_a_pair_with_no_other_path_on_the_gossip_rung(
 }
 
 /// The most gossip connections that the recursion rule may close in `CHURN_WINDOW` for a pair
-/// that has only the gossip rung. The rule closes a gossip link whose path is the gossip rung,
-/// and the gossip layer may dial it again: a pair that cannot leave that path would close and
-/// dial in a loop. First measurement on the host, three runs of this test with the bound at 0:
-/// 3, 2 and 3 closes in 30 s (one in about 10 s, a link dialed again, not a hot loop). The bound is
-/// twice the highest: a pair that closes at that rate is bounded, and a loop would pass it.
-const CHURN_BOUND: u64 = 6;
+/// that has only the gossip rung. The rule closes a gossip link whose path is the gossip rung, so
+/// the engine must not graft such a pair: `request_graft` refuses it. With the bound at 0 the
+/// engine grafted the pair again about every 10 s (3, 2 and 3 closes in 30 s). A guard in
+/// `graft_proven` alone left the `PeerInfo` graft: 2, 0, 0, 2, 0, 2, 1 and 1 closes. With the
+/// guard in `request_graft`, six runs gave 0.
+const CHURN_BOUND: u64 = 0;
 const CHURN_WINDOW: Duration = Duration::from_secs(30);
 
 /// A pair with only the gossip rung does not churn: while the pair is read for `CHURN_WINDOW`

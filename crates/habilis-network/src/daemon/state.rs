@@ -960,6 +960,7 @@ impl EventLoopState {
     ) -> bool {
         if self.direct.get(&peer) != Some(&DirectState::Direct)
             || self.pair_path_kind(peer) == Some(crate::transport::probe::PathKind::Relay)
+            || self.rides_gossip_rung(peer)
             || self.relink_on_cooldown(peer, now)
         {
             return false;
@@ -1616,6 +1617,12 @@ impl EventLoopState {
         )
     }
 
+    /// Whether the selected path of `peer` is the gossip rung. The recursion rule closes a gossip
+    /// link on that path, so a graft only makes the gossip layer dial a link that dies at once.
+    pub(crate) fn rides_gossip_rung(&self, peer: EndpointId) -> bool {
+        self.pair_path_kind(peer) == Some(crate::transport::probe::PathKind::Gossip)
+    }
+
     /// Whether to report that this author's digest could not be read: once per
     /// author per window. The author runs a build with another digest format, or
     /// sends garbage; either way the two never repair each other's gaps.
@@ -1806,6 +1813,23 @@ mod tests {
         assert!(
             lost(PathKind::Ip).plan_regraft_on_link_loss(bob, now, 0.0),
             "an IP path is grafted again"
+        );
+    }
+
+    /// A gossip link on the gossip rung is closed by the recursion rule, so a graft of the pair
+    /// only makes the gossip layer dial a link that dies.
+    #[test]
+    fn a_pair_that_rides_the_gossip_rung_is_not_regrafted() {
+        use crate::transport::probe::PathKind;
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let mut node = fresh_state();
+        node.direct.insert(bob, DirectState::Direct);
+        node.path_kinds.insert(bob, PathKind::Gossip);
+
+        assert!(node.rides_gossip_rung(bob));
+        assert!(
+            !node.plan_regraft_on_link_loss(bob, now, 0.0),
+            "no re-graft is planned for a pair on the gossip rung"
         );
     }
 
