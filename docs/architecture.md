@@ -453,7 +453,7 @@ An id of version 1, minted before the policy had its own byte, is refused with a
 
 Every create surface names three mesh-wide choices apart, because they are three concepts.
 `lookup` (`--lookup mdns,dht,relay` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport udp,webrtc,multihop,relay`, `transport: ['udp', 'webrtc', 'multihop', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` needs `udp`, and `udp,webrtc,multihop` is the default.
+`transport` (`--transport udp,webrtc,multihop,relay`, `transport: ['udp', 'webrtc', 'multihop', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` needs one of the two next to it, and `udp,webrtc,multihop` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `habilis_network_protocol::Lookup` and `Transport` are the entries of the first two lists, and `MeshConfig::resolve` is the one place that knows all three.
 The two rules that need two of them live there and nowhere else: a ladder needs `relay` among the lookups, and so does letting the relay carry payload.

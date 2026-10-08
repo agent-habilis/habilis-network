@@ -318,9 +318,6 @@ impl MeshConfig {
                 "transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload"
             );
         }
-        if transport.multihop && !transport.udp {
-            bail!("transport `multihop` needs `udp`: its underlay is a UDP endpoint");
-        }
         // A native member without UDP has no address a peer could reach, so the
         // JSEP exchange that opens its data channel can only cross the relay.
         if !transport.udp && no_relay {
@@ -1048,28 +1045,25 @@ mod lookup_tests {
         assert!(MeshConfig::resolve(&[Lookup::Mdns], None, &[Transport::Udp]).is_ok());
     }
 
+    /// `webrtc` is a direct path, so `webrtc,multihop` is a list that multihop can forward
+    /// over, with no `udp`: the case of a browser, and of a native member run without IP.
     #[test]
-    fn multihop_needs_udp() {
-        let error = MeshConfig::resolve(
-            &[Lookup::Relay],
-            None,
-            &[Transport::WebRtc, Transport::Multihop],
-        )
-        .unwrap_err()
-        .to_string();
+    fn multihop_with_webrtc_and_no_udp_resolves() {
         assert!(
-            error.contains("multihop") && error.contains("udp"),
-            "{error}"
+            MeshConfig::resolve(
+                &[Lookup::Relay],
+                None,
+                &[Transport::WebRtc, Transport::Multihop],
+            )
+            .is_ok()
         );
         let bytes = vec![0b0111, super::TRANSPORT_WEBRTC | super::TRANSPORT_MULTIHOP];
-        assert!(MeshConfig::from_bytes(&bytes).is_err());
+        assert!(MeshConfig::from_bytes(&bytes).is_ok());
     }
 
     const NEEDS_A_DIRECT_PATH: &str =
         "a transport list needs a direct path: name `udp`, `webrtc`, or both";
-    const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp`";
-    const MULTIHOP_NEEDS_UDP: &str =
-        "transport `multihop` needs `udp`: its underlay is a UDP endpoint";
+    const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp` or `webrtc`";
 
     /// Every subset of the four transports, each with its result: `Ok`, or the
     /// exact error. A relay lookup is on, so the relay rules do not speak here.
@@ -1085,13 +1079,13 @@ mod lookup_tests {
             (&[Udp, WebRtc], Ok(())),
             (&[Udp, Multihop], Ok(())),
             (&[Udp, Relay], Ok(())),
-            (&[WebRtc, Multihop], Err(MULTIHOP_NEEDS_UDP)),
+            (&[WebRtc, Multihop], Ok(())),
             (&[WebRtc, Relay], Ok(())),
             (&[Multihop, Relay], Err(MULTIHOP_ALONE)),
             (&[Udp, WebRtc, Multihop], Ok(())),
             (&[Udp, WebRtc, Relay], Ok(())),
             (&[Udp, Multihop, Relay], Ok(())),
-            (&[WebRtc, Multihop, Relay], Err(MULTIHOP_NEEDS_UDP)),
+            (&[WebRtc, Multihop, Relay], Ok(())),
             (&[Udp, WebRtc, Multihop, Relay], Ok(())),
         ];
         let mask = |list: &[Transport]| {

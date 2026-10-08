@@ -25,17 +25,16 @@ pub enum Transport {
     #[serde(rename = "webrtc")]
     WebRtc,
     /// Source-routed multi-hop: reach a peer with no direct path through other
-    /// members. Native only, over a UDP underlay, so it needs `udp`.
+    /// members. It forwards over a direct path, so the list names `udp` or `webrtc` next to it.
     Multihop,
     /// Let payload also fall back to the relay when no direct path exists.
     Relay,
 }
 
 /// The error for `multihop` with no direct transport next to it: it forwards
-/// over a direct path, so it cannot stand alone, and `relay` is not one. Until
-/// multihop also rides `webrtc`, the direct path it needs is `udp`.
-pub(super) const MULTIHOP_ALONE: &str =
-    "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp`";
+/// over a direct path, so it cannot stand alone, and `relay` is not one. The
+/// direct path it needs is `udp` or `webrtc`.
+pub(super) const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp` or `webrtc`";
 
 impl Transport {
     const NAMES: &[&str] = &["udp", "webrtc", "multihop", "relay"];

@@ -17,7 +17,7 @@ published to a registry; pin it with
   dials for the relay policy.
 - `multihop` is an entry of the `transport` list, and the default list is
   `udp,webrtc,multihop`. A peer with no direct path is reached through other
-  members. It needs `udp` (its underlay is a UDP endpoint) and is native only; a
+  members. It needs `udp` or `webrtc` next to it in the list, and is native only; a
   browser ignores it, as it ignores `udp`. Multi-hop and `WebRTC` now share one
   endpoint and one key. A link-vector is signed by the peer that advertises it,
   so a node cannot claim another peer's underlay, and only the endpoint that the

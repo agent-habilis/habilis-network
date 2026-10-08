@@ -9,7 +9,8 @@ export type Lookup = 'mdns' | 'dht' | 'relay'
 /**
  * One path a mesh's payload may ride. A list needs `udp` or `webrtc`; a
  * browser has no UDP, so it needs `webrtc` or `relay`. `multihop` (native only,
- * and it needs `udp`) reaches a peer with no direct path through other members.
+ * and it needs `udp` or `webrtc` next to it) reaches a peer with no direct path
+ * through other members.
  */
 export type Transport = 'udp' | 'webrtc' | 'multihop' | 'relay'
 
