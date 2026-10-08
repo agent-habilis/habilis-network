@@ -5,8 +5,9 @@
 //! `WebRtcHandle`, its own admission table (cap G) and the signal protocol on
 //! its router. A session opens only to a gossip neighbor whose application
 //! path is `WebRTC`: where IP works, the underlay reaches the neighbor over IP
-//! already. So a session on the underlay rides a gossip edge, which is why it
-//! counts in G and not in D.
+//! already. A node without `udp` has an underlay with no IP socket, and a
+//! session opens to every neighbor. So a session on the underlay rides a gossip
+//! edge, which is why it counts in G and not in D.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -28,7 +29,7 @@ pub(crate) struct Plan {
 }
 
 /// Decide the sessions of the underlay. `wanted` are the underlay ids of the
-/// neighbors whose application path is `WebRTC`, and `kept` those whose session
+/// neighbors that need a session (see [`wanted_underlays`]), and `kept` those whose session
 /// stays, that is every neighbor that is not on IP; `held` are the ids with a live
 /// session, and `local` is our own underlay id. The lower id dials, so exactly one
 /// offer crosses per pair. A session goes only when its neighbor is no longer one
@@ -61,10 +62,18 @@ pub(crate) fn plan(
 /// address, and `kind_of` gives the selected path of the application pair.
 /// A neighbor that left the list, or whose path climbed to IP, is not wanted, so
 /// `plan` detaches its session.
+///
+/// A node without `udp` has an underlay with no IP socket, so no neighbor reaches it over IP
+/// and the session is the only path of the underlay to every neighbor, whatever the
+/// application path is.
 fn wanted_underlays(
     neighbors: &[(EndpointId, iroh::EndpointAddr)],
+    local_has_udp: bool,
     kind_of: impl Fn(EndpointId) -> Option<super::probe::PathKind>,
 ) -> Vec<iroh::EndpointAddr> {
+    if !local_has_udp {
+        return neighbors.iter().map(|(_, addr)| addr.clone()).collect();
+    }
     neighbors
         .iter()
         .filter(|(member, _)| kind_of(*member) == Some(super::probe::PathKind::WebRtc))
@@ -156,7 +165,9 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
         .allowed
         .replace(neighbors.iter().map(|(_, addr)| addr.id).collect());
 
-    let wanted_addrs = wanted_underlays(&neighbors, |member| state.pair_path_kind(member));
+    let wanted_addrs = wanted_underlays(&neighbors, state.local_udp_transport, |member| {
+        state.pair_path_kind(member)
+    });
     let wanted: Vec<EndpointId> = wanted_addrs.iter().map(|addr| addr.id).collect();
     let kept = kept_underlays(&neighbors, |member| state.pair_path_kind(member));
     let held = underlay.handle.live_peer_ids();
@@ -334,8 +345,23 @@ mod tests {
             .into_iter()
             .map(|member| (member, EndpointAddr::new(id(member.as_bytes()[0] ^ 0x55))))
             .collect();
-        let wanted = wanted_underlays(&neighbors, neighbor_kinds(webrtc, ip, relay));
+        let wanted = wanted_underlays(&neighbors, true, neighbor_kinds(webrtc, ip, relay));
         assert_eq!(wanted, vec![neighbors[0].1.clone()]);
+    }
+
+    /// A node without `udp` has no IP on its underlay: the session is the only path to every
+    /// neighbor, so each one is wanted, whatever the application path is (a lookup-only mesh
+    /// can leave the pair on the relay or unread).
+    #[test]
+    fn a_node_without_udp_wants_a_session_to_every_neighbor() {
+        let (webrtc, ip, relay, unknown) = (id(11), id(12), id(13), id(14));
+        let neighbors: Vec<(EndpointId, EndpointAddr)> = [webrtc, ip, relay, unknown]
+            .into_iter()
+            .map(|member| (member, EndpointAddr::new(id(member.as_bytes()[0] ^ 0x55))))
+            .collect();
+        let wanted = wanted_underlays(&neighbors, false, neighbor_kinds(webrtc, ip, relay));
+        let all: Vec<EndpointAddr> = neighbors.iter().map(|(_, addr)| addr.clone()).collect();
+        assert_eq!(wanted, all);
     }
 
     /// A neighbor whose path is not read for the moment (an idle connection of the
