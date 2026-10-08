@@ -15,7 +15,7 @@
 //! here (`Transmit` has no public constructor), so a reading under traffic needs real iroh
 //! endpoints on top of the sessions, which this example does not do.
 //!
-//! `measure` starts a peer process (this binary, `peer`), opens one throw-away session to take
+//! `measure` starts a peer process (this binary, `peer`), opens one warm-up session, which stays open, to take
 //! the start-up cost of the libraries out of the slope, reads the resident memory, opens `k`
 //! sessions, reads it again after `settle` seconds, once more after `hold` seconds with the
 //! sessions alive, and a last time after closing them. It prints one JSON line. `fit` reads
@@ -226,9 +226,11 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
     let local = SecretKey::generate().public();
     let transport = WebRtcTransport::new(local);
 
-    // One throw-away session takes the start-up of the libraries out of the slope.
+    // One warm-up session takes the start-up of the libraries out of the slope. It stays open: a
+    // session that is closed gives back part of its memory late, after the baseline reading, and
+    // that fell into the later readings (the K = 0 runs lost 0.5 to 1.0 MiB over the hold).
     let at_start = resident();
-    let warm = Box::pin(open_one(
+    let _warm = Box::pin(open_one(
         role,
         &transport,
         local,
@@ -236,8 +238,6 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
         &mut from_peer,
     ))
     .await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    transport.detach(&warm);
     let before = settled(settle).await;
 
     let mut remotes = Vec::with_capacity(sessions);
@@ -254,9 +254,10 @@ async fn measure(role: Role, sessions: usize, settle: u64, hold: u64) -> anyhow:
         );
     }
     anyhow::ensure!(
-        transport.session_count() == sessions,
-        "{} sessions are live, not {sessions}",
-        transport.session_count()
+        transport.session_count() == sessions + 1,
+        "{} sessions are live, not {} (the warm-up session and {sessions})",
+        transport.session_count(),
+        sessions + 1
     );
     let after_open = settled(settle).await;
     let after_hold = if hold > 0 {
