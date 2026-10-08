@@ -65,7 +65,10 @@ pub(crate) fn plan(
 ///
 /// A node without `udp` has an underlay with no IP socket, so no neighbor reaches it over IP
 /// and the session is the only path of the underlay to every neighbor, whatever the
-/// application path is.
+/// application path is. The same holds from the other side: a neighbor whose underlay address
+/// has no IP entry (a node without `udp`, read from its signed link vector) is wanted, since
+/// it can only be reached by a session. [`plan`] dials only from the lower id, so each end
+/// has to want the pair for the lower one to offer.
 fn wanted_underlays(
     neighbors: &[(EndpointId, iroh::EndpointAddr)],
     local_has_udp: bool,
@@ -76,7 +79,10 @@ fn wanted_underlays(
     }
     neighbors
         .iter()
-        .filter(|(member, _)| kind_of(*member) == Some(super::probe::PathKind::WebRtc))
+        .filter(|(member, addr)| {
+            kind_of(*member) == Some(super::probe::PathKind::WebRtc)
+                || addr.ip_addrs().next().is_none()
+        })
         .map(|(_, addr)| addr.clone())
         .collect()
 }
@@ -358,10 +364,47 @@ mod tests {
         let (webrtc, ip, relay, unknown) = (id(11), id(12), id(13), id(14));
         let neighbors: Vec<(EndpointId, EndpointAddr)> = [webrtc, ip, relay, unknown]
             .into_iter()
-            .map(|member| (member, EndpointAddr::new(id(member.as_bytes()[0] ^ 0x55))))
+            .map(|member| (member, reachable_over_ip(id(member.as_bytes()[0] ^ 0x55))))
             .collect();
         let wanted = wanted_underlays(&neighbors, true, neighbor_kinds(webrtc, ip, relay));
         assert_eq!(wanted, vec![neighbors[0].1.clone()]);
+    }
+
+    /// The underlay address of a neighbor that has an IP socket.
+    fn reachable_over_ip(underlay: EndpointId) -> EndpointAddr {
+        EndpointAddr::new(underlay).with_ip_addr("127.0.0.1:4433".parse().expect("an address"))
+    }
+
+    /// The underlay address of a neighbor without an IP socket, as its link vector gives it: the
+    /// relay and nothing else.
+    fn relay_only(underlay: EndpointId) -> EndpointAddr {
+        EndpointAddr::new(underlay).with_relay_url("https://relay.test".parse().expect("a url"))
+    }
+
+    /// A neighbor whose underlay address has no IP entry (a node without `udp`) can only be
+    /// reached by a session, so a node with `udp` wants it too, whatever the application path is.
+    /// A neighbor with an IP entry on the relay path is not wanted.
+    #[test]
+    fn a_neighbor_whose_underlay_has_no_ip_is_wanted_by_a_node_with_udp() {
+        let (no_ip, with_ip) = (id(41), id(42));
+        let neighbors = vec![
+            (no_ip, relay_only(id(51))),
+            (with_ip, reachable_over_ip(id(52))),
+        ];
+        let on_relay = |_member: EndpointId| Some(PathKind::Relay);
+        assert_eq!(
+            wanted_underlays(&neighbors, true, on_relay),
+            vec![neighbors[0].1.clone()]
+        );
+    }
+
+    /// The rule above is for the lower id: `plan` dials only from there. A node with the higher
+    /// underlay id wants the session and waits for the offer.
+    #[test]
+    fn the_higher_underlay_id_wants_a_session_and_does_not_dial() {
+        let (low, high) = ordered();
+        assert_eq!(plan(high, &[low], &[low], &[]), Plan::default());
+        assert_eq!(plan(low, &[high], &[high], &[]).dial, vec![high]);
     }
 
     /// A node without `udp` has no IP on its underlay: the session is the only path to every
