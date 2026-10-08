@@ -104,10 +104,8 @@ pub(crate) async fn ladder_multihop_third(args: &Args) -> Outcome {
         let third = hop(&secret(12)).await?;
         let third_id = secret(12).public();
         let bob = node(secret(13)).await?;
-        // Every member learns the vector of every other, as gossip does in a mesh: a route
-        // names ids only, and each hop resolves the address of the next one from the vector
-        // that this next hop signed. The third forwards to bob and to alice, and bob answers
-        // through the third, so none of the three can start without the others' vectors.
+        // Every member learns the vector of every other, as gossip does in a mesh: a hop resolves
+        // the next hop's address from the vector that hop signed.
         let vectors = [
             alice.handle.link_vector(vec![(third_id, COST)]),
             third.link_vector(vec![(alice.id, COST), (bob.id, COST)]),

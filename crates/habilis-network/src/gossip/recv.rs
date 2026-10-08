@@ -637,7 +637,7 @@ async fn dispatch_infra(
         }
         MessageKind::LinkState => {
             if handle_link_state(message, state) {
-                crate::transport::probe::nudge_routable_relay_pairs(state, ctx, true);
+                crate::transport::probe::nudge_climbing_pairs(state, ctx, true);
             }
             return ControlFlow::Break(());
         }

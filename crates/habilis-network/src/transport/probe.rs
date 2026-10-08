@@ -240,12 +240,12 @@ pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, ctx: &HandlerCtx<'
             super::webrtc::nudge(&endpoint, peer).await;
         });
     }
-    nudge_routable_relay_pairs(state, ctx, false);
+    nudge_climbing_pairs(state, ctx, false);
 }
 
-/// A pair on the relay, or on gossip, that the topology can now route: dial with the route. The watcher does
-/// this when the path is lost, but a route learned later is then missing, and nothing else runs
-/// a lookup for a pair that already has a session or no offer to make.
+/// A pair on the relay, or on gossip, that the topology can now route: dial with the route. The
+/// watcher does this when the path is lost, but a route learned later is then missing, and
+/// nothing else runs a lookup for a pair that already has a session or no offer to make.
 ///
 /// The alive tick calls this with `only_changed` false, as the backstop: every pair that has
 /// something to carry is dialed. A link-state vector that changed the topology calls it with
@@ -253,7 +253,7 @@ pub(crate) fn nudge_webrtc_riders(state: &mut EventLoopState, ctx: &HandlerCtx<'
 /// guard is on the route, not on the dial: a route that a link-state event dialed already is not
 /// dialed again by another event, and the alive tick dials it as the backstop. No in-flight guard,
 /// by design: each dial is bounded by `DIAL_TIMEOUT`.
-pub(crate) fn nudge_routable_relay_pairs(
+pub(crate) fn nudge_climbing_pairs(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
     only_changed: bool,

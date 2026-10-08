@@ -467,7 +467,7 @@ pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'
     let updated = handle.feed_topology(vector.clone());
     // Our own links changed the topology: a route may exist now that did not at the last tick.
     if updated {
-        crate::transport::probe::nudge_routable_relay_pairs(state, ctx, true);
+        crate::transport::probe::nudge_climbing_pairs(state, ctx, true);
     }
     let Some(body) = gossip::json_body(&vector) else {
         return;
@@ -971,7 +971,7 @@ async fn sleep_until_opt(deadline: Option<TokioInstant>) {
 /// one that it refused, so the best first hop to a pair on the relay can be another now.
 /// The pass dials the pairs whose route changed.
 pub(crate) fn route_wake_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    crate::transport::probe::nudge_routable_relay_pairs(state, ctx, true);
+    crate::transport::probe::nudge_climbing_pairs(state, ctx, true);
 }
 
 /// The wake of the multihop handle, which rings when its relay rule starts to refuse a
@@ -1189,7 +1189,7 @@ mod route_wake_tests {
 
     use super::{linkstate_arm, route_wake_arm};
     use crate::testing::{LaneNode, nick};
-    use crate::transport::probe::{PathKind, nudge_routable_relay_pairs};
+    use crate::transport::probe::{PathKind, nudge_climbing_pairs};
 
     async fn multihop_handle() -> MultihopHandle {
         let secret = SecretKey::generate();
@@ -1308,7 +1308,7 @@ mod route_wake_tests {
         state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id()));
         state.path_kinds.insert(dst.app_id(), PathKind::Relay);
 
-        nudge_routable_relay_pairs(&mut state, &ctx, true);
+        nudge_climbing_pairs(&mut state, &ctx, true);
         let direct = state
             .route_dialed
             .get(&dst.app_id())
