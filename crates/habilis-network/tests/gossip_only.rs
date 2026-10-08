@@ -430,7 +430,14 @@ async fn state_written_by_alice_reaches_carol_while_the_pair_has_only_the_gossip
         .await
         .unwrap_or_else(|error| panic!("{NAME}: the merge was refused: {error}"));
     let started = Instant::now();
-    while !fixture.carol.state_json().await.contains("held") {
+    let pair = format!("\"{NAME}\":\"held\"");
+    while !fixture
+        .carol
+        .state_json()
+        .await
+        .replace(' ', "")
+        .contains(&pair)
+    {
         assert!(
             started.elapsed() < PAYLOAD_DEADLINE,
             "{NAME}: carol never held alice's change"
