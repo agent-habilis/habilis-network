@@ -18,6 +18,7 @@ use crate::util::clock::Instant;
 pub(crate) fn fresh_state() -> EventLoopState {
     EventLoopState::new(
         StateInit {
+            #[cfg(feature = "host")]
             state_file: None,
             identity: Arc::new(Identity::generate()),
             secrets: MeshSecrets::default(),
