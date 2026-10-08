@@ -45,6 +45,12 @@ pub(crate) struct MultihopTransport {
 }
 
 impl MultihopTransport {
+    /// The hop that this transport stamps as the source of the cells it originates.
+    #[cfg(test)]
+    pub(crate) fn self_hop(&self) -> RouteHop {
+        self.shared.self_hop.clone()
+    }
+
     pub(crate) fn new(shared: Arc<Shared>, inbound: mpsc::Receiver<Delivered>) -> Self {
         Self {
             shared,
@@ -182,5 +188,5 @@ fn revisits_us(route: &Route, me: &RouteHop) -> bool {
     route
         .hops()
         .iter()
-        .any(|hop| hop.underlay.id == me.underlay.id || hop.app_id == me.app_id)
+        .any(|hop| hop.underlay_id == me.underlay_id || hop.app_id == me.app_id)
 }

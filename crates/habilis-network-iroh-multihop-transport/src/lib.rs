@@ -197,17 +197,19 @@ impl MultihopHandle {
             "the underlay must be bound to `underlay_secret(secret)`, not another key"
         );
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(INBOUND_CAP);
+        let topology = Arc::new(RwLock::new(Topology::with_max_age(config.vector_max_age)));
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
             app_id,
             inbound_tx,
             config.relay_payload,
             config.relay_stuck_after,
+            Arc::clone(&topology),
         ));
 
         let self_hop = RouteHop {
             app_id,
-            underlay: underlay.addr(),
+            underlay_id: underlay.id(),
         };
         let self_addr = RouteInner::singleton(self_hop.clone()).encode();
         let shared = Arc::new(Shared {
@@ -226,7 +228,6 @@ impl MultihopHandle {
         }
         let router = router.spawn();
 
-        let topology = Arc::new(RwLock::new(Topology::with_max_age(config.vector_max_age)));
         let chooser = RouteChooser::new(app_id, Arc::clone(&topology), Arc::clone(&forwarder));
 
         Ok(Self {
@@ -895,6 +896,61 @@ mod tests {
         );
     }
 
+    /// The return route that the far end builds from a cell is the route that it would dial
+    /// itself. The two ends then name one iroh path for one route; if the bytes differ, iroh
+    /// maps them to two paths (a custom address is mapped by value), and one of them idles out.
+    ///
+    /// The topology holds every underlay with a relay URL, as the link vectors carry it once an
+    /// underlay is online. The stamp that a node puts on its cells (`self_hop`) was taken when
+    /// the handle was made, before that.
+    #[tokio::test]
+    async fn the_return_route_of_a_cell_is_the_route_that_the_far_end_dials() {
+        let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
+        let secrets = [81_u8, 82, 83].map(|seed| SecretKey::from_bytes(&[seed; 32]));
+        let [alice, carol, bob] = &secrets;
+        let with_relay = |secret: &SecretKey| {
+            iroh::EndpointAddr::new(underlay_secret(secret).public()).with_relay_url(relay.clone())
+        };
+        let alice_handle = MultihopHandle::new(
+            alice,
+            loopback_underlay(alice).await,
+            HandleConfig::default(),
+        )
+        .expect("a handle");
+        let bob_handle =
+            MultihopHandle::new(bob, loopback_underlay(bob).await, HandleConfig::default())
+                .expect("a handle");
+        for handle in [&alice_handle, &bob_handle] {
+            for (node, links) in [
+                (alice, vec![(carol.public(), 1)]),
+                (carol, vec![(alice.public(), 1), (bob.public(), 1)]),
+                (bob, vec![(carol.public(), 1)]),
+            ] {
+                handle.feed_topology(crate::LinkVector::signed(
+                    node,
+                    crate::topology::wall_clock_ms(),
+                    with_relay(node),
+                    links,
+                ));
+            }
+        }
+
+        // Alice dials Bob; Bob gets the cell and builds the way back from it.
+        let forward = Route::decode(&alice_handle.route_addr(bob.public()).expect("a route"))
+            .expect("a route");
+        let stamp = alice_handle.inner.transport.self_hop();
+        let way_back = Route::reverse_from(forward.hops(), stamp).expect("a legal route");
+
+        // Bob's own route to Alice, as his address lookup would hand it to iroh.
+        let dialed = Route::decode(&bob_handle.route_addr(alice.public()).expect("a route"))
+            .expect("a route");
+        assert_eq!(
+            way_back.encode(),
+            dialed.encode(),
+            "the way back from a cell is not the route that Bob dials: two iroh paths for one route"
+        );
+    }
+
     #[tokio::test]
     async fn the_shorter_route_is_kept_when_every_first_hop_is_refused() {
         let (
@@ -935,10 +991,15 @@ mod tests {
             "a link before any cell"
         );
 
+        // Each end holds the vector of the other: a route names a hop by ids, and the
+        // forwarder dials the address that the hop signed.
+        first.feed_topology(second.link_vector(Vec::new()));
+        second.feed_topology(first.link_vector(Vec::new()));
+
         // Traffic each way: the gate refuses it, since only the relay is open.
         let hop = |handle: &MultihopHandle, id| RouteHop {
             app_id: id,
-            underlay: handle.underlay_addr(),
+            underlay_id: handle.underlay_id(),
         };
         for (from, from_id, to, to_id) in [
             (&first, first_id, &second, second_id),

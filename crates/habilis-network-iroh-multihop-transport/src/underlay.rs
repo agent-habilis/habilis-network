@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Context;
 use iroh::endpoint::Connection;
@@ -29,6 +29,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use crate::addr::{Route, RouteHop};
+use crate::topology::Topology;
 use crate::wire::{Cell, read_cell, write_cell};
 
 /// ALPN for the multihop underlay's hop-to-hop forwarding protocol.
@@ -339,6 +340,11 @@ pub(crate) struct Forwarder {
     forwarded: AtomicU64,
     /// What the relay may do for cells.
     rule: RelayRule,
+    /// Where the dial address of a next hop comes from: a route names a hop by two ids,
+    /// and the address is the one that the hop signed in its link vector.
+    topology: Arc<RwLock<Topology>>,
+    /// Hops that a writer was spawned for without an address in the topology.
+    unresolved_hops: AtomicU64,
 }
 
 impl Forwarder {
@@ -348,6 +354,7 @@ impl Forwarder {
         inbound: mpsc::Sender<Delivered>,
         allow_relay: bool,
         stuck_after: Duration,
+        topology: Arc<RwLock<Topology>>,
     ) -> Self {
         Self {
             underlay,
@@ -362,7 +369,40 @@ impl Forwarder {
                 allow_relay,
                 stuck_after,
             },
+            topology,
+            unresolved_hops: AtomicU64::new(0),
         }
+    }
+
+    /// How many writers were spawned for a hop that is not in the topology.
+    #[cfg(test)]
+    pub(crate) fn unresolved_hops(&self) -> u64 {
+        self.unresolved_hops.load(Ordering::Relaxed)
+    }
+
+    /// The address to dial for `hop`: the one that its node signed in its link vector, if the
+    /// vector names the same underlay endpoint as the hop. A hop that the topology does not
+    /// know is dialed by its id alone, and counted: it may still be reachable by what iroh
+    /// knows of the id, and if it is not, the cells are lost like any other.
+    fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
+        let known = self
+            .topology
+            .read()
+            .expect("topology lock poisoned")
+            .underlay_of(hop.app_id)
+            .filter(|addr| addr.id == hop.underlay_id);
+        known.unwrap_or_else(|| {
+            let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
+            if total == 1 || total.is_multiple_of(256) {
+                tracing::warn!(
+                    total,
+                    hop = %hop.underlay_id.fmt_short(),
+                    app_id = %hop.app_id.fmt_short(),
+                    "multihop forwarder: hop not in the topology, dialing it by id"
+                );
+            }
+            EndpointAddr::new(hop.underlay_id)
+        })
     }
 
     /// How many cells this node passed on for other nodes.
@@ -433,7 +473,7 @@ impl Forwarder {
             self.note_drop("forwarding byte budget exhausted");
             return;
         }
-        let key = hop.underlay.id;
+        let key = hop.underlay_id;
         // First attempt on any existing writer.
         if let Some(sender) = self.writer_for(key)
             && sender.try_send(cell.clone()).is_ok()
@@ -441,7 +481,7 @@ impl Forwarder {
             return;
         }
         // Stale or absent: (re)spawn a writer, then try once more.
-        let Some(sender) = self.spawn_writer(hop.underlay.clone(), hop.app_id) else {
+        let Some(sender) = self.spawn_writer(hop) else {
             self.pool.release(cost);
             return;
         };
@@ -468,7 +508,7 @@ impl Forwarder {
     /// carry different keys and a cell should not be able to pair our underlay
     /// with somebody else's application id.
     fn is_self(&self, hop: &RouteHop) -> bool {
-        hop.underlay.id == self.underlay.id() && hop.app_id == self.self_app_id
+        hop.underlay_id == self.underlay.id() && hop.app_id == self.self_app_id
     }
 
     /// The hop that should have sent us this cell: our predecessor on the route,
@@ -498,7 +538,7 @@ impl Forwarder {
             return;
         }
         let is_expected_upstream =
-            Self::expected_upstream(&cell).is_some_and(|hop| hop.underlay.id == from);
+            Self::expected_upstream(&cell).is_some_and(|hop| hop.underlay_id == from);
         if !is_expected_upstream {
             self.note_drop("cell did not arrive from its preceding hop");
             return;
@@ -526,7 +566,9 @@ impl Forwarder {
     /// neighbours out of the map. A refused flood instead clears itself, because
     /// each spawned writer gives up after [`DIAL_ATTEMPTS`] and removes its own
     /// entry on the way out.
-    fn spawn_writer(&self, dst: EndpointAddr, app_id: EndpointId) -> Option<mpsc::Sender<Cell>> {
+    fn spawn_writer(&self, hop: &RouteHop) -> Option<mpsc::Sender<Cell>> {
+        let dst = self.dial_addr(hop);
+        let app_id = hop.app_id;
         let (tx, rx) = mpsc::channel(WRITER_QUEUE);
         {
             let mut writers = self.pool.writers.lock().expect("writers mutex poisoned");
@@ -707,9 +749,12 @@ impl ProtocolHandler for ForwardAcceptor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, TransportAddr};
+    use super::{
+        Arc, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, RwLock, TransportAddr,
+    };
     use crate::addr::{Route, RouteHop};
     use crate::test_support::relay_server;
+    use crate::topology::{LinkVector, Topology};
     use crate::wire::Cell;
     use iroh::endpoint::presets;
     use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
@@ -721,7 +766,7 @@ mod tests {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
         RouteHop {
             app_id: id,
-            underlay: EndpointAddr::new(id),
+            underlay_id: id,
         }
     }
 
@@ -740,7 +785,14 @@ mod tests {
         let app_id: EndpointId = SecretKey::from_bytes(&[99; 32]).public();
         let (inbound, received) = mpsc::channel(4);
         (
-            Forwarder::new(underlay, app_id, inbound, false, Duration::from_secs(20)),
+            Forwarder::new(
+                underlay,
+                app_id,
+                inbound,
+                false,
+                Duration::from_secs(20),
+                Arc::new(RwLock::new(Topology::default())),
+            ),
             app_id,
             received,
         )
@@ -750,7 +802,7 @@ mod tests {
     fn self_hop(forwarder: &Forwarder) -> RouteHop {
         RouteHop {
             app_id: forwarder.self_app_id,
-            underlay: forwarder.underlay.addr(),
+            underlay_id: forwarder.underlay.id(),
         }
     }
 
@@ -778,7 +830,7 @@ mod tests {
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
         let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay.id);
+        forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_ok());
         assert_eq!(
             forwarder.forwarded_cells(),
@@ -794,7 +846,7 @@ mod tests {
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
         let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay.id);
+        forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_err());
         assert_eq!(live_writers(&forwarder), 0, "no writer, no dial, no bytes");
     }
@@ -812,7 +864,7 @@ mod tests {
             1,
             source,
         );
-        forwarder.handle_cell(subject, downstream.underlay.id);
+        forwarder.handle_cell(subject, downstream.underlay_id);
         assert!(received.try_recv().is_err());
         assert_eq!(live_writers(&forwarder), 0);
     }
@@ -822,7 +874,7 @@ mod tests {
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
         let subject = cell(vec![self_hop(&forwarder)], 7, source.clone());
-        forwarder.handle_cell(subject, source.underlay.id);
+        forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_err());
     }
 
@@ -832,7 +884,7 @@ mod tests {
         let source = stranger(1);
         let next = stranger(5);
         let subject = cell(vec![self_hop(&forwarder), next.clone()], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay.id);
+        forwarder.handle_cell(subject, source.underlay_id);
         assert!(received.try_recv().is_err(), "not ours to deliver");
         assert_eq!(live_writers(&forwarder), 1);
         assert_eq!(forwarder.forwarded_cells(), 1);
@@ -843,7 +895,7 @@ mod tests {
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
         let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
-        forwarder.handle_cell(subject, source.underlay.id);
+        forwarder.handle_cell(subject, source.underlay_id);
         assert_eq!(forwarder.forwarded_cells(), 0);
     }
 
@@ -852,8 +904,31 @@ mod tests {
     struct RelayNode {
         forwarder: Arc<Forwarder>,
         hop: RouteHop,
+        /// The key of the application endpoint, which signs the link vector of the node.
+        app_secret: SecretKey,
+        /// The address that the node would advertise for its underlay.
+        underlay_addr: EndpointAddr,
         received: mpsc::Receiver<Delivered>,
         _router: iroh::protocol::Router,
+    }
+
+    impl RelayNode {
+        /// Make `other` known to this node, as the link vector of `other` would: signed by
+        /// its application key, with its underlay address. A route names a hop by ids, and
+        /// the forwarder dials the address of the topology.
+        fn learns(&self, other: &RelayNode) {
+            let vector = LinkVector::signed(
+                &other.app_secret,
+                crate::topology::wall_clock_ms(),
+                other.underlay_addr.clone(),
+                Vec::new(),
+            );
+            self.forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .ingest(vector);
+        }
     }
 
     async fn relay_node(seed: u8, url: &iroh::RelayUrl, allow_relay: bool) -> RelayNode {
@@ -867,7 +942,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), underlay.online())
             .await
             .expect("the underlay reaches the relay");
-        let app_id: EndpointId = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]).public();
+        let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
+        let app_id: EndpointId = app_secret.public();
         let (inbound, received) = mpsc::channel(8);
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
@@ -875,6 +951,7 @@ mod tests {
             inbound,
             allow_relay,
             Duration::from_millis(300),
+            Arc::new(RwLock::new(Topology::default())),
         ));
         let router = iroh::protocol::Router::builder(underlay.clone())
             .accept(
@@ -884,11 +961,13 @@ mod tests {
             .spawn();
         let hop = RouteHop {
             app_id,
-            underlay: underlay.addr(),
+            underlay_id: underlay.id(),
         };
         RelayNode {
             forwarder,
             hop,
+            app_secret,
+            underlay_addr: underlay.addr(),
             received,
             _router: router,
         }
@@ -897,6 +976,7 @@ mod tests {
     /// Send one cell from `from` to `to` over their underlays and say whether it
     /// arrived within a few seconds.
     async fn cell_arrives(from: &RelayNode, to: &mut RelayNode) -> bool {
+        from.learns(to);
         let subject = Cell {
             path: Route::new(vec![to.hop.clone()]).expect("legal route"),
             pos: 0,
@@ -984,9 +1064,70 @@ mod tests {
             .is_ok()
     }
 
+    /// A hop of `seed`, whose node signed a vector that names `advertised` as its underlay
+    /// endpoint, held by `forwarder`. The hop itself names `named`.
+    fn hop_with_vector(
+        forwarder: &Forwarder,
+        seed: u8,
+        advertised: &EndpointAddr,
+        named: EndpointId,
+    ) -> RouteHop {
+        let app = SecretKey::from_bytes(&[seed; 32]);
+        forwarder
+            .topology
+            .write()
+            .expect("topology lock poisoned")
+            .ingest(LinkVector::signed(
+                &app,
+                crate::topology::wall_clock_ms(),
+                advertised.clone(),
+                Vec::new(),
+            ));
+        RouteHop {
+            app_id: app.public(),
+            underlay_id: named,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hop_is_dialed_at_the_address_that_its_vector_signed() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let underlay_id = SecretKey::from_bytes(&[121; 32]).public();
+        let signed = EndpointAddr::new(underlay_id)
+            .with_ip_addr("10.0.0.9:4000".parse().expect("an address"));
+        let hop = hop_with_vector(&forwarder, 120, &signed, underlay_id);
+        assert_eq!(forwarder.dial_addr(&hop), signed);
+        assert_eq!(forwarder.unresolved_hops(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_hop_that_the_topology_does_not_know_is_dialed_by_id_and_counted() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let hop = stranger(122);
+        assert_eq!(
+            forwarder.dial_addr(&hop),
+            EndpointAddr::new(hop.underlay_id),
+            "no address is made up"
+        );
+        assert_eq!(forwarder.unresolved_hops(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_vector_that_names_another_underlay_does_not_resolve_the_hop() {
+        // The route says the underlay of this node is `named`; the node signed another.
+        // The address of the vector is not the address of the hop.
+        let (forwarder, _app, _received) = forwarder().await;
+        let signed = EndpointAddr::new(SecretKey::from_bytes(&[124; 32]).public())
+            .with_ip_addr("10.0.0.9:4000".parse().expect("an address"));
+        let named = SecretKey::from_bytes(&[125; 32]).public();
+        let hop = hop_with_vector(&forwarder, 123, &signed, named);
+        assert_eq!(forwarder.dial_addr(&hop), EndpointAddr::new(named));
+        assert_eq!(forwarder.unresolved_hops(), 1);
+    }
+
     #[tokio::test]
     async fn the_pool_wakes_at_the_first_refusal_of_a_hop_and_at_its_recovery() {
-        let (hop, app) = (stranger(13).underlay.id, stranger(14).app_id);
+        let (hop, app) = (stranger(13).underlay_id, stranger(14).app_id);
         let pool = super::WriterPool::default();
         let wake = Arc::clone(&pool.route_wake);
         pool.track(hop, app);
@@ -1008,7 +1149,7 @@ mod tests {
 
     #[test]
     fn a_stuck_hop_is_a_link_again_once_it_is_admitted() {
-        let (hop, app) = (stranger(11).underlay.id, stranger(12).app_id);
+        let (hop, app) = (stranger(11).underlay_id, stranger(12).app_id);
         let pool = super::WriterPool::default();
         pool.track(hop, app);
         pool.note_refused(hop, Duration::ZERO);
@@ -1044,7 +1185,8 @@ mod tests {
             builder = builder.path_selector(selector);
         }
         let underlay = builder.bind().await.expect("bind a loopback underlay");
-        let app_id: EndpointId = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]).public();
+        let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
+        let app_id: EndpointId = app_secret.public();
         let (inbound, received) = mpsc::channel(8);
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
@@ -1052,6 +1194,7 @@ mod tests {
             inbound,
             false,
             stuck_after,
+            Arc::new(RwLock::new(Topology::default())),
         ));
         let router = iroh::protocol::Router::builder(underlay.clone())
             .accept(
@@ -1061,11 +1204,13 @@ mod tests {
             .spawn();
         let hop = RouteHop {
             app_id,
-            underlay: underlay.addr(),
+            underlay_id: underlay.id(),
         };
         RelayNode {
             forwarder,
             hop,
+            app_secret,
+            underlay_addr: underlay.addr(),
             received,
             _router: router,
         }
@@ -1195,7 +1340,7 @@ mod tests {
         let source = stranger(1);
         for seed in 0..u8::try_from(MAX_WRITERS + 8).expect("fits") {
             let next = stranger(seed.wrapping_add(100));
-            if next.underlay.id == forwarder.underlay.id() {
+            if next.underlay_id == forwarder.underlay.id() {
                 continue;
             }
             forwarder.enqueue(&next, cell(vec![next.clone()], 0, source.clone()));

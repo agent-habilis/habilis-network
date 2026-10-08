@@ -32,6 +32,32 @@ impl ProtocolHandler for Echo {
     }
 }
 
+/// Echoes like [`Echo`], then reports how many multihop custom paths its end of the connection
+/// holds, so that a test can read the server side of a connection.
+#[derive(Debug, Clone)]
+struct EchoCountingPaths(tokio::sync::mpsc::UnboundedSender<usize>);
+
+impl ProtocolHandler for EchoCountingPaths {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        tokio::io::copy(&mut recv, &mut send).await?;
+        send.finish()?;
+        let _ = self.0.send(multihop_paths(&connection));
+        connection.closed().await;
+        Ok(())
+    }
+}
+
+/// How many multihop custom paths `conn` holds open, selected or not.
+fn multihop_paths(conn: &Connection) -> usize {
+    conn.paths()
+        .iter()
+        .filter(|path| {
+            matches!(path.remote_addr(), TransportAddr::Custom(addr) if addr.id() == MULTIHOP_TRANSPORT_ID)
+        })
+        .count()
+}
+
 /// A plain loopback underlay endpoint: real IP on 127.0.0.1, no relay/discovery,
 /// on the key derived from the peer's own.
 async fn underlay_endpoint(peer: &SecretKey) -> Endpoint {
@@ -112,6 +138,21 @@ async fn make_relay(secret: SecretKey) -> MultihopHandle {
         .expect("underlay on the derived key")
 }
 
+/// Every node of a mesh holds the link vector of every other one: gossip does that. A route
+/// names a hop by ids, and each forwarder dials the address that its next hop signed in its
+/// own vector, so a relay that has not heard of the destination cannot forward to it.
+fn gossip_all(nodes: &[(&MultihopHandle, Vec<(EndpointId, u32)>)]) {
+    let vectors: Vec<_> = nodes
+        .iter()
+        .map(|(handle, links)| handle.link_vector(links.clone()))
+        .collect();
+    for (handle, _) in nodes {
+        for vector in &vectors {
+            handle.feed_topology(vector.clone());
+        }
+    }
+}
+
 fn secret(seed: u8) -> SecretKey {
     SecretKey::from_bytes(&[seed; 32])
 }
@@ -148,15 +189,11 @@ async fn connects_end_to_end_through_one_relay() {
 
     // Alice's routing table: the chain A→R→B, each vector carrying that node's
     // real underlay dial address.
-    alice
-        .handle
-        .feed_topology(alice.handle.link_vector(vec![(relay_id, COST)]));
-    alice
-        .handle
-        .feed_topology(relay.link_vector(vec![(alice.id, COST), (bob.id, COST)]));
-    alice
-        .handle
-        .feed_topology(bob.handle.link_vector(vec![(relay_id, COST)]));
+    gossip_all(&[
+        (&alice.handle, vec![(relay_id, COST)]),
+        (&relay, vec![(alice.id, COST), (bob.id, COST)]),
+        (&bob.handle, vec![(relay_id, COST)]),
+    ]);
 
     let echo = Router::builder(bob.app.clone())
         .accept(ECHO_ALPN, Echo)
@@ -178,6 +215,44 @@ async fn connects_end_to_end_through_one_relay() {
 }
 
 #[tokio::test]
+async fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
+    // Cells go both ways over A -> R -> B. A hop is named by ids, so the route that A dials and
+    // the way back that B builds from a cell are the same bytes, and iroh maps them to one path.
+    let alice = make_node(secret(31)).await;
+    let relay = make_relay(secret(32)).await;
+    let relay_id = secret(32).public();
+    let bob = make_node(secret(33)).await;
+    gossip_all(&[
+        (&alice.handle, vec![(relay_id, COST)]),
+        (&relay, vec![(alice.id, COST), (bob.id, COST)]),
+        (&bob.handle, vec![(relay_id, COST)]),
+    ]);
+    let (counted, mut server_side) = tokio::sync::mpsc::unbounded_channel();
+    let echo = Router::builder(bob.app.clone())
+        .accept(ECHO_ALPN, EchoCountingPaths(counted))
+        .spawn();
+
+    let conn = tokio::time::timeout(
+        Duration::from_secs(30),
+        alice.app.connect(bob.id, ECHO_ALPN),
+    )
+    .await
+    .expect("connect timed out")
+    .expect("connect over one relay");
+    echo_roundtrip(&conn, b"cells both ways").await;
+
+    let at_bob = tokio::time::timeout(Duration::from_secs(10), server_side.recv())
+        .await
+        .expect("bob reports his paths")
+        .expect("the handler is alive");
+    assert_eq!(multihop_paths(&conn), 1, "alice's end");
+    assert_eq!(at_bob, 1, "bob's end");
+
+    conn.close(0u32.into(), b"done");
+    echo.shutdown().await.expect("shutdown echo router");
+}
+
+#[tokio::test]
 async fn connects_end_to_end_through_two_relays() {
     // A → R1 → R2 → B: a genuine multi-hop route.
     let alice = make_node(secret(11)).await;
@@ -187,18 +262,12 @@ async fn connects_end_to_end_through_two_relays() {
     let r2_id = secret(13).public();
     let bob = make_node(secret(14)).await;
 
-    alice
-        .handle
-        .feed_topology(alice.handle.link_vector(vec![(r1_id, COST)]));
-    alice
-        .handle
-        .feed_topology(r1.link_vector(vec![(alice.id, COST), (r2_id, COST)]));
-    alice
-        .handle
-        .feed_topology(r2.link_vector(vec![(r1_id, COST), (bob.id, COST)]));
-    alice
-        .handle
-        .feed_topology(bob.handle.link_vector(vec![(r2_id, COST)]));
+    gossip_all(&[
+        (&alice.handle, vec![(r1_id, COST)]),
+        (&r1, vec![(alice.id, COST), (r2_id, COST)]),
+        (&r2, vec![(r1_id, COST), (bob.id, COST)]),
+        (&bob.handle, vec![(r2_id, COST)]),
+    ]);
 
     let echo = Router::builder(bob.app.clone())
         .accept(ECHO_ALPN, Echo)
@@ -240,15 +309,11 @@ async fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
         "and so is the WebRTC address"
     );
 
-    alice
-        .handle
-        .feed_topology(alice.handle.link_vector(vec![(relay_id, COST)]));
-    alice
-        .handle
-        .feed_topology(relay.link_vector(vec![(alice.id, COST), (bob.id, COST)]));
-    alice
-        .handle
-        .feed_topology(bob.handle.link_vector(vec![(relay_id, COST)]));
+    gossip_all(&[
+        (&alice.handle, vec![(relay_id, COST)]),
+        (&relay, vec![(alice.id, COST), (bob.id, COST)]),
+        (&bob.handle, vec![(relay_id, COST)]),
+    ]);
 
     let echo = Router::builder(bob.app.clone())
         .accept(ECHO_ALPN, Echo)

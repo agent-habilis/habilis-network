@@ -325,7 +325,7 @@ impl Topology {
             .map(|hop| {
                 self.underlay_of(*hop).map(|underlay| RouteHop {
                     app_id: *hop,
-                    underlay,
+                    underlay_id: underlay.id,
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -602,6 +602,30 @@ mod tests {
         assert!(ingest(&mut store, vector(na, 3_000, &[(nb, 1)])));
     }
 
+    /// iroh names a path by the bytes of its address, so two spellings of one route are two
+    /// paths. Two ends hold different versions of a vector for a while (a relay switch, a new
+    /// IP), so the bytes of a route must depend on the ids of its hops and on nothing else.
+    #[test]
+    fn the_locator_of_a_route_does_not_depend_on_the_addresses_a_vector_carries() {
+        let (na, nb, nc) = (eid(1), eid(2), eid(3));
+        let mut store = Topology::default();
+        ingest(&mut store, vector(na, 1, &[(nb, 1)]));
+        ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
+        ingest(&mut store, vector(nc, 1, &[]));
+        let before = store.route_to(na, nc, 1)[0].encode();
+
+        let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
+        let moved = EndpointAddr::new(nc)
+            .with_relay_url(relay)
+            .with_ip_addr("10.0.0.7:4000".parse().expect("an address"));
+        assert!(ingest(
+            &mut store,
+            LinkVector::signed(&secret_of(nc), 2, moved, Vec::new())
+        ));
+        let after = store.route_to(na, nc, 1)[0].encode();
+        assert_eq!(before, after, "the same route, the same bytes");
+    }
+
     #[test]
     fn route_traces_the_chain_and_carries_underlay_addrs() {
         let (na, nb, nc, nd) = (eid(1), eid(2), eid(3), eid(4));
@@ -620,8 +644,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![nb, nc, nd]
         );
-        // Every hop carries a dialable underlay addr for that node.
-        assert_eq!(routes[0].hops()[0].underlay, EndpointAddr::new(nb));
+        // Every hop names the underlay endpoint of that node.
+        assert_eq!(routes[0].hops()[0].underlay_id, nb);
     }
 
     #[test]

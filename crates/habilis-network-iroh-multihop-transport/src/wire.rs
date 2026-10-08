@@ -100,13 +100,13 @@ pub(crate) async fn read_cell(recv: &mut RecvStream) -> Result<Cell> {
 mod tests {
     use super::Cell;
     use crate::addr::{MAX_ROUTE_HOPS, Route, RouteHop};
-    use iroh::{EndpointAddr, EndpointId, SecretKey};
+    use iroh::{EndpointId, SecretKey};
 
     fn hop(seed: u8) -> RouteHop {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
         RouteHop {
             app_id: id,
-            underlay: EndpointAddr::new(id),
+            underlay_id: id,
         }
     }
 
