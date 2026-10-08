@@ -446,7 +446,7 @@ pub const REGRAFT_AFTER_MS: u64 = 1000;
 pub const LANE_OFFERS_IN_FLIGHT: usize = 4;
 
 /// How many events the mesh topic may queue for the splitter before iroh-gossip reports a lag
-/// and closes the subscription (the default is 2048). Each event holds a message of up to
+/// and keeps the subscription (the default is 2048; the engine counts the lag). Each event holds a message of up to
 /// 3840 bytes, so the worst case is about 31 MB. The splitter reads at once, so the queue
 /// only covers a stall of that task; the final value comes from the gossip cell on the host:
 /// the smallest one at which `topic_lagged` stays 0 at 700 Mbit/s.

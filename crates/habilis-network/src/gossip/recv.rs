@@ -177,9 +177,10 @@ pub(crate) async fn handle_gossip_event(
             }
         }
         Some(Ok(Event::Lagged)) => {
-            // Upstream closes a lagging subscriber outright (its docs:
-            // "close and re-open"), so a terminal `None` follows; the
-            // heal arm's resubscribe handles the re-open.
+            // Upstream reports the lag and keeps the subscription open (it
+            // does not close it, whatever its docs say): the split counts it
+            // on the transport handle, and this arm only tells the user. A
+            // terminal `None` is another event, handled below.
             ctx.sink.emit(NodeEvent::Info(
                 "Event stream lagged, some messages may have been missed".to_owned(),
             ));
@@ -304,7 +305,7 @@ pub(crate) async fn drain_dead_receiver(
         match receiver.next().now_or_never() {
             Some(Some(item @ Ok(Event::Received(_)))) => {
                 // A buffered frame goes to the transport, as in the split: it is not a message.
-                if super::split::route(&item, state.gossip_handle.as_ref())
+                if super::split::route_and_deliver(&item, state.gossip_handle.as_ref())
                     != super::split::Route::Data
                 {
                     continue;

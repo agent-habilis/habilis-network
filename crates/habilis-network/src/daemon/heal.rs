@@ -204,7 +204,7 @@ pub(super) async fn resubscribe_tick(
             // emits its own NeighborUps (and re-arms the probe gate).
             state.rendezvous_linked = false;
             let ctx = env.parts.ctx(link.sender);
-            if let Some(mut dead_receiver) = dead_receiver.into_dead().await {
+            if let Some(mut dead_receiver) = dead_receiver.into_dead() {
                 gossip::drain_dead_receiver(&mut dead_receiver, state, app, &ctx).await;
             }
             gossip::heal::recover_from_starvation(state, &ctx).await;

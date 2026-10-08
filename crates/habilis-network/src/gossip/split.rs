@@ -69,7 +69,9 @@ pub(crate) struct MeshReceiver<S> {
 
 impl<S> MeshReceiver<S> {
     /// The next mesh event, or `None` when the topic ended and the queued messages are read.
-    /// The control events come first; the end of the topic comes after the data queued before it.
+    /// The control events come first, so a control event can overtake a mesh message that was
+    /// queued before it: nobody relies on the order across the two queues. The end of the topic
+    /// comes after the data queued before it.
     pub(crate) async fn next(&mut self) -> Option<TopicItem> {
         loop {
             let Some(control) = self.control.as_mut() else {
@@ -86,9 +88,11 @@ impl<S> MeshReceiver<S> {
         }
     }
 
-    /// The topic receiver of a subscription that ended, for the drain of what it buffered.
-    pub(crate) async fn into_dead(self) -> Option<S> {
-        self.dead?.await.ok()
+    /// The topic receiver of a subscription that ended, for the drain of what it buffered. It does
+    /// not wait: the task hands the receiver back before it closes the queues, so a loop that has
+    /// read the end of the topic finds it here. A subscription that has not ended yields none.
+    pub(crate) fn into_dead(mut self) -> Option<S> {
+        self.dead.take()?.try_recv().ok()
     }
 }
 
@@ -97,9 +101,9 @@ pub(crate) fn is_frame(content: &[u8]) -> bool {
     content.first() == Some(&FRAME_KIND)
 }
 
-/// Where an item of the topic goes. A frame is handed to the transport here, and a lag is
-/// counted on it. Without a handle (the engine installs one at step 10) a frame is dropped.
-pub(crate) fn route(item: &TopicItem, handle: Option<&GossipHandle>) -> Route {
+/// Where an item of the topic goes, with two side effects: a frame is handed to the transport
+/// here, and a lag is counted on it. Without a handle (the engine installs one at step 10) a frame is dropped.
+pub(crate) fn route_and_deliver(item: &TopicItem, handle: Option<&GossipHandle>) -> Route {
     match item {
         Ok(Event::Received(message)) if is_frame(&message.content) => {
             if let Some(handle) = handle {
@@ -130,7 +134,7 @@ where
         let mut stream = stream;
         let mut dropped = 0u64;
         while let Some(item) = stream.next().await {
-            let delivered = match route(&item, handle.as_ref()) {
+            let delivered = match route_and_deliver(&item, handle.as_ref()) {
                 Route::Frame => true,
                 Route::Control => control_tx.send(item).is_ok(),
                 Route::Data => match data_tx.try_send(item) {
@@ -209,6 +213,17 @@ mod tests {
         frame::encode(app, endpoint_id(8), b"datagram").expect("a frame")
     }
 
+    /// Wait until the handle has counted `frames` frames, or fail after 5 s.
+    async fn frames_in(handle: &GossipHandle, frames: u64) {
+        for _ in 0..500 {
+            if handle.stats().frames_in >= frames {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("only {} of {frames} frames read", handle.stats().frames_in);
+    }
+
     /// A mesh message: its first byte is not the frame kind.
     fn numbered(index: usize) -> Bytes {
         let mut content = b"m".to_vec();
@@ -280,10 +295,7 @@ mod tests {
             Some(Ok(Event::Received(_)))
         ));
         assert!(next_within(&mut mesh).await.is_none(), "the topic ended");
-        assert!(
-            mesh.into_dead().await.is_some(),
-            "the dead receiver comes back"
-        );
+        assert!(mesh.into_dead().is_some(), "the dead receiver comes back");
     }
 
     /// A loop that is busy does not make the topic lag: the splitter reads at once, and the mesh
@@ -302,12 +314,12 @@ mod tests {
                     .expect("send");
             }
         }
-        // The loop sleeps; the splitter must read the whole topic meanwhile.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The loop reads nothing; the splitter must read the whole topic meanwhile.
+        frames_in(&handle, 10_000).await;
         assert_eq!(
             handle.stats().frames_in,
             10_000,
-            "every frame was read while the loop slept"
+            "every frame was read while the loop was busy"
         );
         for index in 0..10u8 {
             let Some(Ok(Event::Received(forwarded))) = next_within(&mut mesh).await else {
@@ -340,8 +352,8 @@ mod tests {
         }
         tx.send(Ok(Event::NeighborDown(endpoint_id(7))))
             .expect("send");
-        // The loop sleeps; nothing is read from the mesh meanwhile.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The loop reads nothing from the mesh meanwhile.
+        frames_in(&handle, storm as u64).await;
 
         let stats = handle.stats();
         assert_eq!(
@@ -387,5 +399,32 @@ mod tests {
             assert_eq!(item.content, numbered(usize::from(index)));
         }
         assert!(next_within(&mut mesh).await.is_none(), "then the end");
+    }
+
+    /// The heal arm asks for the dead receiver without waiting: a subscription that has not ended
+    /// yields none, at once.
+    #[tokio::test]
+    async fn into_dead_does_not_wait_for_a_subscription_that_has_not_ended() {
+        let (_tx, events) = topic();
+        let mesh = spawn_split(events, None);
+
+        assert!(mesh.into_dead().is_none(), "the stream has not ended");
+    }
+
+    /// A message of the engine's own encoder is JSON: its first byte is never the frame kind.
+    #[test]
+    fn a_message_of_the_engine_does_not_start_with_the_frame_kind() {
+        use habilis_network_iroh_gossip_transport::frame::FRAME_KIND;
+
+        let mesh = crate::protocol::MeshId::from("test");
+        let author = crate::testing::nick("alice");
+        let answer =
+            crate::protocol::Message::new_pong(&mesh, &author, crate::testing::nick("bob"));
+        let request = crate::protocol::Message::new_ping(&mesh, &author);
+        for message in [answer, request] {
+            let bytes = message.serialize().expect("serialize");
+            assert_ne!(bytes.first(), Some(&FRAME_KIND), "{bytes:?}");
+            assert!(!super::is_frame(&bytes));
+        }
     }
 }
