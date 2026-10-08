@@ -27,8 +27,11 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+mod common;
+
 use std::time::{Duration, Instant};
 
+use common::GOSSIP_INSTALLED;
 use habilis_network::iroh::{EndpointId, RelayUrl};
 use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, MeshConfig, Transport};
@@ -62,6 +65,9 @@ enum Blocked {
     Ip,
     IpWebRtc,
     IpWebRtcMultihop,
+    /// The gossip rung too. It can be blocked per node only, so the cut is made on both
+    /// members of the pair.
+    IpWebRtcMultihopGossip,
 }
 
 /// What a cell sends. Only a directed message for now; the gossip and stream
@@ -98,6 +104,11 @@ enum Cut {
     WebRtcUnderlays,
     /// The whole multihop rung of alice's application endpoint.
     MultihopAlice,
+    /// The gossip rung of alice. The block table is per node and rung, not per remote, so bob
+    /// is cut too: see `GossipBob`.
+    GossipAlice,
+    /// The gossip rung of bob.
+    GossipBob,
 }
 
 impl Cell {
@@ -118,6 +129,9 @@ impl Cell {
         if self.blocked >= Blocked::IpWebRtcMultihop {
             cuts.push(Cut::MultihopAlice);
         }
+        if self.blocked >= Blocked::IpWebRtcMultihopGossip {
+            cuts.extend([Cut::GossipAlice, Cut::GossipBob]);
+        }
         if self.via_third {
             cuts.extend([
                 Cut::IpUnderlays,
@@ -134,7 +148,7 @@ impl Cell {
 
     /// How long the expected rung must be read before the cell counts as settled.
     fn settle(self, expected: Rung) -> Duration {
-        let allowed_above = [Rung::Ip, Rung::WebRtc, Rung::Multihop]
+        let allowed_above = [Rung::Ip, Rung::WebRtc, Rung::Multihop, Rung::Gossip]
             .into_iter()
             .any(|rung| rung < expected && self.allows(rung));
         if allowed_above {
@@ -150,9 +164,9 @@ impl Cell {
             Rung::Ip => self.has(Transport::Udp),
             Rung::WebRtc => self.has(Transport::WebRtc),
             Rung::Multihop => self.has(Transport::Multihop),
+            Rung::Gossip => self.has(Transport::Gossip),
             Rung::Relay => self.has(Transport::Relay),
-            // Gossip has no transport yet: its cells come with Phase 6.
-            Rung::Gossip | Rung::Other => false,
+            Rung::Other => false,
         }
     }
 
@@ -166,7 +180,8 @@ impl Cell {
                 Rung::Ip => self.blocked < Blocked::Ip,
                 Rung::WebRtc => self.blocked < Blocked::IpWebRtc,
                 Rung::Multihop => self.blocked < Blocked::IpWebRtcMultihop,
-                Rung::Gossip | Rung::Other => false,
+                Rung::Gossip => self.blocked < Blocked::IpWebRtcMultihopGossip,
+                Rung::Other => false,
                 Rung::Relay => true,
             },
         )
@@ -468,6 +483,8 @@ async fn apply(cut: Cut, alice: &Member, bob: &Member) {
         Cut::WebRtcBobToAlice => bob.block_rung_to(Rung::WebRtc, "alice").await,
         Cut::WebRtcUnderlays => block_underlay_rung(Rung::WebRtc, underlays),
         Cut::MultihopAlice => alice.block_rung(Rung::Multihop, true).await,
+        Cut::GossipAlice => alice.block_rung(Rung::Gossip, true).await,
+        Cut::GossipBob => bob.block_rung(Rung::Gossip, true).await,
     }
 }
 
@@ -514,6 +531,10 @@ async fn members(
 
 async fn run(cell: Cell, name: &str, sender_id: SenderId) {
     init_logging();
+    if cell.has(Transport::Gossip) && !GOSSIP_INSTALLED {
+        eprintln!("SKIPPED {name}: the engine does not install the gossip transport yet");
+        return;
+    }
     assert!(
         !cell.target_full && !cell.kinds.is_empty(),
         "{name}: a cell with a full target has no test before Phase 2"
@@ -854,6 +875,9 @@ cells! {
     udp_webrtc_multihop_relay_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop, Relay } IpWebRtcMultihop false;
     // The lists without `udp` that D8 made valid: a member with `webrtc` and `multihop` reaches
     // its peer on WebRTC, then on multihop (its underlay still has UDP until Phase 4c step 3).
+    // After step 3 the direct edge is the underlay's WebRTC session, and these cells keep their
+    // expectation. The relay lists have no `via_third` cell: see
+    // `no_cell_through_a_third_member_has_the_relay_in_its_list`.
     #[ignore = "run by cargo task matrix"]
     webrtc_multihop_none_direct { WebRtc, Multihop } None false;
     #[ignore = "run by cargo task matrix"]
@@ -868,6 +892,24 @@ cells! {
     webrtc_multihop_relay_ip_webrtc_direct { WebRtc, Multihop, Relay } IpWebRtc false;
     #[ignore = "run by cargo task matrix"]
     webrtc_multihop_relay_ip_webrtc_multihop_direct { WebRtc, Multihop, Relay } IpWebRtcMultihop false;
+    // The gossip cells. Gossip sits between multihop and the relay: it wins over the relay,
+    // and loses to multihop. See `GOSSIP_INSTALLED`.
+    #[ignore = "run by cargo task matrix"]
+    udp_gossip_ip_direct { Udp, Gossip } Ip false;
+    #[ignore = "run by cargo task matrix"]
+    udp_webrtc_gossip_ip_webrtc_direct { Udp, WebRtc, Gossip } IpWebRtc false;
+    #[ignore = "run by cargo task matrix"]
+    udp_multihop_gossip_ip_webrtc_multihop_direct { Udp, Multihop, Gossip } IpWebRtcMultihop false;
+    #[ignore = "run by cargo task matrix"]
+    udp_webrtc_multihop_gossip_ip_webrtc_multihop_direct { Udp, WebRtc, Multihop, Gossip } IpWebRtcMultihop false;
+    #[ignore = "run by cargo task matrix"]
+    udp_multihop_gossip_ip_webrtc_via_third { Udp, Multihop, Gossip } IpWebRtc true;
+    #[ignore = "run by cargo task matrix"]
+    udp_gossip_relay_ip_direct { Udp, Gossip, Relay } Ip false;
+    #[ignore = "run by cargo task matrix"]
+    udp_gossip_relay_all_blocked { Udp, Gossip, Relay } IpWebRtcMultihopGossip false;
+    #[ignore = "run by cargo task matrix"]
+    udp_gossip_all_blocked { Udp, Gossip } IpWebRtcMultihopGossip false;
 }
 
 /// The matrix covers exactly the lists that the protocol accepts: every valid
@@ -897,6 +939,101 @@ fn the_cells_cover_every_valid_transport_list_and_no_other() {
 /// The cuts of a cell that goes through a third member close every rung of the
 /// direct underlay edge; the cells that do not go through one leave the
 /// underlays alone.
+/// What a send says when the pair has no rung that may carry payload: the relay is lookup
+/// only. Pinned here on purpose, as the text that a user reads (`path::RELAY_REFUSED`).
+const RELAY_REFUSED: &str = "relay-only path refused: the relay is lookup only on this mesh";
+
+/// With `gossip` off in the list, a pair that has no direct path is refused with a clear error:
+/// no silence, no delivery. The pair is alice and bob with IP between them cut, on `udp` alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
+    const NAME: &str = "udp_ip_direct_clear_error";
+    init_logging();
+    let (_, cell) = CELLS
+        .iter()
+        .find(|(cell, _)| *cell == "udp_ip_direct")
+        .expect("the cell is in the table");
+    assert!(!cell.has(Transport::Gossip) && cell.expected().is_none());
+    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+        .await
+        .expect("local relay");
+    let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Any).await;
+    assert!(
+        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+        "{NAME}: the three members never formed a mesh"
+    );
+    alice.expect_rung("bob", "ip", NAME).await;
+    for cut in cell.cuts() {
+        apply(cut, &alice, &bob).await;
+    }
+    let waiting = Instant::now();
+    while alice.rung_to("bob").await == Some("ip") {
+        assert!(
+            waiting.elapsed() < LEAVE_IP_DEADLINE,
+            "{NAME}: the pair never left IP after the cut"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    let text = format!("matrix {NAME}");
+    assert_eq!(
+        alice.send("bob", &text).await,
+        Err(RELAY_REFUSED.to_owned()),
+        "{NAME}: the send must fail with the reason"
+    );
+    tokio::time::sleep(REFUSAL_WINDOW).await;
+    assert!(!bob.saw_msg(&text), "{NAME}: the refused message arrived");
+    for member in [alice, bob, carol] {
+        member.leave().await;
+    }
+}
+
+/// The gossip cells use lists that the protocol accepts, each with a direct path next to gossip,
+/// and each expects the rung that the ladder names: gossip above the relay, below multihop.
+#[test]
+fn the_gossip_cells_use_valid_lists_and_the_ladder_orders_gossip_between_multihop_and_the_relay() {
+    let gossip_cells: Vec<_> = CELLS
+        .iter()
+        .filter(|(_, cell)| cell.has(Transport::Gossip))
+        .collect();
+    assert_eq!(gossip_cells.len(), 8, "the eight cells of the design");
+    for (name, cell) in &gossip_cells {
+        assert!(
+            cell.has(Transport::Udp) || cell.has(Transport::WebRtc),
+            "{name}: gossip rides the links that another path carries"
+        );
+        assert!(
+            MeshConfig::resolve(&[Lookup::Relay], None, cell.transports).is_ok(),
+            "{name}: the transport list {:?}",
+            cell.transports
+        );
+    }
+    let expected = |name: &str| {
+        CELLS
+            .iter()
+            .find(|(cell, _)| *cell == name)
+            .and_then(|(_, cell)| cell.expected())
+    };
+    assert_eq!(expected("udp_gossip_ip_direct"), Some(Rung::Gossip));
+    assert_eq!(
+        expected("udp_multihop_gossip_ip_webrtc_via_third"),
+        Some(Rung::Multihop),
+        "gossip does not win while multihop is available"
+    );
+    assert_eq!(
+        expected("udp_gossip_relay_ip_direct"),
+        Some(Rung::Gossip),
+        "gossip wins over the relay"
+    );
+    assert_eq!(
+        expected("udp_gossip_relay_all_blocked"),
+        Some(Rung::Relay),
+        "the relay is what is left when gossip is blocked"
+    );
+    assert_eq!(expected("udp_gossip_all_blocked"), None);
+}
+
 #[test]
 fn a_cell_through_a_third_member_cuts_the_underlay_edge_on_every_rung() {
     for (name, cell) in CELLS {

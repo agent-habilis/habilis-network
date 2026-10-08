@@ -1,0 +1,293 @@
+//! Requirement 9: gossip carries the payload of a pair that has no other path, and the features
+//! run over it (Phase 6, design section 7).
+//!
+//! Four members on a local relay, A (alice), B (bob), C (carol) and D (dave), on the transport
+//! list `udp,gossip`. IP between alice and carol is cut in both directions, so they are not
+//! neighbors: alice-bob and bob-carol keep their paths and carry the gossip links, and dave is a
+//! bystander that must carry the flood. A message from alice to carol can then ride the gossip
+//! rung only.
+//!
+//! Every test is `#[ignore]`: each stands up four real members, and they run one at a time, under
+//! a host grant, with `--include-ignored --test-threads=1` (`cargo task matrix`). While the engine
+//! does not install the gossip transport (`common::GOSSIP_INSTALLED`), a test prints SKIPPED and
+//! returns. The helpers are a slim copy of those of `send_ladder_matrix.rs`: the two files are
+//! separate test crates.
+
+#![cfg(all(feature = "host", feature = "iroh-test-utils"))]
+
+mod common;
+
+use std::time::{Duration, Instant};
+
+use common::GOSSIP_INSTALLED;
+use habilis_network::iroh::RelayUrl;
+use habilis_network::membership::{self, Inbound, Membership, Request};
+use habilis_network::protocol::{Lookup, Transport};
+use tokio::sync::mpsc::UnboundedReceiver;
+
+/// Long enough for the gossip path to be tried and chosen: a probe goes every second.
+const STEP_DEADLINE: Duration = Duration::from_mins(2);
+const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
+/// How long the gossip rung must be read, in a row, for the pair to count as settled.
+const SETTLE: Duration = Duration::from_secs(10);
+
+struct Member {
+    membership: Membership,
+    _events: UnboundedReceiver<String>,
+    seen_msgs: Vec<Inbound>,
+}
+
+impl Member {
+    async fn open(opts: &membership::Opts) -> Self {
+        let (sink, events) = membership::json_sink();
+        let membership = membership::join(opts, sink).await.expect("open a member");
+        Self {
+            membership,
+            _events: events,
+            seen_msgs: Vec::new(),
+        }
+    }
+
+    async fn create(nick: &str, relay: &RelayUrl) -> Self {
+        Self::open(&membership::Opts {
+            nick: Some(nick.to_owned()),
+            lookup: vec![Lookup::Relay],
+            transport: vec![Transport::Udp, Transport::Gossip],
+            relay_urls: vec![relay.to_string()],
+            ..membership::Opts::default()
+        })
+        .await
+    }
+
+    async fn join(nick: &str, creator: &Self) -> Self {
+        Self::open(&membership::Opts {
+            nick: Some(nick.to_owned()),
+            mesh: Some(creator.membership.node.mesh_id().to_string()),
+            ..membership::Opts::default()
+        })
+        .await
+    }
+
+    async fn roster_len(&self) -> usize {
+        let json = self
+            .membership
+            .request(|reply| Request::Peers { reply })
+            .await
+            .unwrap_or_default();
+        serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|roster| roster["peers"].as_array().map(Vec::len))
+            .unwrap_or(0)
+    }
+
+    fn ports(&self) -> Vec<u16> {
+        self.membership.node.bound_ports().to_vec()
+    }
+
+    async fn block_ip_to(&self, ports: Vec<u16>) {
+        self.membership
+            .request(|reply| Request::BlockIpTo {
+                remote_ports: ports,
+                reply,
+            })
+            .await
+            .expect("the loop answers");
+    }
+
+    /// The rung of the selected path on this member's pooled connection to `peer`.
+    async fn rung_to(&self, peer: &str) -> Option<&'static str> {
+        self.membership
+            .request(|reply| Request::SelectedRung {
+                peer: peer.to_owned(),
+                reply,
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// A directed message. A refusal is an answer, not a failure of the harness.
+    async fn send(&self, to: &str, text: &str) -> Result<(), String> {
+        let to = membership::parse_to(Some(to)).expect("a nickname");
+        let body = membership::msg_body(text).expect("fits one frame");
+        self.membership
+            .request(|reply| Request::Send { to, body, reply })
+            .await
+            .expect("the loop answers")
+    }
+
+    fn saw_msg(&mut self, text: &str) -> bool {
+        while let Ok(msg) = self.membership.inbound.try_recv() {
+            self.seen_msgs.push(msg);
+        }
+        self.seen_msgs
+            .iter()
+            .any(|msg| msg.directed && msg.text == text)
+    }
+
+    /// Settle the pair on `expected`, driving it as production does: the engine tries a better
+    /// path only for a pair that is sent to, so a probe goes every second.
+    async fn settle_on(&self, peer: &str, expected: &str, name: &str) {
+        let started = Instant::now();
+        let mut held_since: Option<Instant> = None;
+        let mut seen = None;
+        let mut probes = 0u32;
+        while started.elapsed() < STEP_DEADLINE {
+            probes += 1;
+            let _ = self.send(peer, &format!("probe {name} {probes}")).await;
+            seen = self.rung_to(peer).await;
+            if seen == Some(expected) {
+                if held_since.get_or_insert_with(Instant::now).elapsed() >= SETTLE {
+                    return;
+                }
+            } else {
+                held_since = None;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        panic!(
+            "{name}: expected the rung {expected}, the last rung read was {seen:?} after {probes} probes"
+        );
+    }
+
+    async fn leave(self) {
+        let _ = self.membership.node.leave().await;
+    }
+}
+
+fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
+}
+
+async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        let mut all = true;
+        for member in members {
+            all &= member.roster_len().await == peers;
+        }
+        if all {
+            return true;
+        }
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// The four members, cut between alice and carol, with the rungs asserted: alice reaches bob on
+/// IP and carol on gossip.
+struct Fixture {
+    alice: Member,
+    bob: Member,
+    carol: Member,
+    dave: Member,
+    _relay: Box<dyn std::any::Any + Send>,
+}
+
+impl Fixture {
+    async fn stand_up(name: &str) -> Self {
+        init_logging();
+        let (relay_url, relay) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay_url).await;
+        let bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
+        let dave = Member::join("dave", &alice).await;
+        assert!(
+            rosters_hold(&[&alice, &bob, &carol, &dave], 3, Duration::from_mins(1)).await,
+            "{name}: the four members never formed a mesh"
+        );
+        // The pair that keeps its path stands on IP.
+        alice.settle_on("bob", "ip", name).await;
+
+        alice.block_ip_to(carol.ports()).await;
+        carol.block_ip_to(alice.ports()).await;
+        alice.settle_on("carol", "gossip", name).await;
+        assert_eq!(
+            alice.rung_to("bob").await,
+            Some("ip"),
+            "{name}: alice-bob keeps its IP path while alice-carol rides gossip"
+        );
+        Self {
+            alice,
+            bob,
+            carol,
+            dave,
+            _relay: Box::new(relay),
+        }
+    }
+
+    async fn leave(self) {
+        for member in [self.alice, self.bob, self.carol, self.dave] {
+            member.leave().await;
+        }
+    }
+}
+
+/// The gate: the test needs the gossip transport that the engine does not install yet.
+fn skipped(name: &str) -> bool {
+    if GOSSIP_INSTALLED {
+        return false;
+    }
+    eprintln!("SKIPPED {name}: the engine does not install the gossip transport yet");
+    true
+}
+
+/// A directed message from alice reaches carol, who has no other path to her, and the reply
+/// from carol reaches alice: the rung is gossip both ways. The design lists "unicast" and
+/// "directed" as two features; here they are one API, a payload on the pooled unicast connection
+/// to the peer, so this one test covers both. A broadcast does not use the transports, so it is
+/// not in this list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung() {
+    const NAME: &str = "gossip_only_directed";
+    if skipped(NAME) {
+        return;
+    }
+    let mut fixture = Fixture::stand_up(NAME).await;
+
+    let text = format!("{NAME} alice to carol");
+    fixture
+        .alice
+        .send("carol", &text)
+        .await
+        .unwrap_or_else(|error| panic!("{NAME}: the send was refused: {error}"));
+    let started = Instant::now();
+    while !fixture.carol.saw_msg(&text) {
+        assert!(
+            started.elapsed() < PAYLOAD_DEADLINE,
+            "{NAME}: the message never reached carol on the gossip rung"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    let reply = format!("{NAME} carol to alice");
+    fixture
+        .carol
+        .send("alice", &reply)
+        .await
+        .unwrap_or_else(|error| panic!("{NAME}: the reply was refused: {error}"));
+    let reply_started = Instant::now();
+    while !fixture.alice.saw_msg(&reply) {
+        assert!(
+            reply_started.elapsed() < PAYLOAD_DEADLINE,
+            "{NAME}: the reply never reached alice on the gossip rung"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    assert_eq!(
+        fixture.alice.rung_to("carol").await,
+        Some("gossip"),
+        "{NAME}: the pair is still on the gossip rung after the exchange"
+    );
+    fixture.leave().await;
+}

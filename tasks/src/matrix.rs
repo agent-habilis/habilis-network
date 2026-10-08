@@ -3,7 +3,9 @@
 //! The matrix is `crates/habilis-network/tests/send_ladder_matrix.rs`: one test per
 //! cell of transport list, blocked rungs and path of the third member. The D11 gate is
 //! `crates/habilis-network/tests/d11_gate_loopback.rs`: a node at a ceiling of two direct
-//! connections, and a lane pair. Every test of both files is `#[ignore]`, because each
+//! connections, and a lane pair. `crates/habilis-network/tests/gossip_only.rs` runs the
+//! features over the gossip rung between two members with no other path. Every test of
+//! the three files is `#[ignore]`, because each
 //! stands up several real members and must not run next to another test, so a full run
 //! takes a while. The gate runs two cells by name (a row of [`crate::gate::STEPS`]). This
 //! task runs them all, and the nightly workflow runs this task.
@@ -17,7 +19,7 @@ use crate::TaskOutcome;
 use crate::util::output;
 
 /// The test binaries of the run, in order. Each is `#[ignore]` throughout.
-const TESTS: [&str; 2] = ["send_ladder_matrix", "d11_gate_loopback"];
+const TESTS: [&str; 3] = ["send_ladder_matrix", "d11_gate_loopback", "gossip_only"];
 
 pub(crate) fn run(sh: &Shell, list: bool) -> TaskOutcome {
     output::status(
