@@ -35,8 +35,8 @@ use super::{Args, Skip, build};
 
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
-const LINK_TIMEOUT: Duration = Duration::from_mins(4);
-const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const LINK_TIMEOUT: Duration = Duration::from_mins(4);
+pub(super) const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Policy {
@@ -163,7 +163,7 @@ impl std::io::Write for BufferWriter {
     }
 }
 
-fn init_logging() {
+pub(super) fn init_logging() {
     use tracing_subscriber::fmt::MakeWriter;
     struct Make;
     impl<'a> MakeWriter<'a> for Make {
@@ -183,13 +183,13 @@ fn init_logging() {
 }
 
 /// Peek without draining — for waiting on a native-side line mid-cell.
-fn logs_contain(needle: &str) -> bool {
+pub(super) fn logs_contain(needle: &str) -> bool {
     log_buffer()
         .lock()
         .is_ok_and(|buffer| buffer.contains(needle))
 }
 
-fn drain_logs() -> String {
+pub(super) fn drain_logs() -> String {
     log_buffer()
         .lock()
         .map(|mut buffer| std::mem::take(&mut *buffer))
@@ -200,15 +200,15 @@ fn drain_logs() -> String {
 
 /// The in-process side of a cell: a live membership plus everything a check
 /// reads — inbound messages, surfaced events, the roster on demand.
-struct Native {
-    membership: membership::Membership,
+pub(super) struct Native {
+    pub(super) membership: membership::Membership,
     events: tokio::sync::mpsc::UnboundedReceiver<String>,
     seen_events: Vec<serde_json::Value>,
     seen_msgs: Vec<membership::Inbound>,
 }
 
 impl Native {
-    async fn open(opts: &membership::Opts) -> Result<Self, Skip> {
+    pub(super) async fn open(opts: &membership::Opts) -> Result<Self, Skip> {
         let (sink, events) = membership::json_sink();
         let membership = membership::join(opts, sink)
             .await
@@ -232,7 +232,7 @@ impl Native {
         }
     }
 
-    fn saw_event(&mut self, kind: &str, nick: &str) -> bool {
+    pub(super) fn saw_event(&mut self, kind: &str, nick: &str) -> bool {
         self.pump();
         self.seen_events.iter().any(|event| {
             event.get("kind").and_then(serde_json::Value::as_str) == Some(kind)
@@ -240,27 +240,27 @@ impl Native {
         })
     }
 
-    fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
+    pub(super) fn saw_msg(&mut self, text: &str, directed: bool) -> bool {
         self.pump();
         self.seen_msgs
             .iter()
             .any(|msg| msg.directed == directed && msg.text == text)
     }
 
-    async fn request<T>(
+    pub(super) async fn request<T>(
         &self,
         build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> membership::Request,
     ) -> Result<T, String> {
         self.membership.request(build).await
     }
 
-    async fn roster_json(&self) -> String {
+    pub(super) async fn roster_json(&self) -> String {
         self.request(|reply| membership::Request::Peers { reply })
             .await
             .unwrap_or_default()
     }
 
-    async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
+    pub(super) async fn send(&self, to: Option<&str>, text: &str) -> Result<(), String> {
         let to = membership::parse_to(to).map_err(|error| error.to_string())?;
         let body = membership::msg_body(text).map_err(|error| error.to_string())?;
         self.request(|reply| membership::Request::Send { to, body, reply })
@@ -286,7 +286,7 @@ impl Native {
 /// measures the mesh's steady state, not that race. The receipt checks below
 /// keep their own deadline, so a send that only succeeds at the end of the
 /// window still fails the cell if the frame never lands.
-async fn native_send_with_retry(
+pub(super) async fn native_send_with_retry(
     native: &Native,
     to: Option<&str>,
     text: &str,
