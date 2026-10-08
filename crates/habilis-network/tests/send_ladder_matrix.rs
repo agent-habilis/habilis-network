@@ -629,6 +629,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
                     }
                 }
                 let text = format!("matrix {name}");
+                let before = alice.rung_to("bob").await;
                 let sent = alice.send("bob", &text).await;
                 let started = Instant::now();
                 if expected.is_some() {
@@ -651,10 +652,15 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
                     // No rung may carry payload: a refusal, or silence, and never
                     // a delivery over the relay.
                     while started.elapsed() < REFUSAL_WINDOW {
-                        assert!(
-                            !bob.saw_msg(&text),
-                            "{name}: the message arrived on a rung that may not carry payload"
-                        );
+                        if bob.saw_msg(&text) {
+                            let now = alice.rung_to("bob").await;
+                            panic!(
+                                "{name}: the message arrived on a rung that may not carry payload \
+                                 (alice read {before:?} before the send and {now:?} when it \
+                                 arrived, {:?} after the send)",
+                                started.elapsed()
+                            );
+                        }
                         tokio::time::sleep(Duration::from_millis(250)).await;
                     }
                 }
