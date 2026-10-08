@@ -135,6 +135,20 @@ impl Member {
             .expect("the loop answers")
     }
 
+    async fn state_merge(&self, merge: serde_json::Value) -> Result<(), String> {
+        self.membership
+            .request(|reply| Request::StateMerge { merge, reply })
+            .await
+            .expect("the loop answers")
+    }
+
+    async fn state_json(&self) -> String {
+        self.membership
+            .request(|reply| Request::StateJson { reply })
+            .await
+            .expect("the loop answers")
+    }
+
     fn saw_msg(&mut self, text: &str) -> bool {
         while let Ok(msg) = self.membership.inbound.try_recv() {
             self.seen_msgs.push(msg);
@@ -392,5 +406,36 @@ async fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
         Some("gossip"),
         "{NAME}: the pair is on the gossip rung at the end"
     );
+    fixture.leave().await;
+}
+
+/// State is a topic broadcast: a change that alice writes reaches carol through the mesh, and
+/// the gossip rung carries none of it. This is the row for state in the gossip-only list. It
+/// shows that state still converges while the pair has only the rung, and it does not claim
+/// that the rung carried the change. Backfill (the unicast answer to a digest) goes only to a
+/// linked neighbor, and a gossip-only pair cannot keep a link, so the unit tests in
+/// `transport/send.rs` own it: a proven asker that is not linked is answered on the topic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn state_written_by_alice_reaches_carol_while_the_pair_has_only_the_gossip_rung() {
+    const NAME: &str = "gossip_only_state";
+    if skipped(NAME) {
+        return;
+    }
+    let fixture = Fixture::stand_up(NAME).await;
+
+    fixture
+        .alice
+        .state_merge(serde_json::json!({ NAME: "held" }))
+        .await
+        .unwrap_or_else(|error| panic!("{NAME}: the merge was refused: {error}"));
+    let started = Instant::now();
+    while !fixture.carol.state_json().await.contains("held") {
+        assert!(
+            started.elapsed() < PAYLOAD_DEADLINE,
+            "{NAME}: carol never held alice's change"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     fixture.leave().await;
 }
