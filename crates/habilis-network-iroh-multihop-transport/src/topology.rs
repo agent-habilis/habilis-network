@@ -304,7 +304,7 @@ impl Topology {
     /// `refused`, with the same filter on underlay addresses as [`Self::route_to`].
     /// The destination can be a refused first hop: a direct link is skipped too.
     #[must_use]
-    pub fn route_to_avoiding_first_hops(
+    pub(crate) fn route_to_avoiding_first_hops(
         &self,
         src: EndpointId,
         dst: EndpointId,

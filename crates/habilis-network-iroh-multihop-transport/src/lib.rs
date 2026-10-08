@@ -283,6 +283,18 @@ impl MultihopHandle {
         Some(chosen.route.encode())
     }
 
+    /// Mark the hop `hop` (an application id) as refused by the gate now, without
+    /// the stuck deadline having passed: for a test of a holder that chooses a
+    /// route again when the gate refuses a hop. A hop whose underlay is unknown is
+    /// left alone.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn refuse_hop_for_test(&self, hop: EndpointId) {
+        if let Some(underlay) = self.underlay_addr_of(hop) {
+            self.inner.forwarder.refuse_hop_for_test(underlay.id, hop);
+        }
+    }
+
     /// Woken when the relay rule starts to refuse a hop, and when it admits one
     /// that it refused: the moments at which the best route to a peer can change,
     /// well before the stuck deadline and the next link-state tick. A holder that

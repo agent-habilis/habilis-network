@@ -104,13 +104,8 @@ impl AddressLookup for MultihopLookup {
     fn publish(&self, _data: &EndpointData) {}
 
     fn resolve(&self, endpoint_id: EndpointId) -> Option<BoxStream<Result<Item, Error>>> {
-        // One route: the pool's alternates are for the send path's own failover,
-        // not iroh's path set, and nothing here reads past the first.
-        //
-        // Asking for `max_paths` and then taking `[0]` cost a Dijkstra per
-        // discarded alternate on every dial. `max_paths` stays on the handle
-        // for the failover consumer that will want it; until one exists, the
-        // resolver pays for exactly what it uses.
+        // One route, chosen as `route_addr` chooses it: the shortest, unless the gate
+        // refuses its first hop.
         let chosen = self.chooser.choose(endpoint_id);
         tracing::debug!(target: "habilis_lookup", me = %self.chooser.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = chosen.is_some(), first_hop_skipped = chosen.as_ref().is_some_and(|chosen| chosen.skipped), hops = %chosen.as_ref().map_or_else(String::new, |chosen| chosen.route.describe()), "multihop lookup");
         let route = chosen?.route;

@@ -388,7 +388,7 @@ impl Forwarder {
 
     /// Mark a hop as refused now, without the deadline having passed, as a test of
     /// the choice of a route needs it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-hooks"))]
     pub(crate) fn refuse_hop_for_test(&self, underlay: EndpointId, app_id: EndpointId) {
         self.pool.track(underlay, app_id);
         self.pool.note_refused(underlay, Duration::from_mins(1));

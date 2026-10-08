@@ -39,6 +39,11 @@ blake3.workspace = true
 postcard = { version = "1", features = ["use-std"] }
 serde.workspace = true
 
+[features]
+# `MultihopHandle::refuse_hop_for_test`, for a test of the engine that needs the gate
+# to refuse a hop without waiting for a relay.
+test-hooks = []
+
 [dev-dependencies]
 tokio.workspace = true
 # A local relay server, for the tests that put a connection on the relay.
