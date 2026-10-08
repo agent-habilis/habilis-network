@@ -133,7 +133,7 @@ Each cost comes from full-mesh rows only (N up to 33 on UDP, N up to 17 on WebRT
 | Multihop underlay, idle, per node | UDP directed with and without multihop, N = 17 and 33 | 1.5 to 3 in total |
 | WebRTC stack, fixed | WebRTC minus UDP, N = 2 | 3 to 4 in total |
 | WebRTC session, per added session | WebRTC minus UDP, N = 2 to 17, net of the fixed stack | about 0.2 |
-| WebRTC session, idle, session object only | `session_cost`, K = 0 to 32, one end per process (see the section on underlay sessions) | 0.075 per session, 0.22 once |
+| WebRTC session, idle, session object only | `session_cost`, K = 0 to 32, one end per process (see the section on underlay sessions) | 0.075 MiB per session, 0.22 MiB once |
 
 About the multihop row: in a full direct mesh no cell goes through a relay hop. The row is the idle cost. The cost of forwarding is not measured. The maximum of 126 MB in the N = 65 multihop run comes from one run, and I have no explanation for it.
 
