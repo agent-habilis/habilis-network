@@ -925,8 +925,11 @@ mod lookup_tests {
     fn a_passwordless_config_has_no_feature_byte() {
         // The lookups byte, the policy byte, and nothing else: the feature
         // byte only exists for a password or an invite.
-        assert_eq!(MeshConfig::loopback().to_bytes(), vec![0b0000, 0b0111]);
-        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111, 0b0111]);
+        assert_eq!(MeshConfig::loopback().to_bytes(), vec![0b0000, 0b1_0111]);
+        assert_eq!(
+            MeshConfig::public_preset().to_bytes(),
+            vec![0b0111, 0b1_0111]
+        );
     }
 
     #[test]
@@ -951,9 +954,9 @@ mod lookup_tests {
             ..MeshConfig::public_preset()
         };
         let bytes = config.to_bytes();
-        // Lookups byte, then the policy byte with every path on, the relay
+        // Lookups byte, then the policy byte with every path on, the relay and gossip
         // included. No feature byte: no password and no invite.
-        assert_eq!(bytes, vec![0b0111, 0b1111]);
+        assert_eq!(bytes, vec![0b0111, 0b1_1111]);
         assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), config);
         assert_ne!(
             bytes,
@@ -974,12 +977,17 @@ mod lookup_tests {
     }
 
     #[test]
-    fn udp_webrtc_and_multihop_are_on_by_default() {
+    fn udp_webrtc_multihop_and_gossip_are_on_by_default() {
         let default = TransportPolicy::default();
         assert!(default.udp && default.webrtc && default.multihop && !default.relay_transport);
-        assert!(!default.gossip, "gossip is off until the engine uses it");
-        assert_eq!(MeshConfig::public_preset().to_bytes(), vec![0b0111, 0b0111]);
-        let decoded = MeshConfig::from_bytes(&[0b0111, 0b0111]).unwrap().transport;
+        assert!(default.gossip, "gossip is on by default");
+        assert_eq!(
+            MeshConfig::public_preset().to_bytes(),
+            vec![0b0111, 0b1_0111]
+        );
+        let decoded = MeshConfig::from_bytes(&[0b0111, 0b1_0111])
+            .unwrap()
+            .transport;
         assert_eq!(decoded, default);
         let with_relay = MeshConfig::from_bytes(&[0b0111, 0b1111]).unwrap().transport;
         assert!(
@@ -1070,27 +1078,31 @@ mod lookup_tests {
     const MULTIHOP_ALONE: &str = "transport `multihop` cannot be the only transport: it forwards over a direct path, name `udp` or `webrtc`";
 
     /// The gossip bit is the fifth: an id that an older build made has it clear, reads as gossip
-    /// off, and keeps its bytes, so its id and its topic do not move.
+    /// off, and keeps its bytes, so its id and its topic do not move. The default has the bit,
+    /// so a default mesh made now has another id than one made before.
     #[test]
     fn the_gossip_bit_is_the_fifth_and_an_older_id_reads_as_gossip_off() {
-        let with_gossip = MeshConfig {
+        let default = MeshConfig::public_preset();
+        let bytes = default.to_bytes();
+        assert_eq!(bytes, vec![0b0111, 0b1_0111]);
+        assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), default);
+        let without_gossip = MeshConfig {
             transport: TransportPolicy {
-                gossip: true,
+                gossip: false,
                 ..TransportPolicy::default()
             },
             ..MeshConfig::public_preset()
         };
-        let bytes = with_gossip.to_bytes();
-        assert_eq!(bytes, vec![0b0111, 0b1_0111]);
-        assert_eq!(MeshConfig::from_bytes(&bytes).unwrap(), with_gossip);
+        assert_eq!(without_gossip.to_bytes(), vec![0b0111, 0b0111]);
         assert_ne!(
             bytes,
-            MeshConfig::public_preset().to_bytes(),
+            without_gossip.to_bytes(),
             "gossip on derives another id and another topic"
         );
         let older = [0b0111, 0b0111];
         let decoded = MeshConfig::from_bytes(&older).unwrap();
         assert!(!decoded.transport.gossip);
+        assert_eq!(decoded, without_gossip);
         assert_eq!(decoded.to_bytes(), older, "an older id keeps its bytes");
     }
 
@@ -1109,7 +1121,7 @@ mod lookup_tests {
         assert_eq!(with_multihop, MULTIHOP_ALONE);
     }
 
-    /// Every subset of the four transports, each with its result: `Ok`, or the
+    /// Every subset of the five transports, each with its result: `Ok`, or the
     /// exact error. A relay lookup is on, so the relay rules do not speak here.
     #[test]
     fn every_subset_of_the_transports_resolves_or_names_its_error() {

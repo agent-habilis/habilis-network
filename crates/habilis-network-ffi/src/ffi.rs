@@ -46,7 +46,7 @@ pub struct HabilisNetworkOpts {
     /// (a loopback mesh on create).
     pub lookup: *const c_char,
     /// Comma-separated transports, any of `udp`, `webrtc`, `multihop`, `gossip`, `relay`;
-    /// NULL ⇒ `udp,webrtc,multihop`, so all data stays peer to peer.
+    /// NULL ⇒ `udp,webrtc,multihop,gossip`, so all data stays peer to peer.
     pub transport: *const c_char,
     /// Comma-separated custom relay ladder; NULL ⇒ the default ladder.
     pub relay_urls: *const c_char,

@@ -111,14 +111,14 @@ pub struct TransportPolicy {
 }
 
 impl Default for TransportPolicy {
-    /// `udp,webrtc,multihop`: every direct path and multi-hop, the relay for
-    /// lookup alone. Gossip is off until the engine uses it.
+    /// `udp,webrtc,multihop,gossip`: every direct path, multi-hop and gossip, the relay for
+    /// lookup alone.
     fn default() -> Self {
         Self {
             udp: true,
             webrtc: true,
             multihop: true,
-            gossip: false,
+            gossip: true,
             relay_transport: false,
         }
     }
@@ -126,7 +126,8 @@ impl Default for TransportPolicy {
 
 impl TransportPolicy {
     /// The policy a `transport` list names. Empty ⇒ the default,
-    /// `udp,webrtc,multihop`.
+    /// `udp,webrtc,multihop,gossip`. A list names exactly what it carries: `udp,webrtc,multihop`
+    /// has no gossip.
     ///
     /// # Errors
     /// The list is non-empty and names neither `udp` nor `webrtc`; with

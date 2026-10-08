@@ -9,7 +9,7 @@
  * - `nick` — this peer's nickname.
  * - `relay` — a custom relay URL (repeatable); with `topic` it is part of
  *   the derived id, so the native side must pass the same.
- * - `transport` — what payload may ride, `udp,webrtc,multihop` (the default),
+ * - `transport` — what payload may ride, `udp,webrtc,multihop,gossip` (the default),
  *   `webrtc`, or any with `relay` (id-changing, same rule). A tab needs
  *   `webrtc` or `relay`, and ignores `multihop`.
  * - `log` — an `EnvFilter` for the engine's tracing, to the console.

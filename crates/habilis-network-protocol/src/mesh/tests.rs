@@ -222,8 +222,24 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset());
     assert_eq!(
         mesh.to_string(),
-        "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqay2YxkRe"
+        "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH"
     );
+    let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
+    assert_eq!(
+        format!("{topic:?}"),
+        "TopicId(1898d0078596295e6f69e42e9284e139d69921f2db46026b16611a924e65bd1d)"
+    );
+}
+
+// The golden id and topic of a mesh that an older build made (the default had no gossip). The id
+// decodes, gossip reads as off, and the id and the topic come out the same: nothing that exists
+// moves when the default turns gossip on.
+#[test]
+fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
+    let older = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqay2YxkRe";
+    let mesh: Mesh = older.parse().expect("an older id decodes");
+    assert!(!mesh.config.transport.gossip, "it has no gossip");
+    assert_eq!(mesh.to_string(), older, "and it keeps its id");
     let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
     assert_eq!(
         format!("{topic:?}"),
@@ -323,15 +339,15 @@ fn a_mesh_id_carries_the_transport_policy_for_every_list() {
         }
         seen.push((config.transport, id));
     }
-    // An empty list is the default, `udp,webrtc,multihop`.
-    assert_eq!(
-        MeshConfig::resolve(&[Lookup::Relay], None, &[])
-            .unwrap()
-            .transport,
-        MeshConfig::resolve(&[Lookup::Relay], None, &[Udp, WebRtc, Multihop])
+    // An empty list is the default, `udp,webrtc,multihop,gossip`. A list names what it carries:
+    // the same list without `gossip` is not the default.
+    let policy = |list: &[super::transport::Transport]| {
+        MeshConfig::resolve(&[Lookup::Relay], None, list)
             .unwrap()
             .transport
-    );
+    };
+    assert_eq!(policy(&[]), policy(&[Udp, WebRtc, Multihop, Gossip]));
+    assert_ne!(policy(&[]), policy(&[Udp, WebRtc, Multihop]));
 }
 
 #[test]

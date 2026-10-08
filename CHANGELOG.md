@@ -15,6 +15,13 @@ published to a registry; pin it with
   under its peer in the direct-peer slot table, so that the table can prune the
   slots of closed connections, and that watches the gossip connections the node
   dials for the relay policy.
+- `gossip` is an entry of the `transport` list, and the default list is now
+  `udp,webrtc,multihop,gossip`. A pair with no other path rides the frames of the mesh's own
+  gossip topic, below every direct path and multihop, above the relay. It needs `udp` or
+  `webrtc` next to it. A list names exactly what it carries: `udp,webrtc,multihop` has no gossip.
+  **Breaking, once:** a mesh created with the default list has another id and another topic,
+  and a build without `gossip` refuses its id with a request to upgrade. An id made before
+  keeps working with gossip off, with the same id and topic.
 - `multihop` is an entry of the `transport` list, and the default list is
   `udp,webrtc,multihop`. A peer with no direct path is reached through other
   members. It needs `udp` or `webrtc` next to it in the list, and is native only; a

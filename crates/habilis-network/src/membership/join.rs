@@ -44,10 +44,12 @@ pub struct Opts {
     /// any uses only those; naming none is a loopback mesh. Ignored with a
     /// `topic` (always all three) or a `mesh` id (which carries its own).
     pub lookup: Vec<Lookup>,
-    /// What may carry payload: any of `udp`, `webrtc`, `multihop`, `relay`, with
+    /// What may carry payload: any of `udp`, `webrtc`, `multihop`, `gossip`, `relay`, with
     /// `udp` or `webrtc` among them, and `udp` with `multihop`. Empty ⇒
-    /// `udp,webrtc,multihop`, so all data is peer to peer (through other members
-    /// when no direct path exists) and the relay serves lookup only. `relay`, or
+    /// `udp,webrtc,multihop,gossip`, so all data is peer to peer (through other members
+    /// when no direct path exists, and through the mesh topic when no member routes) and the
+    /// relay serves lookup only. A list names what it carries: without `gossip` there is none.
+    /// `relay`, or
     /// a list without `udp`,
     /// needs `relay` in `lookup`. Part of the mesh id, so a joiner inherits
     /// it; ignored when joining by id.
