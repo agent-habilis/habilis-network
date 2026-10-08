@@ -4,4 +4,4 @@
 /// that needs the gossip rung has nothing to measure: it prints SKIPPED and returns, so that
 /// `cargo task matrix` and the nightly stay green and say so in the log. The commit that installs
 /// the transport sets this to `true` and runs those tests on the host.
-pub(crate) const GOSSIP_INSTALLED: bool = false;
+pub(crate) const GOSSIP_INSTALLED: bool = true;
