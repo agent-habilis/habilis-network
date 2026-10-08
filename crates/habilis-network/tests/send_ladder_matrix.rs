@@ -936,12 +936,10 @@ fn the_cells_cover_every_valid_transport_list_and_no_other() {
     }
 }
 
-/// The cuts of a cell that goes through a third member close every rung of the
-/// direct underlay edge; the cells that do not go through one leave the
-/// underlays alone.
-/// What a send says when the pair has no rung that may carry payload: the relay is lookup
-/// only. Pinned here on purpose, as the text that a user reads (`path::RELAY_REFUSED`).
-const RELAY_REFUSED: &str = "relay-only path refused: the relay is lookup only on this mesh";
+/// The part that both refusals carry. The lower-id sender gets the `HeldForDirect` text, the
+/// higher-id sender gets `path::RELAY_REFUSED`, so a cell with a fixed sender id cannot match
+/// one full text.
+const LOOKUP_ONLY: &str = "lookup only on this mesh";
 
 /// With `gossip` off in the list, a pair that has no direct path is refused with a clear error:
 /// no silence, no delivery. The pair is alice and bob with IP between them cut, on `udp` alone.
@@ -977,10 +975,13 @@ async fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
     }
 
     let text = format!("matrix {NAME}");
-    assert_eq!(
-        alice.send("bob", &text).await,
-        Err(RELAY_REFUSED.to_owned()),
-        "{NAME}: the send must fail with the reason"
+    let refusal = alice
+        .send("bob", &text)
+        .await
+        .expect_err("the send must fail, not park");
+    assert!(
+        refusal.contains(LOOKUP_ONLY),
+        "{NAME}: the error must give the reason, got: {refusal}"
     );
     tokio::time::sleep(REFUSAL_WINDOW).await;
     assert!(!bob.saw_msg(&text), "{NAME}: the refused message arrived");
@@ -1034,6 +1035,9 @@ fn the_gossip_cells_use_valid_lists_and_the_ladder_orders_gossip_between_multiho
     assert_eq!(expected("udp_gossip_all_blocked"), None);
 }
 
+/// The cuts of a cell that goes through a third member close every rung of the
+/// direct underlay edge; the cells that do not go through one leave the
+/// underlays alone.
 #[test]
 fn a_cell_through_a_third_member_cuts_the_underlay_edge_on_every_rung() {
     for (name, cell) in CELLS {
