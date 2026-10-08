@@ -169,11 +169,11 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     // joined: a node alone at start logs nothing until a link forms, and
     // without this floor what the mesh said before that was never asked for.
     // Nothing older than `joined_at` is ever surfaced, so asking from there
-    // costs no budget on history.
+    // costs no budget on history. The floor takes in the whole second of the
+    // earlier of the two: a message of that second with a smaller id key than
+    // the first one we hold sorts before it, and is in range.
     let floor = |window: &mut DigestWindow| {
-        if state.joined_at < window.lo.0 {
-            window.lo = (state.joined_at, KEY_MIN);
-        }
+        window.lo = (state.joined_at.min(window.lo.0), KEY_MIN);
     };
     if newest.from_start {
         floor(&mut newest);
@@ -1886,6 +1886,61 @@ mod tests {
     /// The windows of a digest tile the log. A message that sorts between two
     /// windows, and that the node lacks, is asked for within a few rounds even
     /// when nothing else changes and no window moves.
+    /// A node that joined in the second of its first message must still ask for a message of
+    /// that second with a smaller id key: the floor lowers `lo` to `joined_at` only when it is
+    /// earlier than the first message, and `(second, key)` of that message leaves the smaller keys
+    /// of the same second out of every window.
+    #[test]
+    fn a_message_of_the_second_a_node_joined_in_is_asked_for_whatever_its_key() {
+        let second = 1_700_000_000;
+        let mut pair = [chat_at("first", second), chat_at("second", second)];
+        pair.sort_by_key(Message::dedup_key);
+        let [smaller, larger] = pair;
+        let mut holder = MessageLog::new(1000);
+        holder.push(smaller.clone());
+        holder.push(larger.clone());
+        let mut node = fresh_state();
+        node.joined_at = second;
+        node.message_log.push(larger);
+        let budget = crate::util::tuning::antientropy_max_resend();
+
+        let answered = answer_within_budget(&mut node, &holder, budget);
+
+        assert!(
+            answered
+                .iter()
+                .any(|message| message.dedup_key() == smaller.dedup_key()),
+            "the holder never offered the message of the same second with the smaller key"
+        );
+    }
+
+    /// The first message of the log is from a peer and stamped before `joined_at` (a clock that
+    /// runs behind). Nothing sorts before it in the log, so a message of its second with a
+    /// smaller key is in the range that the window must reach back to.
+    #[test]
+    fn a_message_of_the_second_of_the_first_logged_message_is_asked_for_whatever_its_key() {
+        let second = 1_700_000_000;
+        let mut pair = [chat_at("first", second - 1), chat_at("second", second - 1)];
+        pair.sort_by_key(Message::dedup_key);
+        let [smaller, larger] = pair;
+        let mut holder = MessageLog::new(1000);
+        holder.push(smaller.clone());
+        holder.push(larger.clone());
+        let mut node = fresh_state();
+        node.joined_at = second;
+        node.message_log.push(larger);
+        let budget = crate::util::tuning::antientropy_max_resend();
+
+        let answered = answer_within_budget(&mut node, &holder, budget);
+
+        assert!(
+            answered
+                .iter()
+                .any(|message| message.dedup_key() == smaller.dedup_key()),
+            "the holder never offered the message of the same second with the smaller key"
+        );
+    }
+
     #[test]
     fn a_message_between_two_windows_is_asked_for() {
         let mut all = scrambled_messages(12);
