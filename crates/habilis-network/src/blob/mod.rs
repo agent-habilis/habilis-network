@@ -11,6 +11,11 @@
 //! consumer is the application's job (it is a short string, so a single
 //! [`crate::gossip::send_app`] frame carries it).
 //!
+//! A mesh with only the gossip rung does not carry blobs. The producer and the consumer each
+//! bind an endpoint of their own with no custom transport, and the gossip transport lives on
+//! the member endpoint alone, so a fetch needs an IP path (or the relay, when the mesh allows
+//! it for payload).
+//!
 //! Raw bytes, not text: unlike a frame body, nothing here is UTF-8-constrained or
 //! re-encoded, and the transfer streams in bounded chunks so memory stays flat
 //! regardless of size.
@@ -162,6 +167,49 @@ mod tests {
             "habilis-network-blob-spool-{}",
             rand::rng().next_u64()
         ))
+    }
+
+    /// The gossip transport lives on the member endpoint. A blob endpoint, on either side, has
+    /// no custom transport, so a blob fetch cannot ride the gossip rung. The control is an
+    /// endpoint that does hold one custom transport (`WebRTC`): if it showed no custom address
+    /// either, this test would prove nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_blob_endpoint_has_no_custom_transport() {
+        use crate::lookup::{TransportOpts, build_peer_endpoint, build_peer_webrtc};
+
+        let has_custom = |addr: iroh::EndpointAddr| {
+            addr.addrs
+                .iter()
+                .any(|addr| matches!(addr, iroh::TransportAddr::Custom(_)))
+        };
+
+        let (control, _handle) =
+            build_peer_webrtc(&LookupOpts::loopback(), TransportOpts::default())
+                .await
+                .expect("control endpoint");
+        assert!(
+            has_custom(control.addr()),
+            "the control shows no custom address, so the check below is empty"
+        );
+        control.close().await;
+
+        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
+            .await
+            .expect("start producer");
+        assert!(
+            !has_custom(server.addr()),
+            "the blob server holds a custom transport"
+        );
+        server.shutdown().await;
+
+        let consumer = build_peer_endpoint(&LookupOpts::loopback())
+            .await
+            .expect("consumer endpoint");
+        assert!(
+            !has_custom(consumer.addr()),
+            "the blob consumer holds a custom transport"
+        );
+        consumer.close().await;
     }
 
     /// Start a loopback producer serving `payload`, fetch it back over a second
