@@ -446,11 +446,15 @@ pub const REGRAFT_AFTER_MS: u64 = 1000;
 pub const LANE_OFFERS_IN_FLIGHT: usize = 4;
 
 /// How many events the mesh topic may queue for the splitter before iroh-gossip reports a lag
-/// and keeps the subscription (the default is 2048; the engine counts the lag). Each event holds
-/// a message of up to 3840 bytes, so the worst case is about 31 MB. The splitter reads at once,
-/// so the queue only covers a stall of that task; the final value comes from the gossip cell on
-/// the host: the smallest one at which `topic_lagged` stays 0 at 700 Mbit/s.
-pub const MESH_TOPIC_EVENTS_CAP: usize = 8192;
+/// and keeps the subscription (the engine counts the lag). It is also the size of the queue of
+/// mesh messages to the event loop. This is iroh's default, 2048: at most 8 MB of queued events
+/// (each holds a message of up to 3840 bytes).
+///
+/// The load run on real gossip (`docs/perf/benchmark.md`, "The split of the mesh topic under
+/// load") found no difference in the frames lost between 2048 and 8192 at 64 or 128 MiB/s. The
+/// topic does not lag below about 64 MiB/s with the split (about 16 MiB/s before it), and at
+/// 128 MiB/s the split cuts the frames lost from 22% to 0.1% to 0.4%.
+pub const MESH_TOPIC_EVENTS_CAP: usize = 2048;
 
 /// How long a node may hold two or more links fewer than G, and how long it waits
 /// between two fallbacks, before a graft asks with a `Join` instead of a low
