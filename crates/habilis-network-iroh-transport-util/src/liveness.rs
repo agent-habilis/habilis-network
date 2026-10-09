@@ -11,8 +11,8 @@
 //! prove nothing. At the end of a window the address has grown or it has not. It grew when
 //! some rank of the sorted counts is present in the baseline and now, and the count is higher now.
 //! A rank that is only present now is a new entry, a path opened again, and is not growth. A rank
-//! that is gone is ignored. A count that went down is not growth. When every rank went down and no
-//! entry left, the whole address was opened again and it is fresh again.
+//! that is gone is ignored. A count that went down is not growth. When every rank went down, the
+//! whole address was opened again and it is fresh again.
 //!
 //! An address is *alive* when it grew in two windows in a row. A new address, one that was never
 //! judged, is *fresh*: it can be chosen, but it is never evidence for or against another address.
@@ -96,9 +96,8 @@ impl Seen {
             .all(|(now, before)| now < before)
             && !received.is_empty()
             && !self.baseline.is_empty()
-            && received.len() >= self.baseline.len()
         {
-            // Every entry counts less than before and none left: the whole address was opened again.
+            // Every entry counts less than before: the whole address was opened again.
             *self = Self::fresh(received, now_instant);
             return;
         }
@@ -566,55 +565,6 @@ mod tests {
             ),
             Some(&multihop_addr),
             "multihop is alive and the WebRTC address did not grow"
-        );
-    }
-
-    /// Run a16, bob, one step later: the highest entry of a vetoed address leaves, {6, 1} becomes
-    /// {1}. The one rank that is left counts less, but an entry left, and that is not a path opened
-    /// again: the veto stands.
-    #[test]
-    fn an_entry_that_leaves_is_not_a_reopen() {
-        let (webrtc_addr, multihop_addr) = (webrtc(1), multihop(1));
-        let (mut liveness, start) = (Liveness::new(), Instant::now());
-        choose(
-            &mut liveness,
-            start,
-            &[
-                entry(&webrtc_addr, 6),
-                entry(&webrtc_addr, 1),
-                entry(&multihop_addr, 3),
-            ],
-        );
-        choose(
-            &mut liveness,
-            after(start, 1),
-            &[
-                entry(&webrtc_addr, 6),
-                entry(&webrtc_addr, 1),
-                entry(&multihop_addr, 23),
-            ],
-        );
-        assert_eq!(
-            choose(
-                &mut liveness,
-                after(start, 2),
-                &[
-                    entry(&webrtc_addr, 6),
-                    entry(&webrtc_addr, 1),
-                    entry(&multihop_addr, 43)
-                ]
-            ),
-            Some(&multihop_addr),
-            "the WebRTC address is flat while multihop is alive: vetoed"
-        );
-        assert_eq!(
-            choose(
-                &mut liveness,
-                after(start, 3),
-                &[entry(&webrtc_addr, 1), entry(&multihop_addr, 63)]
-            ),
-            Some(&multihop_addr),
-            "the entry with 6 left: the address is not fresh again and the veto stands"
         );
     }
 
