@@ -1216,15 +1216,7 @@ mod tests {
         let mut beacon = None;
         let mut probe = None;
         assert!(
-            ensure(
-                &params,
-                &peer,
-                &book,
-                &mut beacon,
-                false,
-                &mut probe
-            )
-            .await,
+            ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
             "a free ladder rung is claimed"
         );
 
@@ -1280,15 +1272,7 @@ mod tests {
         let mut beacon = None;
         let mut probe = None;
         assert!(
-            ensure(
-                &params,
-                &peer,
-                &book,
-                &mut beacon,
-                false,
-                &mut probe
-            )
-            .await,
+            ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
             "a public rendezvous is claimed when no probe is asked for"
         );
         sender
@@ -1330,15 +1314,7 @@ mod tests {
         let mut probe = None;
 
         let started = std::time::Instant::now();
-        let claimed = ensure(
-            &params,
-            &peer,
-            &book,
-            &mut beacon,
-            true,
-            &mut probe,
-        )
-        .await;
+        let claimed = ensure(&params, &peer, &book, &mut beacon, true, &mut probe).await;
         let elapsed = started.elapsed();
 
         // The structural assertion, not the clock, is what pins this: a call
@@ -1363,17 +1339,7 @@ mod tests {
         // A second call must not stack a second probe answering the same
         // question at the same cost.
         let before = std::time::Instant::now();
-        assert!(
-            !ensure(
-                &params,
-                &peer,
-                &book,
-                &mut beacon,
-                true,
-                &mut probe
-            )
-            .await
-        );
+        assert!(!ensure(&params, &peer, &book, &mut beacon, true, &mut probe).await);
         assert!(
             before.elapsed() < std::time::Duration::from_secs(1),
             "and neither must the next tick"
