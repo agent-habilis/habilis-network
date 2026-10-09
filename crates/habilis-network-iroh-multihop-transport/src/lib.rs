@@ -65,6 +65,19 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use n0_future::time::{Duration, Instant};
 
 pub use addr::{Route, RouteHop};
+
+/// What the data path of a node counted: a test reads them to tell where cells go.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MultihopCounters {
+    /// Cells passed on to a next hop for other nodes.
+    pub forwarded: u64,
+    /// Cells refused or dropped: a gate, a budget, a full inbox, a packet that did not fit.
+    pub dropped: u64,
+    /// Cells a writer dropped because its connection was not on a direct path.
+    pub refused_on_relay: u64,
+    /// Cells that ended here and went into the inbox of the local transport.
+    pub delivered: u64,
+}
 pub use metric::LinkMetric;
 pub use topology::{LinkVector, Topology, TopologyEdge, TopologyView};
 
@@ -423,6 +436,12 @@ impl MultihopHandle {
     #[must_use]
     pub fn forwarded_cells(&self) -> u64 {
         self.inner.forwarder.forwarded_cells()
+    }
+
+    /// The counters of the data path of this node.
+    #[must_use]
+    pub fn counters(&self) -> MultihopCounters {
+        self.inner.forwarder.counters()
     }
 
     /// The application id of the peer whose multihop underlay endpoint is

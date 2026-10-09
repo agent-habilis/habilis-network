@@ -112,12 +112,19 @@ impl CustomEndpoint for MultihopEndpoint {
             Poll::Ready(0) => return Poll::Ready(Err(io::Error::other("multihop inbound closed"))),
             Poll::Ready(_) => {}
         }
+        tracing::debug!(
+            target: "habilis_network_iroh_multihop_transport::inbox",
+            batch = batch.len(),
+            left = self.inbound.len(),
+            "multihop poll_recv"
+        );
         let mut count = 0;
         for delivered in batch {
             let len = delivered.packet.len();
             if bufs[count].len() < len {
                 // Packet larger than the buffer iroh handed us: drop it, as a
                 // NIC would a jumbo frame on an MTU-limited path.
+                self.shared.forwarder.note_oversized(len, bufs[count].len());
                 continue;
             }
             bufs[count][..len].copy_from_slice(&delivered.packet);

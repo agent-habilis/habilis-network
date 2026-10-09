@@ -342,6 +342,8 @@ pub(crate) struct Forwarder {
     dropped: AtomicU64,
     /// Cells passed on to a next hop for other nodes. Our own sends are not counted.
     forwarded: AtomicU64,
+    /// Cells that ended here and went into the inbox of the local transport.
+    delivered: AtomicU64,
     /// What the relay may do for cells.
     rule: RelayRule,
     /// Where the dial address of a next hop comes from: a route names a hop by two ids,
@@ -371,6 +373,7 @@ impl Forwarder {
             inbound,
             dropped: AtomicU64::new(0),
             forwarded: AtomicU64::new(0),
+            delivered: AtomicU64::new(0),
             rule: RelayRule {
                 allow_relay,
                 stuck_after,
@@ -433,6 +436,29 @@ impl Forwarder {
     /// How many cells this node passed on for other nodes.
     pub(crate) fn forwarded_cells(&self) -> u64 {
         self.forwarded.load(Ordering::Relaxed)
+    }
+
+    /// The counters of the data path: what was passed on, refused, dropped and delivered.
+    pub(crate) fn counters(&self) -> crate::MultihopCounters {
+        crate::MultihopCounters {
+            forwarded: self.forwarded.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            refused_on_relay: self.pool.refused_on_relay.load(Ordering::Relaxed),
+            delivered: self.delivered.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The local transport dropped a packet that did not fit the buffer that iroh handed it.
+    pub(crate) fn note_oversized(&self, len: usize, capacity: usize) {
+        if let Some(total) = self.count_drop() {
+            tracing::warn!(
+                total,
+                len,
+                capacity,
+                reason = "packet larger than the receive buffer",
+                "multihop transport dropping packets"
+            );
+        }
     }
 
     /// The application ids of the hops stuck on the relay past the deadline.
@@ -525,8 +551,13 @@ impl Forwarder {
             remote: route.encode(),
             packet: cell.packet,
         };
-        // A full inbox drops the packet, as a saturated NIC would.
-        let _ = self.inbound.try_send(delivered);
+        // A full inbox drops the packet, as a saturated NIC would. It is counted and the first
+        // drop is logged: an inbox that nobody drains is a silent black hole otherwise.
+        if self.inbound.try_send(delivered).is_ok() {
+            self.delivered.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.note_drop("inbox of the local transport is full");
+        }
     }
 
     /// Whether `hop` is this node — both identities, since the two endpoints
@@ -863,6 +894,40 @@ mod tests {
             0,
             "a delivery is not a forward"
         );
+    }
+
+    #[tokio::test]
+    async fn a_cell_that_ends_at_us_is_counted_as_delivered() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let source = stranger(1);
+        let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
+        forwarder.handle_cell(subject, source.underlay_id);
+        let counters = forwarder.counters();
+        assert_eq!(
+            (counters.delivered, counters.dropped, counters.forwarded),
+            (1, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_inbox_drops_the_cell_and_counts_it() {
+        // The inbox of the fixture holds 4 cells and nothing drains it, as on a transport
+        // that is never polled: the fifth and sixth cell are lost, and the counters say so.
+        let (forwarder, _app, _received) = forwarder().await;
+        let source = stranger(1);
+        for _ in 0..6 {
+            let subject = cell(vec![self_hop(&forwarder)], 0, source.clone());
+            forwarder.handle_cell(subject, source.underlay_id);
+        }
+        let counters = forwarder.counters();
+        assert_eq!((counters.delivered, counters.dropped), (4, 2));
+    }
+
+    #[tokio::test]
+    async fn a_packet_that_does_not_fit_the_buffer_is_counted_as_dropped() {
+        let (forwarder, _app, _received) = forwarder().await;
+        forwarder.note_oversized(2000, 1500);
+        assert_eq!(forwarder.counters().dropped, 1);
     }
 
     #[tokio::test]

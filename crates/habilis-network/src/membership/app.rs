@@ -231,6 +231,17 @@ pub enum Request {
     ForwardedCells {
         reply: oneshot::Sender<u64>,
     },
+    /// Tests only: what the multihop data path of this node counted: cells passed on,
+    /// dropped, refused on the relay and delivered to the local transport. All `0` when
+    /// multihop is off.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    MultihopCounters {
+        reply: oneshot::Sender<habilis_network_iroh_multihop_transport::MultihopCounters>,
+    },
     /// Tests only: how many `WebRTC` sessions the multihop underlay of this node
     /// holds. `0` when multihop is off.
     #[cfg(all(
@@ -665,6 +676,19 @@ impl NodeDriver for MembershipApp {
                     habilis_network_iroh_multihop_transport::MultihopHandle::forwarded_cells,
                 );
                 let _ = reply.send(forwarded);
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::MultihopCounters { reply } => {
+                let counters = state.multihop().map_or_else(
+                    Default::default,
+                    habilis_network_iroh_multihop_transport::MultihopHandle::counters,
+                );
+                let _ = reply.send(counters);
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
