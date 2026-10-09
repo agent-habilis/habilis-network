@@ -1400,7 +1400,7 @@ async fn handle_peer_info(
     // it. An address with no entry is not given to it: with none known it would start an
     // Address Lookup and wait for it.
     if first_sighting || changed {
-        let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
+        add_peer_addr(&state.address_book, peer_addr.clone());
         state.unicast_pool.note_addr(&peer_addr);
         if !peer_addr.addrs.is_empty() {
             let endpoint = ctx.endpoint.clone();
@@ -1469,7 +1469,7 @@ async fn handle_peer_info(
         && !state.graft_blocked(peer_id, now)
     {
         state.note_relink(peer_id, now);
-        let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
+        add_peer_addr(&state.address_book, peer_addr.clone());
         state.unicast_pool.note_addr(&peer_addr);
         // With the relay lookup only, the graft waits for a proven direct
         // path (`transport::probe`); the loop grafts on the probe's verdict.

@@ -653,6 +653,7 @@ async fn build_rendezvous_endpoint(
 pub(crate) async fn ensure(
     params: &RendezvousParams,
     peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     probe_first: bool,
     probe: &mut Option<RivalProbe>,
@@ -670,7 +671,7 @@ pub(crate) async fn ensure(
         }
         return false;
     }
-    claim(params, peer, current).await
+    claim(params, peer, peer_book, current).await
 }
 
 /// Apply an off-loop probe's verdict: claim the rendezvous if it is free.
@@ -682,6 +683,7 @@ pub(crate) async fn ensure(
 pub(crate) async fn claim_after_probe(
     params: &RendezvousParams,
     peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     found_rival: bool,
 ) -> bool {
@@ -692,7 +694,7 @@ pub(crate) async fn claim_after_probe(
     if !releasable(current) {
         return false;
     }
-    claim(params, peer, current).await
+    claim(params, peer, peer_book, current).await
 }
 
 /// Whether the beacon slot is free to (re)claim: empty, or holding a
@@ -724,6 +726,7 @@ fn releasable(current: &mut Option<Rendezvous>) -> bool {
 async fn claim(
     params: &RendezvousParams,
     peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
 ) -> bool {
     let Some((endpoint, lane)) = build_rendezvous_endpoint(params).await else {
@@ -741,7 +744,7 @@ async fn claim(
     // A *public* rendezvous answers JSEP (`build_rendezvous_endpoint` put
     // the transport on the endpoint): a browser-shaped peer has no other
     // way onto a mesh whose relay is lookup only.
-    let (gossip, router) = build_mesh(
+    let (gossip, router, book) = build_mesh(
         endpoint.clone(),
         crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
@@ -763,10 +766,10 @@ async fn claim(
 
     // Register the peer's address so the rendezvous can dial it
     // in private mode (no lookup); a harmless direct hint in public.
-    let _ = add_peer_addr(&endpoint, peer.addr());
+    add_peer_addr(&book, peer.addr());
     // And the other way: our peer is the one that dials the rendezvous, and a
     // public mesh without a relay rung gives it no lookup to find the id by.
-    let _ = add_peer_addr(peer, endpoint.addr());
+    add_peer_addr(peer_book, endpoint.addr());
     let topic_id = params.topic_id;
 
     // Relay-monitor inputs. The monitor runs as its **own** task (below),
@@ -1194,7 +1197,7 @@ mod tests {
         params.bind_ports = vec![port];
 
         let peer = loopback_endpoint().await;
-        let (gossip, router) = crate::lookup::build_mesh(
+        let (gossip, router, _book) = crate::lookup::build_mesh(
             peer.clone(),
             crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             None,
@@ -1209,10 +1212,19 @@ mod tests {
             .expect("subscribe without a bootstrap")
             .split();
 
+        let book = crate::lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         assert!(
-            ensure(&params, &peer, &mut beacon, false, &mut probe).await,
+            ensure(
+                &params,
+                &peer,
+                &book,
+                &mut beacon,
+                false,
+                &mut probe
+            )
+            .await,
             "a free ladder rung is claimed"
         );
 
@@ -1249,7 +1261,7 @@ mod tests {
 
         let params = public_params();
         let peer = loopback_endpoint().await;
-        let (gossip, router) = crate::lookup::build_mesh(
+        let (gossip, router, _book) = crate::lookup::build_mesh(
             peer.clone(),
             crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             None,
@@ -1264,10 +1276,19 @@ mod tests {
             .expect("subscribe without a bootstrap")
             .split();
 
+        let book = crate::lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
         assert!(
-            ensure(&params, &peer, &mut beacon, false, &mut probe).await,
+            ensure(
+                &params,
+                &peer,
+                &book,
+                &mut beacon,
+                false,
+                &mut probe
+            )
+            .await,
             "a public rendezvous is claimed when no probe is asked for"
         );
         sender
@@ -1304,11 +1325,20 @@ mod tests {
         // 3s budget expired and the graceful `Left` was never sent.
         let params = public_params();
         let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
 
         let started = std::time::Instant::now();
-        let claimed = ensure(&params, &peer, &mut beacon, true, &mut probe).await;
+        let claimed = ensure(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            true,
+            &mut probe,
+        )
+        .await;
         let elapsed = started.elapsed();
 
         // The structural assertion, not the clock, is what pins this: a call
@@ -1333,7 +1363,17 @@ mod tests {
         // A second call must not stack a second probe answering the same
         // question at the same cost.
         let before = std::time::Instant::now();
-        assert!(!ensure(&params, &peer, &mut beacon, true, &mut probe).await);
+        assert!(
+            !ensure(
+                &params,
+                &peer,
+                &book,
+                &mut beacon,
+                true,
+                &mut probe
+            )
+            .await
+        );
         assert!(
             before.elapsed() < std::time::Duration::from_secs(1),
             "and neither must the next tick"

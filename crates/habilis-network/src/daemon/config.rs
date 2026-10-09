@@ -192,6 +192,9 @@ pub struct EventLoopConfig {
     /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
     /// side and the answering side share one direct-peer ceiling.
     pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    /// The address book of the member endpoint. `run()` moves it into
+    /// `EventLoopState::address_book`, where the addresses of the peers are registered.
+    pub(crate) address_book: iroh::address_lookup::memory::MemoryLookup,
     /// How far ICE may reach when gathering — host-only on a loopback mesh.
     /// `run()` moves it into `EventLoopState::webrtc_ice`.
     pub(crate) webrtc_ice: crate::transport::IceProfile,

@@ -132,6 +132,7 @@ pub(super) async fn maybe_cohost(
         let claimed = beacon::ensure(
             arm.params,
             ctx.endpoint,
+            &state.address_book,
             current,
             probes_before_claim(arm.policy),
             probe,
@@ -177,6 +178,7 @@ pub(super) async fn maybe_reclaim(
         let claimed = beacon::ensure(
             arm.params,
             ctx.endpoint,
+            &state.address_book,
             current,
             probes_before_claim(arm.policy),
             probe,

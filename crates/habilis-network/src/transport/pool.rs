@@ -761,7 +761,7 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, Hold)
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
         let pool = super::UnicastPool::new(client.clone(), false);
 
         assert!(!pool.selected_is_ip(server.id()), "nothing pooled yet");
@@ -818,7 +818,7 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, Hold)
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
         let pool = super::UnicastPool::with_idle(client.clone(), false, idle);
         (pool, server.id(), router, client)
     }
@@ -924,7 +924,7 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, Hold)
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
         let pool = super::UnicastPool::with_timeouts(client.clone(), false, idle, probe_hold);
         (pool, server.id(), router, client)
     }
@@ -1000,7 +1000,7 @@ mod tests {
                     silent.local_addr().expect("silent addr"),
                 )],
             );
-            crate::lookup::add_peer_addr(&endpoint, bob_addr).expect("register bob");
+            crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), bob_addr);
             let pool = super::UnicastPool::new(endpoint, false);
             assert!(
                 pool.dial_and_send_in_background(bob, bytes::Bytes::new())
@@ -1070,7 +1070,7 @@ mod tests {
             .bind()
             .await
             .expect("bind a loopback endpoint");
-        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&node), server.addr());
         let pool = super::UnicastPool::new(node.clone(), true);
         pool.set_admission(admission.clone());
 
@@ -1118,7 +1118,7 @@ mod tests {
             .bind()
             .await
             .expect("bind a loopback endpoint");
-        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&node), server.addr());
         let pool = super::UnicastPool::new(node.clone(), true);
         pool.set_admission(admission.clone());
         admission.note_evicted(server.id());
@@ -1181,7 +1181,7 @@ mod tests {
             .bind()
             .await
             .expect("bind a loopback endpoint");
-        crate::lookup::add_peer_addr(&node, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&node), server.addr());
         let pool = super::UnicastPool::new(node.clone(), true);
         pool.set_admission(admission.clone());
 

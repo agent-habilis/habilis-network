@@ -909,9 +909,13 @@ pub(crate) async fn build_peer_multihop_with(
         let ice = crate::transport::IceProfile {
             host_only: lookups.is_loopback(),
         };
+        // The underlay is an endpoint of its own, with lookup services of its own, so it has
+        // an address book of its own.
+        let book = address_book(&underlay);
         let acceptor = crate::transport::WebRtcSignalAcceptor::new(
             handle.clone(),
             underlay.clone(),
+            book.clone(),
             underlay.id(),
             table.clone(),
             ice,
@@ -933,6 +937,7 @@ pub(crate) async fn build_peer_multihop_with(
             handle,
             admission: table,
             endpoint: underlay.clone(),
+            book,
             allowed,
         });
     }
@@ -960,15 +965,30 @@ pub(crate) async fn build_peer_multihop_with(
     Ok((endpoint, handle, webrtc, underlay_webrtc))
 }
 
-/// Register a peer's address so the endpoint can connect to it.
-/// # Errors
-/// The endpoint exposes no address book to add to.
-pub fn add_peer_addr(endpoint: &Endpoint, addr: EndpointAddr) -> Result<()> {
-    let lookup = MemoryLookup::new();
-    lookup.add_endpoint_info(addr);
-    endpoint.address_lookup()?.add(lookup);
+/// The address book of `endpoint`: one `MemoryLookup`, added to the lookup services of the
+/// endpoint. Call it once per endpoint, where the endpoint is built, and keep the book with the
+/// endpoint. [`add_peer_addr`] is the one writer of the book. The addresses of the peers change
+/// (a home relay comes late, an interface changes) and are told again, so a lookup per call would
+/// add one service to the endpoint for each of them.
+///
+/// An endpoint that exposes no lookup services gets a book that nothing reads, as a call of
+/// `add_peer_addr` used to fail and be ignored.
+pub fn address_book(endpoint: &Endpoint) -> MemoryLookup {
+    let book = MemoryLookup::new();
+    match endpoint.address_lookup() {
+        Ok(services) => services.add(book.clone()),
+        Err(error) => {
+            tracing::warn!(target: "habilis_network::lookup", %error, "the endpoint has no lookup services for its address book");
+        }
+    }
+    book
+}
+
+/// Register a peer's address in the address book of the endpoint, so that the endpoint can
+/// connect to it by its id. The book is made by [`address_book`].
+pub fn add_peer_addr(book: &MemoryLookup, addr: EndpointAddr) {
+    book.add_endpoint_info(addr);
     tracing::debug!(target: "habilis_network::lookup", "registered a direct peer address with the endpoint");
-    Ok(())
 }
 
 /// Bounded `GOSSIP_ALPN` connect-probe. On a mesh whose relay is lookup
@@ -1046,7 +1066,7 @@ pub(crate) fn build_mesh(
     // This node has no UDP path, so its gossip gate needs a `WebRTC` session
     // with the dialer (see `DirectOnlyGossip::accept`).
     needs_session: bool,
-) -> (Gossip, Router) {
+) -> (Gossip, Router, MemoryLookup) {
     // `active_view_capacity` is the live direct-neighbor cap (`--max-peers`),
     // raised above iroh-gossip's default (5) so meshes up to it form a full mesh
     // with nothing to shuffle — no membership churn, hence none of the
@@ -1061,8 +1081,10 @@ pub(crate) fn build_mesh(
         .membership_config(membership)
         .spawn(endpoint.clone());
     let local = endpoint.id();
-    // Cloned before the Router consumes the endpoint; the signal acceptor
-    // registers webrtc transport addresses on attach.
+    // The address book of the endpoint, made where the endpoint is wrapped. The caller keeps it,
+    // and the signal acceptor registers webrtc transport addresses in it on attach.
+    let book = address_book(&endpoint);
+    // Cloned before the Router consumes the endpoint.
     let endpoint_for_acceptor = endpoint.clone();
     if let Some((_, admission, _)) = &webrtc {
         admission.watch_dialed_gossip(!relay_transport);
@@ -1095,6 +1117,7 @@ pub(crate) fn build_mesh(
             crate::transport::WebRtcSignalAcceptor::new(
                 handle,
                 endpoint_for_acceptor,
+                book.clone(),
                 local,
                 admission,
                 ice,
@@ -1114,7 +1137,7 @@ pub(crate) fn build_mesh(
         builder = builder.accept(alpn, handler);
     }
     let router = builder.spawn();
-    (gossip, router)
+    (gossip, router, book)
 }
 
 #[cfg(test)]
@@ -1312,6 +1335,44 @@ mod tests {
         );
         sender.close().await;
         receiver.close().await;
+    }
+
+    // An address that changes is told again, so addresses are registered again and again for one
+    // endpoint. The endpoint has one lookup service for them, made once by `address_book`, not one
+    // per registration.
+    #[tokio::test]
+    async fn the_addresses_of_one_endpoint_go_to_one_lookup_service() {
+        let peer = iroh::SecretKey::generate().public();
+        let at =
+            |ip: &str| iroh::EndpointAddr::new(peer).with_ip_addr(ip.parse().expect("an address"));
+        let first = build_peer_endpoint(&LookupOpts::loopback())
+            .await
+            .expect("loopback endpoint must bind");
+        let second = build_peer_endpoint(&LookupOpts::loopback())
+            .await
+            .expect("loopback endpoint must bind");
+        let services =
+            |endpoint: &iroh::Endpoint| endpoint.address_lookup().expect("lookup services").len();
+        let (first_before, second_before) = (services(&first), services(&second));
+
+        let first_book = super::address_book(&first);
+        super::add_peer_addr(&first_book, at("192.0.2.1:4000"));
+        super::add_peer_addr(&first_book, at("192.0.2.2:4000"));
+        let second_book = super::address_book(&second);
+        super::add_peer_addr(&second_book, at("192.0.2.3:4000"));
+
+        assert_eq!(
+            services(&first),
+            first_before + 1,
+            "two registrations for one endpoint add one lookup service"
+        );
+        assert_eq!(
+            services(&second),
+            second_before + 1,
+            "another endpoint has a book of its own"
+        );
+        first.close().await;
+        second.close().await;
     }
 
     #[tokio::test]

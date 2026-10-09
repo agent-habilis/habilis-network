@@ -217,7 +217,7 @@ mod watcher_tests {
             .accept(ALPN, WatchAndDrop)
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
 
         let conn = client.connect(server.id(), ALPN).await.expect("connect");
         let closed = tokio::time::timeout(Duration::from_secs(10), conn.closed()).await;

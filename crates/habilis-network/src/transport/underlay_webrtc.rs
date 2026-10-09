@@ -227,8 +227,9 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
                 continue;
             }
         };
-        let (endpoint, handle, admission) = (
+        let (endpoint, book, handle, admission) = (
             underlay.endpoint.clone(),
+            underlay.book.clone(),
             underlay.handle.clone(),
             underlay.admission.clone(),
         );
@@ -237,7 +238,11 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
         let epoch = guard.epoch();
         let task = n0_future::task::spawn(async move {
             let _guard = guard;
-            match Box::pin(super::webrtc::dial_signal(&endpoint, addr, &handle, ice)).await {
+            match Box::pin(super::webrtc::dial_signal(
+                &endpoint, &book, addr, &handle, ice,
+            ))
+            .await
+            {
                 Ok(()) => {
                     admission.note_success(peer);
                     // The acceptor of the other side nudges when it takes the
@@ -265,6 +270,8 @@ pub(crate) struct UnderlayWebRtc {
     pub(crate) handle: habilis_network_iroh_webrtc_transport::WebRtcHandle,
     pub(crate) admission: SignalAdmission,
     pub(crate) endpoint: Endpoint,
+    /// The address book of `endpoint`: the sessions of the underlay are named in it.
+    pub(crate) book: iroh::address_lookup::memory::MemoryLookup,
     pub(crate) allowed: Allowed,
 }
 
@@ -533,6 +540,7 @@ mod tests {
         let acceptor = WebRtcSignalAcceptor::new(
             crate::lookup::new_webrtc_handle(server.id()),
             server.clone(),
+            crate::lookup::address_book(&server.clone()),
             server.id(),
             SignalAdmission::new(4),
             IceProfile { host_only: true },

@@ -98,6 +98,7 @@ pub async fn run<A: NodeDriver>(
         webrtc_enabled,
         local_udp_transport,
         webrtc_admission,
+        address_book,
         webrtc_ice,
         unicast_rx,
         live_count,
@@ -172,6 +173,7 @@ pub async fn run<A: NodeDriver>(
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
             webrtc_admission,
+            address_book,
             webrtc_ice,
         },
         started,
@@ -229,6 +231,7 @@ pub async fn run<A: NodeDriver>(
         let claimed = beacon::ensure(
             &rendezvous_params,
             &endpoint,
+            &state.address_book,
             &mut rendezvous,
             probes_before_claim(cohost),
             &mut rival_probe,
@@ -823,7 +826,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // 0 when idle while `wakeups` stays equal to the column sum.
             Ok(()) = rung_rx.changed() => {
                 state.idle.external += 1;
-                apply_rung_change(&mut state, &mut rendezvous_params, &endpoint, &mut rendezvous, &rung_rx);
+                apply_rung_change(&mut state, &mut rendezvous_params, &mut rendezvous, &rung_rx);
             }
             // The off-loop probe-before-claim answered. Its own arm rather
             // than a poll at the next heal tick: the probe already cost up to
@@ -846,7 +849,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     state.rendezvous_probe_read_free = true;
                 } else {
                     state.rendezvous_probe_read_free = false;
-                    let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
+                    let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &state.address_book, &mut rendezvous, found_rival).await;
                     if claimed {
                         // Still from the brisk base: two joiners that start
                         // together both read free twice and claim in the same

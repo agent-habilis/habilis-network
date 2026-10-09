@@ -534,7 +534,7 @@ mod tests {
         state
             .direct
             .insert(bob_addr.id, crate::daemon::state::DirectState::Direct);
-        crate::lookup::add_peer_addr(endpoint, bob_addr.clone()).expect("register bob");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(endpoint), bob_addr.clone());
         state.peer_endpoints.insert(nick("bob"), bob_addr);
         state
     }

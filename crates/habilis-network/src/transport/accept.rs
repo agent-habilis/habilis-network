@@ -154,7 +154,7 @@ mod tests {
             .accept(UNICAST_ALPN, UnicastAcceptor::with_idle(tx, true, idle))
             .spawn();
         let client = bind().await;
-        crate::lookup::add_peer_addr(&client, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
         let conn = client
             .connect(server.id(), UNICAST_ALPN)
             .await

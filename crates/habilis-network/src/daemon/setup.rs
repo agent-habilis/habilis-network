@@ -155,7 +155,10 @@ fn spawn_startup_rung_confirmation(
 /// with the rival probe's dial target: the probe asks whether anyone serves
 /// the identity *a joiner would reach*, so the two must name the same place or
 /// it is answering a different question.
-pub(crate) fn register_rendezvous(endpoint: &Endpoint, params: &RendezvousParams) {
+pub(crate) fn register_rendezvous(
+    book: &iroh::address_lookup::memory::MemoryLookup,
+    params: &RendezvousParams,
+) {
     // Relay disabled (not in the allowlist) or private without a port ladder:
     // nothing to pre-register — joiners resolve the rendezvous id via
     // mDNS/DHT only.
@@ -176,7 +179,7 @@ pub(crate) fn register_rendezvous(endpoint: &Endpoint, params: &RendezvousParams
             "pre-registered rendezvous on the loopback port ladder"
         );
     }
-    let _ = add_peer_addr(endpoint, addr);
+    add_peer_addr(book, addr);
 }
 
 /// Build the endpoint, subscribe to the topic, and produce a ready
@@ -579,6 +582,8 @@ struct Assembled {
     /// Threaded on so `EventLoopState` gets the *same* one — the dialing side
     /// and the answering side must share a ceiling, or neither enforces it.
     webrtc_admission: crate::transport::SignalAdmission,
+    /// The address book of the member endpoint: the one place its peers' addresses are registered.
+    address_book: iroh::address_lookup::memory::MemoryLookup,
     /// How far ICE may reach — host-only on a loopback mesh. Derived from the
     /// mesh's own lookups, so it cannot disagree with them.
     webrtc_ice: crate::transport::IceProfile,
@@ -693,6 +698,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         underlay_webrtc,
         webrtc,
         webrtc_admission,
+        address_book,
         webrtc_ice,
         topic_string,
     } = match kind {
@@ -758,6 +764,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         webrtc_enabled: transports.webrtc,
         local_udp_transport: transports.udp,
         webrtc_admission,
+        address_book,
         webrtc_ice,
         unicast_rx,
         live_count,
@@ -791,12 +798,13 @@ fn build_overlay(
     iroh_gossip::net::Gossip,
     iroh::protocol::Router,
     crate::transport::SignalAdmission,
+    iroh::address_lookup::memory::MemoryLookup,
     crate::transport::IceProfile,
 ) {
     let ice = crate::transport::IceProfile {
         host_only: mesh.is_loopback(),
     };
-    let (gossip, router) = build_mesh(
+    let (gossip, router, address_book) = build_mesh(
         endpoint.clone(),
         build.max_peers,
         Some(
@@ -813,7 +821,7 @@ fn build_overlay(
         build.relay_transport,
         crate::transport::webrtc::local_needs_webrtc_lane(build.transports.udp),
     );
-    (gossip, router, admission, ice)
+    (gossip, router, admission, address_book, ice)
 }
 
 /// The value cluster [`setup_create`] needs beyond the shared [`SetupBuild`]
@@ -923,13 +931,13 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         mesh.network_label(),
     );
 
-    let (gossip, router, webrtc_admission, webrtc_ice) =
+    let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
         build_overlay(build, &mesh, &endpoint, &webrtc, admission);
     // Creator has no peers yet — bootstrap is empty.
     let topic = crate::gossip::split::subscribe_mesh(&gossip, topic_id, []).await?;
 
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
-    register_rendezvous(&endpoint, &rdv);
+    register_rendezvous(&address_book, &rdv);
 
     Ok(Assembled {
         mesh_id,
@@ -949,6 +957,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         underlay_webrtc,
         webrtc,
         webrtc_admission,
+        address_book,
         webrtc_ice,
         topic_string: None,
     })
@@ -993,13 +1002,12 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         build_member_endpoint(build).await?;
 
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
-    // Must precede the join: the peer resolves the rendezvous id via
+    let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
+        build_overlay(build, &mesh, &endpoint, &webrtc, admission);
+    // Must precede the join (the subscribe below): the peer resolves the rendezvous id via
     // this registered address — the loopback port ladder (loopback-only) or
     // the chosen relay rung (reachable across machines).
-    register_rendezvous(&endpoint, &rdv);
-
-    let (gossip, router, webrtc_admission, webrtc_ice) =
-        build_overlay(build, &mesh, &endpoint, &webrtc, admission);
+    register_rendezvous(&address_book, &rdv);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
     // until we are meshed, so we never register a duplicate `rendezvous_id` on
@@ -1051,6 +1059,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         underlay_webrtc,
         webrtc,
         webrtc_admission,
+        address_book,
         webrtc_ice,
         topic_string,
     })
@@ -1497,7 +1506,11 @@ mod browser_tests {
         .await
         .expect("a mesh sets up");
         assert_eq!(
-            config.multihop.as_ref().expect("a multihop handle").link_cost(),
+            config
+                .multihop
+                .as_ref()
+                .expect("a multihop handle")
+                .link_cost(),
             100
         );
         config.router.shutdown().await.expect("the router stops");

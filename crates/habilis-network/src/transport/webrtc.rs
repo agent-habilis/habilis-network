@@ -28,6 +28,7 @@
 
 use anyhow::{Context, Result};
 use habilis_network_iroh_webrtc_transport::{MAX_ENVELOPE_BYTES, SignalEnvelope, WebRtcHandle};
+use iroh::address_lookup::memory::MemoryLookup;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId};
@@ -153,20 +154,15 @@ use close_code::{CAP_REFUSED, EVICTED, SIGNAL_ABORTED, SIGNAL_FAILED};
 /// Without this registration every connection to a session-holding peer still
 /// carried exactly one path, the relay, which the lookup-only accept gate then
 /// (correctly) refused.
-fn register_session_addr(endpoint: &Endpoint, remote: EndpointId) {
+fn register_session_addr(book: &MemoryLookup, remote: EndpointId) {
     let addr = EndpointAddr::from_parts(
         remote,
         [iroh::TransportAddr::Custom(
             habilis_network_iroh_webrtc_transport::custom_addr(remote),
         )],
     );
-    if let Err(error) = crate::lookup::add_peer_addr(endpoint, addr) {
-        // `warn`: a session that cannot be named is a session that cannot
-        // carry anything, and this is the only line that says why.
-        tracing::warn!(target: LOG_TARGET, %remote, %error, "could not register the webrtc transport address");
-    } else {
-        tracing::debug!(target: LOG_TARGET, %remote, "registered the webrtc transport address");
-    }
+    crate::lookup::add_peer_addr(book, addr);
+    tracing::debug!(target: LOG_TARGET, %remote, "registered the webrtc transport address");
 }
 
 /// The deadlines one round runs under.
@@ -287,6 +283,8 @@ pub struct WebRtcSignalAcceptor {
     /// For registering the peer's transport address on attach; see
     /// [`register_session_addr`].
     endpoint: Endpoint,
+    /// The address book of `endpoint`, where that address goes.
+    book: MemoryLookup,
     local: EndpointId,
     /// Shared with the dialing side, so the ceiling is one number for the node
     /// rather than one per role.
@@ -301,6 +299,7 @@ impl WebRtcSignalAcceptor {
     pub fn new(
         handle: WebRtcHandle,
         endpoint: Endpoint,
+        book: MemoryLookup,
         local: EndpointId,
         admission: SignalAdmission,
         ice: IceProfile,
@@ -308,6 +307,7 @@ impl WebRtcSignalAcceptor {
         Self {
             handle,
             endpoint,
+            book,
             local,
             admission,
             deadlines: SignalDeadlines::DEFAULT,
@@ -382,6 +382,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
         let epoch = guard.epoch();
         let handle = self.handle.clone();
         let endpoint = self.endpoint.clone();
+        let book = self.book.clone();
         let local = self.local;
         let deadlines = self.deadlines;
         let ice = self.ice;
@@ -410,7 +411,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                 Ok(Ok(())) => {
                     admission.note_success(remote);
                     admission.report_answered(remote);
-                    register_session_addr(&endpoint, remote);
+                    register_session_addr(&book, remote);
                     conn.close(0u32.into(), b"jsep done");
                     // A connection that we dialed before the attach moves onto the
                     // session only after a path event of our own endpoint, and the
@@ -499,12 +500,14 @@ async fn answer_one(
 /// complete before the deadline.
 pub async fn dial_signal(
     endpoint: &Endpoint,
+    book: &MemoryLookup,
     peer: EndpointAddr,
     handle: &WebRtcHandle,
     ice: IceProfile,
 ) -> Result<()> {
     Box::pin(dial_signal_with(
         endpoint,
+        book,
         peer,
         handle,
         SignalDeadlines::DEFAULT,
@@ -519,6 +522,7 @@ pub async fn dial_signal(
 /// As [`dial_signal`].
 pub(crate) async fn dial_signal_with(
     endpoint: &Endpoint,
+    book: &MemoryLookup,
     peer: EndpointAddr,
     handle: &WebRtcHandle,
     deadlines: SignalDeadlines,
@@ -535,7 +539,9 @@ pub(crate) async fn dial_signal_with(
         deadlines.round,
         // Boxed for the same reason `answer_one` is: the pending session state
         // is large, and this future is held across a spawn.
-        Box::pin(dial_signal_round(endpoint, peer, handle, deadlines, ice)),
+        Box::pin(dial_signal_round(
+            endpoint, book, peer, handle, deadlines, ice,
+        )),
     )
     .await
     {
@@ -551,6 +557,7 @@ pub(crate) async fn dial_signal_with(
 
 async fn dial_signal_round(
     endpoint: &Endpoint,
+    book: &MemoryLookup,
     peer: EndpointAddr,
     handle: &WebRtcHandle,
     deadlines: SignalDeadlines,
@@ -589,7 +596,7 @@ async fn dial_signal_round(
     let answer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal answer")?;
 
     offer.with_answer(answer).complete(remote, handle).await?;
-    register_session_addr(endpoint, remote);
+    register_session_addr(book, remote);
     // Signalling is done the moment the session is attached; the data rides its
     // own connections from here.
     conn.close(0u32.into(), b"jsep done");
@@ -1014,6 +1021,7 @@ fn spawn_offer_round(
     offer: Offer,
 ) {
     let endpoint = ctx.endpoint.clone();
+    let book = state.address_book.clone();
     let admission = state.webrtc_admission.clone();
     let ice = state.webrtc_ice;
     let proven = state.direct_proven.clone();
@@ -1021,7 +1029,7 @@ fn spawn_offer_round(
     let epoch = guard.epoch();
     let task = n0_future::task::spawn(async move {
         let _guard = guard;
-        if let Err(error) = Box::pin(dial_signal(&endpoint, addr, &handle, ice)).await {
+        if let Err(error) = Box::pin(dial_signal(&endpoint, &book, addr, &handle, ice)).await {
             if is_cap_refusal(&error) {
                 admission.note_refused(peer);
             }
@@ -1872,6 +1880,7 @@ mod tests {
                 WebRtcSignalAcceptor::new(
                     handle.clone(),
                     endpoint.clone(),
+                    crate::lookup::address_book(&endpoint.clone()),
                     endpoint.id(),
                     admission.clone(),
                     // Host candidates only: these tests must not touch STUN.
@@ -1986,6 +1995,7 @@ mod tests {
             let (client, client_hub) = endpoint().await;
             dial_signal_with(
                 &client,
+                &crate::lookup::address_book(&client),
                 server.addr(),
                 &client_hub,
                 quick(),
@@ -2025,6 +2035,7 @@ mod tests {
         for (client, hub) in [(&first, &first_hub), (&second, &second_hub)] {
             dial_signal_with(
                 client,
+                &crate::lookup::address_book(client),
                 server.addr(),
                 hub,
                 quick(),
@@ -2040,6 +2051,7 @@ mod tests {
 
         let error = dial_signal_with(
             &first,
+            &crate::lookup::address_book(&first),
             server.addr(),
             &first_hub,
             quick(),
@@ -2099,6 +2111,7 @@ mod tests {
         let (client, client_hub) = endpoint_with_lookup().await;
         dial_signal_with(
             &client,
+            &crate::lookup::address_book(&client),
             server.addr(),
             &client_hub,
             quick(),
@@ -2108,7 +2121,7 @@ mod tests {
         .expect("the signal round must attach a session");
         assert!(client_hub.has_session(&server.id()));
 
-        register_session_addr(&client, server.id());
+        register_session_addr(&crate::lookup::address_book(&client), server.id());
 
         let conn = tokio::time::timeout(
             Duration::from_secs(10),
@@ -2143,6 +2156,7 @@ mod tests {
         let client_router = serve(&client, &client_hub, &client_admission);
         dial_signal_with(
             &client,
+            &crate::lookup::address_book(&client),
             server.addr(),
             &client_hub,
             quick(),
@@ -2197,6 +2211,7 @@ mod tests {
                 WebRtcSignalAcceptor::new(
                     server_hub.clone(),
                     server.clone(),
+                    crate::lookup::address_book(&server.clone()),
                     server.id(),
                     admission.clone(),
                     IceProfile { host_only: true },
@@ -2214,6 +2229,7 @@ mod tests {
 
         dial_signal_with(
             &client,
+            &crate::lookup::address_book(&client),
             server.addr(),
             &client_hub,
             quick(),
@@ -2221,7 +2237,7 @@ mod tests {
         )
         .await
         .expect("the signal round must attach a session");
-        register_session_addr(&client, server.id());
+        register_session_addr(&crate::lookup::address_book(&client), server.id());
 
         let topic = iroh_gossip::proto::TopicId::from_bytes([9u8; 32]);
         let mut server_topic = server_gossip
@@ -2316,6 +2332,7 @@ mod tests {
                 WebRtcSignalAcceptor::new(
                     server_hub.clone(),
                     server.clone(),
+                    crate::lookup::address_book(&server.clone()),
                     server.id(),
                     admission.clone(),
                     IceProfile { host_only: true },
@@ -2332,6 +2349,7 @@ mod tests {
         let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
         dial_signal_with(
             &client,
+            &crate::lookup::address_book(&client),
             relay_addr,
             &client_hub,
             SignalDeadlines::DEFAULT,
@@ -2339,7 +2357,7 @@ mod tests {
         )
         .await
         .expect("the signal round must attach a session over the relay");
-        register_session_addr(&client, server.id());
+        register_session_addr(&crate::lookup::address_book(&client), server.id());
 
         let topic = iroh_gossip::proto::TopicId::from_bytes([11u8; 32]);
         let mut server_topic = server_gossip
@@ -2443,6 +2461,7 @@ mod tests {
                 WebRtcSignalAcceptor::new(
                     high_hub.clone(),
                     high.clone(),
+                    crate::lookup::address_book(&high.clone()),
                     high.id(),
                     admission,
                     IceProfile { host_only: true },
@@ -2459,6 +2478,7 @@ mod tests {
 
         dial_signal_with(
             &low,
+            &crate::lookup::address_book(&low),
             high_on_relay,
             &low_hub,
             SignalDeadlines::DEFAULT,
@@ -2466,7 +2486,7 @@ mod tests {
         )
         .await
         .expect("the offerer attaches a session");
-        register_session_addr(&low, high.id());
+        register_session_addr(&crate::lookup::address_book(&low), high.id());
         nudge(&low, high.id()).await;
 
         let direct = tokio::time::timeout(Duration::from_secs(20), held_rx.recv())
@@ -2536,6 +2556,7 @@ mod tests {
                 WebRtcSignalAcceptor::new(
                     server_hub.clone(),
                     server.clone(),
+                    crate::lookup::address_book(&server.clone()),
                     server.id(),
                     admission.clone(),
                     IceProfile { host_only: true },
@@ -2551,6 +2572,7 @@ mod tests {
             .expect("a relayed connection before any session");
         dial_signal_with(
             &client,
+            &crate::lookup::address_book(&client),
             relay_addr,
             &client_hub,
             quick(),
@@ -2634,6 +2656,7 @@ mod tests {
                 WebRtcSignalAcceptor::new(
                     server_hub.clone(),
                     server.clone(),
+                    crate::lookup::address_book(&server.clone()),
                     server.id(),
                     admission.clone(),
                     IceProfile { host_only: true },
@@ -2649,10 +2672,9 @@ mod tests {
         // What register_rendezvous does for a joiner: the relay-homed
         // address, registered before the first graft dial.
         crate::lookup::add_peer_addr(
-            &client,
+            &crate::lookup::address_book(&client),
             EndpointAddr::new(server.id()).with_relay_url(relay_url.clone()),
-        )
-        .expect("register the relay-homed address");
+        );
         let topic = iroh_gossip::proto::TopicId::from_bytes([13u8; 32]);
         let mut server_topic = server_gossip
             .subscribe(topic, vec![])
@@ -2672,6 +2694,7 @@ mod tests {
         let relay_addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
         dial_signal_with(
             &client,
+            &crate::lookup::address_book(&client),
             relay_addr,
             &client_hub,
             SignalDeadlines::DEFAULT,
@@ -2679,7 +2702,7 @@ mod tests {
         )
         .await
         .expect("the signal round must attach a session over the relay");
-        register_session_addr(&client, server.id());
+        register_session_addr(&crate::lookup::address_book(&client), server.id());
 
         let linked = tokio::time::timeout(Duration::from_secs(40), async {
             loop {
@@ -2781,6 +2804,7 @@ mod tests {
         let started = std::time::Instant::now();
         let outcome = dial_signal_with(
             &client,
+            &crate::lookup::address_book(&client),
             server.addr(),
             &client_hub,
             quick(),
@@ -2965,6 +2989,7 @@ mod tests {
             .expect("room");
         dial_signal_with(
             &client,
+            &crate::lookup::address_book(&client),
             server.addr(),
             &client_hub,
             quick(),
@@ -3052,7 +3077,7 @@ mod tests {
         let router = Router::builder(server.clone())
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
-        crate::lookup::add_peer_addr(&endpoint, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
 
         let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
@@ -3159,7 +3184,7 @@ mod tests {
         let router = Router::builder(server.clone())
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
-        crate::lookup::add_peer_addr(&endpoint, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
 
         let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
@@ -3271,7 +3296,7 @@ mod tests {
         let router = Router::builder(server.clone())
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
-        crate::lookup::add_peer_addr(&endpoint, server.addr()).expect("register the server");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
 
         let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
@@ -3844,6 +3869,7 @@ mod tests {
 
         dial_signal_with(
             &lower,
+            &crate::lookup::address_book(&lower),
             higher.addr(),
             &lower_hub,
             quick(),
@@ -3892,6 +3918,7 @@ mod tests {
 
         dial_signal_with(
             &lower,
+            &crate::lookup::address_book(&lower),
             higher.addr(),
             &lower_hub,
             quick(),
@@ -3966,6 +3993,7 @@ mod tests {
 
         let outcome = dial_signal_with(
             &higher,
+            &crate::lookup::address_book(&higher),
             lower.addr(),
             &higher_hub,
             quick(),

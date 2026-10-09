@@ -407,6 +407,9 @@ pub struct EventLoopState {
     /// so the direct-peer ceiling is one number for this node rather than one
     /// per role. See [`crate::transport::SignalAdmission`].
     pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    /// The address book of the member endpoint (`lookup::address_book`): where the addresses of the
+    /// peers are registered with `lookup::add_peer_addr`.
+    pub(crate) address_book: iroh::address_lookup::memory::MemoryLookup,
     /// How far ICE may reach when this peer gathers candidates. Host-only on a
     /// loopback mesh, which promises to make no external network call —
     /// `IceConfig::default()` would query two public STUN servers.
@@ -659,6 +662,9 @@ pub(crate) struct StateInit {
     /// *same* table. Defaulting it here and overwriting it later left a second
     /// ceiling briefly existing and enforcing nothing.
     pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    /// The address book of the member endpoint, made by `lookup::address_book` where the
+    /// endpoint was built.
+    pub(crate) address_book: iroh::address_lookup::memory::MemoryLookup,
     /// How far ICE may reach, derived from the mesh's own lookups so it cannot
     /// disagree with them.
     pub(crate) webrtc_ice: crate::transport::IceProfile,
@@ -681,6 +687,7 @@ impl EventLoopState {
             secrets,
             per_peer_gate,
             webrtc_admission,
+            address_book,
             webrtc_ice,
         } = init;
         let MeshSecrets {
@@ -767,6 +774,7 @@ impl EventLoopState {
             underlay_webrtc: None,
             webrtc: None,
             webrtc_admission,
+            address_book,
             webrtc_ice,
             reclaim_until: None,
             next_rival_recheck: None,

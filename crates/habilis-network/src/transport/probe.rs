@@ -979,7 +979,7 @@ pub(crate) async fn regraft_due(state: &mut EventLoopState, ctx: &HandlerCtx<'_>
             continue;
         };
         state.note_relink(peer, Instant::now());
-        let _ = crate::lookup::add_peer_addr(ctx.endpoint, addr.clone());
+        crate::lookup::add_peer_addr(&state.address_book, addr.clone());
         state.unicast_pool.note_addr(&addr);
         tracing::debug!(target: super::LOG_TARGET, %peer, "the link went down: grafting the proven peer again");
         if ensure_direct(state, ctx, peer, &addr) {
@@ -1034,7 +1034,7 @@ async fn fill_active_view(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         return;
     };
     state.note_relink(addr.id, now);
-    let _ = crate::lookup::add_peer_addr(ctx.endpoint, addr.clone());
+    crate::lookup::add_peer_addr(&state.address_book, addr.clone());
     state.unicast_pool.note_addr(&addr);
     tracing::debug!(target: super::LOG_TARGET, peer = %addr.id, linked = state.linked_endpoints.len(), "filling the active view");
     if ensure_direct(state, ctx, addr.id, &addr) {
@@ -2338,7 +2338,7 @@ mod tests {
         state.local_udp_transport = true;
         state.unicast_pool = crate::transport::UnicastPool::new(client.clone(), false);
         for (name, server) in [("bob", &bob), ("beacon", &beacon)] {
-            crate::lookup::add_peer_addr(&client, server.addr()).expect("register");
+            crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
             state.peer_endpoints.insert(nick(name), server.addr());
             state
                 .unicast_pool

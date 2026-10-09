@@ -16,7 +16,7 @@ pub use crate::lookup::set_underlay_leg_off;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use crate::lookup::test_relay;
 pub use crate::lookup::{
-    InjectedMultihop, TransportHandles, TransportOpts, add_peer_addr, build_endpoint,
+    InjectedMultihop, TransportHandles, TransportOpts, add_peer_addr, address_book, build_endpoint,
     build_peer_endpoint, check_injected_identity, install_transports, probe_connect, probe_ladder,
     relay_ladder,
 };

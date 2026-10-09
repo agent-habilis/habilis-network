@@ -26,6 +26,7 @@ pub(crate) fn fresh_state() -> EventLoopState {
             webrtc_admission: crate::transport::SignalAdmission::new(
                 crate::transport::MAX_DIRECT_PEERS,
             ),
+            address_book: iroh::address_lookup::memory::MemoryLookup::new(),
             webrtc_ice: crate::transport::IceProfile::default(),
         },
         Instant::now(),

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use iroh::{Endpoint, RelayUrl};
+use iroh::RelayUrl;
 use iroh_gossip::api::{GossipReceiver, GossipSender};
 use tokio::sync::watch;
 
@@ -97,7 +97,7 @@ pub(super) async fn run_heal(
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
-        setup::register_rendezvous(ctx.endpoint, params);
+        setup::register_rendezvous(&state.address_book, params);
         if crate::transport::webrtc::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
         }
@@ -289,7 +289,6 @@ pub(super) async fn try_resubscribe(
 pub(super) fn apply_rung_change(
     state: &mut EventLoopState,
     params: &mut beacon::RendezvousParams,
-    endpoint: &Endpoint,
     rendezvous: &mut Option<beacon::Rendezvous>,
     rung_rx: &watch::Receiver<Option<RelayUrl>>,
 ) {
@@ -304,7 +303,7 @@ pub(super) fn apply_rung_change(
             "bootstrap relay rung changed; re-registering rendezvous and re-homing the beacon"
         );
         params.bootstrap_relay = new;
-        setup::register_rendezvous(endpoint, params);
+        setup::register_rendezvous(&state.address_book, params);
         // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
         // homed on the new rung at the next heal/reclaim tick — `shed`, not a
         // plain drop. The old endpoint is still open and still homed on the
