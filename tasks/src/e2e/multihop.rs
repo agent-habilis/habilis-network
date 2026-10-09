@@ -72,6 +72,17 @@ async fn forwarded_cells(alpha: &Native) -> Result<u64, CellFailure> {
         .map_err(|error| CellFailure(format!("A's forwarded-cell count is unreadable: {error}")))
 }
 
+/// The WebRTC sessions on A's multihop underlay. The tab has no IP, so A reaches it only over one.
+async fn underlay_sessions(alpha: &Native) -> String {
+    alpha
+        .request(|reply| membership::Request::UnderlaySessions { reply })
+        .await
+        .map_or_else(
+            |error| format!("unreadable: {error}"),
+            |count| count.to_string(),
+        )
+}
+
 async fn run_cell(
     relay_url: &str,
     harness: &BunServer,
@@ -166,7 +177,11 @@ async fn run_cell(
             .then_some(())
     });
     if arrived.is_none() {
-        return Err(fail("B's message never reached the tab".to_owned()));
+        let now = forwarded_cells(&alpha).await?;
+        return Err(fail(format!(
+            "B's message never reached the tab (A's forwarded cells: {before} then {now}; A's underlay sessions: {})",
+            underlay_sessions(&alpha).await
+        )));
     }
     let after_down = forwarded_cells(&alpha).await?;
     if after_down <= before {
@@ -184,7 +199,11 @@ async fn run_cell(
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(fail("the tab's message never reached B".to_owned()));
+            let now = forwarded_cells(&alpha).await?;
+            return Err(fail(format!(
+                "the tab's message never reached B (A's forwarded cells: {after_down} then {now}; A's underlay sessions: {})",
+                underlay_sessions(&alpha).await
+            )));
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
