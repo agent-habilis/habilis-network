@@ -1352,6 +1352,7 @@ async fn handle_peer_info(
     // fresh endpoint replaces the old. The beacon gossips *as* the rendezvous,
     // so it advertises `rendezvous_id` here — record that too, so a joiner can
     // tell its rendezvous link belongs to the beacon's nickname.
+    let changed = state.peer_endpoints.get(&message.author) != Some(&peer_addr);
     state
         .peer_endpoints
         .insert(message.author.clone(), peer_addr.clone());
@@ -1390,9 +1391,26 @@ async fn handle_peer_info(
         ip_addrs = ?peer_addr.ip_addrs().collect::<Vec<_>>(),
         "peerinfo received"
     );
-    if first_sighting {
+    // Every address that is new or differs from the last one of this author is handed to
+    // the endpoint, whatever the link state: a home relay that came late, or an interface
+    // that changed, is learned by a peer that is already linked. `add_endpoint_addr`
+    // makes the address a path of the live connections, so it does not matter whether
+    // it runs before or after the dial that follows; the lookup serves a dial by bare id.
+    // The call goes through two actor inboxes of the endpoint, so the loop never awaits
+    // it. An address with no entry is not given to it: with none known it would start an
+    // Address Lookup and wait for it.
+    if first_sighting || changed {
         let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
         state.unicast_pool.note_addr(&peer_addr);
+        if !peer_addr.addrs.is_empty() {
+            let endpoint = ctx.endpoint.clone();
+            let addr = peer_addr.clone();
+            n0_future::task::spawn(async move {
+                if let Err(error) = endpoint.add_endpoint_addr(addr).await {
+                    tracing::debug!(target: "habilis_network::gossip", peer = %peer_id.fmt_short(), %error, "the endpoint did not take the peer address");
+                }
+            });
+        }
     }
     // A buffered directed frame addressed to this author may just have become
     // deliverable — its endpoint binding and dial address are now registered.
@@ -2171,6 +2189,113 @@ mod first_contact_tests {
             "bob's proof, bob's frame"
         );
         node.endpoint.close().await;
+    }
+
+    /// The address in the first `PeerInfo` of a peer must reach the endpoint, not only
+    /// a lookup: the endpoint reads a lookup at a dial, and a connection that is live
+    /// gets a path only from the call that hands the address over.
+    #[tokio::test]
+    async fn the_address_of_a_first_peer_info_reaches_the_endpoint() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let peer = iroh::SecretKey::generate().public();
+        let first = iroh::EndpointAddr::new(peer).with_ip_addr(test_ip());
+
+        super::handle_peer_info(
+            &peer_info(&node, &first),
+            bytes::Bytes::new(),
+            &mut state,
+            &ctx,
+        )
+        .await;
+
+        assert!(
+            eventually(|| async { node.endpoint.remote_info(peer).await.is_some() }).await,
+            "the first address reaches the endpoint"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// A peer that is linked is not asked for its address again, so a change of it
+    /// (a home relay that came late, an interface that changed) reaches us only
+    /// through its `PeerInfo`. The endpoint already knows the peer here, so only the
+    /// change is under test: a relay that the peer gained must be handed over too.
+    #[tokio::test]
+    async fn a_linked_peers_changed_address_is_applied() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let peer = iroh::SecretKey::generate().public();
+        state.link(peer);
+        let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
+        let knows_relay = || async {
+            node.endpoint.remote_info(peer).await.is_some_and(|info| {
+                info.addrs().any(
+                    |known| matches!(known.addr(), iroh::TransportAddr::Relay(url) if *url == relay),
+                )
+            })
+        };
+        let first = iroh::EndpointAddr::new(peer).with_ip_addr(test_ip());
+        node.endpoint
+            .add_endpoint_addr(first.clone())
+            .await
+            .expect("the endpoint takes the first address");
+        super::handle_peer_info(
+            &peer_info(&node, &first),
+            bytes::Bytes::new(),
+            &mut state,
+            &ctx,
+        )
+        .await;
+        assert!(!knows_relay().await, "no relay yet");
+
+        let later = first.with_relay_url(relay.clone());
+        super::handle_peer_info(
+            &peer_info(&node, &later),
+            bytes::Bytes::new(),
+            &mut state,
+            &ctx,
+        )
+        .await;
+
+        assert!(
+            eventually(knows_relay).await,
+            "the relay that a linked peer gained reaches the endpoint"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// Polls `check` until it holds or five seconds pass. The endpoint takes an address
+    /// from a task, so the test waits for the effect and not for a time.
+    async fn eventually<F, Fut>(mut check: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if check().await {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        check().await
+    }
+
+    /// An address from a documentation range (RFC 5737): no interface carries it.
+    fn test_ip() -> std::net::SocketAddr {
+        "192.0.2.10:4000".parse().expect("an address")
+    }
+
+    /// A `PeerInfo` of the author `bob` that carries `addr`.
+    fn peer_info(node: &Node, addr: &iroh::EndpointAddr) -> Message {
+        use crate::protocol::message::MessageBody;
+        use crate::protocol::peer_addr::endpoint_addr_to_json;
+
+        let body =
+            MessageBody::new(endpoint_addr_to_json(addr).to_string()).expect("an address body");
+        Message::new_peer_info(&node.mesh, &nick("bob"), body).signed(&Identity::generate())
     }
 
     /// The tie-break defers the first dial to the lower endpoint id. A second
