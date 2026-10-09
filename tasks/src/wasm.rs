@@ -26,7 +26,42 @@ pub(crate) fn run(sh: &Shell, scope: &Scope) -> TaskOutcome {
     ensure_target(sh)?;
     dev::run(sh, Kind::WasmCheck, scope)?;
     dev::run(sh, Kind::WasmClippy, scope)?;
-    Ok(())
+    check_disallowed_list(sh)
+}
+
+/// A path in `clippy.toml` that names no function is only a warning, which `-D warnings` leaves
+/// alone, so a typo would switch one entry of the list off and fail nothing. Clippy says it once
+/// for each crate that depends on the crate in the path, so one crate that depends on Tokio is
+/// enough. The crate is cleaned first: clippy prints the warning only when it lints the crate, and
+/// a crate that an earlier row left fresh would not print it.
+fn check_disallowed_list(sh: &Shell) -> TaskOutcome {
+    const UNREACHABLE: &str = "does not refer to a reachable function";
+    output::status("Checking", "the disallowed methods of clippy.toml");
+    cmd!(
+        sh,
+        "cargo clean -p habilis-network-iroh-gossip-transport --target {TARGET}"
+    )
+    .quiet()
+    .run()?;
+    let out = cmd!(
+        sh,
+        "cargo clippy --target {TARGET} -p habilis-network-iroh-gossip-transport -- -D warnings -D clippy::disallowed_methods"
+    )
+    .quiet()
+    .ignore_status()
+    .output()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let dead: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains(UNREACHABLE))
+        .collect();
+    if dead.is_empty() {
+        return Ok(());
+    }
+    for line in dead {
+        output::detail(line);
+    }
+    Err("clippy.toml lists a path that names no function".into())
 }
 
 /// Fail on the missing target rather than on the wall of resolver errors it

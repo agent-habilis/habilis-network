@@ -217,6 +217,10 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# `clippy.toml` lists the Tokio calls that panic in a browser. The lint stays off here: on a native
+# target `n0_future` re-exports those functions, so a native run would flag the replacements. Every
+# wasm32 clippy row (the gate and `ci.yml`) passes `-D clippy::disallowed_methods`.
+disallowed_methods = "allow"
 # Prevents holding a sync `std::sync::Mutex` (or RwLock) guard across an
 # `.await` point — a recipe for deadlocks.
 await_holding_lock = "deny"

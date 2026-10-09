@@ -266,6 +266,39 @@ pub(crate) const STEPS: &[Step] = &[
         scope: Scope::Crate("habilis-network-bench-wasm"),
         args: &[],
     },
+    // Every crate that builds for wasm32 has a row of its own, so the `-D
+    // clippy::disallowed_methods` that every row passes reaches it as a primary package: the rows
+    // above reach these six only as dependencies of another crate.
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-protocol"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-util"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-transport-util"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-iroh-gossip-transport"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-doc"),
+        args: &["--no-default-features"],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-logging"),
+        args: &["--no-default-features"],
+    },
     Step {
         kind: Kind::Test,
         scope: Scope::Workspace,
@@ -376,6 +409,12 @@ impl Step {
             argv.push("--".to_owned());
             argv.push("-D".to_owned());
             argv.push("warnings".to_owned());
+        }
+        // `clippy.toml` lists the Tokio calls that panic in a browser, and the lint is off in
+        // the workspace: a wasm32 row turns it on for every crate it compiles.
+        if self.kind == Kind::WasmClippy {
+            argv.push("-D".to_owned());
+            argv.push("clippy::disallowed_methods".to_owned());
         }
 
         argv

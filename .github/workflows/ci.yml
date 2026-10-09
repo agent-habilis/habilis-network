@@ -117,15 +117,37 @@ jobs:
           # The browser side of `cargo task benchmark`.
           cargo check --target wasm32-unknown-unknown -p habilis-network-bench-wasm
 
+      # `-D clippy::disallowed_methods` is what forbids the Tokio calls that panic in a browser
+      # (the list is in `clippy.toml`); the lint is off in the workspace, and a wasm32 row turns it
+      # on for every crate it compiles.
       - name: Clippy (wasm32)
         run: |
-          cargo clippy --target wasm32-unknown-unknown -p habilis-network-chunks --all-targets --features wasm-simd -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-webrtc-transport --features web,bench -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p habilis-network --no-default-features -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p habilis-network-netplay --no-default-features -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p habilis-network-stream -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p habilis-network-wasm -- -D warnings
-          cargo clippy --target wasm32-unknown-unknown -p habilis-network-bench-wasm -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-chunks --all-targets --features wasm-simd -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-webrtc-transport --features web,bench -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-multihop-transport -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network --no-default-features -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-netplay --no-default-features -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-stream -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-wasm -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-bench-wasm -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-protocol --no-default-features -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-util --no-default-features -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-transport-util -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-gossip-transport -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-doc --no-default-features -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-logging --no-default-features -- -D warnings -D clippy::disallowed_methods
+
+      # A path in `clippy.toml` that names no function is a plain warning, which `-D warnings`
+      # leaves alone: a typo would switch one entry off. Clippy prints it only when it lints the
+      # crate, so the crate is cleaned first: the step above left it fresh.
+      - name: Clippy list names only functions
+        run: |
+          cargo clean -p habilis-network-iroh-gossip-transport --target wasm32-unknown-unknown
+          out=$(cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-gossip-transport -- -D warnings -D clippy::disallowed_methods 2>&1)
+          if grep 'does not refer to a reachable function' <<< "$out"; then
+            echo "clippy.toml lists a path that names no function"
+            exit 1
+          fi
 
       # Runs habilis-network-stream's integration tests too, relay and WebRTC-only ones
       # included, on purpose: they are the only CI proof of the stream's
