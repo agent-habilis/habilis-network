@@ -109,6 +109,15 @@ function mirrorConsole(): void {
     full.push(stamped)
     pending.push(stamped)
   }
+  // A Rust panic reaches the page through console.error. Without this the dump of a failed run
+  // never shows one: the router task that panicked just stops, and nothing else says why.
+  const originalError = console.error.bind(console)
+  console.error = (...parts: unknown[]) => {
+    originalError(...parts)
+    const stamped = `${new Date().toISOString().slice(11, 23)}Z ERROR ${parts.map(String).join(' ')}`
+    full.push(stamped)
+    pending.push(stamped)
+  }
 }
 
 async function main(): Promise<void> {
