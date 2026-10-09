@@ -38,6 +38,10 @@ const TRANSPORTS: [Transport; 3] = [Transport::Udp, Transport::WebRtc, Transport
 
 struct CellFailure(String);
 
+fn fail(message: String) -> CellFailure {
+    CellFailure(message)
+}
+
 fn transports() -> String {
     TRANSPORTS
         .iter()
@@ -83,12 +87,93 @@ async fn underlay_sessions(alpha: &Native) -> String {
         )
 }
 
+/// Whether B learns a route to the tab, through A, before the window ends.
+async fn route_to_tab(bravo: &Native) -> bool {
+    let deadline = tokio::time::Instant::now() + ROUTE_TIMEOUT;
+    loop {
+        let has_route = bravo
+            .request(|reply| membership::Request::HasRoute {
+                peer: "tab".to_owned(),
+                reply,
+            })
+            .await
+            .unwrap_or(false);
+        if has_route {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// B sends the tab a directed message. The tab must show it, and A must have carried cells for it.
+/// Returns A's forwarded cells before the message and after it.
+async fn b_to_tab(page: &Page, alpha: &Native, bravo: &Native) -> Result<(u64, u64), CellFailure> {
+    let before = forwarded_cells(alpha).await?;
+    native_send_with_retry(bravo, Some("tab"), "b-to-tab")
+        .await
+        .map_err(|error| fail(format!("B's directed message was refused: {error}")))?;
+    let arrived = wait_for(ROUTE_TIMEOUT, Duration::from_millis(500), || {
+        page.evaluate("(document.getElementById('messages')||{}).textContent||''")
+            .contains("b-to-tab")
+            .then_some(())
+    });
+    if arrived.is_none() {
+        let now = forwarded_cells(alpha).await?;
+        return Err(fail(format!(
+            "B's message never reached the tab (A's forwarded cells: {before} then {now}; A's underlay sessions: {})",
+            underlay_sessions(alpha).await
+        )));
+    }
+    let after_down = forwarded_cells(alpha).await?;
+    if after_down <= before {
+        return Err(fail(format!(
+            "B's message reached the tab, but A passed on no cells for it ({before} then {after_down}): the pair was not on a multihop route"
+        )));
+    }
+    Ok((before, after_down))
+}
+
+/// The tab sends B a directed message. B must receive it, and A must have carried cells for it.
+/// Returns A's forwarded cells after the message.
+async fn tab_to_b(
+    page: &Page,
+    alpha: &Native,
+    bravo: &mut Native,
+    after_down: u64,
+) -> Result<u64, CellFailure> {
+    let deadline = tokio::time::Instant::now() + ROUTE_TIMEOUT;
+    loop {
+        // A send before the tab has its route is refused or held; try again until the window ends.
+        let _ = call_page(page, "harness", "send('bravo', 'tab-to-b')");
+        if bravo.saw_msg("tab-to-b", true) {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let now = forwarded_cells(alpha).await?;
+            return Err(fail(format!(
+                "the tab's message never reached B (A's forwarded cells: {after_down} then {now}; A's underlay sessions: {})",
+                underlay_sessions(alpha).await
+            )));
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let after_up = forwarded_cells(alpha).await?;
+    if after_up <= after_down {
+        return Err(fail(format!(
+            "the tab's message reached B, but A passed on no cells for it ({after_down} then {after_up})"
+        )));
+    }
+    Ok(after_up)
+}
+
 async fn run_cell(
     relay_url: &str,
     harness: &BunServer,
     page: &Page,
 ) -> Result<String, CellFailure> {
-    let fail = |message: String| CellFailure(message);
     let topic = format!("multihop-cell-{}", rand_token());
     drain_logs();
 
@@ -141,81 +226,14 @@ async fn run_cell(
         .await
         .map_err(|error| fail(format!("B could not deny the tab: {error}")))?;
 
-    // The route from B to the tab exists through A.
-    let routed = async {
-        let deadline = tokio::time::Instant::now() + ROUTE_TIMEOUT;
-        loop {
-            let has_route = bravo
-                .request(|reply| membership::Request::HasRoute {
-                    peer: "tab".to_owned(),
-                    reply,
-                })
-                .await
-                .unwrap_or(false);
-            if has_route {
-                return true;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-    .await;
-    if !routed {
+    if !route_to_tab(&bravo).await {
         return Err(fail("B never learned a route to the tab".to_owned()));
     }
-
-    // ── B to the tab ────────────────────────────────────────────────
-    let before = forwarded_cells(&alpha).await?;
-    native_send_with_retry(&bravo, Some("tab"), "b-to-tab")
-        .await
-        .map_err(|error| fail(format!("B's directed message was refused: {error}")))?;
-    let arrived = wait_for(ROUTE_TIMEOUT, Duration::from_millis(500), || {
-        page.evaluate("(document.getElementById('messages')||{}).textContent||''")
-            .contains("b-to-tab")
-            .then_some(())
-    });
-    if arrived.is_none() {
-        let now = forwarded_cells(&alpha).await?;
-        return Err(fail(format!(
-            "B's message never reached the tab (A's forwarded cells: {before} then {now}; A's underlay sessions: {})",
-            underlay_sessions(&alpha).await
-        )));
-    }
-    let after_down = forwarded_cells(&alpha).await?;
-    if after_down <= before {
-        return Err(fail(format!(
-            "B's message reached the tab, but A passed on no cells for it ({before} then {after_down}): the pair was not on a multihop route"
-        )));
-    }
-
-    // ── the tab to B ────────────────────────────────────────────────
-    let deadline = tokio::time::Instant::now() + ROUTE_TIMEOUT;
-    loop {
-        // A send before the tab has its route is refused or held; try again until the window ends.
-        let _ = call_page(page, "harness", "send('bravo', 'tab-to-b')");
-        if bravo.saw_msg("tab-to-b", true) {
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let now = forwarded_cells(&alpha).await?;
-            return Err(fail(format!(
-                "the tab's message never reached B (A's forwarded cells: {after_down} then {now}; A's underlay sessions: {})",
-                underlay_sessions(&alpha).await
-            )));
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let after_up = forwarded_cells(&alpha).await?;
-    if after_up <= after_down {
-        return Err(fail(format!(
-            "the tab's message reached B, but A passed on no cells for it ({after_down} then {after_up})"
-        )));
-    }
+    let (before, after_down) = b_to_tab(page, &alpha, &bravo).await?;
+    let after_up = tab_to_b(page, &alpha, &mut bravo, after_down).await?;
 
     // The leave is heard on both natives, so the cell ends on a clean mesh.
-    call_page(page, "harness", "close()").map_err(&fail)?;
+    call_page(page, "harness", "close()").map_err(fail)?;
     let left = wait_for(PAYLOAD_TIMEOUT, Duration::from_secs(1), || {
         (alpha.saw_event("left", "tab") && bravo.saw_event("left", "tab")).then_some(())
     });
