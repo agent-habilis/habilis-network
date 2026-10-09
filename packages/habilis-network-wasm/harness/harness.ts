@@ -111,6 +111,9 @@ function mirrorConsole(): void {
   }
   // A Rust panic reaches the page through console.error. Without this the dump of a failed run
   // never shows one: the router task that panicked just stops, and nothing else says why.
+  // The stack of that panic is a JS Error stack, and V8 keeps ten frames by default: a panic deep
+  // in the executor would then end at the panic hook and never name the call that caused it.
+  Object.assign(Error, { stackTraceLimit: 100 })
   const originalError = console.error.bind(console)
   console.error = (...parts: unknown[]) => {
     originalError(...parts)
