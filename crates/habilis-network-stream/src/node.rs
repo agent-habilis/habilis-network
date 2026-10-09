@@ -7,12 +7,12 @@ use anyhow::{Context, Result, bail};
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
-use habilis_network::net::TransportOpts;
 use habilis_network::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, PROBE_DEADLINE, SignalAdmission,
     WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc, dial_signal, is_cap_refusal,
     pair_needs_lane, wait_direct,
 };
+use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
     Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, Transport, TransportPolicy,
 };
@@ -58,9 +58,8 @@ pub struct StreamNode {
     transport: TransportPolicy,
     transports: TransportOpts,
     ice: IceProfile,
-    /// The producers this node has opened, by address. One lookup for all of
-    /// them, so a node that opens many streams does not grow its address book
-    /// by one lookup service per open.
+    /// The address book of the endpoint: the producers this node has opened, and
+    /// the peers of its WebRTC sessions.
     producers: MemoryLookup,
 }
 
@@ -108,6 +107,7 @@ impl StreamNode {
         #[cfg(target_arch = "wasm32")]
         habilis_network::runtime::refuse_in_browser(&lookups, transport, transports)?;
         let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports).await?;
+        let producers = address_book(&endpoint);
         let registry = Arc::new(Registry::default());
         let ice = IceProfile {
             host_only: lookups.is_loopback(),
@@ -125,6 +125,7 @@ impl StreamNode {
                 WebRtcSignalAcceptor::new(
                     webrtc.clone(),
                     endpoint.clone(),
+                    producers.clone(),
                     endpoint.id(),
                     SignalAdmission::new(MAX_DIRECT_PEERS),
                     ice,
@@ -132,8 +133,6 @@ impl StreamNode {
             );
         }
         let router = router.spawn();
-        let producers = MemoryLookup::new();
-        endpoint.address_lookup()?.add(producers.clone());
         Ok(Self {
             endpoint,
             router,
@@ -194,15 +193,21 @@ impl StreamNode {
         if needs_lane && !can_lane && !relay_ok {
             bail!(Refused::RelayRefused);
         }
-        self.producers.add_endpoint_info(hash.addr.clone());
+        add_peer_addr(&self.producers, hash.addr.clone());
         // The WebRTC lane first: the connect below then finds the session's
         // path in the address book and can start on the data channel, rather
         // than on the relay a later attach would have to move it off.
         if can_lane
             && needs_lane
             && !self.webrtc.has_session(&hash.addr.id)
-            && let Err(error) =
-                dial_signal(&self.endpoint, hash.addr.clone(), &self.webrtc, self.ice).await
+            && let Err(error) = dial_signal(
+                &self.endpoint,
+                &self.producers,
+                hash.addr.clone(),
+                &self.webrtc,
+                self.ice,
+            )
+            .await
             && !relay_ok
         {
             if is_cap_refusal(&error) {
