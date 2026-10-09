@@ -767,6 +767,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.sweep += 1;
                 sweep_arm(&mut anchors, &mut state, sink.as_ref());
                 let ctx = parts.ctx(&sender);
+                crate::transport::probe::prove_routed_pairs(&mut state, &ctx).await;
                 app.on_tick(&mut state, &ctx).await;
             }
             _ = intervals.heal.tick() => {

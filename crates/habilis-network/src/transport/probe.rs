@@ -600,6 +600,70 @@ pub(crate) fn pair_kind(watched: Option<PathKind>, admitted: Option<PathKind>) -
     watched.filter(|kind| *kind != PathKind::None).or(admitted)
 }
 
+/// Pure: the peers that a multihop route proves, though no watcher reports them. A pair with an
+/// IP-less end has no path watcher (`ensure_watchers` skips it), and its session is its proof
+/// (`ensure_direct`); when the session is refused or gone, the pair can still ride a multihop
+/// route, and nothing else reads that. A peer is returned when it is not proven, has no watcher,
+/// and its selected path is multihop (not gossip: the recursion rule closes gossip links on that
+/// rung, so it proves nothing). A peer that is watched is left to its watcher, which also
+/// revokes; here nothing is revoked.
+pub(crate) fn proven_by_route(
+    peers: impl IntoIterator<Item = EndpointId>,
+    direct: &HashMap<EndpointId, DirectState>,
+    watched: &HashMap<EndpointId, Option<usize>>,
+    kind_of: impl Fn(EndpointId) -> Option<PathKind>,
+) -> Vec<EndpointId> {
+    let mut proven: Vec<EndpointId> = peers
+        .into_iter()
+        .filter(|peer| {
+            direct.get(peer) != Some(&DirectState::Direct)
+                && !watched.contains_key(peer)
+                && kind_of(*peer) == Some(PathKind::Multihop)
+        })
+        .collect();
+    proven.sort_unstable();
+    proven
+}
+
+/// Mark the pairs that [`proven_by_route`] returns, and flush what waited for them. Runs on the
+/// sweep tick.
+pub(crate) async fn prove_routed_pairs(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    let peers: Vec<EndpointId> = state
+        .peer_endpoints
+        .values()
+        .map(|addr| addr.id)
+        .filter(|id| *id != ctx.rendezvous_id)
+        .collect();
+    let proven = proven_by_route(peers, &state.direct, &state.path_watchers, |peer| {
+        state.pair_path_kind(peer)
+    });
+    let mut flush = false;
+    for peer in proven {
+        tracing::info!(target: super::LOG_TARGET, %peer, "pair is off the relay on a multihop route; proven");
+        flush |= mark_proven(state, peer);
+        // The proof must not remove the trigger of the session: a held frame used to open it, and a
+        // pair that is proven is no longer held. A multihop route has no lane of its own, so the
+        // pair keeps racing for one, as the watcher's report of a multihop path does.
+        state.want_lane_session(peer, Instant::now());
+        let has_session = state
+            .webrtc
+            .as_ref()
+            .is_some_and(|handle| handle.has_session(&peer));
+        if !has_session
+            && let Some(addr) = state
+                .peer_endpoints
+                .values()
+                .find(|addr| addr.id == peer)
+                .cloned()
+        {
+            super::webrtc::negotiate_session(state, ctx, peer, addr);
+        }
+    }
+    if flush {
+        crate::gossip::flush_pending(state, ctx, "path off the relay").await;
+    }
+}
+
 /// Pure: may a peer be grafted, from what is known right now? A `WebRTC`
 /// pair needs its session attached; an IP pair needs a proven direct path.
 pub(crate) fn may_graft(known_direct: bool, has_session: bool, needs_webrtc: bool) -> bool {
@@ -1037,6 +1101,48 @@ mod tests {
     };
     use crate::daemon::state::EventLoopState;
     use crate::testing::{endpoint_id, fresh_state, nick};
+
+    // A multihop route proves a pair that no watcher reports: not a watched peer (its watcher
+    // decides), not a proven one, not a pair on the relay, on IP or on gossip, not a pair with
+    // no selected path.
+    #[test]
+    fn a_pair_on_a_multihop_route_with_no_watcher_is_proven() {
+        use super::proven_by_route;
+        use crate::daemon::state::DirectState;
+        use std::collections::HashMap;
+
+        let [routed, watched, proven, relay, ip, gossip, none] =
+            [1, 2, 3, 4, 5, 6, 7].map(endpoint_id);
+        let kind_of = |peer| {
+            if peer == relay {
+                Some(PathKind::Relay)
+            } else if peer == ip {
+                Some(PathKind::Ip)
+            } else if peer == gossip {
+                Some(PathKind::Gossip)
+            } else if peer == none {
+                None
+            } else {
+                Some(PathKind::Multihop)
+            }
+        };
+        let direct = HashMap::from([
+            (routed, DirectState::RelayOnly),
+            (proven, DirectState::Direct),
+        ]);
+        let watchers = HashMap::from([(watched, Some(7))]);
+        let peers = [routed, watched, proven, relay, ip, gossip, none];
+        assert_eq!(
+            proven_by_route(peers, &direct, &watchers, kind_of),
+            vec![routed]
+        );
+        // A peer the table does not know at all is not proven yet either.
+        let unknown = HashMap::new();
+        assert_eq!(
+            proven_by_route([routed], &unknown, &HashMap::new(), kind_of),
+            vec![routed]
+        );
+    }
 
     // A graft that only fills a view must not make a full view drop a neighbor, so it asks
     // with low priority. The rendezvous may hold a tombstone for this node, which refuses a
