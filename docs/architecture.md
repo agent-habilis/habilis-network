@@ -353,7 +353,7 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 | `Presence { joined \| left \| alive }` | Arrival, departure, keepalive. |
 | `PeerInfo` | A signed card with the self-advertised endpoint. |
 | `Digest` | Anti-entropy digest of the message log window. |
-| `Ping`, `Pong { to }` | Reachability rounds. |
+| `Ping`, `Pong { to, probe }` | Reachability rounds. A pong names the ping it answers. |
 | `State`, `StateDigest` | The free-form CRDT channel and its repair digest. |
 | `Meta`, `MetaDigest` | The gated CRDT channel and its repair digest. |
 | `LinkState` | The multihop link vector. Ephemeral, never logged. |

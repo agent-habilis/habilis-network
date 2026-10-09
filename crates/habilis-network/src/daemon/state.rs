@@ -14,7 +14,7 @@ use super::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
-use crate::protocol::{Message, Nickname, ShardGroup};
+use crate::protocol::{Message, MessageId, Nickname, ShardGroup};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
@@ -621,19 +621,66 @@ impl IdleCounters {
     }
 }
 
-/// An in-flight RTT round. `t1` is when the probe was broadcast;
-/// `pongs` records each peer's local arrival instant so RTT is
-/// `arrival - t1`; the round is emitted and cleared at `deadline`.
+/// An in-flight RTT round. [`start_ping_round`](crate::ops::start_ping_round), which a driver
+/// calls, arms it and sends the first probe at `t1`; the event loop sends the second, a fresh
+/// ping, at the middle of the window, so that a probe lost on the way (the peer was not linked
+/// yet, a dropped frame) is made up for. A pong names the probe it answers, so its RTT is read
+/// from that probe's send, and a pong that names no probe of this round is dropped. A peer's
+/// first pong is the one kept. The price is one more broadcast per round and one more pong per
+/// peer. The round is emitted and cleared at `deadline`.
 #[derive(Debug)]
-pub struct PingRound {
-    pub t1: TokioInstant,
-    pub deadline: TokioInstant,
-    pub pongs: HashMap<Nickname, TokioInstant>,
+pub(crate) struct PingRound {
+    pub(crate) t1: TokioInstant,
+    pub(crate) deadline: TokioInstant,
+    /// The probes of the round, by message id, with the instant each left.
+    pub(crate) probes: HashMap<MessageId, TokioInstant>,
+    /// The RTT of the first pong of each peer.
+    pub(crate) pongs: HashMap<Nickname, Duration>,
     /// When set (the in-process `ping` request), the finalized RTT rows are
     /// delivered here instead of only emitted as a `ping_report` event — the
     /// in-process driver has no event stream to read the report from. `None`
     /// for the CLI/IPC path, which consumes the event.
-    pub resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
+    pub(crate) resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
+}
+
+impl PingRound {
+    /// A round whose first probe is `first`, sent at `t1`.
+    pub(crate) fn new(
+        first: &Message,
+        t1: TokioInstant,
+        deadline: TokioInstant,
+        resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
+    ) -> Self {
+        Self {
+            t1,
+            deadline,
+            probes: HashMap::from([(first.id.clone(), t1)]),
+            pongs: HashMap::new(),
+            resp,
+        }
+    }
+
+    /// When the second probe is due: the middle of the window, once.
+    pub(crate) fn second_probe_at(&self) -> Option<TokioInstant> {
+        (self.probes.len() < 2).then(|| self.t1 + self.deadline.duration_since(self.t1) / 2)
+    }
+
+    /// Record the pong of `peer` that answers `probe`, arriving at `arrival`: the RTT is read from
+    /// that probe's send, and the first pong of a peer is kept. `false` when `probe` is no probe
+    /// of this round.
+    pub(crate) fn record_pong(
+        &mut self,
+        peer: Nickname,
+        probe: &MessageId,
+        arrival: TokioInstant,
+    ) -> bool {
+        let Some(sent) = self.probes.get(probe) else {
+            return false;
+        };
+        let rtt = arrival.duration_since(*sent);
+        self.pongs.entry(peer).or_insert(rtt);
+        true
+    }
 }
 
 /// The mesh's secret material, grouped so [`EventLoopState::new`] can take
@@ -1588,14 +1635,8 @@ impl EventLoopState {
     }
 
     /// Arm a ping round, replacing any already in flight.
-    pub fn arm_ping_round(&mut self, round: PingRound) {
+    pub(crate) fn arm_ping_round(&mut self, round: PingRound) {
         self.ping_round = Some(Box::new(round));
-    }
-
-    /// Take the in-flight ping round, if one is armed — the round is finalized
-    /// exactly once, so the caller consumes it.
-    pub fn take_ping_round(&mut self) -> Option<Box<PingRound>> {
-        self.ping_round.take()
     }
 
     /// Sender-side cache of serialized shard frames, for answering repair
@@ -1705,7 +1746,8 @@ const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport:
 mod tests {
     use super::{
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
-        KNOWN_ENDPOINTS_CAP, Message, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
+        KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
+        TokioInstant,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -2981,5 +3023,78 @@ mod tests {
         );
         assert!(state.meshed);
         assert!(!state.degraded);
+    }
+
+    /// The second probe of a round is due at the middle of the window, and only once.
+    #[test]
+    fn the_second_probe_is_due_at_the_middle_of_the_window_and_only_once() {
+        let t1 = TokioInstant::now();
+        let first = Message::new_ping(&MeshId::from("test"), &nick("alice"));
+        let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
+
+        assert_eq!(round.second_probe_at(), Some(t1 + Duration::from_secs(5)));
+        let second = Message::new_ping(&MeshId::from("test"), &nick("alice"));
+        round.probes.insert(second.id, t1 + Duration::from_secs(5));
+        assert_eq!(round.second_probe_at(), None);
+    }
+
+    /// A pong reads its RTT from the probe it names, so a peer that answers only the second
+    /// probe gets a true RTT.
+    #[test]
+    fn a_pong_reads_its_rtt_from_the_probe_it_names() {
+        let t1 = TokioInstant::now();
+        let mesh = MeshId::from("test");
+        let first = Message::new_ping(&mesh, &nick("alice"));
+        let second = Message::new_ping(&mesh, &nick("alice"));
+        let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
+        round
+            .probes
+            .insert(second.id.clone(), t1 + Duration::from_secs(5));
+
+        let at = t1 + Duration::from_secs(5) + Duration::from_millis(30);
+        assert!(round.record_pong(nick("bob"), &second.id, at));
+        assert!(round.record_pong(nick("carol"), &first.id, t1 + Duration::from_millis(40)));
+
+        assert_eq!(round.pongs[&nick("bob")], Duration::from_millis(30));
+        assert_eq!(round.pongs[&nick("carol")], Duration::from_millis(40));
+    }
+
+    /// The first pong of a peer is the one kept: the answer to the second probe does not replace
+    /// it.
+    #[test]
+    fn the_first_pong_of_a_peer_is_kept() {
+        let t1 = TokioInstant::now();
+        let mesh = MeshId::from("test");
+        let first = Message::new_ping(&mesh, &nick("alice"));
+        let second = Message::new_ping(&mesh, &nick("alice"));
+        let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
+        round
+            .probes
+            .insert(second.id.clone(), t1 + Duration::from_secs(5));
+
+        round.record_pong(nick("bob"), &first.id, t1 + Duration::from_millis(10));
+        round.record_pong(
+            nick("bob"),
+            &second.id,
+            t1 + Duration::from_secs(5) + Duration::from_millis(20),
+        );
+
+        assert_eq!(round.pongs[&nick("bob")], Duration::from_millis(10));
+    }
+
+    /// A pong that names no probe of the round, such as the answer to a round that is over, is
+    /// dropped.
+    #[test]
+    fn a_pong_that_names_no_probe_of_the_round_is_dropped() {
+        let t1 = TokioInstant::now();
+        let first = Message::new_ping(&MeshId::from("test"), &nick("alice"));
+        let mut round = PingRound::new(&first, t1, t1 + Duration::from_secs(10), None);
+
+        assert!(!round.record_pong(
+            nick("bob"),
+            &MessageId::random(),
+            t1 + Duration::from_millis(5)
+        ));
+        assert!(round.pongs.is_empty());
     }
 }

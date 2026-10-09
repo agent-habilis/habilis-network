@@ -474,8 +474,12 @@ mod tests {
 
         let mesh = crate::protocol::MeshId::from("test");
         let author = crate::testing::nick("alice");
-        let answer =
-            crate::protocol::Message::new_pong(&mesh, &author, crate::testing::nick("bob"));
+        let answer = crate::protocol::Message::new_pong(
+            &mesh,
+            &author,
+            crate::testing::nick("bob"),
+            &crate::protocol::MessageId::random(),
+        );
         let request = crate::protocol::Message::new_ping(&mesh, &author);
         for message in [answer, request] {
             let bytes = message.serialize().expect("serialize");

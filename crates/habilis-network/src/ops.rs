@@ -5,7 +5,8 @@
 //! the hook, so none of it can be called out of band.
 
 pub use crate::gossip::{
-    StateMergeParams, broadcast_msg, broadcast_state_merge, send_app, unicast_farewell,
+    StateMergeParams, broadcast_msg, broadcast_state_merge, send_app, start_ping_round,
+    unicast_farewell,
 };
 pub use crate::transport::{MeshSender, deliver, deliver_in_background};
 

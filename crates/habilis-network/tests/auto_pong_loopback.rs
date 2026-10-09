@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
-    PingRound,
 };
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, Message, MessageKind, Nickname, PresenceSubtype};
@@ -103,19 +102,7 @@ impl NodeDriver for Pinger {
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
     ) -> bool {
-        let now = tokio::time::Instant::now();
-        state.arm_ping_round(PingRound {
-            t1: now,
-            deadline: now
-                + Duration::from_secs(habilis_network::runtime::tuning::ping_window_secs()),
-            pongs: std::collections::HashMap::new(),
-            resp: Some(resp),
-        });
-        habilis_network::ops::broadcast_msg(
-            ctx.sender,
-            &Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity),
-        )
-        .await;
+        habilis_network::ops::start_ping_round(state, ctx, Some(resp)).await;
         true
     }
 }
@@ -232,6 +219,28 @@ async fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
         trace()
     );
 
+    alice.leave().await.expect("alice leaves");
+    bob.leave().await.expect("bob leaves");
+}
+
+/// A probe sent while no link exists reaches nobody, so the first probe of a round is lost. The
+/// second one, sent at the middle of the window, meets a linked peer, and the round holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ping_sent_before_any_link_exists_is_answered_after_the_second_probe() {
+    init_logging();
+    let topic = format!("auto-pong-early-{}", rand::random::<u64>());
+    let alice = spawn(&topic, "alice", Arc::new(Joined::default())).await;
+    let bob = spawn(&topic, "bob", Arc::new(Joined::default())).await;
+    let bob_nick = Nickname::new("bob").expect("valid");
+
+    // No wait for `joined`: the round starts before the pair is linked.
+    let rtts = ping(&alice).await;
+
+    assert!(
+        rtts.iter().any(|(peer, _)| *peer == bob_nick),
+        "bob never answered alice's early ping: {rtts:?}\n{}",
+        trace()
+    );
     alice.leave().await.expect("alice leaves");
     bob.leave().await.expect("bob leaves");
 }

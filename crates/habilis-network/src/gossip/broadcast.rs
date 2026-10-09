@@ -9,7 +9,7 @@ use crate::transport::MeshSender;
 use bytes::Bytes;
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::state::EventLoopState;
+use crate::daemon::state::{EventLoopState, PingRound};
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::message::AppFrameParams;
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
@@ -102,6 +102,34 @@ pub async fn broadcast_msg(sender: &MeshSender, msg: &Message) {
             "presence/plumbing broadcast failed"
         );
     }
+}
+
+/// Start an RTT round: arm it and broadcast the first probe. The event loop sends the second probe
+/// at the middle of the window ([`send_second_probe`]); the round ends at its deadline and reports
+/// the first pong of each peer. This is the one place that starts a round.
+pub async fn start_ping_round(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
+) {
+    let now = n0_future::time::Instant::now();
+    let window = std::time::Duration::from_secs(crate::util::tuning::ping_window_secs());
+    let probe = Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity);
+    state.arm_ping_round(PingRound::new(&probe, now, now + window, resp));
+    broadcast_msg(ctx.sender, &probe).await;
+}
+
+/// Send the second probe of the round in flight, a fresh ping: a repeat of the first one would be
+/// dropped as a duplicate by gossip and by `ingest`, and would never reach a peer's `auto_pong`.
+pub(crate) async fn send_second_probe(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    let Some(round) = state.ping_round.as_mut() else {
+        return;
+    };
+    let probe = Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity);
+    round
+        .probes
+        .insert(probe.id.clone(), n0_future::time::Instant::now());
+    broadcast_msg(ctx.sender, &probe).await;
 }
 
 /// Parameters for [`broadcast_state_merge`]. A dedicated struct rather than
@@ -375,7 +403,12 @@ mod tests {
             iroh::EndpointAddr::new(bob)
                 .with_relay_url("https://relay.invalid".parse().expect("relay url")),
         );
-        let frame = Message::new_pong(&MeshId::from("test"), &nick("alice"), nick("bob"));
+        let frame = Message::new_pong(
+            &MeshId::from("test"),
+            &nick("alice"),
+            nick("bob"),
+            &crate::protocol::MessageId::random(),
+        );
         let bytes = Bytes::from_static(b"frame");
         let now = crate::util::clock::Instant::now();
         assert!(

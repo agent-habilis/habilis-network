@@ -330,7 +330,7 @@ mod tests {
     use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
-    use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody};
+    use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody, MessageId};
 
     fn mesh() -> MeshId {
         MeshId::from("test")
@@ -358,7 +358,7 @@ mod tests {
 
     /// A directed frame addressed to `bob` — a `Pong` is the simplest one.
     fn directed_msg() -> Message {
-        Message::new_pong(&mesh(), &nick("alice"), nick("bob"))
+        Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
     }
 
     fn open_broadcast() -> Message {
@@ -741,7 +741,7 @@ mod tests {
                 body: body(),
             },
         );
-        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"));
+        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random());
         assert_eq!(route(&req, &state), Route::Unicast(bob));
         assert_eq!(route(&pong, &state), Route::Unicast(bob));
     }

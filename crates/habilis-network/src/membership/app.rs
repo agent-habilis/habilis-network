@@ -455,18 +455,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::Ping { reply } => {
-                let now = tokio::time::Instant::now();
-                state.arm_ping_round(crate::embed::PingRound {
-                    t1: now,
-                    deadline: now + Duration::from_secs(crate::util::tuning::ping_window_secs()),
-                    pongs: std::collections::HashMap::new(),
-                    resp: Some(reply),
-                });
-                crate::ops::broadcast_msg(
-                    ctx.sender,
-                    &Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity),
-                )
-                .await;
+                crate::ops::start_ping_round(state, ctx, Some(reply)).await;
                 true
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

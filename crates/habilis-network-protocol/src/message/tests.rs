@@ -1,6 +1,6 @@
 use super::{
-    AppFrameParams, AppTag, BuildMsgParams, ChainCtx, MeshId, Message, MessageBody, MessageKind,
-    Nickname, PresenceSubtype, build_msg_bytes,
+    AppFrameParams, AppTag, BuildMsgParams, ChainCtx, MeshId, Message, MessageBody, MessageId,
+    MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
 };
 
 fn nick(name: &str) -> Nickname {
@@ -82,10 +82,11 @@ fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
 #[test]
 fn test_pong_round_trip() {
     let target = nick("pinger-here");
-    let msg = Message::new_pong(&sid(), &nick("word-word"), target.clone());
+    let probe = MessageId::random();
+    let msg = Message::new_pong(&sid(), &nick("word-word"), target.clone(), &probe);
     let bytes = msg.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
-    assert_eq!(parsed.kind, MessageKind::Pong { to: target });
+    assert_eq!(parsed.kind, MessageKind::Pong { to: target, probe });
     assert_eq!(parsed.body.as_str(), "");
 }
 

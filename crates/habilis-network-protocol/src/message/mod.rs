@@ -122,7 +122,7 @@ impl fmt::Display for PresenceSubtype {
 #[must_use]
 pub fn sole_addressee(kind: &MessageKind) -> Option<&Nickname> {
     match kind {
-        MessageKind::Pong { to } => Some(to),
+        MessageKind::Pong { to, .. } => Some(to),
         MessageKind::App { to, .. } => to.as_ref(),
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo
@@ -259,11 +259,13 @@ pub enum MessageKind {
     /// pinger. Plumbing like `PeerInfo`/`Digest`: never logged or surfaced
     /// via `poll`/`fetch` — only the originator's `ping_report` event surfaces.
     Ping,
-    /// Response to a `Ping`, addressed to the original pinger (`to`).
-    /// The pinger records its local arrival time to compute RTT. Same
-    /// plumbing treatment as `Ping`.
+    /// Response to a `Ping`, addressed to the original pinger (`to`). `probe` is
+    /// the id of the `Ping` it answers: a round sends more than one probe, and the
+    /// pinger reads the RTT from the probe that the pong names, and drops a pong
+    /// that names none of its own. Same plumbing treatment as `Ping`.
     Pong {
         to: Nickname,
+        probe: MessageId,
     },
     /// A durable `state`-channel event: one Base58 automerge change
     /// (`{"k":"change",…}`) applied to the channel's `MeshDoc`
@@ -589,10 +591,12 @@ impl Message {
         Self::new(mesh, author, MessageKind::Ping, empty_body())
     }
 
-    /// A `Pong` response addressed to the original pinger (`to`).
+    /// A `Pong` response addressed to the original pinger (`to`), naming the `Ping` (`probe`) that
+    /// it answers.
     #[must_use]
-    pub fn new_pong(mesh: &MeshId, author: &Nickname, to: Nickname) -> Self {
-        Self::new(mesh, author, MessageKind::Pong { to }, empty_body())
+    pub fn new_pong(mesh: &MeshId, author: &Nickname, to: Nickname, probe: &MessageId) -> Self {
+        let probe = probe.clone();
+        Self::new(mesh, author, MessageKind::Pong { to, probe }, empty_body())
     }
 
     /// Create a `PeerInfo` message. The body carries endpoint address data

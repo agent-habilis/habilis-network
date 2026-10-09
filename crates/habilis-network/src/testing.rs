@@ -180,6 +180,11 @@ impl LaneNode {
     }
 
     pub(crate) fn frame_to_bob(&self) -> crate::protocol::Message {
-        crate::protocol::Message::new_pong(&self.mesh, &self.author, nick("bob"))
+        crate::protocol::Message::new_pong(
+            &self.mesh,
+            &self.author,
+            nick("bob"),
+            &crate::protocol::MessageId::random(),
+        )
     }
 }

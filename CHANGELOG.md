@@ -379,6 +379,16 @@ published to a registry; pin it with
   with the gossip relay-refused code. The accept gate checked the path only once, so a
   path lost later left a link up on the relay with nothing to say that no
   payload may ride it.
+- A ping round no longer ends empty when its first probe is lost. A node that was not linked to a
+  peer yet when the probe arrived, or a frame dropped on the way, left that peer out of the round:
+  `auto_pong_loopback` failed about once in twenty to forty runs under load for this reason, on
+  `main` as well. The round now sends a second probe at the middle of its window, a fresh ping, and keeps the
+  first pong of each peer. **Wire change:** a `Pong` names the `Ping` it answers (`probe`), so the
+  RTT is read from that probe, and a pong that names no probe of the round, such as the answer to
+  an earlier round, is dropped. A build without the field cannot read a pong of this build, and
+  the other way round. `ops::start_ping_round` starts a round; `PingRound` is no longer part of
+  `embed` and no driver builds one: a driver that did (`agent-gossip`'s `a2a/send.rs`) calls
+  `start_ping_round` instead.
 
 ### Removed
 

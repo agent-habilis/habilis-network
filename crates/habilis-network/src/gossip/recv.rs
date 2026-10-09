@@ -586,18 +586,20 @@ async fn dispatch_infra(
             auto_pong(message, state, ctx).await;
             return ControlFlow::Break(());
         }
-        MessageKind::Pong { to } => {
-            // Record arrival for the active round only if addressed to us
-            // and from a known peer — the roster gate bounds the
-            // map and keeps `responded`/`known` honest against a peer that
-            // forges pongs from fabricated authors.
+        MessageKind::Pong { to, probe } => {
+            // Record the RTT for the active round only if addressed to us, from a
+            // known peer, and naming a probe of this round — the roster gate
+            // bounds the map and keeps `responded`/`known` honest against a peer
+            // that forges pongs from fabricated authors, and the probe id drops a
+            // pong that answers a round that is over.
             if to == ctx.author
                 && state.peers.contains(message.author.as_str())
                 && let Some(round) = state.ping_round.as_mut()
             {
-                round
-                    .pongs
-                    .insert(message.author.clone(), TokioInstant::now());
+                let known = round.record_pong(message.author.clone(), probe, TokioInstant::now());
+                if !known {
+                    tracing::debug!(target: "habilis_network::gossip", pong_from = %message.author, "pong names no probe of this round");
+                }
             }
             return ControlFlow::Break(());
         }
@@ -735,7 +737,8 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
 /// nobody receives is the right outcome: the pinger's round misses us and
 /// tries again.
 async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
-    let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone()).signed(ctx.identity);
+    let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone(), &message.id)
+        .signed(ctx.identity);
     crate::logging::messages::log_out(&pong);
     let warm_endpoint = state
         .peer_endpoints

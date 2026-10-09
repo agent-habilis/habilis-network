@@ -676,6 +676,11 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.external += 1;
                 finalize_ping_round(&mut state, sink.as_ref());
             }
+            () = sleep_until_opt(state.ping_round.as_ref().and_then(|round| round.second_probe_at())) => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                gossip::send_second_probe(&mut state, &ctx).await;
+            }
             () = sleep_until_opt(app.earliest_poll_deadline()) => {
                 state.idle.external += 1;
                 app.poll_deadline_elapsed();
@@ -1026,8 +1031,8 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     let mut peers: Vec<(Nickname, u64)> = round
         .pongs
         .iter()
-        .map(|(nickname, arrival)| {
-            let rtt_ms = millis_saturating(arrival.duration_since(round.t1));
+        .map(|(nickname, rtt)| {
+            let rtt_ms = millis_saturating(*rtt);
             (nickname.clone(), rtt_ms)
         })
         .collect();
