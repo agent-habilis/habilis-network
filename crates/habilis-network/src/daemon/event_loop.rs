@@ -206,6 +206,7 @@ pub async fn run<A: NodeDriver>(
         .set_proven_sink(state.direct_proven.clone());
     // Path watchers report here; the loop re-races or detaches on it.
     let (path_tx, path_rx) = mpsc::unbounded_channel();
+    state.webrtc_admission.set_path_sink(path_tx.clone());
     state.path_changes = path_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     state.rendezvous_answers_jsep = rendezvous_params.answers_jsep();
@@ -724,7 +725,11 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             Some(change) = path_rx.recv() => {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
-                crate::transport::probe::on_path_change(change, &mut state, &ctx).await;
+                if Some(change.peer) == state.rendezvous_id {
+                    crate::transport::webrtc::offer_rendezvous_on_path_loss(&mut state, &ctx);
+                } else {
+                    crate::transport::probe::on_path_change(change, &mut state, &ctx).await;
+                }
             }
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
             frame = recv_opt(&mut unicast_rx) => match frame {

@@ -81,7 +81,7 @@ impl ProtocolHandler for DirectOnlyGossip {
             return Ok(());
         }
         if !self.relay_transport {
-            watch_relay_policy(&conn);
+            watch_relay_policy(&conn, None);
         }
         self.inner
             .handle_connection(conn)
@@ -116,7 +116,10 @@ impl ProtocolHandler for DirectOnlyGossip {
 ///
 /// Holds the connection weakly: the watcher must not keep a link open that
 /// gossip has dropped.
-pub(super) fn watch_relay_policy(gossip_conn: &Connection) {
+pub(super) fn watch_relay_policy(
+    gossip_conn: &Connection,
+    path_sink: Option<tokio::sync::mpsc::UnboundedSender<super::probe::PathChange>>,
+) {
     let weak = gossip_conn.weak_handle();
     let mut events = gossip_conn.path_events();
     n0_future::task::spawn(async move {
@@ -131,6 +134,15 @@ pub(super) fn watch_relay_policy(gossip_conn: &Connection) {
             if selected_is_direct(&conn) {
                 on_relay_since = None;
             } else {
+                if on_relay_since.is_none()
+                    && let Some(sink) = &path_sink
+                {
+                    let _ = sink.send(super::probe::PathChange {
+                        peer: conn.remote_id(),
+                        kind: super::probe::PathKind::Relay,
+                        conn_id: conn.stable_id(),
+                    });
+                }
                 let since = *on_relay_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= PROBE_DEADLINE {
                     tracing::info!(
@@ -189,7 +201,7 @@ mod watcher_tests {
         struct WatchAndDrop;
         impl ProtocolHandler for WatchAndDrop {
             async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-                watch_relay_policy(&conn);
+                watch_relay_policy(&conn, None);
                 Ok(())
             }
         }

@@ -978,6 +978,9 @@ async fn nudge_addr(endpoint: &Endpoint, addr: EndpointAddr) {
 enum Offer {
     /// The rendezvous: graft at once, and say so.
     Rendezvous,
+    /// The rendezvous, while its link is up on the relay: the link is the graft, so only the
+    /// connection is nudged onto the session.
+    RendezvousLinked,
     /// A pair that needs the lane: graft at once.
     Lane,
     /// A pair with UDP on both ends: detach instead if UDP won. Only this kind
@@ -1028,7 +1031,10 @@ fn spawn_offer_round(
         // The peer took the round: it is not refusing us, so its wait starts over.
         admission.note_success(peer);
         // A connection opened before the attach rides the session only after a connect.
-        if matches!(offer, Offer::UdpRace | Offer::AfterLoss) {
+        if matches!(
+            offer,
+            Offer::UdpRace | Offer::AfterLoss | Offer::RendezvousLinked
+        ) {
             nudge_session(&endpoint, peer).await;
         }
         // The race is judged on the connection after the nudge.
@@ -1038,6 +1044,8 @@ fn spawn_offer_round(
             if handle.detach(&peer) {
                 tracing::debug!(target: LOG_TARGET, %peer, "udp won the race; webrtc session detached");
             }
+        } else if offer == Offer::RendezvousLinked {
+            tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached to the linked rendezvous");
         } else {
             if offer == Offer::Rendezvous {
                 tracing::info!(target: LOG_TARGET, %peer, "webrtc session attached to the rendezvous");
@@ -1158,6 +1166,39 @@ pub(crate) fn negotiate_rendezvous_session(
         }
     }
     state.rendezvous_session_stale = false;
+    offer_to_rendezvous(state, ctx, handle, Offer::Rendezvous);
+}
+
+/// Offer a `WebRTC` session to the rendezvous while its gossip link is up on the relay.
+///
+/// The relay policy closes that link after [`PROBE_DEADLINE`](super::path::PROBE_DEADLINE), and
+/// the offer of [`negotiate_rendezvous_session`] comes only after the close. This one comes at
+/// the edge, so a session that attaches inside the deadline gives the link a direct path and the
+/// link stays. No fallback grace: IP is lost, not unknown. A session that is held is left alone,
+/// and the stale-session detach of the heal tick does not run here.
+pub(crate) fn offer_rendezvous_on_path_loss(
+    state: &mut crate::daemon::state::EventLoopState,
+    ctx: &crate::daemon::ctx::HandlerCtx<'_>,
+) {
+    if !state.rendezvous_wanted() || state.relay_transport || !state.rendezvous_linked {
+        return;
+    }
+    let Some(handle) = state.webrtc.clone() else {
+        return;
+    };
+    if handle.has_session(&ctx.rendezvous_id) {
+        return;
+    }
+    offer_to_rendezvous(state, ctx, handle, Offer::RendezvousLinked);
+}
+
+fn offer_to_rendezvous(
+    state: &mut crate::daemon::state::EventLoopState,
+    ctx: &crate::daemon::ctx::HandlerCtx<'_>,
+    handle: WebRtcHandle,
+    offer: Offer,
+) {
+    let rendezvous = ctx.rendezvous_id;
     let guard = match state.webrtc_admission.try_admit(rendezvous, &handle) {
         Ok(guard) => guard,
         Err(reason) => {
@@ -1174,7 +1215,7 @@ pub(crate) fn negotiate_rendezvous_session(
         EndpointAddr::new(rendezvous),
         handle,
         guard,
-        Offer::Rendezvous,
+        offer,
     );
 }
 

@@ -245,6 +245,8 @@ struct Inner {
     evicted_by: super::ceiling::EvictionBackoff,
     /// Where an answered session is reported to the event loop, set once the loop has its channel.
     proven_sink: Option<tokio::sync::mpsc::UnboundedSender<super::probe::DirectOutcome>>,
+    /// Where the relay watch of a dialed gossip link reports to the event loop, set with the sink above.
+    path_sink: Option<tokio::sync::mpsc::UnboundedSender<super::probe::PathChange>>,
     /// The gossip transport of the endpoint, when the mesh has `gossip`. The table sees every
     /// connection, so it tells the handle which peers are established and which pairs a higher
     /// rung carries (see [`Inner::sync_gossip`]).
@@ -440,6 +442,7 @@ impl SignalAdmission {
                 we_evicted: super::ceiling::EvictionBackoff::default(),
                 denied: HashSet::new(),
                 proven_sink: None,
+                path_sink: None,
                 gossip: None,
             })),
             cap,
@@ -909,6 +912,18 @@ impl SignalAdmission {
         self.lock().proven_sink = Some(sink);
     }
 
+    /// The event loop's channel for the dialed gossip links that left a direct path.
+    pub(crate) fn set_path_sink(
+        &self,
+        sink: tokio::sync::mpsc::UnboundedSender<super::probe::PathChange>,
+    ) {
+        self.lock().path_sink = Some(sink);
+    }
+
+    fn path_sink(&self) -> Option<tokio::sync::mpsc::UnboundedSender<super::probe::PathChange>> {
+        self.lock().path_sink.clone()
+    }
+
     /// A session to `peer` attached on the answering side. The loop flushes the frames held for the
     /// peer, if there are any: the offering side does the same on its own attach.
     pub(crate) fn report_answered(&self, peer: EndpointId) {
@@ -1009,7 +1024,7 @@ impl EndpointHooks for ConnectionHook {
             && self.admission.watch_dialed_gossip.load(Ordering::Relaxed)
             && conn.alpn() == iroh_gossip::net::GOSSIP_ALPN
         {
-            super::direct_gossip::watch_relay_policy(conn);
+            super::direct_gossip::watch_relay_policy(conn, self.admission.path_sink());
         }
         AfterHandshakeOutcome::accept()
     }
