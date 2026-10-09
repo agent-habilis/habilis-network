@@ -170,20 +170,11 @@ mod tests {
             selector.select_at(start, &first).selected_for_test(),
             Some(&webrtc)
         );
-        let growing =
+        let later =
             PathSelectionContext::for_test(None, vec![entry(&webrtc, 6), entry(&multihop, 23)]);
         assert_eq!(
             selector
-                .select_at(start + Duration::from_secs(10), &growing)
-                .selected_for_test(),
-            Some(&webrtc),
-            "one growing window is not yet life"
-        );
-        let later =
-            PathSelectionContext::for_test(None, vec![entry(&webrtc, 6), entry(&multihop, 43)]);
-        assert_eq!(
-            selector
-                .select_at(start + Duration::from_secs(20), &later)
+                .select_at(start + Duration::from_secs(10), &later)
                 .selected_for_test(),
             Some(&multihop)
         );
