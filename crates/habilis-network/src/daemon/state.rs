@@ -195,6 +195,9 @@ pub struct EventLoopState {
     /// A `NeighborUp` wanted to flood our `PeerInfo` inside the window and was
     /// held back. The alive tick pays it once the window ends.
     pub(crate) peerinfo_deferred: bool,
+    /// The address our last `PeerInfo` carried. `None` until the first flood.
+    /// Stamped by `broadcast_peer_info`; read by `address_flood_due`.
+    pub(crate) last_flooded_addr: Option<EndpointAddr>,
     /// Tests only: the closes of direct connections and the reconnects soon after.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) redials: crate::transport::redial::Redials,
@@ -716,6 +719,7 @@ impl EventLoopState {
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
             peerinfo_deferred: false,
+            last_flooded_addr: None,
             below_target_since: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             redials: crate::transport::redial::Redials::default(),
@@ -1060,6 +1064,19 @@ impl EventLoopState {
             self.peerinfo_deferred = false;
         }
         due
+    }
+
+    /// Whether our own address, `current`, differs from the one our last `PeerInfo`
+    /// carried. The window of the `NeighborUp` and `joined` gates damps link storms;
+    /// a changed address (the home relay arriving after the arrival flood, an
+    /// interface change) is not one, and no later flood would repair it. Before the
+    /// first flood there is nothing to repair: the arrival flood takes the current
+    /// address. `EndpointAddr` holds its addresses in a set, so only a gained or
+    /// lost address counts, not their order.
+    pub(crate) fn address_flood_due(&self, current: &EndpointAddr) -> bool {
+        self.last_flooded_addr
+            .as_ref()
+            .is_some_and(|flooded| flooded != current)
     }
 
     /// Whether a `joined` received at `now` re-floods our `PeerInfo`. A first
@@ -2437,6 +2454,74 @@ mod tests {
         // Past the window a genuine re-link is allowed again (no permanent lockout).
         let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
         assert!(!cooled.relink_on_cooldown(peer, later));
+    }
+
+    // The arrival flood goes out on the first `NeighborUp`, in the same milliseconds in
+    // which the endpoint gets its home relay, so it can carry no relay. Every later
+    // flood is gated by the window, and the receiver keeps the first address it saw. A
+    // changed address of our own must therefore call for a flood of its own.
+    #[test]
+    fn a_changed_own_address_is_due_a_flood_and_an_unchanged_one_is_not() {
+        let id = endpoint_id(1);
+        let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
+        let ip: std::net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
+        let other_ip: std::net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
+        let without_relay = iroh::EndpointAddr::new(id).with_ip_addr(ip);
+        let with_relay = without_relay.clone().with_relay_url(relay.clone());
+
+        let mut state = fresh_state();
+        assert!(
+            !state.address_flood_due(&with_relay),
+            "before the first flood there is nothing to repair"
+        );
+
+        state.last_flooded_addr = Some(without_relay.clone());
+        assert!(
+            !state.address_flood_due(&without_relay),
+            "an address that did not change is not flooded again"
+        );
+        assert!(
+            state.address_flood_due(&with_relay),
+            "the relay arrived after the flood"
+        );
+
+        state.last_flooded_addr = Some(with_relay.clone());
+        assert!(
+            !state.address_flood_due(&with_relay),
+            "the flooded address is the current one"
+        );
+        assert!(
+            state.address_flood_due(
+                &iroh::EndpointAddr::new(id)
+                    .with_relay_url(relay)
+                    .with_ip_addr(other_ip)
+            ),
+            "an IP address changed"
+        );
+        assert!(
+            state.address_flood_due(&iroh::EndpointAddr::new(id).with_ip_addr(ip)),
+            "the relay was lost"
+        );
+    }
+
+    #[test]
+    fn the_order_of_the_addresses_does_not_make_an_address_differ() {
+        let id = endpoint_id(1);
+        let first: std::net::SocketAddr = "192.0.2.1:4000".parse().expect("an address");
+        let second: std::net::SocketAddr = "192.0.2.2:4000".parse().expect("an address");
+        let mut state = fresh_state();
+        state.last_flooded_addr = Some(
+            iroh::EndpointAddr::new(id)
+                .with_ip_addr(first)
+                .with_ip_addr(second),
+        );
+        assert!(
+            !state.address_flood_due(
+                &iroh::EndpointAddr::new(id)
+                    .with_ip_addr(second)
+                    .with_ip_addr(first)
+            )
+        );
     }
 
     // The residual flap amplifier the re-link cooldown did NOT cover: every

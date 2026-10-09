@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use iroh::{Endpoint, EndpointId, RelayUrl};
+use iroh::{Endpoint, EndpointId, RelayUrl, Watcher as _};
 use iroh_gossip::api::GossipReceiver;
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -30,6 +30,7 @@ use crate::util::tuning::{
     ALIVE_INTERVAL_SECS, LINKSTATE_INTERVAL_SECS, RECLAIM_INTERVAL_MS, STATE_REFRESH_SECS,
     antientropy_interval_secs, heal_interval_secs, sweep_interval_secs,
 };
+use n0_future::StreamExt as _;
 use n0_future::time::Instant as TokioInstant;
 // Gated with `spawn_orphan_watch`, its only caller.
 use crate::{beacon, gossip, lifecycle};
@@ -657,6 +658,11 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         crate::transport::webrtc::offer_rendezvous_off_tick(&mut state, &ctx);
     }
 
+    // Our own address changes (the home relay arrives after the arrival flood, an
+    // interface changes): a `PeerInfo` that was flooded without it is repaired by
+    // the next flood, and the watcher keeps only the latest value.
+    let mut address_changes = endpoint.watch_addr().stream_updates_only();
+
     loop {
         // Whether this process hosts the beacon is read here, once per turn,
         // from the one place that owns it, so that no path that claims or sheds
@@ -721,6 +727,14 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 route_wake_arm(&mut state, &ctx);
+            }
+            Some(address) = address_changes.next() => {
+                state.idle.external += 1;
+                if state.address_flood_due(&address) {
+                    let ctx = parts.ctx(&sender);
+                    gossip::broadcast_peer_info(&mut state, &ctx).await;
+                    state.last_sent_at = Instant::now();
+                }
             }
             Some(change) = path_rx.recv() => {
                 state.idle.external += 1;

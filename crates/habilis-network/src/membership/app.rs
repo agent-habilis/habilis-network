@@ -130,6 +130,14 @@ pub enum Request {
         blocked: bool,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: add `addr` to the addresses this node advertises, as an
+    /// external address. The address of the node's endpoint changes, which is
+    /// what a late home relay or an interface change does.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    AddExternalAddr {
+        addr: std::net::SocketAddr,
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: take UDP away from this node alone, to the nodes bound on
     /// `remote_ports` (see `Node::bound_ports`). An empty list gives it back.
     /// Unlike [`Request::BlockUdp`] it leaves every other node's paths alone,
@@ -692,6 +700,11 @@ impl NodeDriver for MembershipApp {
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::AddExternalAddr { addr, reply } => {
+                ctx.endpoint.add_external_addr(addr).await;
+                let _ = reply.send(());
+                false
+            }
             Request::BlockUdp { blocked, reply } => {
                 habilis_network_iroh_webrtc_transport::block_ip_paths(blocked);
                 for addr in state.peer_endpoints.values() {
