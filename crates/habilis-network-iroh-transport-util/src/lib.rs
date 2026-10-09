@@ -12,8 +12,6 @@
 
 use std::time::Duration;
 
-pub mod liveness;
-
 use iroh::endpoint::transports::{Addr, PathSelectionData, Transmit};
 
 /// The lowest-RTT path in `iter`.

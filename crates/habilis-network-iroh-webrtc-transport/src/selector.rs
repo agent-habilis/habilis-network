@@ -25,13 +25,10 @@
 //! demoted relay path is what lets a connection survive a dead data channel —
 //! so the relay stays open and unused rather than being torn down.
 
-use std::sync::Mutex;
-
-use habilis_network_iroh_transport_util::{blocked, custom_rung, liveness::Liveness, rung_of};
+use habilis_network_iroh_transport_util::{blocked, climb, custom_rung, rung_of};
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
-use n0_future::time::Instant;
 
 /// Prefers, in order: direct IP, `WebRTC`, multihop, gossip, relay.
 ///
@@ -50,31 +47,21 @@ pub(crate) struct WebRtcPreferred {
     /// The endpoint this selector serves, so that a test can take paths away
     /// from one node to some others and not from the whole process.
     local: iroh_base::EndpointId,
-    /// What each address received at the last calls: a path that the peer never sends on does not
-    /// stay selected. One selector serves every remote of the endpoint.
-    liveness: Mutex<Liveness>,
 }
 
 impl WebRtcPreferred {
     pub(crate) fn new(local: iroh_base::EndpointId) -> Self {
-        Self {
-            local,
-            liveness: Mutex::new(Liveness::new()),
-        }
+        Self { local }
     }
+}
 
-    /// [`PathSelector::select`] at `now`, so that a test can move the clock.
-    fn select_at(&self, now: Instant, ctx: &PathSelectionContext<'_>) -> PathSelection {
+impl PathSelector for WebRtcPreferred {
+    fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
         let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
-        // The first rung with a usable path wins; within a rung, lowest RTT; a path whose
-        // address stays silent while another rung is heard from is skipped for a while.
-        let chosen = self
-            .liveness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .choose(now, &paths, custom_rung, |rung, path| {
-                !blocked(self.local, rung, path)
-            });
+        // The first rung with a usable path wins; within a rung, lowest RTT.
+        let chosen = climb(&paths, custom_rung, |rung, path| {
+            !blocked(self.local, rung, path)
+        });
         // Trace level, off by default: every call, with what it saw and chose, so
         // that a path that stays unselected can be told from a selector that never
         // ran.
@@ -83,11 +70,10 @@ impl WebRtcPreferred {
                 .iter()
                 .map(|path| {
                     format!(
-                        "{:?} {:?} rtt_rx={:?}",
+                        "{:?} {:?} rtt={:?}",
                         rung_of(path, custom_rung),
                         path.network_path().remote(),
-                        path.stats()
-                            .map(|stats| (stats.rtt, stats.udp_rx.datagrams))
+                        path.stats().map(|stats| stats.rtt)
                     )
                 })
                 .collect();
@@ -108,12 +94,6 @@ impl WebRtcPreferred {
     }
 }
 
-impl PathSelector for WebRtcPreferred {
-    fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
-        self.select_at(Instant::now(), ctx)
-    }
-}
-
 #[cfg(feature = "test-hooks")]
 pub use habilis_network_iroh_transport_util::{
     block_ip_paths, block_ip_to, block_rung, block_rung_to,
@@ -129,54 +109,5 @@ mod tests {
     #[test]
     fn the_ladder_knows_the_webrtc_transport_id_of_this_crate() {
         assert_eq!(custom_rung(crate::WEBRTC_TRANSPORT_ID), Rung::WebRtc);
-    }
-
-    /// The shape of the flake of the send ladder matrix: the WebRTC path stays at 6 datagrams
-    /// while the multihop path grows. The first call takes the better rung, ten seconds later the
-    /// selector has seen that the WebRTC address received nothing.
-    #[test]
-    fn a_webrtc_path_that_receives_nothing_does_not_stay_selected() {
-        use std::time::Duration;
-
-        use habilis_network_iroh_transport_util::MULTIHOP_TRANSPORT_ID;
-        use iroh::endpoint::PathStats;
-        use iroh::endpoint::transports::{
-            Addr, FourTuple, PathSelectionContext, PathSelectionData,
-        };
-        use n0_future::time::Instant;
-
-        let address = |transport: u64| {
-            FourTuple::from_remote(Addr::Custom(iroh_base::CustomAddr::from_parts(
-                transport,
-                &[1],
-            )))
-        };
-        let (webrtc, multihop) = (
-            address(crate::WEBRTC_TRANSPORT_ID),
-            address(MULTIHOP_TRANSPORT_ID),
-        );
-        let entry = |path_address, rx| {
-            let mut stats = PathStats::default();
-            stats.udp_rx.datagrams = rx;
-            PathSelectionData::for_test(path_address, Some(stats))
-        };
-        let selector =
-            super::WebRtcPreferred::new(iroh_base::SecretKey::from_bytes(&[7; 32]).public());
-        let start = Instant::now();
-
-        let first =
-            PathSelectionContext::for_test(None, vec![entry(&webrtc, 6), entry(&multihop, 3)]);
-        assert_eq!(
-            selector.select_at(start, &first).selected_for_test(),
-            Some(&webrtc)
-        );
-        let later =
-            PathSelectionContext::for_test(None, vec![entry(&webrtc, 6), entry(&multihop, 23)]);
-        assert_eq!(
-            selector
-                .select_at(start + Duration::from_secs(10), &later)
-                .selected_for_test(),
-            Some(&multihop)
-        );
     }
 }

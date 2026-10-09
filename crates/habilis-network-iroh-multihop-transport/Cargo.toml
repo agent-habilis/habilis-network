@@ -45,8 +45,6 @@ serde.workspace = true
 test-hooks = []
 
 [dev-dependencies]
-# The constructors of synthetic paths, for the tests of the path selector.
-iroh = { workspace = true, features = ["selector-test-utils"] }
 tokio.workspace = true
 # A local relay server, for the tests that put a connection on the relay.
 iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "8a248273eaa368073d3c755b6fd788420b004bed", default-features = false, features = ["server"] }

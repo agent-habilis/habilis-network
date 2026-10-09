@@ -7,10 +7,8 @@
 //! path and above the relay. The order is the one of [`Rung`], shared with the selectors of the
 //! other transports.
 
-use std::sync::Mutex;
-
 use habilis_network_iroh_transport_util::{
-    custom_rung, ip_remote, is_blocked_to, liveness::Liveness, remote_id,
+    climb, custom_rung, ip_remote, is_blocked_to, remote_id,
 };
 use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
@@ -21,44 +19,25 @@ use iroh::endpoint::transports::{
 #[derive(Debug)]
 pub(crate) struct GossipLadder {
     local: iroh::EndpointId,
-    /// What each address received at the last calls: a path that the peer never sends on does not
-    /// stay selected. One selector serves every remote of the endpoint.
-    liveness: Mutex<Liveness>,
 }
 
 impl GossipLadder {
     pub(crate) fn new(local: iroh::EndpointId) -> Self {
-        Self {
-            local,
-            liveness: Mutex::new(Liveness::new()),
-        }
-    }
-
-    /// [`PathSelector::select`] at `now`, so that a test can move the clock.
-    fn select_at(
-        &self,
-        now: n0_future::time::Instant,
-        ctx: &PathSelectionContext<'_>,
-    ) -> PathSelection {
-        let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
-        let chosen = self
-            .liveness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .choose(now, &paths, custom_rung, |rung, path| {
-                !is_blocked_to(self.local, rung, ip_remote(path), remote_id(path))
-            });
-        let mut selection = PathSelection::none();
-        if let Some(path) = chosen {
-            selection.set(path);
-        }
-        selection
+        Self { local }
     }
 }
 
 impl PathSelector for GossipLadder {
     fn select(&self, ctx: &PathSelectionContext<'_>) -> PathSelection {
-        self.select_at(n0_future::time::Instant::now(), ctx)
+        let paths: Vec<PathSelectionData<'_>> = ctx.paths().collect();
+        let chosen = climb(&paths, custom_rung, |rung, path| {
+            !is_blocked_to(self.local, rung, ip_remote(path), remote_id(path))
+        });
+        let mut selection = PathSelection::none();
+        if let Some(path) = chosen {
+            selection.set(path);
+        }
+        selection
     }
 }
 
@@ -74,46 +53,6 @@ mod tests {
     #[test]
     fn the_ladder_knows_the_gossip_transport_id_of_this_crate() {
         assert_eq!(custom_rung(crate::GOSSIP_TRANSPORT_ID), Rung::Gossip);
-    }
-
-    /// A gossip path that receives nothing, while the relay is heard from, does not stay selected.
-    #[test]
-    fn a_gossip_path_that_receives_nothing_does_not_stay_selected() {
-        use std::time::Duration;
-
-        use iroh::endpoint::PathStats;
-        use iroh::endpoint::transports::{Addr, FourTuple};
-
-        let gossip = FourTuple::from_remote(Addr::Custom(iroh_base::CustomAddr::from_parts(
-            crate::GOSSIP_TRANSPORT_ID,
-            &[1],
-        )));
-        let remote = SecretKey::from_bytes(&[5; 32]).public();
-        let relay = FourTuple::from_remote(Addr::Relay(
-            "https://relay.test".parse().expect("a relay url"),
-            remote,
-        ));
-        let entry = |path_address, rx| {
-            let mut stats = PathStats::default();
-            stats.udp_rx.datagrams = rx;
-            PathSelectionData::for_test(path_address, Some(stats))
-        };
-        let ladder = GossipLadder::new(SecretKey::from_bytes(&[6; 32]).public());
-        let start = n0_future::time::Instant::now();
-
-        let first = PathSelectionContext::for_test(None, vec![entry(&gossip, 6), entry(&relay, 3)]);
-        assert_eq!(
-            ladder.select_at(start, &first).selected_for_test(),
-            Some(&gossip)
-        );
-        let later =
-            PathSelectionContext::for_test(None, vec![entry(&gossip, 6), entry(&relay, 23)]);
-        assert_eq!(
-            ladder
-                .select_at(start + Duration::from_secs(10), &later)
-                .selected_for_test(),
-            Some(&relay)
-        );
     }
 
     use std::time::Duration;

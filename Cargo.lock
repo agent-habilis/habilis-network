@@ -1867,7 +1867,6 @@ version = "0.6.0"
 dependencies = [
  "iroh",
  "iroh-base",
- "n0-future",
 ]
 
 [[package]]
