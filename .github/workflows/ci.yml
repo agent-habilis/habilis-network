@@ -139,12 +139,25 @@ jobs:
 
       # A path in `clippy.toml` that names no function is a plain warning, which `-D warnings`
       # leaves alone: a typo would switch one entry off. Clippy prints it only when it lints the
-      # crate, so the crate is cleaned first: the step above left it fresh.
+      # crate, so the crate is cleaned first: the step above left it fresh. The step matches
+      # clippy's warning text, so the probe is what keeps the match honest across toolchain
+      # updates: clippy runs on a scratch config with a path that names no function, and a
+      # reworded message fails there instead of passing the real check.
       - name: Clippy list names only functions
         run: |
-          cargo clean -p habilis-network-iroh-gossip-transport --target wasm32-unknown-unknown
-          out=$(cargo clippy --target wasm32-unknown-unknown -p habilis-network-iroh-gossip-transport -- -D warnings -D clippy::disallowed_methods 2>&1)
-          if grep 'does not refer to a reachable function' <<< "$out"; then
+          crate=habilis-network-iroh-gossip-transport
+          dead='does not refer to a reachable function'
+          probe=$(mktemp -d)
+          echo 'disallowed-methods = [{ path = "tokio::time::sleeeep" }]' > "$probe/clippy.toml"
+          cargo clean -p $crate --target wasm32-unknown-unknown
+          out=$(CLIPPY_CONF_DIR="$probe" cargo clippy --target wasm32-unknown-unknown -p $crate 2>&1)
+          if ! grep -q "$dead" <<< "$out"; then
+            echo "clippy did not warn about a path that names no function: has its message changed?"
+            exit 1
+          fi
+          cargo clean -p $crate --target wasm32-unknown-unknown
+          out=$(cargo clippy --target wasm32-unknown-unknown -p $crate -- -D warnings -D clippy::disallowed_methods 2>&1)
+          if grep "$dead" <<< "$out"; then
             echo "clippy.toml lists a path that names no function"
             exit 1
           fi

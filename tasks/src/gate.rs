@@ -432,3 +432,104 @@ impl Step {
         (self.kind.verb(), subject)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::{Kind, STEPS, Scope};
+
+    /// Workspace members that never build for wasm32, each with its reason. Every other member
+    /// needs a wasm32 clippy row of its own: that row is what puts `-D
+    /// clippy::disallowed_methods` on the crate, with the feature set the crate needs. A new
+    /// crate fails the first test below until it has a row or an entry here.
+    const NATIVE_ONLY: &[(&str, &str)] = &[
+        ("tasks", "the task runner drives the host"),
+        ("chat", "the native chat example"),
+        ("habilis-network-ffi", "the C ABI for native hosts"),
+        ("habilis-network-stream-cli", "a command-line binary"),
+    ];
+
+    /// The names of the workspace members, from `cargo metadata`.
+    fn workspace_members() -> Vec<String> {
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
+        let output = Command::new(env!("CARGO"))
+            .args([
+                "metadata",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                manifest,
+            ])
+            .output()
+            .expect("cargo metadata runs");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("the metadata is JSON");
+        metadata["packages"]
+            .as_array()
+            .expect("a package list")
+            .iter()
+            .map(|package| package["name"].as_str().expect("a package name").to_owned())
+            .collect()
+    }
+
+    /// The crates that have a wasm32 clippy row of their own.
+    fn wasm_clippy_crates() -> Vec<&'static str> {
+        STEPS
+            .iter()
+            .filter(|step| step.kind == Kind::WasmClippy)
+            .filter_map(|step| match step.scope {
+                Scope::Crate(name) => Some(name),
+                Scope::Workspace => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_workspace_crate_that_builds_for_wasm32_has_a_wasm_clippy_row() {
+        let rows = wasm_clippy_crates();
+        let missing: Vec<String> = workspace_members()
+            .into_iter()
+            .filter(|name| !rows.contains(&name.as_str()))
+            .filter(|name| !NATIVE_ONLY.iter().any(|(native, _)| native == name))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "no wasm32 clippy row, and not native-only: {missing:?}. Add a `Kind::WasmClippy` \
+             step to `STEPS` and a line to `ci.yml`, or list the crate in `NATIVE_ONLY` with a reason"
+        );
+    }
+
+    #[test]
+    fn the_rows_and_the_exemptions_name_workspace_crates_and_do_not_overlap() {
+        let members = workspace_members();
+        let rows = wasm_clippy_crates();
+        let unknown: Vec<&str> = rows
+            .iter()
+            .copied()
+            .chain(NATIVE_ONLY.iter().map(|(name, _)| *name))
+            .filter(|name| !members.iter().any(|member| member == name))
+            .collect();
+        let both: Vec<&str> = NATIVE_ONLY
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| rows.contains(name))
+            .collect();
+
+        assert!(
+            unknown.is_empty(),
+            "names that are no workspace crate: {unknown:?}"
+        );
+        assert!(
+            both.is_empty(),
+            "native-only crates that have a wasm32 row: {both:?}"
+        );
+    }
+}
