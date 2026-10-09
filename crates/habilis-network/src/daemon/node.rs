@@ -151,6 +151,14 @@ impl<A: NodeDriver + 'static> Node<A> {
         &self.bound_ports
     }
 
+    /// Tests only: the id of this node's member endpoint. A test that reads
+    /// the log for one pair of nodes matches its lines by these ids.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn endpoint_id(&self) -> iroh::EndpointId {
+        self.crash_handles.1.id()
+    }
+
     /// Tests only: the id of this node's multihop underlay endpoint, or `None`
     /// when multihop is off. The underlay has a key of its own, so a test that
     /// matches it to a member goes through `MultihopHandle::app_id_of`.

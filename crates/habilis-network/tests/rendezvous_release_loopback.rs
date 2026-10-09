@@ -11,7 +11,7 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use habilis_network::iroh::RelayUrl;
+use habilis_network::iroh::{EndpointId, RelayUrl};
 use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -49,7 +49,8 @@ impl std::io::Write for BufferWriter {
 fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
-            "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info",
+            "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info,\
+             habilis_ladder=trace",
         )
     });
     let _ = tracing_subscriber::fmt()
@@ -66,6 +67,71 @@ fn logs() -> String {
 
 fn count(needle: &str) -> usize {
     logs().matches(needle).count()
+}
+
+/// The log from line `since` on. A check about a step of the test reads only what the step wrote:
+/// the whole buffer holds lines from the start of the test, and from members the step did not touch.
+/// A line count, not a byte offset: a count cannot fall inside a character.
+fn logs_since(since: usize) -> String {
+    logs().lines().skip(since).collect::<Vec<_>>().join("\n")
+}
+
+/// Whether, since `since`, the ladder of `local` considered a path of the member that bound
+/// `remote_ports` (an IP path with one of these ports is in the list the ladder saw) and chose
+/// something that is not an IP path: nothing, or a relay path. The port names the remote, as it does
+/// in the block itself; the line carries no span of the remote, because the test's log filter drops the
+/// spans of iroh.
+fn left_ip(since: usize, local: &EndpointId, remote_ports: &[u16]) -> bool {
+    let local = local.fmt_short().to_string();
+    logs_since(since).lines().any(|line| {
+        line.contains("habilis_ladder: path selection")
+            && line.contains(&format!("local={local} "))
+            && sees_port(line, remote_ports)
+            && !line.contains("chosen=Some(Ip(")
+    })
+}
+
+/// Whether the ladder line lists an IP path with one of `ports`.
+fn sees_port(line: &str, ports: &[u16]) -> bool {
+    ports
+        .iter()
+        .any(|port| line.contains(&format!(":{port}) rtt=")))
+}
+
+/// The last ladder lines of `local` that list a path with one of `remote_ports`, since `since`, for
+/// the text of a failure: they say whether the cut left no candidate or the IP path was still chosen.
+fn ladder_lines(since: usize, local: &EndpointId, remote_ports: &[u16]) -> String {
+    let local = local.fmt_short().to_string();
+    let lines: Vec<String> = logs_since(since)
+        .lines()
+        .filter(|line| {
+            line.contains("habilis_ladder: path selection")
+                && line.contains(&format!("local={local} "))
+                && sees_port(line, remote_ports)
+        })
+        .map(str::to_owned)
+        .collect();
+    lines[lines.len().saturating_sub(3)..].join("\n")
+}
+
+/// Whether, since `since`, the link between `one` and `two` was closed for staying on the relay path
+/// past its deadline, and reported down by one of the two. Both ids name the pair: a close of a link
+/// of any other member, the rendezvous host included, does not count.
+fn pair_link_closed(since: usize, one: &EndpointId, two: &EndpointId) -> bool {
+    let log = logs_since(since);
+    let closed = log.lines().any(|line| {
+        line.contains("gossip link on the relay path past the deadline: closing it")
+            && (line.contains(&format!("remote={one} "))
+                || line.contains(&format!("remote={two} ")))
+    });
+    let down = log.lines().any(|line| {
+        line.contains("gossip neighbor down")
+            && ((line.contains(&format!("local={} ", one.fmt_short()))
+                && line.contains(&format!("endpoint_id={two} ")))
+                || (line.contains(&format!("local={} ", two.fmt_short()))
+                    && line.contains(&format!("endpoint_id={one} "))))
+    });
+    closed && down
 }
 
 /// How many times a member reported its link to the rendezvous down. It counts
@@ -421,10 +487,18 @@ fn refs(members: &[Member]) -> Vec<&Member> {
 
 /// The cut between two chosen nodes (`Request::BlockIpTo`): they lose UDP to
 /// each other and to no one else. Their link falls back to the relay, which
-/// carries no payload on this mesh, so it is closed after a minute; the heal
+/// carries no payload on this mesh, so it is closed after 15 seconds; the heal
 /// brings it back once the cut is lifted. The process-wide block of the test
 /// above takes UDP from every node, so it cannot show that the other links of
 /// the two nodes are left alone.
+///
+/// The fall back needs the relay in the book of the pair: with none, the ladder
+/// has no candidate once IP is blocked, it chooses nothing, and iroh keeps the
+/// old IP path. The test first waits for the ladder of both members to choose no IP
+/// path, which shows that the block took, and then for the close of their link.
+/// It reads the log only from the cut on and only for the two members: the close
+/// of the link of any other member, the rendezvous host included, is not the
+/// cut.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
     let _serial = serial().lock().await;
@@ -461,14 +535,26 @@ async fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // Cut member-1 from member-2, and nobody else.
+    // Cut member-1 from member-2, and nobody else. Every check about the cut reads the log from here.
+    let (one_id, two_id) = (
+        members[1].membership.node.endpoint_id(),
+        members[2].membership.node.endpoint_id(),
+    );
     let (one, two) = (members[1].ports(), members[2].ports());
-    members[1].block_ip_to(two).await;
-    members[2].block_ip_to(one).await;
-    let closed = eventually(Duration::from_mins(2), || {
-        logs().contains("gossip link on the relay path past the deadline: closing it")
+    let cut_at = logs().lines().count();
+    members[1].block_ip_to(two.clone()).await;
+    members[2].block_ip_to(one.clone()).await;
+    // The cut took when the ladder of each member, with the other's IP path in view, chooses no IP
+    // path. That is the block working; it does not say that the link moved. The close below does.
+    let cut_took = eventually(Duration::from_secs(30), || {
+        left_ip(cut_at, &one_id, &two) && left_ip(cut_at, &two_id, &one)
     })
     .await;
+    let closed = cut_took
+        && eventually(Duration::from_mins(2), || {
+            pair_link_closed(cut_at, &one_id, &two_id)
+        })
+        .await;
     // The others still talk: member-0 reaches member-3 while the cut stands.
     members[0].send("through the cut").await;
     let others = eventually(Duration::from_secs(30), || {
@@ -491,10 +577,17 @@ async fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
     }
 
     let trace = rendezvous_trace();
-    if !(closed && others && healed) {
-        dump_logs();
-    }
+    let ladder = format!(
+        "member-1 about member-2:\n{}\nmember-2 about member-1:\n{}",
+        ladder_lines(cut_at, &one_id, &two),
+        ladder_lines(cut_at, &two_id, &one)
+    );
+    dump_logs();
     leave_all(members).await;
+    assert!(
+        cut_took,
+        "the cut never took: the ladder of the pair still chose an IP path\n{ladder}\n{trace}"
+    );
     assert!(closed, "the cut link was never closed\n{trace}");
     assert!(others, "the cut reached nodes it did not name\n{trace}");
     assert!(healed, "the link never came back after the cut\n{trace}");
