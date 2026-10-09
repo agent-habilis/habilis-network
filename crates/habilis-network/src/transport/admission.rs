@@ -805,7 +805,7 @@ impl SignalAdmission {
     /// `EVICTED` code, note that too, so that no proactive dial goes back to that peer for a while.
     fn watch_for_eviction(&self, conn: Connection) {
         let admission = self.clone();
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             let reason = conn.closed().await;
             let peer = conn.remote_id();
             let mut inner = admission.lock();
