@@ -705,6 +705,7 @@ impl NodeDriver for MembershipApp {
                 let _ = reply.send(());
                 false
             }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::BlockUdp { blocked, reply } => {
                 habilis_network_iroh_webrtc_transport::block_ip_paths(blocked);
                 for addr in state.peer_endpoints.values() {
