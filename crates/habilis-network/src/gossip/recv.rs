@@ -114,6 +114,12 @@ pub(crate) async fn handle_gossip_event(
                     // proof; `conn_path` cannot see which path is selected.
                     state.direct.insert(node_id, DirectState::Direct);
                 }
+                // A frame parked across a gap in the links waits for the next link:
+                // `meshed` stays set through the gap, so the first-link edge below
+                // does not come again, and a `PeerInfo` may not either.
+                if state.meshed && !state.pending_outbound.is_empty() {
+                    flush_pending(state, ctx, "link up").await;
+                }
                 // First link to a *real* peer: now (and only now) can
                 // user content actually be delivered. Flush anything
                 // buffered while we were unmeshed, in order.
@@ -330,7 +336,7 @@ pub(crate) async fn drain_dead_receiver(
 /// Drain `pending_outbound` onto the wire, in order. Runs on the meshed
 /// edges — the first real-peer `NeighborUp`, and a degraded node's first
 /// inbound message after a fault (starvation recovery / resume) — and again
-/// on a later `PeerInfo` arrival while frames remain buffered: a frame that
+/// on every later `NeighborUp` and `PeerInfo` arrival while frames remain buffered: a frame that
 /// fails to deliver (typically a directed frame whose addressee's endpoint
 /// isn't known yet at the first flush) is re-buffered for that retry, not
 /// dropped.
@@ -1984,6 +1990,79 @@ mod first_contact_tests {
     /// Feed one gossip event to the handler, as the loop does.
     async fn feed(event: Event, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         handle_gossip_event(Some(Ok(event)), state, &mut Inert, ctx).await;
+    }
+
+    /// A frame parked while the links were down is sent at the next `NeighborUp`. The
+    /// node stays meshed through the gap, so the first-link edge does not come again,
+    /// and no `PeerInfo` arrives to flush it.
+    #[tokio::test]
+    async fn a_frame_parked_across_a_gap_in_the_links_is_sent_at_the_next_neighbor_up() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        feed(Event::NeighborUp(endpoint_id(1)), &mut state, &ctx).await;
+        feed(Event::NeighborDown(endpoint_id(1)), &mut state, &ctx).await;
+        assert!(state.meshed, "the gap does not clear meshed");
+        let frame = Message::new_joined(&node.mesh, &node.author);
+        let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
+        assert!(state.pending_outbound.push((frame, bytes)));
+
+        feed(Event::NeighborUp(endpoint_id(2)), &mut state, &ctx).await;
+
+        assert!(
+            state.pending_outbound.is_empty(),
+            "the parked frame waits for a PeerInfo that may not come"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// The frame of the field red: a directed frame parked across a gap in the links reaches
+    /// its addressee at the next `NeighborUp`, with no `PeerInfo`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_directed_frame_parked_across_a_gap_in_the_links_is_delivered_at_the_next_neighbor_up()
+     {
+        use iroh::protocol::Router;
+
+        use crate::protocol::MessageId;
+        use crate::transport::{UNICAST_ALPN, UnicastAcceptor, UnicastPool};
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let bob = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind bob");
+        let (inbox, mut frames) = tokio::sync::mpsc::channel(8);
+        let router = Router::builder(bob.clone())
+            .accept(
+                UNICAST_ALPN,
+                UnicastAcceptor::with_idle(inbox, false, std::time::Duration::from_secs(60)),
+            )
+            .spawn();
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&node.endpoint), bob.addr());
+        let mut state = fresh_state();
+        state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
+        state.peer_endpoints.insert(nick("bob"), bob.addr());
+        feed(Event::NeighborUp(bob.id()), &mut state, &ctx).await;
+        feed(Event::NeighborDown(bob.id()), &mut state, &ctx).await;
+        assert!(state.meshed, "the gap does not clear meshed");
+        let frame = Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random());
+        let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
+        assert!(state.pending_outbound.push((frame, bytes.clone())));
+
+        feed(Event::NeighborUp(bob.id()), &mut state, &ctx).await;
+
+        let delivered =
+            tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv()).await;
+        assert_eq!(
+            delivered.ok().flatten(),
+            Some(bytes),
+            "bob never got the parked frame"
+        );
+        assert!(state.pending_outbound.is_empty());
+        router.shutdown().await.expect("shutdown");
+        node.endpoint.close().await;
     }
 
     /// A node that reaches the release count tells gossip to leave the
