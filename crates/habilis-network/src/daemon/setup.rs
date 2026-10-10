@@ -267,7 +267,7 @@ async fn build_member_endpoint(
     // to this table from the first handshake on.
     let admission = crate::transport::SignalAdmission::new(build.max_direct);
     if build.multihop {
-        // The underlay holds a session only to a gossip neighbor, so G caps them.
+        // G caps the sessions of the underlay: it holds one to each known member that needs one.
         let (endpoint, handle, webrtc, underlay_webrtc) = build_peer_multihop_with(
             build.lookups,
             build.transports,

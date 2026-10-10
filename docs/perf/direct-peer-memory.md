@@ -222,7 +222,7 @@ G bounds a count. It does not refuse a member. The iroh-gossip fork (`src/proto/
 
 ### Sessions of the multihop underlay
 
-The multihop underlay is an endpoint of its own, and it can hold WebRTC sessions too. A node opens one to a gossip neighbor only when its application path to that neighbor is WebRTC, that is, when the pair has no IP path. Where IP works, the underlay reaches the neighbor over IP, and the node opens no session. These sessions count in G, not in D. The underlay keeps its own table of sessions, with a cap of G, and a session exists only to a gossip neighbor. So a node holds at most D + G WebRTC sessions. In practice only neighbors that have no IP path add to the count.
+The multihop underlay is an endpoint of its own, and it can hold WebRTC sessions too. A node opens one to a member only when the application path to that member is WebRTC, that is, when the pair has no IP path. A node without UDP opens one to every member that it holds a link vector from. Where IP works, the underlay reaches the member over IP, and the node opens no session. The members come from the roster, not from the live gossip links: the relay watcher closes a gossip link on purpose, and a route that other members use must not end with it. These sessions count in G, not in D. The underlay keeps its own table of sessions, with a cap of G. So a node holds at most D + G WebRTC sessions. In practice only members that have no IP path add to the count.
 
 #### Measured cost of one idle session
 
@@ -398,7 +398,7 @@ A pair that needs the lane has no direct path without a session. On a mesh whose
 
 ### The underlay leg
 
-The underlay keeps its own ledger with G as its ceiling. Before D11, that table refused the session after the G-th. Now it evicts at G. The leg opens a session only to a gossip neighbor, so its count stays at G or less, and the ledger does not act. Test: `a_ledger_with_g_as_its_ceiling_never_evicts_while_the_sessions_stay_within_g`.
+The underlay keeps its own ledger with G as its ceiling. Before D11, that table refused the session after the G-th. Now it evicts at G. The leg opens a session to the members that need one, not only to the gossip neighbors. A node without UDP and with more than G members reaches the ceiling, and then the ledger acts. Below G it does not. Test: `a_ledger_with_g_as_its_ceiling_never_evicts_while_the_sessions_stay_within_g`.
 
 ### Generous windows of one connection
 
