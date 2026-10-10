@@ -229,6 +229,59 @@ mod watcher_tests {
         router.shutdown().await.expect("shutdown");
         client.close().await;
     }
+
+    /// A watch that starts on a link already off a direct path reports the relay
+    /// at once, not after the deadline. The link is relay-only: neither end has an
+    /// IP transport.
+    #[cfg(feature = "iroh-test-utils")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_watch_that_starts_on_a_relay_link_reports_the_relay() {
+        use crate::transport::probe::{PathChange, PathKind};
+
+        const ALPN: &[u8] = b"habilis-mesh/test-watch-relay/0";
+
+        #[derive(Debug, Clone)]
+        struct WatchAndHold(tokio::sync::mpsc::UnboundedSender<PathChange>);
+        impl ProtocolHandler for WatchAndHold {
+            async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+                watch_relay_policy(&conn, Some(self.0.clone()));
+                conn.closed().await;
+                Ok(())
+            }
+        }
+        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let bind = || {
+            let relay_url = relay_url.clone();
+            async move {
+                iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                    .relay_mode(iroh::RelayMode::custom([relay_url]))
+                    .clear_ip_transports()
+                    .bind()
+                    .await
+                    .expect("bind a relay-only endpoint")
+            }
+        };
+        let (sink, mut reports) = tokio::sync::mpsc::unbounded_channel();
+        let server = bind().await;
+        let router = Router::builder(server.clone())
+            .accept(ALPN, WatchAndHold(sink))
+            .spawn();
+        let client = bind().await;
+
+        let relayed = iroh::EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
+        let _conn = client.connect(relayed, ALPN).await.expect("connect");
+        let report = tokio::time::timeout(Duration::from_secs(5), reports.recv())
+            .await
+            .expect("no report inside 5 s: the watch waits for the deadline")
+            .expect("the sink stays open");
+
+        assert_eq!(report.kind, PathKind::Relay);
+        assert_eq!(report.peer, client.id());
+        router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
 }
 
 #[cfg(test)]
