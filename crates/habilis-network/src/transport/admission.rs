@@ -36,12 +36,12 @@
 //! attached all 24 — eight over a ceiling whose own comment claimed to be
 //! enforced. The header rendered `24/16`.
 //!
-//! **In-flight rounds count.** [`Self::try_admit`] is a plain `fn` and the
-//! retry tick calls it in a loop with nothing awaited between calls, so
-//! `session_count()` alone never moves during a pass: twenty dials each read
-//! zero and all twenty were spawned. Counting reservations is what makes the
-//! loop self-limiting, and doing it in one lock scope is what makes it correct
-//! without ever holding a lock across an await.
+//! **In-flight rounds do not count against the ceiling.** [`Self::try_admit`] keeps one round
+//! per peer, and the ceiling counts attached units only: it acts when a session attaches, and
+//! evicts then (see [`super::ceiling`]). So a pass of the retry tick may admit a round for every
+//! peer, and the count can pass the ceiling by the rounds that attach together. That is by
+//! design: a round that fails costs nothing, and one that succeeds evicts the least valuable
+//! peer. The lock is never held across an await.
 //!
 //! **Nothing can be pinned forever.** The slot is released by
 //! [`AdmissionGuard`]'s `Drop`, so it survives the task being aborted — at
