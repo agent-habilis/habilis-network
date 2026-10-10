@@ -2037,7 +2037,7 @@ mod first_contact_tests {
         let router = Router::builder(bob.clone())
             .accept(
                 UNICAST_ALPN,
-                UnicastAcceptor::with_idle(inbox, false, std::time::Duration::from_secs(60)),
+                UnicastAcceptor::with_idle(inbox, false, std::time::Duration::from_mins(1)),
             )
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&node.endpoint), bob.addr());

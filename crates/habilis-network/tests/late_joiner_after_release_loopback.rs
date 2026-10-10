@@ -15,7 +15,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::Lookup;
 
@@ -24,7 +23,7 @@ const RELEASE_LINKS: usize = 3;
 const PRECONDITION_DEADLINE: Duration = Duration::from_mins(1);
 const FORMATION_DEADLINE: Duration = Duration::from_mins(2);
 /// Less than the 90 s dedup window: a delivery that waited for it is a failure.
-const LATE_JOINER_DEADLINE: Duration = Duration::from_secs(60);
+const LATE_JOINER_DEADLINE: Duration = Duration::from_mins(1);
 
 fn log_buffer() -> &'static Mutex<String> {
     static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
