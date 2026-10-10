@@ -3,11 +3,15 @@
 //!
 //! The underlay is an endpoint of its own with its own key. It gets its own
 //! `WebRtcHandle`, its own admission table (cap G) and the signal protocol on
-//! its router. A session opens only to a gossip neighbor whose application
-//! path is `WebRTC`: where IP works, the underlay reaches the neighbor over IP
-//! already. A node without `udp` has an underlay with no IP socket, and a
-//! session opens to every neighbor. So a session on the underlay rides a gossip
-//! edge, which is why it counts in G and not in D.
+//! its router. A session opens only to a member whose application path is
+//! `WebRTC`: where IP works, the underlay reaches the member over IP already. A
+//! node without `udp` has an underlay with no IP socket, and a session opens to
+//! every member it holds a link vector from.
+//!
+//! The members are read from the roster, not from the live gossip links. The
+//! relay watcher closes a gossip link on purpose, and a route that other
+//! members use must not end with it. So there is one session per known member
+//! that needs one, and the cap of the admission table bounds them.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -112,8 +116,8 @@ fn kept_underlays(
         .collect()
 }
 
-/// The underlay ids that may open a session with us now: the underlay ids of our
-/// gossip neighbors. The event loop refreshes it on each tick.
+/// The underlay ids that may open a session with us now: the underlay ids of the
+/// members we hold a link vector from. The event loop refreshes it on each tick.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Allowed(Arc<Mutex<HashSet<EndpointId>>>);
 
@@ -171,12 +175,12 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
     let Some(multihop) = state.multihop() else {
         return;
     };
-    // The underlay address of a neighbor is in its signed link-vector. A
-    // neighbor we hold no vector from yet is skipped: it gets one on a later tick.
+    // The underlay address of a member is in its signed link-vector. A member
+    // we hold no vector from yet is skipped: it gets one on a later tick.
     let mut neighbors: Vec<(EndpointId, iroh::EndpointAddr)> = Vec::new();
-    for member in &state.linked_endpoints {
-        if let Some(addr) = multihop.underlay_addr_of(*member) {
-            neighbors.push((*member, addr));
+    for member in state.peer_endpoints.values().map(|addr| addr.id) {
+        if let Some(addr) = multihop.underlay_addr_of(member) {
+            neighbors.push((member, addr));
         }
     }
     let neighbors = undenied(neighbors, |member| state.webrtc_admission.is_denied(member));
@@ -193,7 +197,9 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
     let Plan { dial, detach } = plan(underlay.endpoint.id(), &wanted, &kept, &held);
     tracing::debug!(
         target: LOG_TARGET,
+        local = %underlay.endpoint.id().fmt_short(),
         linked = state.linked_endpoints.len(),
+        members = neighbors.len(),
         kinds = ?neighbors
             .iter()
             .map(|(member, _)| (member.fmt_short().to_string(), state.pair_path_kind(*member)))
@@ -213,7 +219,7 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
     }
     for peer in detach {
         if underlay.handle.detach(&peer) {
-            tracing::debug!(target: LOG_TARGET, %peer, "underlay session detached: its neighbor left, or the pair is on IP");
+            tracing::debug!(target: LOG_TARGET, %peer, "underlay session detached: its member left the roster, or the pair is on IP");
         }
     }
     for peer in dial {
@@ -475,7 +481,7 @@ mod tests {
                 dial: vec![],
                 detach: vec![high]
             },
-            "the neighbor left the view"
+            "the member left the roster"
         );
     }
 

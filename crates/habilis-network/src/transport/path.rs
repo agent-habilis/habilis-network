@@ -37,6 +37,34 @@ pub(crate) fn gossip_recursion_closes() -> u64 {
     GOSSIP_RECURSION_CLOSES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+static GOSSIP_CONNS: std::sync::Mutex<Vec<iroh::endpoint::WeakConnectionHandle>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Tests only: remember a gossip connection, so that [`close_gossip_links_to`] can close it. The
+/// list is shared by every member of the process. A connection has two ends and a close on one ends
+/// both, so a test names the remote of the end it closes.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn track_gossip_conn(conn: &Connection) {
+    let mut conns = GOSSIP_CONNS.lock().expect("gossip conns poisoned");
+    conns.retain(|weak| weak.upgrade().is_some());
+    conns.push(conn.weak_handle());
+}
+
+/// Tests only: close every live gossip connection whose remote is `remote`, as a lost link does.
+/// Returns how many it closed.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn close_gossip_links_to(remote: iroh::EndpointId) -> usize {
+    const TEST_CLOSE_CODE: u32 = 0x7e57;
+    let conns = GOSSIP_CONNS.lock().expect("gossip conns poisoned");
+    conns
+        .iter()
+        .filter_map(iroh::endpoint::WeakConnectionHandle::upgrade)
+        .filter(|conn| conn.remote_id() == remote && conn.close_reason().is_none())
+        .map(|conn| conn.close(TEST_CLOSE_CODE.into(), b"closed by a test"))
+        .count()
+}
+
 /// Close `conn` with [`GOSSIP_RECURSION_REFUSED_CODE`] once its selected path is the gossip
 /// rung, now or after a path change. Unconditional: it reads no mesh policy.
 pub(crate) fn watch_gossip_recursion(conn: &Connection) {

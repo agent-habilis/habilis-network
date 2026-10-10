@@ -1016,6 +1016,8 @@ impl EndpointHooks for ConnectionHook {
         // policy-gated.
         if conn.alpn() == iroh_gossip::net::GOSSIP_ALPN {
             super::path::watch_gossip_recursion(conn);
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            super::path::track_gossip_conn(conn);
         }
         // The accept side watches the gossip connections it holds
         // (`DirectOnlyGossip::accept`). iroh-gossip dials its own, so the

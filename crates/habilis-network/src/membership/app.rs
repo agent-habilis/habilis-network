@@ -202,6 +202,23 @@ pub enum Request {
         peer: String,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: close the live gossip connections to the member `peer` and nothing else. The
+    /// engine then runs its own `NeighborDown` path.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    CloseLink {
+        peer: String,
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only: run the underlay tick now, as the alive tick does. A test that closes a link
+    /// uses it to put a tick inside the time the link is down.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        not(target_arch = "wasm32"),
+        feature = "multihop"
+    ))]
+    UnderlayTick {
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: the endpoint id of this node. A test that needs the order of two
     /// ids (the lower id offers a session) reads them here.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -533,6 +550,24 @@ impl NodeDriver for MembershipApp {
                         .insert(addr.id, crate::daemon::state::DirectState::RelayOnly);
                     crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
                 }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::CloseLink { peer, reply } => {
+                if let Some(addr) = state.peer_endpoints.get(peer.as_str()) {
+                    crate::transport::path::close_gossip_links_to(addr.id);
+                }
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                not(target_arch = "wasm32"),
+                feature = "multihop"
+            ))]
+            Request::UnderlayTick { reply } => {
+                crate::transport::underlay_webrtc::tick_now(state);
                 let _ = reply.send(());
                 false
             }
