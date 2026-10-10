@@ -1567,6 +1567,13 @@ impl EventLoopState {
         &self.identity
     }
 
+    /// The address book of the member endpoint: one per endpoint, made by
+    /// `lookup::address_book`. Write to it with `add_peer_addr`.
+    #[must_use]
+    pub fn address_book(&self) -> &iroh::address_lookup::memory::MemoryLookup {
+        &self.address_book
+    }
+
     /// The roster, as a set of nicknames. See [`Self::roster_snapshot`] for the
     /// richer per-peer view.
     #[must_use]
@@ -1750,7 +1757,30 @@ mod tests {
         TokioInstant,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::testing::{endpoint_id, fresh_state, fresh_state_with_book, nick};
+
+    /// The accessor hands out the book that the state was built with, not a copy of it: an address
+    /// written through it is in the book of the endpoint.
+    #[test]
+    fn the_address_book_of_the_state_is_the_book_it_was_given() {
+        let book = iroh::address_lookup::memory::MemoryLookup::new();
+        let state = fresh_state_with_book(book.clone());
+        let bob = endpoint_id(1);
+        assert!(
+            book.get_endpoint_info(bob).is_none(),
+            "the book starts empty"
+        );
+
+        crate::lookup::add_peer_addr(
+            state.address_book(),
+            iroh::EndpointAddr::new(bob).with_ip_addr("192.0.2.1:4000".parse().expect("address")),
+        );
+
+        assert!(
+            book.get_endpoint_info(bob).is_some(),
+            "an address written through the accessor reaches the book of the endpoint"
+        );
+    }
 
     /// A linked pair that proved a direct path and loses UDP is re-raced at once: the relay
     /// policy closes at 15 s, and the retry tick would wait up to 30 s for the offer.

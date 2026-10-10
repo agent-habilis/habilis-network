@@ -16,6 +16,13 @@ use crate::util::clock::Instant;
 /// A bare state with a fresh identity: no state file, no secrets, no per-peer
 /// gate. The starting point for a test that only cares about one field.
 pub(crate) fn fresh_state() -> EventLoopState {
+    fresh_state_with_book(iroh::address_lookup::memory::MemoryLookup::new())
+}
+
+/// [`fresh_state`] with the given address book.
+pub(crate) fn fresh_state_with_book(
+    address_book: iroh::address_lookup::memory::MemoryLookup,
+) -> EventLoopState {
     EventLoopState::new(
         StateInit {
             #[cfg(feature = "host")]
@@ -26,7 +33,7 @@ pub(crate) fn fresh_state() -> EventLoopState {
             webrtc_admission: crate::transport::SignalAdmission::new(
                 crate::transport::MAX_DIRECT_PEERS,
             ),
-            address_book: iroh::address_lookup::memory::MemoryLookup::new(),
+            address_book,
             webrtc_ice: crate::transport::IceProfile::default(),
         },
         Instant::now(),
