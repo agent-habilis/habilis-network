@@ -1215,6 +1215,17 @@ pub(crate) fn offer_rendezvous_on_path_loss(
     offer_to_rendezvous(state, ctx, handle, Offer::RendezvousLinked);
 }
 
+/// The address that an offer to the rendezvous dials: the id with every address the book holds for
+/// it. A dial by the bare id carries no ip address, so iroh opens only the custom path first and the
+/// connection waits for the first retransmit onto the ip path it learns meanwhile. The peers already
+/// dial with an explicit address; this was the one dial that did not.
+fn rendezvous_dial_target(book: &MemoryLookup, rendezvous: EndpointId) -> EndpointAddr {
+    book.get_endpoint_info(rendezvous).map_or_else(
+        || EndpointAddr::new(rendezvous),
+        iroh::address_lookup::EndpointInfo::into_endpoint_addr,
+    )
+}
+
 fn offer_to_rendezvous(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
@@ -1229,17 +1240,8 @@ fn offer_to_rendezvous(
             return;
         }
     };
-    // The bare id resolves through the address registered by
-    // `register_rendezvous` — the relay-homed rendezvous address.
-    spawn_offer_round(
-        state,
-        ctx,
-        rendezvous,
-        EndpointAddr::new(rendezvous),
-        handle,
-        guard,
-        offer,
-    );
+    let target = rendezvous_dial_target(&state.address_book, rendezvous);
+    spawn_offer_round(state, ctx, rendezvous, target, handle, guard, offer);
 }
 
 /// A rendezvous offer made off the heal tick: when the loop starts, and when
@@ -2837,6 +2839,48 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         client.close().await;
+    }
+
+    /// A dial by the bare id carries no ip address, so the connection waits for the first retransmit
+    /// onto the ip path iroh learns meanwhile. The offer to the rendezvous dials with the addresses of
+    /// the book: the ip addresses and the relay of the entry, and only those of the beacon that holds
+    /// the id now (a claim replaces the entry, a shed removes it).
+    #[test]
+    fn the_offer_to_the_rendezvous_dials_with_the_addresses_of_the_book() {
+        let book = MemoryLookup::new();
+        let id = SecretKey::generate().public();
+        let at = |port: u16| std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+        assert_eq!(
+            rendezvous_dial_target(&book, id).ip_addrs().count(),
+            0,
+            "no entry in the book: the bare id"
+        );
+
+        // A claim of the first beacon, its shed, a claim of the second beacon: the dial carries
+        // the second beacon's address only.
+        crate::lookup::replace_peer_addr(&book, EndpointAddr::new(id).with_ip_addr(at(4000)));
+        book.remove_endpoint_info(id);
+        crate::lookup::replace_peer_addr(&book, EndpointAddr::new(id).with_ip_addr(at(5000)));
+
+        let target = rendezvous_dial_target(&book, id);
+        assert_eq!(target.id, id);
+        assert_eq!(
+            target.ip_addrs().copied().collect::<Vec<_>>(),
+            vec![at(5000)],
+            "the dial carries the ip address of the beacon that holds the id now, and only that one"
+        );
+
+        // An entry with a relay (a relay-homed rendezvous, as `register_rendezvous` writes it).
+        let relay: iroh::RelayUrl = "https://relay.invalid".parse().expect("relay url");
+        book.set_endpoint_info(EndpointAddr::new(id).with_relay_url(relay.clone()));
+        assert_eq!(
+            rendezvous_dial_target(&book, id)
+                .relay_urls()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![relay],
+            "the dial carries the relay of the entry"
+        );
     }
 
     /// An id that nobody serves never answers the connect, and the connect had no bound of its own:
