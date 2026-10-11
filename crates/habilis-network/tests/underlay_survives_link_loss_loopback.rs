@@ -11,12 +11,15 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+mod until_known;
+
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::EndpointId;
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
+use until_known::until_peer_known;
 
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 
@@ -160,13 +163,11 @@ async fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
 
     // One close of the connection; the engine runs its own `NeighborDown` on both ends.
     let since = log_len();
-    alice
-        .request(|reply| Request::CloseLink {
-            peer: "bob".to_owned(),
-            reply,
-        })
-        .await
-        .expect("the loop answers");
+    until_peer_known(&alice, "bob", |reply| Request::CloseLink {
+        peer: "bob".to_owned(),
+        reply,
+    })
+    .await;
     // A tick has to run while the link is down, or the test proves nothing: the pair grafts again
     // within seconds. So both ends tick every 50 ms through the window.
     let window = Instant::now();

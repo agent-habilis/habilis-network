@@ -9,12 +9,15 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+mod until_known;
+
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
+use until_known::until_peer_known;
 
 /// Long enough for an ICE round on the application pair, then for the alive tick
 /// that offers the underlay session, then for a second ICE round.
@@ -113,15 +116,13 @@ impl Member {
     }
 
     async fn block_rung_to(&self, rung: Rung, peer: &str, blocked: bool) {
-        self.membership
-            .request(|reply| Request::BlockRungTo {
-                rung,
-                peer: peer.to_owned(),
-                blocked,
-                reply,
-            })
-            .await
-            .expect("the loop answers");
+        until_peer_known(&self.membership, peer, |reply| Request::BlockRungTo {
+            rung,
+            peer: peer.to_owned(),
+            blocked,
+            reply,
+        })
+        .await;
     }
 
     async fn forwarded_cells(&self) -> u64 {

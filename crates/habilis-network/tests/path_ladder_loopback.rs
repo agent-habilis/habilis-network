@@ -11,12 +11,15 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+mod until_known;
+
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
+use until_known::until_peer_known;
 
 /// Long enough for an ICE round, or for a multihop route to be advertised once
 /// (every 15 s) and then used.
@@ -110,13 +113,11 @@ impl Member {
 
     /// Forget that `peer` is proven direct and offer it a `WebRTC` session now.
     async fn offer_session(&self, peer: &str) {
-        self.membership
-            .request(|reply| Request::OfferSession {
-                peer: peer.to_owned(),
-                reply,
-            })
-            .await
-            .expect("the loop answers");
+        until_peer_known(&self.membership, peer, |reply| Request::OfferSession {
+            peer: peer.to_owned(),
+            reply,
+        })
+        .await;
     }
 
     /// The rung of the selected path on this member's pooled connection to `peer`.

@@ -21,6 +21,8 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+mod until_known;
+
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -28,6 +30,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network_iroh_multihop_transport::MultihopCounters;
 use tokio::sync::mpsc::UnboundedReceiver;
+use until_known::until_peer_known;
 
 /// Long enough for the climb to multihop and for the topology to hold the route.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
@@ -109,14 +112,12 @@ impl Member {
     /// Refuse every `WebRTC` session with `peer`, on the application endpoint and on the
     /// underlay.
     async fn deny_peer(&self, peer: &str) {
-        self.membership
-            .request(|reply| Request::DenyPeer {
-                peer: peer.to_owned(),
-                denied: true,
-                reply,
-            })
-            .await
-            .expect("the loop answers");
+        until_peer_known(&self.membership, peer, |reply| Request::DenyPeer {
+            peer: peer.to_owned(),
+            denied: true,
+            reply,
+        })
+        .await;
     }
 
     /// The rung of the selected path on this member's pooled connection to `peer`.

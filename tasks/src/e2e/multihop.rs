@@ -224,6 +224,7 @@ async fn run_cell(
             reply,
         })
         .await
+        .map_err(|error| fail(format!("B could not deny the tab: {error}")))?
         .map_err(|error| fail(format!("B could not deny the tab: {error}")))?;
 
     if !route_to_tab(&bravo).await {

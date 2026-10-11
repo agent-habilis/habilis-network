@@ -28,6 +28,7 @@
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
 mod common;
+mod until_known;
 
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,7 @@ use habilis_network::iroh::{EndpointId, RelayUrl};
 use habilis_network::membership::{self, Inbound, Membership, Request, Rung};
 use habilis_network::protocol::{Lookup, MeshConfig, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
+use until_known::until_peer_known;
 
 /// Long enough for an ICE round, or for a multihop route to be advertised once
 /// (every 15 s) and then used: the stuck edge of the pair ages out after 20 s.
@@ -300,15 +302,13 @@ impl Member {
     }
 
     async fn block_rung_to(&self, rung: Rung, peer: &str) {
-        self.membership
-            .request(|reply| Request::BlockRungTo {
-                rung,
-                peer: peer.to_owned(),
-                blocked: true,
-                reply,
-            })
-            .await
-            .expect("the loop answers");
+        until_peer_known(&self.membership, peer, |reply| Request::BlockRungTo {
+            rung,
+            peer: peer.to_owned(),
+            blocked: true,
+            reply,
+        })
+        .await;
     }
 
     async fn endpoint_id(&self) -> EndpointId {

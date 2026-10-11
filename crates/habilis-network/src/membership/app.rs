@@ -166,7 +166,7 @@ pub enum Request {
         rung: Rung,
         peer: String,
         blocked: bool,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: refuse every `WebRTC` session with the member `peer`, on the application
     /// endpoint and on the underlay, offered or answered, and end the ones that exist (or lift
@@ -176,7 +176,7 @@ pub enum Request {
     DenyPeer {
         peer: String,
         denied: bool,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: ping every member and answer with the round trip time in
     /// milliseconds of each one that answered within the ping window. A test uses it to
@@ -200,14 +200,14 @@ pub enum Request {
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     OfferSession {
         peer: String,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: close the live gossip connections to the member `peer` and nothing else. The
     /// engine then runs its own `NeighborDown` path.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     CloseLink {
         peer: String,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: run the underlay tick now, as the alive tick does. A test that closes a link
     /// uses it to put a tick inside the time the link is down.
@@ -508,7 +508,7 @@ impl NodeDriver for MembershipApp {
                 blocked,
                 reply,
             } => {
-                if let Some(addr) = state.peer_endpoints.get(peer.as_str()) {
+                let result = known_peer(state, &peer).map(|addr| {
                     let remote = addr.id;
                     habilis_network_iroh_webrtc_transport::block_rung_to(
                         ctx.endpoint.id(),
@@ -520,8 +520,8 @@ impl NodeDriver for MembershipApp {
                     n0_future::task::spawn(async move {
                         crate::transport::webrtc::nudge(&endpoint, remote).await;
                     });
-                }
-                let _ = reply.send(());
+                });
+                let _ = reply.send(result);
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -530,8 +530,8 @@ impl NodeDriver for MembershipApp {
                 denied,
                 reply,
             } => {
-                if let Some(addr) = state.peer_endpoints.get(peer.as_str()) {
-                    let member = addr.id;
+                let member = known_peer(state, &peer).map(|addr| addr.id);
+                if let Ok(member) = member {
                     state.webrtc_admission.deny(member, denied);
                     if denied
                         && let Some(handle) = state.webrtc.as_ref()
@@ -546,26 +546,26 @@ impl NodeDriver for MembershipApp {
                     #[cfg(feature = "multihop")]
                     crate::transport::underlay_webrtc::tick_now(state);
                 }
-                let _ = reply.send(());
+                let _ = reply.send(member.map(|_| ()));
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::OfferSession { peer, reply } => {
-                if let Some(addr) = state.peer_endpoints.get(peer.as_str()).cloned() {
+                let result = known_peer(state, &peer).cloned().map(|addr| {
                     state
                         .direct
                         .insert(addr.id, crate::daemon::state::DirectState::RelayOnly);
                     crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
-                }
-                let _ = reply.send(());
+                });
+                let _ = reply.send(result);
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::CloseLink { peer, reply } => {
-                if let Some(addr) = state.peer_endpoints.get(peer.as_str()) {
+                let result = known_peer(state, &peer).map(|addr| {
                     crate::transport::path::close_gossip_links_to(addr.id);
-                }
-                let _ = reply.send(());
+                });
+                let _ = reply.send(result);
                 false
             }
             #[cfg(all(
@@ -596,7 +596,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::SelectedRung { peer, reply } => {
-                let id = state.peer_endpoints.get(peer.as_str()).map(|addr| addr.id);
+                let id = known_peer(state, &peer).ok().map(|addr| addr.id);
                 let pool = state.unicast_pool.clone();
                 // Off the event loop: a dial can take seconds.
                 n0_future::task::spawn(async move {
@@ -627,7 +627,7 @@ impl NodeDriver for MembershipApp {
                 not(target_arch = "wasm32")
             ))]
             Request::HasRoute { peer, reply } => {
-                let has_route = state.peer_endpoints.get(peer.as_str()).is_some_and(|addr| {
+                let has_route = known_peer(state, &peer).is_ok_and(|addr| {
                     state
                         .multihop()
                         .is_some_and(|handle| handle.route_addr(addr.id).is_some())
@@ -775,6 +775,35 @@ impl NodeDriver for MembershipApp {
             }
         }
     }
+}
+
+/// Tests only: the member that a request names is not in the book of this node. A request on it
+/// does nothing; the node says so, and the test waits for the `PeerInfo` that brings the member.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownPeer(pub String);
+
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+impl std::fmt::Display for UnknownPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the member {:?} is not in the book of this node", self.0)
+    }
+}
+
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+impl std::error::Error for UnknownPeer {}
+
+/// The address of the member `peer`, or [`UnknownPeer`]. The requests of the tests that name a
+/// member resolve it here, so that none of them answers for a member it does not know.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+fn known_peer<'a>(
+    state: &'a EventLoopState,
+    peer: &str,
+) -> Result<&'a iroh::EndpointAddr, UnknownPeer> {
+    state
+        .peer_endpoints
+        .get(peer)
+        .ok_or_else(|| UnknownPeer(peer.to_owned()))
 }
 
 #[cfg(test)]
