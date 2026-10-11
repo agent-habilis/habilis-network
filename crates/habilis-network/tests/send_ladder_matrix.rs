@@ -67,8 +67,8 @@ enum Blocked {
     Ip,
     IpWebRtc,
     IpWebRtcMultihop,
-    /// The gossip rung too. It can be blocked per node only, so the cut is made on both
-    /// members of the pair.
+    /// The gossip rung too. It can be blocked per node only, so the cut is made on every
+    /// member.
     IpWebRtcMultihopGossip,
 }
 
@@ -91,7 +91,27 @@ struct Cell {
     target_full: bool,
 }
 
-/// One cut that a cell makes between alice and bob before it settles.
+/// A member of the three that a cell starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Who {
+    Alice,
+    Bob,
+    Carol,
+}
+
+impl Who {
+    const ALL: [Self; 3] = [Self::Alice, Self::Bob, Self::Carol];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Alice => "alice",
+            Self::Bob => "bob",
+            Self::Carol => "carol",
+        }
+    }
+}
+
+/// One cut that a cell makes before it settles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cut {
     /// IP between the two application endpoints.
@@ -105,6 +125,14 @@ enum Cut {
     /// The whole `WebRTC` rung of bob's application endpoint. Every cell that cuts alice's rung
     /// cuts bob's too (a cell through a third member cuts `WebRtcBobToAlice` instead).
     WebRtcBob,
+    /// The whole `WebRTC` rung of carol's application endpoint. The block table is per node and
+    /// rung, so the cut of alice and of bob also takes the rung toward carol. Carol is cut as
+    /// well, or the pair keeps the rung at carol's end only: its ends select different paths, and
+    /// the path that gets no return traffic times out after 15 s.
+    WebRtcCarol,
+    /// The `WebRTC` rung of carol's application endpoint toward alice: the cell through a third
+    /// member lets carol keep the rung toward bob.
+    WebRtcCarolToAlice,
     /// The `WebRTC` rung between the two underlays, in both directions.
     WebRtcUnderlays,
     /// The whole multihop rung of alice's application endpoint.
@@ -113,11 +141,37 @@ enum Cut {
     /// rung and alice's path gets no return traffic, and iroh drops it: the pair flaps. A
     /// selection block at one end exists only in our test hooks, so every cell cuts both ends.
     MultihopBob,
+    /// The whole multihop rung of carol's application endpoint: see `WebRtcCarol`.
+    MultihopCarol,
     /// The gossip rung of alice. The block table is per node and rung, not per remote, so bob
-    /// is cut too: see `GossipBob`.
+    /// and carol are cut too: see `GossipBob` and `GossipCarol`.
     GossipAlice,
     /// The gossip rung of bob.
     GossipBob,
+    /// The gossip rung of carol.
+    GossipCarol,
+}
+
+impl Cut {
+    /// The rung that the cut takes from an application endpoint, and from whom: the member that
+    /// loses it, and the one remote that it loses it toward (`None`: toward every remote). The
+    /// cuts of IP and of the underlays take no rung from a member and answer `None`.
+    fn rung_cut(self) -> Option<(Rung, Who, Option<Who>)> {
+        match self {
+            Self::IpApp | Self::IpUnderlays | Self::WebRtcUnderlays => None,
+            Self::WebRtcAlice => Some((Rung::WebRtc, Who::Alice, None)),
+            Self::WebRtcBob => Some((Rung::WebRtc, Who::Bob, None)),
+            Self::WebRtcCarol => Some((Rung::WebRtc, Who::Carol, None)),
+            Self::WebRtcBobToAlice => Some((Rung::WebRtc, Who::Bob, Some(Who::Alice))),
+            Self::WebRtcCarolToAlice => Some((Rung::WebRtc, Who::Carol, Some(Who::Alice))),
+            Self::MultihopAlice => Some((Rung::Multihop, Who::Alice, None)),
+            Self::MultihopBob => Some((Rung::Multihop, Who::Bob, None)),
+            Self::MultihopCarol => Some((Rung::Multihop, Who::Carol, None)),
+            Self::GossipAlice => Some((Rung::Gossip, Who::Alice, None)),
+            Self::GossipBob => Some((Rung::Gossip, Who::Bob, None)),
+            Self::GossipCarol => Some((Rung::Gossip, Who::Carol, None)),
+        }
+    }
 }
 
 impl Cell {
@@ -135,20 +189,21 @@ impl Cell {
         if self.blocked >= Blocked::IpWebRtc {
             cuts.push(Cut::WebRtcAlice);
             if !self.via_third {
-                cuts.push(Cut::WebRtcBob);
+                cuts.extend([Cut::WebRtcBob, Cut::WebRtcCarol]);
             }
         }
         if self.blocked >= Blocked::IpWebRtcMultihop {
-            cuts.extend([Cut::MultihopAlice, Cut::MultihopBob]);
+            cuts.extend([Cut::MultihopAlice, Cut::MultihopBob, Cut::MultihopCarol]);
         }
         if self.blocked >= Blocked::IpWebRtcMultihopGossip {
-            cuts.extend([Cut::GossipAlice, Cut::GossipBob]);
+            cuts.extend([Cut::GossipAlice, Cut::GossipBob, Cut::GossipCarol]);
         }
         if self.via_third {
             cuts.extend([
                 Cut::IpUnderlays,
                 Cut::WebRtcUnderlays,
                 Cut::WebRtcBobToAlice,
+                Cut::WebRtcCarolToAlice,
             ]);
         }
         cuts
@@ -470,7 +525,7 @@ fn block_underlay_rung(
     }
 }
 
-async fn apply(cut: Cut, alice: &Member, bob: &Member) {
+async fn apply(cut: Cut, alice: &Member, bob: &Member, carol: &Member) {
     let underlays = [(alice, bob), (bob, alice)].map(|(from, to)| {
         (
             from.membership.node.underlay_id(),
@@ -489,14 +544,31 @@ async fn apply(cut: Cut, alice: &Member, bob: &Member) {
                 habilis_network_iroh_webrtc_transport::block_ip_to(from, ports);
             }
         }
-        Cut::WebRtcAlice => alice.block_rung(Rung::WebRtc, true).await,
-        Cut::WebRtcBobToAlice => bob.block_rung_to(Rung::WebRtc, "alice").await,
-        Cut::WebRtcBob => bob.block_rung(Rung::WebRtc, true).await,
         Cut::WebRtcUnderlays => block_underlay_rung(Rung::WebRtc, underlays),
-        Cut::MultihopAlice => alice.block_rung(Rung::Multihop, true).await,
-        Cut::MultihopBob => bob.block_rung(Rung::Multihop, true).await,
-        Cut::GossipAlice => alice.block_rung(Rung::Gossip, true).await,
-        Cut::GossipBob => bob.block_rung(Rung::Gossip, true).await,
+        Cut::WebRtcAlice
+        | Cut::WebRtcBob
+        | Cut::WebRtcCarol
+        | Cut::WebRtcBobToAlice
+        | Cut::WebRtcCarolToAlice
+        | Cut::MultihopAlice
+        | Cut::MultihopBob
+        | Cut::MultihopCarol
+        | Cut::GossipAlice
+        | Cut::GossipBob
+        | Cut::GossipCarol => {
+            let (rung, from, toward) = cut
+                .rung_cut()
+                .expect("a cut that takes a rung from a member says so in rung_cut");
+            let member = match from {
+                Who::Alice => alice,
+                Who::Bob => bob,
+                Who::Carol => carol,
+            };
+            match toward {
+                None => member.block_rung(rung, true).await,
+                Some(remote) => member.block_rung_to(rung, remote.name()).await,
+            }
+        }
     }
 }
 
@@ -564,7 +636,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
     }
 
     for cut in cell.cuts() {
-        apply(cut, &alice, &bob).await;
+        apply(cut, &alice, &bob, &carol).await;
     }
 
     let expected = cell.expected();
@@ -728,7 +800,7 @@ async fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
     );
     alice.expect_rung("bob", "ip", NAME).await;
     for cut in cell.cuts() {
-        apply(cut, &alice, &bob).await;
+        apply(cut, &alice, &bob, &carol).await;
     }
 
     // (text, the lane read before the send, when it went)
@@ -985,7 +1057,7 @@ async fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
     );
     alice.expect_rung("bob", "ip", NAME).await;
     for cut in cell.cuts() {
-        apply(cut, &alice, &bob).await;
+        apply(cut, &alice, &bob, &carol).await;
     }
     let waiting = Instant::now();
     while alice.rung_to("bob").await == Some("ip") {
@@ -1109,6 +1181,40 @@ fn no_cell_cuts_the_webrtc_or_multihop_rung_at_one_end_only() {
     assert!(
         one_ended.is_empty(),
         "{} cells cut one end only:\n{}",
+        one_ended.len(),
+        one_ended.join("\n")
+    );
+}
+
+/// The block table is per node and rung: a cut that takes a rung from alice takes it toward every
+/// remote, carol included. A pair that keeps the rung at one end only has two ends that select
+/// different paths, and the path that gets no return traffic times out after 15 s. So for every
+/// pair of the three members, a cell that takes a rung in one direction takes it in the other too.
+/// In a cell through a third member, carol is cut toward alice only and keeps the rung toward
+/// bob, and bob is cut toward alice only: the pair bob and carol keeps the rung at both ends.
+#[test]
+fn no_member_keeps_a_rung_that_another_member_has_cut() {
+    let mut one_ended = Vec::new();
+    for (name, cell) in CELLS {
+        let mut taken = Vec::new();
+        for (rung, from, toward) in cell.cuts().into_iter().filter_map(Cut::rung_cut) {
+            for to in Who::ALL {
+                if to != from && toward.is_none_or(|only| only == to) {
+                    taken.push((rung, from, to));
+                }
+            }
+        }
+        for &(rung, from, to) in &taken {
+            if !taken.contains(&(rung, to, from)) {
+                one_ended.push(format!(
+                    "{name}: {rung:?} cut from {from:?} toward {to:?} only"
+                ));
+            }
+        }
+    }
+    assert!(
+        one_ended.is_empty(),
+        "{} one-ended cuts:\n{}",
         one_ended.len(),
         one_ended.join("\n")
     );
