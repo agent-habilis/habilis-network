@@ -39,6 +39,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_gossip::proto::TopicId;
 use n0_future::task::JoinHandle;
 use tokio::sync::{oneshot, watch};
+use tracing::Instrument as _;
 
 use crate::lookup::{
     TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect, replace_peer_addr,
@@ -424,7 +425,7 @@ fn verdict_of(result: Result<bool, oneshot::error::RecvError>) -> bool {
 /// it costs milliseconds, and holding it lets a departure close it (see
 /// [`RivalProbe::abort_and_close`]). `None` ⇒ the build failed, so we
 /// cannot tell and must not claim blind; the next tick retries.
-async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
+async fn spawn_rival_probe(params: &RendezvousParams, node: EndpointId) -> Option<RivalProbe> {
     let target = match rendezvous_addr(params) {
         Some(addr) => addr,
         // Nothing to name (relay disabled, no ladder). The bare id is a
@@ -432,7 +433,7 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
         // when the mesh carries them and this build wires them.
         None if bare_id_resolvable(&params.lookups) => EndpointAddr::new(params.id),
         None => {
-            tracing::info!(target: "habilis_network::beacon",
+            tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(),
                 "rival probe has nothing to dial and no lookup to resolve the id; reading the rendezvous as held");
             let (tx, rx) = oneshot::channel();
             // The receiver is held below; this send cannot fail.
@@ -457,29 +458,39 @@ async fn spawn_rival_probe(params: &RendezvousParams) -> Option<RivalProbe> {
     {
         Ok(prober) => prober,
         Err(error) => {
-            tracing::debug!(target: "habilis_network::beacon", %error, "rival probe endpoint build failed; next tick retries");
+            tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), %error, "rival probe endpoint build failed; next tick retries");
             return None;
         }
     };
-    tracing::debug!(target: "habilis_network::beacon", "rival probe endpoint built");
+    tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "rival probe endpoint built");
     // Clamped so at most one probe is outstanding per heal tick even when
     // tests shorten the cadence below the probe cap.
     let budget = Duration::from_secs(HEAL_PROBE_SECS.min(heal_interval_secs()));
     let (tx, rx) = oneshot::channel();
     let endpoint = prober.clone();
     let (cancel, cancelled) = oneshot::channel();
-    let task = n0_future::task::spawn(async move {
-        let found_rival = tokio::select! {
-            found = probe_connect(&prober, target, budget) => found,
-            // A departure: no one will read the verdict, but the endpoint
-            // must still close below.
-            _ = cancelled => true,
-        };
-        prober.close().await;
-        // A closed receiver means the loop moved on (departure, or the
-        // beacon arrived another way); the verdict is simply stale.
-        let _ = tx.send(found_rival);
-    });
+    // The span names the member that probes, so the `connect-probe finished` line of `lookup`,
+    // which knows only the throwaway prober, carries it too.
+    let probe_span = tracing::info_span!(
+        target: "habilis_network::beacon",
+        "rival_probe",
+        node = %node.fmt_short()
+    );
+    let task = n0_future::task::spawn(
+        async move {
+            let found_rival = tokio::select! {
+                found = probe_connect(&prober, target, budget) => found,
+                // A departure: no one will read the verdict, but the endpoint
+                // must still close below.
+                _ = cancelled => true,
+            };
+            prober.close().await;
+            // A closed receiver means the loop moved on (departure, or the
+            // beacon arrived another way); the verdict is simply stale.
+            let _ = tx.send(found_rival);
+        }
+        .instrument(probe_span),
+    );
     Some(RivalProbe {
         rx,
         task,
@@ -717,11 +728,17 @@ pub(crate) async fn ensure(
     // same question at the same cost.
     if params.bind_ports.is_empty() && probe_first {
         if probe.is_none() {
-            *probe = spawn_rival_probe(params).await;
+            *probe = spawn_rival_probe(params, peer.id()).await;
         }
         return false;
     }
     claim(params, peer, peer_book, current).await
+}
+
+/// Whether a holder lets go of its beacon for a rival holder it has read: the lower member id
+/// keeps the rendezvous. Both holders compute it from the same two ids, so exactly one yields.
+pub(crate) fn yields_to(own: EndpointId, other: EndpointId) -> bool {
+    other < own
 }
 
 /// Apply an off-loop probe's verdict: claim the rendezvous if it is free.
@@ -881,8 +898,23 @@ mod tests {
     use super::{
         Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, ensure,
         foreign_sessions, oneshot, probe_verdict, releasable, rendezvous_addr, spawn_rival_probe,
-        verdict_of, watch,
+        verdict_of, watch, yields_to,
     };
+
+    #[test]
+    fn the_holder_with_the_lower_member_id_keeps_the_beacon() {
+        let first = SecretKey::generate().public();
+        let second = SecretKey::generate().public();
+        let (low, high) = if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+
+        assert!(yields_to(high, low), "the higher id yields to the lower");
+        assert!(!yields_to(low, high), "the lower id keeps the beacon");
+        assert!(!yields_to(low, low), "an id never yields to itself");
+    }
 
     /// Observed on both holders of a split topic: the one session counted as a
     /// dependent was the holder's own peer endpoint, so each deferred its shed
@@ -987,7 +1019,7 @@ mod tests {
             .expect("a silent loopback socket");
         let mut params = public_params();
         params.bind_ports = vec![silent.local_addr().expect("its address").port()];
-        let probe = spawn_rival_probe(&params)
+        let probe = spawn_rival_probe(&params, SecretKey::generate().public())
             .await
             .expect("a probe with a rung to dial");
         let prober = probe.endpoint.clone().expect("the probe dials");
@@ -1146,7 +1178,7 @@ mod tests {
         // probe exists to prevent, and `gossip::recv::arms_reclaim`'s
         // widened gate leans on exactly this.
         let params = public_params();
-        let mut slot = spawn_rival_probe(&params).await;
+        let mut slot = spawn_rival_probe(&params, SecretKey::generate().public()).await;
         assert!(
             slot.is_some(),
             "the probe reports a verdict, it does not vanish"

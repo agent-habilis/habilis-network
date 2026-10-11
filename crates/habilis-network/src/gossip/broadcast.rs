@@ -312,6 +312,21 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
     }
 }
 
+/// The body of our `PeerInfo`: our address, the proof that we own it, and, while we hold the
+/// rendezvous, a flag that lets another holder in the same overlay order itself against us.
+pub(crate) fn peer_info_json(
+    addr: &iroh::EndpointAddr,
+    proof: String,
+    holds_beacon: bool,
+) -> serde_json::Value {
+    let mut json = crate::protocol::peer_addr::endpoint_addr_to_json(addr);
+    json["proof"] = serde_json::Value::String(proof);
+    if holds_beacon {
+        json["beacon"] = serde_json::Value::Bool(true);
+    }
+    json
+}
+
 /// Broadcast a `PeerInfo` carrying our endpoint address so peers can
 /// dial us directly. Unlike `joined`, `PeerInfo` never enters the
 /// message log (`handle_peer_info` returns before the log push), so
@@ -341,8 +356,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
             )
         })
         .clone();
-    let mut addr_json = crate::protocol::peer_addr::endpoint_addr_to_json(&our_addr);
-    addr_json["proof"] = serde_json::Value::String(proof);
+    let addr_json = peer_info_json(&our_addr, proof, state.hosts_rendezvous);
     let addr_data = serde_json::to_string(&addr_json)
         .expect("endpoint_addr_to_json produces a Value that always serializes");
     let addr_body =
@@ -409,9 +423,37 @@ fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Me
 mod tests {
     use bytes::Bytes;
 
-    use super::mark_parked;
+    use super::{mark_parked, peer_info_json};
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
+
+    #[test]
+    fn our_peer_info_says_so_while_we_hold_the_rendezvous() {
+        let addr = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
+
+        let holding = peer_info_json(&addr, "proof".to_owned(), true);
+        let idle = peer_info_json(&addr, "proof".to_owned(), false);
+
+        assert_eq!(holding["beacon"], serde_json::Value::Bool(true));
+        assert_eq!(holding["proof"], "proof");
+        assert!(
+            idle.get("beacon").is_none(),
+            "no key while we do not hold it"
+        );
+    }
+
+    /// Members built before the flag read the body by key. The new key must not stop them from
+    /// reading the address.
+    #[test]
+    fn a_reader_that_predates_the_flag_still_reads_the_address() {
+        let id = iroh::SecretKey::generate().public();
+        let json = peer_info_json(&iroh::EndpointAddr::new(id), "proof".to_owned(), true);
+
+        let (read, _) =
+            crate::protocol::peer_addr::endpoint_addr_from_json(&json).expect("the address reads");
+
+        assert_eq!(read, id);
+    }
 
     /// A node that is not meshed parks a directed frame to a lane peer, and the park asks for the
     /// peer's session.

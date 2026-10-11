@@ -1459,6 +1459,19 @@ async fn handle_peer_info(
             .proven_endpoints
             .insert(signer, peer_id, &state.linked_endpoints);
     }
+    // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
+    // endpoint is believed.
+    if let Some(signer) = crate::transport::endpoint_proof::signer_bytes(&message.pubkey) {
+        let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
+        state.note_rival_beacon_flag(
+            ctx.endpoint.id(),
+            signer,
+            peer_id,
+            proven,
+            parsed["beacon"].as_bool() == Some(true),
+            Instant::now(),
+        );
+    }
     // Remember every advertised peer for the rendezvous-independent
     // re-bridge, and register its address once. Unconditional on link
     // state — a `PeerInfo` normally arrives over an already-formed link,

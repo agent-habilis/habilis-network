@@ -340,6 +340,18 @@ pub struct EventLoopState {
     /// mesh would split into islands (the 18-node test shows it). So this
     /// node never releases the link.
     pub(crate) hosts_rendezvous: bool,
+    /// A holder with a lower member id said, in its `PeerInfo`, that it holds the rendezvous
+    /// too. The next due re-check then sheds at once, whatever depends on this beacon: the
+    /// rival's flag already settled who keeps it. Cleared by the shed and by a fresh claim.
+    pub(crate) yield_to_lower: bool,
+    /// What the last `PeerInfo` we flooded said about `hosts_rendezvous`, so the flag is sent
+    /// again when it changes.
+    pub(crate) beacon_flag_flooded: bool,
+    /// The members that said in their `PeerInfo` that they hold the rendezvous, by the signing
+    /// key and the endpoint that key proved. A `PeerInfo` of the same signer without the flag,
+    /// or the roster removal of the member, takes it out again. While it is not empty and we do
+    /// not hold the rendezvous, we do not probe to claim it.
+    pub(crate) rival_holders: HashMap<[u8; 32], EndpointId>,
     /// How many links to other members make this node release the rendezvous.
     /// A field, not a constant, so a test can set it.
     pub(crate) rendezvous_release_links: usize,
@@ -825,6 +837,9 @@ impl EventLoopState {
             rendezvous_comeback_until: None,
             rendezvous_dwell_until: None,
             hosts_rendezvous: false,
+            yield_to_lower: false,
+            beacon_flag_flooded: false,
+            rival_holders: HashMap::new(),
             rendezvous_release_links: crate::util::tuning::RENDEZVOUS_RELEASE_LINKS,
             rendezvous_session_stale: false,
             rendezvous_offer_fallback: false,
@@ -1175,6 +1190,8 @@ impl EventLoopState {
         let addr = self.peer_endpoints.remove(nick)?;
         self.graft_backoff.reset(addr.id);
         self.proven_endpoints.forget_endpoint(addr.id);
+        self.rival_holders
+            .retain(|_, endpoint| *endpoint != addr.id);
         self.direct.remove(&addr.id);
         self.path_watchers.remove(&addr.id);
         self.path_kinds.remove(&addr.id);
@@ -1196,6 +1213,54 @@ impl EventLoopState {
         self.regraft_at.remove(&peer);
         self.graft_backoff.reset(peer);
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+    }
+
+    /// A member's `PeerInfo` read: `flag` says it holds the rendezvous. A flag from a proven
+    /// sender is remembered whether we hold the rendezvous or not; it moves our re-check only
+    /// while we hold it too.
+    pub(crate) fn note_rival_beacon_flag(
+        &mut self,
+        own: EndpointId,
+        signer: [u8; 32],
+        sender: EndpointId,
+        proven: bool,
+        flag: bool,
+        now: Instant,
+    ) {
+        if !flag {
+            self.rival_holders.remove(&signer);
+            return;
+        }
+        if !proven || sender == own {
+            return;
+        }
+        let newly = self.rival_holders.insert(signer, sender) != Some(sender);
+        if !self.hosts_rendezvous {
+            return;
+        }
+        if crate::beacon::yields_to(own, sender) {
+            self.yield_to_lower = true;
+            self.next_rival_recheck = Some(now);
+        } else if newly {
+            // Once per holder, so that a holder that sends its flag again and again cannot keep
+            // our re-check away. Pushed, not dropped: a holder that never re-checks never finds
+            // a co-host it does not know of.
+            let pushed = now
+                + super::beacon_arm::next_recheck_delay(
+                    self.rival_recheck_rounds.max(1),
+                    self.peers.len(),
+                    own,
+                );
+            self.next_rival_recheck = Some(
+                self.next_rival_recheck
+                    .map_or(pushed, |due| due.max(pushed)),
+            );
+        }
+    }
+
+    /// Whether some member is known to hold the rendezvous.
+    pub(crate) fn rival_holder_known(&self) -> bool {
+        !self.rival_holders.is_empty()
     }
 
     /// Open the fast `beacon::ensure` burst; the only writer of
@@ -1812,6 +1877,161 @@ mod tests {
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::testing::{endpoint_id, fresh_state, fresh_state_with_book, nick};
+
+    fn lower_and_higher() -> (EndpointId, EndpointId) {
+        let first = endpoint_id(1);
+        let second = endpoint_id(2);
+        if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        }
+    }
+
+    /// Two holders of one rendezvous that share an overlay, one dependent on each: the lower
+    /// holder's flag must end the split now, not after the wait for the dependent.
+    #[test]
+    fn a_flag_from_a_lower_holder_makes_us_yield_at_once() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        let now = Instant::now();
+
+        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, now);
+
+        assert!(state.yield_to_lower);
+        assert_eq!(state.next_rival_recheck, Some(now));
+    }
+
+    /// The winner keeps its beacon. Its re-check is pushed one steady round, not dropped: a
+    /// holder that never re-checks never finds a co-host it does not know of.
+    #[test]
+    fn a_flag_from_a_higher_holder_pushes_our_re_check_out() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        state.rival_recheck_rounds = 2;
+        state.rival_recheck_deferrals = 1;
+        let now = Instant::now();
+
+        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, now);
+
+        assert!(!state.yield_to_lower);
+        let next = state
+            .next_rival_recheck
+            .expect("the re-check is pushed out, not dropped");
+        assert!(next > now, "a steady round out, not due");
+        assert_eq!(state.rival_recheck_rounds, 2, "the rounds stay");
+        assert_eq!(state.rival_recheck_deferrals, 1, "the deferrals stay");
+    }
+
+    /// A flag is remembered only from a proven sender that is not us, and moves our re-check
+    /// only while we hold the beacon.
+    #[test]
+    fn a_flag_that_does_not_count_changes_nothing() {
+        let (low, high) = lower_and_higher();
+        let signer = [9u8; 32];
+        let now = Instant::now();
+
+        let mut no_flag = fresh_state();
+        no_flag.hosts_rendezvous = true;
+        no_flag.note_rival_beacon_flag(high, signer, low, true, false, now);
+
+        let mut unproven = fresh_state();
+        unproven.hosts_rendezvous = true;
+        unproven.note_rival_beacon_flag(high, signer, low, false, true, now);
+
+        let mut ourselves = fresh_state();
+        ourselves.hosts_rendezvous = true;
+        ourselves.note_rival_beacon_flag(high, signer, high, true, true, now);
+
+        for state in [no_flag, unproven, ourselves] {
+            assert!(!state.yield_to_lower);
+            assert_eq!(state.next_rival_recheck, None);
+            assert!(!state.rival_holder_known());
+        }
+    }
+
+    /// A node that does not hold the rendezvous still learns who does: it is what keeps it from
+    /// probing to claim. Its own re-check has nothing to move.
+    #[test]
+    fn a_flag_read_while_we_do_not_hold_is_remembered() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+
+        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, Instant::now());
+
+        assert!(state.rival_holder_known());
+        assert!(!state.yield_to_lower);
+        assert_eq!(state.next_rival_recheck, None);
+    }
+
+    /// A holder that sends its flag again and again must not keep our re-check away: the push
+    /// happens once per holder, and exists only to hold our release until the higher one yields.
+    #[test]
+    fn a_holder_that_repeats_its_flag_pushes_our_re_check_out_once() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        let first = Instant::now();
+
+        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, first);
+        let pushed = state.next_rival_recheck;
+        assert!(pushed.is_some_and(|due| due > first), "pushed out once");
+
+        state.note_rival_beacon_flag(
+            low,
+            [9u8; 32],
+            high,
+            true,
+            true,
+            first + Duration::from_secs(5),
+        );
+
+        assert_eq!(
+            state.next_rival_recheck, pushed,
+            "the repeat changes nothing"
+        );
+    }
+
+    /// The push is to at least a steady round out. A re-check that is already later stays.
+    #[test]
+    fn a_push_never_brings_a_later_re_check_closer() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        let now = Instant::now();
+        let far = now + Duration::from_secs(100_000);
+        state.next_rival_recheck = Some(far);
+
+        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, now);
+
+        assert_eq!(state.next_rival_recheck, Some(far));
+    }
+
+    /// The holder says it let go (a `PeerInfo` without the flag), or the member leaves: the
+    /// rendezvous is no longer known to be held by it.
+    #[test]
+    fn a_holder_stops_counting_when_it_drops_the_flag_or_leaves() {
+        let (low, high) = lower_and_higher();
+        let signer = [9u8; 32];
+        let mut state = fresh_state();
+        state.note_rival_beacon_flag(high, signer, low, true, true, Instant::now());
+        assert!(state.rival_holder_known());
+
+        state.note_rival_beacon_flag(high, signer, low, true, false, Instant::now());
+        assert!(!state.rival_holder_known(), "no flag takes it out");
+
+        state.note_rival_beacon_flag(high, signer, low, true, true, Instant::now());
+        state
+            .peer_endpoints
+            .insert(nick("bob"), iroh::EndpointAddr::new(low));
+        state.forget_peer_endpoint("bob");
+        assert!(
+            !state.rival_holder_known(),
+            "the roster removal takes it out"
+        );
+    }
 
     /// The accessor hands out the book that the state was built with, not a copy of it: an address
     /// written through it is in the book of the endpoint.

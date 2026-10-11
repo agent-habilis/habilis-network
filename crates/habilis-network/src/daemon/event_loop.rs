@@ -39,7 +39,7 @@ use super::app::NodeDriver;
 use super::beacon_arm::{
     CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, note_rival_holds,
     offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
-    shed_rival_beacon_if_due,
+    shed_rival_beacon_if_due, verdict_after_known_holders,
 };
 use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
 use super::ctx::HandlerCtx;
@@ -672,6 +672,13 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         // from the one place that owns it, so that no path that claims or sheds
         // the beacon has to remember to say so.
         state.hosts_rendezvous = rendezvous.is_some();
+        // Said in our `PeerInfo` from here, for the same reason: no claim or shed path has to
+        // remember to send it again.
+        if state.hosts_rendezvous != state.beacon_flag_flooded {
+            state.beacon_flag_flooded = state.hosts_rendezvous;
+            let ctx = parts.ctx(&sender);
+            gossip::broadcast_peer_info(&mut state, &ctx).await;
+        }
         tokio::select! {
             () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
                 state.idle.external += 1;
@@ -841,6 +848,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // latency this change was meant to leave untouched.
             found_rival = beacon::probe_verdict(&mut rival_probe) => {
                 state.idle.external += 1;
+                let found_rival = verdict_after_known_holders(found_rival, &state);
                 let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
                 state.probe_backoff.note_verdict(found_rival, Instant::now(), spread);
                 // One free verdict is not enough to claim: a live beacon's

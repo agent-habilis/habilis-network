@@ -129,15 +129,16 @@ pub(super) async fn maybe_cohost(
         if would_probe && probe.is_none() && !state.probe_backoff.due(Instant::now()) {
             return;
         }
-        let claimed = beacon::ensure(
-            arm.params,
-            ctx.endpoint,
-            &state.address_book,
-            current,
-            probes_before_claim(arm.policy),
-            probe,
-        )
-        .await;
+        let claimed = may_probe_to_claim(state)
+            && beacon::ensure(
+                arm.params,
+                ctx.endpoint,
+                &state.address_book,
+                current,
+                probes_before_claim(arm.policy),
+                probe,
+            )
+            .await;
         if claimed {
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
             // The new rendezvous never dials us; the reclaim tick re-grafts it.
@@ -191,15 +192,16 @@ pub(super) async fn maybe_reclaim(
             .reclaim_until
             .is_some_and(|deadline| Instant::now() < deadline)
     {
-        let claimed = beacon::ensure(
-            arm.params,
-            ctx.endpoint,
-            &state.address_book,
-            current,
-            probes_before_claim(arm.policy),
-            probe,
-        )
-        .await;
+        let claimed = may_probe_to_claim(state)
+            && beacon::ensure(
+                arm.params,
+                ctx.endpoint,
+                &state.address_book,
+                current,
+                probes_before_claim(arm.policy),
+                probe,
+            )
+            .await;
         if claimed {
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
             offer_to_the_new_holder(state, ctx);
@@ -339,6 +341,18 @@ pub(super) fn defer_shed(dependents: usize, deferrals: u32) -> bool {
     dependents > 0 && deferrals < MAX_SHED_DEFERRALS
 }
 
+/// Whether a member that does not hold the rendezvous may probe it in order to claim it. Not
+/// while it knows a holder: its own shed makes the shared id read free for a moment, and a claim
+/// on that reading stands up the second holder again.
+pub(super) fn may_probe_to_claim(state: &EventLoopState) -> bool {
+    !state.rival_holder_known()
+}
+
+/// A probe that was already in flight when a holder became known must not decide a claim.
+pub(super) fn verdict_after_known_holders(found_rival: bool, state: &EventLoopState) -> bool {
+    found_rival || state.rival_holder_known()
+}
+
 /// Arm the next rival re-check after a fresh claim (a `None` → live
 /// `beacon::ensure` transition). No-op for sessions the shed doesn't
 /// apply to, so every claim site can call it unconditionally. A fresh claim
@@ -355,6 +369,7 @@ pub(super) fn schedule_rival_recheck(
 ) {
     state.cancel_rendezvous_round();
     state.rival_recheck_deferrals = 0;
+    state.yield_to_lower = false;
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
@@ -392,7 +407,7 @@ pub(super) fn shed_rival_beacon_if_due(
     let dependents = rendezvous
         .as_ref()
         .map_or_else(beacon::Dependents::default, |held| held.dependents(peer));
-    if defer_shed(dependents.count(), state.rival_recheck_deferrals) {
+    if !state.yield_to_lower && defer_shed(dependents.count(), state.rival_recheck_deferrals) {
         state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
         state.next_rival_recheck =
             Some(Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()));
@@ -413,8 +428,10 @@ pub(super) fn shed_rival_beacon_if_due(
     tracing::info!(
         target: "habilis_network::gossip",
         node = %peer.fmt_short(),
+        yield_to_lower = state.yield_to_lower,
         "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
     );
+    state.yield_to_lower = false;
     // `shed`, not a plain drop: the graceful endpoint close turns the
     // peer's link to its own dead beacon into an immediate
     // `NeighborDown` instead of a zombie that only dies at the QUIC idle
@@ -530,6 +547,89 @@ mod tests {
             iroh::SecretKey::generate().public(),
         ));
         assert!(rendezvous.is_some(), "the beacon is still held");
+    }
+
+    /// A member that knows a holder and holds nothing does not probe to claim: its own shed makes
+    /// the shared id read free for a moment, and a claim on that reading stands up the second
+    /// holder again. The holder's `PeerInfo` without the flag ends it.
+    #[test]
+    fn a_known_holder_keeps_us_from_probing_to_claim() {
+        let mut state = crate::testing::fresh_state();
+        let own = iroh::SecretKey::generate().public();
+        let holder = iroh::SecretKey::generate().public();
+        let now = crate::util::clock::Instant::now();
+        assert!(super::may_probe_to_claim(&state), "no holder known: probe");
+
+        state.note_rival_beacon_flag(own, [9u8; 32], holder, true, true, now);
+        assert!(!super::may_probe_to_claim(&state), "a holder is known");
+
+        state.note_rival_beacon_flag(own, [9u8; 32], holder, true, false, now);
+        assert!(super::may_probe_to_claim(&state), "it let go: probe again");
+    }
+
+    /// A probe that was already out when the holder became known reads the id as free. It must
+    /// not decide a claim.
+    #[test]
+    fn a_probe_that_read_free_does_not_claim_while_a_holder_is_known() {
+        let mut state = crate::testing::fresh_state();
+        let own = iroh::SecretKey::generate().public();
+        let holder = iroh::SecretKey::generate().public();
+        assert!(!super::verdict_after_known_holders(false, &state));
+
+        state.note_rival_beacon_flag(
+            own,
+            [9u8; 32],
+            holder,
+            true,
+            true,
+            crate::util::clock::Instant::now(),
+        );
+
+        assert!(
+            super::verdict_after_known_holders(false, &state),
+            "free is read as held"
+        );
+        assert!(super::verdict_after_known_holders(true, &state));
+    }
+
+    /// A lower holder in our overlay already settled who keeps the rendezvous, so a tab on this
+    /// beacon must not hold the release back: the tab re-dials, and two holders that each
+    /// kept a tab would stay split.
+    #[tokio::test]
+    async fn a_due_shed_does_not_wait_when_a_lower_holder_was_seen() {
+        let params = public_params();
+        let arm = super::CohostArm {
+            policy: CoHostPolicy::EagerProbed,
+            params: &params,
+            started: crate::util::clock::Instant::now(),
+        };
+        let mut state = crate::testing::fresh_state();
+        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        state.yield_to_lower = true;
+        let (mut rendezvous, _round) =
+            beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
+
+        assert!(super::shed_rival_beacon_if_due(
+            &mut state,
+            &arm,
+            &mut rendezvous,
+            iroh::SecretKey::generate().public(),
+        ));
+        assert!(rendezvous.is_none(), "the beacon was released");
+        assert!(!state.yield_to_lower, "the release uses the request up");
+    }
+
+    /// A yield request belongs to the beacon it was made for: a new claim starts clean.
+    #[tokio::test]
+    async fn a_new_claim_forgets_a_yield_request() {
+        let params = public_params();
+        let endpoint = loopback_endpoint().await;
+        let mut state = crate::testing::fresh_state();
+        state.yield_to_lower = true;
+
+        super::schedule_rival_recheck(&mut state, CoHostPolicy::EagerProbed, &params, &endpoint);
+
+        assert!(!state.yield_to_lower);
     }
 
     /// A beacon claimed after another went without a shed (a co-host task
