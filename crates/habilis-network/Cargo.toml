@@ -149,7 +149,6 @@ habilis-network-logging = { path = "../habilis-network-logging", default-feature
 bs58.workspace = true
 sha2.workspace = true
 rand.workspace = true
-libc = { workspace = true, optional = true }
 # mDNS + mainline-DHT address-lookup providers were extracted from iroh core
 # in the 1.0 line; these companion crates restore the `--mdns` / `--dht` legs.
 # From the workspace, because they are forked to pin iroh — see the iroh family
@@ -210,6 +209,11 @@ iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh"
 habilis-network-iroh-webrtc-transport = { path = "../habilis-network-iroh-webrtc-transport", features = ["web"] }
 iroh.workspace = true
 iroh-gossip.workspace = true
+
+# Unix only, and only under `host` (`dep:libc`). Windows has no libc: its
+# process and pipe calls go through `windows-sys` in `habilis-network-util`.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
 
 # Scoped to non-wasm on purpose. The workspace `tokio` dev-dep turns on `net`,
 # which drags in `mio` — and dev-dependencies are resolved for test targets too,

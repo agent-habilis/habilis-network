@@ -59,9 +59,19 @@ pub fn mesh_prefix(mesh_id: &str) -> String {
 /// env-var config" rule. The `-<uid>` suffix adds only a few bytes, so the
 /// socket path stays well inside the `AF_UNIX` `sun_path` ~104-byte limit.
 #[must_use]
-#[cfg(feature = "host")]
+#[cfg(all(unix, feature = "host"))]
 pub fn runtime_base(product: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/tmp/{product}-{}", current_uid()))
+}
+
+/// The Windows base. R2 of `docs/windows.md` asks for
+/// `<LocalAppData>\<product>\run` from `SHGetKnownFolderPath`: not built yet,
+/// so this is a stub. `temp_dir` is the per-user temp directory, so two users
+/// still do not share a base.
+#[must_use]
+#[cfg(all(windows, feature = "host"))]
+pub fn runtime_base(product: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(product)
 }
 
 /// This process's effective user id — the id a newly created file/dir is
@@ -70,11 +80,26 @@ pub fn runtime_base(product: &str) -> std::path::PathBuf {
 /// base we just created ourselves). The one place the crate calls libc, so the
 /// single `unsafe` block has one documented home (mirrors the termios FFI in
 /// `main`). `geteuid` has no safety preconditions.
-#[cfg(feature = "host")]
+#[cfg(all(unix, feature = "host"))]
 #[expect(unsafe_code, reason = "libc::geteuid FFI; no safe std wrapper exists")]
 fn current_uid() -> u32 {
     // SAFETY: geteuid cannot fail and reads no memory.
     unsafe { libc::geteuid() }
+}
+
+/// A recursive directory builder that makes `0700` directories where the
+/// platform has modes. On Windows a directory inherits the ACL of its parent
+/// (R2 of `docs/windows.md`), so there is nothing to set.
+#[cfg(feature = "host")]
+fn private_dir_builder() -> std::fs::DirBuilder {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
 }
 
 /// Ensure `base` (from [`runtime_base`]) exists as a private (`0700`) directory
@@ -95,9 +120,9 @@ fn current_uid() -> u32 {
 /// user (a squatting attempt — a clear message so the operator can remove it);
 /// or the create / chmod syscalls fail. Fails *closed*: a failure here must
 /// abort the write, never fall through to an unvalidated directory.
-#[cfg(feature = "host")]
+#[cfg(all(unix, feature = "host"))]
 pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     // Deliberately *not* cached: a long-running daemon writes on every heartbeat,
     // and the OS `/tmp` reaper (systemd-tmpfiles, macOS periodic) can delete the
@@ -105,11 +130,7 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
     // syscalls — is what keeps a reaped base from silently reappearing at the
     // umask default `0755` on the next write. Idempotent and concurrency-safe:
     // racing creates collapse to `AlreadyExists`, the checks are read-only.
-    match std::fs::DirBuilder::new()
-        .mode(0o700)
-        .recursive(true)
-        .create(base)
-    {
+    match private_dir_builder().create(base) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
@@ -143,6 +164,32 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The Windows twin of [`ensure_runtime_base`]: create the base and check that
+/// it is a directory. R2 of `docs/windows.md` also asks to reject a reparse
+/// point and to leave the ACL to the profile; the reparse check is not built
+/// yet, and the ACL needs no code.
+///
+/// # Errors
+/// The create failed, or the base is not a directory.
+#[cfg(all(windows, feature = "host"))]
+pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
+    match private_dir_builder().create(base) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    if !std::fs::symlink_metadata(base)?.file_type().is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "runtime dir {} is not a directory — remove it",
+                base.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Whether `path` is inside `base`. A `--state-file` / `--log-dir` override can
 /// point outside the base and must not be gated on its validation.
 #[must_use]
@@ -169,7 +216,6 @@ pub fn ensure_parent_private(
     base: Option<&std::path::Path>,
     path: &std::path::Path,
 ) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt as _;
     if let Some(base) = base
         && is_under_runtime_base(base, path)
     {
@@ -179,10 +225,7 @@ pub fn ensure_parent_private(
         // Mode 0700 (not plain `create_dir_all`, which is 0755): closes the
         // narrow window where the reaper deletes the base between the ensure
         // above and this create, and keeps the per-mesh subdir private too.
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(parent)?;
+        private_dir_builder().create(parent)?;
     }
     Ok(())
 }
@@ -211,21 +254,16 @@ pub fn ensure_mesh_runtime_dir(
     base: &std::path::Path,
     mesh_id: &str,
 ) -> std::io::Result<std::path::PathBuf> {
-    use std::os::unix::fs::DirBuilderExt as _;
     ensure_runtime_base(base)?;
     let dir = mesh_runtime_dir(base, mesh_id);
     // 0700, and closes the reaper race (see `ensure_parent_private`).
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .recursive(true)
-        .create(&dir)?;
+    private_dir_builder().create(&dir)?;
     Ok(dir)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{is_under_runtime_base, mesh_prefix, runtime_base};
-    use std::path::Path;
 
     #[test]
     fn runtime_base_is_deterministic_and_uid_scoped() {
@@ -235,7 +273,16 @@ mod tests {
         // find the socket.
         assert_eq!(runtime_base("demo"), runtime_base("demo"));
         let shown = runtime_base("demo").to_string_lossy().into_owned();
+        #[cfg(unix)]
         assert!(shown.starts_with("/tmp/demo-"), "unexpected base: {shown}");
+        // Windows has no uid suffix: the per-user part is the temp directory
+        // (R2 will move it to the profile). The product is the last component.
+        #[cfg(windows)]
+        assert_eq!(
+            runtime_base("demo").file_name(),
+            Some(std::ffi::OsStr::new("demo")),
+            "unexpected base: {shown}"
+        );
         // …and two embedders never share a base, so their daemons can never
         // collide on a socket or read each other's state files.
         assert_ne!(runtime_base("demo"), runtime_base("other"));
@@ -248,11 +295,20 @@ mod tests {
             &base,
             &base.join("abcdefghijkmnp/nick.state.json")
         ));
-        assert!(!is_under_runtime_base(&base, Path::new("/etc/passwd")));
-        // The un-suffixed sibling is a different directory, not a parent.
+        // A path beside the base, built from the base so it is valid on each OS.
+        let parent = base.parent().expect("the base has a parent");
         assert!(!is_under_runtime_base(
             &base,
-            Path::new("/tmp/demo/sessions/x.json")
+            &parent.join("elsewhere").join("passwd")
+        ));
+        // A sibling whose name only *starts with* the base name is a different
+        // directory, not a child: the test is by component, not by string.
+        let name = base.file_name().expect("the base has a name");
+        let mut sibling = name.to_os_string();
+        sibling.push("x");
+        assert!(!is_under_runtime_base(
+            &base,
+            &parent.join(sibling).join("sessions").join("x.json")
         ));
     }
 
