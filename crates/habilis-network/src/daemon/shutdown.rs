@@ -135,6 +135,11 @@ pub(super) fn spawn_quit_signal_tasks(
     if exit_on_quit {
         spawn_orphan_watch(quit_tx, owner);
     }
+    // Windows has neither of them yet: the owner watch is R6 and the console
+    // events (`ctrl_break`, `ctrl_close`, `ctrl_logoff`, `ctrl_shutdown`) are R7
+    // of `docs/windows.md`. Only ctrl-c reaches the quit channel until then.
+    #[cfg(not(unix))]
+    let _ = (exit_on_quit, owner);
     quit_rx
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
@@ -187,6 +192,15 @@ impl Owner {
         self.pid
     }
 
+    // Called by the Unix `watch_owner`. The Windows twin is R6 of
+    // `docs/windows.md`, not built yet.
+    #[cfg_attr(
+        not(unix),
+        expect(
+            dead_code,
+            reason = "called by the owner watch, which is R6 on Windows"
+        )
+    )]
     fn lost(self) -> bool {
         crate::util::process::live_start_time(self.pid) != Some(self.start)
     }
