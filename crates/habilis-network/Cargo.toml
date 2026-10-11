@@ -214,7 +214,8 @@ iroh.workspace = true
 iroh-gossip.workspace = true
 
 # Unix only, and only under `host` (`dep:libc`). Windows has no libc: its
-# process and pipe calls go through `windows-sys` in `habilis-network-util`.
+# process queries go through `windows-sys` in `habilis-network-util`. The pipe
+# of the IPC endpoint (R3 of `docs/windows.md`) is not built yet.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true, optional = true }
 

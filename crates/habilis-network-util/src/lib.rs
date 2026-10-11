@@ -311,6 +311,13 @@ mod tests {
             &base,
             &parent.join(sibling).join("sessions").join("x.json")
         ));
+        // The un-suffixed sibling is the old fixed path: not under
+        // `/tmp/demo-<uid>`.
+        #[cfg(unix)]
+        assert!(!is_under_runtime_base(
+            &base,
+            std::path::Path::new("/tmp/demo/sessions/x.json")
+        ));
     }
 
     #[test]
