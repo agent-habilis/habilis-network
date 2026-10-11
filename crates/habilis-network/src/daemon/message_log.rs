@@ -181,7 +181,7 @@ impl MessageLog {
             .expect("the fullest author holds at least one message")
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "iroh-test-utils"))]
     pub(crate) fn len(&self) -> usize {
         self.messages.len()
     }

@@ -1761,6 +1761,13 @@ impl EventLoopState {
         &mut self.message_log
     }
 
+    /// How many messages the anti-entropy log holds. Tests only.
+    #[cfg(feature = "iroh-test-utils")]
+    #[must_use]
+    pub fn message_log_len(&self) -> usize {
+        self.message_log.len()
+    }
+
     /// Whether this author's digest may be served now.
     ///
     /// Answering one costs up to `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts,

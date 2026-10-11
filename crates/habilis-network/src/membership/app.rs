@@ -193,6 +193,13 @@ pub enum Request {
     GossipRecursionCloses {
         reply: oneshot::Sender<u64>,
     },
+    /// Tests only: how many messages this node holds in its log, the ones that anti-entropy
+    /// can serve to a peer that asks. A broadcast that a node sent itself is there only if the
+    /// send path retains it.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    MessageLogLen {
+        reply: oneshot::Sender<usize>,
+    },
     /// Tests only: forget that the member `peer` is proven direct, and offer it a
     /// `WebRTC` session now, as the path watcher does when a direct path is lost.
     /// A test uses it to attach a session at a chosen moment instead of at the
@@ -576,6 +583,11 @@ impl NodeDriver for MembershipApp {
             Request::UnderlayTick { reply } => {
                 crate::transport::underlay_webrtc::tick_now(state);
                 let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::MessageLogLen { reply } => {
+                let _ = reply.send(state.message_log.len());
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
