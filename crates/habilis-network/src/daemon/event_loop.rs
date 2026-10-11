@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::Result;
 use iroh::{Endpoint, EndpointId, RelayUrl, Watcher as _};
 use iroh_gossip::api::GossipReceiver;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
@@ -896,6 +896,15 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     }
                 }
             }
+            () = closed_opt(&mut state.beacon_closing) => {
+                // The beacon that the re-check shed is closed: the id is free of our own corpse, so
+                // the re-probe starts now. The reclaim tick below stays as the net.
+                state.beacon_closing = None;
+                state.idle.reclaim += 1;
+                let ctx = parts.ctx(&sender);
+                let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
+                maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
+            }
             _ = intervals.reclaim.tick() => {
                 state.idle.reclaim += 1;
                 let ctx = parts.ctx(&sender);
@@ -1225,6 +1234,17 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
 /// when the channel is absent so the arm stays inert for drivers that
 /// don't wire it (CLI/MCP). Shared by the ipc / external-quit /
 /// external-send arms so the idiom isn't written three ways.
+/// Pends while no shed runs; resolves once when the close of the shed beacon is done. A receiver
+/// whose sender was dropped also resolves, so a lost close task cannot hold the re-probe back.
+async fn closed_opt(rx: &mut Option<oneshot::Receiver<()>>) {
+    match rx.as_mut() {
+        Some(rx) => {
+            let _ = rx.await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     match rx.as_mut() {
         Some(rx) => rx.recv().await,
@@ -1233,7 +1253,50 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+
+    use super::closed_opt;
+
+    /// The wake for the close of a shed beacon: pending with no shed, ready when the close reports,
+    /// ready when the close task is lost.
+    async fn wakes_within_a_moment(closing: &mut Option<oneshot::Receiver<()>>) -> bool {
+        n0_future::time::timeout(Duration::from_millis(100), closed_opt(closing))
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn no_shed_does_not_wake_the_loop() {
+        assert!(!wakes_within_a_moment(&mut None).await);
+    }
+
+    #[tokio::test]
+    async fn the_close_of_the_shed_beacon_wakes_the_loop() {
+        let (done, closed) = oneshot::channel();
+        let mut closing = Some(closed);
+        assert!(
+            !wakes_within_a_moment(&mut closing).await,
+            "pends while it closes"
+        );
+
+        done.send(()).expect("the receiver is held");
+
+        assert!(wakes_within_a_moment(&mut closing).await);
+    }
+
+    #[tokio::test]
+    async fn a_lost_close_task_does_not_hold_the_re_probe_back() {
+        let (done, closed) = oneshot::channel::<()>();
+        let mut closing = Some(closed);
+
+        drop(done);
+
+        assert!(wakes_within_a_moment(&mut closing).await);
+    }
+}
 
 #[cfg(all(test, feature = "host"))]
 mod route_wake_tests {

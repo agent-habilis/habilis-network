@@ -438,7 +438,7 @@ pub(super) fn shed_rival_beacon_if_due(
     // timeout — the zombie both stalls the post-shed re-graft and leaves
     // a poisoned pool entry under the shared id.
     if let Some(held) = rendezvous.take() {
-        held.shed();
+        state.beacon_closing = Some(held.shed_then());
     }
     state.next_rival_recheck = None;
     state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);

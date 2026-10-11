@@ -205,11 +205,30 @@ impl Rendezvous {
     /// own peer) sees an immediate `NeighborDown` instead of a
     /// zombie link that only dies at the QUIC idle timeout.
     pub(crate) fn shed(self) {
+        drop(self.shed_then());
+    }
+
+    /// [`Self::shed`], and a receiver that resolves when the close of the endpoint is done. The
+    /// event loop waits on it to re-probe the id at once: the wait that the reclaim tick used to
+    /// give is the close, and the close is an event, not a time.
+    pub(crate) fn shed_then(self) -> oneshot::Receiver<()> {
         let endpoint = self.endpoint.clone();
+        let (done, closed) = oneshot::channel();
+        let shed_at = n0_future::time::Instant::now();
         n0_future::task::spawn(async move {
             endpoint.close().await;
+            tracing::debug!(
+                target: "habilis_network::beacon",
+                age_ms = u64::try_from(shed_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "beacon closed"
+            );
+            // The last handle of the endpoint goes before the event does, so that whoever waits sees
+            // the id free of it.
+            drop(endpoint);
+            let _ = done.send(());
         });
         // `self` drops here, aborting the co-host task and stopping the monitor.
+        closed
     }
 
     /// The same graceful release, *awaited* — for the event loop's teardown.
@@ -1222,6 +1241,21 @@ mod tests {
 
         settle(&endpoint).await;
         assert!(endpoint.is_closed(), "`shed` must close, not just abort");
+    }
+
+    #[tokio::test]
+    async fn shed_then_resolves_when_the_endpoint_is_closed() {
+        let endpoint = loopback_endpoint().await;
+        let beacon = dead_beacon(endpoint.clone()).await;
+
+        let closed = beacon.shed_then();
+        assert!(!endpoint.is_closed(), "the close runs off the caller");
+        closed.await.expect("the close task reports");
+
+        assert!(
+            endpoint.is_closed(),
+            "the receiver resolves after the close, not before"
+        );
     }
 
     #[tokio::test]

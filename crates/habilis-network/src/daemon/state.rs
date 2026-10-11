@@ -468,6 +468,9 @@ pub struct EventLoopState {
     /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
     /// fresh claim (`beacon_arm::schedule_rival_recheck`).
     pub(crate) rival_recheck_deferrals: u32,
+    /// The close of the beacon that a rival re-check just shed: when it resolves the loop
+    /// re-probes the id at once, instead of at the next reclaim tick. `None` when no shed runs.
+    pub(crate) beacon_closing: Option<tokio::sync::oneshot::Receiver<()>>,
     /// Recently-seen message ids, for duplicate suppression. Gossip
     /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
     /// re-sends, the rendezvous double-path) can deliver the same message
@@ -866,6 +869,7 @@ impl EventLoopState {
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
             rival_recheck_deferrals: 0,
+            beacon_closing: None,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
             pending_outbound: BoundedQueue::new(PENDING_OUTBOUND_CAP),
             #[cfg(feature = "host")]
