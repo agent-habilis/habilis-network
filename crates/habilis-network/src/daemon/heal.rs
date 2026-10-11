@@ -194,7 +194,7 @@ pub(super) async fn resubscribe_tick(
 ) -> Result<()> {
     match try_resubscribe(env, state, link.attempts).await {
         Resubscribe::Restored(new_sender, new_receiver) => {
-            let dead_receiver = std::mem::replace(link.receiver, new_receiver);
+            let mut dead_receiver = std::mem::replace(link.receiver, new_receiver);
             if let Some(handle) = &state.gossip_handle {
                 handle.attach_gossip(new_sender.clone());
             }
@@ -204,9 +204,10 @@ pub(super) async fn resubscribe_tick(
             // emits its own NeighborUps (and re-arms the probe gate).
             state.rendezvous_linked = false;
             let ctx = env.parts.ctx(link.sender);
+            gossip::drain_queued(&mut dead_receiver, state, app, &ctx).await;
             // Nothing in the normal path: the guard for a splitter that ended early.
-            if let Some(mut dead_receiver) = dead_receiver.into_dead() {
-                gossip::drain_dead_receiver(&mut dead_receiver, state, app, &ctx).await;
+            if let Some(mut topic_receiver) = dead_receiver.into_dead() {
+                gossip::drain_dead_receiver(&mut topic_receiver, state, app, &ctx).await;
             }
             gossip::heal::recover_from_starvation(state, &ctx).await;
         }

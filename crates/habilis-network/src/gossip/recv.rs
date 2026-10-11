@@ -333,6 +333,32 @@ pub(crate) async fn drain_dead_receiver(
     );
 }
 
+/// Hand to the app the mesh messages that the old subscription already queued for it, before
+/// the resubscribe drops that queue. The loop does not read the queue while the topic is marked
+/// closed, yet the old splitter keeps filling it until its receiver is dropped, and the gossip
+/// layer has counted each message as delivered: the queue holds the only copy. A message that
+/// arrives after this drain and before the drop is the residue; the resend repairs it (see
+/// `transport::outbox` and the nonce of the resend).
+pub(crate) async fn drain_queued<S>(
+    receiver: &mut super::split::MeshReceiver<S>,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    ctx: &HandlerCtx<'_>,
+) {
+    use futures_util::FutureExt as _;
+    let mut recovered = 0usize;
+    while let Some(Some(item)) = receiver.next().now_or_never() {
+        if let Ok(Event::Received(incoming)) = item {
+            ingest(incoming.content, state, app, ctx).await;
+            recovered += 1;
+        }
+    }
+    tracing::info!(target: "habilis_network::gossip",
+        recovered,
+        "drained the messages that the old subscription had queued"
+    );
+}
+
 /// Drain `pending_outbound` onto the wire, in order. Runs on the meshed
 /// edges — the first real-peer `NeighborUp`, and a degraded node's first
 /// inbound message after a fault (starvation recovery / resume) — and again
@@ -2013,6 +2039,56 @@ mod first_contact_tests {
             state.pending_outbound.is_empty(),
             "the parked frame waits for a PeerInfo that may not come"
         );
+        node.endpoint.close().await;
+    }
+
+    /// The messages that the old subscription queued reach the app when the topic is swapped.
+    /// The loop does not read the queue while the topic is marked closed, and the gossip layer
+    /// counted each message as delivered, so the queue holds the only copy.
+    #[tokio::test]
+    async fn the_messages_the_old_subscription_queued_reach_the_app_at_the_swap() {
+        use futures_util::stream::{self, StreamExt as _};
+        use iroh_gossip::api::Message as GossipMessage;
+        use iroh_gossip::proto::DeliveryScope;
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let author = Identity::generate();
+        let frames: Vec<Message> = ["ann", "bob", "cat"]
+            .into_iter()
+            .map(|name| Message::new_joined(&node.mesh, &nick(name)).signed(&author))
+            .collect();
+        let (feed_topic, topic_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = stream::unfold(topic_rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })
+        .boxed();
+        let mut receiver = crate::gossip::split::spawn_split(events, None);
+        for frame in &frames {
+            let content = bytes::Bytes::from(frame.serialize().expect("serialize"));
+            let delivered = GossipMessage {
+                content,
+                scope: DeliveryScope::Neighbors,
+                delivered_from: endpoint_id(9),
+            };
+            feed_topic
+                .send(Ok(Event::Received(delivered)))
+                .expect("the splitter reads the topic");
+        }
+        while receiver.high_water() < frames.len() {
+            tokio::task::yield_now().await;
+        }
+
+        super::drain_queued(&mut receiver, &mut state, &mut Inert, &ctx).await;
+
+        for frame in &frames {
+            assert!(
+                state.mark_seen(frame),
+                "{} was queued by the old subscription and never reached the app",
+                frame.author
+            );
+        }
         node.endpoint.close().await;
     }
 

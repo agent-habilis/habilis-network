@@ -225,6 +225,13 @@ pub enum Request {
     EndpointId {
         reply: oneshot::Sender<iroh::EndpointId>,
     },
+    /// Tests only: mark the gossip topic closed without a real end of the stream, as the heal
+    /// arm reads a terminal `None`. The loop stops reading the topic, the heal tick resubscribes,
+    /// and the messages that arrive in between must still reach the app.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    SeverGossip {
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: the rung of the selected path on this node's pooled
     /// connection to the member `peer`: `ip`, `webrtc`, `multihop` or `relay`.
     /// It opens the connection first if there is none. This is the connection
@@ -579,6 +586,12 @@ impl NodeDriver for MembershipApp {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::EndpointId { reply } => {
                 let _ = reply.send(ctx.endpoint.id());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::SeverGossip { reply } => {
+                state.gossip_open = false;
+                let _ = reply.send(());
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
