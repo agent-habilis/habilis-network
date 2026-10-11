@@ -293,7 +293,7 @@ pub async fn rtt_samples(
     let head = header_with_mode(MODE_ECHO, u32::try_from(RTT_PROBE_BYTES)?);
     let mut samples = Vec::with_capacity(rounds);
     for round in 0..warmup + rounds {
-        let started = std::time::Instant::now();
+        let started = n0_future::time::Instant::now();
         let (mut send, mut recv) = connection.open_bi().await?;
         send.write_all(&head).await?;
         send.write_all(&probe).await?;

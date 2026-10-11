@@ -89,6 +89,9 @@ tracing.workspace = true
 # CustomSender traits both backends implement; the workspace entry turns it on.
 iroh = { workspace = true, optional = true }
 habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util", optional = true }
+# The clock of `bench::rtt_samples` and the timers of the browser test: `std::time::Instant`
+# panics in a browser. Already in the dependency closure via iroh on both targets.
+n0-future.workspace = true
 # `RecvMeta` appears in the `CustomEndpoint::poll_recv` signature.
 noq-udp = { workspace = true, optional = true }
 n0-watcher = { workspace = true, optional = true }
@@ -137,10 +140,6 @@ serde_json.workspace = true
 habilis-network-util = { path = "../habilis-network-util" }
 n0-error = "1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-# The browser test's timers and its concurrent JSEP join. Already in the
-# dependency closure via iroh on both targets; named here so the test target
-# does not rely on that.
-n0-future.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
