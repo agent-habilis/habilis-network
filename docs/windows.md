@@ -10,7 +10,7 @@ The target is Windows 11 x64 (`x86_64-pc-windows-msvc`).
 The port is done when all of these are true:
 
 - `cargo build`, `cargo clippy -- -D warnings` and `cargo test` pass for the workspace on Windows, with the default features (`host`, `mdns`, `dht`).
-- A `windows-latest` CI job is green.
+- The Windows CI jobs of [R11](#r11-windows-on-ci) run on every pull request, are required checks, and are green.
 - The agent-gossip scenario in [§6](#6-test-plan-on-a-real-windows-machine) passes on a real Windows machine, with a macOS or Linux peer.
 
 Backwards compatibility is not necessary.
@@ -145,12 +145,48 @@ Ctrl-c, `ctrl_break`, `ctrl_close`, `ctrl_logoff` and `ctrl_shutdown` (`tokio::s
 - Replace `touch -t` in `chunks/tests/origin.rs` with `File::set_modified`.
 - Make the path assertions in `util/lib.rs` and `ipc.rs` correct on each OS.
 
-### R11. CI
+### R11. Windows on CI
 
-- Add a `windows` job on `windows-latest` to `.github/workflows/ci.yml`.
-- It runs `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and `cargo task ffi`. The Linux job keeps `cargo fmt --check`.
-- Install CMake and NASM if `aws-lc-sys` needs them.
-- Steps that need bash stay on Linux.
+Windows tests run on CI for every change, so the port cannot break without a red check.
+The real machine of [§6](#6-test-plan-on-a-real-windows-machine) then tests only what CI cannot.
+
+**`ci.yml`: a `windows` job.**
+
+- The job runs on `windows-latest`, on every push and pull request, as the `check` job does.
+- It is a required check for `main`. It has no `continue-on-error`.
+- It runs the native steps of the Linux `check` job:
+
+  ```
+  cargo clippy --workspace --all-targets -- -D warnings
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --workspace
+  cargo test -p habilis-network --features blob
+  cargo test -p habilis-network-iroh-webrtc-transport --features native
+  cargo task ffi
+  ```
+
+- It also runs `bun install --frozen-lockfile` and `bun run test`. This tests `discover.ts` and the Node `isize` mapping on `win32`.
+- The Linux job keeps `cargo fmt --check`, `cargo doc` and the wasm32 steps.
+- Steps that need bash stay on Linux: `Clippy list names only functions` and the light-cycles web job.
+
+**A host lifecycle test.**
+Add `crates/habilis-network/tests/host_lifecycle.rs`.
+It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
+
+1. Start a node in `Cli` driver mode, with a runtime base in a temporary directory.
+2. IPC `Info` returns the node, and `active_endpoints` finds it.
+3. IPC `Quit` stops the node. The state file and the endpoint are gone.
+4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval.
+
+**Nightly and e2e.**
+
+- `matrix.yml`: add `windows-latest` next to `ubuntu-latest` with `strategy.matrix.os`.
+- `e2e.yml`: add `windows-latest` to the `stream` job with `strategy.matrix.os`.
+
+**Runner toolchain.**
+
+- Install NASM for `aws-lc-sys`, for example with `ilammy/setup-nasm`. CMake and the MSVC build tools are already on `windows-latest`.
+- Use `Swatinem/rust-cache`, as the other jobs do.
 
 ## 4. Requirements: agent-gossip
 
@@ -198,7 +234,11 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 
 ### G5. Distribution
 
-- Add a `windows-latest` job to CI, with a create, poll and leave smoke test.
+- Add a `windows-latest` job to CI. It builds, runs the tests, and runs a smoke test:
+  1. `agent-gossip create`, with `--owner-pid` set to the pid of the job shell.
+  2. `broadcast`, then `poll`.
+  3. `leave`. Then no `agent-gossip.exe` process stays, and the state file is gone.
+- Make the job a required check.
 - Add `x86_64-pc-windows-msvc` to `release.yml`, packaged as a `.zip`.
 - Add a Windows install route to the README. Homebrew does not cover Windows.
 
@@ -206,16 +246,18 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 
 Make one commit for each step where possible.
 
-1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`, or let CI do it. Then build on the Windows machine.
-2. **Runtime base and IPC (R2, R3).**
-3. **Process helpers, `Quit`, owner watch, console events (R4 to R7).**
-4. **State file and FFI ABI (R8, R9).**
-5. **CI (R11).**
+1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
+2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
+3. **Runtime base and IPC (R2, R3).** Add the `Info` and `active_endpoints` part of `host_lifecycle.rs`.
+4. **Process helpers, `Quit`, owner watch, console events (R4 to R7).** Add the `Quit` and owner-watch parts of `host_lifecycle.rs`.
+5. **State file and FFI ABI (R8, R9).**
 6. **agent-gossip (G0 to G5).**
 
 ## 6. Test plan on a real Windows machine
 
 The machine is Windows 11 x64.
+T1 to T4 also run on CI ([R11](#r11-windows-on-ci)). On the real machine, they confirm the CI result on a computer that is not a CI runner.
+T5 to T7 run only on the real machine.
 Run the commands in PowerShell unless the step says otherwise.
 Record each result as a checklist item in the PR #5 description.
 For each failure, attach the log from the log directory that `doctor` shows.
