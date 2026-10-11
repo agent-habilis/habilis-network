@@ -81,8 +81,186 @@ pub fn comm_of(pid: u32) -> Option<String> {
     Some(comm.trim_end().to_string())
 }
 
+/// The Windows process queries. A handle is an [`OwnedHandle`], so each one
+/// closes on every path out.
+#[cfg(windows)]
+mod windows {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, FILETIME, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+
+    /// 100 ns intervals from 1601-01-01 (`FILETIME`) to 1970-01-01.
+    const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+
+    /// `MAX_PATH` is not a limit of the image name that the kernel returns, so
+    /// the buffer holds the longest path that NTFS allows.
+    const IMAGE_NAME_UTF16_MAX: usize = 32_768;
+
+    #[expect(unsafe_code, reason = "OpenProcess FFI; no safe std wrapper exists")]
+    fn open(pid: u32) -> Option<OwnedHandle> {
+        // SAFETY: the arguments are plain values. The call returns a new handle,
+        // or null with the error in `GetLastError`.
+        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: `raw` is a handle that `OpenProcess` just made and nothing else
+        // owns or closes.
+        Some(unsafe { OwnedHandle::from_raw_handle(raw) })
+    }
+
+    /// Whether the process has not exited. A handle outlives its process, so an
+    /// exited process that someone still holds open is "gone" here, the same as
+    /// the zombie of the Unix twins.
+    #[expect(unsafe_code, reason = "GetExitCodeProcess FFI; no safe std wrapper")]
+    fn still_active(handle: &OwnedHandle) -> Option<bool> {
+        let mut code = 0_u32;
+        // SAFETY: `handle` is open for the call, and `code` is a valid pointer
+        // to one `u32`.
+        let ok = unsafe { GetExitCodeProcess(handle.as_raw_handle(), &raw mut code) };
+        (ok != 0).then(|| code == STILL_ACTIVE.cast_unsigned())
+    }
+
+    pub(super) fn is_alive(pid: u32) -> bool {
+        match open(pid) {
+            Some(handle) => still_active(&handle).unwrap_or(false),
+            // The twin of `EPERM`: a protected process refuses the query, and
+            // that refusal proves that it exists. A pid with no process gives
+            // `ERROR_INVALID_PARAMETER`.
+            None => {
+                std::io::Error::last_os_error().raw_os_error()
+                    == i32::try_from(ERROR_ACCESS_DENIED).ok()
+            }
+        }
+    }
+
+    /// The creation time, in microseconds since the Unix epoch.
+    #[expect(unsafe_code, reason = "GetProcessTimes FFI; no safe std wrapper")]
+    pub(super) fn live_start_time(pid: u32) -> Option<u64> {
+        let handle = open(pid)?;
+        if !still_active(&handle)? {
+            return None;
+        }
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: `handle` is open for the call, and the four pointers are valid
+        // and distinct. Only the creation time is read.
+        let ok = unsafe {
+            GetProcessTimes(
+                handle.as_raw_handle(),
+                &raw mut created,
+                &raw mut exited,
+                &raw mut kernel,
+                &raw mut user,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+        Some(ticks.saturating_sub(FILETIME_UNIX_EPOCH) / 10)
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "QueryFullProcessImageNameW FFI; no safe wrapper"
+    )]
+    pub(super) fn comm_of(pid: u32) -> Option<String> {
+        let handle = open(pid)?;
+        let mut buffer = vec![0_u16; IMAGE_NAME_UTF16_MAX];
+        let mut length = u32::try_from(buffer.len()).ok()?;
+        // SAFETY: `handle` is open for the call. `buffer` holds `length` code
+        // units, and the call writes at most that many, then sets `length` to the
+        // count that it wrote, with no terminator.
+        let ok = unsafe {
+            QueryFullProcessImageNameW(
+                handle.as_raw_handle(),
+                0,
+                buffer.as_mut_ptr(),
+                &raw mut length,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let image = String::from_utf16(buffer.get(..usize::try_from(length).ok()?)?).ok()?;
+        // The file stem, so `claude.exe` and `claude` compare equal: the Unix
+        // `comm` has no extension.
+        let stem = std::path::Path::new(&image).file_stem()?;
+        Some(stem.to_string_lossy().into_owned())
+    }
+
+    #[expect(unsafe_code, reason = "Toolhelp snapshot FFI; no safe std wrapper")]
+    pub(super) fn parent_of(pid: u32) -> Option<u32> {
+        // SAFETY: the arguments are plain values. The call returns a new
+        // snapshot handle, or `INVALID_HANDLE_VALUE`.
+        let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if raw == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        // SAFETY: `raw` is a handle that the call above just made and nothing
+        // else owns or closes.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: u32::try_from(size_of::<PROCESSENTRY32W>()).ok()?,
+            ..PROCESSENTRY32W::default()
+        };
+        // SAFETY: `snapshot` is open for the call, and `entry` is a valid pointer
+        // to a `PROCESSENTRY32W` with `dwSize` set, as the API requires.
+        let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
+        while more {
+            if entry.th32ProcessID == pid {
+                return Some(entry.th32ParentProcessID);
+            }
+            // SAFETY: as for `Process32FirstW` above.
+            more = unsafe { Process32NextW(snapshot.as_raw_handle(), &raw mut entry) } != 0;
+        }
+        None
+    }
+}
+
+#[cfg(windows)]
+#[must_use]
+pub fn parent_of(pid: u32) -> Option<u32> {
+    windows::parent_of(pid)
+}
+
+/// The start time of a live process, in microseconds since the epoch. `None`
+/// for a pid with no process, or one that has exited but is still held open.
+#[cfg(windows)]
+#[must_use]
+pub fn live_start_time(pid: u32) -> Option<u64> {
+    windows::live_start_time(pid)
+}
+
+/// The image name of the process without `.exe`. `None` when the process is not
+/// there, or is one that this user may not query.
+#[cfg(windows)]
+#[must_use]
+pub fn comm_of(pid: u32) -> Option<String> {
+    windows::comm_of(pid)
+}
+
+#[cfg(windows)]
+#[must_use]
+pub fn is_alive(pid: u32) -> bool {
+    windows::is_alive(pid)
+}
+
 /// Whether a process with this pid exists (regardless of whether we could
 /// signal it: `EPERM` still proves existence).
+#[cfg(unix)]
 #[expect(
     unsafe_code,
     reason = "libc::kill(pid, 0) FFI; no safe existence probe exists"
@@ -98,6 +276,7 @@ pub fn is_alive(pid: u32) -> bool {
 
 /// Ask a process to terminate (SIGTERM) — the graceful path: a mesh daemon
 /// catches it, broadcasts `left`, and removes its state file.
+#[cfg(unix)]
 #[expect(unsafe_code, reason = "libc::kill FFI; no safe wrapper")]
 /// # Errors
 /// Propagates the `kill(2)` failure — no such process, or no permission.
@@ -110,6 +289,17 @@ pub fn terminate(pid: u32) -> std::io::Result<()> {
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+/// Windows has no polite signal, and `TerminateProcess` is a hard kill that
+/// skips the `left` broadcast. The graceful stop is an IPC `Quit` command: R5
+/// of `docs/windows.md`, not built yet, so this returns an error.
+///
+/// # Errors
+/// Always [`std::io::ErrorKind::Unsupported`], until R5 lands.
+#[cfg(windows)]
+pub fn terminate(_pid: u32) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// Whether `ancestor` appears in `pid`'s parent chain (proper ancestors
@@ -144,6 +334,7 @@ mod tests {
         std::process::id()
     }
 
+    #[cfg(unix)]
     #[test]
     fn parent_of_self_is_our_ppid() {
         #[expect(unsafe_code, reason = "libc::getppid FFI; always succeeds")]

@@ -186,6 +186,9 @@ automerge = "0.10"
 sha2 = "0.10"
 rand = "0.9"
 libc = "0.2"
+# Windows only. Each member names the features its code uses; the root turns
+# none on. 0.61 is the version `Cargo.lock` already holds for iroh and tokio.
+windows-sys = "0.61"
 # Shared dev-deps (unit + integration tests, benches).
 proptest = "1.6"
 insta = "1"
