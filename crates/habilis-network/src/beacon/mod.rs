@@ -318,6 +318,19 @@ pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr>
     Some(addr.with_relay_url(params.bootstrap_relay.clone()?))
 }
 
+/// The entry of the rendezvous id in the book of the member endpoint after a claim: the direct
+/// addresses of the new holder, and what the mesh registered for the id by itself, a relay rung or
+/// the loopback ladder ([`rendezvous_addr`]). The addresses of a former holder are not in it. A
+/// member whose IP transports are cleared dials the bare id and can use only the registered part.
+fn holder_entry(holder: EndpointAddr, params: &RendezvousParams) -> EndpointAddr {
+    match rendezvous_addr(params) {
+        Some(registered) => {
+            EndpointAddr::from_parts(holder.id, holder.addrs.into_iter().chain(registered.addrs))
+        }
+        None => holder,
+    }
+}
+
 /// A public probe-before-claim running **off** the event loop.
 ///
 /// The probe answers one question — does a beacon already serve this
@@ -854,8 +867,9 @@ async fn claim(
     // in private mode (no lookup); a harmless direct hint in public.
     add_peer_addr(&book, peer.addr());
     // And the other way: our peer is the one that dials the rendezvous, and a
-    // public mesh without a relay rung gives it no lookup to find the id by.
-    replace_peer_addr(peer_book, endpoint.addr());
+    // public mesh without a relay rung gives it no lookup to find the id by. The entry keeps the
+    // relay rung or the ladder that the mesh registered, see `holder_entry`.
+    replace_peer_addr(peer_book, holder_entry(endpoint.addr(), params));
     let topic_id = params.topic_id;
 
     // Relay-monitor inputs. The monitor runs as its **own** task (below),
@@ -915,9 +929,9 @@ async fn claim(
 #[cfg(test)]
 mod tests {
     use super::{
-        Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, ensure,
-        foreign_sessions, oneshot, probe_verdict, releasable, rendezvous_addr, spawn_rival_probe,
-        verdict_of, watch, yields_to,
+        Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, claim,
+        ensure, foreign_sessions, holder_entry, oneshot, probe_verdict, releasable,
+        rendezvous_addr, spawn_rival_probe, verdict_of, watch, yields_to,
     };
 
     #[test]
@@ -1120,6 +1134,85 @@ mod tests {
             !errors.contains("Endpoint dropped without calling"),
             "the relay monitor's probe endpoint reached its drop open:\n{errors}"
         );
+    }
+
+    /// The claim writes the address of the new beacon into the book of the member endpoint. The
+    /// entry of the rendezvous id must keep what the mesh registered for it by itself, here every
+    /// rung of the ladder. A member that dials the bare id has only that registered address to use:
+    /// on a public mesh it is the relay rung, and a lane peer with its IP transports cleared finds
+    /// nothing else.
+    #[tokio::test]
+    async fn a_claim_keeps_the_rungs_the_mesh_registered_for_the_rendezvous() {
+        let sockets: Vec<_> = (0..2)
+            .map(|_| {
+                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .expect("a free loopback port")
+            })
+            .collect();
+        let rungs: Vec<u16> = sockets
+            .iter()
+            .map(|socket| socket.local_addr().expect("its address").port())
+            .collect();
+        drop(sockets);
+        let mut params = public_params();
+        params.bind_ports = rungs.clone();
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        crate::daemon::setup::register_rendezvous(&book, &params);
+        let mut beacon = None;
+
+        let claimed = claim(&params, &peer, &book, &mut beacon).await;
+
+        let entry = book
+            .get_endpoint_info(params.id)
+            .expect("an entry")
+            .into_endpoint_addr();
+        let kept: std::collections::BTreeSet<u16> =
+            entry.ip_addrs().map(std::net::SocketAddr::port).collect();
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        peer.close().await;
+        assert!(claimed, "a free rung is claimed");
+        for rung in rungs {
+            assert!(
+                kept.contains(&rung),
+                "the claim wrote over the rung {rung} that the mesh registered for the rendezvous: {kept:?}"
+            );
+        }
+    }
+
+    /// The entry after a claim holds the relay rung of the rendezvous and the direct addresses of
+    /// the new holder, and none of a former holder's. A lane peer, whose IP transports are cleared,
+    /// dials the bare id and can use only the relay rung.
+    #[test]
+    fn a_claim_keeps_the_relay_rung_of_the_rendezvous() {
+        let mut params = public_params();
+        params.bootstrap_relay = Some("https://relay.example/".parse().expect("relay url"));
+        let at = |port: u16| {
+            iroh::EndpointAddr::new(params.id).with_ip_addr(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+            )))
+        };
+        let book = iroh::address_lookup::memory::MemoryLookup::new();
+        crate::lookup::add_peer_addr(&book, at(4000));
+
+        crate::lookup::replace_peer_addr(&book, holder_entry(at(5000), &params));
+
+        let entry = book
+            .get_endpoint_info(params.id)
+            .expect("an entry")
+            .into_endpoint_addr();
+        assert!(
+            entry
+                .addrs
+                .iter()
+                .any(|addr| matches!(addr, iroh::TransportAddr::Relay(_))),
+            "the relay rung that the mesh registered is gone"
+        );
+        let ports: Vec<u16> = entry.ip_addrs().map(std::net::SocketAddr::port).collect();
+        assert_eq!(ports, vec![5000], "the address of a former holder stays");
     }
 
     #[test]
