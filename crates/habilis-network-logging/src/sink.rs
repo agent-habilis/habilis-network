@@ -54,16 +54,23 @@ fn rotate(path: &Path, reopen: impl FnOnce(&Path) -> io::Result<fs::File>) -> io
 }
 
 fn open_truncated(path: &Path) -> io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
+    open_private(path)
+}
 
-    fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        // Owner-only: the log records the mesh's nicknames, peers and (with
-        // `--log-raw`) message bodies, so it must not be world-readable.
-        .mode(0o600)
-        .open(path)
+/// Create or truncate `path` so that only its owner reads it. The log records
+/// the mesh's nicknames, peers and (with `--log-raw`) message bodies, so it
+/// must not be world-readable.
+fn open_private(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    // Unix: owner-only by mode. Windows has no mode bits: the file is private
+    // through the ACL that it inherits from the user's profile directory.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// Rotate the attached file once `written` reaches `max` (`max == 0`
@@ -134,16 +141,8 @@ impl LogSink {
         // is 0600, but a hijacked dir could still swap the file for an
         // attacker-owned one under create-truncate.)
         let base = habilis_network_util::logs::configured_base();
-        let opened =
-            habilis_network_util::ensure_parent_private(base.as_deref(), &path).and_then(|()| {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&path)
-            });
+        let opened = habilis_network_util::ensure_parent_private(base.as_deref(), &path)
+            .and_then(|()| open_private(&path));
         match opened {
             Ok(mut file) => {
                 let mut written = 0u64;
