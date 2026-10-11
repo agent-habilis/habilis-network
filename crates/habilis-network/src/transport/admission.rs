@@ -702,6 +702,32 @@ impl SignalAdmission {
         true
     }
 
+    /// The identity of `peer` has a new holder, or none: a round of this node that was started
+    /// against the previous holder cannot find the new one, and holds the slot for the whole round
+    /// deadline. End it, so that the next offer is made at once, and forget the wait that the
+    /// refusals of the previous holder earned. An aborted round never reaches its error branch, so
+    /// this records no wait of its own. Returns whether a round was ended.
+    pub(crate) fn cancel_round(&self, peer: EndpointId) -> bool {
+        let mut inner = self.lock();
+        inner.refused.forget(&peer);
+        let Some(slot) = inner
+            .slots
+            .get_mut(&peer)
+            .filter(|slot| slot.round.is_some())
+        else {
+            return false;
+        };
+        if let Some(Round::Running(abort)) = slot.round.take() {
+            abort.abort();
+        }
+        slot.epoch += 1;
+        slot.outgoing = false;
+        drop(inner);
+        tracing::debug!(target: super::LOG_TARGET, peer = %peer.fmt_short(), "cancelled the signalling round of a peer whose holder changed");
+        self.freed.notify_one();
+        true
+    }
+
     /// Record the task holding `peer`'s slot, so shutdown can cancel it.
     ///
     /// Separate from `try_admit` because the slot must be claimed *before* the
@@ -1130,6 +1156,34 @@ mod tests {
     /// these tests exercise the admission logic and nothing else.
     fn hub() -> WebRtcHandle {
         WebRtcHandle::new(WebRtcTransport::new(peer(0)))
+    }
+
+    /// A round that was started while the identity had no holder never finds the holder that comes
+    /// later, and held the slot for the whole round deadline: every later offer was refused
+    /// `InFlight`. Cancelling the round frees the slot, and the refusals of the old holder are forgotten.
+    #[tokio::test]
+    async fn a_cancelled_round_frees_the_slot_and_forgets_the_refusals() {
+        let admission = SignalAdmission::new(4);
+        let hub = hub();
+        let guard = admission.try_admit(peer(1), &hub).expect("a free slot");
+        let epoch = guard.epoch();
+        let task = n0_future::task::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        admission.track(peer(1), epoch, task.abort_handle());
+        admission.note_refused(peer(1));
+        assert!(matches!(
+            admission.try_admit(peer(1), &hub),
+            Err(Refusal::InFlight)
+        ));
+
+        assert!(admission.cancel_round(peer(1)), "a round was ended");
+
+        assert!(
+            admission.try_admit(peer(1), &hub).is_ok(),
+            "the slot is free and the old refusals are gone"
+        );
     }
 
     #[test]

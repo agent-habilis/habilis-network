@@ -40,7 +40,9 @@ use iroh_gossip::proto::TopicId;
 use n0_future::task::JoinHandle;
 use tokio::sync::{oneshot, watch};
 
-use crate::lookup::{TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect};
+use crate::lookup::{
+    TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect, replace_peer_addr,
+};
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
 use crate::util::tuning::{
     HEAL_PROBE_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_ATTEMPTS, RENDEZVOUS_PROBE_RETRY_MS,
@@ -817,7 +819,7 @@ async fn claim(
     add_peer_addr(&book, peer.addr());
     // And the other way: our peer is the one that dials the rendezvous, and a
     // public mesh without a relay rung gives it no lookup to find the id by.
-    add_peer_addr(peer_book, endpoint.addr());
+    replace_peer_addr(peer_book, endpoint.addr());
     let topic_id = params.topic_id;
 
     // Relay-monitor inputs. The monitor runs as its **own** task (below),

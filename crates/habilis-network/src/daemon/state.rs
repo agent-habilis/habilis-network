@@ -1281,6 +1281,15 @@ impl EventLoopState {
         }
     }
 
+    /// Somebody else now holds the rendezvous identity, or nobody does: a signalling round to it
+    /// that was started against the previous holder cannot find the new one, and holds the slot for
+    /// the whole round deadline. End it, so that the next offer is made at once.
+    pub(crate) fn cancel_rendezvous_round(&self) {
+        if let Some(rendezvous) = self.rendezvous_id {
+            self.webrtc_admission.cancel_round(rendezvous);
+        }
+    }
+
     /// A probe reported no direct path to `peer`. A peer that proved itself
     /// another way while the probe ran (its inbound graft landed), or that
     /// left meanwhile, keeps what it has.

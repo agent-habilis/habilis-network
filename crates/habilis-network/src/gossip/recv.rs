@@ -236,6 +236,9 @@ fn rendezvous_neighbor_down(
     if state.rendezvous_released {
         return;
     }
+    // The holder is gone, so a round that is still dialling it is moot, and its slot would refuse
+    // the re-offer below for the rest of the round deadline.
+    state.cancel_rendezvous_round();
     // A shed beacon takes its session table with it (the rival
     // re-check releases and re-claims the rendezvous on a fresh
     // endpoint), so a held session is stale the moment the link
@@ -2351,6 +2354,41 @@ mod first_contact_tests {
         assert!(state.reclaim_until.is_none(), "no loss, no reclaim");
         assert!(!state.rendezvous_wanted(), "no graft, no offer");
         node.endpoint.close().await;
+    }
+
+    /// The holder of the rendezvous is gone: a round that is still dialling it holds the slot, and
+    /// the re-offer that follows the `NeighborDown` would be refused `InFlight` for the rest of the
+    /// round deadline.
+    #[tokio::test]
+    async fn losing_the_rendezvous_ends_a_round_that_is_still_dialling_it() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_id = Some(ctx.rendezvous_id);
+        let hub = crate::lookup::new_webrtc_handle(node.endpoint.id());
+        let held_round = state
+            .webrtc_admission
+            .try_admit(ctx.rendezvous_id, &hub)
+            .expect("a free slot");
+        let epoch = held_round.epoch();
+        let task = n0_future::task::spawn(async move {
+            let _held_round = held_round;
+            std::future::pending::<()>().await;
+        });
+        state
+            .webrtc_admission
+            .track(ctx.rendezvous_id, epoch, task.abort_handle());
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        assert_eq!(state.webrtc_admission.in_flight(), 1);
+
+        feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
+
+        let round_running = state.webrtc_admission.in_flight() != 0;
+        node.endpoint.close().await;
+        assert!(
+            !round_running,
+            "the round to the lost holder still holds the slot of the rendezvous"
+        );
     }
 
     /// Losing a rendezvous we did not release still arms the reclaim: it may

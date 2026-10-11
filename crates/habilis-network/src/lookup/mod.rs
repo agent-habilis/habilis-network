@@ -987,8 +987,20 @@ pub fn address_book(endpoint: &Endpoint) -> MemoryLookup {
 /// Register a peer's address in the address book of the endpoint, so that the endpoint can
 /// connect to it by its id. The book is made by [`address_book`].
 pub fn add_peer_addr(book: &MemoryLookup, addr: EndpointAddr) {
+    let node = addr.id.fmt_short();
+    let ip_addrs: Vec<_> = addr.ip_addrs().copied().collect();
     book.add_endpoint_info(addr);
-    tracing::debug!(target: "habilis_network::lookup", "registered a direct peer address with the endpoint");
+    tracing::debug!(target: "habilis_network::lookup", %node, ?ip_addrs, "registered a direct peer address with the endpoint");
+}
+
+/// [`add_peer_addr`] for an identity that changes holder: the entry is replaced, not merged. A merge
+/// keeps the address of every beacon that this process held under the id, and a dial to the id
+/// then tries ports of beacons that are gone.
+pub(crate) fn replace_peer_addr(book: &MemoryLookup, addr: EndpointAddr) {
+    let node = addr.id.fmt_short();
+    let ip_addrs: Vec<_> = addr.ip_addrs().copied().collect();
+    book.set_endpoint_info(addr);
+    tracing::debug!(target: "habilis_network::lookup", %node, ?ip_addrs, "replaced the address of a peer in the endpoint's book");
 }
 
 /// Bounded `GOSSIP_ALPN` connect-probe. On a mesh whose relay is lookup
@@ -1143,6 +1155,40 @@ pub(crate) fn build_mesh(
 #[cfg(test)]
 mod tests {
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+
+    /// A merge kept the address of every beacon that this process held under the rendezvous id.
+    #[test]
+    fn replacing_a_peer_address_leaves_exactly_the_new_one() {
+        use super::{add_peer_addr, replace_peer_addr};
+
+        let book = iroh::address_lookup::memory::MemoryLookup::new();
+        let id = iroh::SecretKey::generate().public();
+        let at = |port: u16| {
+            iroh::EndpointAddr::new(id).with_ip_addr(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+            )))
+        };
+        add_peer_addr(&book, at(4000));
+
+        replace_peer_addr(&book, at(5000));
+
+        let ip_addrs: Vec<_> = book
+            .get_endpoint_info(id)
+            .expect("an entry")
+            .into_endpoint_addr()
+            .ip_addrs()
+            .copied()
+            .collect();
+        assert_eq!(
+            ip_addrs,
+            vec![std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                5000
+            ))],
+            "the book keeps the address of a beacon that is gone"
+        );
+    }
 
     #[test]
     fn the_mesh_policy_turns_off_the_paths_it_leaves_out() {

@@ -573,10 +573,20 @@ async fn dial_signal_round(
     // several seconds and costs us nothing.
     let offer = build_offer(local, handle, ice).await?;
 
-    let conn = endpoint
-        .connect(peer, MESH_WEBRTC_SIGNAL_ALPN)
-        .await
-        .context("dial the mesh WebRTC signal ALPN")?;
+    // The connect holds the peer's slot like every later step does, and an id that nobody serves
+    // never answers it: without its own bound the round lives to the round deadline.
+    let conn = match n0_future::time::timeout(
+        deadlines.exchange,
+        endpoint.connect(peer, MESH_WEBRTC_SIGNAL_ALPN),
+    )
+    .await
+    {
+        Ok(conn) => conn.context("dial the mesh WebRTC signal ALPN")?,
+        Err(_elapsed) => anyhow::bail!(
+            "dial of the mesh WebRTC signal ALPN of {remote} exceeded {:?}",
+            deadlines.exchange
+        ),
+    };
 
     // Any step of the exchange can be the one that trips over a refusal: a peer
     // at its cap closes as soon as it sees the connection, often before our
@@ -1028,15 +1038,19 @@ fn spawn_offer_round(
     let proven = state.direct_proven.clone();
     let pool = state.unicast_pool.clone();
     let epoch = guard.epoch();
+    let node = endpoint.id();
     let task = n0_future::task::spawn(async move {
         let _guard = guard;
+        let started = n0_future::time::Instant::now();
+        tracing::debug!(target: LOG_TARGET, node = %node.fmt_short(), %peer, book = ?book.get_endpoint_info(peer), "offer round started");
         if let Err(error) = Box::pin(dial_signal(&endpoint, &book, addr, &handle, ice)).await {
             if is_cap_refusal(&error) {
                 admission.note_refused(peer);
             }
-            tracing::debug!(target: LOG_TARGET, %peer, %error, "webrtc offer failed");
+            tracing::debug!(target: LOG_TARGET, %peer, %error, age_ms = started.elapsed().as_millis(), "webrtc offer failed");
             return;
         }
+        tracing::debug!(target: LOG_TARGET, node = %node.fmt_short(), %peer, age_ms = started.elapsed().as_millis(), "offer round ended: signalled");
         // The peer took the round: it is not refusing us, so its wait starts over.
         admission.note_success(peer);
         // A connection opened before the attach rides the session only after a connect.
@@ -2822,6 +2836,41 @@ mod tests {
         assert_eq!(client_hub.session_count(), 0);
 
         router.shutdown().await.expect("shutdown");
+        client.close().await;
+    }
+
+    /// An id that nobody serves never answers the connect, and the connect had no bound of its own:
+    /// the round held the slot of the peer for the whole round deadline, and every later offer was
+    /// refused `InFlight`. The connect now ends at the exchange deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dial_to_an_id_that_nobody_serves_ends_at_the_exchange_deadline() {
+        // Bound, and never read: packets to it vanish, and nothing answers.
+        let silent =
+            std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("a socket");
+        let nobody = EndpointAddr::new(SecretKey::generate().public())
+            .with_ip_addr(silent.local_addr().expect("its address"));
+        let (client, client_hub) = endpoint().await;
+        let deadlines = SignalDeadlines {
+            exchange: Duration::from_millis(400),
+            round: Duration::from_secs(8),
+        };
+        let started = n0_future::time::Instant::now();
+        let outcome = dial_signal_with(
+            &client,
+            &crate::lookup::address_book(&client),
+            nobody,
+            &client_hub,
+            deadlines,
+            IceProfile { host_only: true },
+        )
+        .await;
+
+        assert!(outcome.is_err(), "nobody answers");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the connect must end at the exchange deadline, not the round deadline: took {:?}",
+            started.elapsed()
+        );
         client.close().await;
     }
 

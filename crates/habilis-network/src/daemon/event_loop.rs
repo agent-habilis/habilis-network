@@ -37,8 +37,9 @@ use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::beacon_arm::{
-    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, probes_before_claim,
-    release_rendezvous, schedule_rival_recheck, shed_rival_beacon_if_due,
+    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, note_rival_holds,
+    offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
+    shed_rival_beacon_if_due,
 };
 use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
 use super::ctx::HandlerCtx;
@@ -863,11 +864,13 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
                         // The new rendezvous never dials us; the reclaim tick re-grafts it.
                         state.arm_reclaim(Instant::now());
+                        offer_to_the_new_holder(&mut state, &parts.ctx(&sender));
                     } else if found_rival {
                         // A rival holds the identity: this arbitration epoch is
                         // settled, so a later claim (the rival died) starts the
                         // re-check backoff from its brisk base again.
                         state.rival_recheck_rounds = 0;
+                        note_rival_holds(&mut state, &parts.ctx(&sender));
                     }
                 }
             }
