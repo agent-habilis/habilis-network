@@ -356,6 +356,7 @@ pub(super) fn shed_rival_beacon_if_due(
     state: &mut EventLoopState,
     arm: &CohostArm<'_>,
     rendezvous: &mut Option<beacon::Rendezvous>,
+    peer: EndpointId,
 ) -> bool {
     if rendezvous.is_none() || !rival_recheck_applies(arm.policy, arm.params.bind_ports.is_empty())
     {
@@ -369,14 +370,19 @@ pub(super) fn shed_rival_beacon_if_due(
     }
     let dependents = rendezvous
         .as_ref()
-        .map_or(0, beacon::Rendezvous::dependents);
-    if defer_shed(dependents, state.rival_recheck_deferrals) {
+        .map_or_else(beacon::Dependents::default, |held| held.dependents(peer));
+    if defer_shed(dependents.count(), state.rival_recheck_deferrals) {
         state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
         state.next_rival_recheck =
             Some(Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()));
         tracing::info!(
             target: "habilis_network::gossip",
-            dependents,
+            node = %peer.fmt_short(),
+            dependents = dependents.count(),
+            dependent_ids = ?dependents.foreign_ids(),
+            live_ids = ?dependents.live_ids(),
+            own_ids = ?dependents.own_ids(),
+            in_flight = dependents.in_flight,
             deferrals = state.rival_recheck_deferrals,
             "beacon rival re-check deferred: a data-channel peer is hanging off this beacon"
         );
@@ -385,6 +391,7 @@ pub(super) fn shed_rival_beacon_if_due(
     state.rival_recheck_deferrals = 0;
     tracing::info!(
         target: "habilis_network::gossip",
+        node = %peer.fmt_short(),
         "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
     );
     // `shed`, not a plain drop: the graceful endpoint close turns the
@@ -492,7 +499,8 @@ mod tests {
         assert!(!super::shed_rival_beacon_if_due(
             &mut state,
             &arm,
-            &mut rendezvous
+            &mut rendezvous,
+            iroh::SecretKey::generate().public(),
         ));
         assert!(rendezvous.is_some(), "the beacon is still held");
     }
@@ -518,7 +526,12 @@ mod tests {
         let (mut rendezvous, _round) = beacon_with_a_negotiating_tab(&params, endpoint);
         state.next_rival_recheck = Some(crate::util::clock::Instant::now());
         assert!(
-            !super::shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous),
+            !super::shed_rival_beacon_if_due(
+                &mut state,
+                &arm,
+                &mut rendezvous,
+                iroh::SecretKey::generate().public()
+            ),
             "the new beacon's first due shed must wait for its tab"
         );
         assert!(rendezvous.is_some(), "the beacon is still held");

@@ -129,13 +129,60 @@ type RendezvousLane = Option<(
     crate::transport::SignalAdmission,
 )>;
 
+/// The sessions in `live` whose remote is none of `own`. A member's own endpoints
+/// attach to its beacon's answerer as well, and no other peer hangs off the beacon
+/// through them: counted, they made each split holder defer its shed for the full wait.
+fn foreign_sessions(live: &[EndpointId], own: &[EndpointId]) -> Vec<EndpointId> {
+    live.iter()
+        .copied()
+        .filter(|id| !own.contains(id))
+        .collect()
+}
+
+/// Who hangs off a beacon's data channel: the sessions on its answerer, the endpoints that
+/// are ours, and the number of rounds still negotiating a session.
+#[derive(Debug, Default)]
+pub(crate) struct Dependents {
+    live: Vec<EndpointId>,
+    own: Vec<EndpointId>,
+    pub(crate) in_flight: usize,
+}
+
+impl Dependents {
+    pub(crate) fn count(&self) -> usize {
+        foreign_sessions(&self.live, &self.own).len() + self.in_flight
+    }
+
+    pub(crate) fn foreign_ids(&self) -> Vec<String> {
+        short_ids(&foreign_sessions(&self.live, &self.own))
+    }
+
+    pub(crate) fn live_ids(&self) -> Vec<String> {
+        short_ids(&self.live)
+    }
+
+    pub(crate) fn own_ids(&self) -> Vec<String> {
+        short_ids(&self.own)
+    }
+}
+
+fn short_ids(ids: &[EndpointId]) -> Vec<String> {
+    ids.iter().map(|id| id.fmt_short().to_string()).collect()
+}
+
 impl Rendezvous {
     /// How many peers depend on this beacon's data channel: sessions attached
-    /// to its answerer, plus rounds still negotiating one.
-    pub(crate) fn dependents(&self) -> usize {
-        self.lane.as_ref().map_or(0, |(handle, admission)| {
-            handle.session_count() + admission.in_flight()
-        })
+    /// to its answerer, plus rounds still negotiating one. `peer` is our own
+    /// member endpoint. `in_flight` does not name its peers, so a round counts
+    /// whoever it is with.
+    pub(crate) fn dependents(&self, peer: EndpointId) -> Dependents {
+        self.lane
+            .as_ref()
+            .map_or_else(Dependents::default, |(handle, admission)| Dependents {
+                live: handle.live_peer_ids(),
+                own: vec![peer, self.endpoint.id()],
+                in_flight: admission.in_flight(),
+            })
     }
 
     /// A beacon holding `endpoint` whose answerer is `lane`, for a test that
@@ -535,6 +582,7 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
 /// every rung foreign-squatted (≈0); the next tick retries.
 async fn build_rendezvous_endpoint(
     params: &RendezvousParams,
+    node: EndpointId,
 ) -> Option<(Endpoint, RendezvousLane)> {
     let lookups = beacon_lookups(params);
     if params.answers_jsep() {
@@ -566,7 +614,7 @@ async fn build_rendezvous_endpoint(
         .await
         .ok();
         if endpoint.is_some() {
-            tracing::info!(target: "habilis_network::beacon", "beacon assumed: bound public rendezvous endpoint (ephemeral port)");
+            tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(), "beacon assumed: bound public rendezvous endpoint (ephemeral port)");
         } else {
             tracing::debug!(target: "habilis_network::beacon", "public beacon endpoint build failed; next tick retries");
         }
@@ -589,7 +637,7 @@ async fn build_rendezvous_endpoint(
         )
         .await
         {
-            tracing::info!(target: "habilis_network::beacon", port, "beacon assumed: bound rendezvous ladder rung");
+            tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "beacon assumed: bound rendezvous ladder rung");
             // No `WebRTC` on the ladder: a loopback mesh has no browsers.
             verdict = Some((endpoint, None));
             break;
@@ -607,14 +655,14 @@ async fn build_rendezvous_endpoint(
             .ok();
         }
         let Some(prober) = prober.as_ref() else {
-            tracing::debug!(target: "habilis_network::beacon", "rung probe endpoint build failed; staying peer this tick");
+            tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "rung probe endpoint build failed; staying peer this tick");
             break;
         };
         if rung_serves_our_mesh(prober, params.id, port).await {
-            tracing::debug!(target: "habilis_network::beacon", port, "rung already serves our beacon; staying peer");
+            tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung already serves our beacon; staying peer");
             break;
         }
-        tracing::debug!(target: "habilis_network::beacon", port, "rung squatted by a foreign mesh; trying next rung");
+        tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung squatted by a foreign mesh; trying next rung");
     }
     if let Some(prober) = prober {
         // Closed, not dropped: a dropped endpoint reaches `Drop` open and
@@ -623,7 +671,7 @@ async fn build_rendezvous_endpoint(
         prober.close().await;
     }
     if verdict.is_none() {
-        tracing::debug!(target: "habilis_network::beacon", "no rendezvous ladder rung taken; staying peer");
+        tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "no rendezvous ladder rung taken; staying peer");
     }
     verdict
 }
@@ -688,7 +736,7 @@ pub(crate) async fn claim_after_probe(
     found_rival: bool,
 ) -> bool {
     if found_rival {
-        tracing::debug!(target: "habilis_network::beacon", "public rendezvous already served by a beacon; staying peer");
+        tracing::debug!(target: "habilis_network::beacon", node = %peer.id().fmt_short(), "public rendezvous already served by a beacon; staying peer");
         return false;
     }
     if !releasable(current) {
@@ -729,7 +777,7 @@ async fn claim(
     peer_book: &iroh::address_lookup::memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
 ) -> bool {
-    let Some((endpoint, lane)) = build_rendezvous_endpoint(params).await else {
+    let Some((endpoint, lane)) = build_rendezvous_endpoint(params, peer.id()).await else {
         // Public: endpoint build failed. Private: every ladder rung is
         // occupied — our mesh's beacon(s) already exist on the ladder
         // (joiners reach them by identity-checked dial). Either way,
@@ -816,7 +864,7 @@ async fn claim(
         crate::lookup::spawn_relay_monitor(monitor_endpoint, ladder, monitor_rung_tx, monitor_homed)
     });
 
-    tracing::info!(target: "habilis_network::beacon", "beacon role active: serving the rendezvous");
+    tracing::info!(target: "habilis_network::beacon", node = %peer.id().fmt_short(), "beacon role active: serving the rendezvous");
     *current = Some(Rendezvous {
         task,
         monitor,
@@ -830,8 +878,23 @@ async fn claim(
 mod tests {
     use super::{
         Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, ensure,
-        oneshot, probe_verdict, releasable, rendezvous_addr, spawn_rival_probe, verdict_of, watch,
+        foreign_sessions, oneshot, probe_verdict, releasable, rendezvous_addr, spawn_rival_probe,
+        verdict_of, watch,
     };
+
+    /// Observed on both holders of a split topic: the one session counted as a
+    /// dependent was the holder's own peer endpoint, so each deferred its shed
+    /// for the full wait and the split stayed.
+    #[test]
+    fn a_session_of_our_own_endpoints_is_no_dependent() {
+        let peer = SecretKey::generate().public();
+        let beacon = SecretKey::generate().public();
+        let tab = SecretKey::generate().public();
+        let own = [peer, beacon];
+
+        assert_eq!(foreign_sessions(&[peer, beacon], &own).len(), 0);
+        assert_eq!(foreign_sessions(&[peer, tab], &own), [tab]);
+    }
 
     /// A real endpoint that touches nothing: `LookupOpts::loopback` binds
     /// 127.0.0.1 with relay, mDNS, DHT and the portmapper all off, so these
