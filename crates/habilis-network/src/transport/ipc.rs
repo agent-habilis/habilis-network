@@ -19,8 +19,10 @@ use crate::util::tuning::{
 use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
 
 /// Returns the IPC endpoint identifier for a specific agent on a mesh —
-/// a filesystem socket path (the project targets Unix only). Lives in the
-/// mesh's runtime folder beside its `<nick>.tracing.log` / `<nick>.state.json`.
+/// a filesystem socket path, which is a Unix endpoint. Windows has no such
+/// path: its endpoint is a named pipe, and the name of it is R3 of
+/// `docs/windows.md`, not built yet. Lives in the mesh's runtime folder beside
+/// its `<nick>.tracing.log` / `<nick>.state.json`.
 pub(crate) fn socket_path(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> String {
     format!(
         "{}/{nickname}.ipc.sock",
