@@ -22,6 +22,9 @@
 //!   (random) one message to each of 3 to 5 random peers.
 //! - `MESH_FLOOD_PEERS=K`: from the second 30 on, the node sends messages of 3000 bytes to its first
 //!   K roster peers as fast as it can. The RSS against K is the worst case of one connection.
+//! - `MESH_FLOOD_SENDERS=S`: with `MESH_FLOOD_PEERS`, only the nodes with `MESH_NODE_INDEX` up to S
+//!   flood (`scripts/perf/run.sh` sets the index). The others only receive. Each line then ends
+//!   with `role sender` or `role receiver`. Unset, every node floods and the line has no role.
 //! - `MESH_BLOCK_UDP_AFTER_SECS=60`: after that many seconds the node takes IP away
 //!   from every connection of the process, once. This is the second phase of the
 //!   underlay measurement: the app endpoint and the underlay fall back to `WebRTC`.
@@ -56,6 +59,21 @@ fn env_number(name: &str) -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0)
+}
+
+/// How many peers this node floods, and the suffix that tells its role on the output line. A node
+/// that is not a sender floods none. Unset `MESH_FLOOD_SENDERS` makes every node a sender and
+/// leaves the line without a role.
+fn flood_plan() -> (usize, &'static str) {
+    let peers = usize::try_from(env_number("MESH_FLOOD_PEERS")).unwrap_or(0);
+    let senders = std::env::var("MESH_FLOOD_SENDERS")
+        .ok()
+        .and_then(|senders| senders.parse::<u64>().ok());
+    match senders {
+        Some(limit) if env_number("MESH_NODE_INDEX") <= limit => (peers, " role sender"),
+        Some(_) => (0, " role receiver"),
+        None => (peers, ""),
+    }
 }
 
 /// The transport list of the mesh the creator mints.
@@ -182,8 +200,7 @@ async fn talk(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -191,12 +208,38 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// Take IP away from every connection of the process. The node's answer does not matter.
+async fn block_udp(sender: &mpsc::Sender<Request>) {
+    let (reply, _) = oneshot::channel();
+    let _ = sender
+        .send(Request::BlockUdp {
+            blocked: true,
+            reply,
+        })
+        .await;
+}
+
+/// The redial counters of the node, all zero when the node is gone.
+async fn redial_counts(sender: &mpsc::Sender<Request>) -> [u64; 6] {
+    let (reply, answer) = oneshot::channel();
+    if sender.send(Request::RedialCounts { reply }).await.is_ok() {
+        answer.await.unwrap_or([0; 6])
+    } else {
+        [0; 6]
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    init_logging();
 
     let traffic = std::env::var("MESH_TRAFFIC").as_deref() != Ok("off");
     let block_udp_after = Some(env_number("MESH_BLOCK_UDP_AFTER_SECS")).filter(|secs| *secs > 0);
     let traffic_until = Some(env_number("MESH_TRAFFIC_UNTIL_SECS")).filter(|secs| *secs > 0);
     let bursty = std::env::var("MESH_TRAFFIC_BURSTY").as_deref() == Ok("1");
-    let flood_peers = usize::try_from(env_number("MESH_FLOOD_PEERS")).unwrap_or(0);
+    let (flood_peers, role) = flood_plan();
     let mut flooding = false;
     if std::env::var("MESH_UNDERLAY_LEG").as_deref() == Ok("off") {
         habilis_network::net::set_underlay_leg_off(true);
@@ -260,13 +303,7 @@ async fn main() -> anyhow::Result<()> {
                 && elapsed >= after
             {
                 blocked = true;
-                let (reply, _) = oneshot::channel();
-                let _ = sender
-                    .send(Request::BlockUdp {
-                        blocked: true,
-                        reply,
-                    })
-                    .await;
+                block_udp(&sender).await;
             }
             let Some((nicks, links)) = roster(&sender).await else {
                 break;
@@ -281,14 +318,9 @@ async fn main() -> anyhow::Result<()> {
             let underlay = count(&sender, |reply| Request::UnderlaySessions { reply }).await;
             let idle_sessions =
                 count(&sender, |reply| Request::SessionsToNonNeighbors { reply }).await;
-            let (reply, answer) = oneshot::channel();
-            let redials = if sender.send(Request::RedialCounts { reply }).await.is_ok() {
-                answer.await.unwrap_or([0; 6])
-            } else {
-                [0; 6]
-            };
+            let redials = redial_counts(&sender).await;
             println!(
-                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions} qclose {} qredial {} sclose {} sredial {} pclose {} predial {}",
+                "t {elapsed} phase {} peers {} links {links} sessions {} underlay {underlay} rss_mb {} idle_sessions {idle_sessions} qclose {} qredial {} sclose {} sredial {} pclose {} predial {}{role}",
                 if blocked { 2 } else { 1 },
                 nicks.len(),
                 webrtc.session_count(),

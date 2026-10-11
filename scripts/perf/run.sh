@@ -18,7 +18,7 @@ export MESH_TRAFFIC=${MESH_TRAFFIC:-on}
 HERE=$(cd "$(dirname "$0")" && pwd)
 python3 "$HERE/canary.py" "$OUT/canary.log" & CAN=$!
 PIDFILE="$OUT/pids"; : > "$PIDFILE"
-"$BIN" > "$OUT/n1.out" 2> "$OUT/n1.err" & echo "1 $!" >> "$PIDFILE"
+MESH_NODE_INDEX=1 "$BIN" > "$OUT/n1.out" 2> "$OUT/n1.err" & echo "1 $!" >> "$PIDFILE"
 for _ in $(seq 1 60); do ID=$(sed -n 's/^mesh *//p' "$OUT/n1.out"); [ -n "$ID" ] && break; sleep 0.5; done
 [ -z "$ID" ] && { echo "creator gave no id"; kill $CAN; exit 1; }
 (
@@ -39,7 +39,7 @@ for _ in $(seq 1 60); do ID=$(sed -n 's/^mesh *//p' "$OUT/n1.out"); [ -n "$ID" ]
   done
 ) & SAM=$!
 for i in $(seq 2 "$N"); do
-  "$BIN" "$ID" > "$OUT/n$i.out" 2> "$OUT/n$i.err" & echo "$i $!" >> "$PIDFILE"
+  MESH_NODE_INDEX=$i "$BIN" "$ID" > "$OUT/n$i.out" 2> "$OUT/n$i.err" & echo "$i $!" >> "$PIDFILE"
   sleep "${STAGGER:-0.3}"
 done
 sleep "$STEADY"
