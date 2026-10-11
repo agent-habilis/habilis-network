@@ -6,11 +6,13 @@
 //! connections, and a lane pair. `crates/habilis-network/tests/gossip_only.rs` runs the
 //! features over the gossip rung between two members with no other path.
 //! `crates/habilis-network/tests/first_broadcast_after_join_loopback.rs` sends a broadcast
-//! right after join and watches when the creator gets it. Every test of the four files is
-//! `#[ignore]`, because each stands up several real members and must not run next to
-//! another test, so a full run takes a while. The gate runs two cells by name (a row of
-//! [`crate::gate::STEPS`]). This
-//! task runs them all, and the nightly workflow runs this task.
+//! right after join and watches when the creator gets it.
+//! `crates/habilis-network/tests/simultaneous_topic_start.rs` starts members of one topic
+//! room at the same moment, many rounds in a row, and checks that they become one mesh.
+//! Every test of the five files is `#[ignore]`, because each stands up several real members
+//! and must not run next to another test, so a full run takes a while. The gate runs two
+//! cells by name (a row of [`crate::gate::STEPS`]). This task runs them all, and the nightly
+//! workflow runs this task.
 //!
 //! One test thread: the cells share the process-wide block tables, and a cell
 //! that takes IP away from a node must not meet another cell on the same host.
@@ -21,11 +23,12 @@ use crate::TaskOutcome;
 use crate::util::output;
 
 /// The test binaries of the run, in order. Each is `#[ignore]` throughout.
-const TESTS: [&str; 4] = [
+const TESTS: [&str; 5] = [
     "send_ladder_matrix",
     "d11_gate_loopback",
     "gossip_only",
     "first_broadcast_after_join_loopback",
+    "simultaneous_topic_start",
 ];
 
 pub(crate) fn run(sh: &Shell, list: bool) -> TaskOutcome {
