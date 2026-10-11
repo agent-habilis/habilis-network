@@ -66,6 +66,15 @@ pub(crate) fn chrome_for_testing() -> Result<PathBuf, Skip> {
         ("macos", "aarch64") => "mac-arm64",
         ("macos", _) => "mac-x64",
         ("linux", _) => "linux64",
+        // The download below unpacks with `unzip`, which Windows does not have,
+        // so there is no `win64` build here. Set `$CHROME_FOR_TESTING` to a
+        // Chrome that is already installed (R10).
+        ("windows", _) => {
+            return Err(Skip(
+                "no Chrome for Testing download on Windows (it needs unzip) — set $CHROME_FOR_TESTING"
+                    .to_owned(),
+            ));
+        }
         (os, arch) => return Err(Skip(format!("no Chrome for Testing build for {os}/{arch}"))),
     };
     let root = PathBuf::from(concat!(

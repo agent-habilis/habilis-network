@@ -59,11 +59,7 @@ fn locate(env_var: &str, binary: &str) -> Option<PathBuf> {
     {
         return Some(path);
     }
-    let found = Command::new("which").arg(binary).output().ok()?;
-    found
-        .status
-        .success()
-        .then(|| PathBuf::from(String::from_utf8_lossy(&found.stdout).trim().to_owned()))
+    which::which(binary).ok()
 }
 
 impl Driver {
