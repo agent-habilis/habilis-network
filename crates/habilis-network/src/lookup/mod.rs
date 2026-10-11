@@ -880,7 +880,7 @@ pub(crate) async fn build_peer_multihop_with(
     let underlay_leg = underlay_cap.filter(|_| opts.webrtc).map(|cap| {
         (
             new_webrtc_handle(underlay_secret.public()),
-            crate::transport::SignalAdmission::new(cap),
+            crate::transport::SignalAdmission::new_route_table(cap),
         )
     });
     let underlay = build_endpoint(

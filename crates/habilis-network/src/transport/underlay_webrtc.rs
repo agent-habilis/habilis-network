@@ -32,7 +32,9 @@ pub(crate) struct Plan {
     pub(crate) detach: Vec<EndpointId>,
 }
 
-/// Decide the sessions of the underlay. `wanted` are the underlay ids of the
+/// Decide the sessions of the underlay. `room` is how many new offers the table of sessions admits
+/// now (see `SignalAdmission::room`): the lowest ids that are wanted go first, and the others wait for
+/// a later tick. `wanted` are the underlay ids of the
 /// neighbors that need a session (see [`wanted_underlays`]), and `kept` those whose session
 /// stays, that is every neighbor that is not on IP; `held` are the ids with a live
 /// session, and `local` is our own underlay id. The lower id dials, so exactly one
@@ -45,6 +47,7 @@ pub(crate) fn plan(
     wanted: &[EndpointId],
     kept: &[EndpointId],
     held: &[EndpointId],
+    room: usize,
 ) -> Plan {
     let mut dial: Vec<EndpointId> = wanted
         .iter()
@@ -53,6 +56,7 @@ pub(crate) fn plan(
         .collect();
     // Sorted, so that a cap that bites picks the same peers on each run.
     dial.sort_unstable();
+    dial.truncate(room);
     let detach = held
         .iter()
         .copied()
@@ -194,7 +198,13 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
     let wanted: Vec<EndpointId> = wanted_addrs.iter().map(|addr| addr.id).collect();
     let kept = kept_underlays(&neighbors, |member| state.pair_path_kind(member));
     let held = underlay.handle.live_peer_ids();
-    let Plan { dial, detach } = plan(underlay.endpoint.id(), &wanted, &kept, &held);
+    let Plan { dial, detach } = plan(
+        underlay.endpoint.id(),
+        &wanted,
+        &kept,
+        &held,
+        underlay.admission.room(),
+    );
     tracing::debug!(
         target: LOG_TARGET,
         local = %underlay.endpoint.id().fmt_short(),
@@ -316,7 +326,7 @@ mod tests {
     fn the_lower_id_dials_a_wanted_neighbor_with_no_session() {
         let (low, high) = ordered();
         assert_eq!(
-            plan(low, &[high], &[high], &[]),
+            plan(low, &[high], &[high], &[], usize::MAX),
             Plan {
                 dial: vec![high],
                 detach: vec![]
@@ -327,20 +337,23 @@ mod tests {
     #[test]
     fn the_higher_id_waits_to_be_dialed() {
         let (low, high) = ordered();
-        assert_eq!(plan(high, &[low], &[low], &[]), Plan::default());
+        assert_eq!(plan(high, &[low], &[low], &[], usize::MAX), Plan::default());
     }
 
     #[test]
     fn a_neighbor_that_has_a_session_is_not_dialed_again() {
         let (low, high) = ordered();
-        assert_eq!(plan(low, &[high], &[high], &[high]), Plan::default());
+        assert_eq!(
+            plan(low, &[high], &[high], &[high], usize::MAX),
+            Plan::default()
+        );
     }
 
     #[test]
     fn a_session_with_a_peer_that_is_not_kept_is_detached() {
         let (low, high) = ordered();
         assert_eq!(
-            plan(low, &[], &[], &[high]),
+            plan(low, &[], &[], &[high], usize::MAX),
             Plan {
                 dial: vec![],
                 detach: vec![high]
@@ -351,7 +364,10 @@ mod tests {
     #[test]
     fn a_session_with_a_kept_peer_stays_even_when_it_is_not_wanted() {
         let (low, high) = ordered();
-        assert_eq!(plan(low, &[], &[high], &[high]), Plan::default());
+        assert_eq!(
+            plan(low, &[], &[high], &[high], usize::MAX),
+            Plan::default()
+        );
     }
 
     fn neighbor_kinds(
@@ -416,8 +432,11 @@ mod tests {
     #[test]
     fn the_higher_underlay_id_wants_a_session_and_does_not_dial() {
         let (low, high) = ordered();
-        assert_eq!(plan(high, &[low], &[low], &[]), Plan::default());
-        assert_eq!(plan(low, &[high], &[high], &[]).dial, vec![high]);
+        assert_eq!(plan(high, &[low], &[low], &[], usize::MAX), Plan::default());
+        assert_eq!(
+            plan(low, &[high], &[high], &[], usize::MAX).dial,
+            vec![high]
+        );
     }
 
     /// A node without `udp` has no IP on its underlay: the session is the only path to every
@@ -458,15 +477,26 @@ mod tests {
             |kind_of: &dyn Fn(EndpointId) -> Option<PathKind>| kept_underlays(&neighbor, kind_of);
 
         let on_webrtc = kept_with(&neighbor_kinds(member, other, other));
-        assert_eq!(plan(low, &[], &on_webrtc, &[high]), Plan::default());
+        assert_eq!(
+            plan(low, &[], &on_webrtc, &[high], usize::MAX),
+            Plan::default()
+        );
         let unread = kept_with(&neighbor_kinds(other, other, other));
-        assert_eq!(plan(low, &[], &unread, &[high]), Plan::default(), "unread");
+        assert_eq!(
+            plan(low, &[], &unread, &[high], usize::MAX),
+            Plan::default(),
+            "unread"
+        );
         let on_relay = kept_with(&neighbor_kinds(other, other, member));
-        assert_eq!(plan(low, &[], &on_relay, &[high]), Plan::default(), "relay");
+        assert_eq!(
+            plan(low, &[], &on_relay, &[high], usize::MAX),
+            Plan::default(),
+            "relay"
+        );
 
         let on_ip = kept_with(&neighbor_kinds(other, member, other));
         assert_eq!(
-            plan(low, &[], &on_ip, &[high]),
+            plan(low, &[], &on_ip, &[high], usize::MAX),
             Plan {
                 dial: vec![],
                 detach: vec![high]
@@ -476,13 +506,26 @@ mod tests {
 
         let left = kept_underlays(&[], neighbor_kinds(member, other, other));
         assert_eq!(
-            plan(low, &[], &left, &[high]),
+            plan(low, &[], &left, &[high], usize::MAX),
             Plan {
                 dial: vec![],
                 detach: vec![high]
             },
             "the member left the roster"
         );
+    }
+
+    #[test]
+    fn plan_dials_the_lowest_ids_that_the_room_allows() {
+        let mut ids: Vec<EndpointId> = (1..=4).map(id).collect();
+        ids.sort_unstable();
+        let (low, higher) = (ids[0], ids[1..].to_vec());
+        let all = plan(low, &higher, &higher, &[], usize::MAX);
+        assert_eq!(all.dial, higher, "no limit: every wanted id above ours");
+        let one = plan(low, &higher, &higher, &[], 1);
+        assert_eq!(one.dial, higher[..1].to_vec(), "room 1: the lowest id");
+        let none = plan(low, &higher, &higher, &[], 0);
+        assert!(none.dial.is_empty(), "no room: no offer");
     }
 
     async fn loopback_endpoint() -> Endpoint {

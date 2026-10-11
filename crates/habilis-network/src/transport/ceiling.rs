@@ -107,6 +107,10 @@ pub(crate) struct Admission {
 #[derive(Debug)]
 pub(crate) struct Ceiling {
     cap: usize,
+    /// Whether an admission above the cap evicts the least recently used peer. The cache of the
+    /// application evicts; the sessions of the underlay are route edges, which are not evicted: its
+    /// table refuses a newcomer at the cap instead (see `SignalAdmission::new_route_table`).
+    evicts: bool,
     entries: HashMap<EndpointId, Entry>,
     neighbors: HashSet<EndpointId>,
     last_batch: Option<Instant>,
@@ -116,10 +120,29 @@ impl Ceiling {
     pub(crate) fn new(cap: usize) -> Self {
         Self {
             cap,
+            evicts: true,
             entries: HashMap::new(),
             neighbors: HashSet::new(),
             last_batch: None,
         }
+    }
+
+    /// A ceiling that evicts nothing: the table that owns it refuses at the cap.
+    pub(crate) fn refusing(cap: usize) -> Self {
+        Self {
+            evicts: false,
+            ..Self::new(cap)
+        }
+    }
+
+    /// Whether the table refuses a newcomer at the cap, and evicts nobody.
+    pub(crate) fn refuses(&self) -> bool {
+        !self.evicts
+    }
+
+    /// Whether `peer` already counts against the ceiling.
+    pub(crate) fn holds(&self, peer: EndpointId) -> bool {
+        self.entries.get(&peer).is_some_and(Entry::counted)
     }
 
     /// When `peer` was last used, for a test.
@@ -267,6 +290,9 @@ impl Ceiling {
 
     /// `peer` became a unit at `now`: the victims that keep the ceiling.
     fn admit(&mut self, peer: EndpointId, now: Instant) -> Admission {
+        if !self.evicts {
+            return Admission::default();
+        }
         let units = self.units();
         let need = units.saturating_sub(self.cap);
         if need == 0 {
@@ -516,6 +542,28 @@ mod tests {
                 ceiling.units()
             );
         }
+    }
+
+    #[test]
+    fn a_refusing_ceiling_evicts_nobody_above_its_cap() {
+        let start = Instant::now();
+        let mut ceiling = Ceiling::refusing(2);
+        for byte in 1..=4 {
+            let admission = ceiling.register_session(endpoint_id(byte), start);
+            assert!(
+                admission.evict.is_empty(),
+                "peer {byte}: nothing is evicted"
+            );
+        }
+        assert_eq!(ceiling.units(), 4, "the count passes the cap, no victim");
+        assert!(ceiling.refuses());
+        assert!(ceiling.holds(endpoint_id(1)));
+        assert!(!ceiling.holds(endpoint_id(9)));
+        let mut cache = Ceiling::new(2);
+        cache.register_session(endpoint_id(1), start);
+        cache.register_session(endpoint_id(2), start);
+        let admission = cache.register_session(endpoint_id(3), start);
+        assert_eq!(admission.evict.len(), 1, "the cache evicts, as before");
     }
 
     #[test]

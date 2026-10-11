@@ -139,6 +139,9 @@ pub(crate) enum Refusal {
     ShuttingDown,
     /// A test denied this peer: no round with it, offered or answered.
     Denied,
+    /// The table of a route edge is at its cap: the units and the rounds in flight reach it, and
+    /// nobody is evicted for a newcomer. The offerer waits as for any cap refusal.
+    AtCapacity,
 }
 
 /// What the table needs from a `WebRTC` hub. A trait so a test can stand in
@@ -427,6 +430,26 @@ pub struct SignalAdmission {
 }
 
 impl SignalAdmission {
+    /// The table of the sessions of the underlay. A session there is a route edge, not a cache
+    /// entry: at the cap it refuses a newcomer and evicts nobody, so a route that other members use
+    /// does not end because a node learned of one more. Above the cap a pair has no session and
+    /// routes through others.
+    #[must_use]
+    pub fn new_route_table(cap: usize) -> Self {
+        let table = Self::new(cap);
+        table.lock().ceiling = super::ceiling::Ceiling::refusing(cap);
+        table
+    }
+
+    /// How many new rounds the table admits now: the cap less the units and the rounds in flight.
+    #[cfg(any(feature = "multihop", test))]
+    #[must_use]
+    pub(crate) fn room(&self) -> usize {
+        let inner = self.lock();
+        self.cap
+            .saturating_sub(inner.ceiling.units() + inner.rounds_in_flight())
+    }
+
     #[must_use]
     pub fn new(cap: usize) -> Self {
         Self {
@@ -607,6 +630,12 @@ impl SignalAdmission {
         // Only the offer of the peer: our own offer, from a frame that is held for it, is a send.
         if !outgoing && inner.we_evicted.holds(&peer, now) {
             return Err(Refusal::Evicted);
+        }
+        if inner.ceiling.refuses()
+            && !inner.ceiling.holds(peer)
+            && inner.ceiling.units() + inner.rounds_in_flight() >= self.cap
+        {
+            return Err(Refusal::AtCapacity);
         }
         if inner.hub.is_none() {
             inner.hub = Some(Arc::new(handle.clone()));
@@ -1161,6 +1190,38 @@ mod tests {
         let _one = admission.try_admit(peer(1), &hub).expect("first admit");
         let _two = admission.try_admit(peer(2), &hub).expect("second admit");
         assert!(admission.try_admit(peer(3), &hub).is_ok());
+    }
+
+    /// The table of the underlay is a route table: at its cap it refuses and evicts nobody.
+    #[test]
+    fn a_route_table_refuses_at_its_cap_and_evicts_nobody() {
+        let admission = SignalAdmission::new_route_table(2);
+        let hub = hub();
+        assert_eq!(admission.room(), 2);
+        let one = admission.try_admit(peer(1), &hub).expect("first admit");
+        let two = admission.try_admit(peer(2), &hub).expect("second admit");
+        assert_eq!(admission.room(), 0, "the rounds in flight count");
+        assert_eq!(
+            admission.try_admit(peer(3), &hub).unwrap_err(),
+            Refusal::AtCapacity
+        );
+        // The first round ends in a session: its unit counts, and the third peer is still refused.
+        admission.note_success(peer(1));
+        drop(one);
+        assert_eq!(admission.room(), 0, "one unit and one round in flight");
+        assert_eq!(
+            admission.try_admit(peer(3), &hub).unwrap_err(),
+            Refusal::AtCapacity
+        );
+        // The second round fails: its room is free again, and nobody was evicted.
+        drop(two);
+        assert_eq!(admission.room(), 1);
+        let _three = admission.try_admit(peer(3), &hub).expect("room again");
+        assert_eq!(
+            admission.try_admit(peer(4), &hub).unwrap_err(),
+            Refusal::AtCapacity
+        );
+        assert_eq!(admission.direct_units(), 1, "nothing was evicted");
     }
 
     #[test]
