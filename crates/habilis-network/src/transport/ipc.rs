@@ -110,6 +110,10 @@ pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -
     // mesh/meta state — with no bearer token (unlike the localhost HTTP TCP
     // binding). Restrict it to the owner. The 0700 base already blocks other
     // users; this is defense in depth against a permissive umask on the socket.
+    // Windows has no mode bits: its endpoint is a named pipe, and a security
+    // descriptor that grants only the current user SID takes the place of this
+    // block. That is R3 of `docs/windows.md`, not built yet.
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
@@ -398,10 +402,21 @@ mod tests {
     fn socket_path_format() {
         let mesh = MeshId::from("abcdefghijkmnpqr");
         let base = test_base();
-        let path = socket_path(&base, &mesh, &Nickname::from("my-nick"));
-        assert!(path.starts_with(&*base.to_string_lossy()));
-        assert!(path.ends_with("/my-nick.ipc.sock"));
-        assert!(path.contains(&crate::util::mesh_prefix(mesh.as_str())));
+        let shown = socket_path(&base, &mesh, &Nickname::from("my-nick"));
+        // By component, so the separator of the OS does not matter.
+        let path = std::path::Path::new(&shown);
+        assert!(path.starts_with(&base), "{shown}");
+        assert_eq!(
+            path.file_name(),
+            Some(std::ffi::OsStr::new("my-nick.ipc.sock"))
+        );
+        let folder = path.parent().and_then(std::path::Path::file_name);
+        assert_eq!(
+            folder,
+            Some(std::ffi::OsStr::new(&crate::util::mesh_prefix(
+                mesh.as_str()
+            )))
+        );
     }
 
     // ── property-based tests ───────────────────────────────────────
