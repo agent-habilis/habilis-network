@@ -95,6 +95,7 @@ pub async fn run<A: NodeDriver>(
         multihop,
         #[cfg(feature = "multihop")]
         underlay_webrtc,
+        lan_contacts,
         webrtc,
         webrtc_enabled,
         local_udp_transport,
@@ -380,6 +381,7 @@ pub async fn run<A: NodeDriver>(
         exit_on_quit,
         http_rx,
         unicast_rx: Some(unicast_rx),
+        lan_contacts,
         direct_rx,
         path_rx,
     }))
@@ -555,6 +557,9 @@ struct EventLoop<A: NodeDriver> {
     /// `gossip::ingest` (same validation + dedup path as gossip). `Option` so
     /// the `select!` arm can disable itself if the channel ever closes.
     unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+    /// The members of this mesh that the LAN announces (`gossip::lan`). `Option` so the arm is
+    /// off without an mDNS handle and when the channel closes.
+    lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
     /// Direct-path probe verdicts (`transport::probe`). Never closes: `state`
     /// holds a sender for the loop's lifetime.
     direct_rx: mpsc::UnboundedReceiver<crate::transport::probe::DirectOutcome>,
@@ -613,6 +618,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         exit_on_quit,
         mut http_rx,
         mut unicast_rx,
+        mut lan_contacts,
         mut direct_rx,
         mut path_rx,
     } = loop_state;
@@ -744,6 +750,14 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 let ctx = parts.ctx(&sender);
                 route_wake_arm(&mut state, &ctx);
             }
+            lan_event = recv_opt(&mut lan_contacts) => match lan_event {
+                None => lan_contacts = None,
+                Some(event) => {
+                    state.idle.external += 1;
+                    let ctx = parts.ctx(&sender);
+                    gossip::lan::on_lan_event(event, &mut state, &ctx).await;
+                }
+            },
             Some(address) = address_changes.next() => {
                 state.idle.external += 1;
                 if state.address_flood_due(&address) {

@@ -178,6 +178,9 @@ pub struct EventLoopConfig {
     /// injected endpoint, whose underlay the caller built.
     #[cfg(feature = "multihop")]
     pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    /// The members of this mesh that the LAN announces, read by the event loop. `None` when the
+    /// endpoint has no mDNS handle: there is no LAN arm then.
+    pub(crate) lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
     /// This peer's `WebRTC` transport handle. Portable: it is the browser's
     /// only direct path onto the mesh, and an extra candidate path for a native
     /// peer. `run()` moves it into `EventLoopState::webrtc`.

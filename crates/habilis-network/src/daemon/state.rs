@@ -421,6 +421,8 @@ pub struct EventLoopState {
     /// [`crate::transport::underlay_webrtc`].
     #[cfg(feature = "multihop")]
     pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    /// What this node already asked of the members it heard on the LAN.
+    pub(crate) lan_grafts: crate::gossip::lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
     /// endpoint. Portable — it is the browser's only direct path, and an
     /// opportunistic extra one for a native peer. `None` on the beacon.
@@ -855,6 +857,7 @@ impl EventLoopState {
             multihop: None,
             #[cfg(feature = "multihop")]
             underlay_webrtc: None,
+            lan_grafts: crate::gossip::lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,
             address_book,

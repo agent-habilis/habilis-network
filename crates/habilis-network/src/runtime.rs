@@ -19,6 +19,7 @@ pub use crate::daemon::setup::{
 };
 #[cfg(feature = "host")]
 pub use crate::daemon::validate_owner_pid;
+pub use crate::lookup::MdnsHandle;
 
 /// The session state file the daemon writes for external readers — its sole
 /// writer. Daemon-session state, not a generic filesystem helper.

@@ -229,6 +229,7 @@ async fn build_member_endpoint(
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
     crate::transport::SignalAdmission,
     Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    Option<crate::lookup::MdnsHandle>,
 )> {
     if let Some(injected) = build.injected.as_ref() {
         // Shared endpoint: no key to mint, nothing to bind. The caller built it
@@ -261,6 +262,7 @@ async fn build_member_endpoint(
             injected.webrtc.clone(),
             injected.admission.clone(),
             None,
+            injected.mdns.clone(),
         ));
     }
     // Made before the endpoint, because the endpoint reports its connections
@@ -268,7 +270,7 @@ async fn build_member_endpoint(
     let admission = crate::transport::SignalAdmission::new(build.max_direct);
     if build.multihop {
         // G caps the sessions of the underlay: it holds one to each known member that needs one.
-        let (endpoint, handle, webrtc, underlay_webrtc) = build_peer_multihop_with(
+        let (endpoint, handle, webrtc, underlay_webrtc, mdns) = build_peer_multihop_with(
             build.lookups,
             build.transports,
             Some(&admission),
@@ -276,15 +278,22 @@ async fn build_member_endpoint(
             crate::lookup::underlay_cap(build.max_peers),
         )
         .await?;
-        Ok((endpoint, Some(handle), webrtc, admission, underlay_webrtc))
+        Ok((
+            endpoint,
+            Some(handle),
+            webrtc,
+            admission,
+            underlay_webrtc,
+            mdns,
+        ))
     } else {
-        let (endpoint, webrtc) = crate::lookup::build_peer_webrtc_with(
+        let (endpoint, webrtc, mdns) = crate::lookup::build_peer_webrtc_with(
             build.lookups,
             build.transports,
             Some(&admission),
         )
         .await?;
-        Ok((endpoint, None, webrtc, admission, None))
+        Ok((endpoint, None, webrtc, admission, None, mdns))
     }
 }
 
@@ -301,6 +310,7 @@ async fn build_member_endpoint(
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
     crate::transport::SignalAdmission,
     UnderlaySlot,
+    Option<crate::lookup::MdnsHandle>,
 )> {
     if let Some(injected) = build.injected.as_ref() {
         crate::lookup::check_injected_identity(
@@ -317,12 +327,13 @@ async fn build_member_endpoint(
             injected.webrtc.clone(),
             injected.admission.clone(),
             None,
+            injected.mdns,
         ));
     }
     let admission = crate::transport::SignalAdmission::new(build.max_direct);
     #[cfg(feature = "multihop")]
     if build.multihop {
-        let (endpoint, handle, webrtc, underlay_webrtc) = build_peer_multihop_with(
+        let (endpoint, handle, webrtc, underlay_webrtc, mdns) = build_peer_multihop_with(
             build.lookups,
             build.transports,
             Some(&admission),
@@ -330,12 +341,19 @@ async fn build_member_endpoint(
             crate::lookup::underlay_cap(build.max_peers),
         )
         .await?;
-        return Ok((endpoint, Some(handle), webrtc, admission, underlay_webrtc));
+        return Ok((
+            endpoint,
+            Some(handle),
+            webrtc,
+            admission,
+            underlay_webrtc,
+            mdns,
+        ));
     }
-    let (endpoint, webrtc) =
+    let (endpoint, webrtc, mdns) =
         crate::lookup::build_peer_webrtc_with(build.lookups, build.transports, Some(&admission))
             .await?;
-    Ok((endpoint, None, webrtc, admission, None))
+    Ok((endpoint, None, webrtc, admission, None, mdns))
 }
 
 /// An endpoint the caller already built, shared with the mesh.
@@ -368,6 +386,10 @@ pub struct InjectedEndpoint {
     /// gossip connections would not be kept, and slots of closed connections
     /// would not be pruned.
     pub admission: crate::transport::SignalAdmission,
+    /// The handle of the mDNS address lookup of the endpoint, when the caller wired one. The mesh
+    /// hears the other members of its mesh on the LAN through it, and marks the endpoint as a
+    /// member in the record it announces. `None` leaves the node without that LAN arm.
+    pub mdns: Option<crate::lookup::MdnsHandle>,
 }
 
 impl std::fmt::Debug for InjectedEndpoint {
@@ -574,6 +596,8 @@ struct Assembled {
     /// for the alive tick that opens its sessions. `None` when multihop is off.
     #[cfg(feature = "multihop")]
     underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    /// The members of the mesh that the LAN announces; see `EventLoopConfig::lan_contacts`.
+    lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
     /// This peer's `WebRTC` transport handle, threaded into `EventLoopState` so
     /// the session manager can negotiate with peers as it learns of them, and
     /// so a consumer can read its live direct-peer count.
@@ -612,11 +636,18 @@ fn resolve_caps(max_peers: usize, max_direct: usize) -> (usize, usize) {
 /// # Errors
 /// The join target fails to resolve, the password fails to verify, or the
 /// endpoint cannot bind.
+pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
+    // `Box::pin` keeps the assembly future off the frame of every caller that awaits it, so those
+    // callers stay under clippy's `large_futures` threshold. The size depends on the target, so
+    // boxing the one await is more robust than shaving fields.
+    Box::pin(setup_mesh_inner(kind, params)).await
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the one-shot assembly of a member: each step is a single call or a literal of the loop config, and splitting it would only scatter sequential setup across helpers"
 )]
-pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
+async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
     let SetupParams {
         author,
         max_peers,
@@ -696,6 +727,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
             multihop: multihop_handle,
         #[cfg(feature = "multihop")]
         underlay_webrtc,
+        lan_contacts,
         webrtc,
         webrtc_admission,
         address_book,
@@ -760,6 +792,7 @@ pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoo
         multihop: multihop_handle,
         #[cfg(feature = "multihop")]
         underlay_webrtc,
+        lan_contacts,
         webrtc,
         webrtc_enabled: transports.webrtc,
         local_udp_transport: transports.udp,
@@ -860,7 +893,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
             reason = "no multihop handle without the `multihop` feature — see `build_member_endpoint`"
         )
     )]
-    let (endpoint, multihop, webrtc, admission, underlay_webrtc) =
+    let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
         build_member_endpoint(build).await?;
 
     let mut mesh = Mesh::new(seed, name.clone(), config);
@@ -924,6 +957,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     // Keeping the conversion here is what lets habilis-network-protocol build
     // without iroh-gossip at all (see habilis_network_protocol::topic).
     let topic_id = iroh_gossip::proto::TopicId::from_bytes(mesh.topic_id().to_bytes());
+    let lan_contacts = crate::lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     lifecycle::log_ready(
         topic_id,
         name.as_str(),
@@ -955,6 +989,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         multihop,
         #[cfg(feature = "multihop")]
         underlay_webrtc,
+        lan_contacts,
         webrtc,
         webrtc_admission,
         address_book,
@@ -998,9 +1033,10 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
             reason = "no multihop handle without the `multihop` feature — see `build_member_endpoint`"
         )
     )]
-    let (endpoint, multihop, webrtc, admission, underlay_webrtc) =
+    let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
         build_member_endpoint(build).await?;
 
+    let lan_contacts = crate::lookup::lan_contacts(&endpoint, mdns, &topic_id).await?;
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     let (gossip, router, webrtc_admission, address_book, webrtc_ice) =
         build_overlay(build, &mesh, &endpoint, &webrtc, admission);
@@ -1057,6 +1093,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         multihop,
         #[cfg(feature = "multihop")]
         underlay_webrtc,
+        lan_contacts,
         webrtc,
         webrtc_admission,
         address_book,
@@ -1375,6 +1412,7 @@ mod tests {
             webrtc,
             multihop: Some(handle),
             admission,
+            mdns: None,
         }
     }
 

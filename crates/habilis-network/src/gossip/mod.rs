@@ -13,6 +13,7 @@ pub(crate) mod app;
 mod broadcast;
 pub(crate) mod event;
 pub(crate) mod heal;
+pub(crate) mod lan;
 mod recv;
 pub(crate) mod split;
 

@@ -10,6 +10,13 @@ published to a registry; pin it with
 
 ### Added
 
+- Members of one mesh on the same LAN link before any beacon is claimed. A member puts a tag
+  of its mesh in its mDNS record, and a member that sees that tag asks the other member to be a
+  neighbor, at most 8 times per minute. The tag hashes the topic, so two meshes on one LAN do not
+  meet. The engine reads the LAN through the mDNS handle of the member endpoint.
+  **Breaking:** `InjectedEndpoint` has a new field, `mdns: Option<MdnsHandle>`, so every
+  `InjectedEndpoint { .. }` literal must change. Pass the handle that the endpoint was built
+  with, or `None` for a node without this arm. `runtime::MdnsHandle` is the type.
 - `SignalAdmission::connection_hook` and the `ConnectionHook` it returns: an
   endpoint hook that records every connection of the endpoint, on any protocol,
   under its peer in the direct-peer slot table, so that the table can prune the

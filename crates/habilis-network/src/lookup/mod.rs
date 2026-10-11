@@ -340,13 +340,6 @@ fn quic_limits() -> iroh::endpoint::QuicTransportConfig {
 
 /// # Errors
 /// Returns an error if the inputs are invalid or the operation fails.
-#[cfg_attr(
-    not(feature = "host"),
-    expect(
-        unused_variables,
-        reason = "`bind_port` feeds the loopback `bind_addr` below, which is `host`-only"
-    )
-)]
 pub async fn build_endpoint(
     lookups: &LookupOpts,
     secret_key: Option<SecretKey>,
@@ -354,6 +347,124 @@ pub async fn build_endpoint(
     alpns: Vec<Vec<u8>>,
     transports: TransportHandles,
 ) -> Result<Endpoint> {
+    Ok(
+        build_endpoint_keeping_mdns(lookups, secret_key, bind_port, alpns, transports)
+            .await?
+            .0,
+    )
+}
+
+/// The handle of the mDNS address lookup of an endpoint, kept so that the endpoint can hear the
+/// other members of its mesh on the LAN. An uninhabited type where mDNS is not compiled in.
+#[cfg(all(feature = "host", feature = "mdns"))]
+pub type MdnsHandle = iroh_mdns_address_lookup::MdnsAddressLookup;
+#[cfg(not(all(feature = "host", feature = "mdns")))]
+pub type MdnsHandle = std::convert::Infallible;
+
+/// What the LAN says about the other members of our mesh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(feature = "host", feature = "mdns")),
+    expect(
+        dead_code,
+        reason = "only the mDNS forwarder makes these, and it needs `host` and `mdns`"
+    )
+)]
+pub(crate) enum LanEvent {
+    /// A member of our mesh announced itself, with the addresses it announced.
+    Seen(EndpointAddr),
+    /// A record expired. It may name an endpoint that was never a member: the listener ignores it
+    /// when it holds nothing for the id.
+    Gone(iroh::EndpointId),
+}
+
+/// The LAN members of our mesh, as the event loop reads them. `None` where the endpoint has no
+/// mDNS handle: that is the off switch of the LAN arm.
+///
+/// # Errors
+/// Returns an error if the tag does not fit the user data of the endpoint.
+#[cfg_attr(
+    not(all(feature = "host", feature = "mdns")),
+    expect(
+        clippy::unused_async,
+        reason = "the forwarder is started with an await, and only where mDNS is compiled in"
+    )
+)]
+pub(crate) async fn lan_contacts(
+    endpoint: &Endpoint,
+    mdns: Option<MdnsHandle>,
+    topic: &iroh_gossip::proto::TopicId,
+) -> Result<Option<tokio::sync::mpsc::Receiver<LanEvent>>> {
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    if let Some(handle) = mdns {
+        // The tag first, so that the record we announce already says that we are a member.
+        tag_as_member(endpoint, topic)?;
+        return Ok(Some(
+            mdns::spawn_lan_contacts(&handle, lan_member_tag(topic), endpoint.id()).await,
+        ));
+    }
+    #[cfg(not(all(feature = "host", feature = "mdns")))]
+    let _ = (endpoint, mdns, topic);
+    Ok(None)
+}
+
+/// What a member of a mesh puts in the user data of its endpoint, so that another member can tell
+/// it from a beacon, a probe, or an endpoint of another mesh in the same mDNS service. It hashes
+/// the topic id of the mesh, which already folds in the name, the config and the password: two
+/// rooms with the same name and different passwords do not share a tag.
+#[cfg(all(feature = "host", feature = "mdns"))]
+#[must_use]
+pub(crate) fn lan_member_tag(topic: &iroh_gossip::proto::TopicId) -> String {
+    use std::fmt::Write as _;
+
+    use sha2::{Digest as _, Sha256};
+
+    let digest = Sha256::new()
+        .chain_update(b"habilis-network/lan-member/1")
+        .chain_update(topic.as_bytes())
+        .finalize();
+    let mut tag = String::from("hn1:");
+    for byte in &digest[..8] {
+        let _ = write!(tag, "{byte:02x}");
+    }
+    tag
+}
+
+/// Mark the endpoint as a member of the mesh with this topic, in the mDNS record it announces.
+/// The tag is set after the endpoint is built, because the member endpoint exists before the mesh
+/// is known, and an injected endpoint is built by the caller. iroh announces the new record at
+/// once.
+/// # Errors
+/// Returns an error if the tag does not fit the user data of an endpoint.
+#[cfg(all(feature = "host", feature = "mdns"))]
+pub(crate) fn tag_as_member(
+    endpoint: &Endpoint,
+    topic: &iroh_gossip::proto::TopicId,
+) -> Result<()> {
+    let tag = lan_member_tag(topic)
+        .parse()
+        .context("the member tag does not fit the endpoint user data")?;
+    endpoint.set_user_data_for_address_lookup(Some(tag));
+    Ok(())
+}
+
+/// [`build_endpoint`], and the mDNS handle when the endpoint has one.
+/// # Errors
+/// As [`build_endpoint`].
+#[cfg_attr(
+    not(feature = "host"),
+    expect(
+        unused_variables,
+        reason = "`bind_port` feeds the loopback `bind_addr` below, which is `host`-only"
+    )
+)]
+pub(crate) async fn build_endpoint_keeping_mdns(
+    lookups: &LookupOpts,
+    secret_key: Option<SecretKey>,
+    bind_port: Option<u16>,
+    alpns: Vec<Vec<u8>>,
+    transports: TransportHandles,
+) -> Result<(Endpoint, Option<MdnsHandle>)> {
     // A peer endpoint carrying a custom transport also pins a key, so it is
     // *not* a beacon; the presence of a handle disambiguates.
     let is_beacon = secret_key.is_some() && transports.is_empty() && !transports.underlay;
@@ -475,10 +586,14 @@ pub async fn build_endpoint(
     // that need the bound endpoint's id), so `clear_address_lookup` above does
     // not reach them — they have to be skipped here as well. Both exist to find
     // IP paths, so an instance with IP off has no use for either.
-    if lookups.mdns && opts.udp {
-        #[cfg(all(feature = "host", feature = "mdns"))]
-        mdns::wire(&endpoint)?;
-    }
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    let mdns_handle = if lookups.mdns && opts.udp {
+        Some(mdns::wire(&endpoint)?)
+    } else {
+        None
+    };
+    #[cfg(not(all(feature = "host", feature = "mdns")))]
+    let mdns_handle: Option<MdnsHandle> = None;
     if lookups.dht && opts.udp {
         #[cfg(all(feature = "host", feature = "dht"))]
         dht::wire(&endpoint)?;
@@ -498,7 +613,7 @@ pub async fn build_endpoint(
         endpoint_id = %endpoint.id(),
         "endpoint bound"
     );
-    Ok(endpoint)
+    Ok((endpoint, mdns_handle))
 }
 
 /// The normal peer endpoint: a fresh random identity, no
@@ -682,7 +797,8 @@ pub async fn build_peer_webrtc(
     Endpoint,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
 )> {
-    build_peer_webrtc_with(lookups, opts, None).await
+    let (endpoint, handle, _mdns) = build_peer_webrtc_with(lookups, opts, None).await?;
+    Ok((endpoint, handle))
 }
 
 /// [`build_peer_webrtc`], reporting the endpoint's connections to `admission`,
@@ -697,11 +813,12 @@ pub(crate) async fn build_peer_webrtc_with(
 ) -> Result<(
     Endpoint,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    Option<MdnsHandle>,
 )> {
     let secret = mint_secret();
     let handle = new_webrtc_handle(secret.public());
     let gossip = new_gossip_handle(opts, secret.public(), admission);
-    let endpoint = build_endpoint(
+    let (endpoint, mdns) = build_endpoint_keeping_mdns(
         lookups,
         Some(secret),
         None,
@@ -722,7 +839,7 @@ pub(crate) async fn build_peer_webrtc_with(
         handle.transport().local_id(),
         "the WebRTC transport must advertise this endpoint's identity"
     );
-    Ok((endpoint, handle))
+    Ok((endpoint, handle, mdns))
 }
 
 /// The gossip handle of a member endpoint, made from the key that the endpoint will bind, when
@@ -807,7 +924,7 @@ pub(crate) async fn build_peer_multihop(
     habilis_network_iroh_multihop_transport::MultihopHandle,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
 )> {
-    let (endpoint, handle, webrtc, _underlay_webrtc) = build_peer_multihop_with(
+    let (endpoint, handle, webrtc, _underlay_webrtc, _mdns) = build_peer_multihop_with(
         lookups,
         opts,
         admission,
@@ -869,6 +986,7 @@ pub(crate) async fn build_peer_multihop_with(
     habilis_network_iroh_multihop_transport::MultihopHandle,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
     Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    Option<MdnsHandle>,
 )> {
     let secret = mint_secret();
     let webrtc = new_webrtc_handle(secret.public());
@@ -947,7 +1065,7 @@ pub(crate) async fn build_peer_multihop_with(
         handle_config,
         protocols,
     )?;
-    let endpoint = build_endpoint(
+    let (endpoint, mdns) = build_endpoint_keeping_mdns(
         lookups,
         Some(secret),
         None,
@@ -962,7 +1080,7 @@ pub(crate) async fn build_peer_multihop_with(
         },
     )
     .await?;
-    Ok((endpoint, handle, webrtc, underlay_webrtc))
+    Ok((endpoint, handle, webrtc, underlay_webrtc, mdns))
 }
 
 /// The address book of `endpoint`: one `MemoryLookup`, added to the lookup services of the
@@ -1155,6 +1273,211 @@ pub(crate) fn build_mesh(
 #[cfg(test)]
 mod tests {
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+
+    /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
+    /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
+    /// user data of an endpoint.
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    #[test]
+    fn the_lan_tag_follows_the_topic() {
+        let one = iroh_gossip::proto::TopicId::from_bytes([1u8; 32]);
+        let other = iroh_gossip::proto::TopicId::from_bytes([2u8; 32]);
+
+        assert_eq!(super::lan_member_tag(&one), super::lan_member_tag(&one));
+        assert_ne!(super::lan_member_tag(&one), super::lan_member_tag(&other));
+        let user_data: Result<iroh::endpoint_info::UserData, _> =
+            super::lan_member_tag(&one).parse();
+        assert!(user_data.is_ok(), "the tag must fit the user data");
+    }
+
+    /// R1: our tag in, a foreign tag out, no user data out.
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    #[test]
+    fn only_our_tag_is_a_member_of_our_mesh() {
+        let ours = super::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([1u8; 32]));
+        let foreign = super::lan_member_tag(&iroh_gossip::proto::TopicId::from_bytes([2u8; 32]));
+        let user = |text: &str| text.parse::<iroh::endpoint_info::UserData>().expect("fits");
+
+        assert!(super::mdns::is_member_tag(Some(&user(&ours)), &ours));
+        assert!(!super::mdns::is_member_tag(Some(&user(&foreign)), &ours));
+        assert!(!super::mdns::is_member_tag(Some(&user("hello")), &ours));
+        assert!(!super::mdns::is_member_tag(None, &ours));
+    }
+
+    /// R2 (the forwarder's filter): a new id passes, the same record again does not, a changed record
+    /// does, and a `Gone` passes only for an id that was passed before.
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    #[test]
+    fn the_forwarder_passes_news_only() {
+        use std::collections::HashMap;
+
+        use super::LanEvent;
+        use super::mdns::news_only;
+
+        let id = iroh::SecretKey::generate().public();
+        let stranger = iroh::SecretKey::generate().public();
+        let at = |port: u16| {
+            iroh::EndpointAddr::new(id).with_ip_addr(std::net::SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                port,
+            )))
+        };
+        let mut known = HashMap::new();
+
+        assert_eq!(
+            news_only(LanEvent::Gone(stranger), &mut known),
+            None,
+            "a Gone for an id never passed ends here"
+        );
+        assert!(news_only(LanEvent::Seen(at(1)), &mut known).is_some());
+        assert_eq!(
+            news_only(LanEvent::Seen(at(1)), &mut known),
+            None,
+            "the same record again is the refresh, not news"
+        );
+        assert!(
+            news_only(LanEvent::Seen(at(2)), &mut known).is_some(),
+            "a changed record is news"
+        );
+        assert_eq!(
+            news_only(LanEvent::Gone(id), &mut known),
+            Some(LanEvent::Gone(id))
+        );
+        assert_eq!(news_only(LanEvent::Gone(id), &mut known), None);
+    }
+
+    /// R3: two members of one mesh and a stranger of another, all on the LAN with mDNS and no
+    /// beacon at all. The members hear each other through the mDNS stream, graft each other, and
+    /// become gossip neighbors; the stranger is never reported. The test runs on a host that sends
+    /// multicast; where it cannot, nothing is discovered and the test fails on the deadline, which
+    /// the slot reports as VOID for fix C, never as green.
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "needs a host that sends mDNS multicast: run with --ignored --nocapture"]
+    async fn two_members_on_the_lan_link_with_no_beacon() {
+        use std::io::Write as _;
+        use std::time::{Duration, Instant};
+
+        use futures_util::StreamExt as _;
+        use iroh_gossip::api::Event;
+
+        use super::LanEvent;
+        use super::{
+            Endpoint, GOSSIP_ALPN, Gossip, MemoryLookup, RelayChoice, Router, TransportHandles,
+            address_book,
+        };
+
+        struct Member {
+            endpoint: Endpoint,
+            book: MemoryLookup,
+            sender: iroh_gossip::api::GossipSender,
+            receiver: iroh_gossip::api::GossipReceiver,
+            events: tokio::sync::mpsc::Receiver<LanEvent>,
+            _router: Router,
+        }
+
+        async fn member(topic: iroh_gossip::proto::TopicId) -> Member {
+            let lan = LookupOpts {
+                mdns: true,
+                dht: false,
+                relay_lookup: RelayChoice::Disabled,
+            };
+            let (endpoint, handle) = super::build_endpoint_keeping_mdns(
+                &lan,
+                None,
+                None,
+                Vec::new(),
+                TransportHandles::default(),
+            )
+            .await
+            .expect("a LAN endpoint");
+            super::tag_as_member(&endpoint, &topic).expect("the tag fits");
+            let gossip = Gossip::builder().spawn(endpoint.clone());
+            let router = Router::builder(endpoint.clone())
+                .accept(GOSSIP_ALPN, gossip.clone())
+                .spawn();
+            let (sender, receiver) = gossip
+                .subscribe(topic, Vec::new())
+                .await
+                .expect("subscribe without a bootstrap")
+                .split();
+            let events = super::mdns::spawn_lan_contacts(
+                &handle.expect("mDNS is wired on a LAN endpoint"),
+                super::lan_member_tag(&topic),
+                endpoint.id(),
+            )
+            .await;
+            Member {
+                book: address_book(&endpoint),
+                endpoint,
+                sender,
+                receiver,
+                events,
+                _router: router,
+            }
+        }
+
+        let topic = iroh_gossip::proto::TopicId::from_bytes([3u8; 32]);
+        let other_topic = iroh_gossip::proto::TopicId::from_bytes([4u8; 32]);
+        let started = Instant::now();
+        let mut first = member(topic).await;
+        let mut second = member(topic).await;
+        let stranger = member(other_topic).await;
+        let ids = (first.endpoint.id(), second.endpoint.id());
+        let mut stderr = std::io::stderr();
+        let mut seen_first = std::collections::HashSet::new();
+        let mut seen_second = std::collections::HashSet::new();
+        let mut neighbors = (false, false);
+
+        let deadline = tokio::time::sleep(Duration::from_secs(30));
+        tokio::pin!(deadline);
+        while !(neighbors.0 && neighbors.1) {
+            tokio::select! {
+                () = &mut deadline => break,
+                Some(event) = first.events.recv() => {
+                    if let LanEvent::Seen(addr) = event {
+                        let _ = writeln!(stderr, "lan: first saw {} at {:?}", addr.id.fmt_short(), started.elapsed());
+                        seen_first.insert(addr.id);
+                        first.book.add_endpoint_info(addr.clone());
+                        first.sender.neighbor_peers(vec![addr.id]).await.expect("graft request");
+                    }
+                }
+                Some(event) = second.events.recv() => {
+                    if let LanEvent::Seen(addr) = event {
+                        let _ = writeln!(stderr, "lan: second saw {} at {:?}", addr.id.fmt_short(), started.elapsed());
+                        seen_second.insert(addr.id);
+                        second.book.add_endpoint_info(addr.clone());
+                        second.sender.neighbor_peers(vec![addr.id]).await.expect("graft request");
+                    }
+                }
+                Some(Ok(Event::NeighborUp(id))) = first.receiver.next() => {
+                    if id == ids.1 {
+                        let _ = writeln!(stderr, "lan: first has the second as neighbor at {:?}", started.elapsed());
+                        neighbors.0 = true;
+                    }
+                }
+                Some(Ok(Event::NeighborUp(id))) = second.receiver.next() => {
+                    if id == ids.0 {
+                        let _ = writeln!(stderr, "lan: second has the first as neighbor at {:?}", started.elapsed());
+                        neighbors.1 = true;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            neighbors.0 && neighbors.1,
+            "the two members did not become gossip neighbors through the LAN within 30 s: first saw {seen_first:?}, second saw {seen_second:?}, neighbors {neighbors:?}"
+        );
+        assert!(
+            !seen_first.contains(&stranger.endpoint.id())
+                && !seen_second.contains(&stranger.endpoint.id()),
+            "a member of another mesh was reported"
+        );
+        first.endpoint.close().await;
+        second.endpoint.close().await;
+        stranger.endpoint.close().await;
+    }
 
     /// A merge kept the address of every beacon that this process held under the rendezvous id.
     #[test]
@@ -1478,7 +1801,7 @@ mod tests {
                 ..TransportOpts::default()
             };
             let table = crate::transport::SignalAdmission::new(8);
-            let (_endpoint, _handle, _webrtc, leg) = super::build_peer_multihop_with(
+            let (_endpoint, _handle, _webrtc, leg, _mdns) = super::build_peer_multihop_with(
                 &LookupOpts::loopback(),
                 opts,
                 Some(&table),
@@ -1539,7 +1862,7 @@ mod tests {
         let mut members = Vec::new();
         for _ in 0..2 {
             let table = crate::transport::SignalAdmission::new(8);
-            let (endpoint, _webrtc) =
+            let (endpoint, _webrtc, _mdns) =
                 super::build_peer_webrtc_with(&LookupOpts::loopback(), opts, Some(&table))
                     .await
                     .expect("a member binds");
@@ -1618,7 +1941,8 @@ mod tests {
             .expect("a multihop peer binds")
         };
 
-        let (_endpoint, handle, _webrtc, leg) = build(TransportOpts::default(), Some(5)).await;
+        let (_endpoint, handle, _webrtc, leg, _mdns) =
+            build(TransportOpts::default(), Some(5)).await;
         let leg = leg.expect("a leg when a cap is given");
         assert_eq!(leg.admission.cap(), 5, "the table has the cap of G");
         assert_eq!(
@@ -1628,13 +1952,13 @@ mod tests {
         );
         assert_eq!(leg.handle.session_count(), 0);
 
-        let (_, _, _, without_cap) = build(TransportOpts::default(), None).await;
+        let (_, _, _, without_cap, _) = build(TransportOpts::default(), None).await;
         assert!(without_cap.is_none(), "no cap, no leg");
         let off = TransportOpts {
             webrtc: false,
             ..TransportOpts::default()
         };
-        let (_, _, _, webrtc_off) = build(off, Some(5)).await;
+        let (_, _, _, webrtc_off, _) = build(off, Some(5)).await;
         assert!(webrtc_off.is_none(), "WebRTC off, no leg");
     }
 
