@@ -406,6 +406,31 @@ fn requeue(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, msg: Message, bytes
     state.pending_outbound.push((msg, bytes))
 }
 
+/// Tests only: whether the hook that names a frame asked the node to drop this one before the app
+/// reads it, as a full queue between the gossip layer and the loop does.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+fn dropped_by_test_hook(state: &mut EventLoopState, message: &Message) -> bool {
+    use crate::daemon::state::TestDrop;
+    let drops = match &state.test_drop {
+        Some(TestDrop::AppBody(body)) => {
+            matches!(message.kind, MessageKind::App { .. }) && message.body.as_str() == body
+        }
+        Some(TestDrop::StateChange) => matches!(message.kind, MessageKind::State),
+        None => false,
+    };
+    if drops {
+        state.test_drop = None;
+        state.test_drops_fired += 1;
+        tracing::debug!(target: "habilis_network::gossip", "test hook: dropped an inbound frame");
+    }
+    drops
+}
+
+#[cfg(not(all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Message) -> bool {
+    false
+}
+
 /// Validate + dispatch one inbound wire message, regardless of transport. Both
 /// the gossip event pump (`handle_gossip_event`) and the unicast inbound arm
 /// (`daemon::event_loop`) funnel here, so signature-verify, the mesh gate, and
@@ -418,7 +443,7 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     ctx: &HandlerCtx<'_>,
 ) {
-    let Ok(mut message) = Message::parse(&content) else {
+    let Ok((mut message, _resend_nonce)) = Message::parse_wire(&content) else {
         ctx.sink
             .emit(NodeEvent::Error("Failed to parse message".to_owned()));
         tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
@@ -430,6 +455,9 @@ pub(crate) async fn ingest(
     // pubkey is computed once at loop setup (`ctx.our_pubkey`), so this is a
     // string compare, not a key-derivation + allocation per message.
     if message.pubkey == ctx.our_pubkey {
+        return;
+    }
+    if dropped_by_test_hook(state, &message) {
         return;
     }
     tracing::trace!(target: "habilis_network::gossip", author = %message.author, "gossip message received");
@@ -2038,6 +2066,66 @@ mod first_contact_tests {
         assert!(
             state.pending_outbound.is_empty(),
             "the parked frame waits for a PeerInfo that may not come"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// An app frame counts the times that it reaches the app.
+    struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for Counting {
+        fn classify(&self, _message: &Message) -> AppClass {
+            AppClass {
+                loggable: false,
+                beat: true,
+                valid: true,
+                chained: false,
+                sealed: false,
+            }
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+    }
+
+    /// A resend of a message that the app already read has a new gossip payload, and the ingest
+    /// of the app still drops it by the id of the message inside: the app sees the frame once.
+    #[tokio::test]
+    async fn a_resend_of_a_known_message_reaches_the_app_once() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut app = Counting(reads.clone());
+        let frame = Message::new_app(
+            &node.mesh,
+            &nick("alice"),
+            crate::protocol::message::AppFrameParams {
+                tag: crate::protocol::AppTag::from("app_msg"),
+                to: None,
+                corr: None,
+                body: MessageBody::from("hello"),
+            },
+        )
+        .signed(&Identity::generate());
+        let original = frame.serialize().expect("serialize");
+        let resend = crate::protocol::message::wire_with_resend_nonce(&original, 42);
+
+        ingest(bytes::Bytes::from(original), &mut state, &mut app, &ctx).await;
+        ingest(bytes::Bytes::from(resend), &mut state, &mut app, &ctx).await;
+
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the first delivery reaches the app and the resend does not"
         );
         node.endpoint.close().await;
     }

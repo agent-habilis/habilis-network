@@ -12,6 +12,8 @@
 pub use crate::daemon::app::IpcRequest;
 pub use crate::daemon::app::NodeDriver;
 pub use crate::daemon::ctx::HandlerCtx;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use crate::daemon::state::TestDrop;
 pub use crate::daemon::state::{EventLoopState, Reach, RosterEntry, RosterSnapshot};
 pub use crate::doc::SelfWriteGate;
 pub use crate::gossip::app::{AppClass, InboundApp, NodeApp};

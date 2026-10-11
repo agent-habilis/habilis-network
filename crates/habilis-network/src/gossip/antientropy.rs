@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
 use std::time::Duration;
 
-use crate::transport::MeshSender;
+use crate::transport::{MeshSender, Resend};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
@@ -300,6 +300,14 @@ fn resend_one(msg: &Message, state: &mut EventLoopState) -> bool {
     };
     match crate::transport::resolve(msg, Bytes::from(bytes), state) {
         Ok(resend) => {
+            // The gossip layer drops a payload it has seen for 90 s, whether the app read it or
+            // not. A broadcast resend therefore carries a new nonce, and so a new name.
+            let resend = match resend {
+                Resend::Broadcast(frame) => Resend::Broadcast(Bytes::from(
+                    crate::protocol::message::wire_with_resend_nonce(&frame, rand::random()),
+                )),
+                unicast @ Resend::Unicast(..) => unicast,
+            };
             if state.resend_outbox.offer(resend) {
                 state.idle.resent += 1;
             } else {
@@ -941,7 +949,9 @@ pub(crate) async fn handle_state_digest(
             return answered;
         }
         for bytes in frames {
-            let _ = ctx.sender.broadcast(bytes).await;
+            // A new name for each answer, as for the resend of a message (see `resend_one`).
+            let answer = crate::protocol::message::wire_with_resend_nonce(&bytes, rand::random());
+            let _ = ctx.sender.broadcast(Bytes::from(answer)).await;
         }
         answered.broadcast = count;
         state
@@ -1435,6 +1445,41 @@ mod tests {
             crate::util::tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
             "the rest of the answer is dropped, and counted"
         );
+    }
+
+    /// A broadcast resend is a new gossip message: the gossip layer names a message by the hash of
+    /// its payload and drops a payload it has seen, so the same bytes cannot repair a message that
+    /// the gossip layer delivered and the app did not read. Each resend carries its own nonce, the
+    /// trailer is outside the signature, and a reader that does not know it fails closed.
+    #[test]
+    fn each_broadcast_resend_has_a_payload_of_its_own() {
+        let mut state = fresh_state();
+        let (outbox, mut resends) = crate::transport::ResendOutbox::new(4);
+        state.resend_outbox = outbox;
+        let identity = crate::protocol::Identity::generate();
+        let message = chat_at("kept in the log", 1_700_000_000).signed(&identity);
+
+        assert!(super::resend_one(&message, &mut state));
+        assert!(super::resend_one(&message, &mut state));
+
+        let mut payloads = Vec::new();
+        while let Ok(crate::transport::Resend::Broadcast(bytes)) = resends.try_recv() {
+            payloads.push(bytes);
+        }
+        assert_eq!(payloads.len(), 2, "both resends are broadcasts");
+        let original = message.serialize().expect("serialize");
+        assert_ne!(payloads[0], payloads[1], "two resends, two names");
+        for payload in &payloads {
+            assert_ne!(&payload[..], original.as_slice());
+            let (parsed, nonce) = Message::parse_wire(payload).expect("a resend parses");
+            assert!(nonce.is_some());
+            assert_eq!(parsed.id, message.id);
+            assert!(parsed.verify_signature_with(&parsed.canonical_bytes()));
+            assert!(
+                Message::parse(payload).is_err(),
+                "a reader that does not know the trailer must fail closed"
+            );
+        }
     }
 
     /// A node whose only gossip neighbor is the rendezvous relay: linked to it,

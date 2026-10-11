@@ -45,6 +45,16 @@ pub enum Reach {
     Gossip,
 }
 
+/// Tests only: which inbound frame the drop hook takes.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestDrop {
+    /// The app frame whose body is this text.
+    AppBody(String),
+    /// A shared-state change.
+    StateChange,
+}
+
 /// One peer in a [`RosterSnapshot`]. `last_seen_secs_ago` is
 /// `None` until the peer's first heartbeat is timed; `quiet` marks a
 /// peer heartbeat-evicted past `ALIVE_TIMEOUT_SECS` (still returnable);
@@ -221,6 +231,13 @@ pub struct EventLoopState {
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
     pub(crate) resend_outbox: crate::transport::ResendOutbox,
+    /// Tests only: the one inbound frame to drop before the app reads it, as a full queue between
+    /// the gossip layer and the loop does. The gossip layer has counted it as delivered.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) test_drop: Option<TestDrop>,
+    /// Tests only: how many frames the hook dropped.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) test_drops_fired: u32,
     pub(crate) resend_receiver: Option<tokio::sync::mpsc::Receiver<crate::transport::Resend>>,
     /// When each asker's state or meta digest was last served, per plane. A
     /// new node sends a digest pair for every peer it sees, all with the same
@@ -786,6 +803,10 @@ impl EventLoopState {
             )),
             digest_unreadable: Cooldown::new(UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            test_drop: None,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            test_drops_fired: 0,
             resend_receiver: Some(resend_receiver),
             state_digest_serves: crate::gossip::antientropy::ServeBudget::default(),
             fast_rounds: crate::gossip::antientropy::FastRounds::default(),
@@ -1735,6 +1756,30 @@ impl EventLoopState {
     #[cfg(feature = "adversarial")]
     pub fn sever_gossip(&mut self) {
         self.gossip_open = false;
+    }
+
+    /// Tests only: drop the next inbound frame that `what` names, once, before the app reads it.
+    /// The frame is named, not counted, so that no other frame can take the drop.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub fn drop_inbound(&mut self, what: TestDrop) {
+        self.test_drop = Some(what);
+    }
+
+    /// Tests only: how many frames [`Self::drop_inbound`] has dropped.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn inbound_drops_fired(&self) -> u32 {
+        self.test_drops_fired
+    }
+
+    /// Tests only: forget the proof that `peer` signs for its endpoint (the `PeerInfo` proof of
+    /// `transport::endpoint_proof`). A state digest of an asker whose endpoint is not proven is
+    /// answered on gossip, as it is for a late joiner before its `PeerInfo` arrives.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub fn forget_endpoint_proof(&mut self, peer: &Nickname) {
+        if let Some(endpoint) = self.peer_endpoints.get(peer).map(|addr| addr.id) {
+            self.proven_endpoints.forget_endpoint(endpoint);
+        }
     }
 
     /// Frames queued for send while the topic was closed.
