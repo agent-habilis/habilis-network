@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent,
 };
-use crate::ops::{StateMergeParams, broadcast_state_merge, send_app};
+use crate::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
 use crate::protocol::{
     AppFrameParams, AppTag, Channel, Message, MessageBody, MessageKind, Nickname,
 };
@@ -428,8 +428,7 @@ impl NodeDriver for MembershipApp {
     ) -> bool {
         match req {
             Request::Send { to, body, reply } => {
-                let sent = send_app(
-                    state,
+                let frame = app_frame(
                     ctx,
                     AppFrameParams {
                         tag: AppTag::from(MSG_TAG),
@@ -437,8 +436,9 @@ impl NodeDriver for MembershipApp {
                         corr: None,
                         body,
                     },
-                )
-                .await;
+                );
+                let class = self.classify(&frame);
+                let sent = send_app(state, ctx, frame, class).await;
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true
             }

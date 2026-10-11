@@ -88,6 +88,8 @@ pub struct MessageLog {
     /// counter updates already know. The map is the *only* derived state here,
     /// and both mutation sites are in [`Self::push`], so it cannot drift.
     per_author: HashMap<String, usize>,
+    /// The dedup key of every held message, so a frame that is pushed twice is held once.
+    keys: HashSet<[u8; 16]>,
 }
 
 impl MessageLog {
@@ -96,6 +98,7 @@ impl MessageLog {
             capacity,
             messages: VecDeque::with_capacity(capacity),
             per_author: HashMap::new(),
+            keys: HashSet::new(),
         }
     }
 
@@ -107,8 +110,14 @@ impl MessageLog {
     /// mesh-wide retained set well-defined: peers agree on which messages
     /// survive, so anti-entropy recovery converges on one set instead of the
     /// union of divergent arrival-order windows. The returned eviction lets
-    /// callers prune side indexes keyed by it (the DAG `by_hash`, fork map).
+    /// callers prune side indexes keyed by it (the DAG `by_hash`, fork map). A message whose
+    /// dedup key is already held is not added, and nothing is evicted.
     pub fn push(&mut self, msg: Message) -> Option<Message> {
+        // A frame that is already held is held once: two paths that retain the same frame
+        // (an author that logs its own send and a consumer that pushes it too) cost a lookup.
+        if !self.keys.insert(msg.dedup_key()) {
+            return None;
+        }
         *self.per_author.entry(msg.pubkey.clone()).or_default() += 1;
         self.messages.push_back(msg);
         if self.messages.len() <= self.capacity {
@@ -116,6 +125,9 @@ impl MessageLog {
         }
         let victim = self.eviction_index();
         let evicted = self.messages.remove(victim);
+        if let Some(gone) = &evicted {
+            self.keys.remove(&gone.dedup_key());
+        }
         if let Some(gone) = &evicted
             && let Some(held) = self.per_author.get_mut(&gone.pubkey)
         {
@@ -487,6 +499,31 @@ mod tests {
         // The join burst: every message in one second, far past the 70 a window
         // lists.
         assert_range_matches_ids(&shuffled_log(300, 1));
+    }
+
+    /// The same frame pushed twice is held once, and the digest lists it once.
+    #[test]
+    fn a_frame_pushed_twice_is_held_once() {
+        let mut log = MessageLog::new(10);
+        let frame = msg_at("once", 10);
+        assert!(log.push(frame.clone()).is_none());
+        assert!(log.push(frame.clone()).is_none());
+        assert_eq!(log.len(), 1);
+        let window = log.window_at(0, 1).expect("one message");
+        assert_eq!(window.ids, vec![frame.dedup_key()]);
+    }
+
+    /// A key leaves the index with its message: a frame that was evicted can be held again.
+    #[test]
+    fn an_evicted_frame_can_be_held_again() {
+        let mut log = MessageLog::new(1);
+        assert!(log.push(msg_at("first", 10)).is_none());
+        let evicted = log.push(msg_at("second", 20)).expect("the log is full");
+        assert!(
+            log.push(evicted).is_some(),
+            "the evicted frame is new again, so the push evicts one of the two"
+        );
+        assert_eq!(log.len(), 1);
     }
 
     /// A message tagged with an explicit timestamp, for window tests.

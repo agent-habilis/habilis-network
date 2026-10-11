@@ -37,7 +37,7 @@ const _: () = assert!(
 );
 
 pub use broadcast::{
-    StateMergeParams, broadcast_msg, broadcast_state_merge, send_app, start_ping_round,
+    StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge, send_app, start_ping_round,
     unicast_farewell,
 };
 pub(crate) use broadcast::{broadcast_peer_info, send_second_probe};

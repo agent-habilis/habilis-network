@@ -989,6 +989,24 @@ pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Message
     push_to_log(state, message.clone());
 }
 
+/// Keep an app broadcast that this node sent, when the app's class says it is loggable. The same
+/// reason as for [`retain_own_broadcast`]: a peer that holds the frame resends it to its author
+/// on every digest round, forever, if the author's digest never lists it, and the author cannot
+/// serve it to a peer that missed it. The class comes from the app, as at the ingest of a frame
+/// (`retain_and_index`), so an app that does not log its frames keeps none. A directed frame is
+/// not kept: its body is sealed on the way out and only its addressee may be served.
+pub(crate) fn retain_own_app_broadcast(
+    state: &mut EventLoopState,
+    message: &Message,
+    class: &AppClass,
+) {
+    if !class.loggable || class.beat || !matches!(message.kind, MessageKind::App { to: None, .. }) {
+        return;
+    }
+    state.mark_seen(message);
+    push_to_log(state, message.clone());
+}
+
 /// Route a received `State`/`Meta` event to its channel doc, then — for `meta` —
 /// adopt the author's endpoint hint into the dial book. Selects the disjoint doc
 /// field so the borrow released by [`ingest_channel_event`] frees `state` for the
@@ -1731,6 +1749,54 @@ mod retain_own_broadcast_tests {
             0,
             "PeerInfo is never logged inbound, so it must not be logged outbound either"
         );
+    }
+
+    fn app_frame(state: &EventLoopState, to: Option<&str>) -> Message {
+        Message::new_app(
+            &MeshId::from("💬test"),
+            &Nickname::from("me"),
+            crate::protocol::message::AppFrameParams {
+                tag: crate::protocol::AppTag::from("app_msg"),
+                to: to.map(Nickname::from),
+                corr: None,
+                body: crate::protocol::MessageBody::from("hello"),
+            },
+        )
+        .signed(&state.identity)
+    }
+
+    fn class(loggable: bool) -> crate::gossip::app::AppClass {
+        crate::gossip::app::AppClass {
+            loggable,
+            beat: false,
+            valid: true,
+            chained: false,
+            sealed: false,
+        }
+    }
+
+    /// An app broadcast that the app logs is held by its author, as at the ingest of a peer: the
+    /// author can serve it to a peer that missed it, and the peers that hold it do not resend it
+    /// to her on every round.
+    #[test]
+    fn an_own_app_broadcast_that_the_app_logs_is_retained() {
+        let mut state = fresh_state();
+        let frame = app_frame(&state, None);
+        super::retain_own_app_broadcast(&mut state, &frame, &class(true));
+        assert_eq!(state.message_log.len(), 1);
+    }
+
+    /// The class is the app's, not the kind's: an app that does not log its frames keeps none, and a
+    /// directed frame is never kept (its body is sealed on the way out, and only its addressee may
+    /// be served).
+    #[test]
+    fn an_own_app_frame_that_the_app_does_not_log_or_that_is_directed_is_not_retained() {
+        let mut state = fresh_state();
+        let broadcast = app_frame(&state, None);
+        super::retain_own_app_broadcast(&mut state, &broadcast, &class(false));
+        let directed = app_frame(&state, Some("you"));
+        super::retain_own_app_broadcast(&mut state, &directed, &class(true));
+        assert_eq!(state.message_log.len(), 0);
     }
 
     /// The end-to-end property, as the two peers actually exchange it: a holder

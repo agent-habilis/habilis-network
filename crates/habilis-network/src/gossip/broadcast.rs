@@ -10,6 +10,7 @@ use bytes::Bytes;
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
+use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::message::AppFrameParams;
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
@@ -46,15 +47,22 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 /// broadcast must therefore seal its body under the mesh key before calling
 /// this; the shipped application does so on its broadcast chat path.
 ///
+/// `frame` comes from [`app_frame`], and `class` is what the app says of it
+/// (`app.classify(&frame)`). A **broadcast** frame that the class marks as loggable is kept in
+/// the message log of the sender, as at the ingest of the same frame on a peer. Without it a peer that holds the frame
+/// would resend it to its author on every digest round, and the author could not serve it to a
+/// peer that missed it. A frame the app does not log is not kept. The log holds a frame
+/// once, so a consumer that also pushes the same frame into it costs a lookup, not a duplicate.
+///
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
 /// failure, and errors if the unmeshed buffer is full.
 pub async fn send_app(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    params: AppFrameParams,
+    frame: Message,
+    class: AppClass,
 ) -> anyhow::Result<()> {
-    let frame = Message::new_app(ctx.mesh, ctx.author, params).signed(ctx.identity);
     if frame.wire_len() > MAX_MESSAGE_SIZE {
         anyhow::bail!(
             "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
@@ -72,18 +80,33 @@ pub async fn send_app(
             Err(error) if error.is::<crate::transport::HeldForDirect>() => {
                 park_and_offer(state, ctx, &frame, &bytes);
             }
-            outcome => return outcome,
+            outcome => {
+                if outcome.is_ok() {
+                    super::recv::retain_own_app_broadcast(state, &frame, &class);
+                }
+                return outcome;
+            }
         }
     } else {
         park_and_offer(state, ctx, &frame, &bytes);
     }
-    if state.pending_outbound.push((frame, bytes)) {
+    if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
-        // decision (see `gossip::recv::flush_pending`).
+        // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
+        super::recv::retain_own_app_broadcast(state, &frame, &class);
         Ok(())
     } else {
         anyhow::bail!("pending outbound buffer full; app frame dropped")
     }
+}
+
+/// Build and sign the frame that [`send_app`] sends. A plain function, so that a caller can
+/// classify the frame (`app.classify(&frame)`) before the send and hold no reference to the app
+/// across the `await` of [`send_app`]: the app is not `Sync`, and a future that holds it is not
+/// `Send`.
+#[must_use]
+pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Message {
+    Message::new_app(ctx.mesh, ctx.author, params).signed(ctx.identity)
 }
 
 /// Fire-and-forget gossip broadcast. Serialize errors are swallowed:
