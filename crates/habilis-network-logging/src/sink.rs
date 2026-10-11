@@ -63,8 +63,12 @@ fn open_truncated(path: &Path) -> io::Result<fs::File> {
 fn open_private(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.create(true).write(true).truncate(true);
-    // Unix: owner-only by mode. Windows has no mode bits: the file is private
-    // through the ACL that it inherits from the user's profile directory.
+    // Unix: owner-only by mode, wherever the file is. Windows has no mode
+    // bits: the file takes the ACL of its directory. It is private only when
+    // that directory is under the user's profile, which is where the runtime
+    // base is. A `--log-dir` outside the profile, or a stub runtime base
+    // whose `TEMP` or `TMP` points outside it, gives the log the ACL of that
+    // directory instead.
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
