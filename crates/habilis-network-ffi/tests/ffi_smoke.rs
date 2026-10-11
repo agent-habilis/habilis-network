@@ -540,7 +540,7 @@ fn four_peers_converge(public: bool) {
     }
 
     let deadline = Instant::now() + Duration::from_secs(45);
-    let mut counts = vec![0_i64; handles.len()];
+    let mut counts = vec![0 as c_long; handles.len()];
     while Instant::now() < deadline {
         for (idx, &handle) in handles.iter().enumerate() {
             // SAFETY: each handle came from habilis_network_mesh_open and is still open.
