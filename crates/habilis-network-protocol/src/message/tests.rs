@@ -607,3 +607,64 @@ mod prop {
         }
     }
 }
+
+#[test]
+fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
+    let identity = super::identity::Identity::generate();
+    let msg = Message::new_app(
+        &sid(),
+        &nick("word-word"),
+        AppFrameParams {
+            tag: AppTag::from("app_msg"),
+            to: None,
+            corr: None,
+            body: MessageBody::from("Hello, world!"),
+        },
+    )
+    .signed(&identity);
+    let frame = msg.serialize().unwrap();
+
+    let first = super::wire_with_resend_nonce(&frame, 7);
+    let second = super::wire_with_resend_nonce(&frame, 8);
+
+    assert_ne!(first, second, "each nonce gives the payload a new name");
+    assert_ne!(first, frame);
+    assert_eq!(first.len(), frame.len() + super::RESEND_TRAILER_LEN);
+    let (parsed, nonce) = Message::parse_wire(&first).unwrap();
+    assert_eq!(nonce, Some(7));
+    assert_eq!(parsed.id, msg.id);
+    assert!(
+        parsed.verify_signature_with(&parsed.canonical_bytes()),
+        "the signature does not cover the trailer"
+    );
+    let (plain, no_nonce) = Message::parse_wire(&frame).unwrap();
+    assert_eq!(no_nonce, None);
+    assert_eq!(plain.id, msg.id);
+}
+
+#[test]
+fn a_reader_without_the_trailer_fails_closed_on_a_resend() {
+    let msg = Message::new_alive(&sid(), &nick("word-word"));
+    let frame = msg.serialize().unwrap();
+    let wire = super::wire_with_resend_nonce(&frame, 1);
+    assert!(
+        Message::parse(&wire).is_err(),
+        "Message::parse must reject the trailer, not skip it"
+    );
+}
+
+#[test]
+fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
+    let msg = Message::new_alive(&sid(), &nick("word-word"));
+    let mut frame = msg.serialize().unwrap();
+    // JSON whitespace pads the frame up to the cap.
+    frame.resize(habilis_network_util::consts::MAX_MESSAGE_SIZE, b' ');
+    let wire = super::wire_with_resend_nonce(&frame, u64::MAX);
+    assert_eq!(
+        wire.len(),
+        habilis_network_util::consts::MAX_MESSAGE_SIZE + super::RESEND_TRAILER_LEN
+    );
+    let (parsed, nonce) = Message::parse_wire(&wire).unwrap();
+    assert_eq!(nonce, Some(u64::MAX));
+    assert_eq!(parsed.id, msg.id);
+}
