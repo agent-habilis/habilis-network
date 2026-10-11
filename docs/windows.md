@@ -1,0 +1,310 @@
+# habilis-network — Windows port
+
+This document gives the requirements and the test plan for the Windows port.
+It is a hand-off: an agent can start the work from this document alone.
+The style follows ASD-STE100 Simplified Technical English.
+
+## 1. Goal
+
+The target is Windows 11 x64 (`x86_64-pc-windows-msvc`).
+The port is done when all of these are true:
+
+- `cargo build`, `cargo clippy -- -D warnings` and `cargo test` pass for the workspace on Windows, with the default features (`host`, `mdns`, `dht`).
+- A `windows-latest` CI job is green.
+- The agent-gossip scenario in [§6](#6-test-plan-on-a-real-windows-machine) passes on a real Windows machine, with a macOS or Linux peer.
+
+Backwards compatibility is not necessary.
+Ids, wire formats, the IPC protocol and the C ABI can change.
+
+## 2. Current state
+
+Today the workspace does not compile for Windows.
+Every native artifact turns on `host`, and `host` pulls in Unix-only code.
+The lists below give each problem with its location, so you do not have to find them again.
+
+### 2.1 Build blockers
+
+| Location | Problem |
+|---|---|
+| `crates/habilis-network-util/src/lib.rs:63` | `runtime_base` returns `/tmp/{product}-{uid}`. |
+| `crates/habilis-network-util/src/lib.rs:75` | `current_uid` calls `libc::geteuid`. |
+| `crates/habilis-network-util/src/lib.rs` (`ensure_runtime_base`) | Uses `DirBuilderExt`, `MetadataExt` and `PermissionsExt` for the `0700`, owner and symlink checks. |
+| `crates/habilis-network-util/src/process.rs` | `parent_of`, `comm_of` and `live_start_time` exist only for macOS and Linux. `ancestry_contains` (`:121`) calls `parent_of`. `is_alive` (`:91`) and `terminate` (`:104`) call `libc::kill`. |
+| `crates/habilis-network/src/daemon/shutdown.rs:154-198` | `validate_owner_pid`, `owner_start` and `Owner::lost` have only a `host` gate, and they call `live_start_time`. |
+| `crates/habilis-network/src/daemon/shutdown.rs:113` | `spawn_quit_signal_tasks` uses `exit_on_quit` and `owner` only under `cfg(unix)`. On Windows this is an unused-variable error under `-D warnings`. |
+| `crates/habilis-network/src/transport/ipc.rs:114` | `PermissionsExt` sets `0600` on the socket, with no `cfg(unix)`. |
+| `crates/habilis-network-logging/src/sink.rs:57`, `:139` | `OpenOptionsExt::mode(0o600)` on the log file, with no `cfg(unix)`. |
+| `Cargo.toml:188`, `crates/habilis-network/Cargo.toml:151`, `crates/habilis-network-util/Cargo.toml:46` | `libc` is not scoped to a target. |
+
+These parts are already correct on Windows:
+
+- `crates/habilis-network/src/daemon/state_file.rs:209-221` has a `cfg(unix)` / `cfg(not(unix))` split.
+- `habilis-network-util` `resident_memory` falls back to `None`.
+- `habilis-network-stream-cli` gates its `libc` use on `cfg(unix)`.
+- The tests that cut a link or an IP port use in-process iroh hooks, not `pf` or `iptables`.
+- `packages/habilis-network-ffi/src/discover.ts:15` already returns `habilis_network_ffi.dll` on `win32`.
+
+### 2.2 Runtime breaks
+
+These problems occur after the workspace compiles.
+
+- **IPC name.** `socket_path` (`ipc.rs:24`) joins a file path with `/`. `to_name` (`ipc.rs:32`) uses `GenericFilePath`. On Windows, `interprocess` maps this to a named pipe and rejects every path outside `\\.\pipe\`. So `bind`, `send` and `send_to_path` fail.
+- **IPC discovery.** `active_socket_paths` (`ipc.rs:316`) finds daemons by a scan for `*.sock` files. A named pipe is not a file, so `doctor` and `leave` find nothing.
+- **IPC security.** On Unix, the socket has no auth. Security comes from the `0700` runtime directory and the `0600` socket. A named pipe needs its own security descriptor.
+- **Stop.** `terminate` sends `SIGTERM`. Windows has no polite signal. `TerminateProcess` is a hard kill, so the `Left` broadcast does not go out and the state file stays.
+- **Owner watch.** `spawn_orphan_watch` (`shutdown.rs:214`) is `cfg(unix)` only. On Windows a daemon does not stop when its owner dies.
+- **Console events.** Only ctrl-c is handled. Close, logoff and shutdown events skip the graceful path.
+- **State file.** `state_file.rs:225` writes a temporary file and renames it over the target. On Windows the rename fails while a reader holds the file open without `FILE_SHARE_DELETE`.
+- **Node FFI.** `packages/habilis-network-ffi/src/dlopen/node.ts:26` maps `isize` to koffi `long`. On Win64, `long` is 4 bytes, so return values are truncated. `abi.ts:14` says "8 bytes on every target here", which is false on Windows.
+- **C ABI.** `crates/habilis-network-ffi/src/ffi.rs` returns `c_long`, and `include/habilis_network.h:107`, `:122`, `:125`, `:135`, `:212` declare `long`. Both sides agree, but on Windows the value is 32-bit.
+
+### 2.3 Tooling and tests
+
+- `tasks/src/ffi.rs:16` uses `libhabilis_network_ffi.a`. On MSVC the static library is `habilis_network_ffi.lib`.
+- `tasks/src/ffi.rs:90` falls back to `nm -gU`. `:104` finds `bin/llvm-nm` with no `.exe`. The symbol filter knows Mach-O and ELF, not COFF.
+- `tasks/src/util/webdriver.rs:62` calls `which`.
+- `tasks/src/util/cdp.rs:65-80` has no `win64` Chrome for Testing build, and calls `curl` (`:84`, `:113`) and `unzip` (`:126`).
+- `tasks/src/util/wasm.rs` looks for clang only in Homebrew paths.
+- `crates/habilis-network-chunks/tests/origin.rs:221` calls `touch -t`.
+- `crates/habilis-network-util/src/lib.rs:238`, `:255` and `crates/habilis-network/src/transport/ipc.rs:403` assert Unix paths.
+- `scripts/perf/*.sh` and `examples/tail/tail.sh` are bash. They stay Unix-only. Say so in their headers.
+
+### 2.4 Toolchain
+
+`str0m` pulls in `aws-lc-sys`.
+On MSVC it needs the Visual Studio C++ build tools, CMake and NASM.
+
+## 3. Requirements: habilis-network
+
+Do this work on the `feat-windows-support` branch (PR #5).
+
+### R1. Compile
+
+- Put each item of [§2.1](#21-build-blockers) behind `cfg(unix)` or `cfg(windows)`.
+- Move `libc` to `[target.'cfg(unix)'.dependencies]`.
+- Add `windows-sys` under `[target.'cfg(windows)'.dependencies]`, with only the features that the code uses.
+- Keep the `unsafe` blocks small, with a `SAFETY:` comment each, as the `libc` blocks have now.
+
+### R2. Runtime base
+
+- On Windows, `runtime_base(product)` returns `<LocalAppData>\<product>\run`.
+- Get `LocalAppData` from `SHGetKnownFolderPath(FOLDERID_LocalAppData)`, not from an environment variable. This keeps the rule that every context computes the same base.
+- Do not add a uid suffix. The profile directory is already per user.
+- `ensure_runtime_base` rejects a reparse point at the base. This replaces the symlink check.
+- The directory inherits the profile ACL. Do not set a new ACL.
+
+### R3. IPC
+
+- On Windows, the endpoint is a named pipe: `\\.\pipe\<product>-<user>-<mesh-prefix>-<nick>`. `<user>` is a short hash of the user SID. Use `GenericNamespaced`.
+- Give the pipe a security descriptor that grants access only to the current user SID. `interprocess` `ListenerOptions` accepts a security descriptor on Windows.
+- Discovery does not depend on socket files on any OS. Write the endpoint name in the state file, or in a `<nick>.ipc` marker file next to it. Rename `active_socket_paths` to `active_endpoints`, and make it read these records.
+- Fix the tests in `ipc.rs` that assume a file path.
+
+### R4. Process helpers
+
+Add Windows versions in `crates/habilis-network-util/src/process.rs`:
+
+| Function | Windows implementation |
+|---|---|
+| `is_alive` | `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`, then `GetExitCodeProcess` is `STILL_ACTIVE`. |
+| `live_start_time` | `GetProcessTimes`, creation time. |
+| `comm_of` | `QueryFullProcessImageNameW`, file stem with no `.exe`. |
+| `parent_of` | `CreateToolhelp32Snapshot` and `Process32NextW`. |
+| `ancestry_contains` | No change. It stays generic over `parent_of`. |
+
+### R5. Graceful stop
+
+- Add an IPC `Quit` command. It runs the same path as `SIGTERM`: broadcast `Left`, remove the state file, exit.
+- `terminate` sends `Quit` on every OS. On Unix, `SIGTERM` stays as the fallback when the IPC send fails.
+
+### R6. Owner watch
+
+- On Windows, watch the `--owner-pid` process with `is_alive` and `live_start_time`. The start time guards against pid reuse.
+- Windows has no `getppid`. Without an owner pid, there is no watch.
+
+### R7. Console events
+
+Ctrl-c, `ctrl_break`, `ctrl_close`, `ctrl_logoff` and `ctrl_shutdown` (`tokio::signal::windows`) all take the graceful path.
+
+### R8. State file
+
+- The atomic replace must work while a reader holds the file. Use `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and retry for a short time on a sharing violation.
+- Readers in this repository open the file with `FILE_SHARE_DELETE`.
+- The file is private through the inherited profile ACL.
+
+### R9. FFI
+
+- Change `c_long` to `i64` in `ffi.rs`, and `long` to `int64_t` in `habilis_network.h`.
+- Map `isize` to a 64-bit integer in `dlopen/node.ts`. Fix the comment in `abi.ts`.
+- `cargo task ffi` (`tasks/src/ffi.rs`) uses `habilis_network_ffi.lib` on Windows, finds `llvm-nm.exe`, and reads COFF symbols.
+
+### R10. Tooling and tests
+
+- Replace `which` in `webdriver.rs` with the `which` crate.
+- Add `win64` to `cdp.rs`, or skip it with a reason.
+- Replace `touch -t` in `chunks/tests/origin.rs` with `File::set_modified`.
+- Make the path assertions in `util/lib.rs` and `ipc.rs` correct on each OS.
+
+### R11. CI
+
+- Add a `windows` job on `windows-latest` to `.github/workflows/ci.yml`.
+- It runs `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and `cargo task ffi`. The Linux job keeps `cargo fmt --check`.
+- Install CMake and NASM if `aws-lc-sys` needs them.
+- Steps that need bash stay on Linux.
+
+## 4. Requirements: agent-gossip
+
+This work is in the agent-gossip repository, on its own branch.
+Start it after the engine work of [§3](#3-requirements-habilis-network).
+
+### G0. Prerequisite
+
+- Merge `chore-migrate-habilis-network` into agent-gossip `main`. On `main` the engine is still the old `fofoca` package.
+- During development, point the engine at a local checkout:
+
+  ```toml
+  [patch."https://github.com/agent-habilis/habilis-network"]
+  habilis-network = { path = "../habilis-network/feat-windows-support/crates/habilis-network" }
+  ```
+
+  Add an entry for each engine crate that `Cargo.lock` pulls from that URL.
+
+### G1. Detach
+
+`detach_if_owned` (`crates/agent-gossip/src/cli/mod.rs:161-216`) calls `setsid` in `pre_exec`.
+
+- On Unix, keep it.
+- On Windows, spawn with `creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)`. If the spawn fails with access denied, try again without `CREATE_BREAKAWAY_FROM_JOB`.
+- On Windows, set stdin, stdout and stderr to null.
+
+### G2. Unix-only code
+
+- `cli/bell.rs`: put `mode(0o600)` behind `cfg(unix)`. `File::try_lock` works on Windows.
+- `cli/signal.rs`: on Windows, use ctrl-c only.
+- `home_dir` (`cli/agent.rs`) and `home_path` (`status.rs`): fall back to `USERPROFILE`.
+
+### G3. Leave
+
+`leave` (`cli/session.rs`) stops the daemon with the engine `terminate`, which sends `Quit` (R5).
+
+### G4. Skills
+
+The skill launch lines are bash. They use `/tmp/agent-gossip-$(id -u)` and `$PPID` (`skills/shared/daemon-session.md`, `skills/gossip-leave/workflow.md`).
+On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an MSYS pid, not the Windows pid of the agent.
+
+- Add `--state-file auto` and `--owner-pid auto`. The binary finds the runtime base and the pid of its parent agent.
+- Change the skills to use `auto`, so the same skill text works on every OS.
+- Update the snapshots in `crates/agent-gossip/src/cli/snapshots/`.
+
+### G5. Distribution
+
+- Add a `windows-latest` job to CI, with a create, poll and leave smoke test.
+- Add `x86_64-pc-windows-msvc` to `release.yml`, packaged as a `.zip`.
+- Add a Windows install route to the README. Homebrew does not cover Windows.
+
+## 5. Order of work
+
+Make one commit for each step where possible.
+
+1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`, or let CI do it. Then build on the Windows machine.
+2. **Runtime base and IPC (R2, R3).**
+3. **Process helpers, `Quit`, owner watch, console events (R4 to R7).**
+4. **State file and FFI ABI (R8, R9).**
+5. **CI (R11).**
+6. **agent-gossip (G0 to G5).**
+
+## 6. Test plan on a real Windows machine
+
+The machine is Windows 11 x64.
+Run the commands in PowerShell unless the step says otherwise.
+Record each result as a checklist item in the PR #5 description.
+For each failure, attach the log from the log directory that `doctor` shows.
+
+### 6.1 Machine setup
+
+1. Install Visual Studio Build Tools with the "Desktop development with C++" workload.
+2. Install rustup. The toolchain in `rust-toolchain.toml` installs on the first `cargo` call.
+3. Install Git for Windows, CMake, NASM and Bun.
+4. Install Claude Code.
+5. Clone the repository and check out `feat-windows-support`.
+6. On the first run, allow the Windows Firewall prompt for private networks.
+
+### T1. Build and unit tests
+
+```powershell
+cargo build --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+Pass: all three are green.
+
+### T2. Loopback integration tests
+
+```powershell
+cargo test -p habilis-network --test gossip_only
+cargo test -p habilis-network --test rendezvous_release_loopback
+cargo test -p habilis-network --test underlay_webrtc_loopback
+cargo task matrix --list
+```
+
+Then run two cells from the list by name.
+Pass: all are green, and no test hangs past its own timeout.
+
+### T3. FFI
+
+```powershell
+cargo build --release -p habilis-network-ffi
+cargo task ffi
+bun test packages/habilis-network-ffi
+```
+
+Then run `examples/chat/bun-ffi` on Windows and join a mesh with a macOS peer.
+Send a message in each direction.
+Do it again under Node with koffi. This tests the `isize` fix of R9.
+Pass: the messages arrive, and the peer count is correct on both sides.
+
+### T4. Runtime directory and IPC security
+
+1. Start a daemon. The runtime base appears under `%LOCALAPPDATA%`.
+2. `Get-Acl` on the base shows only the user, `SYSTEM` and `Administrators`.
+3. `[System.IO.Directory]::GetFiles("\\.\pipe\")` lists the pipe.
+4. Create a second local user. Connect to the pipe as that user with `runas /user:<second-user>`. The connection is refused.
+
+### T5. agent-gossip lifecycle
+
+Do this after G0 to G5.
+Use one Windows peer and one macOS peer.
+
+1. Run `agent-gossip plug` on Windows.
+2. In Claude Code on Windows, run `/gossip-create`.
+3. On macOS, run `/gossip-join <id>`.
+4. Broadcast from each side. Each side receives the message.
+5. `poll --long` on Windows wakes up when the macOS peer sends.
+6. Run `/gossip-msg` in each direction.
+7. `/gossip-status` on each side lists both peers.
+8. `/gossip-doctor` on Windows finds the active mesh.
+9. Run `/gossip-leave` on Windows.
+
+Pass:
+
+- macOS shows that the Windows peer left.
+- The Windows state file is gone.
+- `Get-Process agent-gossip` finds no process.
+
+### T6. Failure paths
+
+| Action on Windows | Expected result |
+|---|---|
+| Kill the Claude Code process that owns the daemon (`Stop-Process -Force`). | The daemon stops within one owner-watch interval. macOS sees the peer leave or time out. |
+| Close the console window of a foreground node. | The graceful `Left` arrives on macOS (`ctrl_close`). |
+| Sign out, then sign in. | No stale state file stays. |
+| Pid reuse after the owner dies. | A unit test covers this: the start time does not match, so the watch stops the daemon. |
+
+### T7. Network
+
+| Setup | Expected result |
+|---|---|
+| Windows and macOS on the same LAN. | mDNS finds the peer. |
+| Windows behind a home NAT, macOS on a different network. | A direct path or the relay connects them. |
+| Windows Firewall blocks the program. | The relay still connects them. |
