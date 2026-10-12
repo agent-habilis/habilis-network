@@ -25,7 +25,7 @@ use crate::TaskOutcome;
 use crate::util::cdp;
 use crate::util::page::{rand_token, wait_ready};
 use crate::util::webdriver;
-use crate::util::{output, repo_root, wait_for};
+use crate::util::{output, repo_root, target_dir, wait_for};
 
 use habilis_network::membership;
 use habilis_network::protocol::{Lookup, Transport};
@@ -620,6 +620,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         return Ok(());
     }
 
+    let target = target_dir()?;
     build::ensure_bun("the mesh suite serves its harness with bun")?;
 
     // The suite owns its wasm: a stale glue silently tests the previous
@@ -718,7 +719,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
                         page.evaluate(expr)
                     )
                 });
-                let dump = repo_root().join("target").join(format!(
+                let dump = target.join(format!(
                     "mesh-cell-{}.log",
                     cell.label().replace([' ', '/'], "_")
                 ));

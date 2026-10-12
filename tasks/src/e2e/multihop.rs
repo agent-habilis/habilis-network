@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use crate::TaskOutcome;
 use crate::util::page::{rand_token, wait_ready};
-use crate::util::{output, repo_root, wait_for};
+use crate::util::{output, repo_root, target_dir, wait_for};
 
 use habilis_network::membership;
 use habilis_network::protocol::Transport;
@@ -254,6 +254,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         return Ok(());
     }
 
+    let target = target_dir()?;
     build::ensure_bun("the multihop suite serves its harness with bun")?;
     // The suite owns its wasm: a stale glue tests the previous engine.
     build::build_browser_peer()?;
@@ -296,7 +297,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         Err(CellFailure(reason)) => {
             output::failure("FAILED", &reason);
             let logs = drain_logs();
-            let dump = repo_root().join("target").join("multihop-cell.log");
+            let dump = target.join("multihop-cell.log");
             let browser = page.evaluate("(window.harnessLog||[]).join('\\n')");
             let _ = std::fs::write(&dump, format!("── browser console ──\n{browser}\n{logs}"));
             output::detail(&format!("full log: {}", dump.display()));

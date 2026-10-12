@@ -435,9 +435,10 @@ impl Step {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use xshell::Shell;
 
     use super::{Kind, STEPS, Scope};
+    use crate::util::metadata;
 
     /// Workspace members that never build for wasm32, each with its reason. Every other member
     /// needs a wasm32 clippy row of its own: that row is what puts `-D
@@ -452,30 +453,12 @@ mod tests {
 
     /// The names of the workspace members, from `cargo metadata`.
     fn workspace_members() -> Vec<String> {
-        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
-        let output = Command::new(env!("CARGO"))
-            .args([
-                "metadata",
-                "--no-deps",
-                "--format-version",
-                "1",
-                "--manifest-path",
-                manifest,
-            ])
-            .output()
-            .expect("cargo metadata runs");
-        assert!(
-            output.status.success(),
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let metadata: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("the metadata is JSON");
-        metadata["packages"]
-            .as_array()
-            .expect("a package list")
-            .iter()
-            .map(|package| package["name"].as_str().expect("a package name").to_owned())
+        let sh = Shell::new().expect("a shell");
+        metadata(&sh)
+            .expect("cargo metadata runs")
+            .packages
+            .into_iter()
+            .map(|package| package.name)
             .collect()
     }
 

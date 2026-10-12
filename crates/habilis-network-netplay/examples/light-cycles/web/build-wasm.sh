@@ -12,7 +12,6 @@ set -euo pipefail
 cd "$(dirname "$0")/wasm"
 
 TARGET=wasm32-unknown-unknown
-ARTIFACT="target/$TARGET/release/light_cycles_web.wasm"
 
 # Fail on the prerequisite rather than a hundred lines of downstream errors.
 if ! rustup target list --installed | grep -qx "$TARGET"; then
@@ -46,6 +45,10 @@ fi
 # `--no-default-features`: the portable half of `habilis-network`/`habilis-network-netplay`
 # only — see wasm/Cargo.toml's own comment on why.
 cargo build --release --target "$TARGET" --no-default-features
+
+# Cargo says where the build landed: `CARGO_TARGET_DIR` and `build.target-dir` both move it.
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+ARTIFACT="$TARGET_DIR/$TARGET/release/light_cycles_web.wasm"
 
 # `--target web` emits ES modules that fetch the binary themselves, which is
 # what the frontend next door loads. Only one target is generated: this
