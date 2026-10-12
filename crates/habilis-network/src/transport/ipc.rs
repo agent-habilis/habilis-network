@@ -507,6 +507,12 @@ mod tests {
         }
     }
 
+    // On Windows `bind` fails: it gives `interprocess` a file path, and a
+    // Windows endpoint is a named pipe (R3 of `docs/windows.md`, not built
+    // yet). The attribute expects the error text of `interprocess` for that
+    // path, so the test passes only while `bind` fails. R3 removes the
+    // attribute.
+    #[cfg_attr(windows, should_panic(expected = "not a named pipe path"))]
     #[test]
     async fn ipc_listen_and_send_msg() {
         // Base58-encode the pid so the mesh id passes strict charset validation.
@@ -571,6 +577,13 @@ mod tests {
     // I/O deadline instead of pinning a handler task + fd for the
     // daemon's lifetime, and the listener must keep serving others
     // throughout. Real-time: waits out `IPC_IO_TIMEOUT` (10s).
+    //
+    // On Windows `bind` fails: it gives `interprocess` a file path, and a
+    // Windows endpoint is a named pipe (R3 of `docs/windows.md`, not built
+    // yet). The attribute expects the error text of `interprocess` for that
+    // path, so the test passes only while `bind` fails. R3 removes the
+    // attribute.
+    #[cfg_attr(windows, should_panic(expected = "not a named pipe path"))]
     #[test]
     async fn idle_connection_is_closed_at_the_read_deadline() {
         use interprocess::local_socket::{
