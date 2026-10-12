@@ -12,11 +12,11 @@ mod join;
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use app::Rung;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use app::UnknownPeer;
 pub use app::{
     DEPARTURE_GRACE, INBOUND_CAP, Inbound, MAX_MSG, MSG_TAG, MembershipApp, Request, msg_body,
     msg_fits, parse_to,
 };
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub use app::UnknownPeer;
 pub use event::{MembershipEvent, json_sink};
 pub use join::{Membership, Opts, depart, join, resolve_kind};
