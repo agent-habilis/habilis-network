@@ -254,8 +254,8 @@ impl std::fmt::Display for NotANeighbor {
 impl std::error::Error for NotANeighbor {}
 
 /// Whether a failed offer round was the underlay of the peer turning us away as not (yet) a
-/// neighbor.
-#[cfg(any(feature = "multihop", test))]
+/// neighbor. Only the multihop underlay asks, so only a build with it has the function.
+#[cfg(feature = "multihop")]
 #[must_use]
 pub(crate) fn is_not_a_neighbor_refusal(error: &anyhow::Error) -> bool {
     error.downcast_ref::<NotANeighbor>().is_some()
