@@ -172,6 +172,22 @@ pub(crate) fn tick_now(state: &crate::daemon::state::EventLoopState) {
     }
 }
 
+/// The members that the underlay can name, less the denied ones. The underlay address of a
+/// member is in its signed link-vector, and a member we hold no vector from yet is skipped: it
+/// gets one on a later tick.
+fn neighbors_of(
+    state: &crate::daemon::state::EventLoopState,
+    multihop: &habilis_network_iroh_multihop_transport::MultihopHandle,
+) -> Vec<(EndpointId, iroh::EndpointAddr)> {
+    let mut neighbors: Vec<(EndpointId, iroh::EndpointAddr)> = Vec::new();
+    for member in state.peer_endpoints.values().map(|addr| addr.id) {
+        if let Some(addr) = multihop.underlay_addr_of(member) {
+            neighbors.push((member, addr));
+        }
+    }
+    undenied(neighbors, |member| state.webrtc_admission.is_denied(member))
+}
+
 /// One alive tick: offer a session to each neighbor that needs one, and drop the
 /// sessions that no neighbor needs. A neighbor needs one when its application
 /// path is `WebRTC`; see the module note.
@@ -179,15 +195,7 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
     let Some(multihop) = state.multihop() else {
         return;
     };
-    // The underlay address of a member is in its signed link-vector. A member
-    // we hold no vector from yet is skipped: it gets one on a later tick.
-    let mut neighbors: Vec<(EndpointId, iroh::EndpointAddr)> = Vec::new();
-    for member in state.peer_endpoints.values().map(|addr| addr.id) {
-        if let Some(addr) = multihop.underlay_addr_of(member) {
-            neighbors.push((member, addr));
-        }
-    }
-    let neighbors = undenied(neighbors, |member| state.webrtc_admission.is_denied(member));
+    let neighbors = neighbors_of(state, multihop);
     underlay
         .allowed
         .replace(neighbors.iter().map(|(_, addr)| addr.id).collect());
@@ -280,6 +288,35 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
     }
 }
 
+/// The members whose underlay holds a live session with us, by member id. `neighbors` pairs each
+/// member with its underlay address, and `held` are the underlay ids with a live session.
+pub(crate) fn members_with_session(
+    neighbors: &[(EndpointId, iroh::EndpointAddr)],
+    held: &[EndpointId],
+) -> Vec<EndpointId> {
+    neighbors
+        .iter()
+        .filter(|(_, addr)| held.contains(&addr.id))
+        .map(|(member, _)| *member)
+        .collect()
+}
+
+/// The members with a live session on our underlay, by member id: the edges of the routing graph
+/// that a session carries, whether or not a gossip link to the member is up. Empty when the
+/// node has no multihop handle.
+pub(crate) fn held_members(
+    state: &crate::daemon::state::EventLoopState,
+    underlay: &UnderlayWebRtc,
+) -> Vec<EndpointId> {
+    let Some(multihop) = state.multihop() else {
+        return Vec::new();
+    };
+    members_with_session(
+        &neighbors_of(state, multihop),
+        &underlay.handle.live_peer_ids(),
+    )
+}
+
 /// What the event loop keeps of the `WebRTC` leg of the underlay.
 #[derive(Debug, Clone)]
 pub(crate) struct UnderlayWebRtc {
@@ -301,7 +338,8 @@ mod tests {
     use iroh::{Endpoint, RelayMode};
 
     use super::{
-        Allowed, Plan, UnderlaySignalGate, kept_underlays, plan, undenied, wanted_underlays,
+        Allowed, Plan, UnderlaySignalGate, kept_underlays, members_with_session, plan, undenied,
+        wanted_underlays,
     };
     use crate::transport::probe::PathKind;
     use crate::transport::{
@@ -513,6 +551,21 @@ mod tests {
             },
             "the member left the roster"
         );
+    }
+
+    /// A session is named by the underlay id of its member, and the edge by the member id.
+    #[test]
+    fn a_member_whose_underlay_holds_a_session_is_listed_by_its_member_id() {
+        let (with_session, without) = (id(61), id(62));
+        let neighbors = vec![
+            (with_session, relay_only(id(71))),
+            (without, relay_only(id(72))),
+        ];
+        assert_eq!(
+            members_with_session(&neighbors, &[id(71)]),
+            vec![with_session]
+        );
+        assert!(members_with_session(&neighbors, &[]).is_empty());
     }
 
     #[test]

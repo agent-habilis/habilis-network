@@ -433,7 +433,7 @@ async fn antientropy_arm(
 }
 
 /// The multihop link-state tick: re-broadcast our own links (one per direct
-/// neighbour, carrying our underlay dial address) so every peer keeps a fresh
+/// neighbour and one per member with a live underlay session, carrying our underlay dial address) so every peer keeps a fresh
 /// routing graph for the multihop transport. Each link carries the cost of the handle
 /// (`HandleConfig::link_cost`; a browser's is higher), until live telemetry (RTT, delivery) is
 /// wired into the metric. No-op until meshed, or when the multihop transport is off — a vector
@@ -448,6 +448,22 @@ async fn antientropy_arm(
 )]
 async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let _ = (state, ctx);
+}
+
+/// The edges that our link-vector advertises: one per gossip neighbour, and one per member
+/// whose underlay holds a live session with us (`held`), whether or not a gossip link to it is
+/// up. The relay watcher closes a gossip link on purpose, and a gossip dial that came before the
+/// session of its pair was refused, so a session that carries a route must not lose its edge
+/// with the link. A hop that the underlay holds stuck is still dropped by `link_vector`.
+#[cfg(feature = "multihop")]
+fn advertised_links(
+    linked: &std::collections::HashSet<EndpointId>,
+    held: &[EndpointId],
+    cost: u32,
+) -> Vec<(EndpointId, u32)> {
+    let mut members: std::collections::BTreeSet<EndpointId> = linked.iter().copied().collect();
+    members.extend(held.iter().copied());
+    members.into_iter().map(|member| (member, cost)).collect()
 }
 
 #[cfg(feature = "multihop")]
@@ -467,11 +483,12 @@ pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'
     if handle.underlay_addr().addrs.is_empty() {
         return;
     }
-    let links: Vec<_> = state
-        .linked_endpoints
-        .iter()
-        .map(|eid| (*eid, handle.link_cost()))
-        .collect();
+    let held = state
+        .underlay_webrtc
+        .as_ref()
+        .map(|underlay| crate::transport::underlay_webrtc::held_members(state, underlay))
+        .unwrap_or_default();
+    let links = advertised_links(&state.linked_endpoints, &held, handle.link_cost());
     let vector = handle.link_vector(links);
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
@@ -1459,5 +1476,48 @@ mod route_wake_tests {
         );
         state.webrtc_admission.close();
         node.endpoint.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "multihop"))]
+mod advertised_links_tests {
+    use std::collections::HashSet;
+
+    use iroh::{EndpointId, SecretKey};
+
+    use super::advertised_links;
+
+    fn id(seed: u8) -> EndpointId {
+        SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    fn sorted(mut links: Vec<(EndpointId, u32)>) -> Vec<(EndpointId, u32)> {
+        links.sort_unstable();
+        links
+    }
+
+    /// The route graph of every member is built from these links. A pair whose gossip dial
+    /// was refused before its session, or whose gossip link the relay watcher closed, still
+    /// has a session on the underlay that carries cells: without its edge, no route to the
+    /// member exists, and the pair is locked out until the gossip link comes back.
+    #[test]
+    fn a_member_with_a_held_session_and_no_gossip_link_is_an_edge() {
+        let linked = HashSet::from([id(1)]);
+        let links = advertised_links(&linked, &[id(2)], 10);
+        assert_eq!(sorted(links), sorted(vec![(id(1), 10), (id(2), 10)]));
+    }
+
+    #[test]
+    fn a_member_that_is_linked_and_held_is_one_edge() {
+        let linked = HashSet::from([id(1)]);
+        let links = advertised_links(&linked, &[id(1)], 10);
+        assert_eq!(links, vec![(id(1), 10)]);
+    }
+
+    #[test]
+    fn with_no_held_session_the_edges_are_the_gossip_links() {
+        let linked = HashSet::from([id(1), id(2)]);
+        let links = advertised_links(&linked, &[], 100);
+        assert_eq!(sorted(links), sorted(vec![(id(1), 100), (id(2), 100)]));
     }
 }
