@@ -148,7 +148,7 @@ mod tests {
     /// paths are open at that moment, all are closed, none opened again within the 5 s that
     /// `selects_ip` waits, and the assert "both paths opened" fails. The condition is the number
     /// of IP paths of the connection, not Windows: the Windows host that was measured gave three,
-    /// and on a Linux host with no global IPv6 address the test did not fail in 20 runs.
+    /// and on a Linux host with no global `IPv6` address the test did not fail in 20 runs.
     /// `an_endpoint_with_ip_and_gossip_selects_ip`, the test of the ladder itself, still runs on
     /// Windows and passes: with the ladder the IP path is the selected one.
     #[cfg_attr(
