@@ -356,7 +356,7 @@ jobs:
         run: cargo check --target wasm32-unknown-unknown --no-default-features
 
       - name: Clippy (wasm32)
-        run: cargo clippy --target wasm32-unknown-unknown --no-default-features -- -D warnings
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features -- -D warnings -D clippy::disallowed_methods
 
       # `wasm-bindgen-cli`'s version must match the `wasm-bindgen` crate
       # version resolved into wasm/Cargo.lock, or the glue it emits and the

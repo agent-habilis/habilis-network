@@ -53,6 +53,10 @@ unsafe_code = "deny"
 pedantic = { level = "warn", priority = -1 }
 wildcard_enum_match_arm = "warn"
 module_name_repetitions = "allow"
+# The repo's `clippy.toml` lists the calls that panic in a browser, and clippy finds it from here
+# too. On a native target `web_time` is `std::time`, where the clock is right, so the lint stays off,
+# as in the root workspace; the wasm32 row passes `-D clippy::disallowed_methods`.
+disallowed_methods = "allow"
 
 [profile.release]
 opt-level = "s"
