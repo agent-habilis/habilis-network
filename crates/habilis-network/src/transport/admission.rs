@@ -84,6 +84,10 @@ use crate::util::tuning;
 #[derive(Debug, Default)]
 struct RefusalBackoff {
     by_peer: HashMap<EndpointId, Backoff>,
+    /// The peers that turned an offer away as not a neighbor, and when it was last: the first
+    /// time in a row is a race that the next offer wins, a second one goes through [`Self::note`].
+    #[cfg(any(feature = "multihop", test))]
+    strangers: HashMap<EndpointId, Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -121,6 +125,24 @@ impl RefusalBackoff {
 
     fn forget(&mut self, peer: &EndpointId) {
         self.by_peer.remove(peer);
+        #[cfg(any(feature = "multihop", test))]
+        self.strangers.remove(peer);
+    }
+
+    /// `peer` turned an offer away as not a neighbor: its underlay does not hold our link vector
+    /// yet. Whether the offer is tried again soon. The first turn-away in a row is a race of two
+    /// vectors that cross, and the next offer wins it. A second one in a row (the earlier one is
+    /// not older than the longest wait) is a refusal like the cap and waits as one.
+    #[cfg(any(feature = "multihop", test))]
+    fn note_stranger(&mut self, peer: EndpointId, now: Instant) -> bool {
+        let max = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_MAX_SECS);
+        self.strangers
+            .retain(|_, at| now.saturating_duration_since(*at) < max);
+        if self.strangers.insert(peer, now).is_none() {
+            return true;
+        }
+        self.note(peer, now);
+        false
     }
 }
 
@@ -755,6 +777,14 @@ impl SignalAdmission {
         self.lock().refused.note(peer, Instant::now());
     }
 
+    /// Note that the underlay of `peer` turned our offer away as not a neighbor. Whether to offer
+    /// again soon: only the first time in a row. A second one waits like a refusal at the cap,
+    /// and a success starts the row over.
+    #[cfg(any(feature = "multihop", test))]
+    pub(crate) fn note_not_a_neighbor(&self, peer: EndpointId) -> bool {
+        self.lock().refused.note_stranger(peer, Instant::now())
+    }
+
     /// A round with `peer` ended in a session: it is no longer refusing us, so
     /// its wait starts over.
     pub(crate) fn note_success(&self, peer: EndpointId) {
@@ -1125,6 +1155,48 @@ mod tests {
 
     fn peer(byte: u8) -> EndpointId {
         iroh::SecretKey::from_bytes(&[byte; 32]).public()
+    }
+
+    /// The first turn-away as not a neighbor in a row is a race that the next offer wins, so the
+    /// peer is offered again at once; a second one in a row is a refusal and waits.
+    #[test]
+    fn two_turn_aways_in_a_row_make_the_peer_wait_and_one_does_not() {
+        let admission = SignalAdmission::new(4);
+        let stranger = peer(31);
+        assert!(
+            admission.note_not_a_neighbor(stranger),
+            "the first one: offer again soon"
+        );
+        assert!(
+            !admission
+                .lock()
+                .refused
+                .on_cooldown(&stranger, Instant::now()),
+            "one turn-away does not make the peer wait"
+        );
+        assert!(
+            !admission.note_not_a_neighbor(stranger),
+            "the second one in a row: wait"
+        );
+        assert!(
+            admission
+                .lock()
+                .refused
+                .on_cooldown(&stranger, Instant::now()),
+            "two in a row do"
+        );
+    }
+
+    #[test]
+    fn a_session_with_the_peer_starts_the_row_of_turn_aways_over() {
+        let admission = SignalAdmission::new(4);
+        let stranger = peer(32);
+        assert!(admission.note_not_a_neighbor(stranger));
+        admission.note_success(stranger);
+        assert!(
+            admission.note_not_a_neighbor(stranger),
+            "after a success the first one is a first one again"
+        );
     }
 
     /// The end of a round wakes the waiter of `slot_freed`, however the round ended, and a round

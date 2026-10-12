@@ -468,6 +468,14 @@ fn advertised_links(
 
 #[cfg(feature = "multihop")]
 pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    advertise_links(state, ctx, false).await;
+}
+
+/// Advertise the links of this node. The tick sends whatever the set is, as the vector is also
+/// what keeps our edges alive in the graph of the others; `only_if_changed` is for a link that
+/// came up (see [`linkstate_now`]).
+#[cfg(feature = "multihop")]
+async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_if_changed: bool) {
     // Before the early return, and before our own vector goes in: a peer that has
     // stopped advertising must not keep its edges in the graph, and a node that is
     // not meshed yet keeps hearing vectors it will route over once it is.
@@ -489,6 +497,10 @@ pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'
         .map(|underlay| crate::transport::underlay_webrtc::held_members(state, underlay))
         .unwrap_or_default();
     let links = advertised_links(&state.linked_endpoints, &held, handle.link_cost());
+    if only_if_changed && !advertised_changed(state.last_advertised.as_deref(), &links) {
+        return;
+    }
+    state.last_advertised = Some(links.clone());
     let vector = handle.link_vector(links);
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
@@ -508,6 +520,23 @@ pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'
     // that every digest asks us for again.
     let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity);
     gossip::broadcast_msg(ctx.sender, &vector_msg).await;
+}
+
+/// Whether the links of a vector are another set than the last one that went out. None went
+/// out yet: it is another one.
+#[cfg(feature = "multihop")]
+fn advertised_changed(last: Option<&[(EndpointId, u32)]>, links: &[(EndpointId, u32)]) -> bool {
+    last != Some(links)
+}
+
+/// [`linkstate_arm`] now, for a link that came up: the vector of this node is what lets a
+/// neighbor offer a session on the underlay and route over its edges, and the first tick is
+/// `LINKSTATE_INTERVAL_SECS` away. It sends only when the links are another set than the last
+/// vector had: a second link that comes up 100 ms after the first goes out at once, and a link
+/// that flaps back to the set that went out sends nothing.
+#[cfg(feature = "multihop")]
+pub(crate) async fn linkstate_now(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    advertise_links(state, ctx, true).await;
 }
 
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own
@@ -649,6 +678,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
 
     log_daemon_start(&author);
     let slot_freed = state.webrtc_admission.slot_freed();
+    let underlay_slot_freed = underlay_slot_freed_of(&state);
     let route_wake = route_wake_of(&state);
 
     // The surfaced-events ring (`poll`/`fetch` history) lives app-side, fed by
@@ -770,6 +800,19 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::top_up_lane_offers(&mut state, &ctx).await;
+            }
+            // A round of the multihop underlay ended, offered or answered: an offer that its
+            // answerer turned away, because our link vector had not reached it yet, is made again
+            // now, and not at the alive tick. A session that the round attached is an edge of this
+            // node: its vector goes out at once, and nothing goes out when the set did not change.
+            () = underlay_slot_freed.notified() => {
+                state.idle.external += 1;
+                #[cfg(feature = "multihop")]
+                {
+                    crate::transport::underlay_webrtc::tick_now(&state);
+                    let ctx = parts.ctx(&sender);
+                    linkstate_now(&mut state, &ctx).await;
+                }
             }
             // The gate of the multihop underlay began to refuse a hop, or admitted one that
             // it refused: the best first hop to a pair on the relay can be another now, and
@@ -1078,6 +1121,22 @@ fn route_wake_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> 
 /// Without the `multihop` feature there is no multihop transport: the wake never rings.
 #[cfg(not(feature = "multihop"))]
 fn route_wake_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+    std::sync::Arc::new(tokio::sync::Notify::new())
+}
+
+/// The wake of the admission table of the multihop underlay, which rings when a round of the
+/// underlay ends, whatever its end. It is the table of the underlay, not `webrtc_admission`.
+#[cfg(feature = "multihop")]
+fn underlay_slot_freed_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+    state.underlay_webrtc.as_ref().map_or_else(
+        || std::sync::Arc::new(tokio::sync::Notify::new()),
+        |underlay| underlay.admission.slot_freed(),
+    )
+}
+
+/// Without the `multihop` feature there is no underlay: the wake never rings.
+#[cfg(not(feature = "multihop"))]
+fn underlay_slot_freed_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
     std::sync::Arc::new(tokio::sync::Notify::new())
 }
 
@@ -1476,6 +1535,51 @@ mod route_wake_tests {
         );
         state.webrtc_admission.close();
         node.endpoint.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "multihop"))]
+mod advertised_changed_tests {
+    use std::collections::HashSet;
+
+    use iroh::{EndpointId, SecretKey};
+
+    use super::{advertised_changed, advertised_links};
+
+    fn id(seed: u8) -> EndpointId {
+        SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    #[test]
+    fn a_node_that_advertised_nothing_yet_has_a_new_set() {
+        assert!(advertised_changed(None, &[(id(1), 10)]));
+    }
+
+    /// The links of a node come up 0.1 to 0.4 s apart. The vector of the second one must go
+    /// out at once: held back to the tick, the route over its edge would wait 15 s.
+    #[test]
+    fn a_second_link_that_comes_up_is_a_new_set() {
+        let first = [(id(1), 10)];
+        let both = [(id(1), 10), (id(2), 10)];
+        assert!(advertised_changed(Some(&first), &both));
+    }
+
+    /// A round of the underlay that attached a session adds an edge without a gossip link: the
+    /// set changes, and the vector follows the end of the round. Without a change, nothing goes.
+    #[test]
+    fn a_session_that_attached_is_a_new_set() {
+        let linked = HashSet::from([id(1)]);
+        let before = advertised_links(&linked, &[], 10);
+        let after = advertised_links(&linked, &[id(2)], 10);
+        assert!(advertised_changed(Some(&before), &after));
+        assert!(!advertised_changed(Some(&after), &after));
+    }
+
+    /// A link that flaps and comes back leaves the set that went out: no second broadcast.
+    #[test]
+    fn a_link_that_comes_back_is_the_set_that_went_out() {
+        let both = [(id(1), 10), (id(2), 10)];
+        assert!(!advertised_changed(Some(&both), &both));
     }
 }
 

@@ -148,6 +148,12 @@ pub(crate) async fn handle_gossip_event(
                     // (the app's card dial hint); see `NodeApp::on_meshed`.
                     app.on_meshed(state, ctx).await;
                 }
+                // The vector names the address of our underlay, and a neighbor that holds it
+                // can offer a session at once: it does not wait for the 15 s tick, which would
+                // leave the first session for the moment that the relay watcher closes the
+                // links that stayed on the relay.
+                #[cfg(feature = "multihop")]
+                crate::daemon::event_loop::linkstate_now(state, ctx).await;
                 super::heal::release_rendezvous_if_due(state, ctx).await;
             }
         }

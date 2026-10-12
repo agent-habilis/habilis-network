@@ -232,6 +232,35 @@ pub fn is_cap_refusal(error: &anyhow::Error) -> bool {
     error.downcast_ref::<CapRefused>().is_some()
 }
 
+/// The answerer of the multihop underlay turned our offer away because it holds no link vector
+/// of ours yet. That is a race of two vectors that cross, not a verdict: the vector arrives a few
+/// milliseconds after the offer, so the offerer tries again soon (see `underlay_webrtc`).
+#[cfg(any(feature = "multihop", test))]
+#[derive(Debug)]
+struct NotANeighbor(EndpointId);
+
+#[cfg(any(feature = "multihop", test))]
+impl std::fmt::Display for NotANeighbor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} holds no link vector of ours yet: not a neighbor",
+            self.0
+        )
+    }
+}
+
+#[cfg(any(feature = "multihop", test))]
+impl std::error::Error for NotANeighbor {}
+
+/// Whether a failed offer round was the underlay of the peer turning us away as not (yet) a
+/// neighbor.
+#[cfg(any(feature = "multihop", test))]
+#[must_use]
+pub(crate) fn is_not_a_neighbor_refusal(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<NotANeighbor>().is_some()
+}
+
 /// Write our envelope and wait for theirs, on an already-open connection.
 ///
 /// Split out so the caller can consult the connection's close reason once for
@@ -268,6 +297,28 @@ fn refused_at_cap(conn: &Connection) -> bool {
         Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
             if [u64::from(CAP_REFUSED), u64::from(EVICTED)].contains(&close.error_code.into_inner())
     )
+}
+
+/// Whether the underlay of the peer closed `conn` because we are not a neighbor of it yet.
+#[cfg(any(feature = "multihop", test))]
+fn refused_not_a_neighbor(conn: &Connection) -> bool {
+    matches!(
+        conn.close_reason(),
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(ref close))
+            if close.error_code.into_inner() == u64::from(close_code::NOT_A_NEIGHBOR)
+    )
+}
+
+/// `error` of a failed exchange, with the refusal that the close reason of `conn` names.
+fn with_refusal(conn: &Connection, error: anyhow::Error, remote: EndpointId) -> anyhow::Error {
+    if refused_at_cap(conn) {
+        return error.context(CapRefused(remote));
+    }
+    #[cfg(any(feature = "multihop", test))]
+    if refused_not_a_neighbor(conn) {
+        return error.context(NotANeighbor(remote));
+    }
+    error
 }
 
 /// The `ProtocolHandler` the Router runs for [`MESH_WEBRTC_SIGNAL_ALPN`]: read
@@ -596,13 +647,7 @@ async fn dial_signal_round(
     let offer_bytes = serde_json::to_vec(offer.envelope())?;
     let raw = match exchange_envelopes(&conn, &offer_bytes, remote, deadlines).await {
         Ok(raw) => raw,
-        Err(error) => {
-            return Err(if refused_at_cap(&conn) {
-                error.context(CapRefused(remote))
-            } else {
-                error
-            });
-        }
+        Err(error) => return Err(with_refusal(&conn, error, remote)),
     };
     let answer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal answer")?;
 

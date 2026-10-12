@@ -15,6 +15,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -22,6 +23,13 @@ use iroh::{Endpoint, EndpointId};
 
 use super::webrtc::close_code::NOT_A_NEIGHBOR;
 use super::{LOG_TARGET, SignalAdmission, WebRtcSignalAcceptor};
+
+/// How long the task of an offer that was turned away as not a neighbor keeps its slot, the first
+/// time in a row. Its end wakes the event loop, which offers again: the answerer reads our link
+/// vector a few milliseconds after our offer reaches it, so the second offer finds us a neighbor,
+/// and the alive tick (30 s) would be too late for the route that the session carries. A peer
+/// that turns us away again goes through the backoff of the admission table.
+const REFUSAL_RETRY: Duration = Duration::from_secs(1);
 
 /// What one tick does with the sessions of the underlay.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -281,6 +289,14 @@ pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &Unde
                         admission.note_refused(peer);
                     }
                     tracing::debug!(target: LOG_TARGET, %peer, %error, "underlay webrtc offer failed");
+                    // The guard of the round is held for the delay: its end rings the table, and
+                    // the loop ticks and offers again (see `event_loop`). A second turn-away in
+                    // a row is noted as a refusal: the peer waits, and the round ends at once.
+                    if super::webrtc::is_not_a_neighbor_refusal(&error)
+                        && admission.note_not_a_neighbor(peer)
+                    {
+                        n0_future::time::sleep(REFUSAL_RETRY).await;
+                    }
                 }
             }
         });
@@ -682,6 +698,70 @@ mod tests {
                 .is_err(),
             "a neighbor is not turned away"
         );
+        router.shutdown().await.expect("the router stops");
+    }
+
+    /// The offerer must tell a stranger's turn-away from a refusal at the cap: the first is a
+    /// race that the next offer wins, the second backs off.
+    #[tokio::test]
+    async fn an_offer_that_the_gate_turns_away_is_told_apart_from_a_cap_refusal() {
+        let server = loopback_endpoint().await;
+        let allowed = Allowed::default();
+        let acceptor = WebRtcSignalAcceptor::new(
+            crate::lookup::new_webrtc_handle(server.id()),
+            server.clone(),
+            crate::lookup::address_book(&server.clone()),
+            server.id(),
+            SignalAdmission::new(4),
+            IceProfile { host_only: true },
+        );
+        let router = Router::builder(server.clone())
+            .accept(
+                MESH_WEBRTC_SIGNAL_ALPN,
+                UnderlaySignalGate::new(acceptor, allowed.clone()),
+            )
+            .spawn();
+        let client = loopback_endpoint().await;
+        let handle = crate::lookup::new_webrtc_handle(client.id());
+        let book = crate::lookup::address_book(&client);
+
+        let error = crate::transport::webrtc::dial_signal(
+            &client,
+            &book,
+            server.addr(),
+            &handle,
+            IceProfile { host_only: true },
+        )
+        .await
+        .expect_err("the gate turns a stranger away");
+        assert!(
+            crate::transport::webrtc::is_not_a_neighbor_refusal(&error),
+            "the refusal is read from the close code: {error:#}"
+        );
+        assert!(
+            !crate::transport::webrtc::is_cap_refusal(&error),
+            "a stranger is not a cap refusal: {error:#}"
+        );
+
+        // Once the client is a neighbor the same dial is not turned away as one.
+        allowed.replace([client.id()].into_iter().collect());
+        if let Ok(Err(late_error)) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::transport::webrtc::dial_signal(
+                &client,
+                &book,
+                server.addr(),
+                &handle,
+                IceProfile { host_only: true },
+            ),
+        )
+        .await
+        {
+            assert!(
+                !crate::transport::webrtc::is_not_a_neighbor_refusal(&late_error),
+                "a neighbor is not turned away: {late_error:#}"
+            );
+        }
         router.shutdown().await.expect("the router stops");
     }
 }

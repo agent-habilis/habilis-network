@@ -424,6 +424,12 @@ pub struct EventLoopState {
     /// [`crate::transport::underlay_webrtc`].
     #[cfg(feature = "multihop")]
     pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    /// The links that this node advertised in its last link vector, whichever arm sent it. A link
+    /// that comes up sends a vector only when the set is another one, so that a link that flaps
+    /// does not cause a broadcast per flap, and a second link that comes up 100 ms after the
+    /// first is not held back until the tick. See `event_loop::linkstate_now`.
+    #[cfg(feature = "multihop")]
+    pub(crate) last_advertised: Option<Vec<(EndpointId, u32)>>,
     /// What this node already asked of the members it heard on the LAN.
     pub(crate) lan_grafts: crate::gossip::lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
@@ -864,6 +870,8 @@ impl EventLoopState {
             multihop: None,
             #[cfg(feature = "multihop")]
             underlay_webrtc: None,
+            #[cfg(feature = "multihop")]
+            last_advertised: None,
             lan_grafts: crate::gossip::lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,
