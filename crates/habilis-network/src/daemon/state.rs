@@ -168,6 +168,9 @@ pub struct EventLoopState {
     /// the race covers (`transport::probe::on_path_change`).
     pub(crate) path_changes:
         tokio::sync::mpsc::UnboundedSender<crate::transport::probe::PathChange>,
+    /// Where a flushed frame whose dial failed comes back to the loop, to be buffered again
+    /// (`gossip::requeue_failed`). A detached sender until the real loop installs its channel.
+    pub(crate) flush_failed: tokio::sync::mpsc::UnboundedSender<(Message, Bytes)>,
     /// The pooled connection each watched peer's watcher follows, by stable
     /// id (`None` while its dial runs), so a replaced connection gets a fresh
     /// watcher and a stale one's reports are dropped.
@@ -796,6 +799,7 @@ impl EventLoopState {
             direct_proven: tokio::sync::mpsc::unbounded_channel().0,
             gossip_handle: None,
             path_changes: tokio::sync::mpsc::unbounded_channel().0,
+            flush_failed: tokio::sync::mpsc::unbounded_channel().0,
             path_watchers: HashMap::new(),
             path_kinds: HashMap::new(),
             route_dialed: HashMap::new(),

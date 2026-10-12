@@ -136,6 +136,17 @@ published to a registry; pin it with
 
 ### Changed
 
+- **Breaking:** `ops::deliver` returns at once, and no longer waits for a dial. A broadcast, a
+  frame held for a direct path, a refused frame and a send to a warm connection give their verdict
+  as before. A directed message to a cold peer is sent by a task, and `deliver` returns
+  `Delivered::Pending(handle)`: a oneshot receiver of the outcome, which the caller awaits off its
+  event loop (the dial error is the send's outcome, as before). `Delivered` is `must_use`.
+  `ops::send_app` returns `Delivered` too. `deliver_in_background` is the same for its callers.
+  Every call site of `ops::deliver` that runs on an event loop must await the handle on a task of
+  its own. The pool dials a peer once: a send to a cold peer whose dial is in flight waits for
+  that dial and is sent after it, where it was dropped, and a buffered frame whose dial fails is
+  buffered again.
+
 - A node picks its path by one ladder: a direct IP path, then `WebRTC`, then
   multihop, then the relay, and the lowest RTT inside a rung. Multihop used to
   rank below the relay on a mesh with `WebRTC`, and the order changed with the

@@ -56,7 +56,7 @@ pub(crate) fn json_body<T: serde::Serialize>(value: &T) -> Option<crate::protoco
     crate::protocol::MessageBody::new(json).ok()
 }
 pub(crate) use recv::{
-    drain_dead_receiver, drain_queued, flush_pending, handle_gossip_event, ingest,
+    drain_dead_receiver, drain_queued, flush_pending, handle_gossip_event, ingest, requeue_failed,
     retain_own_broadcast,
 };
 

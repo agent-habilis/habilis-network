@@ -213,6 +213,9 @@ pub async fn run<A: NodeDriver>(
     let (path_tx, path_rx) = mpsc::unbounded_channel();
     state.webrtc_admission.set_path_sink(path_tx.clone());
     state.path_changes = path_tx;
+    // A flushed frame whose dial failed comes back here; the loop buffers it again.
+    let (flush_failed_tx, flush_failed_rx) = mpsc::unbounded_channel();
+    state.flush_failed = flush_failed_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     state.rendezvous_answers_jsep = rendezvous_params.answers_jsep();
     state.write_peer_count();
@@ -384,6 +387,7 @@ pub async fn run<A: NodeDriver>(
         lan_contacts,
         direct_rx,
         path_rx,
+        flush_failed_rx,
     }))
     .await
 }
@@ -566,6 +570,8 @@ struct EventLoop<A: NodeDriver> {
     /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<crate::transport::probe::PathChange>,
+    /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
+    flush_failed_rx: mpsc::UnboundedReceiver<(Message, bytes::Bytes)>,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI
@@ -621,6 +627,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut lan_contacts,
         mut direct_rx,
         mut path_rx,
+        mut flush_failed_rx,
     } = loop_state;
 
     log_daemon_start(&author);
@@ -736,6 +743,11 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 let ctx = parts.ctx(&sender);
                 crate::transport::probe::on_outcome(outcome, &mut state, &ctx).await;
                 crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
+            }
+            Some((msg, bytes)) = flush_failed_rx.recv() => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                gossip::requeue_failed(&mut state, &ctx, msg, bytes);
             }
             () = slot_freed.notified() => {
                 state.idle.external += 1;

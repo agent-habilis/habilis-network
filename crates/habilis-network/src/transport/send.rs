@@ -1,39 +1,62 @@
 //! The single send decision. Every outbound message funnels through
 //! [`deliver`]: a broadcast (no sole addressee) rides gossip, structurally; a
 //! directed message goes over the unicast connection only — warm pooled
-//! connection first, inline dial otherwise — and gossip never carries it. The
+//! connection first, a dial on a task of its own otherwise — and gossip never carries it. The
 //! bytes are the same canonical wire `Message` on both planes, so the
 //! receiver's path is identical either way.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use iroh::EndpointId;
+use tokio::sync::oneshot;
 
 use super::outbox::Resend;
-use super::pool::WarmSend;
+use super::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
 use crate::daemon::state::EventLoopState;
 use crate::protocol::message::sole_addressee;
 use crate::protocol::{Message, Nickname};
 use crate::transport::MeshSender;
 
+/// What [`deliver`] did with a frame.
+#[derive(Debug)]
+#[must_use = "a dropped Pending handle loses the verdict of the send"]
+pub enum Delivered {
+    /// Sent, or handed to a warm connection: nothing is left to wait for.
+    Done,
+    /// A unicast leg runs on a task of its own. Its outcome comes through the handle.
+    Pending(PendingSend),
+}
+
+/// The outcome of a send that runs on a task. A caller that needs the verdict awaits it off its
+/// event loop. Dropping it does not cancel the send: a failure is then only logged.
+pub type PendingSend = oneshot::Receiver<Result<()>>;
+
 /// Route one already-signed, already-serialized message. `bytes` MUST be
 /// `msg.serialize()` — the same wire form gossip uses.
 ///
+/// It returns at once: it never waits on a dial, on the wait for a direct path, or on a write.
+/// A broadcast, a frame held for a direct path, a refused frame, and a send to a warm connection
+/// give their verdict here. A directed message to a cold peer is sent by a task, and the verdict
+/// comes through [`Delivered::Pending`].
+///
 /// # Errors
-/// Propagates a gossip broadcast failure or a unicast dial/send failure. A
-/// directed message whose addressee has no dialable endpoint (its `PeerInfo`
+/// Propagates a gossip broadcast failure, a refused path, or a cold peer on the dial-failure
+/// cooldown. A directed message whose addressee has no dialable endpoint (its `PeerInfo`
 /// hasn't arrived, or its advertised endpoint is the rendezvous pseudo-node)
 /// is undeliverable — the error names which; callers retry once a real
-/// endpoint is learned.
+/// endpoint is learned. A dial or a write that fails comes through the handle.
 pub async fn deliver(
     msg: &Message,
     bytes: Bytes,
     state: &EventLoopState,
     sender: &MeshSender,
-) -> Result<()> {
+) -> Result<Delivered> {
     match resolve(msg, bytes, state)? {
-        Resend::Broadcast(bytes) => broadcast(sender, bytes).await,
-        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, state).await,
+        Resend::Broadcast(bytes) => {
+            broadcast(sender, bytes).await?;
+            Ok(Delivered::Done)
+        }
+        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool).await,
     }
 }
 
@@ -84,8 +107,6 @@ pub(crate) fn resolve(msg: &Message, bytes: Bytes, state: &EventLoopState) -> Re
 ///   moments ago reads the same way until its path is selected, for up to
 ///   the path-select budget.
 /// - it is cold and on the per-peer dial-failure cooldown.
-/// - it is cold and a background dial or batch send to it is already in
-///   flight.
 /// - the gossip broadcast failed.
 ///
 /// A `false` send is not queued: the caller tries again later.
@@ -105,20 +126,7 @@ pub async fn deliver_in_background(
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> bool {
-    match route(msg, state) {
-        Route::Broadcast => broadcast(sender, bytes).await.is_ok(),
-        Route::Unicast(eid) => match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
-            WarmSend::Sent => true,
-            WarmSend::Cold => {
-                state
-                    .unicast_pool
-                    .dial_and_send_in_background(eid, bytes)
-                    .await
-            }
-            WarmSend::Refused => false,
-        },
-        Route::Held(_) | Route::Undeliverable => false,
-    }
+    deliver(msg, bytes, state, sender).await.is_ok()
 }
 
 /// The chosen transport for a message — a **pure** decision so both planes are
@@ -269,17 +277,35 @@ fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
 
 /// Warm pooled connection first (steady state, no dial — an optimistic
 /// fire-and-forget handoff; a write that fails on a dead connection redials
-/// and resends once in the background); a cold peer is dialed inline, and the
-/// dial error is the send's outcome — there is no fallback.
-async fn send_unicast(eid: EndpointId, bytes: Bytes, state: &EventLoopState) -> Result<()> {
-    let pool = state.unicast_pool.clone();
+/// and resends once in the background). A cold peer is dialed on a task of its own, so that the
+/// caller never waits on the dial, the path wait or the write. The dial error is the send's
+/// outcome, through the handle — there is no fallback. A cold peer on the dial-failure cooldown is
+/// refused at once.
+async fn send_unicast(eid: EndpointId, bytes: Bytes, pool: &UnicastPool) -> Result<Delivered> {
     match pool.send_if_warm(eid, bytes.clone()).await {
-        WarmSend::Sent => Ok(()),
+        WarmSend::Sent => Ok(Delivered::Done),
         WarmSend::Refused => Err(anyhow::anyhow!("{}", super::RELAY_REFUSED)),
-        WarmSend::Cold => pool
-            .dial_and_send(eid, bytes)
-            .await
-            .with_context(|| format!("unicast dial to {eid} failed")),
+        WarmSend::Cold => {
+            if pool.is_cooling(eid).await {
+                return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
+                    .context(format!("unicast dial to {eid} failed")));
+            }
+            // The guard of the dial of this peer is taken here, before the spawn: a second send
+            // finds this dial in flight even when it ends at once.
+            let registration = pool.register_dial(eid);
+            let (outcome_tx, outcome) = oneshot::channel();
+            let pool = pool.clone();
+            n0_future::task::spawn(async move {
+                let sent = pool
+                    .send_registered(registration, eid, bytes)
+                    .await
+                    .with_context(|| format!("unicast dial to {eid} failed"));
+                if let Err(Err(error)) = outcome_tx.send(sent) {
+                    tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
+                }
+            });
+            Ok(Delivered::Pending(outcome))
+        }
     }
 }
 
@@ -630,7 +656,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(first, "the first send starts the dial");
-        assert!(!second, "the second send finds the dial in flight");
+        assert!(second, "the second send waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
     }
 
@@ -649,7 +675,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(sent, "the background send starts the dial");
-        assert!(!replied, "the reply finds the dial in flight");
+        assert!(replied, "the reply waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
     }
 

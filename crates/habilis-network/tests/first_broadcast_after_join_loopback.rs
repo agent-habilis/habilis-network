@@ -298,7 +298,7 @@ impl NodeDriver for Chat {
                     },
                 );
                 let class = self.classify(&frame);
-                let sent = send_app(state, ctx, frame, class).await;
+                let sent = send_app(state, ctx, frame, class).await.map(|_| ());
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true
             }

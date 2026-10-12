@@ -54,6 +54,9 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 /// peer that missed it. A frame the app does not log is not kept. The log holds a frame
 /// once, so a consumer that also pushes the same frame into it costs a lookup, not a duplicate.
 ///
+/// A directed frame to a cold peer comes back as [`crate::transport::Delivered::Pending`]: the dial runs on a task,
+/// and the caller awaits the handle off its event loop.
+///
 /// # Errors
 /// Refuses a body too large for one frame, propagates a serialize/deliver
 /// failure, and errors if the unmeshed buffer is full.
@@ -62,7 +65,7 @@ pub async fn send_app(
     ctx: &HandlerCtx<'_>,
     frame: Message,
     class: AppClass,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<crate::transport::Delivered> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
         anyhow::bail!(
             "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
@@ -94,7 +97,7 @@ pub async fn send_app(
         // Buffered until the meshed edge flushes it through the same send
         // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
         super::recv::retain_own_app_broadcast(state, &frame, &class);
-        Ok(())
+        Ok(crate::transport::Delivered::Done)
     } else {
         anyhow::bail!("pending outbound buffer full; app frame dropped")
     }

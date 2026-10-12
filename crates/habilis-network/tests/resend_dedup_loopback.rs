@@ -151,7 +151,7 @@ impl NodeDriver for Chat {
                     },
                 );
                 let class = self.classify(&frame);
-                send_app(state, ctx, frame, class)
+                let _ = send_app(state, ctx, frame, class)
                     .await
                     .expect("a small frame is accepted");
                 let _ = done.send(());

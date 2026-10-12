@@ -200,6 +200,15 @@ pub enum Request {
     MessageLogLen {
         reply: oneshot::Sender<usize>,
     },
+    /// Tests only: forget the pooled unicast connection of the member `peer`, and its dial
+    /// cooldown, and keep its address, so that the next directed send to it is cold. It answers
+    /// whether a connection was pooled: a test that needs a cold send asks until the answer is
+    /// `false`, because a direct-path probe can pool a connection again.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    ForgetUnicast {
+        peer: String,
+        reply: oneshot::Sender<Result<bool, UnknownPeer>>,
+    },
     /// Tests only: forget that the member `peer` is proven direct, and offer it a
     /// `WebRTC` session now, as the path watcher does when a direct path is lost.
     /// A test uses it to attach a session at a chosen moment instead of at the
@@ -445,8 +454,24 @@ impl NodeDriver for MembershipApp {
                     },
                 );
                 let class = self.classify(&frame);
-                let sent = send_app(state, ctx, frame, class).await;
-                let _ = reply.send(sent.map_err(|error| error.to_string()));
+                match send_app(state, ctx, frame, class).await {
+                    Ok(crate::transport::Delivered::Done) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Ok(crate::transport::Delivered::Pending(handle)) => {
+                        // The dial runs on a task, and so does the wait for its outcome: the loop
+                        // serves the next request meanwhile.
+                        n0_future::task::spawn(async move {
+                            let outcome = handle.await.unwrap_or_else(|_| {
+                                Err(anyhow::anyhow!("the send ended without an outcome"))
+                            });
+                            let _ = reply.send(outcome.map_err(|error| error.to_string()));
+                        });
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error.to_string()));
+                    }
+                }
                 true
             }
             Request::StateMerge { merge, reply } => {
@@ -588,6 +613,17 @@ impl NodeDriver for MembershipApp {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::MessageLogLen { reply } => {
                 let _ = reply.send(state.message_log.len());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::ForgetUnicast { peer, reply } => {
+                let id = known_peer(state, &peer).map(|addr| addr.id);
+                let pool = state.unicast_pool.clone();
+                let outcome = match id {
+                    Ok(id) => Ok(pool.drop_connection(id).await),
+                    Err(unknown) => Err(unknown),
+                };
+                let _ = reply.send(outcome);
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

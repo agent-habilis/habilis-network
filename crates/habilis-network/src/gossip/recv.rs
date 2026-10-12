@@ -380,16 +380,20 @@ pub(crate) async fn flush_pending(
         // Re-route each frame through the send decision rather than blanket-
         // broadcasting: a directed frame buffered while unmeshed must still
         // take unicast, never the gossip flood.
-        let Err(error) = crate::transport::deliver(&msg, bytes.clone(), state, ctx.sender).await
-        else {
-            delivered += 1;
-            continue;
-        };
-        if requeue(state, ctx, msg, bytes) {
-            requeued += 1;
-            tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not deliverable yet; requeued");
-        } else {
-            tracing::warn!(target: "habilis_network::gossip", %error, "buffered outbound message undeliverable and the buffer is full; dropped");
+        match crate::transport::deliver(&msg, bytes.clone(), state, ctx.sender).await {
+            Ok(crate::transport::Delivered::Done) => delivered += 1,
+            Ok(crate::transport::Delivered::Pending(handle)) => {
+                delivered += 1;
+                watch_flush(handle, msg, bytes, state.flush_failed.clone());
+            }
+            Err(error) => {
+                if requeue(state, ctx, msg, bytes) {
+                    requeued += 1;
+                    tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not deliverable yet; requeued");
+                } else {
+                    tracing::warn!(target: "habilis_network::gossip", %error, "buffered outbound message undeliverable and the buffer is full; dropped");
+                }
+            }
         }
     }
     tracing::info!(target: "habilis_network::gossip",
@@ -398,6 +402,41 @@ pub(crate) async fn flush_pending(
         edge,
         "meshed: flushed buffered messages"
     );
+}
+
+/// A flushed frame whose unicast leg runs on a task. If the dial or the write fails, the frame goes
+/// back to the loop through `failed`, which buffers it again as a flush does for a frame that cannot
+/// be delivered yet: a failed dial never loses a buffered frame.
+fn watch_flush(
+    handle: crate::transport::PendingSend,
+    msg: Message,
+    bytes: Bytes,
+    failed: tokio::sync::mpsc::UnboundedSender<(Message, Bytes)>,
+) {
+    n0_future::task::spawn(async move {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not delivered; requeued");
+                let _ = failed.send((msg, bytes));
+            }
+            Err(_) => {
+                let _ = failed.send((msg, bytes));
+            }
+        }
+    });
+}
+
+/// A frame of a flush whose dial failed, back on the loop: put it in `pending_outbound` again.
+pub(crate) fn requeue_failed(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    msg: Message,
+    bytes: Bytes,
+) {
+    if !requeue(state, ctx, msg, bytes) {
+        tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
+    }
 }
 
 /// Put a frame that failed to deliver back in `pending_outbound`. A frame that is held for a lane
@@ -2030,6 +2069,7 @@ mod evicted_orphan_tests {
 
 #[cfg(test)]
 mod first_contact_tests {
+    use bytes::Bytes;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
@@ -2123,6 +2163,66 @@ mod first_contact_tests {
         }
     }
 
+    /// A directed frame in the buffer, to a peer that nobody serves: the flush returns at once, the
+    /// dial fails on its task, and the frame comes back to the loop and is buffered again. It is
+    /// not lost, and the loop did not wait for the dial.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pending_frame_whose_dial_fails_is_parked_again() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+        let bob = iroh::SecretKey::generate().public();
+        let bob_addr = iroh::EndpointAddr::from_parts(
+            bob,
+            [iroh::TransportAddr::Ip(
+                silent.local_addr().expect("silent addr"),
+            )],
+        );
+        crate::lookup::add_peer_addr(
+            &crate::lookup::address_book(&node.endpoint),
+            bob_addr.clone(),
+        );
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.unicast_pool = crate::transport::UnicastPool::new(node.endpoint.clone(), false);
+        state
+            .direct
+            .insert(bob, crate::daemon::state::DirectState::Direct);
+        state.peer_endpoints.insert(nick("bob"), bob_addr);
+        let (failed_tx, mut failed_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.flush_failed = failed_tx;
+        let frame = Message::new_pong(
+            &node.mesh,
+            &node.author,
+            nick("bob"),
+            &crate::protocol::MessageId::random(),
+        );
+        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        assert!(state.pending_outbound.push((frame.clone(), bytes)));
+
+        let started = std::time::Instant::now();
+        super::flush_pending(&mut state, &ctx, "test").await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "the flush waited for the dial"
+        );
+        assert!(
+            state.pending_outbound.take().is_empty(),
+            "the frame was handed to its task, so the buffer is empty until the dial fails"
+        );
+
+        let (failed, returned) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), failed_rx.recv())
+                .await
+                .expect("the failed dial reports back to the loop")
+                .expect("the loop keeps its channel");
+        super::requeue_failed(&mut state, &ctx, failed.clone(), returned);
+
+        let parked = state.pending_outbound.take();
+        assert_eq!(parked.len(), 1, "the frame is in the buffer again");
+        assert_eq!(parked[0].0.id, frame.id, "and it is the same frame");
+    }
+
     /// Feed one gossip event to the handler, as the loop does.
     async fn feed(event: Event, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         handle_gossip_event(Some(Ok(event)), state, &mut Inert, ctx).await;
@@ -2140,7 +2240,7 @@ mod first_contact_tests {
         feed(Event::NeighborDown(endpoint_id(1)), &mut state, &ctx).await;
         assert!(state.meshed, "the gap does not clear meshed");
         let frame = Message::new_joined(&node.mesh, &node.author);
-        let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
+        let bytes = Bytes::from(frame.serialize().expect("serialize"));
         assert!(state.pending_outbound.push((frame, bytes)));
 
         feed(Event::NeighborUp(endpoint_id(2)), &mut state, &ctx).await;
@@ -2201,8 +2301,8 @@ mod first_contact_tests {
         let original = frame.serialize().expect("serialize");
         let resend = crate::protocol::message::wire_with_resend_nonce(&original, 42);
 
-        ingest(bytes::Bytes::from(original), &mut state, &mut app, &ctx).await;
-        ingest(bytes::Bytes::from(resend), &mut state, &mut app, &ctx).await;
+        ingest(Bytes::from(original), &mut state, &mut app, &ctx).await;
+        ingest(Bytes::from(resend), &mut state, &mut app, &ctx).await;
 
         assert_eq!(
             reads.load(std::sync::atomic::Ordering::Relaxed),
@@ -2236,7 +2336,7 @@ mod first_contact_tests {
         .boxed();
         let mut receiver = crate::gossip::split::spawn_split(events, None);
         for frame in &frames {
-            let content = bytes::Bytes::from(frame.serialize().expect("serialize"));
+            let content = Bytes::from(frame.serialize().expect("serialize"));
             let delivered = GossipMessage {
                 content,
                 scope: DeliveryScope::Neighbors,
@@ -2294,7 +2394,7 @@ mod first_contact_tests {
         feed(Event::NeighborDown(bob.id()), &mut state, &ctx).await;
         assert!(state.meshed, "the gap does not clear meshed");
         let frame = Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random());
-        let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
+        let bytes = Bytes::from(frame.serialize().expect("serialize"));
         assert!(state.pending_outbound.push((frame, bytes.clone())));
 
         feed(Event::NeighborUp(bob.id()), &mut state, &ctx).await;
@@ -2517,7 +2617,7 @@ mod first_contact_tests {
         let mut state = fresh_state();
         super::handle_peer_info(
             &peer_info(Some(&bobs_proof), &stranger),
-            bytes::Bytes::new(),
+            Bytes::new(),
             &mut state,
             &ctx,
         )
@@ -2530,18 +2630,12 @@ mod first_contact_tests {
             "bob's proof, another signer"
         );
 
-        super::handle_peer_info(
-            &peer_info(None, &bob),
-            bytes::Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(None, &bob), Bytes::new(), &mut state, &ctx).await;
         assert_eq!(state.proven_endpoints.get(&bob_signer), None, "no proof");
 
         super::handle_peer_info(
             &peer_info(Some(&bobs_proof), &bob),
-            bytes::Bytes::new(),
+            Bytes::new(),
             &mut state,
             &ctx,
         )
@@ -2565,13 +2659,7 @@ mod first_contact_tests {
         let peer = iroh::SecretKey::generate().public();
         let first = iroh::EndpointAddr::new(peer).with_ip_addr(test_ip());
 
-        super::handle_peer_info(
-            &peer_info(&node, &first),
-            bytes::Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(&node, &first), Bytes::new(), &mut state, &ctx).await;
 
         assert!(
             eventually(|| async { node.endpoint.remote_info(peer).await.is_some() }).await,
@@ -2604,23 +2692,11 @@ mod first_contact_tests {
             .add_endpoint_addr(first.clone())
             .await
             .expect("the endpoint takes the first address");
-        super::handle_peer_info(
-            &peer_info(&node, &first),
-            bytes::Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(&node, &first), Bytes::new(), &mut state, &ctx).await;
         assert!(!knows_relay().await, "no relay yet");
 
         let later = first.with_relay_url(relay.clone());
-        super::handle_peer_info(
-            &peer_info(&node, &later),
-            bytes::Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(&node, &later), Bytes::new(), &mut state, &ctx).await;
 
         assert!(
             eventually(knows_relay).await,
@@ -2686,18 +2762,18 @@ mod first_contact_tests {
         let peer_info =
             Message::new_peer_info(&node.mesh, &nick("lower"), body).signed(&Identity::generate());
 
-        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
         assert!(
             !state.direct.contains_key(&lower),
             "the first sighting defers"
         );
-        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
         assert!(
             !state.direct.contains_key(&lower),
             "the copy right after must not dial"
         );
         state.relink.clear();
-        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
         assert!(
             state.direct.contains_key(&lower),
             "once the cooldown ends, this side dials after all"
@@ -2752,7 +2828,7 @@ mod first_contact_tests {
         let mut crowded = fresh_state();
         crowd(&mut crowded, max_peers + 2);
         fill_view(&mut crowded, max_peers - 1);
-        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut crowded, &ctx).await;
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut crowded, &ctx).await;
         assert!(
             !crowded.direct.contains_key(&newcomer),
             "a mesh larger than G + 1 leaves the last slot to the fill tick"
@@ -2762,7 +2838,7 @@ mod first_contact_tests {
         let mut small = fresh_state();
         crowd(&mut small, 3);
         fill_view(&mut small, 2);
-        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut small, &ctx).await;
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut small, &ctx).await;
         assert!(
             small.direct.contains_key(&newcomer),
             "a mesh that fits in the view grafts"
@@ -2827,7 +2903,7 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut app = Inert;
         let newcomer = Identity::generate();
-        let wire = |frame: &Message| bytes::Bytes::from(frame.serialize().expect("serialize"));
+        let wire = |frame: &Message| Bytes::from(frame.serialize().expect("serialize"));
         let heads = || MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
 
         let mut digest_first = fresh_state();
