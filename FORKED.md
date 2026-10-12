@@ -383,10 +383,16 @@ patch.
 |---|---|---|
 | `iroh-gossip` | a **direct git dep** in this workspace's `[workspace.dependencies]` | `habilis-network` is the only crate in the graph that names it, so consumers inherit it and restate nothing |
 | `netwatch` + `portmapper` | **git deps inside the `iroh` fork's own `iroh/Cargo.toml`** | `iroh` and `portmapper` both name netwatch from crates.io, so no dep edge *here* could redirect them — but the fork's own edges can. They move as a pair: the fork's `portmapper` takes `netwatch` by path, so splitting them puts two netwatch crates in one graph and the types cross the boundary |
-| `iroh`, `iroh-base`, `iroh-dns` | `[patch.crates-io]`, **restated by every consumer** | `iroh-relay`, the mdns/mainline address-lookup crates, `iroh-gossip` and the consumers themselves all name these from crates.io. Nothing we declare can redirect a third party's edge |
+| `iroh`, `iroh-base`, `iroh-dns` | **direct git deps** in this workspace's `[workspace.dependencies]`, at the same rev, and the same line in each fork that names them | `iroh-relay` is part of the `iroh` fork. The mdns/mainline address-lookup crates and `iroh-gossip` are our forks too, and their own manifests name these three by `git` and the same `rev`. No crate that we do not control names them from crates.io, so the consumers restate nothing |
 
-So a consumer carries **three** patch lines, not five, and the two that left are
-the two it had no business knowing about.
+So a consumer carries **no** `[patch]` and no `iroh` line of its own:
+`habilis-network` owns which fork and which rev. `agent-gossip` and `agent-share`
+both resolve the whole family to the forks through it alone. The check is the
+consumer's `Cargo.lock`: no `iroh`, `iroh-base`, `iroh-dns`, `iroh-relay`,
+`netwatch` or `portmapper` with a registry source (`iroh-metrics` and its derive
+come from crates.io, and nobody forks them). If a crate that we do not control
+ever names `iroh` from crates.io, a second `iroh` shows up in that lock, and the
+fix is a `[patch.crates-io]` in the root of each consumer.
 
 `iroh-base` must stay pinned to the **same repo and rev as `iroh`**: the forked
 `iroh` uses its workspace-local copy, and mixing that with the crates.io release
