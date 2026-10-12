@@ -404,6 +404,14 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// The multihop view of this member for the run log: see `Request::RouteDiag`.
+    async fn route_diag(&self) -> String {
+        self.membership
+            .request(|reply| Request::RouteDiag { reply })
+            .await
+            .expect("the loop answers")
+    }
+
     async fn forwarded_cells(&self) -> u64 {
         self.membership
             .request(|reply| Request::ForwardedCells { reply })
@@ -674,6 +682,44 @@ async fn expect_triangle(name: &str, alice: &Member, bob: &Member, carol: &Membe
     );
 }
 
+/// Send to bob until carol has forwarded a cell, or fail at the deadline.
+async fn probe_until_forwarded(name: &str, alice: &Member, carol: &Member) {
+    // The rung can be selected while the route is still stale, and a cell
+    // goes only when something is sent: traffic goes on, so that cells take
+    // the route through carol once it is there.
+    let started = Instant::now();
+    let mut probes = 0_u32;
+    let mut last = None;
+    while carol.forwarded_cells().await == 0 {
+        // One line each time the picture changes, for the run log: when the
+        // route to bob appeared in alice's topology, and what she rides.
+        let seen = (alice.has_route("bob").await, alice.rung_to("bob").await);
+        if last != Some(seen) {
+            eprintln!(
+                "DIAG {name}: after {:?} and {probes} probes: has_route={} rung={:?} {}",
+                started.elapsed(),
+                seen.0,
+                seen.1,
+                alice.route_diag().await
+            );
+            last = Some(seen);
+        }
+        assert!(
+            started.elapsed() < STEP_DEADLINE,
+            "{name}: the multihop rung is selected, but carol forwarded no cell \
+             after {probes} probes (alice has a route to bob: {}, her rung: {:?}, {})",
+            alice.has_route("bob").await,
+            alice.rung_to("bob").await,
+            alice.route_diag().await
+        );
+        probes += 1;
+        let _ = alice
+            .send("bob", &format!("forward probe {name} {probes}"))
+            .await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 async fn run(cell: Cell, name: &str, sender_id: SenderId) {
     init_logging();
     if cell.has(Transport::Gossip) && !GOSSIP_INSTALLED {
@@ -707,38 +753,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
             .settle_on("bob", rung_name(rung), cell.settle(rung), name)
             .await;
         if cell.via_third && rung == Rung::Multihop {
-            // The rung can be selected while the route is still stale, and a cell
-            // goes only when something is sent: traffic goes on, so that cells take
-            // the route through carol once it is there.
-            let started = Instant::now();
-            let mut probes = 0_u32;
-            let mut last = None;
-            while carol.forwarded_cells().await == 0 {
-                // One line each time the picture changes, for the run log: when the
-                // route to bob appeared in alice's topology, and what she rides.
-                let seen = (alice.has_route("bob").await, alice.rung_to("bob").await);
-                if last != Some(seen) {
-                    eprintln!(
-                        "DIAG {name}: after {:?} and {probes} probes: has_route={} rung={:?}",
-                        started.elapsed(),
-                        seen.0,
-                        seen.1
-                    );
-                    last = Some(seen);
-                }
-                assert!(
-                    started.elapsed() < STEP_DEADLINE,
-                    "{name}: the multihop rung is selected, but carol forwarded no cell \
-                     after {probes} probes (alice has a route to bob: {}, her rung: {:?})",
-                    alice.has_route("bob").await,
-                    alice.rung_to("bob").await
-                );
-                probes += 1;
-                let _ = alice
-                    .send("bob", &format!("forward probe {name} {probes}"))
-                    .await;
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            probe_until_forwarded(name, &alice, &carol).await;
         }
     }
 

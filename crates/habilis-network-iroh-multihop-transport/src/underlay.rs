@@ -222,6 +222,9 @@ struct WriterPool {
     /// Woken when the gate starts to refuse a hop, and when it admits one that it
     /// refused: the moments at which the best first hop to a peer can change.
     route_wake: Arc<tokio::sync::Notify>,
+    /// The connection of each live writer, keyed like `writers`, for a test that reads its paths.
+    #[cfg(feature = "test-hooks")]
+    connections: Mutex<HashMap<EndpointId, Connection>>,
 }
 
 impl WriterPool {
@@ -257,6 +260,11 @@ impl WriterPool {
         self.health
             .lock()
             .expect("health mutex poisoned")
+            .remove(&underlay);
+        #[cfg(feature = "test-hooks")]
+        self.connections
+            .lock()
+            .expect("connections mutex poisoned")
             .remove(&underlay);
     }
 
@@ -485,6 +493,20 @@ impl Forwarder {
         self.pool.note_refused(underlay, Duration::from_mins(1));
     }
 
+    /// The open paths of the connection that our writer holds toward the underlay `hop`, now,
+    /// each with whether it is the selected one: the reading that the gate takes.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn writer_paths(&self, hop: EndpointId) -> Option<Vec<(TransportAddr, bool)>> {
+        let connection = self
+            .pool
+            .connections
+            .lock()
+            .expect("connections mutex poisoned")
+            .get(&hop)
+            .cloned()?;
+        Some(paths_of(&connection))
+    }
+
     /// Rate-limited visibility for a refused cell. Whoever is sending them sets
     /// the rate, so logging every one hands them a second amplifier.
     fn note_drop(&self, reason: &str) {
@@ -687,6 +709,11 @@ async fn drain_to_hop(
     let conn = dial_with_retry(underlay, dst)
         .await
         .context("underlay dial gave up")?;
+    #[cfg(feature = "test-hooks")]
+    pool.connections
+        .lock()
+        .expect("connections mutex poisoned")
+        .insert(dst.id, conn.clone());
     let mut send = conn.open_uni().await.context("open underlay uni-stream")?;
     let mut gate = RelayGate::new(rule.allow_relay, GateRole::Writer);
     // Looks at the path once a second even when no cell comes, so a hop that was

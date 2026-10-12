@@ -269,6 +269,18 @@ pub enum Request {
         peer: String,
         reply: oneshot::Sender<bool>,
     },
+    /// Tests only: the multihop view of this node as one line: its edges, and for each
+    /// member the open paths of the writer connection toward its underlay, or that there
+    /// is none. A writer toward a member exists only if this node sent cells to it: one
+    /// toward the receiver of a cell that must go through a third member is a direct hop.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    RouteDiag {
+        reply: oneshot::Sender<String>,
+    },
     /// Tests only: how many multihop cells this node has passed on for other
     /// nodes. `0` when multihop is off.
     #[cfg(all(
@@ -688,6 +700,15 @@ impl NodeDriver for MembershipApp {
                 feature = "host",
                 not(target_arch = "wasm32")
             ))]
+            Request::RouteDiag { reply } => {
+                let _ = reply.send(route_diag(state));
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
             Request::UnderlaySessions { reply } => {
                 let sessions = state
                     .underlay_webrtc
@@ -852,6 +873,75 @@ fn known_peer<'a>(
         .peer_endpoints
         .get(peer)
         .ok_or_else(|| UnknownPeer(peer.to_owned()))
+}
+
+#[cfg(all(
+    feature = "iroh-test-utils",
+    feature = "host",
+    not(target_arch = "wasm32")
+))]
+fn route_diag(state: &EventLoopState) -> String {
+    use std::borrow::Borrow as _;
+
+    let Some(handle) = state.multihop() else {
+        return "multihop is off".to_owned();
+    };
+    let view = handle.topology_view();
+    let name_of = |id: &str| -> String {
+        if id == view.self_id {
+            return "self".to_owned();
+        }
+        state
+            .peer_endpoints
+            .iter()
+            .find(|(_, addr)| addr.id.to_string() == id)
+            .map_or_else(
+                || id.chars().take(10).collect(),
+                |(nickname, _)| {
+                    let text: &str = nickname.borrow();
+                    text.to_owned()
+                },
+            )
+    };
+    let edges: Vec<String> = view
+        .edges
+        .iter()
+        .map(|edge| {
+            format!(
+                "{}->{}:{}",
+                name_of(&edge.from),
+                name_of(&edge.to),
+                edge.metric
+            )
+        })
+        .collect();
+    let mut writers: Vec<String> = state
+        .peer_endpoints
+        .iter()
+        .filter_map(|(nickname, addr)| {
+            let underlay = handle.underlay_addr_of(addr.id)?;
+            let text: &str = nickname.borrow();
+            let open = handle.underlay_paths_for_test(underlay.id).map_or_else(
+                || "none".to_owned(),
+                |paths| {
+                    let shown: Vec<String> = paths
+                        .into_iter()
+                        .map(|(path, selected)| {
+                            format!("{path:?}{}", if selected { "*" } else { "" })
+                        })
+                        .collect();
+                    shown.join(",")
+                },
+            );
+            Some(format!("{text}:{open}"))
+        })
+        .collect();
+    writers.sort();
+    format!(
+        "edges=[{}] writers=[{}]",
+        edges.join(" "),
+        writers.join(" ")
+    )
 }
 
 #[cfg(test)]

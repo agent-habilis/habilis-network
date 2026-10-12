@@ -343,6 +343,20 @@ impl MultihopHandle {
         }
     }
 
+    /// The open paths of the connection that this node's writer holds toward the
+    /// underlay `underlay_id`, now, each with whether it is the selected one: the
+    /// reading that the relay gate takes before it admits a cell. `None` when no
+    /// writer for that hop is live.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn underlay_paths_for_test(
+        &self,
+        underlay_id: EndpointId,
+    ) -> Option<Vec<(iroh::TransportAddr, bool)>> {
+        self.inner.forwarder.writer_paths(underlay_id)
+    }
+
     /// Woken when the relay rule starts to refuse a hop, and when it admits one
     /// that it refused: the moments at which the best route to a peer can change,
     /// well before the stuck deadline and the next link-state tick. A holder that

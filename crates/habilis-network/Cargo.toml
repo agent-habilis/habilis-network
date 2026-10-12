@@ -56,6 +56,7 @@ iroh-test-utils = [
     "dep:iroh-relay",
     "iroh-relay/server",
     "habilis-network-iroh-webrtc-transport/test-hooks",
+    "habilis-network-iroh-multihop-transport?/test-hooks",
 ]
 # Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
 # server, a ticket, and fetch/offload, for handing a peer a payload too large to
