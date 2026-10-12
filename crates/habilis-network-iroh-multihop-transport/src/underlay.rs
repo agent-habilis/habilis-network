@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Context;
+use habilis_network_iroh_transport_util::{Rung, custom_rung, is_blocked_to, remote_id_of};
 use iroh::endpoint::Connection;
+use iroh::endpoint::transports::Addr;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use iroh_base::CustomAddr;
@@ -102,6 +104,40 @@ fn direct_for_inbound(paths: &[(TransportAddr, bool)]) -> bool {
         .any(|(addr, _)| !matches!(addr, TransportAddr::Relay(_)))
 }
 
+/// The paths that a test has not taken from this node: `blocked` names the ones it took.
+///
+/// A test cut changes what the selector may select, and iroh selects again only when a path
+/// opens or closes. A connection that stood on a path before the cut keeps it selected, and
+/// the gate would read a direct path for ever: the cut would not reach a live writer. So the
+/// gate leaves the blocked paths out of what it reads.
+fn unblocked(
+    paths: Vec<(TransportAddr, bool)>,
+    blocked: impl Fn(&TransportAddr) -> bool,
+) -> Vec<(TransportAddr, bool)> {
+    paths
+        .into_iter()
+        .filter(|(path, _)| !blocked(path))
+        .collect()
+}
+
+/// Whether a test took `path` away from the endpoint `local`: the question that the selector
+/// of the underlay asks of its paths. Without the `test-hooks` of
+/// `habilis-network-iroh-transport-util` nothing is ever blocked, so a build without them reads
+/// every path as before.
+fn blocked_by_test(local: EndpointId, path: &TransportAddr) -> bool {
+    let (rung, ip_remote, remote_id) = match path {
+        TransportAddr::Ip(remote) => (Rung::Ip, Some(*remote), None),
+        TransportAddr::Relay(_) => (Rung::Relay, None, None),
+        TransportAddr::Custom(custom) => (
+            custom_rung(custom.id()),
+            None,
+            remote_id_of(&Addr::Custom(custom.clone())),
+        ),
+        _ => (Rung::Other, None, None),
+    };
+    is_blocked_to(local, rung, ip_remote, remote_id)
+}
+
 /// Which end of a connection a gate stands on.
 #[derive(Debug, Clone, Copy)]
 enum GateRole {
@@ -135,6 +171,8 @@ struct RelayRule {
 /// cells of other peers' traffic must not ride it meanwhile.
 struct RelayGate {
     allow_relay: bool,
+    /// The underlay endpoint that the gate stands on: the node whose blocks a test may set.
+    local: EndpointId,
     role: GateRole,
     reading: Option<(Instant, bool)>,
     /// The path list at the last refusal, so that the log says it once per change.
@@ -142,9 +180,10 @@ struct RelayGate {
 }
 
 impl RelayGate {
-    fn new(allow_relay: bool, role: GateRole) -> Self {
+    fn new(allow_relay: bool, local: EndpointId, role: GateRole) -> Self {
         Self {
             allow_relay,
+            local,
             role,
             reading: None,
             last_refused_paths: None,
@@ -161,9 +200,10 @@ impl RelayGate {
             Some((at, admitted)) if now.duration_since(at) < PATH_RECHECK => admitted,
             _ => {
                 let paths = paths_of(connection);
+                let direct = unblocked(paths.clone(), |path| blocked_by_test(self.local, path));
                 let admitted = match self.role {
-                    GateRole::Writer => direct_for_writer(&paths),
-                    GateRole::Inbound => direct_for_inbound(&paths),
+                    GateRole::Writer => direct_for_writer(&direct),
+                    GateRole::Inbound => direct_for_inbound(&direct),
                 };
                 self.reading = Some((now, admitted));
                 if !admitted {
@@ -715,7 +755,7 @@ async fn drain_to_hop(
         .expect("connections mutex poisoned")
         .insert(dst.id, conn.clone());
     let mut send = conn.open_uni().await.context("open underlay uni-stream")?;
-    let mut gate = RelayGate::new(rule.allow_relay, GateRole::Writer);
+    let mut gate = RelayGate::new(rule.allow_relay, underlay.id(), GateRole::Writer);
     // Looks at the path once a second even when no cell comes, so a hop that was
     // withdrawn for staying on the relay (and so carries no cells) is a link
     // again once a direct path opens.
@@ -815,6 +855,7 @@ impl ProtocolHandler for ForwardAcceptor {
         let upstream = connection.remote_id();
         let gate = Arc::new(Mutex::new(RelayGate::new(
             self.forwarder.rule.allow_relay,
+            self.forwarder.underlay.id(),
             GateRole::Inbound,
         )));
         // Loop ends when the upstream hop closes the connection: normal teardown.
@@ -1396,6 +1437,84 @@ mod tests {
         // The writer keeps the stricter rule: it sends on the selected path.
         assert!(!direct_for_writer(&[(ip(9), false), (relay(), false)]));
         assert!(direct_for_writer(&[(ip(9), true), (relay(), false)]));
+    }
+
+    /// A test cut takes a path away from the selector, and iroh does not select again for a
+    /// connection that already stands on it. The gate must read the cut itself: a path that the
+    /// test blocked is not a direct path, so that a live writer gives the hop up.
+    #[test]
+    fn a_selected_direct_path_that_a_test_blocked_is_not_a_direct_path() {
+        use super::{direct_for_writer, unblocked};
+        let paths = vec![(ip(9), true), (relay(), false)];
+        assert!(
+            direct_for_writer(&paths),
+            "before the cut the writer is admitted"
+        );
+        let open = unblocked(paths, |path| *path == ip(9));
+        assert!(
+            !direct_for_writer(&open),
+            "the blocked path is gone, and nothing direct is selected"
+        );
+        assert!(
+            open.iter().any(|(path, _)| *path == relay()),
+            "the relay stays in the list"
+        );
+    }
+
+    #[test]
+    fn the_accepting_end_gives_up_a_path_that_a_test_blocked_too() {
+        use super::{direct_for_inbound, unblocked};
+        let paths = vec![(ip(9), false), (relay(), false)];
+        assert!(direct_for_inbound(&paths));
+        let open = unblocked(paths, |path| matches!(path, TransportAddr::Ip(_)));
+        assert!(
+            !direct_for_inbound(&open),
+            "only the relay is left, and it is not direct"
+        );
+    }
+
+    #[test]
+    fn a_path_that_no_test_blocked_is_kept() {
+        use super::unblocked;
+        let paths = vec![(ip(9), true), (relay(), false)];
+        assert_eq!(unblocked(paths.clone(), |_| false), paths);
+    }
+
+    #[test]
+    fn an_ip_path_that_a_test_blocked_for_this_node_is_blocked() {
+        use super::blocked_by_test;
+        use habilis_network_iroh_transport_util::block_ip_to;
+        let local = SecretKey::from_bytes(&[141; 32]).public();
+        let other = SecretKey::from_bytes(&[142; 32]).public();
+        block_ip_to(local, [9]);
+        assert!(blocked_by_test(local, &ip(9)), "the blocked port");
+        assert!(!blocked_by_test(local, &ip(10)), "another port");
+        assert!(!blocked_by_test(local, &relay()), "the relay");
+        assert!(!blocked_by_test(other, &ip(9)), "another node");
+        block_ip_to(local, []);
+        assert!(!blocked_by_test(local, &ip(9)), "an empty set clears");
+    }
+
+    #[test]
+    fn a_webrtc_path_that_a_test_blocked_toward_one_remote_is_blocked() {
+        use super::blocked_by_test;
+        use habilis_network_iroh_transport_util::{Rung, WEBRTC_TRANSPORT_ID, block_rung_to};
+        use iroh_base::CustomAddr;
+        let local = SecretKey::from_bytes(&[143; 32]).public();
+        let cut = SecretKey::from_bytes(&[144; 32]).public();
+        let kept = SecretKey::from_bytes(&[145; 32]).public();
+        let webrtc = |remote: EndpointId| {
+            TransportAddr::Custom(CustomAddr::from_parts(
+                WEBRTC_TRANSPORT_ID,
+                remote.as_bytes(),
+            ))
+        };
+        block_rung_to(local, Rung::WebRtc, cut, true);
+        assert!(blocked_by_test(local, &webrtc(cut)), "the cut remote");
+        assert!(!blocked_by_test(local, &webrtc(kept)), "another remote");
+        assert!(!blocked_by_test(local, &ip(9)), "another rung");
+        block_rung_to(local, Rung::WebRtc, cut, false);
+        assert!(!blocked_by_test(local, &webrtc(cut)), "cleared");
     }
 
     #[tokio::test]
