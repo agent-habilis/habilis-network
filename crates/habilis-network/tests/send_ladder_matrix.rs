@@ -315,6 +315,26 @@ impl Member {
             .unwrap_or(0)
     }
 
+    /// Whether this member holds a live gossip link to `peer` now: the roster names
+    /// the reach of a peer `direct` only while it does.
+    async fn linked_to(&self, peer: &str) -> bool {
+        let json = self
+            .membership
+            .request(|reply| Request::Peers { reply })
+            .await
+            .unwrap_or_default();
+        serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .and_then(|roster| {
+                roster["peers"].as_array().map(|peers| {
+                    peers
+                        .iter()
+                        .any(|entry| entry["nickname"] == peer && entry["reach"] == "direct")
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// The lane that a directed frame to `peer` takes now, as the roster names it:
     /// `relay-only` is the one where the frame is parked until a direct path is proven.
     async fn lane_to(&self, peer: &str) -> Option<String> {
@@ -491,6 +511,31 @@ fn init_logging() {
         .try_init();
 }
 
+/// Wait until every member holds a live gossip link to each of the other two, read
+/// at both ends of every pair. A cell is built on that triangle: a pair that starts
+/// without its link is in a state that the ladder does not describe, and a cut made
+/// then reads as a fault of the ladder when it is a late link.
+async fn triangle_linked(members: [(&str, &Member); 3], deadline: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        let mut all = true;
+        for (name, member) in members {
+            for (other, _) in members {
+                if other != name {
+                    all &= member.linked_to(other).await;
+                }
+            }
+        }
+        if all {
+            return true;
+        }
+        if started.elapsed() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> bool {
     let started = Instant::now();
     loop {
@@ -613,6 +658,22 @@ async fn members(
     panic!("no draw of ids gave alice the order {sender_id:?} in 20 tries");
 }
 
+/// The cell starts from the full triangle of gossip links: a pair that starts without its link
+/// is in a state that the ladder does not describe, and a cut made then reads as a fault of the
+/// ladder when it is a late link.
+async fn expect_triangle(name: &str, alice: &Member, bob: &Member, carol: &Member) {
+    assert!(
+        triangle_linked(
+            [("alice", alice), ("bob", bob), ("carol", carol)],
+            STEP_DEADLINE
+        )
+        .await,
+        "{name}: the three members are not all gossip-linked at both ends of every pair \
+         after {STEP_DEADLINE:?}: the cell starts from that triangle, so this is a failure \
+         of link formation, before any cut"
+    );
+}
+
 async fn run(cell: Cell, name: &str, sender_id: SenderId) {
     init_logging();
     if cell.has(Transport::Gossip) && !GOSSIP_INSTALLED {
@@ -631,6 +692,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
         rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
         "{name}: the three members never formed a mesh"
     );
+    expect_triangle(name, &alice, &bob, &carol).await;
     if cell.has(Transport::Udp) {
         alice.expect_rung("bob", "ip", name).await;
     }
