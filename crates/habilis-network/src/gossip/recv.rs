@@ -801,6 +801,19 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
                     .peer_endpoints
                     .get(&message.author)
                     .map(|addr| addr.id);
+                // The `PeerInfo` of the author can be a few milliseconds behind its first
+                // vector: the vector waits for the binding, and is fed when it is written.
+                if bound.is_none() {
+                    let kept = state
+                        .parked_link_states
+                        .park(message.author.clone(), vector);
+                    tracing::debug!(target: "habilis_network::gossip",
+                        author = %message.author,
+                        kept,
+                        "parked multihop link-state: no endpoint is bound to its author yet"
+                    );
+                    return false;
+                }
                 if bound != Some(vector.origin()) {
                     tracing::debug!(target: "habilis_network::gossip",
                         author = %message.author,
@@ -809,6 +822,8 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
                     return false;
                 }
                 let updated = handle.feed_topology(vector);
+                // A vector that waited for this author is older than the one just fed.
+                state.parked_link_states.take(&message.author);
                 tracing::debug!(target: "habilis_network::gossip",
                     author = %message.author,
                     updated,
@@ -1482,9 +1497,7 @@ async fn handle_peer_info(
     // so it advertises `rendezvous_id` here — record that too, so a joiner can
     // tell its rendezvous link belongs to the beacon's nickname.
     let changed = state.peer_endpoints.get(&message.author) != Some(&peer_addr);
-    state
-        .peer_endpoints
-        .insert(message.author.clone(), peer_addr.clone());
+    state.bind_peer_endpoint(message.author.clone(), peer_addr.clone());
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
@@ -2654,6 +2667,64 @@ mod first_contact_tests {
         node.endpoint.close().await;
     }
 
+    /// The first vector of a member goes out when its link comes up, and its `PeerInfo` can be a
+    /// few milliseconds behind it. The vector waits for the binding, and the `PeerInfo` that
+    /// writes the binding feeds it: not the tick, 15 s on, after the relay policy closed the links.
+    #[cfg(feature = "multihop")]
+    #[tokio::test]
+    async fn a_link_vector_that_came_before_the_peer_info_of_its_author_is_fed_by_that_peer_info() {
+        use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
+        use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+
+        use crate::protocol::peer_addr::endpoint_addr_to_json;
+
+        async fn handle_for(secret: &SecretKey) -> MultihopHandle {
+            let underlay = Endpoint::builder(presets::Minimal)
+                .secret_key(underlay_secret(secret))
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind an underlay");
+            MultihopHandle::new(
+                secret,
+                underlay,
+                crate::lookup::multihop_handle_config(false),
+            )
+            .expect("underlay on the derived key")
+        }
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let author_key = SecretKey::generate();
+        let other_key = SecretKey::generate();
+        let ours = handle_for(&SecretKey::generate()).await;
+        let theirs = handle_for(&author_key).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+
+        let vector_body =
+            crate::gossip::json_body(&theirs.link_vector(vec![(other_key.public(), 10)]))
+                .expect("a vector serializes");
+        let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body);
+        assert!(
+            !super::handle_link_state(&vector, &mut state),
+            "no binding yet: nothing is fed"
+        );
+        assert!(ours.topology_view().edges.is_empty());
+
+        let address = endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
+        let address_body = MessageBody::new(address.to_string()).expect("an address body");
+        let peer_info = Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body)
+            .signed(&Identity::generate());
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        assert_eq!(
+            ours.topology_view().edges.len(),
+            1,
+            "the PeerInfo that writes the binding feeds the vector that waited for it"
+        );
+        node.endpoint.close().await;
+    }
+
     /// The address in the first `PeerInfo` of a peer must reach the endpoint, not only
     /// a lookup: the endpoint reads a lookup at a dial, and a connection that is live
     /// gets a path only from the call that hands the address over.
@@ -3332,5 +3403,118 @@ mod requeue_tests {
         );
         state.webrtc_admission.close();
         node.endpoint.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "host"))]
+mod parked_link_state_tests {
+    use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+
+    use super::handle_link_state;
+    use crate::daemon::state::ParkedLinkStates;
+    use crate::protocol::{MeshId, Message};
+    use crate::testing::{fresh_state, nick};
+
+    async fn handle_for(secret: &SecretKey) -> MultihopHandle {
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(secret))
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay");
+        MultihopHandle::new(
+            secret,
+            underlay,
+            crate::lookup::multihop_handle_config(false),
+        )
+        .expect("underlay on the derived key")
+    }
+
+    fn vector_message(
+        author: &str,
+        handle: &MultihopHandle,
+        links: Vec<(iroh::EndpointId, u32)>,
+    ) -> Message {
+        let body =
+            crate::gossip::json_body(&handle.link_vector(links)).expect("a vector serializes");
+        Message::new_link_state(&MeshId::from("test"), &nick(author), body)
+    }
+
+    // The trust rule is the one of a vector that arrives after its binding: the origin must be
+    // the endpoint that the roster binds to the author.
+    #[tokio::test]
+    async fn a_parked_link_vector_whose_origin_is_not_the_bound_endpoint_is_dropped_at_the_binding()
+    {
+        let (alice, bob) = (
+            SecretKey::from_bytes(&[64; 32]),
+            SecretKey::from_bytes(&[65; 32]),
+        );
+        let ours = handle_for(&SecretKey::from_bytes(&[63; 32])).await;
+        let theirs = handle_for(&alice).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+
+        let message = vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]);
+        handle_link_state(&message, &mut state);
+        state.bind_peer_endpoint(nick("mallory-mm"), EndpointAddr::new(bob.public()));
+        assert!(
+            ours.topology_view().edges.is_empty(),
+            "an author bound to another endpoint cannot speak for this origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newer_parked_link_vector_replaces_the_older() {
+        let (alice, bob, carol) = (
+            SecretKey::from_bytes(&[67; 32]),
+            SecretKey::from_bytes(&[68; 32]),
+            SecretKey::from_bytes(&[69; 32]),
+        );
+        let ours = handle_for(&SecretKey::from_bytes(&[66; 32])).await;
+        let theirs = handle_for(&alice).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+
+        let older = vector_message("alice-aa", &theirs, vec![(bob.public(), 10)]);
+        let newer = vector_message(
+            "alice-aa",
+            &theirs,
+            vec![(bob.public(), 10), (carol.public(), 10)],
+        );
+        handle_link_state(&older, &mut state);
+        handle_link_state(&newer, &mut state);
+        state.bind_peer_endpoint(nick("alice-aa"), EndpointAddr::new(alice.public()));
+        assert_eq!(
+            ours.topology_view().edges.len(),
+            2,
+            "the newer vector, with two links, is the one that is fed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_park_holds_one_vector_per_author_up_to_its_cap() {
+        let alice = SecretKey::from_bytes(&[71; 32]);
+        let theirs = handle_for(&alice).await;
+        let vector = theirs.link_vector(Vec::new());
+        let mut parked = ParkedLinkStates::new(2);
+
+        assert!(parked.park(nick("alice-aa"), vector.clone()));
+        assert!(parked.park(nick("bobby-bb"), vector.clone()));
+        assert!(
+            !parked.park(nick("carol-cc"), vector.clone()),
+            "a third author is refused at the cap"
+        );
+        assert!(
+            parked.park(nick("alice-aa"), vector.clone()),
+            "an author that waits is replaced at the cap"
+        );
+        assert!(parked.take(&nick("alice-aa")).is_some());
+        assert!(parked.take(&nick("alice-aa")).is_none(), "taken once");
+        assert!(
+            parked.park(nick("carol-cc"), vector),
+            "a taken vector frees its place"
+        );
     }
 }

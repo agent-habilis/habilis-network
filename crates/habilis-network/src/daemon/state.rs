@@ -55,6 +55,62 @@ pub enum TestDrop {
     StateChange,
 }
 
+/// The most link vectors that wait for the binding of their author: one per author, and a mesh
+/// holds fewer members than this. A flood of authors that never bind cannot grow the park.
+#[cfg(feature = "multihop")]
+const MAX_PARKED_LINK_STATES: usize = 256;
+
+/// Link vectors that arrived before the roster bound an endpoint to their author, one per
+/// author: a newer one replaces the older. The binding comes with the `PeerInfo` of the author,
+/// which can arrive a few milliseconds after its first vector, now that vectors go out when a link
+/// comes up. A vector that is dropped there is waited for until the next tick, 15 s on, and the
+/// session that it makes possible comes too late for the route that it carries.
+#[cfg(feature = "multihop")]
+#[derive(Debug)]
+pub(crate) struct ParkedLinkStates {
+    by_author: HashMap<Nickname, habilis_network_iroh_multihop_transport::LinkVector>,
+    cap: usize,
+}
+
+#[cfg(feature = "multihop")]
+impl ParkedLinkStates {
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            by_author: HashMap::new(),
+            cap,
+        }
+    }
+
+    /// Park `vector` for `author`, in place of the one that waited. Whether it was kept: the
+    /// vector of an author that does not wait yet is refused at the cap.
+    pub(crate) fn park(
+        &mut self,
+        author: Nickname,
+        vector: habilis_network_iroh_multihop_transport::LinkVector,
+    ) -> bool {
+        if !self.by_author.contains_key(&author) && self.by_author.len() >= self.cap {
+            return false;
+        }
+        self.by_author.insert(author, vector);
+        true
+    }
+
+    /// The vector that waits for `author`, if any.
+    pub(crate) fn take(
+        &mut self,
+        author: &Nickname,
+    ) -> Option<habilis_network_iroh_multihop_transport::LinkVector> {
+        self.by_author.remove(author)
+    }
+}
+
+#[cfg(feature = "multihop")]
+impl Default for ParkedLinkStates {
+    fn default() -> Self {
+        Self::new(MAX_PARKED_LINK_STATES)
+    }
+}
+
 /// One peer in a [`RosterSnapshot`]. `last_seen_secs_ago` is
 /// `None` until the peer's first heartbeat is timed; `quiet` marks a
 /// peer heartbeat-evicted past `ALIVE_TIMEOUT_SECS` (still returnable);
@@ -424,6 +480,10 @@ pub struct EventLoopState {
     /// [`crate::transport::underlay_webrtc`].
     #[cfg(feature = "multihop")]
     pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    /// The link vectors whose author has no endpoint bound in the roster yet, until the binding
+    /// is written (see `bind_peer_endpoint`).
+    #[cfg(feature = "multihop")]
+    pub(crate) parked_link_states: ParkedLinkStates,
     /// The links that this node advertised in its last link vector, whichever arm sent it. A link
     /// that comes up sends a vector only when the set is another one, so that a link that flaps
     /// does not cause a broadcast per flap, and a second link that comes up 100 ms after the
@@ -870,6 +930,8 @@ impl EventLoopState {
             multihop: None,
             #[cfg(feature = "multihop")]
             underlay_webrtc: None,
+            #[cfg(feature = "multihop")]
+            parked_link_states: ParkedLinkStates::default(),
             #[cfg(feature = "multihop")]
             last_advertised: None,
             lan_grafts: crate::gossip::lan::LanGrafts::default(),
@@ -1840,13 +1902,54 @@ impl EventLoopState {
             .peer_endpoints
             .get(&nickname)
             .is_some_and(|before| *before != endpoint);
-        self.peer_endpoints.insert(nickname, endpoint);
+        self.bind_peer_endpoint(nickname, endpoint);
         // A peer at a new address is not the peer that refused.
         if changed {
             self.graft_backoff.reset(id);
             if self.rendezvous_id == Some(id) {
                 self.probe_backoff.reset();
             }
+        }
+    }
+
+    /// Write the binding of `nickname` to its endpoint. The one place that does: a `PeerInfo`
+    /// (`handle_peer_info`) and `note_peer_endpoint` both come here.
+    pub(crate) fn bind_peer_endpoint(&mut self, nickname: Nickname, endpoint: EndpointAddr) {
+        #[cfg(feature = "multihop")]
+        let (parked, bound) = (self.parked_link_states.take(&nickname), endpoint.id);
+        self.peer_endpoints.insert(nickname, endpoint);
+        // The vector that came before this binding is fed now, not at the next tick.
+        #[cfg(feature = "multihop")]
+        if let Some(vector) = parked {
+            self.feed_parked_link_state(vector, bound);
+        }
+    }
+
+    /// Feed the link vector that waited for its author's binding, with the check that a vector
+    /// that arrives after its binding goes through: the origin must be the bound endpoint. The
+    /// underlay is ticked when the vector changed the topology, as at any other receipt.
+    #[cfg(feature = "multihop")]
+    fn feed_parked_link_state(
+        &self,
+        vector: habilis_network_iroh_multihop_transport::LinkVector,
+        bound: EndpointId,
+    ) {
+        if vector.origin() != bound {
+            tracing::debug!(target: "habilis_network::gossip",
+                "dropping parked multihop link-state: its origin is not the endpoint bound to its author"
+            );
+            return;
+        }
+        let Some(handle) = self.multihop.as_ref() else {
+            return;
+        };
+        let updated = handle.feed_topology(vector);
+        tracing::debug!(target: "habilis_network::gossip",
+            updated,
+            "multihop link-state received after its binding"
+        );
+        if updated {
+            crate::transport::underlay_webrtc::tick_now(self);
         }
     }
 

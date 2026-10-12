@@ -129,6 +129,15 @@ impl RefusalBackoff {
         self.strangers.remove(peer);
     }
 
+    /// Forget every turn-away as not a neighbor, and the wait that a second one earned.
+    #[cfg(any(feature = "multihop", test))]
+    fn forget_strangers(&mut self) {
+        for peer in self.strangers.keys() {
+            self.by_peer.remove(peer);
+        }
+        self.strangers.clear();
+    }
+
     /// `peer` turned an offer away as not a neighbor: its underlay does not hold our link vector
     /// yet. Whether the offer is tried again soon. The first turn-away in a row is a race of two
     /// vectors that cross, and the next offer wins it. A second one in a row (the earlier one is
@@ -785,6 +794,13 @@ impl SignalAdmission {
         self.lock().refused.note_stranger(peer, Instant::now())
     }
 
+    /// Forget that peers turned our offers away as not a neighbor, and the wait that a second
+    /// turn-away earned: this node just sent its link vector, and the vector is what they lacked.
+    #[cfg(any(feature = "multihop", test))]
+    pub(crate) fn forget_not_a_neighbor(&self) {
+        self.lock().refused.forget_strangers();
+    }
+
     /// A round with `peer` ended in a session: it is no longer refusing us, so
     /// its wait starts over.
     pub(crate) fn note_success(&self, peer: EndpointId) {
@@ -1196,6 +1212,36 @@ mod tests {
         assert!(
             admission.note_not_a_neighbor(stranger),
             "after a success the first one is a first one again"
+        );
+    }
+
+    /// A vector that this node sends is what a peer that turned its offer away lacked: the wait
+    /// that two turn-aways in a row earned ends with it, and the next one is a first again.
+    #[test]
+    fn a_vector_that_this_node_sent_ends_the_wait_that_two_turn_aways_earned() {
+        let admission = SignalAdmission::new(4);
+        let stranger = peer(33);
+        assert!(admission.note_not_a_neighbor(stranger));
+        assert!(!admission.note_not_a_neighbor(stranger));
+        assert!(
+            admission
+                .lock()
+                .refused
+                .on_cooldown(&stranger, Instant::now()),
+            "two in a row wait"
+        );
+
+        admission.forget_not_a_neighbor();
+        assert!(
+            !admission
+                .lock()
+                .refused
+                .on_cooldown(&stranger, Instant::now()),
+            "a vector sent ends the wait"
+        );
+        assert!(
+            admission.note_not_a_neighbor(stranger),
+            "and the next turn-away is a first one again"
         );
     }
 

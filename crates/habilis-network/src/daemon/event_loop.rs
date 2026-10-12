@@ -520,6 +520,13 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
     // that every digest asks us for again.
     let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity);
     gossip::broadcast_msg(ctx.sender, &vector_msg).await;
+    // The vector that this node just sent is what a peer that turned our offer away lacked: the
+    // wait that its turn-aways earned ends, and the underlay offers again at once. One offer per
+    // vector sent: a link event, or the tick.
+    if let Some(underlay) = state.underlay_webrtc.as_ref() {
+        underlay.admission.forget_not_a_neighbor();
+    }
+    crate::transport::underlay_webrtc::tick_now(state);
 }
 
 /// Whether the links of a vector are another set than the last one that went out. None went
