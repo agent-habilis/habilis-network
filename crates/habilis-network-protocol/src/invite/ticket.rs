@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use iroh_base::{PublicKey, SecretKey, Signature};
 
 use crate::base58check::{self, take_array};
@@ -20,6 +20,7 @@ use crate::identity;
 use crate::mesh::Mesh;
 use crate::seal;
 use habilis_network_util::clock;
+use zeroize::Zeroizing;
 
 /// Framing version. Bumped only on a breaking framing change.
 const VERSION: u8 = 2;
@@ -225,10 +226,13 @@ impl InviteTicket {
             (false, Some(_)) => bail!("this invite has no password — drop --password"),
             (false, None) => self.root_field.clone(),
         };
-        let bytes: [u8; 32] = raw
-            .try_into()
-            .map_err(|_| anyhow!("invite root is not 32 bytes"))?;
-        Ok(SymmetricKey::from_bytes(bytes))
+        let raw = Zeroizing::new(raw);
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        if raw.len() != bytes.len() {
+            bail!("invite root is not 32 bytes");
+        }
+        bytes.copy_from_slice(&raw);
+        Ok(SymmetricKey::from_bytes(*bytes))
     }
 }
 

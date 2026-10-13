@@ -82,9 +82,9 @@ pub(crate) fn derive_secret(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
     hasher.update(label);
     hasher.update(seed);
     let digest = hasher.finalize();
-    let mut out = [0u8; 32];
+    let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&digest);
-    out
+    *out
 }
 
 /// The random 32 bytes that a mesh id carries, and the salts of the key
@@ -281,11 +281,11 @@ fn stretch_password(password: &Password, salt_seed: &[u8; 32], label: &[u8]) -> 
     .expect("compile-time KDF params are valid");
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let salt = derive_secret(salt_seed, label);
-    let mut out = [0u8; 32];
+    let mut out = Zeroizing::new([0u8; 32]);
     argon
-        .hash_password_into(password.as_str().as_bytes(), &salt, &mut out)
+        .hash_password_into(password.as_str().as_bytes(), &salt, &mut *out)
         .expect("32-byte salt and output are valid argon2 lengths");
-    out
+    *out
 }
 
 /// The stretched key for a passworded mesh: every derivation (topic,

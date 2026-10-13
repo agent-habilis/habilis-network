@@ -20,6 +20,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 use super::MessageBody;
 use super::crypto::{SymmetricKey, derive_secret};
@@ -59,14 +60,14 @@ struct Envelope {
 /// fallible step is AEAD encryption, which cannot fail for a well-formed
 /// key/nonce.
 fn seal(recipient_pub: &PublicKey, plaintext: &[u8]) -> Sealed {
-    let mut eph_bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut eph_bytes);
-    let ephemeral = StaticSecret::from(eph_bytes);
+    let mut eph_bytes = Zeroizing::new([0u8; 32]);
+    rand::rng().fill_bytes(&mut *eph_bytes);
+    let ephemeral = StaticSecret::from(*eph_bytes);
     let epk = PublicKey::from(&ephemeral);
     let shared = ephemeral.diffie_hellman(recipient_pub);
 
-    let key = derive_secret(shared.as_bytes(), SEAL_LABEL);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let key = Zeroizing::new(derive_secret(shared.as_bytes(), SEAL_LABEL));
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key));
     let mut nonce = [0u8; 12];
     rand::rng().fill_bytes(&mut nonce);
     let ct = cipher
@@ -92,8 +93,8 @@ fn seal(recipient_pub: &PublicKey, plaintext: &[u8]) -> Sealed {
 /// ciphertext/nonce.
 fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>> {
     let shared = our_secret.diffie_hellman(&PublicKey::from(sealed.epk));
-    let key = derive_secret(shared.as_bytes(), SEAL_LABEL);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let key = Zeroizing::new(derive_secret(shared.as_bytes(), SEAL_LABEL));
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key));
     cipher
         .decrypt(
             Nonce::from_slice(&sealed.nonce),
