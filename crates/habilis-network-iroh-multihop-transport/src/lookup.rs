@@ -17,6 +17,7 @@ use n0_future::{boxed::BoxStream, stream};
 
 use crate::addr::Route;
 use crate::graph::Leg;
+use crate::role::AppId;
 use crate::topology::Topology;
 use crate::underlay::Forwarder;
 
@@ -60,14 +61,14 @@ pub(crate) struct Chosen {
 /// the stuck deadline; our own choice of a first hop reads the live gate.
 #[derive(Debug, Clone)]
 pub(crate) struct RouteChooser {
-    self_id: EndpointId,
+    self_id: AppId,
     topology: Arc<RwLock<Topology>>,
     forwarder: Arc<Forwarder>,
 }
 
 impl RouteChooser {
     pub(crate) fn new(
-        self_id: EndpointId,
+        self_id: AppId,
         topology: Arc<RwLock<Topology>>,
         forwarder: Arc<Forwarder>,
     ) -> Self {
@@ -78,8 +79,8 @@ impl RouteChooser {
         }
     }
 
-    pub(crate) fn choose(&self, dst: EndpointId) -> Option<Chosen> {
-        let refused: HashSet<EndpointId> = self.forwarder.refusing_hops().into_iter().collect();
+    pub(crate) fn choose(&self, dst: AppId) -> Option<Chosen> {
+        let refused: HashSet<AppId> = self.forwarder.refusing_hops().into_iter().collect();
         let topology = self.topology.read().expect("topology lock poisoned");
         let leg = Leg {
             src: self.self_id,
@@ -111,7 +112,7 @@ impl AddressLookup for MultihopLookup {
     fn resolve(&self, endpoint_id: EndpointId) -> Option<BoxStream<Result<Item, Error>>> {
         // One route, chosen as `route_addr` chooses it: the shortest, unless the gate
         // refuses its first hop.
-        let chosen = self.chooser.choose(endpoint_id);
+        let chosen = self.chooser.choose(AppId::new(endpoint_id));
         tracing::debug!(target: "habilis_lookup", me = %self.chooser.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = chosen.is_some(), first_hop_skipped = chosen.as_ref().is_some_and(|chosen| chosen.skipped), hops = %chosen.as_ref().map_or_else(String::new, |chosen| chosen.route.describe()), "multihop lookup");
         let route = chosen?.route;
         let info = EndpointInfo::from_parts(

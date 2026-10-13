@@ -17,11 +17,11 @@
 //! are usable in both directions, which the bidirectional link-state graph
 //! already models.
 
-use iroh::EndpointId;
 use iroh_base::CustomAddr;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::MULTIHOP_TRANSPORT_ID;
+use crate::role::{AppId, UnderlayId};
 
 /// Longest route this transport will build or relay. Routes come from Dijkstra
 /// over the link-state graph and multihop is a last-resort path, so real ones
@@ -29,13 +29,13 @@ use crate::MULTIHOP_TRANSPORT_ID;
 /// the amplification limit: a cell can be forwarded at most this many times.
 pub(crate) const MAX_ROUTE_HOPS: usize = 8;
 
-/// One hop in a source route: which node it is (its app-layer [`EndpointId`])
+/// One hop in a source route: which node it is (its [`AppId`])
 /// and which multihop **underlay** endpoint carries its cells. Two ids, 64 bytes,
 /// and no address: see the module note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteHop {
-    pub(crate) app_id: EndpointId,
-    pub(crate) underlay_id: EndpointId,
+    pub(crate) app_id: AppId,
+    pub(crate) underlay_id: UnderlayId,
 }
 
 /// A source route: the ordered hops **after** the sender, ending at the
@@ -157,14 +157,15 @@ impl<'de> Deserialize<'de> for Route {
 #[cfg(test)]
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
+    use crate::role::{AppId, UnderlayId};
     use iroh::{EndpointId, SecretKey};
     use std::fmt::Write as _;
 
     fn hop(seed: u8) -> RouteHop {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
         RouteHop {
-            app_id: id,
-            underlay_id: id,
+            app_id: AppId::new(id),
+            underlay_id: UnderlayId::new(id),
         }
     }
 
@@ -182,12 +183,12 @@ mod tests {
         let id = |seed: u8| -> EndpointId { SecretKey::from_bytes(&[seed; 32]).public() };
         let route = Route::new(vec![
             RouteHop {
-                app_id: id(1),
-                underlay_id: id(2),
+                app_id: AppId::new(id(1)),
+                underlay_id: UnderlayId::new(id(2)),
             },
             RouteHop {
-                app_id: id(3),
-                underlay_id: id(4),
+                app_id: AppId::new(id(3)),
+                underlay_id: UnderlayId::new(id(4)),
             },
         ])
         .unwrap();

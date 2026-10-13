@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::addr::{Route, RouteHop};
 use crate::graph::{Graph, Leg, Link};
 use crate::metric::LinkMetric;
+use crate::role::{AppId, UnderlayId};
 
 /// How long a vector stays without a newer one, unless the handle says otherwise.
 pub(crate) const DEFAULT_VECTOR_MAX_AGE: Duration = Duration::from_secs(45);
@@ -45,22 +46,22 @@ const LINK_VECTOR_DOMAIN: &[u8] = b"habilis-network-iroh-multihop-transport link
 /// a link, in another peer's name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkVector {
-    pub(crate) origin: EndpointId,
+    pub(crate) origin: AppId,
     pub(crate) seq: u64,
     /// How to reach this origin's multihop **underlay** endpoint. A hop with no
     /// advertised underlay address cannot be dialed, so any route through it is
     /// dropped.
     pub(crate) underlay: EndpointAddr,
-    pub(crate) links: Vec<(EndpointId, LinkMetric)>,
+    pub(crate) links: Vec<(AppId, LinkMetric)>,
     /// The origin's signature over every field above.
     pub(crate) sig: Signature,
 }
 
 fn signing_bytes(
-    origin: &EndpointId,
+    origin: &AppId,
     seq: u64,
     underlay: &EndpointAddr,
-    links: &[(EndpointId, LinkMetric)],
+    links: &[(AppId, LinkMetric)],
 ) -> Vec<u8> {
     let mut bytes = LINK_VECTOR_DOMAIN.to_vec();
     bytes.extend(
@@ -81,10 +82,10 @@ impl LinkVector {
         underlay: EndpointAddr,
         links: Vec<(EndpointId, u32)>,
     ) -> Self {
-        let origin = secret.public();
-        let links: Vec<(EndpointId, LinkMetric)> = links
+        let origin = AppId::new(secret.public());
+        let links: Vec<(AppId, LinkMetric)> = links
             .into_iter()
-            .map(|(id, cost)| (id, LinkMetric::new(cost)))
+            .map(|(id, cost)| (AppId::new(id), LinkMetric::new(cost)))
             .collect();
         let sig = secret.sign(&signing_bytes(&origin, seq, &underlay, &links));
         Self {
@@ -99,13 +100,13 @@ impl LinkVector {
     /// The endpoint id that made this vector and signed it.
     #[must_use]
     pub fn origin(&self) -> EndpointId {
-        self.origin
+        self.origin.get()
     }
 
     /// Whether the origin signed exactly these fields.
     fn is_signed_by_origin(&self) -> bool {
         let bytes = signing_bytes(&self.origin, self.seq, &self.underlay, &self.links);
-        self.origin.verify(&bytes, &self.sig).is_ok()
+        self.origin.get().verify(&bytes, &self.sig).is_ok()
     }
 }
 
@@ -113,12 +114,12 @@ impl LinkVector {
 /// material. [`route_to`](Topology::route_to) folds them into the graph on demand.
 #[derive(Debug)]
 pub struct Topology {
-    vectors: HashMap<EndpointId, Held>,
+    vectors: HashMap<AppId, Held>,
     /// Origins removed or expired, with the highest `seq` held for each. A vector
     /// at or below it is refused for one max age, so the last vector of a peer
     /// that left cannot come back as if new (a late joiner gets it again through
     /// anti-entropy).
-    tombstones: HashMap<EndpointId, Tombstone>,
+    tombstones: HashMap<AppId, Tombstone>,
     max_age: Duration,
     /// When a vector last refused for its age was reported in the log.
     last_skew_report: Option<Instant>,
@@ -232,10 +233,10 @@ impl Topology {
     /// Drop an origin's advertised links (e.g. when the peer leaves the mesh) and
     /// remember its highest `seq`. Returns whether anything was removed.
     pub fn remove(&mut self, origin: EndpointId) -> bool {
-        self.remove_at(origin, Instant::now())
+        self.remove_at(AppId::new(origin), Instant::now())
     }
 
-    fn remove_at(&mut self, origin: EndpointId, now: Instant) -> bool {
+    fn remove_at(&mut self, origin: AppId, now: Instant) -> bool {
         let Some(held) = self.vectors.remove(&origin) else {
             return false;
         };
@@ -255,7 +256,7 @@ impl Topology {
     /// Returns how many vectors were dropped.
     pub fn expire_older_than(&mut self, now: Instant) -> usize {
         let max_age = self.max_age;
-        let expired: Vec<EndpointId> = self
+        let expired: Vec<AppId> = self
             .vectors
             .iter()
             .filter(|(_, held)| now.saturating_duration_since(held.received) > max_age)
@@ -270,7 +271,7 @@ impl Topology {
     }
 
     /// The underlay address an origin advertised, for dialing a hop through it.
-    pub(crate) fn underlay_of(&self, origin: EndpointId) -> Option<EndpointAddr> {
+    pub(crate) fn underlay_of(&self, origin: AppId) -> Option<EndpointAddr> {
         self.vectors
             .get(&origin)
             .map(|held| held.vector.underlay.clone())
@@ -279,10 +280,10 @@ impl Topology {
     /// The application id of the origin whose advertised underlay endpoint is
     /// `underlay_id`, if we hold a vector from it.
     #[must_use]
-    pub fn app_id_of(&self, underlay_id: EndpointId) -> Option<EndpointId> {
+    pub fn app_id_of(&self, underlay_id: UnderlayId) -> Option<AppId> {
         self.vectors
             .iter()
-            .find(|(_, held)| held.vector.underlay.id == underlay_id)
+            .find(|(_, held)| UnderlayId::new(held.vector.underlay.id) == underlay_id)
             .map(|(origin, _)| *origin)
     }
 
@@ -307,7 +308,7 @@ impl Topology {
     pub(crate) fn route_to_avoiding_first_hops(
         &self,
         leg: Leg,
-        refused: &std::collections::HashSet<EndpointId>,
+        refused: &std::collections::HashSet<AppId>,
     ) -> Option<Route> {
         let path = self
             .graph()
@@ -324,7 +325,7 @@ impl Topology {
             .map(|hop| {
                 self.underlay_of(*hop).map(|underlay| RouteHop {
                     app_id: *hop,
-                    underlay_id: underlay.id,
+                    underlay_id: UnderlayId::new(underlay.id),
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -393,26 +394,27 @@ mod tests {
     use n0_future::time::{Duration, Instant};
 
     use super::{Leg, LinkVector, Topology};
-    use iroh::{EndpointAddr, EndpointId, SecretKey};
+    use crate::role::{AppId, UnderlayId};
+    use iroh::{EndpointAddr, SecretKey};
 
-    fn eid(seed: u8) -> EndpointId {
-        SecretKey::from_bytes(&[seed; 32]).public()
+    fn eid(seed: u8) -> AppId {
+        AppId::new(SecretKey::from_bytes(&[seed; 32]).public())
     }
 
     /// The key behind an id the tests made with `eid`.
-    fn secret_of(origin: EndpointId) -> SecretKey {
+    fn secret_of(origin: AppId) -> SecretKey {
         (0..=u8::MAX)
             .map(|seed| SecretKey::from_bytes(&[seed; 32]))
-            .find(|secret| secret.public() == origin)
+            .find(|secret| secret.public() == origin.get())
             .expect("the id was made by `eid`")
     }
 
-    fn vector(origin: EndpointId, seq: u64, links: &[(EndpointId, u32)]) -> LinkVector {
+    fn vector(origin: AppId, seq: u64, links: &[(AppId, u32)]) -> LinkVector {
         LinkVector::signed(
             &secret_of(origin),
             seq,
-            EndpointAddr::new(origin),
-            links.iter().map(|(to, cost)| (*to, *cost)).collect(),
+            EndpointAddr::new(origin.get()),
+            links.iter().map(|(to, cost)| (to.get(), *cost)).collect(),
         )
     }
 
@@ -435,12 +437,12 @@ mod tests {
         let mut store = Topology::default();
         let mut forged = vector(mallory, 1, &[(other, 1)]);
         forged.origin = victim;
-        forged.underlay = EndpointAddr::new(mallory);
+        forged.underlay = EndpointAddr::new(mallory.get());
         assert!(
             !ingest(&mut store, forged),
             "a vector the origin did not sign is refused"
         );
-        assert!(store.view(other).edges.is_empty());
+        assert!(store.view(other.get()).edges.is_empty());
     }
 
     #[test]
@@ -451,7 +453,7 @@ mod tests {
         tampered.links.push((nc, crate::metric::LinkMetric::new(1)));
         assert!(!ingest(&mut store, tampered));
         let mut moved = vector(na, 1, &[(nb, 10)]);
-        moved.underlay = EndpointAddr::new(nc);
+        moved.underlay = EndpointAddr::new(nc.get());
         assert!(
             !ingest(&mut store, moved),
             "the underlay address is signed too"
@@ -493,7 +495,7 @@ mod tests {
         assert_eq!(store.expire_older_than(later), 1);
         assert!(
             store
-                .view(na)
+                .view(na.get())
                 .edges
                 .iter()
                 .all(|edge| edge.from == na.to_string()),
@@ -540,7 +542,7 @@ mod tests {
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
         assert!(ingest(&mut store, vector(nb, 7_000, &[(na, 1)])));
-        assert!(store.remove(nb), "Left removes the vector");
+        assert!(store.remove(nb.get()), "Left removes the vector");
         assert!(
             !ingest(&mut store, vector(nb, 7_000, &[(na, 1)])),
             "refused after Left"
@@ -561,7 +563,7 @@ mod tests {
         assert!(store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000));
         assert_eq!(store.expire_older_than(start + secs(46)), 1);
         assert!(store.ingest_at(vector(nb, 47_000, &[(na, 1)]), start + secs(47), 47_000));
-        assert_eq!(store.view(na).edges.len(), 1);
+        assert_eq!(store.view(na.get()).edges.len(), 1);
     }
 
     #[test]
@@ -593,7 +595,7 @@ mod tests {
             ingest(&mut store, vector(nb, 100_050, &[(na, 5)])),
             "the first vector after the restart is above the last one before it"
         );
-        assert_eq!(store.view(na).edges[0].metric, 5);
+        assert_eq!(store.view(na.get()).edges[0].metric, 5);
     }
 
     #[test]
@@ -618,7 +620,7 @@ mod tests {
         let before = store.route_to(Leg { src: na, dst: nc }, 1)[0].encode();
 
         let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
-        let moved = EndpointAddr::new(nc)
+        let moved = EndpointAddr::new(nc.get())
             .with_relay_url(relay)
             .with_ip_addr("10.0.0.7:4000".parse().expect("an address"));
         assert!(ingest(
@@ -648,7 +650,7 @@ mod tests {
             vec![nb, nc, nd]
         );
         // Every hop names the underlay endpoint of that node.
-        assert_eq!(routes[0].hops()[0].underlay_id, nb);
+        assert_eq!(routes[0].hops()[0].underlay_id, UnderlayId::new(nb.get()));
     }
 
     #[test]
@@ -660,18 +662,23 @@ mod tests {
             let signed = LinkVector::signed(
                 &secret_of(origin),
                 1,
-                EndpointAddr::new(underlay),
+                EndpointAddr::new(underlay.get()),
                 Vec::new(),
             );
             ingest(&mut store, signed);
         }
-        assert_eq!(store.app_id_of(bob_underlay), Some(bob));
-        assert_eq!(store.app_id_of(alice_underlay), Some(alice));
-        assert_eq!(store.app_id_of(eid(103)), None, "an unknown underlay");
+        let underlay = |id: AppId| UnderlayId::new(id.get());
+        assert_eq!(store.app_id_of(underlay(bob_underlay)), Some(bob));
+        assert_eq!(store.app_id_of(underlay(alice_underlay)), Some(alice));
         assert_eq!(
-            store.app_id_of(bob),
+            store.app_id_of(underlay(eid(103))),
             None,
-            "an app id is not an underlay id"
+            "an unknown underlay"
+        );
+        assert_eq!(
+            store.app_id_of(underlay(bob)),
+            None,
+            "the key of an app endpoint is not an underlay id"
         );
     }
 
@@ -734,7 +741,7 @@ mod tests {
     const BROWSER_COST: u32 = crate::DEFAULT_LINK_COST * crate::BROWSER_HOP_FACTOR;
 
     /// The application ids of the hops of the best route from `src` to `dst`.
-    fn best_route(store: &Topology, src: EndpointId, dst: EndpointId) -> Option<Vec<EndpointId>> {
+    fn best_route(store: &Topology, src: AppId, dst: AppId) -> Option<Vec<AppId>> {
         store
             .route_to(Leg { src, dst }, 1)
             .first()
@@ -742,7 +749,7 @@ mod tests {
     }
 
     /// The cost of the cheapest path from `src` to `dst`.
-    fn best_cost(store: &Topology, src: EndpointId, dst: EndpointId) -> Option<u32> {
+    fn best_cost(store: &Topology, src: AppId, dst: AppId) -> Option<u32> {
         store
             .graph()
             .shortest_path(Leg { src, dst })
@@ -751,7 +758,7 @@ mod tests {
 
     /// `src` reaches `dst` by three native hops (`n1`, `n2`, `dst`), or by one browser hop (`tab`)
     /// whose own links cost `tab_cost`.
-    fn native_and_browser_routes(tab_cost: u32) -> (Topology, [EndpointId; 5]) {
+    fn native_and_browser_routes(tab_cost: u32) -> (Topology, [AppId; 5]) {
         let [src, n1, n2, dst, tab] = [1, 2, 3, 4, 5].map(eid);
         let mut store = Topology::default();
         for (origin, links) in [
@@ -794,7 +801,10 @@ mod tests {
         }
         assert_eq!(best_route(&store, alice, bob), Some(vec![carol, bob]));
 
-        assert!(store.remove(carol), "carol leaves: her vector is gone");
+        assert!(
+            store.remove(carol.get()),
+            "carol leaves: her vector is gone"
+        );
         assert_eq!(best_route(&store, alice, bob), Some(vec![tab, bob]));
         assert_eq!(
             best_cost(&store, alice, bob),

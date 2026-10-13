@@ -9,34 +9,33 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use iroh::EndpointId;
-
 use crate::metric::LinkMetric;
+use crate::role::AppId;
 
 /// A directed, metric-weighted view of the link-state graph: for each node, its
-/// outbound links `(neighbour, cost)`. Nodes are keyed by their stable `EndpointId`.
+/// outbound links `(neighbour, cost)`. Nodes are keyed by their stable `AppId`.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Graph {
-    adj: HashMap<EndpointId, Vec<(EndpointId, LinkMetric)>>,
+    adj: HashMap<AppId, Vec<(AppId, LinkMetric)>>,
 }
 
 /// The two ends of a route: the node a cell starts at and the node it must reach.
 ///
-/// One struct for the pair, because both are an `EndpointId` and a call that swaps
+/// One struct for the pair, because both are an `AppId` and a call that swaps
 /// them compiles and routes the wrong way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Leg {
     /// Where the route starts.
-    pub src: EndpointId,
+    pub src: AppId,
     /// Where the route must arrive.
-    pub dst: EndpointId,
+    pub dst: AppId,
 }
 
 /// A directed link `from -> to` and what it costs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Link {
-    pub(crate) from: EndpointId,
-    pub(crate) to: EndpointId,
+    pub(crate) from: AppId,
+    pub(crate) to: AppId,
     pub(crate) cost: LinkMetric,
 }
 
@@ -44,7 +43,7 @@ pub(crate) struct Link {
 /// including the destination (`[first_hop, …, dst]`), and the path's total cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Path {
-    pub(crate) hops: Vec<EndpointId>,
+    pub(crate) hops: Vec<AppId>,
     pub(crate) cost: LinkMetric,
 }
 
@@ -73,13 +72,13 @@ impl Graph {
     /// disjoint path exists.
     pub(crate) fn disjoint_paths(&self, leg: Leg, max_paths: usize) -> Vec<Path> {
         let mut paths = Vec::new();
-        let mut blocked: HashSet<EndpointId> = HashSet::new();
+        let mut blocked: HashSet<AppId> = HashSet::new();
         for _ in 0..max_paths {
             let Some(path) = self.shortest_path_avoiding(leg, &blocked) else {
                 break;
             };
             // Interior hops = every hop except the final destination.
-            let interior: Vec<EndpointId> = path.hops.iter().rev().skip(1).copied().collect();
+            let interior: Vec<AppId> = path.hops.iter().rev().skip(1).copied().collect();
             let exhausted = interior.is_empty();
             blocked.extend(interior);
             paths.push(path);
@@ -99,7 +98,7 @@ impl Graph {
     pub(crate) fn shortest_path_avoiding_first_hops(
         &self,
         leg: Leg,
-        refused: &HashSet<EndpointId>,
+        refused: &HashSet<AppId>,
     ) -> Option<Path> {
         self.shortest_path_with(leg, &HashSet::new(), refused)
     }
@@ -107,7 +106,7 @@ impl Graph {
     /// Dijkstra that treats every node in `blocked` as absent — the primitive
     /// behind node-disjoint search. `dst` is never blocked even if the caller
     /// lists it.
-    fn shortest_path_avoiding(&self, leg: Leg, blocked: &HashSet<EndpointId>) -> Option<Path> {
+    fn shortest_path_avoiding(&self, leg: Leg, blocked: &HashSet<AppId>) -> Option<Path> {
         self.shortest_path_with(leg, blocked, &HashSet::new())
     }
 
@@ -116,12 +115,12 @@ impl Graph {
     fn shortest_path_with(
         &self,
         leg: Leg,
-        blocked: &HashSet<EndpointId>,
-        refused_first: &HashSet<EndpointId>,
+        blocked: &HashSet<AppId>,
+        refused_first: &HashSet<AppId>,
     ) -> Option<Path> {
         let Leg { src, dst } = leg;
-        let mut best: HashMap<EndpointId, LinkMetric> = HashMap::new();
-        let mut prev: HashMap<EndpointId, EndpointId> = HashMap::new();
+        let mut best: HashMap<AppId, LinkMetric> = HashMap::new();
+        let mut prev: HashMap<AppId, AppId> = HashMap::new();
         let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
 
         best.insert(src, LinkMetric::ZERO);
@@ -165,20 +164,20 @@ impl Graph {
 /// itself blocked) and the `blocked` set.
 #[derive(Clone, Copy)]
 struct RelaxEdge<'a> {
-    node: EndpointId,
+    node: AppId,
     cost: LinkMetric,
-    next: EndpointId,
+    next: AppId,
     weight: LinkMetric,
-    dst: EndpointId,
-    blocked: &'a HashSet<EndpointId>,
+    dst: AppId,
+    blocked: &'a HashSet<AppId>,
 }
 
 /// Relax `candidate`: skip it when `next` is blocked (unless it's `dst` itself),
 /// then update `best`/`prev`/`heap` if the new cost improves on any previously
 /// known cost to `next`.
 fn relax(
-    best: &mut HashMap<EndpointId, LinkMetric>,
-    prev: &mut HashMap<EndpointId, EndpointId>,
+    best: &mut HashMap<AppId, LinkMetric>,
+    prev: &mut HashMap<AppId, AppId>,
     heap: &mut BinaryHeap<HeapEntry>,
     candidate: RelaxEdge<'_>,
 ) {
@@ -211,7 +210,7 @@ fn relax(
 
 /// Walk `prev` from `dst` back to `src`, returning the hops after `src` in
 /// forward order (`[first_hop, …, dst]`).
-fn reconstruct(prev: &HashMap<EndpointId, EndpointId>, leg: Leg) -> Vec<EndpointId> {
+fn reconstruct(prev: &HashMap<AppId, AppId>, leg: Leg) -> Vec<AppId> {
     let Leg { src, dst } = leg;
     let mut hops = vec![dst];
     let mut cur = dst;
@@ -227,11 +226,11 @@ fn reconstruct(prev: &HashMap<EndpointId, EndpointId>, leg: Leg) -> Vec<Endpoint
 }
 
 /// A min-heap entry ordered by cost only, so the graph never needs `Ord` on
-/// `EndpointId`. The `Ord` impl is reversed so `BinaryHeap` (a max-heap) yields
+/// `AppId`. The `Ord` impl is reversed so `BinaryHeap` (a max-heap) yields
 /// the lowest-cost node first.
 struct HeapEntry {
     cost: LinkMetric,
-    node: EndpointId,
+    node: AppId,
 }
 
 impl PartialEq for HeapEntry {
@@ -257,16 +256,18 @@ impl PartialOrd for HeapEntry {
 
 #[cfg(test)]
 mod tests {
-    use iroh::{EndpointId, SecretKey};
+    use iroh::SecretKey;
+
+    use crate::role::AppId;
 
     use super::{Graph, Leg, Link, LinkMetric};
 
-    fn eid(seed: u8) -> EndpointId {
-        SecretKey::from_bytes(&[seed; 32]).public()
+    fn eid(seed: u8) -> AppId {
+        AppId::new(SecretKey::from_bytes(&[seed; 32]).public())
     }
 
     /// A bidirectional link `left <-> right` of equal cost each way.
-    fn link(graph: &mut Graph, left: EndpointId, right: EndpointId, cost: u32) {
+    fn link(graph: &mut Graph, left: AppId, right: AppId, cost: u32) {
         let cost = LinkMetric::new(cost);
         graph.insert_link(Link {
             from: left,
@@ -287,7 +288,7 @@ mod tests {
         link(&mut graph, src, dst, 1);
         link(&mut graph, src, via, 1);
         link(&mut graph, via, dst, 1);
-        let refusing = |nodes: &[EndpointId]| nodes.iter().copied().collect();
+        let refusing = |nodes: &[AppId]| nodes.iter().copied().collect();
 
         let path = |refused| graph.shortest_path_avoiding_first_hops(Leg { src, dst }, &refused);
         assert_eq!(path(refusing(&[])).expect("direct").hops, vec![dst]);
