@@ -1333,7 +1333,7 @@ impl EventLoopState {
         if !self.hosts_rendezvous {
             return;
         }
-        if crate::beacon::yields_to(own, sender) {
+        if (crate::beacon::Contest { own, rival: sender }).own_yields() {
             self.yield_to_lower = true;
             self.next_rival_recheck = Some(now);
         } else if newly {

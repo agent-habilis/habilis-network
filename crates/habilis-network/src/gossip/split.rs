@@ -229,7 +229,7 @@ mod tests {
     use futures_util::StreamExt as _;
     use futures_util::stream::{self, BoxStream};
     use habilis_network_iroh_gossip_transport::GossipHandle;
-    use habilis_network_iroh_gossip_transport::frame;
+    use habilis_network_iroh_gossip_transport::frame::Frame;
     use iroh_gossip::api::{Event, Message};
     use iroh_gossip::proto::DeliveryScope;
 
@@ -261,7 +261,13 @@ mod tests {
 
     /// A frame for the node `app`, as the transport of another member puts it on the topic.
     fn frame_for(app: iroh::EndpointId) -> Bytes {
-        frame::encode(app, endpoint_id(8), b"datagram").expect("a frame")
+        Frame {
+            dst: app,
+            src: endpoint_id(8),
+            datagram: b"datagram",
+        }
+        .encode()
+        .expect("a frame")
     }
 
     /// Wait until the handle has counted `frames` frames, or fail after 5 s.
@@ -509,7 +515,7 @@ mod real_gossip {
 
     use bytes::Bytes;
     use habilis_network_iroh_gossip_transport::GossipHandle;
-    use habilis_network_iroh_gossip_transport::frame::{self, MAX_DATAGRAM_LEN};
+    use habilis_network_iroh_gossip_transport::frame::{self, Frame, MAX_DATAGRAM_LEN};
     use iroh::address_lookup::memory::MemoryLookup;
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
@@ -638,7 +644,13 @@ mod real_gossip {
             }
             let mut datagram = vec![7u8; MAX_DATAGRAM_LEN];
             datagram[..8].copy_from_slice(&sent.to_le_bytes());
-            let frame = frame::encode(b_endpoint.id(), a_endpoint.id(), &datagram).expect("frame");
+            let frame = Frame {
+                dst: b_endpoint.id(),
+                src: a_endpoint.id(),
+                datagram: &datagram,
+            }
+            .encode()
+            .expect("frame");
             a_sender.broadcast(frame).await.expect("send");
             sent += 1;
             if mesh_sent < mesh_total {
