@@ -158,6 +158,7 @@ impl<'de> Deserialize<'de> for Route {
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
     use iroh::{EndpointId, SecretKey};
+    use std::fmt::Write as _;
 
     fn hop(seed: u8) -> RouteHop {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
@@ -190,12 +191,10 @@ mod tests {
             },
         ])
         .unwrap();
-        let data: String = route
-            .encode()
-            .data()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let mut data = String::new();
+        for byte in route.encode().data() {
+            write!(data, "{byte:02x}").unwrap();
+        }
         assert_eq!(
             data,
             concat!(
