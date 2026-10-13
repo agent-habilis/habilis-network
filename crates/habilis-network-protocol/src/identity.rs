@@ -80,8 +80,8 @@ impl Identity {
 
     /// The X25519 public key peers seal to us with — published in our card.
     #[must_use]
-    pub fn seal_public(&self) -> [u8; 32] {
-        *x25519_dalek::PublicKey::from(&self.seal_secret()).as_bytes()
+    pub fn seal_public(&self) -> x25519_dalek::PublicKey {
+        x25519_dalek::PublicKey::from(&self.seal_secret())
     }
 }
 
