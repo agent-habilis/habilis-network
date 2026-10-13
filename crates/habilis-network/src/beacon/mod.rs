@@ -597,6 +597,40 @@ async fn rung_serves_our_mesh(prober: &Endpoint, rendezvous_id: EndpointId, port
     false
 }
 
+/// Tests only: the members whose rung probe reads "not ours" whatever answers. It stands for the
+/// false negative that `RENDEZVOUS_PROBE_ATTEMPTS` documents (a host too loaded to answer inside
+/// the attempts), and it is per member: a process-wide dial would make every in-process member
+/// misread at once, which is not what a loaded host does.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+static BLIND_RUNG_PROBES: std::sync::Mutex<std::collections::BTreeSet<EndpointId>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Make the rung probe of `member` read "not ours" (`blind`), or let it read the truth again.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn set_blind_rung_probes(member: EndpointId, blind: bool) {
+    let mut members = BLIND_RUNG_PROBES.lock().expect("no poison");
+    if blind {
+        members.insert(member);
+    } else {
+        members.remove(&member);
+    }
+}
+
+fn rung_probes_are_blind(member: EndpointId) -> bool {
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    {
+        BLIND_RUNG_PROBES
+            .lock()
+            .expect("no poison")
+            .contains(&member)
+    }
+    #[cfg(not(all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+    {
+        let _ = member;
+        false
+    }
+}
+
 /// The beacon mirrors the peer's *address-lookups* (so a joiner
 /// resolves `rendezvous_id` via whichever it enabled) but homes on a
 /// **single** relay rung — `params.bootstrap_relay`, the first
@@ -703,7 +737,7 @@ async fn build_rendezvous_endpoint(
             tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "rung probe endpoint build failed; staying peer this tick");
             break;
         };
-        if rung_serves_our_mesh(prober, params.id, port).await {
+        if !rung_probes_are_blind(node) && rung_serves_our_mesh(prober, params.id, port).await {
             tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung already serves our beacon; staying peer");
             break;
         }

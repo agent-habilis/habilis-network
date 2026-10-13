@@ -498,6 +498,11 @@ pub struct EventLoopState {
         not(target_arch = "wasm32")
     ))]
     pub(crate) linkstate_held: bool,
+    /// Tests only: this node claims no rendezvous, neither on a heal tick nor in a reclaim window,
+    /// while it is set. A test uses it to force the order "a late joiner claims the free rung
+    /// before any old member does", which a heal tick of a few seconds would otherwise win.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) claims_held: bool,
     /// What this node already asked of the members it heard on the LAN.
     pub(crate) lan_grafts: crate::gossip::lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
@@ -948,6 +953,8 @@ impl EventLoopState {
                 not(target_arch = "wasm32")
             ))]
             linkstate_held: false,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            claims_held: false,
             lan_grafts: crate::gossip::lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,
@@ -1363,6 +1370,19 @@ impl EventLoopState {
     pub(crate) fn arm_reclaim(&mut self, now: Instant) {
         self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
         self.probe_backoff.reset();
+    }
+
+    /// Whether a test holds this node's claims back (`Request::HoldClaims`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) fn claims_are_held(&self) -> bool {
+        self.claims_held
+    }
+
+    /// Whether a test holds this node's claims back: never, outside a test build.
+    #[cfg(not(all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+    pub(crate) fn claims_are_held(&self) -> bool {
+        let _ = self;
+        false
     }
 
     /// Whether this node should hold, or come back to, the rendezvous link:

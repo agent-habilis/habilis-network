@@ -138,6 +138,23 @@ pub enum Request {
         addr: std::net::SocketAddr,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: hold this node's rendezvous claims back (`hold`), or let it claim again. A held
+    /// node claims on no heal tick and in no reclaim window, and its links are untouched. A test
+    /// holds the old members of a room so that a late joiner takes the free rung first.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    HoldClaims {
+        hold: bool,
+        reply: oneshot::Sender<()>,
+    },
+    /// Tests only: make the rung probe of this node read "not ours" whatever answers (`blind`), or
+    /// let it read the truth again. It is the false negative that a loaded host gives: a node
+    /// that finds its rung taken by the beacon of its own mesh then binds the next rung and holds
+    /// a beacon of its own.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    BlindRungProbes {
+        blind: bool,
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: take UDP away from this node alone, to the nodes bound on
     /// `remote_ports` (see `Node::bound_ports`). An empty list gives it back.
     /// Unlike [`Request::BlockUdp`] it leaves every other node's paths alone,
@@ -517,6 +534,18 @@ impl NodeDriver for MembershipApp {
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
                 true
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::HoldClaims { hold, reply } => {
+                state.claims_held = hold;
+                let _ = reply.send(());
+                false
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::BlindRungProbes { blind, reply } => {
+                crate::beacon::set_blind_rung_probes(ctx.endpoint.id(), blind);
+                let _ = reply.send(());
+                false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::BlockIpTo {
