@@ -2035,7 +2035,7 @@ mod tests {
     #[test]
     fn an_author_with_a_fast_clock_does_not_slow_the_newest_messages() {
         let budget = crate::util::tuning::antientropy_max_resend();
-        let base = crate::util::clock::unix_secs() - 3600;
+        let base = UnixSecs::now().as_secs() - 3600;
         let ahead = 80;
         let mut all: Vec<Message> = Vec::new();
         let (mut next_honest, mut next_fast) = (0usize, 0usize);

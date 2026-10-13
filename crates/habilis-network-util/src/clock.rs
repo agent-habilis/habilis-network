@@ -4,7 +4,7 @@
 //!
 //! Load-bearing on wasm, not a nicety. On `wasm32-unknown-unknown` the `std`
 //! constructors route to `sys/time/unsupported.rs` and **panic**
-//! (`"time not implemented on this platform"`) — and [`unix_secs`] stamps every
+//! (`"time not implemented on this platform"`) — and [`UnixSecs::now`] stamps every
 //! `Message`, so a browser peer could not author a single frame. A panic is
 //! invisible to `cargo check`, which is why the wasm CI leg is green today
 //! while nothing has ever actually run there.
@@ -25,18 +25,6 @@ pub use web_time::{Instant, SystemTime};
 use std::time::Duration;
 
 use web_time::UNIX_EPOCH;
-
-/// Seconds since the Unix epoch, or 0 if the system clock is set
-/// before 1970 or beyond the year 2554 (i64 fits >290 billion
-/// seconds, far beyond any real system clock).
-#[must_use]
-pub fn unix_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|since_epoch| i64::try_from(since_epoch.as_secs()).ok())
-        .unwrap_or(0)
-}
 
 /// A point in time as whole seconds since the Unix epoch: the unit of a message timestamp, of
 /// the join time, of a digest window bound and of an invite expiry.
@@ -71,10 +59,16 @@ impl UnixSecs {
     }
 
     /// The system clock now, or [`UnixSecs::ZERO`] if it is set before 1970 or past the range of
-    /// an `i64`, as [`unix_secs`] has it.
+    /// an `i64` (more than 290 billion seconds, far beyond any real system clock).
     #[must_use]
     pub fn now() -> Self {
-        Self(unix_secs())
+        Self(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|since_epoch| i64::try_from(since_epoch.as_secs()).ok())
+                .unwrap_or(0),
+        )
     }
 
     /// The time from `earlier` to this point. Zero when `earlier` is not earlier, so a clock that
@@ -216,9 +210,11 @@ mod unix_secs_tests {
 
     #[test]
     fn now_is_the_system_clock() {
-        let before = super::unix_secs();
-        let now = UnixSecs::now().as_secs();
-        let after = super::unix_secs();
+        let before = UnixSecs::now();
+        let now = UnixSecs::now();
+        let after = UnixSecs::now();
         assert!(before <= now && now <= after);
+        // 2020-01-01: the "0 on failure" path is not the normal case.
+        assert!(before > UnixSecs::from_secs(1_577_836_800));
     }
 }
