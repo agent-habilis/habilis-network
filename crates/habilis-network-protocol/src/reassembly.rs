@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use crate::{Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
+use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
     LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
@@ -70,11 +70,11 @@ impl PartialGroup {
     }
 }
 
-/// Groups are keyed by `(author pubkey, group)` — the same security boundary
+/// Groups are keyed by `(author key, group)` — the same security boundary
 /// the message-log reassembly had: only the signer fills its own slots, so a
 /// crafted shard carrying a victim's group id forms a separate,
 /// never-completing set and can't inject a slice into the victim's body.
-type GroupKey = (String, ShardGroup);
+type GroupKey = (AuthorKey, ShardGroup);
 
 /// The dedicated buffer partial multipart bodies reassemble in — decoupled
 /// from the message log so log eviction can never break reassembly, and
@@ -84,22 +84,23 @@ type GroupKey = (String, ShardGroup);
 #[derive(Debug, Default)]
 pub struct ReassemblyStore {
     groups: HashMap<GroupKey, PartialGroup>,
-    author_bytes: HashMap<String, usize>,
+    author_bytes: HashMap<AuthorKey, usize>,
     total_bytes: usize,
 }
 
 impl ReassemblyStore {
-    /// Buffer one shard; when it completes its group, synthesize and return
+    /// Buffer one shard of `author`; when it completes its group, synthesize and return
     /// the logical message and free the group's budget. The caller keys
-    /// surfacing-once separately (`reassembled_groups`).
+    /// surfacing-once separately (`reassembled_groups`). `author` is the key that signed
+    /// `shard_msg`, which the caller took from a message that passed verification.
     ///
     /// # Panics
     /// Never: the group that just completed is by construction still stored.
-    pub fn ingest(&mut self, shard_msg: &Message, now: Instant) -> ShardIngest {
+    pub fn ingest(&mut self, author: AuthorKey, shard_msg: &Message, now: Instant) -> ShardIngest {
         let Some(shard) = shard_msg.shard.as_ref() else {
             return ShardIngest::Dropped;
         };
-        let key: GroupKey = (shard_msg.pubkey.clone(), shard.group.clone());
+        let key: GroupKey = (author, shard.group.clone());
         let charge = slot_charge(shard_msg.body.as_str().len());
 
         if let Some(group) = self.groups.get(&key) {
@@ -151,7 +152,7 @@ impl ReassemblyStore {
         if shard.idx == 0 {
             group.header = Some(shard_msg.clone());
         }
-        *self.author_bytes.entry(key.0.clone()).or_default() += charge;
+        *self.author_bytes.entry(key.0).or_default() += charge;
         self.total_bytes += charge;
 
         if !group.is_complete() {
@@ -222,10 +223,10 @@ impl ReassemblyStore {
     }
 
     /// The author's least-recently-touched group other than `except`.
-    fn stalest_group_of(&self, pubkey: &str, except: &GroupKey) -> Option<GroupKey> {
+    fn stalest_group_of(&self, author: &AuthorKey, except: &GroupKey) -> Option<GroupKey> {
         self.groups
             .iter()
-            .filter(|(key, _)| key.0 == pubkey && *key != except)
+            .filter(|(key, _)| key.0 == *author && *key != except)
             .min_by_key(|(_, group)| group.last_seen)
             .map(|(key, _)| key.clone())
     }
@@ -246,8 +247,8 @@ impl ReassemblyStore {
     /// completion path calls this after finishing a group the store had only
     /// a fragment of (e.g. post-TTL, when dedup let just one healed shard
     /// re-ingest).
-    pub fn forget(&mut self, pubkey: &str, group: &ShardGroup) {
-        self.evict(&(pubkey.to_owned(), group.clone()));
+    pub fn forget(&mut self, author: &AuthorKey, group: &ShardGroup) {
+        self.evict(&(*author, group.clone()));
     }
 
     /// The big (unlogged) groups that stalled long enough to ask their author
@@ -391,7 +392,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{ReassemblyStore, ShardIngest};
-    use crate::{AppFrameParams, MeshId, Message, MessageBody, Nickname, Shard, ShardGroup};
+    use crate::{
+        AppFrameParams, AuthorKey, MeshId, Message, MessageBody, Nickname, Shard, ShardGroup,
+    };
     use habilis_network_util::consts::{
         REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES, REASSEMBLY_STALE_SECS,
         REASSEMBLY_TOTAL_BUDGET_BYTES,
@@ -405,8 +408,15 @@ mod tests {
         group("550e8400-e29b-41d4-a716-446655440000")
     }
 
-    /// A shard frame notionally signed by `pubkey`.
-    fn shard_msg(body: &str, pubkey: &str, shard: Shard) -> Message {
+    /// The key of the test author `name`: its bytes, zero-padded.
+    fn author_of(name: &str) -> AuthorKey {
+        let mut bytes = [0u8; 32];
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        AuthorKey::from_bytes(bytes)
+    }
+
+    /// A shard frame notionally signed by the author `name`.
+    fn shard_msg(body: &str, name: &str, shard: Shard) -> Message {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &Nickname::from("author"),
@@ -417,13 +427,13 @@ mod tests {
                 body: MessageBody::from(body),
             },
         );
-        message.pubkey = pubkey.to_owned();
+        message.pubkey = author_of(name).to_string();
         message.shard = Some(shard);
         message
     }
 
     fn ingest(store: &mut ReassemblyStore, msg: &Message, now: Instant) -> ShardIngest {
-        store.ingest(msg, now)
+        store.ingest(msg.author_key().expect("a test shard has a key"), msg, now)
     }
 
     #[test]
@@ -735,11 +745,11 @@ mod tests {
             ShardIngest::Buffered
         ));
         assert!(
-            !store.groups.contains_key(&("a".to_owned(), stale)),
+            !store.groups.contains_key(&(author_of("a"), stale)),
             "stalest group evicted"
         );
-        assert!(store.groups.contains_key(&("a".to_owned(), fresh)));
-        assert!(store.groups.contains_key(&("a".to_owned(), newcomer)));
+        assert!(store.groups.contains_key(&(author_of("a"), fresh)));
+        assert!(store.groups.contains_key(&(author_of("a"), newcomer)));
     }
 
     #[test]
@@ -828,7 +838,11 @@ mod tests {
             );
         }
 
-        let flooder_groups = store.groups.keys().filter(|key| key.0 == "flooder").count();
+        let flooder_groups = store
+            .groups
+            .keys()
+            .filter(|key| key.0 == author_of("flooder"))
+            .count();
         assert!(
             flooder_groups < 8,
             "the flood must actually breach its own budget, or this proves nothing"

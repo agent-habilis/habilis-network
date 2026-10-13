@@ -1490,7 +1490,9 @@ impl EventLoopState {
         if self.reassembled_groups.contains(&shard.group) {
             return None;
         }
-        match self.reassembly.ingest(trigger, Instant::now()) {
+        // A message that reaches reassembly passed the signature gate, so it has a key.
+        let author = trigger.author_key()?;
+        match self.reassembly.ingest(author, trigger, Instant::now()) {
             super::reassembly::ShardIngest::Complete(logical) => {
                 self.reassembled_groups.insert(shard.group.clone());
                 Some(*logical)
@@ -1499,7 +1501,7 @@ impl EventLoopState {
                 let logical = self.reassemble_from_log(trigger)?;
                 // The store may still hold a partial buffer for this group
                 // (e.g. just the trigger, post-TTL) — release its budget.
-                self.reassembly.forget(&trigger.pubkey, &shard.group);
+                self.reassembly.forget(&author, &shard.group);
                 self.reassembled_groups.insert(shard.group.clone());
                 Some(logical)
             }
