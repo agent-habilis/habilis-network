@@ -8,6 +8,7 @@
 //! into the engine's file layout, which then could not be rearranged without
 //! churning every one of them.
 
+mod author_key;
 pub mod base58check;
 pub mod crypto;
 mod dedup_key;
@@ -46,6 +47,7 @@ mod wordlist;
 /// root and never inherits.
 pub use iroh_base;
 
+pub use author_key::AuthorKey;
 pub use crypto::{Password, TicketAuth, TicketSecret, ct_eq};
 pub use dedup_key::DedupKey;
 pub use identity::{Identity, encode_pubkey};
