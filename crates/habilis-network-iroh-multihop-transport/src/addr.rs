@@ -174,6 +174,39 @@ mod tests {
         assert_eq!(Route::decode(&addr).expect("decodes"), route);
     }
 
+    /// The route is a wire value: iroh dedupes a peer's path on these bytes, and a second
+    /// build must read what this one writes.
+    #[test]
+    fn a_route_encodes_to_fixed_bytes() {
+        let id = |seed: u8| -> EndpointId { SecretKey::from_bytes(&[seed; 32]).public() };
+        let route = Route::new(vec![
+            RouteHop {
+                app_id: id(1),
+                underlay_id: id(2),
+            },
+            RouteHop {
+                app_id: id(3),
+                underlay_id: id(4),
+            },
+        ])
+        .unwrap();
+        let data: String = route
+            .encode()
+            .data()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            data,
+            concat!(
+                "028a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+                "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ed",
+                "4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ca93",
+                "ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c"
+            )
+        );
+    }
+
     #[test]
     fn wrong_transport_id_does_not_decode() {
         let route = Route::new(vec![hop(1)]).unwrap();
