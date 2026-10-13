@@ -232,7 +232,18 @@ pub(crate) fn rendezvous_ports(source: Keying<'_>) -> [u16; RENDEZVOUS_LADDER] {
 /// otherwise safe to share. Its bytes are wiped on drop (best-effort: any
 /// `String` reallocation or the CLI prompt buffer it was built from is not
 /// tracked), so a retained password does not linger in freed memory.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Two passwords do not compare with `==`: an equality that stops at the first
+/// byte that differs is a timing oracle, and no caller needs one.
+///
+/// ```compile_fail,E0369
+/// use habilis_network_protocol::Password;
+///
+/// let left = Password::new("hunter2".to_owned());
+/// let right = Password::new("hunter2".to_owned());
+/// let _ = left == right;
+/// ```
+#[derive(Clone)]
 pub struct Password(String);
 
 impl Password {
