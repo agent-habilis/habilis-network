@@ -51,6 +51,16 @@ impl Identity {
         self.secret.public()
     }
 
+    /// The public key as the author key of a message: what [`Message::signed`] puts in the
+    /// message, and what a peer reads back from [`Message::author_key`].
+    ///
+    /// [`Message::signed`]: crate::Message::signed
+    /// [`Message::author_key`]: crate::Message::author_key
+    #[must_use]
+    pub fn author_key(&self) -> AuthorKey {
+        AuthorKey::from_bytes(*self.public().as_bytes())
+    }
+
     /// Sign `bytes` (the message's canonical bytes) with our secret.
     #[must_use]
     pub(crate) fn sign(&self, bytes: &[u8]) -> Signature {

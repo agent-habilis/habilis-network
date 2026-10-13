@@ -479,7 +479,7 @@ impl Signed {
     /// Pair a key with the signature it made. Nothing checks it here: [`Message::verify_signature_with`]
     /// does.
     #[must_use]
-    pub const fn new(key: AuthorKey, sig: Signature) -> Self {
+    pub(crate) const fn new(key: AuthorKey, sig: Signature) -> Self {
         Self { key, sig }
     }
 
@@ -612,9 +612,9 @@ impl TryFrom<WireIn> for Message {
     /// SHA-256 hash 32B). A key with no signature, and a signature with no key, are errors:
     /// no sender emits either, and a message cannot hold one.
     fn try_from(wire: WireIn) -> Result<Self, Self::Error> {
-        if !wire.pubkey.is_empty() && !is_lower_hex(&wire.pubkey, 32) {
-            return Err("malformed pubkey");
-        }
+        let key = (!wire.pubkey.is_empty())
+            .then(|| AuthorKey::from_hex(&wire.pubkey).ok_or("malformed pubkey"))
+            .transpose()?;
         if !wire.sig.is_empty() && !is_lower_hex(&wire.sig, 64) {
             return Err("malformed signature");
         }
@@ -626,12 +626,11 @@ impl TryFrom<WireIn> for Message {
         if wire.parents.iter().any(|hash| !is_lower_hex(hash, 32)) {
             return Err("malformed parent hash");
         }
-        let signer = match (wire.pubkey.is_empty(), wire.sig.is_empty()) {
-            (true, true) => None,
-            (false, true) => return Err("pubkey without a signature"),
-            (true, false) => return Err("signature without a pubkey"),
-            (false, false) => {
-                let key = AuthorKey::from_hex(&wire.pubkey).ok_or("malformed pubkey")?;
+        let signer = match (key, wire.sig.is_empty()) {
+            (None, true) => None,
+            (Some(_), true) => return Err("pubkey without a signature"),
+            (None, false) => return Err("signature without a pubkey"),
+            (Some(key), false) => {
                 let sig = identity::decode_sig(&wire.sig).map_err(|_| "malformed signature")?;
                 Some(Signed::new(key, sig))
             }
@@ -1016,7 +1015,7 @@ impl Message {
     /// the construction expression (`Message::new_app(..).signed(&id)`).
     #[must_use]
     pub fn signed(mut self, identity: &Identity) -> Self {
-        let key = AuthorKey::from_bytes(*identity.public().as_bytes());
+        let key = identity.author_key();
         let sig = identity.sign(&self.canonical_with_key(Some(&key)));
         self.signer = Some(Signed::new(key, sig));
         self

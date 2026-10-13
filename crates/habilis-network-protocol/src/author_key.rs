@@ -9,7 +9,9 @@ use iroh_base::PublicKey;
 /// format: change it and every signature breaks.
 ///
 /// It is not an `iroh_base::PublicKey`, because that type rejects a 32-byte string that is
-/// not a point of the curve, and a message carries the string before it is verified.
+/// not a point of the curve, and a message carries the string before it is verified. Holding
+/// a `PublicKey` inside would make a non-point key a parse error: a change on the parse side
+/// of the wire, with a named decision, not a type swap.
 ///
 /// A raw array does not stand in for the key:
 ///
@@ -171,7 +173,7 @@ mod tests {
         bytes[0] = 2;
         assert!(AuthorKey::from_bytes(bytes).public_key().is_none());
         let identity = crate::identity::Identity::generate();
-        let author = AuthorKey::from_bytes(*identity.public().as_bytes());
+        let author = identity.author_key();
         assert_eq!(author.public_key(), Some(identity.public()));
     }
 }
