@@ -153,8 +153,8 @@ pub fn encode_hex(bytes: &[u8]) -> String {
     to_hex(bytes)
 }
 
-/// Write `bytes` into `formatter` as lowercase hex, so that a `Display` for a byte-array newtype is one
-/// call.
+/// Write `bytes` into `formatter` as lowercase hex, so that a `Display` for a byte-array newtype is
+/// one call.
 ///
 /// # Errors
 /// The formatter fails.
