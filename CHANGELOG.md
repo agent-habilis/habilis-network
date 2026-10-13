@@ -353,6 +353,7 @@ published to a registry; pin it with
   ticket is one, and the wire of the ticket does not change. `clock::unix_secs()` is removed:
   use `UnixSecs::now()`, and `.as_secs()` for the number. A wire struct converts with
   `UnixSecs::from_secs` and `as_secs`, so no byte of a message, a signature or a ticket moves.
+  `EventLoopState::note_dag` takes the timestamp as a `UnixSecs` as its third argument.
 - **Breaking:** the two endpoints of a multihop node have a type each. `MultihopHandle::app_id()`
   is an `AppId` and `underlay_id()` is an `UnderlayId`. `route_addr`, `refuse_hop_for_test`,
   `remove_origin` and `underlay_addr_of` take an `AppId`. `app_id_of` takes an `UnderlayId` and

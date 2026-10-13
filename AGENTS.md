@@ -238,6 +238,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `unix_nanos` in `habilis-network-util` | It has one caller. |
 | `ContentId::new` | It is a newtype already. A new validation rule can reject ids that exist. |
 | `util::logs::log_file_path(mesh_id: &str, nickname: &str)` | The util crate is below the protocol crate, so it cannot name `MeshId`. |
+| The tuning constants in `habilis-network-util/src/tuning.rs` and `consts.rs`, and the timing constants of `beacon/mod.rs` and `transport/probe.rs` | They stay `u64` seconds and milliseconds. A `Duration` rule for them waits on that part, and that part is on hold. This branch does not do it. |
 
 ### Types that exist
 

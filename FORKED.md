@@ -403,6 +403,12 @@ Divergences from upstream, in the order they were made.
       `Listing::first_seen_unix` are a `UnixSecs`. Read the number with `as_secs()`, and
       write an age with `UnixSecs::now().since(timestamp)`. `harness/adversarial.rs:354`
       sets it with `UnixSecs::from_secs(ts)`.
+    - `a2a/task.rs:959` (`beat.timestamp -= 3600`), `mcp/session.rs:528`
+      (`echo.timestamp > 0`) and `tests/adversarial.rs:664` (`main`): `timestamp` is a
+      `UnixSecs`, so write `UnixSecs::from_secs(beat.timestamp.as_secs() - 3600)`, compare
+      `echo.timestamp.as_secs() > 0`, and note that `.timestamp(4_102_444_800)` goes through
+      the harness builder at `harness/adversarial.rs:360`, which takes an `i64`: it converts
+      with `UnixSecs::from_secs`.
     - `output/json.rs:547`, `cli/mod.rs:967` (`feat-webmcp`) and `a2a/task.rs:220` (`main`):
       `clock::unix_secs()` is removed. Call `UnixSecs::now().as_secs()`.
     - agent-gossip does not call the multihop handle. A port that does wraps an `EndpointId`
