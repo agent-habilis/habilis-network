@@ -261,11 +261,15 @@ impl TicketSecret {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    fn wipe(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
 }
 
 impl Drop for TicketSecret {
     fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.0);
+        self.wipe();
     }
 }
 
@@ -564,11 +568,13 @@ mod password_tests {
         assert_eq!(secret.as_bytes(), &[9u8; 32]);
     }
 
-    // `unsafe_code` is denied, so a test cannot read the freed bytes: this
-    // checks that the type has a destructor, which is the wipe.
+    // `unsafe_code` is denied, so a test cannot read the freed bytes: it
+    // checks `wipe`, which `drop` calls.
     #[test]
-    fn a_ticket_secret_has_a_destructor_that_wipes_it() {
-        assert!(std::mem::needs_drop::<super::TicketSecret>());
+    fn wipe_zeroes_the_secret() {
+        let mut secret = super::TicketSecret::from_bytes([9u8; 32]);
+        secret.wipe();
+        assert_eq!(secret.as_bytes(), &[0u8; 32]);
     }
 
     #[test]
