@@ -153,14 +153,14 @@ pub fn encode_hex(bytes: &[u8]) -> String {
     to_hex(bytes)
 }
 
-/// Write `bytes` into `f` as lowercase hex, so that a `Display` for a byte-array newtype is one
+/// Write `bytes` into `formatter` as lowercase hex, so that a `Display` for a byte-array newtype is one
 /// call.
 ///
 /// # Errors
 /// The formatter fails.
-pub fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+pub fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
     for byte in bytes {
-        write!(f, "{byte:02x}")?;
+        write!(formatter, "{byte:02x}")?;
     }
     Ok(())
 }
