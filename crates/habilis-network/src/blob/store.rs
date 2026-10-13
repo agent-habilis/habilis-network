@@ -55,7 +55,8 @@ pub(crate) struct Registered {
 }
 
 /// The content identity of a file being snapshotted into the store —
-/// [`BlobStore::snapshot`]'s content-addressing key plus its owning task.
+/// [`BlobStore::snapshot`]'s content-addressing key plus the content group
+/// that offloads it, which becomes one of the blob's owners.
 pub(crate) struct ContentMeta {
     pub(crate) sha256: [u8; HASH_LEN],
     pub(crate) size: u64,
