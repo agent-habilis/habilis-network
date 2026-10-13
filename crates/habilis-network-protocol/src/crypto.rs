@@ -486,6 +486,27 @@ mod password_tests {
         assert_ne!(meta, broadcast);
     }
 
+    /// The stretched token for a fixed secret, password and label. A change
+    /// here breaks each passworded ticket that exists outside the code.
+    #[test]
+    fn derive_token_matches_the_golden_bytes() {
+        use super::TicketAuth;
+        let auth = TicketAuth::derive(&[3u8; 32], Some(&pw("hunter2")), b"blob-ticket");
+        assert!(auth.password_protected);
+        assert_eq!(
+            hex(&auth.token),
+            "824798ec30b0b968447a543d55adf59dd4a8a8a2218a9833409ce313edd258cf"
+        );
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        bytes.iter().fold(String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+    }
+
     #[test]
     fn ticket_tokens_are_domain_separated_by_label() {
         use super::TicketAuth;

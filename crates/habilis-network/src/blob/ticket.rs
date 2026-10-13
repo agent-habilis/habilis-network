@@ -178,6 +178,28 @@ mod tests {
         assert!(!decoded.password);
     }
 
+    /// The bytes of a ticket minted by the code at the base commit. A change
+    /// here is a wire change: tokens of this shape exist outside the code.
+    const GOLDEN: &str = "7uoCFwgsTez8XFb4njvMAMtE2vJeBnmBrmZUx5yWRCWRQLMdHteB1NQfJibHEK1WioE5QiSF1L29xXB7Jz1Q6z65hGReoUL4qgUyMJ8FijN6j5dJoGV4Z6HZ7iHiabPLdgWqXbLdBMpo7d1DKBM99xrYT79PaLDPMCAtbwHF13yJQ99G9G9LNVeEaaYs9b1Jdex66d8drD2vYGnZvoeJo2dyennE6g8TTVCogg6xvo4ev6RKcaTVLaipT1a6XzUVQg2S";
+
+    #[test]
+    fn encode_matches_the_golden_string() {
+        assert_eq!(sample(false).encode(), GOLDEN);
+    }
+
+    #[test]
+    fn decode_of_the_golden_string_gives_the_same_fields() {
+        let decoded = BlobTicket::decode(GOLDEN).expect("decode");
+        let expected = sample(false);
+        assert_eq!(decoded.addr, expected.addr);
+        assert_eq!(decoded.secret, expected.secret);
+        assert_eq!(decoded.sha256, expected.sha256);
+        assert_eq!(decoded.size, expected.size);
+        assert_eq!(decoded.lookups, expected.lookups);
+        assert_eq!(decoded.password, expected.password);
+        assert_eq!(decoded.relay_transport, expected.relay_transport);
+    }
+
     #[test]
     fn password_flag_round_trips() {
         let decoded = BlobTicket::decode(&sample(true).encode()).expect("decode");

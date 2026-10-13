@@ -481,6 +481,25 @@ mod tests {
     use crate::testutil::TestGame;
     use crate::transport::Message;
 
+    /// The JSON of an input packet whose `ack_frame` is the `-1` sentinel (no
+    /// frame received yet). A change here is a wire change: peers on the old
+    /// bytes cannot play with peers on the new ones.
+    #[test]
+    fn input_packet_json_with_the_null_ack_frame_matches_the_golden() {
+        let message = Message {
+            magic: 0xabcd_1234,
+            body: Body::Input(crate::transport::InputPacket {
+                start_frame: 5,
+                ack_frame: NULL_FRAME,
+                inputs: vec![crate::testutil::TestInput(7)],
+            }),
+        };
+        assert_eq!(
+            serde_json::to_string(&message).expect("a packet serializes"),
+            r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"ack_frame":-1,"inputs":[7]}}}"#
+        );
+    }
+
     fn syncing_peer() -> PeerProtocol<TestGame> {
         PeerProtocol::<TestGame>::new("peer".to_owned(), 1, 0xabcd_1234)
     }

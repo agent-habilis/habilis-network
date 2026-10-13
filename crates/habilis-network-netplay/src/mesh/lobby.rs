@@ -372,10 +372,32 @@ fn session_id_for(players: &[String], proposer: &str, epoch: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lobby, LobbyError, LobbyMessage};
+    use super::{Lobby, LobbyError, LobbyMessage, session_id_for};
 
     fn raw(message: &LobbyMessage) -> String {
         serde_json::to_string(message).expect("a lobby message serializes")
+    }
+
+    #[test]
+    fn start_message_json_matches_the_golden() {
+        let message = LobbyMessage::Start {
+            epoch: 2,
+            session_id: 12_345,
+            players: vec!["aaa".to_owned(), "bbb".to_owned()],
+        };
+        assert_eq!(
+            raw(&message),
+            r#"{"Start":{"epoch":2,"session_id":12345,"players":["aaa","bbb"]}}"#
+        );
+    }
+
+    #[test]
+    fn session_id_matches_the_golden_for_fixed_players_and_proposer() {
+        let players = vec!["aaa".to_owned(), "bbb".to_owned()];
+        assert_eq!(
+            session_id_for(&players, "aaa", 2),
+            3_843_943_743_708_675_032
+        );
     }
 
     #[test]

@@ -276,6 +276,35 @@ mod tests {
         InviteTicket::decode(&mint(mesh, ttl, password).unwrap()).expect("decode")
     }
 
+    /// A ticket with fixed fields: the signature and root are bytes, not the
+    /// output of a mint, so the encoding needs no key and no clock.
+    fn fixed_ticket() -> InviteTicket {
+        InviteTicket {
+            mesh_hash: "fixed-mesh-hash".to_owned(),
+            expiry: 1_700_000_000,
+            password: true,
+            sig: [5u8; 64],
+            root_field: vec![6u8; 32],
+        }
+    }
+
+    /// The bytes of a ticket minted by the code at the base commit. A change
+    /// here is a wire change: tokens of this shape exist outside the code.
+    const GOLDEN: &str = "CwX3aUAD9kjLm3ckGQZRSWa7jgHDTkggEgknyFUdHA9jDSm9M2YETdX3eachwWSHUkki6oZu2rStxtuJy3ZQM51fCh8Le1a7Suh3cuhtAYt67jN72d11tJPQ72hSp1mvLAwaSUkKQpL8eYxewU9y6ANjDBqTn6gHv7XwMWcJSSgM6s";
+
+    #[test]
+    fn encode_matches_the_golden_string() {
+        assert_eq!(fixed_ticket().encode(), GOLDEN);
+    }
+
+    #[test]
+    fn decode_of_the_golden_string_gives_the_same_fields() {
+        assert_eq!(
+            InviteTicket::decode(GOLDEN).expect("decode"),
+            fixed_ticket()
+        );
+    }
+
     // ── happy path ────────────────────────────────────────────────────────
 
     #[test]

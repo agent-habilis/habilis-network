@@ -207,6 +207,23 @@ mod tests {
         }
     }
 
+    /// The bytes of a hash minted by the code at the base commit. A change
+    /// here is a wire change: tokens of this shape exist outside the code.
+    const GOLDEN: &str = "JNa7ZgZwvMzW441NiDGTgK654QRhVajAbdBBcye6WJ3gqu3uyqWdEZZAUNs5cyu9H6FsPMQhkgfib2UHxLsS7a3Xq8jURe1VErA8rdM3UdgvXdmQH74aYiQHPj6hFUCK8dkMb5eFCLZy8D3f3cYXiScH5c7Uk23z4gfeoEbH3ZPX2DSk8niKsyZG1C2mtWdpeMuYQc5f4ytXUKRb5vPHyKrKT4BKPSjA3rK";
+
+    #[test]
+    fn encode_matches_the_golden_string() {
+        assert_eq!(sample(policy(true, true, true)).encode(), GOLDEN);
+    }
+
+    #[test]
+    fn decode_of_the_golden_string_gives_the_same_fields() {
+        assert_eq!(
+            StreamHash::decode(GOLDEN).expect("decodes"),
+            sample(policy(true, true, true))
+        );
+    }
+
     #[test]
     fn an_unknown_flag_is_refused() {
         let mut framed =
