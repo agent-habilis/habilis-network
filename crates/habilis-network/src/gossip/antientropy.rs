@@ -174,7 +174,7 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     // earlier of the two: a message of that second with a smaller id key than
     // the first one we hold sorts before it, and is in range.
     let floor = |window: &mut DigestWindow| {
-        window.lo = (state.joined_at.min(window.lo.0), DedupKey::MIN);
+        window.lo = (state.joined_at.as_secs().min(window.lo.0), DedupKey::MIN);
     };
     if newest.from_start {
         floor(&mut newest);
@@ -1365,7 +1365,7 @@ mod tests {
     use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
-    use crate::protocol::{Channel, DedupKey, MeshId, Message, MessageBody, Nickname};
+    use crate::protocol::{Channel, DedupKey, MeshId, Message, MessageBody, Nickname, UnixSecs};
     use crate::testing::{fresh_state, nick};
 
     fn members(count: usize) -> Vec<Nickname> {
@@ -1912,7 +1912,7 @@ mod tests {
             let all = scrambled_messages(seconds);
             let mut holder = MessageLog::new(1000);
             let mut node = fresh_state();
-            node.joined_at = 1_699_999_999;
+            node.joined_at = UnixSecs::from_secs(1_699_999_999);
             let mut lost = HashSet::new();
             for (index, message) in all.iter().enumerate() {
                 holder.push(message.clone());
@@ -1953,7 +1953,7 @@ mod tests {
         all.sort_by_key(|message| (message.timestamp, message.dedup_key()));
         let mut holder = MessageLog::new(1000);
         let mut node = fresh_state();
-        node.joined_at = 1_699_999_999;
+        node.joined_at = UnixSecs::from_secs(1_699_999_999);
         for (index, message) in all.iter().enumerate() {
             holder.push(message.clone());
             if index != ANTIENTROPY_DIGEST_WINDOW_IDS {
@@ -1985,7 +1985,7 @@ mod tests {
         holder.push(smaller.clone());
         holder.push(larger.clone());
         let mut node = fresh_state();
-        node.joined_at = second;
+        node.joined_at = UnixSecs::from_secs(second);
         node.message_log.push(larger);
         let budget = crate::util::tuning::antientropy_max_resend();
 
@@ -2012,7 +2012,7 @@ mod tests {
         holder.push(smaller.clone());
         holder.push(larger.clone());
         let mut node = fresh_state();
-        node.joined_at = second;
+        node.joined_at = UnixSecs::from_secs(second);
         node.message_log.push(larger);
         let budget = crate::util::tuning::antientropy_max_resend();
 
@@ -2056,7 +2056,7 @@ mod tests {
         let rounds_until_back = |lost_index: usize| {
             let mut holder = MessageLog::new(1000);
             let mut node = fresh_state();
-            node.joined_at = base - 1;
+            node.joined_at = UnixSecs::from_secs(base - 1);
             let lost = all[lost_index].dedup_key();
             for (index, message) in all.iter().enumerate() {
                 holder.push(message.clone());
@@ -2111,10 +2111,10 @@ mod tests {
             .map(|index| chat_at(&format!("e{index}"), base + i64::from(index * 2 / 3)))
             .collect();
         let mut older = fresh_state();
-        older.joined_at = base - 1;
+        older.joined_at = UnixSecs::from_secs(base - 1);
         older.message_log = MessageLog::new(100);
         let mut newer = fresh_state();
-        newer.joined_at = base + 1;
+        newer.joined_at = UnixSecs::from_secs(base + 1);
         newer.message_log = MessageLog::new(100);
         for message in earlier.iter().chain(&common) {
             older.message_log.push(message.clone());
@@ -2155,7 +2155,7 @@ mod tests {
         let joined_at = 1_700_000_000;
         let own_joined = chat_at("own joined", joined_at + 5);
         let mut node = fresh_state();
-        node.joined_at = joined_at;
+        node.joined_at = UnixSecs::from_secs(joined_at);
         node.message_log.push(own_joined.clone());
 
         let mut holder = MessageLog::new(10);

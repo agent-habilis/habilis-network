@@ -16,6 +16,7 @@ use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
 use crate::protocol::{
     AuthorKey, ContentHash, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
+    UnixSecs,
 };
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
@@ -370,7 +371,7 @@ pub struct EventLoopState {
     /// (anti-entropy keeps the mesh's set uniform), but messages
     /// stamped before this are never *surfaced* (printed / `poll` /
     /// `fetch` / library API): the operator/agent view starts at join.
-    pub(crate) joined_at: i64,
+    pub(crate) joined_at: UnixSecs,
     /// Goes false when the receiver stream terminally ends; IPC
     /// keeps working for `msg` / `poll` after that.
     pub(crate) gossip_open: bool,
@@ -637,7 +638,7 @@ pub struct EventLoopState {
     /// rule); `dag_heads` is the current tip set (hashes with no observed
     /// child) — the `parents` stamped on the next `Msg` we author. Both are
     /// pruned alongside the message-log eviction.
-    pub(crate) by_hash: HashMap<ContentHash, i64>,
+    pub(crate) by_hash: HashMap<ContentHash, UnixSecs>,
     pub(crate) dag_heads: HashSet<ContentHash>,
     /// When the last *verified* inbound gossip message arrived — the
     /// starvation watchdog's signal. Keyed on messages, not neighbor
@@ -912,7 +913,7 @@ impl EventLoopState {
             quiet_since: HashMap::new(),
             surfaced: HashSet::new(),
             last_sent_at: now,
-            joined_at: crate::util::clock::unix_secs(),
+            joined_at: UnixSecs::now(),
             gossip_open: true,
             rendezvous_linked: false,
             rendezvous_released: false,
@@ -1674,7 +1675,7 @@ impl EventLoopState {
     /// to flag). Updates `by_hash` and moves the tip set: the named parents
     /// are no longer tips, and `hash` becomes one. Unknown parents are left
     /// alone (the set converges via anti-entropy).
-    pub fn note_dag(&mut self, hash: ContentHash, parents: &[ContentHash], ts: i64) -> bool {
+    pub fn note_dag(&mut self, hash: ContentHash, parents: &[ContentHash], ts: UnixSecs) -> bool {
         let mut backdated = false;
         for parent in parents {
             if let Some(&parent_ts) = self.by_hash.get(parent)
@@ -2019,7 +2020,7 @@ mod tests {
         TokioInstant,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-    use crate::protocol::{AuthorKey, ContentHash};
+    use crate::protocol::{AuthorKey, ContentHash, UnixSecs};
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
 
     fn lower_and_higher() -> (EndpointId, EndpointId) {
@@ -2610,18 +2611,18 @@ mod tests {
     fn note_dag_moves_tip_set() {
         let mut state = fresh_state();
         // First message (no parents) becomes the sole tip.
-        assert!(!state.note_dag(hash_of("h1"), &[], 100));
+        assert!(!state.note_dag(hash_of("h1"), &[], UnixSecs::from_secs(100)));
         assert_eq!(state.dag_parents(), vec![hash_of("h1")]);
         // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
-        assert!(!state.note_dag(hash_of("h2"), &[hash_of("h1")], 101));
+        assert!(!state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from_secs(101)));
         assert_eq!(state.dag_parents(), vec![hash_of("h2")]);
     }
 
     #[test]
     fn note_dag_keeps_concurrent_tips() {
         let mut state = fresh_state();
-        state.note_dag(hash_of("a"), &[], 1);
-        state.note_dag(hash_of("b"), &[], 1); // concurrent: no shared parent
+        state.note_dag(hash_of("a"), &[], UnixSecs::from_secs(1));
+        state.note_dag(hash_of("b"), &[], UnixSecs::from_secs(1)); // concurrent: no shared parent
         let mut both = vec![hash_of("a"), hash_of("b")];
         both.sort();
         assert_eq!(state.dag_parents(), both, "both tips, in hash order");
@@ -2630,17 +2631,25 @@ mod tests {
     #[test]
     fn note_dag_flags_backdating() {
         let mut state = fresh_state();
-        state.note_dag(hash_of("parent"), &[], 200);
+        state.note_dag(hash_of("parent"), &[], UnixSecs::from_secs(200));
         // Child claims an earlier timestamp than a parent it references.
-        assert!(state.note_dag(hash_of("child"), &[hash_of("parent")], 100));
+        assert!(state.note_dag(
+            hash_of("child"),
+            &[hash_of("parent")],
+            UnixSecs::from_secs(100)
+        ));
         // A forward timestamp is fine.
-        assert!(!state.note_dag(hash_of("ok"), &[hash_of("parent")], 300));
+        assert!(!state.note_dag(
+            hash_of("ok"),
+            &[hash_of("parent")],
+            UnixSecs::from_secs(300)
+        ));
     }
 
     #[test]
     fn forget_hash_prunes_dag() {
         let mut state = fresh_state();
-        state.note_dag(hash_of("h"), &[], 1);
+        state.note_dag(hash_of("h"), &[], UnixSecs::from_secs(1));
         state.forget_hash(&hash_of("h"));
         assert!(state.dag_parents().is_empty());
     }

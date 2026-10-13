@@ -17,7 +17,9 @@ use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
 use crate::protocol::message::MessageBody;
-use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
+use crate::protocol::{
+    Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype, UnixSecs,
+};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
@@ -1004,7 +1006,11 @@ fn retain_and_index(
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
         }
         // Fold into the DAG tip set; flag a backdated timestamp.
-        if state.note_dag(hash, &message.parents, message.timestamp) {
+        if state.note_dag(
+            hash,
+            &message.parents,
+            UnixSecs::from_secs(message.timestamp),
+        ) {
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, "message timestamp precedes a referenced parent; possible backdating");
         }
     }
