@@ -193,7 +193,10 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Identity, decode_pubkey, decode_sig, encode_pubkey, encode_sig, verify};
+    use super::{
+        Identity, decode_pubkey, decode_sig, dedup_key16, encode_hex, encode_pubkey, encode_sig,
+        verify,
+    };
 
     #[test]
     fn sign_verify_round_trip() {
@@ -234,6 +237,23 @@ mod tests {
         let hex = encode_sig(&sig);
         assert_eq!(hex.len(), 128);
         assert!(verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()));
+    }
+
+    /// Golden: the key is `SHA-256(pubkey text ‖ id bytes)[..16]`. The unsigned form hashes an
+    /// empty pubkey text. The values were captured at the base commit.
+    #[test]
+    fn dedup_key16_is_pinned_for_a_fixed_pubkey_and_id() {
+        let pubkey = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+        let mut id = [0u8; 16];
+        id[15] = 1;
+        assert_eq!(
+            encode_hex(&dedup_key16(pubkey, &id)),
+            "c7ba26a2ed0d21f0e8913dd8b4456086"
+        );
+        assert_eq!(
+            encode_hex(&dedup_key16("", &id)),
+            "7c3ccd10bb7ec37b46d37926ae627426"
+        );
     }
 
     #[test]

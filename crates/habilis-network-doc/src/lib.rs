@@ -868,6 +868,50 @@ mod tests {
         );
     }
 
+    /// Golden: the hash and the bytes of one change, built with a fixed actor seed on an empty
+    /// document. Documents persist, so a change of either breaks replicas that hold the old
+    /// change. The values were captured at the base commit.
+    #[test]
+    fn a_fixed_change_keeps_its_hash_and_bytes() {
+        let doc = MeshDoc::new_ungated();
+        let bytes = doc
+            .build_change(&json!({"board": "x", "n": 1}), b"alice")
+            .expect("the merge applies")
+            .expect("the merge is not a no-op");
+        assert_eq!(
+            bs58::encode(&bytes).into_string(),
+            "BkyumvZ6ckpDpEVTTzvrfqoyymBWzN1qTVn2sqCJYU4TC7HQkarE1DSR52uEx1vZg2n6LotbD9"
+        );
+        let change = Change::from_bytes(bytes).expect("a change");
+        assert_eq!(
+            format!("{:?}", change.hash()),
+            "ChangeHash(\"c979bd7ef18f904ebbef0fb8fc381516074bbf9a68cdf28227661f35c7239cb6\")"
+        );
+    }
+
+    /// Golden: an `enc` envelope captured at the base commit opens with its key to the plaintext
+    /// `change` body, and that body carries its change bytes. The nonce is random on encrypt, so
+    /// this pins the open path and the envelope shape, and there is no golden for the encrypt path.
+    #[test]
+    fn a_fixed_enc_body_opens_to_its_plaintext_change() {
+        use super::wire::{decrypt_body, parse_change_body};
+
+        let plain = r#"{"k":"change","c":"2VfUX","m":{"board":"x"}}"#;
+        assert_eq!(
+            change_body(&[1, 2, 3, 4], Some(&json!({"board": "x"})))
+                .expect("compose")
+                .as_str(),
+            plain
+        );
+        let enc = concat!(
+            r#"{"k":"enc","d":"418rHy72Zv4wKRPXd4ff7MKEgNVoG1qe7RD94gp7a97VTVc5B4bEXa"#,
+            r#"qCBUwXKpBHZmAAM8zFEEiGKEzMZY7dcnQnuXjCcerUr3F"}"#,
+        );
+        let recovered = decrypt_body(enc, Some(&[3u8; 32])).expect("the key opens the body");
+        assert_eq!(recovered, plain);
+        assert_eq!(parse_change_body(&recovered), Some(vec![1u8, 2, 3, 4]));
+    }
+
     /// The gate the application configures on its `meta` channel. Any
     /// per-peer map/field pair would do; this one is what production uses.
     fn card_gate() -> SelfWriteGate {

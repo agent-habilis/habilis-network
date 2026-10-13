@@ -668,3 +668,144 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
     assert_eq!(nonce, Some(u64::MAX));
     assert_eq!(parsed.id, msg.id);
 }
+
+/// The wire form of a signed message, captured from the code at the base commit with a fixed key
+/// (`SecretKey::from_bytes(&[7; 32])`). A change that moves one byte of it is a wire change.
+const SIGNED_WIRE: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+
+/// The same message with no `pubkey` and no `sig` key: the canonical pre-signing form.
+const UNSIGNED_WIRE: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+
+/// [`UNSIGNED_WIRE`] with both keys present and empty.
+const EMPTY_KEYS_WIRE: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"","sig":"","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+
+/// [`SIGNED_WIRE`] with the `sig` key removed: a key and no signature.
+const KEY_ONLY_WIRE: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+
+const SIGNED_PUBKEY: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+/// The canonical bytes of [`SIGNED_WIRE`], hex, one line per piece: a 4-byte little-endian length,
+/// then the field.
+const SIGNED_CANONICAL_HEX: &str = concat!(
+    "10000000",
+    "686162696c69732d6d6573682f6d7367",
+    "04000000",
+    "31322e30",
+    "24000000",
+    "30303030303030302d303030302d303030302d303030302d303030303030303030303031",
+    "1e000000",
+    "7b2274797065223a22617070222c22746167223a226170705f6d7367227d",
+    "3e000000",
+    "4835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b67774736",
+    "09000000",
+    "616c6963652d626f74",
+    "08000000",
+    "00f1536500000000",
+    "0d000000",
+    "68656c6c6f2c20676f6c64656e",
+    "40000000",
+    "65613461366336336532396335323061626566353530376231333265633566393935343737366165626562653762393234323165656136393134343664323263",
+    "08000000",
+    "0300000000000000",
+    "40000000",
+    "31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131",
+    "44000000",
+    "5b2232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232225d",
+    "04000000",
+    "6e756c6c",
+    "02000000",
+    "7b7d"
+);
+/// The canonical bytes of [`UNSIGNED_WIRE`]. The `pubkey` field is the empty `00000000`.
+const UNSIGNED_CANONICAL_HEX: &str = concat!(
+    "10000000",
+    "686162696c69732d6d6573682f6d7367",
+    "04000000",
+    "31322e30",
+    "24000000",
+    "30303030303030302d303030302d303030302d303030302d303030303030303030303031",
+    "1e000000",
+    "7b2274797065223a22617070222c22746167223a226170705f6d7367227d",
+    "3e000000",
+    "4835473869554a66783555707258466d7053474c544c706a4b55354147686a5164347041616359334e535a36777937325039777641647375376b67774736",
+    "09000000",
+    "616c6963652d626f74",
+    "08000000",
+    "00f1536500000000",
+    "0d000000",
+    "68656c6c6f2c20676f6c64656e",
+    "00000000",
+    "",
+    "08000000",
+    "0300000000000000",
+    "40000000",
+    "31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131",
+    "44000000",
+    "5b2232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232225d",
+    "04000000",
+    "6e756c6c",
+    "02000000",
+    "7b7d"
+);
+
+fn hex(bytes: &[u8]) -> String {
+    crate::identity::encode_hex(bytes)
+}
+
+/// Golden: the bytes of a signed message are fixed. The JSON text, the signed bytes, the content
+/// hash, and the dedup key each equal a literal captured at the base commit.
+#[test]
+fn a_signed_message_keeps_its_wire_form() {
+    let parsed = Message::parse(SIGNED_WIRE.as_bytes()).expect("the signed literal parses");
+    assert!(
+        parsed.verify_signature(),
+        "the literal carries a valid signature"
+    );
+    assert_eq!(parsed.pubkey, SIGNED_PUBKEY);
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), SIGNED_WIRE);
+    assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
+    assert_eq!(
+        parsed.content_hash_hex(),
+        "2e680fcb3a8d77ef027e722046200cf0b07c8d77d7572b7e0712556bfaf76e0e"
+    );
+    assert_eq!(hex(&parsed.dedup_key()), "c7ba26a2ed0d21f0e8913dd8b4456086");
+}
+
+/// Golden: a message with no `pubkey` key and no `sig` key parses, reads as unsigned, and does
+/// not verify. Its JSON stays free of the two keys.
+#[test]
+fn a_message_with_no_key_fields_parses_as_unsigned() {
+    let parsed = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
+    assert_eq!(parsed.pubkey, "");
+    assert_eq!(parsed.sig, "");
+    assert!(!parsed.verify_signature());
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
+    assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
+    assert_eq!(
+        parsed.content_hash_hex(),
+        "7c4c2cb3f17ce751fec8a53c2d01198b424ce71aad8f5eb5747541222bd4c263"
+    );
+}
+
+/// Golden: `"pubkey": ""` and `"sig": ""` parse as the unsigned form. The keys do not come back on
+/// serialize, and the signed bytes equal those of a message with no key fields.
+#[test]
+fn empty_key_fields_parse_as_unsigned_and_serialize_without_the_keys() {
+    let parsed = Message::parse(EMPTY_KEYS_WIRE.as_bytes()).expect("empty key fields parse");
+    assert_eq!(parsed.pubkey, "");
+    assert_eq!(parsed.sig, "");
+    assert!(!parsed.verify_signature());
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
+    assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
+}
+
+/// Golden: a key with no signature parses and does not verify. Its signed bytes are those of the
+/// signed message, because `sig` is not part of them.
+#[test]
+fn a_key_with_no_signature_parses_and_does_not_verify() {
+    let parsed = Message::parse(KEY_ONLY_WIRE.as_bytes()).expect("a key with no sig parses");
+    assert_eq!(parsed.pubkey, SIGNED_PUBKEY);
+    assert_eq!(parsed.sig, "");
+    assert!(!parsed.verify_signature());
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), KEY_ONLY_WIRE);
+    assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
+}

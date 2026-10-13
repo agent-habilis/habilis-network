@@ -258,6 +258,28 @@ mod tests {
         assert_eq!(unseal_from_body(&secret, &body).unwrap(), plaintext);
     }
 
+    /// Golden: an envelope captured at the base commit opens to its plaintext. The nonce and the
+    /// ephemeral key are random on seal, so this pins the open path and the envelope shape, and
+    /// there is no golden for the seal path.
+    #[test]
+    fn a_fixed_envelope_opens_to_its_plaintext() {
+        let (secret, _public) = keypair(1);
+        let body = crate::MessageBody::new(
+            concat!(
+                r#"{"v":"x25519-chacha20poly1305/1","#,
+                r#""epk":"EuHtd9yCn95edmJqLKFeyXeoPw9nPzp1HTwdJEWEw9YL","#,
+                r#""n":"AtaLN3mCmEyUj5ur","#,
+                r#""ct":"79cUk28wvxuqaGBndLf5927gRbiTXuUAaSgPKp2Sho86SQcf1iSKCvXJnj9gvLrpDjSoUarapYeiR"}"#,
+            )
+            .to_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            unseal_from_body(&secret, &body).unwrap(),
+            r#"{"kind":"status-update","taskId":"7f3e"}"#
+        );
+    }
+
     #[test]
     fn a_wrong_recipient_cannot_open_it() {
         let (_recipient, recipient_pub) = keypair(1);

@@ -2195,4 +2195,46 @@ mod tests {
         assert_eq!(back.windows[0].decode_ids().unwrap().len(), 1);
         assert_eq!(back.windows[1].decode_ids().unwrap().len(), 2);
     }
+
+    /// Golden: the whole digest body for a fixed pair of windows, as the wire carries it. The
+    /// newest window is open-ended (`i64::MAX` and the all-ones key), the older one is closed.
+    /// The literal was captured at the base commit.
+    #[test]
+    fn a_digest_body_keeps_its_wire_form() {
+        let newest = DigestWindow {
+            lo: (1_700_000_100, [0x03; 16]),
+            hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
+            ids: vec![[0x11; 16], [0x22; 16]],
+            from_start: false,
+        };
+        let older = DigestWindow {
+            lo: (1_700_000_000, crate::daemon::message_log::KEY_MIN),
+            hi: (1_700_000_099, [0x04; 16]),
+            ids: vec![[0x33; 16]],
+            from_start: true,
+        };
+        let body = crate::gossip::json_body(&DigestBody {
+            windows: vec![WireWindow::encode(&newest), WireWindow::encode(&older)],
+        })
+        .expect("a digest serializes");
+        let wire = concat!(
+            r#"{"windows":[{"lo":1700000100,"lo_key":"Na6EczbX5yvuS59hRb3JJ","#,
+            r#""hi":9223372036854775807,"hi_key":"YcVfxkQb6JRzqk5kF2tNLv","#,
+            r#""ids":"29d2S7vB453rNYFdR5YcwtA5PDEwQncRjCnc4eNvMtWM"},"#,
+            r#"{"lo":1700000000,"lo_key":"1111111111111111","#,
+            r#""hi":1700000099,"hi_key":"Vm7ypzTh7eEsaRsGET44j","#,
+            r#""ids":"7KhXzYt7pTgoNMDYrCyg4z"}]}"#,
+        );
+        assert_eq!(body.as_str(), wire);
+
+        let back: DigestBody = serde_json::from_str(wire).expect("the literal parses");
+        let open_end = back.windows[0].range().expect("the keys decode");
+        assert_eq!(open_end.lo, (1_700_000_100, [0x03; 16]));
+        assert_eq!(open_end.hi, (i64::MAX, [u8::MAX; 16]));
+        let ids = back.windows[0].decode_ids().expect("the ids decode");
+        assert_eq!(ids, HashSet::from([[0x11; 16], [0x22; 16]]));
+        let closed = back.windows[1].range().expect("the keys decode");
+        assert_eq!(closed.lo, (1_700_000_000, [0; 16]));
+        assert_eq!(closed.hi, (1_700_000_099, [0x04; 16]));
+    }
 }
