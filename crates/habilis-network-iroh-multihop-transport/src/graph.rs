@@ -260,8 +260,8 @@ mod tests {
 
     /// A bidirectional link `left <-> right` of equal cost each way.
     fn link(graph: &mut Graph, left: EndpointId, right: EndpointId, cost: u32) {
-        graph.insert_link(left, right, LinkMetric(cost));
-        graph.insert_link(right, left, LinkMetric(cost));
+        graph.insert_link(left, right, LinkMetric::new(cost));
+        graph.insert_link(right, left, LinkMetric::new(cost));
     }
 
     #[test]
@@ -317,7 +317,7 @@ mod tests {
         link(&mut graph, nb, nc, 7);
         let path = graph.shortest_path(na, nc).expect("reachable");
         assert_eq!(path.hops, vec![nb, nc]);
-        assert_eq!(path.cost, LinkMetric(12));
+        assert_eq!(path.cost, LinkMetric::new(12));
     }
 
     #[test]
@@ -330,7 +330,7 @@ mod tests {
         link(&mut graph, na, nd, 1);
         let path = graph.shortest_path(na, nd).expect("reachable");
         assert_eq!(path.hops, vec![nd]);
-        assert_eq!(path.cost, LinkMetric(1));
+        assert_eq!(path.cost, LinkMetric::new(1));
     }
 
     #[test]
@@ -343,7 +343,7 @@ mod tests {
         link(&mut graph, na, nd, 10);
         let path = graph.shortest_path(na, nd).expect("reachable");
         assert_eq!(path.hops, vec![nb, nc, nd]);
-        assert_eq!(path.cost, LinkMetric(3));
+        assert_eq!(path.cost, LinkMetric::new(3));
     }
 
     #[test]

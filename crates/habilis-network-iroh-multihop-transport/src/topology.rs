@@ -84,7 +84,7 @@ impl LinkVector {
         let origin = secret.public();
         let links: Vec<(EndpointId, LinkMetric)> = links
             .into_iter()
-            .map(|(id, cost)| (id, LinkMetric(cost)))
+            .map(|(id, cost)| (id, LinkMetric::new(cost)))
             .collect();
         let sig = secret.sign(&signing_bytes(&origin, seq, &underlay, &links));
         Self {
@@ -345,7 +345,7 @@ impl Topology {
                 vector.links.iter().map(move |(to, metric)| TopologyEdge {
                     from: vector.origin.to_string(),
                     to: to.to_string(),
-                    metric: metric.0,
+                    metric: metric.get(),
                 })
             })
             .collect();
@@ -445,7 +445,7 @@ mod tests {
         let (na, nb, nc) = (eid(1), eid(2), eid(3));
         let mut store = Topology::default();
         let mut tampered = vector(na, 1, &[(nb, 10)]);
-        tampered.links.push((nc, crate::metric::LinkMetric(1)));
+        tampered.links.push((nc, crate::metric::LinkMetric::new(1)));
         assert!(!ingest(&mut store, tampered));
         let mut moved = vector(na, 1, &[(nb, 10)]);
         moved.underlay = EndpointAddr::new(nc);
@@ -743,7 +743,7 @@ mod tests {
         store
             .graph()
             .shortest_path(src, dst)
-            .map(|path| path.cost.0)
+            .map(|path| path.cost.get())
     }
 
     /// `src` reaches `dst` by three native hops (`n1`, `n2`, `dst`), or by one browser hop (`tab`)
@@ -850,10 +850,10 @@ mod tests {
         let [tab, dst] = [1, 2].map(eid);
         let mut store = Topology::default();
         let mut cheaper = vector(tab, 1, &[(dst, BROWSER_COST)]);
-        cheaper.links[0].1 = crate::metric::LinkMetric(NATIVE_COST);
+        cheaper.links[0].1 = crate::metric::LinkMetric::new(NATIVE_COST);
         assert!(!ingest(&mut store, cheaper), "a lowered cost");
         let mut dearer = vector(tab, 1, &[(dst, NATIVE_COST)]);
-        dearer.links[0].1 = crate::metric::LinkMetric(BROWSER_COST);
+        dearer.links[0].1 = crate::metric::LinkMetric::new(BROWSER_COST);
         assert!(!ingest(&mut store, dearer), "a raised cost");
         assert!(ingest(&mut store, vector(tab, 1, &[(dst, BROWSER_COST)])));
     }

@@ -1111,7 +1111,7 @@ mod tests {
             HandleConfig::default()
         );
         // It stays finite: the graph drops a link of infinite cost, and with it the browser as a hop.
-        assert!(crate::metric::LinkMetric(HandleConfig::for_browser().link_cost).is_usable());
+        assert!(crate::metric::LinkMetric::new(HandleConfig::for_browser().link_cost).is_usable());
     }
 
     #[tokio::test]
