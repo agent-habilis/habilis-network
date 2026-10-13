@@ -86,7 +86,8 @@ impl Frame<'_> {
     }
 }
 
-/// Read a frame.
+/// Read a frame. A free function and not a method, because it is the constructor of a
+/// [`Frame`] that borrows `bytes`: there is no frame yet to call a method on.
 ///
 /// # Errors
 /// The bytes are not a frame of this build: see [`DecodeError`].
