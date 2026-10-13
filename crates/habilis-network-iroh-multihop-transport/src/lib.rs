@@ -48,6 +48,7 @@ mod graph;
 mod lookup;
 mod metric;
 mod preset;
+mod role;
 mod selector;
 #[cfg(test)]
 mod test_support;
@@ -80,6 +81,7 @@ pub struct MultihopCounters {
     pub delivered: u64,
 }
 pub use metric::LinkMetric;
+pub use role::{AppId, UnderlayId};
 pub use topology::{LinkVector, Topology, TopologyEdge, TopologyView};
 
 use crate::addr::Route as RouteInner;
