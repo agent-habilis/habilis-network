@@ -140,6 +140,8 @@ pub(super) async fn run_heal(
     if (hard_edge || state.linked_endpoints.is_empty()) && !state.known_endpoints.is_empty() {
         gossip::heal::rebridge_known(state, ctx).await;
     }
+    // A member of the LAN that was asked to be a neighbor and is still not one is asked again.
+    gossip::lan::ask_unlinked_again(state, ctx).await;
     // Starvation watchdog: links/heal can look busy while no traffic
     // flows (the roster-collapse signature), so the last word every heal
     // tick is a check on verified *inbound* silence.
