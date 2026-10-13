@@ -499,13 +499,10 @@ pub(crate) async fn ingest(
     };
     // Self-echo drop: keyed on our **public key**, not the nickname. With
     // non-unique display names a peer may legitimately share our nickname —
-    // only our own signing key identifies our own echoed broadcasts. The hex
-    // pubkey is computed once at loop setup (`ctx.our_pubkey`), so this is a
-    // string compare, not a key-derivation + allocation per message.
-    if message
-        .author_key()
-        .is_some_and(|key| key.matches_hex(ctx.our_pubkey))
-    {
+    // only our own signing key identifies our own echoed broadcasts. The
+    // key is taken once at loop setup (`ctx.our_pubkey`), so this is a 32-byte
+    // compare, not a key derivation per message.
+    if message.author_key() == Some(ctx.our_pubkey) {
         return;
     }
     if dropped_by_test_hook(state, &message) {
@@ -1933,7 +1930,7 @@ mod evicted_orphan_tests {
     use crate::doc::Ingested;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
-    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::identity::Identity;
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -2025,7 +2022,7 @@ mod evicted_orphan_tests {
         let (gossip_sender, _receiver) = topic.split();
         let sender = MeshSender::new(gossip_sender);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let reader_nick = nick("reader");
         let sink = SilentSink;
         let ctx = HandlerCtx {
@@ -2034,7 +2031,7 @@ mod evicted_orphan_tests {
             mesh: &mesh,
             author: &reader_nick,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: endpoint_id(9),
             external_msg_tx: None,
@@ -2103,7 +2100,7 @@ mod first_contact_tests {
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
-    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::identity::Identity;
     use crate::protocol::message::MessageBody;
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -2140,7 +2137,7 @@ mod first_contact_tests {
         sender: MeshSender,
         mesh: MeshId,
         identity: Identity,
-        our_pubkey: String,
+        our_pubkey: crate::protocol::AuthorKey,
         author: Nickname,
         sink: SilentSink,
     }
@@ -2158,7 +2155,7 @@ mod first_contact_tests {
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
             let identity = Identity::generate();
-            let our_pubkey = encode_pubkey(&identity.public());
+            let our_pubkey = identity.author_key();
             Self {
                 endpoint,
                 _gossip: gossip,
@@ -2178,7 +2175,7 @@ mod first_contact_tests {
                 mesh: &self.mesh,
                 author: &self.author,
                 identity: &self.identity,
-                our_pubkey: &self.our_pubkey,
+                our_pubkey: self.our_pubkey,
                 max_peers: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
@@ -3166,7 +3163,7 @@ mod left_tests {
     use crate::lifecycle::membership::MembershipUpdate;
     use crate::lifecycle::{PresenceEvent, handle_presence};
     use crate::lookup::{TransportOpts, build_peer_multihop};
-    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::identity::Identity;
     use crate::protocol::mesh::LookupOpts;
     use crate::protocol::{MeshId, Message, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -3234,7 +3231,7 @@ mod left_tests {
         let (gossip_sender, _receiver) = topic.split();
         let sender = MeshSender::new(gossip_sender);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let mesh = MeshId::from("test");
         let us = nick("us");
         let sink = SilentSink;
@@ -3244,7 +3241,7 @@ mod left_tests {
             mesh: &mesh,
             author: &us,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: endpoint_id(9),
             external_msg_tx: None,
@@ -3335,7 +3332,7 @@ mod left_tests {
         let (gossip_sender, _receiver) = topic.split();
         let sender = MeshSender::new(gossip_sender);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let mesh = MeshId::from("test");
         let us = nick("us");
         let sink = SilentSink;
@@ -3345,7 +3342,7 @@ mod left_tests {
             mesh: &mesh,
             author: &us,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: endpoint_id(9),
             external_msg_tx: None,

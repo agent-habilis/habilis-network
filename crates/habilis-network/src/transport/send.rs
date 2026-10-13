@@ -961,7 +961,7 @@ mod tests {
         sender: crate::transport::MeshSender,
         mesh: MeshId,
         identity: crate::protocol::identity::Identity,
-        our_pubkey: String,
+        our_pubkey: crate::protocol::AuthorKey,
         author: crate::protocol::Nickname,
         sink: crate::gossip::event::SilentSink,
     }
@@ -974,7 +974,7 @@ mod tests {
                 mesh: &self.mesh,
                 author: &self.author,
                 identity: &self.identity,
-                our_pubkey: &self.our_pubkey,
+                our_pubkey: self.our_pubkey,
                 max_peers: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
@@ -991,7 +991,7 @@ mod tests {
         changes: usize,
     ) -> (Net, EventLoopState, Vec<Bytes>) {
         use crate::protocol::Channel;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
 
         let (endpoint, sender) = loopback_node().await;
         let mut state = state_with_pool(&endpoint, bob_addr);
@@ -1019,7 +1019,7 @@ mod tests {
         let frames = write(Channel::State);
         write(Channel::Meta);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let net = Net {
             endpoint,
             sender,

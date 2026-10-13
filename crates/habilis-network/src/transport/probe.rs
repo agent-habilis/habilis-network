@@ -2416,7 +2416,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_alive_tick_fills_one_member_per_tick_on_a_relay_transport_mesh() {
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use iroh::{RelayMode, TransportAddr, endpoint::presets};
 
         let endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -2434,7 +2434,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let rendezvous = endpoint_id(1);
@@ -2444,7 +2444,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 8,
             rendezvous_id: rendezvous,
             external_msg_tx: None,

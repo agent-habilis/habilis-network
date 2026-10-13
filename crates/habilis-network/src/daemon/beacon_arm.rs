@@ -723,7 +723,7 @@ mod tests {
         use crate::daemon::ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::protocol::mesh::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
@@ -764,7 +764,7 @@ mod tests {
         let mesh = MeshId::from("test");
         let author = nick("holder");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let sink = SilentSink;
         let ctx = HandlerCtx {
             sender: &sender,
@@ -772,7 +772,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,
@@ -885,7 +885,7 @@ mod tests {
         use crate::daemon::ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::protocol::mesh::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
@@ -926,7 +926,7 @@ mod tests {
         let mesh = MeshId::from("test");
         let author = nick("holder");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let sink = SilentSink;
         let ctx = HandlerCtx {
             sender: &sender,
@@ -934,7 +934,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,
@@ -990,7 +990,7 @@ mod tests {
         use crate::daemon::ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::protocol::mesh::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
@@ -1030,7 +1030,7 @@ mod tests {
         let mesh = MeshId::from("test");
         let author = nick("holder");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let sink = SilentSink;
         let ctx = HandlerCtx {
             sender: &sender,
@@ -1038,7 +1038,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,

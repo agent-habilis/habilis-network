@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::{AuthorKey, MeshId, Message, Nickname};
 use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
@@ -706,7 +706,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     // Owned Arc clone so the per-arm ctx can borrow it without colliding with `&mut state`.
     let identity = state.identity.clone();
     // Our own pubkey hex, computed once for the per-message self-echo compare.
-    let our_pubkey = crate::protocol::identity::encode_pubkey(&identity.public());
+    let our_pubkey = identity.author_key();
     // Everything a HandlerCtx needs *except* the sender. The ctx itself
     // is built per-arm (`parts.ctx(&sender)`) rather than once out here:
     // a loop-lifetime ctx would borrow `sender` forever, and the
@@ -717,7 +717,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mesh: &mesh_str,
         author: &author,
         identity: identity.as_ref(),
-        our_pubkey: &our_pubkey,
+        our_pubkey,
         max_peers,
         rendezvous_id: rendezvous_params.id,
         external_msg_tx: external_msg_tx.as_ref(),
@@ -1236,7 +1236,7 @@ pub(super) struct CtxParts<'a> {
     pub(super) mesh: &'a MeshId,
     pub(super) author: &'a Nickname,
     pub(super) identity: &'a crate::protocol::identity::Identity,
-    pub(super) our_pubkey: &'a str,
+    pub(super) our_pubkey: AuthorKey,
     pub(super) max_peers: usize,
     pub(super) rendezvous_id: EndpointId,
     pub(super) external_msg_tx: Option<&'a broadcast::Sender<Message>>,
