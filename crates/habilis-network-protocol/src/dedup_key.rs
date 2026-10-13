@@ -8,6 +8,19 @@
 /// gets another key. The password verifier of a mesh is also 16 bytes, which is
 /// why the two are not the same type.
 ///
+/// A raw array does not stand in for the key, so a swap with another 16-byte value fails to
+/// compile:
+///
+/// ```compile_fail
+/// use habilis_network_protocol::{MeshId, Message, Nickname};
+///
+/// let mesh = MeshId::new("H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6")?;
+/// let message = Message::new_alive(&mesh, &Nickname::new("word-word")?);
+/// let raw: [u8; 16] = [0; 16];
+/// assert!(message.dedup_key() == raw);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
 /// [`Message::dedup_key`]: crate::Message::dedup_key
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DedupKey([u8; 16]);
