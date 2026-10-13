@@ -135,6 +135,9 @@ fn maxrss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    // Its one caller is the `unix` test below; the other test is macOS and
+    // Linux only and names its own import.
+    #[cfg(all(unix, feature = "host"))]
     use super::peak_resident_memory_bytes;
 
     /// The current reading falls when memory is given back, which the peak never

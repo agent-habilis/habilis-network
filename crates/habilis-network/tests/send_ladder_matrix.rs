@@ -960,7 +960,11 @@ async fn udp_webrtc_ip_direct_with(sender_id: SenderId, name: &str) {
         .iter()
         .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
         .expect("the cell is in the table");
-    run(*cell, name, sender_id).await;
+    // `Box::pin` keeps the cell's future off this frame: it is just over
+    // clippy's `large_futures` threshold on x86_64-linux with the workspace
+    // feature set, and the two tests below that await this function carry it
+    // too unless it is boxed here.
+    Box::pin(run(*cell, name, sender_id)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1992,6 +1992,7 @@ dependencies = [
  "tracing",
  "vergen-gitcl",
  "web-time",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4874,6 +4875,7 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite",
  "ureq",
+ "which",
  "xshell",
 ]
 
@@ -5670,6 +5672,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf85cb06032201fa7c6f829d7db5a7e5aa45bcc0655327713065f6f0576731bf"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "which"
+version = "8.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

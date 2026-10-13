@@ -15,6 +15,10 @@ publish = false
 # `std::process::Command` directly so it can be killed on drop.
 clap = { workspace = true }
 xshell = "0.2"
+# Finds a driver on `$PATH` without the `which` command, which Windows does not
+# have (R10). `real-sys` is the one feature kept: it is the lookup against the
+# real filesystem and `$PATH`, which is all this needs.
+which = { version = "8", default-features = false, features = ["real-sys"] }
 # Cargo's `--message-format=json` for artifact discovery, and the WebDriver
 # wire format. Both already in `Cargo.lock` via the workspace entries.
 serde = { workspace = true }

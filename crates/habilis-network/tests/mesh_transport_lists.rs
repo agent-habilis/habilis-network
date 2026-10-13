@@ -388,7 +388,10 @@ async fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
 /// Payload flows in every stage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pair_races_again_when_udp_drops_and_detaches_when_it_returns() {
-    pair_races_again_when_udp_drops(None).await;
+    // `Box::pin` keeps the cycle's future off the test's stack frame: it is
+    // just over clippy's `large_futures` threshold on x86_64-linux with the
+    // workspace feature set, and its size depends on the target.
+    Box::pin(pair_races_again_when_udp_drops(None)).await;
 }
 
 /// The same cycle with the order of the ids fixed: bob sends the one directed message, so only
@@ -396,12 +399,14 @@ async fn a_pair_races_again_when_udp_drops_and_detaches_when_it_returns() {
 /// higher id nobody watches, and the engine must see the loss from the admission table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pair_races_again_when_udp_drops_and_bob_has_the_higher_id() {
-    pair_races_again_when_udp_drops(Some(true)).await;
+    // Boxed for `large_futures`, as above.
+    Box::pin(pair_races_again_when_udp_drops(Some(true))).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pair_races_again_when_udp_drops_and_bob_has_the_lower_id() {
-    pair_races_again_when_udp_drops(Some(false)).await;
+    // Boxed for `large_futures`, as above.
+    Box::pin(pair_races_again_when_udp_drops(Some(false))).await;
 }
 
 async fn pair_races_again_when_udp_drops(bob_is_higher: Option<bool>) {
