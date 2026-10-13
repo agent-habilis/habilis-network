@@ -287,6 +287,47 @@ published to a registry; pin it with
 - The idle closes of the pool (120 s), the acceptor (240 s) and the session
   detach (120 s) are one backstop of 900 s, read from the last use of the peer.
 
+- **Breaking:** `Message::dedup_key` and `identity::dedup_key16` return `DedupKey`, a 16-byte
+  newtype, in place of `[u8; 16]`. The message log bounds, the digest codec, the seen set and the
+  doc sink hold it. `KEY_MIN` and `KEY_MAX` are `DedupKey::MIN` and `DedupKey::MAX`. The digest
+  codec packs the same 16 bytes, so the wire does not change.
+- **Breaking:** `Message.pubkey` and `Message.sig`, two strings with an empty-string sentinel, are
+  one field, `Message::signer: Option<Signed>`. `Signed` pairs an `AuthorKey` with an
+  `iroh_base::Signature`, so a message has both or neither. `Message::author_key()` reads the key.
+  `identity::decode_pubkey` and `identity::encode_sig` are removed, and `AuthorKey::public_key`
+  replaces them. The per-author maps of the engine, the reassembly store and the doc sink are
+  keyed by `AuthorKey`. `ReassemblyStore::ingest` and `forget` read the author key and the shard
+  group from the message. The JSON keeps its field names and order, and the signed bytes still
+  carry the hex text of the key.
+- **Wire decision, parser side only:** `Message::parse` rejects a `pubkey` with no `sig`, and a
+  `sig` with no `pubkey`. Before, the first parsed and kept the key without a signature. No
+  sender emits either. There is no `VERSION` bump, and no byte that a sender emits moves. A
+  `pubkey` of `""` with a `sig` of `""` still parses as unsigned.
+- **Breaking:** the blob secret and the blob hash have types. `BlobTicket.secret` is a
+  `TicketSecret` (it was `[u8; 32]`) and `BlobTicket.sha256` is a `BlobDigest`. `TicketAuth::blob`
+  and `TicketAuth::derive` take `&TicketSecret`, and `TicketAuth.token` is a `TicketSecret`. A
+  `TicketSecret` has a `Debug` that prints no byte, has no `PartialEq` (compare with `ct_eq` on
+  `as_bytes`), and wipes its bytes on drop. `BlobDigest` prints as the lowercase hex of the hash,
+  the same text as the spool file name, and is re-exported through `ops::blob`.
+- **Breaking:** the stream hash has types. `StreamHash.id` is a `StreamId` and `StreamHash.secret`
+  is a `StreamSecret`. `StreamHash` compares the secret in constant time in its own `PartialEq`.
+  A `StreamSecret` prints no byte and wipes its bytes on drop.
+- **Breaking:** the netplay crate has types. `P2PSession::new` and `SyncTestSession::add_input`
+  take a `PlayerHandle` in place of a `usize`; `RollbackError::InvalidPlayer` and
+  `StartedMatch::local_handle` hold one. `Frame` is a struct in place of an alias for `i32`:
+  `NULL_FRAME` is `Frame::NULL`, a frame plus a count is a frame, and a frame minus a frame is a
+  count. `StartedMatch::epoch` is an `Epoch` and `StartedMatch::session_id` is a `SessionId`.
+  `Lobby::on_message` and `Lobby::expire` take a `Tick` and a `TickSpan` in place of `u64`. The
+  JSON of the lobby `Start` message and the ids from `session_id_for` do not change.
+- **Wire decision, netplay:** `ack_frame` is an absent field in place of `-1`. An input packet and
+  a standalone ack that had no frame to acknowledge carried `"ack_frame":-1`. They carry no
+  `ack_frame` now, and `Frame`'s `Deserialize` refuses a negative number, so the `-1` of an older
+  peer is a parse error. A negative `Frame` does not serialize either. Packets carry a `magic`
+  and no version, so an older peer and a newer peer cannot play together. Both light-cycles
+  builds, native and web, move at once.
+- **Breaking:** `LinkMetric` in the multihop transport has a private field. Build one with
+  `LinkMetric::new` and read it with `LinkMetric::get`. The serde form is the same number.
+
 ### Fixed
 
 - The `iroh` fork moves to `c2e81ee` (agent-habilis/iroh PR #1). iroh opens a
@@ -407,6 +448,10 @@ published to a registry; pin it with
   the other way round. `ops::start_ping_round` starts a round; `PingRound` is no longer part of
   `embed` and no driver builds one: a driver that did (`agent-gossip`'s `a2a/send.rs`) calls
   `start_ping_round` instead.
+- `BlobTicket` printed its bearer secret, in decimal, through `Debug`. The secret is a
+  `TicketSecret` now, which prints `TicketSecret(***)`.
+- The buffers that hold a fetch request, a stream header and a fresh salt or secret are wiped on
+  every exit path, early returns included. Before, a short read left the token in the buffer.
 
 ### Removed
 
