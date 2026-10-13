@@ -219,18 +219,32 @@ fn parse_rejects_malformed_integrity_fields() {
             r#"{{"v":"12.0","id":"{FIXTURE_ID}","type":"app","tag":"app_msg","mesh":"{FIXTURE_MESH}","author":"a-b","ts":0,"body":"hi"{extra},"ext":{{}}}}"#
         )
     };
-    // 3KB garbage pubkey, non-hex / wrong-length variants, and a bad hash.
-    for extra in [
-        format!(r#","pubkey":"{}""#, "z".repeat(3000)),
-        r#","pubkey":"AABB""#.to_string(), // uppercase + too short
-        r#","sig":"nothex""#.to_string(),
-        r#","prev":"xyz""#.to_string(),
-        r#","parents":["00"]"#.to_string(), // too short
+    // Each malformed field comes with a well-formed partner, so that the pairing rule (a key
+    // without a signature) cannot be the reason for the reject, and the error names the field.
+    let good_sig = r#","sig":""#.to_owned() + &"cd".repeat(64) + "\"";
+    let good_key = r#","pubkey":""#.to_owned() + &"ab".repeat(32) + "\"";
+    for (extra, reason) in [
+        // 3KB garbage pubkey, and an uppercase one that is also too short.
+        (
+            format!(r#","pubkey":"{}"{good_sig}"#, "z".repeat(3000)),
+            "malformed pubkey",
+        ),
+        (format!(r#","pubkey":"AABB"{good_sig}"#), "malformed pubkey"),
+        (
+            format!(r#"{good_key},"sig":"nothex""#),
+            "malformed signature",
+        ),
+        (
+            format!(r#"{good_key},"sig":"{}""#, "CD".repeat(64)),
+            "malformed signature",
+        ),
+        (r#","prev":"xyz""#.to_string(), "malformed prev hash"),
+        // Too short.
+        (r#","parents":["00"]"#.to_string(), "malformed parent hash"),
     ] {
-        assert!(
-            Message::parse(base(&extra).as_bytes()).is_err(),
-            "should reject: {extra}"
-        );
+        let error =
+            Message::parse(base(&extra).as_bytes()).expect_err(&format!("should reject: {extra}"));
+        assert_eq!(error.to_string(), reason, "for: {extra}");
     }
     // A well-formed (if unverifiable) 64-hex pubkey with a 128-hex signature still parses —
     // shape only; the signature gate is a separate, later check.
