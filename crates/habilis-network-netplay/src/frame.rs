@@ -2,7 +2,8 @@
 
 use std::ops::{Add, AddAssign, Sub};
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// A simulation frame number.
 ///
@@ -13,11 +14,25 @@ use serde::{Deserialize, Serialize};
 /// A frame plus a count is a frame, and a frame minus a frame is a count. A
 /// frame plus a frame is not defined, so the two cannot be confused with the
 /// delays and the windows that are plain integers beside them.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
-)]
+///
+/// On the wire a frame is its number. A negative number is not a frame, so
+/// `Deserialize` refuses it: the `-1` that older peers sent for "no frame" is
+/// a parse error, not [`Frame::NULL`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize)]
 #[serde(transparent)]
 pub struct Frame(i32);
+
+impl<'de> Deserialize<'de> for Frame {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let number = i32::deserialize(deserializer)?;
+        if number < 0 {
+            return Err(D::Error::custom(format!(
+                "frame {number} is negative, and no frame is an absent field"
+            )));
+        }
+        Ok(Self(number))
+    }
+}
 
 impl Frame {
     /// "No frame" — an empty slot, an un-started queue, or the absence of a

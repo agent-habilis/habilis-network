@@ -261,9 +261,14 @@ impl<T: Config> PeerProtocol<T> {
         let inputs: Vec<T::Input> = self.pending.iter().map(|(_, input)| *input).collect();
         Some(self.wrap(Body::Input(InputPacket {
             start_frame,
-            ack_frame: self.last_received_frame,
+            ack_frame: self.ack_frame(),
             inputs,
         })))
+    }
+
+    /// The highest frame received contiguously, or `None` before the first.
+    fn ack_frame(&self) -> Option<Frame> {
+        (self.last_received_frame != Frame::NULL).then_some(self.last_received_frame)
     }
 
     fn wrap(&self, body: Body<T::Input>) -> Message<T::Input> {
@@ -410,7 +415,9 @@ impl<T: Config> PeerProtocol<T> {
                 }
             }
             Body::Input(packet) => {
-                self.last_acked_frame = self.last_acked_frame.max(packet.ack_frame);
+                if let Some(ack_frame) = packet.ack_frame {
+                    self.last_acked_frame = self.last_acked_frame.max(ack_frame);
+                }
                 // A run that starts past the next frame we need would leave a
                 // hole, and the rollback engine requires contiguity. Drop it
                 // and wait — the sender resends everything unacked, so the
@@ -445,11 +452,13 @@ impl<T: Config> PeerProtocol<T> {
                     self.last_received_frame = *frame;
                 }
                 replies.push(self.wrap(Body::InputAck {
-                    ack_frame: self.last_received_frame,
+                    ack_frame: self.ack_frame(),
                 }));
             }
             Body::InputAck { ack_frame } => {
-                self.last_acked_frame = self.last_acked_frame.max(*ack_frame);
+                if let Some(ack_frame) = ack_frame {
+                    self.last_acked_frame = self.last_acked_frame.max(*ack_frame);
+                }
             }
             Body::QualityReport {
                 frame_advantage,
@@ -483,23 +492,53 @@ mod tests {
     use crate::testutil::TestGame;
     use crate::transport::Message;
 
-    /// The JSON of an input packet whose `ack_frame` is the `-1` sentinel (no
-    /// frame received yet). A change here is a wire change: peers on the old
-    /// bytes cannot play with peers on the new ones.
+    /// The JSON of an input packet with no ack yet. A change here is a wire
+    /// change: peers on the old bytes cannot play with peers on the new ones.
     #[test]
-    fn input_packet_json_with_the_null_ack_frame_matches_the_golden() {
+    fn input_packet_json_with_no_ack_frame_matches_the_golden() {
         let message = Message {
             magic: 0xabcd_1234,
             body: Body::Input(crate::transport::InputPacket {
                 start_frame: Frame::new(5),
-                ack_frame: Frame::NULL,
+                ack_frame: None,
                 inputs: vec![crate::testutil::TestInput(7)],
             }),
         };
         assert_eq!(
             serde_json::to_string(&message).expect("a packet serializes"),
-            r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"ack_frame":-1,"inputs":[7]}}}"#
+            r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"inputs":[7]}}}"#
         );
+    }
+
+    /// The bytes an older peer sent for a packet with no ack. The `-1` is not
+    /// a frame, so a new peer refuses the packet; it does not read it as
+    /// [`Frame::NULL`] and play on.
+    #[test]
+    fn an_old_packet_with_the_minus_one_ack_frame_is_a_parse_error() {
+        let old = r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"ack_frame":-1,"inputs":[7]}}}"#;
+        let error = serde_json::from_str::<Message<crate::testutil::TestInput>>(old)
+            .expect_err("a negative frame is refused");
+        assert!(error.to_string().contains("negative"), "{error}");
+    }
+
+    #[test]
+    fn an_ack_frame_is_on_the_wire_only_when_there_is_one() {
+        let packet = |ack_frame| Message::<crate::testutil::TestInput> {
+            magic: 0xabcd_1234,
+            body: Body::InputAck { ack_frame },
+        };
+        let none = serde_json::to_string(&packet(None)).expect("serializes");
+        assert_eq!(none, r#"{"magic":2882343476,"body":{"InputAck":{}}}"#);
+        let some = serde_json::to_string(&packet(Some(Frame::new(4)))).expect("serializes");
+        assert_eq!(
+            some,
+            r#"{"magic":2882343476,"body":{"InputAck":{"ack_frame":4}}}"#
+        );
+        for json in [none, some] {
+            let back: Message<crate::testutil::TestInput> =
+                serde_json::from_str(&json).expect("round trips");
+            assert_eq!(serde_json::to_string(&back).expect("serializes"), json);
+        }
     }
 
     fn syncing_peer() -> PeerProtocol<TestGame> {
@@ -577,7 +616,7 @@ mod tests {
                 magic: previous_match,
                 body: Body::Input(crate::transport::InputPacket {
                     start_frame: Frame::new(40),
-                    ack_frame: Frame::new(39),
+                    ack_frame: Some(Frame::new(39)),
                     inputs: vec![crate::testutil::TestInput(7)],
                 }),
             },
