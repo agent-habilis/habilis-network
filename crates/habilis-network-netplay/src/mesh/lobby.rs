@@ -573,6 +573,30 @@ mod tests {
         assert!(lobby.started().is_none());
     }
 
+    /// The literal that the lobby wrote before its players were keys. A new peer refuses
+    /// it, and the lobby does not adopt a match from it.
+    #[test]
+    fn the_old_start_literal_with_text_players_is_refused() {
+        let old = r#"{"Start":{"epoch":2,"session_id":12345,"players":["aaa","bbb"]}}"#;
+        let error =
+            serde_json::from_str::<LobbyMessage>(old).expect_err("players that are not keys");
+        assert!(
+            error.to_string().contains("is not a lowercase hex key"),
+            "{error}"
+        );
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
+        lobby.on_message(&key(0xbb), old, Tick::new(0));
+        assert!(lobby.started().is_none());
+    }
+
+    /// A nickname that `Nickname::new` refuses is not a presence.
+    #[test]
+    fn a_presence_with_a_nickname_the_wire_refuses_is_dropped() {
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
+        lobby.on_message(&key(0xbb), r#"{"Present":{"nick":""}}"#, Tick::new(0));
+        assert_eq!(lobby.present(), vec![(key(0xaa), nick("alice"))]);
+    }
+
     #[test]
     fn a_peer_is_present_in_its_own_lobby() {
         let lobby = Lobby::new(key(0xaa), nick("alice"));
