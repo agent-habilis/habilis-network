@@ -582,7 +582,7 @@ struct Assembled {
     mesh_password: Option<Password>,
     /// The Argon2id-stretched mesh key — retained to derive the state/meta/
     /// broadcast content-encryption keys. `None` when passwordless. Wiped on drop.
-    mesh_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    mesh_key: Option<crate::protocol::SymmetricKey>,
     /// The invite-only creator's mesh (with its in-memory issuer key + root),
     /// retained so `invite` can mint. `Some` only on an invite-only creator.
     mint_mesh: Option<Mesh>,
@@ -929,7 +929,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         }
         (password, _) => (mesh, password),
     };
-    let mesh_key = mesh.stretched_key().map(zeroize::Zeroizing::new);
+    let mesh_key = mesh.mesh_key();
     // The creator alone retains its full mesh (issuer key + root) to mint from.
     let mint_mesh = mesh.requires_invite().then(|| mesh.clone());
     let id_str = mesh.to_string();
@@ -1017,7 +1017,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         }
         SetupKind::Create { .. } => unreachable!("outer arm excludes Create"),
     };
-    let mesh_key = mesh.stretched_key().map(zeroize::Zeroizing::new);
+    let mesh_key = mesh.mesh_key();
     let id_str = mesh.to_string();
     let mesh_id =
         MeshId::new(id_str.clone()).expect("Mesh::to_string always produces a valid MeshId");

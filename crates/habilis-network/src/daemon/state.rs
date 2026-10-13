@@ -14,7 +14,9 @@ use super::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
-use crate::protocol::{AuthorKey, DedupKey, Message, MessageId, Nickname, ShardGroup};
+use crate::protocol::{
+    AuthorKey, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
+};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
@@ -681,7 +683,7 @@ pub struct EventLoopState {
     /// Symmetric key for broadcast-chat app bodies on a passworded
     /// mesh, `derive_secret(mesh_key, "broadcast")` — domain-separated from
     /// the state/meta doc keys. `None` ⇒ chat stays plaintext. Wiped on drop.
-    pub(crate) broadcast_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    pub(crate) broadcast_key: Option<SymmetricKey>,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
 }
@@ -803,7 +805,7 @@ impl PingRound {
 #[derive(Default)]
 pub(crate) struct MeshSecrets {
     pub password: Option<crate::protocol::crypto::Password>,
-    pub key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    pub key: Option<SymmetricKey>,
 }
 
 /// Everything [`EventLoopState::new`] needs beyond the clock, grouped for the
@@ -860,15 +862,9 @@ impl EventLoopState {
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
-        let state_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"state-doc"))
-        });
-        let meta_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"meta-doc"))
-        });
-        let broadcast_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"broadcast"))
-        });
+        let state_key = mesh_key.as_ref().map(|key| key.derive(b"state-doc"));
+        let meta_key = mesh_key.as_ref().map(|key| key.derive(b"meta-doc"));
+        let broadcast_key = mesh_key.as_ref().map(|key| key.derive(b"broadcast"));
         Self {
             linked_endpoints: HashSet::new(),
             direct: HashMap::new(),
@@ -1805,8 +1801,8 @@ impl EventLoopState {
 
     /// The Argon2id-derived broadcast key, for a password-protected mesh.
     #[must_use]
-    pub fn broadcast_key(&self) -> Option<&[u8; 32]> {
-        self.broadcast_key.as_deref()
+    pub fn broadcast_key(&self) -> Option<&SymmetricKey> {
+        self.broadcast_key.as_ref()
     }
 
     /// The raw mesh password, retained for blob-ticket keying.

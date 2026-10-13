@@ -34,7 +34,7 @@ use automerge::{
 };
 use serde_json::{Map, Value};
 
-use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname};
+use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
 use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX};
 
 /// Matches the receive path these drops happen on, so a reader filtering the
@@ -141,7 +141,7 @@ pub struct MeshDoc {
     /// `Some` ⇒ change bodies are sealed on the wire (`enc` envelope) and
     /// decrypted here before applying; `None` ⇒ plaintext, exactly as before.
     /// Wiped on drop.
-    key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    key: Option<SymmetricKey>,
 }
 
 impl MeshDoc {
@@ -245,7 +245,7 @@ impl MeshDoc {
     /// Set this channel's encryption key (the daemon's per-channel
     /// mesh-password-derived key). `None` leaves the channel in plaintext.
     #[must_use]
-    pub fn with_key(mut self, key: Option<zeroize::Zeroizing<[u8; 32]>>) -> Self {
+    pub fn with_key(mut self, key: Option<SymmetricKey>) -> Self {
         self.key = key;
         self
     }
@@ -255,11 +255,11 @@ impl MeshDoc {
     /// body (or, on a passworded mesh, an unsealed or unopenable body) — a
     /// no-op on the doc.
     fn change_bytes(&self, frame: &Message) -> Option<Vec<u8>> {
-        match self.key.as_deref() {
+        match self.key.as_ref() {
             // Passwordless: parse directly — no decrypt indirection, no clone.
             None => wire::parse_change_body(frame.body.as_str()),
             Some(key) => {
-                let plain = wire::decrypt_body(frame.body.as_str(), Some(key))?;
+                let plain = wire::decrypt_body_with_key(frame.body.as_str(), Some(key))?;
                 wire::parse_change_body(&plain)
             }
         }
@@ -281,8 +281,8 @@ impl MeshDoc {
         habilis_network_protocol::MessageBody,
     )> {
         let plain = wire::change_body(change, merge)?;
-        let wire = match self.key.as_deref() {
-            Some(key) => wire::encrypt_body(&plain, key)?,
+        let wire = match self.key.as_ref() {
+            Some(key) => wire::encrypt_body_with_key(&plain, key)?,
             None => plain.clone(),
         };
         Ok((wire, plain))
@@ -293,7 +293,7 @@ impl MeshDoc {
     /// then surfaces the original (opaque) frame.
     #[must_use]
     pub fn surface_body(&self, frame: &Message) -> Option<String> {
-        wire::decrypt_body(frame.body.as_str(), self.key.as_deref())
+        wire::decrypt_body_with_key(frame.body.as_str(), self.key.as_ref())
     }
 
     /// This channel's automerge heads, Base58-encoded — the compact frontier a
@@ -841,7 +841,9 @@ mod tests {
     use super::wire::change_body;
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
     use automerge::Change;
-    use habilis_network_protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname};
+    use habilis_network_protocol::{
+        AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
+    };
     use serde_json::{Value, json};
     use std::collections::HashSet;
 
@@ -912,7 +914,7 @@ mod tests {
     /// this pins the open path and the envelope shape, and there is no golden for the encrypt path.
     #[test]
     fn a_fixed_enc_body_opens_to_its_plaintext_change() {
-        use super::wire::{decrypt_body, parse_change_body};
+        use super::wire::{decrypt_body_with_key, parse_change_body};
 
         let plain = r#"{"k":"change","c":"2VfUX","m":{"board":"x"}}"#;
         assert_eq!(
@@ -925,7 +927,8 @@ mod tests {
             r#"{"k":"enc","d":"418rHy72Zv4wKRPXd4ff7MKEgNVoG1qe7RD94gp7a97VTVc5B4bEXa"#,
             r#"qCBUwXKpBHZmAAM8zFEEiGKEzMZY7dcnQnuXjCcerUr3F"}"#,
         );
-        let recovered = decrypt_body(enc, Some(&[3u8; 32])).expect("the key opens the body");
+        let key = SymmetricKey::from_bytes([3u8; 32]);
+        let recovered = decrypt_body_with_key(enc, Some(&key)).expect("the key opens the body");
         assert_eq!(recovered, plain);
         assert_eq!(parse_change_body(&recovered), Some(vec![1u8, 2, 3, 4]));
     }
@@ -1431,7 +1434,7 @@ mod tests {
         let key = [42u8; 32];
         // Author builds the change and seals the wire body, as the daemon does.
         let merge = json!({"secret": "value"});
-        let author_doc = MeshDoc::new_ungated().with_key(Some(zeroize::Zeroizing::new(key)));
+        let author_doc = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes(key)));
         let bytes = author_doc
             .build_change(&merge, &pad_seed(alice.as_str().as_bytes()))
             .expect("builds")
@@ -1449,7 +1452,7 @@ mod tests {
 
         // A peer holding the key applies it and converges; surface_body recovers
         // the plaintext for the delta.
-        let mut with_key = MeshDoc::new_ungated().with_key(Some(zeroize::Zeroizing::new(key)));
+        let mut with_key = MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes(key)));
         assert!(matches!(
             with_key.ingest(&carrier),
             Ingested::Applied { .. }
@@ -1463,7 +1466,7 @@ mod tests {
         assert!(matches!(no_key.ingest(&carrier), Ingested::Ignored));
         assert_eq!(no_key.to_json(), json!({}));
         let mut wrong_key =
-            MeshDoc::new_ungated().with_key(Some(zeroize::Zeroizing::new([7u8; 32])));
+            MeshDoc::new_ungated().with_key(Some(SymmetricKey::from_bytes([7u8; 32])));
         assert!(matches!(wrong_key.ingest(&carrier), Ingested::Ignored));
         assert_eq!(wrong_key.to_json(), json!({}));
     }

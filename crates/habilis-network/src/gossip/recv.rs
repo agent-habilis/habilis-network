@@ -1328,12 +1328,13 @@ fn gate_directed_to_us(
 /// when there is no key or the body is not a decryptable `enc` envelope (on a
 /// passworded mesh that means an unsealed/tampered body — the caller drops it).
 fn decrypt_broadcast(message: &mut Message, state: &EventLoopState) -> Option<MessageBody> {
-    let key = state.broadcast_key.as_deref()?;
+    let key = state.broadcast_key.as_ref()?;
     // A key exists (passworded mesh), so a body that will not open is either
     // cleartext or tampered — drop it, but say so (mirroring the directed-drop
     // warn) rather than vanishing silently. A generic `send_app` broadcast that
     // did not mesh-key-seal its body lands here; see `send_app`'s doc.
-    let Some(plain) = crate::doc::wire::decrypt_body(message.body.as_str(), Some(key)) else {
+    let Some(plain) = crate::doc::wire::decrypt_body_with_key(message.body.as_str(), Some(key))
+    else {
         tracing::warn!(target: "habilis_network::gossip",
             author = %message.author,
             "dropping a broadcast body that failed mesh-key decryption (cleartext on a passworded mesh?)"

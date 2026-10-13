@@ -19,7 +19,7 @@ pub mod doc {
     /// whether the item exists over there.
     #[cfg(feature = "adversarial")]
     pub use crate::doc::wire::merge_body;
-    pub use crate::doc::wire::{change_body, encrypt_body};
+    pub use crate::doc::wire::{change_body, encrypt_body_with_key};
 }
 
 /// Handing a peer a payload too large for a gossip frame: offload it to a
