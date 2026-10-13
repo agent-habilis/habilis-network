@@ -942,10 +942,9 @@ impl Message {
         buf
     }
 
-    /// This message's content hash (SHA-256 of [`Message::canonical_bytes`], hex) —
-    /// the id used by another author's `prev` backlink and by fork
-    /// detection. Recomputed locally on receive; never trusted off the wire.
-    /// This message's content hash, as the typed value that the DAG and the fork index key on.
+    /// This message's content hash (SHA-256 of [`Message::canonical_bytes`]) — the id used by
+    /// another author's `prev` backlink and by fork detection, and the key of the DAG.
+    /// Recomputed locally on receive; never trusted off the wire.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
         ContentHash::of(&self.canonical_bytes())
