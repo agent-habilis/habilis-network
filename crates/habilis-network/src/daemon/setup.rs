@@ -896,7 +896,11 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
         build_member_endpoint(build).await?;
 
-    let mut mesh = Mesh::new(seed, name.clone(), config);
+    let mut mesh = Mesh::from_seed(
+        crate::protocol::Seed::from_bytes(seed),
+        name.clone(),
+        config,
+    );
     // Invite-only: mint the invite root + issuer keypair and bake the issuer
     // pubkey into the id BEFORE it is rendered. Cheap (random keys, no Argon2).
     if invite_only {
