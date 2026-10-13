@@ -17,6 +17,8 @@
 //! cross-restart identity (on-disk persistence) is a documented follow-up;
 //! see `docs/history-integrity.md`.
 
+use std::fmt;
+
 use anyhow::{Context, Result};
 use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
@@ -151,6 +153,18 @@ pub fn encode_hex(bytes: &[u8]) -> String {
     to_hex(bytes)
 }
 
+/// Write `bytes` into `f` as lowercase hex, so that a `Display` for a byte-array newtype is one
+/// call.
+///
+/// # Errors
+/// The formatter fails.
+pub fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    for byte in bytes {
+        write!(f, "{byte:02x}")?;
+    }
+    Ok(())
+}
+
 /// The bytes of a hex string, either case; `None` for odd length or a non-hex
 /// digit.
 #[must_use]
@@ -256,6 +270,19 @@ mod tests {
             encode_hex(dedup_key16("", &id).as_bytes()),
             "7c3ccd10bb7ec37b46d37926ae627426"
         );
+    }
+
+    #[test]
+    fn write_hex_writes_the_same_text_as_encode_hex() {
+        struct Hex<'a>(&'a [u8]);
+        impl std::fmt::Display for Hex<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                super::write_hex(f, self.0)
+            }
+        }
+        let bytes = [0x00, 0x0f, 0xa5, 0xff];
+        assert_eq!(Hex(&bytes).to_string(), "000fa5ff");
+        assert_eq!(Hex(&bytes).to_string(), encode_hex(&bytes));
     }
 
     #[test]
