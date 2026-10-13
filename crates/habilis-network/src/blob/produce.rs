@@ -194,7 +194,7 @@ impl BlobServer {
         // paying the ~100ms Argon2 stretch again. (A benign race with a
         // concurrent offload of the same content is caught by `snapshot`'s own
         // dedup below.)
-        if let Some(existing) = self.store.lock().await.registered(&sha256) {
+        if let Some(existing) = self.store.lock().await.claim(&sha256, &content_id) {
             return Ok(ticket(existing));
         }
         let mut salt = [0u8; SECRET_LEN];
@@ -224,8 +224,9 @@ impl BlobServer {
         Ok(ticket(registered))
     }
 
-    /// Drop every blob owned by `content_id` — whatever sweep the application
-    /// runs when a content group is done with.
+    /// Release `content_id`'s hold on its blobs — whatever sweep the
+    /// application runs when a content group is done with. A blob another group
+    /// also offloaded stays until that group is evicted too.
     pub async fn evict_content(&self, content_id: &ContentId) {
         self.store.lock().await.evict_content(content_id);
     }
