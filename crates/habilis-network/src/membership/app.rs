@@ -720,13 +720,13 @@ impl NodeDriver for MembershipApp {
             ))]
             Request::HasRoute { peer, reply } => {
                 let has_route = known_peer(state, &peer).is_ok_and(|addr| {
-                    state
-                        .multihop()
-                        .is_some_and(|handle| {
-                            handle
-                                .route_addr(habilis_network_iroh_multihop_transport::AppId::new(addr.id))
-                                .is_some()
-                        })
+                    state.multihop().is_some_and(|handle| {
+                        handle
+                            .route_addr(habilis_network_iroh_multihop_transport::AppId::new(
+                                addr.id,
+                            ))
+                            .is_some()
+                    })
                 });
                 let _ = reply.send(has_route);
                 false
@@ -955,22 +955,25 @@ fn route_diag(state: &EventLoopState) -> String {
         .peer_endpoints
         .iter()
         .filter_map(|(nickname, addr)| {
-            let underlay = handle.underlay_addr_of(habilis_network_iroh_multihop_transport::AppId::new(addr.id))?;
+            let underlay = handle
+                .underlay_addr_of(habilis_network_iroh_multihop_transport::AppId::new(addr.id))?;
             let text: &str = nickname.borrow();
             let open = handle
-                .underlay_paths_for_test(habilis_network_iroh_multihop_transport::UnderlayId::new(underlay.id))
+                .underlay_paths_for_test(habilis_network_iroh_multihop_transport::UnderlayId::new(
+                    underlay.id,
+                ))
                 .map_or_else(
-                || "none".to_owned(),
-                |paths| {
-                    let shown: Vec<String> = paths
-                        .into_iter()
-                        .map(|(path, selected)| {
-                            format!("{path:?}{}", if selected { "*" } else { "" })
-                        })
-                        .collect();
-                    shown.join(",")
-                },
-            );
+                    || "none".to_owned(),
+                    |paths| {
+                        let shown: Vec<String> = paths
+                            .into_iter()
+                            .map(|(path, selected)| {
+                                format!("{path:?}{}", if selected { "*" } else { "" })
+                            })
+                            .collect();
+                        shown.join(",")
+                    },
+                );
             Some(format!("{text}:{open}"))
         })
         .collect();

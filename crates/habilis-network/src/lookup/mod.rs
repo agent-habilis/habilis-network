@@ -533,10 +533,11 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // otherwise run iroh's default selector: it gets `MultihopLadder`.
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
     if let Some(id) = underlay_id.filter(|_| underlay && transports.webrtc.is_none()) {
-        builder = builder
-            .path_selector(habilis_network_iroh_multihop_transport::underlay_path_selector(
+        builder = builder.path_selector(
+            habilis_network_iroh_multihop_transport::underlay_path_selector(
                 habilis_network_iroh_multihop_transport::UnderlayId::new(id),
-            ));
+            ),
+        );
     }
     // Data-plane exclusivity: with IP cleared, a WebRTC-only peer cannot
     // silently fall back onto a hole-punched path, so a run that *claims* to be

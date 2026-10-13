@@ -510,7 +510,12 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
     let vector = handle.link_vector(
         links
             .iter()
-            .map(|&(id, cost)| (habilis_network_iroh_multihop_transport::AppId::new(id), cost))
+            .map(|&(id, cost)| {
+                (
+                    habilis_network_iroh_multihop_transport::AppId::new(id),
+                    cost,
+                )
+            })
             .collect(),
     );
     // Fold our own vector into our own routing table: gossip never loops a

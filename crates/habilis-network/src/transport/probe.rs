@@ -355,7 +355,9 @@ fn route_to(state: &EventLoopState, peer: EndpointId) -> Option<iroh::TransportA
     state
         .multihop
         .as_ref()
-        .and_then(|handle| handle.route_addr(habilis_network_iroh_multihop_transport::AppId::new(peer)))
+        .and_then(|handle| {
+            handle.route_addr(habilis_network_iroh_multihop_transport::AppId::new(peer))
+        })
         .map(iroh::TransportAddr::Custom)
 }
 

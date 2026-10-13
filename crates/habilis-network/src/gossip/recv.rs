@@ -2703,9 +2703,11 @@ mod first_contact_tests {
         let mut state = fresh_state();
         state.multihop = Some(ours.clone());
 
-        let vector_body =
-            crate::gossip::json_body(&theirs.link_vector(vec![(habilis_network_iroh_multihop_transport::AppId::new(other_key.public()), 10)]))
-                .expect("a vector serializes");
+        let vector_body = crate::gossip::json_body(&theirs.link_vector(vec![(
+            habilis_network_iroh_multihop_transport::AppId::new(other_key.public()),
+            10,
+        )]))
+        .expect("a vector serializes");
         let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body);
         assert!(
             !super::handle_link_state(&vector, &mut state),
@@ -3114,8 +3116,11 @@ mod link_state_tests {
         let mut state = fresh_state();
         state.multihop = Some(ours.clone());
 
-        let body = crate::gossip::json_body(&theirs.link_vector(vec![(habilis_network_iroh_multihop_transport::AppId::new(bob.public()), 10)]))
-            .expect("a vector serializes");
+        let body = crate::gossip::json_body(&theirs.link_vector(vec![(
+            habilis_network_iroh_multihop_transport::AppId::new(bob.public()),
+            10,
+        )]))
+        .expect("a vector serializes");
         let message_from = |author: &str| {
             Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
         };
@@ -3219,7 +3224,10 @@ mod left_tests {
         let mut state = fresh_state();
         state.multihop = Some(handle.clone());
         let leaver = nick("leaver");
-        state.note_peer_endpoint(leaver.clone(), EndpointAddr::new(leaver_handle.app_id().get()));
+        state.note_peer_endpoint(
+            leaver.clone(),
+            EndpointAddr::new(leaver_handle.app_id().get()),
+        );
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
@@ -3440,7 +3448,12 @@ mod parked_link_state_tests {
     ) -> Message {
         let links = links
             .into_iter()
-            .map(|(id, cost)| (habilis_network_iroh_multihop_transport::AppId::new(id), cost))
+            .map(|(id, cost)| {
+                (
+                    habilis_network_iroh_multihop_transport::AppId::new(id),
+                    cost,
+                )
+            })
             .collect();
         let body =
             crate::gossip::json_body(&handle.link_vector(links)).expect("a vector serializes");
