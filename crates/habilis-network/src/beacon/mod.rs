@@ -767,10 +767,25 @@ pub(crate) async fn ensure(
     claim(params, peer, peer_book, current).await
 }
 
-/// Whether a holder lets go of its beacon for a rival holder it has read: the lower member id
-/// keeps the rendezvous. Both holders compute it from the same two ids, so exactly one yields.
+/// Two holders of one beacon: this node and a rival that it has read. One struct for the pair,
+/// because both are an `EndpointId` and a swap compiles and flips the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Contest {
+    pub(crate) own: EndpointId,
+    pub(crate) rival: EndpointId,
+}
+
+impl Contest {
+    /// Whether this holder lets go of its beacon for the rival: the lower member id keeps the
+    /// rendezvous. Both holders compute it from the same two ids, so exactly one yields.
+    pub(crate) fn own_yields(self) -> bool {
+        self.rival < self.own
+    }
+}
+
+/// [`Contest::own_yields`] for a caller that holds the two ids apart.
 pub(crate) fn yields_to(own: EndpointId, other: EndpointId) -> bool {
-    other < own
+    Contest { own, rival: other }.own_yields()
 }
 
 /// Apply an off-loop probe's verdict: claim the rendezvous if it is free.
@@ -929,9 +944,9 @@ async fn claim(
 #[cfg(test)]
 mod tests {
     use super::{
-        Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, claim,
-        ensure, foreign_sessions, holder_entry, oneshot, probe_verdict, releasable,
-        rendezvous_addr, spawn_rival_probe, verdict_of, watch, yields_to,
+        Contest, Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey,
+        TopicId, claim, ensure, foreign_sessions, holder_entry, oneshot, probe_verdict, releasable,
+        rendezvous_addr, spawn_rival_probe, verdict_of, watch,
     };
 
     #[test]
@@ -944,9 +959,10 @@ mod tests {
             (second, first)
         };
 
-        assert!(yields_to(high, low), "the higher id yields to the lower");
-        assert!(!yields_to(low, high), "the lower id keeps the beacon");
-        assert!(!yields_to(low, low), "an id never yields to itself");
+        let contest = |own, rival| Contest { own, rival }.own_yields();
+        assert!(contest(high, low), "the higher id yields to the lower");
+        assert!(!contest(low, high), "the lower id keeps the beacon");
+        assert!(!contest(low, low), "an id never yields to itself");
     }
 
     /// Observed on both holders of a split topic: the one session counted as a
