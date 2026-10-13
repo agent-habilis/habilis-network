@@ -33,7 +33,8 @@ pub(crate) struct BlobEntry {
     /// Every content group that offloaded these bytes. The spool file goes
     /// only when the last of them is evicted.
     owners: HashSet<ContentId>,
-    /// Monotonic insertion order, for oldest-first eviction under disk pressure.
+    /// Monotonic order of the last registration or claim, for oldest-first
+    /// eviction under disk pressure.
     seq: u64,
 }
 
@@ -142,8 +143,9 @@ impl BlobStore {
     }
 
     /// For an already-spooled blob (a content-addressed dedup hit), add
-    /// `content_id` to its owners and return its ticket fields; `None` when the
-    /// blob is not spooled. Lets the producer skip the ~100ms password stretch
+    /// `content_id` to its owners, make it the newest blob for disk-pressure
+    /// eviction, and return its ticket fields; `None` when the blob is not
+    /// spooled. Lets the producer skip the ~100ms password stretch
     /// when re-offloading content it already holds.
     pub(crate) fn claim(
         &mut self,
@@ -152,6 +154,8 @@ impl BlobStore {
     ) -> Option<Registered> {
         let entry = self.map.get_mut(hash)?;
         entry.owners.insert(content_id.clone());
+        entry.seq = self.next_seq;
+        self.next_seq += 1;
         Some(Registered {
             ticket_secret: entry.ticket_secret,
             password: entry.password,
@@ -409,6 +413,48 @@ mod tests {
         store.evict_content(&group);
         assert!(store.get(&hash).is_none());
         assert!(!path.exists());
+
+        fs::remove_dir_all(&src_dir).ok();
+    }
+
+    /// A blob a new group claimed a moment ago is the newest, whatever its
+    /// first registration said: under disk pressure the next-oldest goes.
+    #[test]
+    fn a_claim_makes_the_blob_the_newest_under_disk_pressure() {
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"x").unwrap();
+
+        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let (oldest, next_oldest, filler) = ([6u8; HASH_LEN], [7u8; HASH_LEN], [8u8; HASH_LEN]);
+        let group_a = ContentId::new("blob-test-group-a");
+        let group_b = ContentId::new("blob-test-group-b");
+        // `size` is the accounted size, so a one-byte file stands in for a
+        // blob of any weight.
+        for (hash, size) in [(oldest, 1), (next_oldest, 1)] {
+            let meta = ContentMeta {
+                sha256: hash,
+                size,
+                content_id: group_a.clone(),
+            };
+            store
+                .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
+                .unwrap();
+        }
+        assert!(store.claim(&oldest, &group_b).is_some());
+
+        // One byte over the budget: exactly one blob has to go.
+        let meta = ContentMeta {
+            sha256: filler,
+            size: super::MAX_BLOB_STORE_BYTES - 1,
+            content_id: group_a.clone(),
+        };
+        store
+            .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
+            .unwrap();
+
+        assert!(store.get(&oldest).is_some(), "the claimed blob stays");
+        assert!(store.get(&next_oldest).is_none(), "the next oldest goes");
 
         fs::remove_dir_all(&src_dir).ok();
     }
