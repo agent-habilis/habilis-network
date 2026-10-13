@@ -52,6 +52,7 @@ pub use author_key::AuthorKey;
 pub use content_hash::ContentHash;
 pub use crypto::{Password, Seed, SymmetricKey, TicketAuth, TicketSecret, ct_eq};
 pub use dedup_key::DedupKey;
+pub use habilis_network_util::clock::UnixSecs;
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
     AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, Lookup,
