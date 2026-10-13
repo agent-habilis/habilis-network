@@ -10,6 +10,7 @@
 
 pub mod base58check;
 pub mod crypto;
+mod dedup_key;
 pub mod directory;
 mod ident;
 mod newtype;
@@ -46,6 +47,7 @@ mod wordlist;
 pub use iroh_base;
 
 pub use crypto::{Password, TicketAuth, ct_eq};
+pub use dedup_key::DedupKey;
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
     AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, Lookup,
