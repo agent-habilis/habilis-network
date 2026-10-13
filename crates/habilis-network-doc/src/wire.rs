@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use habilis_network_protocol::SymmetricKey;
 use habilis_network_protocol::message::MessageBody;
 
 /// The tagged `State`/`Meta` message body.
@@ -85,12 +86,24 @@ pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
 ///
 /// # Errors
 /// Serialization or `MessageBody` validation of the envelope fails.
-pub fn encrypt_body(plain: &MessageBody, key: &[u8; 32]) -> anyhow::Result<MessageBody> {
+pub fn encrypt_body_with_key(
+    plain: &MessageBody,
+    key: &SymmetricKey,
+) -> anyhow::Result<MessageBody> {
     let blob = habilis_network_protocol::seal::seal_symmetric(key, plain.as_str().as_bytes());
     let json = serde_json::to_string(&StateOp::Enc {
         data: bs58::encode(blob).into_string(),
     })?;
     MessageBody::new(json).map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+/// [`encrypt_body_with_key`] for a caller that still holds the key as a raw
+/// array.
+///
+/// # Errors
+/// Serialization or `MessageBody` validation of the envelope fails.
+pub fn encrypt_body(plain: &MessageBody, key: &[u8; 32]) -> anyhow::Result<MessageBody> {
+    encrypt_body_with_key(plain, &SymmetricKey::from_bytes(*key))
 }
 
 /// Recover the plaintext body string. With a `key` (passworded mesh) the body
@@ -100,7 +113,7 @@ pub fn encrypt_body(plain: &MessageBody, key: &[u8; 32]) -> anyhow::Result<Messa
 /// an `enc` body can't be opened (wrong key / malformed) — the caller treats a
 /// `None` as an opaque no-op (state/meta) or a drop (chat).
 #[must_use]
-pub fn decrypt_body(body: &str, key: Option<&[u8; 32]>) -> Option<String> {
+pub fn decrypt_body_with_key(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
     match serde_json::from_str::<StateOp>(body) {
         Ok(StateOp::Enc { data }) => {
             let key = key?;
@@ -117,16 +130,33 @@ pub fn decrypt_body(body: &str, key: Option<&[u8; 32]>) -> Option<String> {
     }
 }
 
+/// [`decrypt_body_with_key`] for a caller that still holds the key as a raw
+/// array.
+#[must_use]
+pub fn decrypt_body(body: &str, key: Option<&[u8; 32]>) -> Option<String> {
+    decrypt_body_with_key(
+        body,
+        key.map(|bytes| SymmetricKey::from_bytes(*bytes)).as_ref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{change_body, decrypt_body, encrypt_body, merge_body, parse_change_body};
+    use super::{
+        change_body, decrypt_body_with_key, encrypt_body_with_key, merge_body, parse_change_body,
+    };
+    use habilis_network_protocol::SymmetricKey;
+
+    fn key(byte: u8) -> SymmetricKey {
+        SymmetricKey::from_bytes([byte; 32])
+    }
 
     #[test]
     fn enc_body_round_trips_and_hides_the_delta() {
-        let key = [3u8; 32];
+        let key = key(3);
         let plain =
             change_body(&[1, 2, 3, 4], Some(&serde_json::json!({"board": "x"}))).expect("compose");
-        let enc = encrypt_body(&plain, &key).expect("encrypt");
+        let enc = encrypt_body_with_key(&plain, &key).expect("encrypt");
         assert_ne!(
             enc.as_str(),
             plain.as_str(),
@@ -137,19 +167,22 @@ mod tests {
             "the merge delta must not leak into the ciphertext body"
         );
         // decrypt_body recovers the exact plaintext body, which then parses.
-        let recovered = decrypt_body(enc.as_str(), Some(&key)).expect("decrypt");
+        let recovered = decrypt_body_with_key(enc.as_str(), Some(&key)).expect("decrypt");
         assert_eq!(recovered, plain.as_str());
         assert_eq!(parse_change_body(&recovered), Some(vec![1u8, 2, 3, 4]));
     }
 
     #[test]
     fn enc_body_needs_the_right_key() {
-        let enc = encrypt_body(&change_body(&[9, 9], None).unwrap(), &[1u8; 32]).unwrap();
+        let enc = encrypt_body_with_key(&change_body(&[9, 9], None).unwrap(), &key(1)).unwrap();
         assert!(
-            decrypt_body(enc.as_str(), Some(&[2u8; 32])).is_none(),
+            decrypt_body_with_key(enc.as_str(), Some(&key(2))).is_none(),
             "wrong key"
         );
-        assert!(decrypt_body(enc.as_str(), None).is_none(), "no key");
+        assert!(
+            decrypt_body_with_key(enc.as_str(), None).is_none(),
+            "no key"
+        );
         // An `enc` body is not itself a change (must be decrypted first).
         assert_eq!(parse_change_body(enc.as_str()), None);
     }
@@ -159,12 +192,12 @@ mod tests {
         let plain = change_body(&[5], None).expect("compose");
         // Passwordless (no key): a non-`enc` body is returned verbatim.
         assert_eq!(
-            decrypt_body(plain.as_str(), None).as_deref(),
+            decrypt_body_with_key(plain.as_str(), None).as_deref(),
             Some(plain.as_str())
         );
         // Passworded (key set): a non-`enc` body is rejected — cleartext can't
         // slip past the encryption guarantee.
-        assert!(decrypt_body(plain.as_str(), Some(&[7u8; 32])).is_none());
+        assert!(decrypt_body_with_key(plain.as_str(), Some(&key(7))).is_none());
     }
 
     #[test]

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use super::MessageBody;
-use super::crypto::derive_secret;
+use super::crypto::{SymmetricKey, derive_secret};
 
 /// KDF label separating the seal key from every other seed-derived secret, and
 /// the AEAD associated data (bound into the tag).
@@ -55,15 +55,15 @@ struct Envelope {
     ct: String,
 }
 
-/// Seal `plaintext` to `recipient_pub` (a raw X25519 public key). Infallible in
-/// practice — the only fallible step is AEAD encryption, which cannot fail for a
-/// well-formed key/nonce.
-fn seal(recipient_pub: &[u8; 32], plaintext: &[u8]) -> Sealed {
+/// Seal `plaintext` to `recipient_pub`. Infallible in practice — the only
+/// fallible step is AEAD encryption, which cannot fail for a well-formed
+/// key/nonce.
+fn seal(recipient_pub: &PublicKey, plaintext: &[u8]) -> Sealed {
     let mut eph_bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut eph_bytes);
     let ephemeral = StaticSecret::from(eph_bytes);
     let epk = PublicKey::from(&ephemeral);
-    let shared = ephemeral.diffie_hellman(&PublicKey::from(*recipient_pub));
+    let shared = ephemeral.diffie_hellman(recipient_pub);
 
     let key = derive_secret(shared.as_bytes(), SEAL_LABEL);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
@@ -114,7 +114,7 @@ fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>> {
 /// # Panics
 /// If `Envelope` fails to serialize. Its fields are `String`s and a version
 /// tag, so serialization cannot fail short of an allocator failure.
-pub fn seal_to_body(recipient_pub: &[u8; 32], plaintext: &str) -> Result<MessageBody> {
+pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<MessageBody> {
     let sealed = seal(recipient_pub, plaintext.as_bytes());
     let envelope = Envelope {
         version: ENVELOPE_VERSION.to_string(),
@@ -155,7 +155,7 @@ fn decode_array<const N: usize>(encoded: &str) -> Result<[u8; N]> {
     bytes.try_into().map_err(|_| anyhow!("expected {N} bytes"))
 }
 
-/// Symmetrically seal `plaintext` under a pre-shared 32-byte `key` (a
+/// Symmetrically seal `plaintext` under a pre-shared `key` (a
 /// mesh-password-derived channel key). Layout: `nonce(12) ‖ ct+tag`. Unlike
 /// [`seal_to_body`] there is no ECDH — every holder of `key` can open it, which
 /// is exactly the shared-channel (state/meta) model: membership already gated
@@ -165,8 +165,8 @@ fn decode_array<const N: usize>(encoded: &str) -> Result<[u8; N]> {
 /// # Panics
 /// Never in practice: ChaCha20-Poly1305 encryption cannot fail for a valid
 /// key/nonce pair, and both are constructed here.
-pub fn seal_symmetric(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+pub fn seal_symmetric(key: &SymmetricKey, plaintext: &[u8]) -> Vec<u8> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
     let mut nonce = [0u8; 12];
     rand::rng().fill_bytes(&mut nonce);
     let ct = cipher
@@ -189,12 +189,12 @@ pub fn seal_symmetric(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
 /// # Errors
 /// The blob is too short to carry a nonce, or the AEAD fails to authenticate (a
 /// wrong key or tampered bytes).
-pub fn open_symmetric(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
+pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>> {
     if blob.len() < 12 {
         return Err(anyhow!("symmetric blob too short for a nonce"));
     }
     let (nonce, ct) = blob.split_at(12);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
     cipher
         .decrypt(
             Nonce::from_slice(nonce),
@@ -209,11 +209,16 @@ pub fn open_symmetric(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{open_symmetric, seal_symmetric, seal_to_body, unseal_from_body};
+    use crate::crypto::SymmetricKey;
     use x25519_dalek::{PublicKey, StaticSecret};
+
+    fn key(byte: u8) -> SymmetricKey {
+        SymmetricKey::from_bytes([byte; 32])
+    }
 
     #[test]
     fn symmetric_round_trips() {
-        let key = [7u8; 32];
+        let key = key(7);
         for plaintext in [b"".as_slice(), b"hello state doc", &[0u8; 5000]] {
             let blob = seal_symmetric(&key, plaintext);
             assert_ne!(
@@ -227,26 +232,26 @@ mod tests {
 
     #[test]
     fn symmetric_wrong_key_or_tamper_fails() {
-        let blob = seal_symmetric(&[1u8; 32], b"the shared state");
+        let blob = seal_symmetric(&key(1), b"the shared state");
         assert!(
-            open_symmetric(&[2u8; 32], &blob).is_err(),
+            open_symmetric(&key(2), &blob).is_err(),
             "a wrong key must not open the blob"
         );
         let mut tampered = blob.clone();
         *tampered.last_mut().unwrap() ^= 0x01;
         assert!(
-            open_symmetric(&[1u8; 32], &tampered).is_err(),
+            open_symmetric(&key(1), &tampered).is_err(),
             "a flipped byte must fail the AEAD tag"
         );
         assert!(
-            open_symmetric(&[1u8; 32], &[0u8; 4]).is_err(),
+            open_symmetric(&key(1), &[0u8; 4]).is_err(),
             "a blob too short for a nonce must fail cleanly"
         );
     }
 
-    fn keypair(byte: u8) -> (StaticSecret, [u8; 32]) {
+    fn keypair(byte: u8) -> (StaticSecret, PublicKey) {
         let secret = StaticSecret::from([byte; 32]);
-        let public = *PublicKey::from(&secret).as_bytes();
+        let public = PublicKey::from(&secret);
         (secret, public)
     }
 

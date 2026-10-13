@@ -97,7 +97,7 @@ pub fn mint(mesh: &Mesh, ttl_secs: Option<u64>, password: Option<&Password>) -> 
     let root_field = match password {
         Some(password) => {
             let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
-            seal::seal_symmetric(wrap_key.as_bytes(), root.as_bytes())
+            seal::seal_symmetric(&wrap_key, root.as_bytes())
         }
         None => root.as_bytes().to_vec(),
     };
@@ -218,7 +218,7 @@ impl InviteTicket {
         let raw = match (self.password, password) {
             (true, Some(password)) => {
                 let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
-                seal::open_symmetric(wrap_key.as_bytes(), &self.root_field)
+                seal::open_symmetric(&wrap_key, &self.root_field)
                     .context("wrong password or corrupt invite")?
             }
             (true, None) => bail!("this invite is password-protected — pass --password"),
