@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::Seed;
+use crate::crypto::{Seed, derive_secret};
 use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
 use crate::{MeshId, MessageBody};
 use habilis_network_util::clock::{Instant, UnixSecs};
@@ -55,7 +55,10 @@ const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/dom
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::new(
-        Seed::from_bytes(*DIRECTORY_BASE_SEED.derive(directory.as_bytes()).as_bytes()),
+        Seed::from_bytes(derive_secret(
+            DIRECTORY_BASE_SEED.as_bytes(),
+            directory.as_bytes(),
+        )),
         directory.clone(),
         directory_config(lookups),
     )
