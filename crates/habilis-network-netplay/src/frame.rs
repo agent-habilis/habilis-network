@@ -3,7 +3,8 @@
 use std::ops::{Add, AddAssign, Sub};
 
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A simulation frame number.
 ///
@@ -16,11 +17,23 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// delays and the windows that are plain integers beside them.
 ///
 /// On the wire a frame is its number. A negative number is not a frame, so
-/// `Deserialize` refuses it: the `-1` that older peers sent for "no frame" is
-/// a parse error, not [`Frame::NULL`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize)]
-#[serde(transparent)]
+/// `Serialize` and `Deserialize` both refuse it: the `-1` that older peers
+/// sent for "no frame" is a parse error, and [`Frame::NULL`] cannot leave as
+/// `-1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Frame(i32);
+
+impl Serialize for Frame {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.0 < 0 {
+            return Err(S::Error::custom(format!(
+                "frame {} is negative, and no frame is an absent field",
+                self.0
+            )));
+        }
+        serializer.serialize_i32(self.0)
+    }
+}
 
 impl<'de> Deserialize<'de> for Frame {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -120,4 +133,28 @@ pub enum InputStatus {
     Predicted,
     /// The player has disconnected; this is the neutral default input.
     Disconnected,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Frame;
+
+    #[test]
+    fn a_frame_that_is_a_real_frame_serializes_as_its_number() {
+        assert_eq!(
+            serde_json::to_string(&Frame::new(7)).expect("serializes"),
+            "7"
+        );
+        assert_eq!(
+            serde_json::to_string(&Frame::ZERO).expect("serializes"),
+            "0"
+        );
+    }
+
+    /// The sentinel is not a frame, so it must not be able to leave in a
+    /// packet as `-1`.
+    #[test]
+    fn the_null_frame_does_not_serialize() {
+        assert!(serde_json::to_string(&Frame::NULL).is_err());
+    }
 }
