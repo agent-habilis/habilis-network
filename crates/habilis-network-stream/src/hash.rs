@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use habilis_network::iroh::EndpointAddr;
 use habilis_network::net::{endpoint_addr_from_json, endpoint_addr_to_json};
 use habilis_network::protocol::base58check::{self, take_array};
+use habilis_network::protocol::identity::write_hex;
 use habilis_network::protocol::{LookupOpts, TransportPolicy, ct_eq};
 
 /// Framing version. An unknown version is rejected on decode.
@@ -62,10 +63,7 @@ impl StreamId {
 
 impl fmt::Display for StreamId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in &self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        write_hex(formatter, &self.0)
     }
 }
 
