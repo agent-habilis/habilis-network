@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::{Channel, DedupKey, MeshId, Message, Nickname};
+use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
     ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN_SECS,
@@ -466,7 +466,7 @@ fn heads_digest(
 /// digest with made-up heads would be new every time.
 #[derive(Debug, Default)]
 pub(crate) struct ServeBudget {
-    windows: HashMap<(String, Channel, Plane), Served>,
+    windows: HashMap<(Option<AuthorKey>, Channel, Plane), Served>,
 }
 
 #[derive(Debug)]
@@ -493,7 +493,12 @@ impl ServeBudget {
     }
 
     /// Whether an answer to these heads may go out now.
-    pub(crate) fn admits(&self, key: &(String, Channel, Plane), heads: u64, now: Instant) -> bool {
+    pub(crate) fn admits(
+        &self,
+        key: &(Option<AuthorKey>, Channel, Plane),
+        heads: u64,
+        now: Instant,
+    ) -> bool {
         match self.windows.get(key) {
             Some(served) if now.duration_since(served.since) < Self::WINDOW => {
                 let repeat_too_soon = served.heads.get(&heads).is_some_and(|at| {
@@ -506,7 +511,12 @@ impl ServeBudget {
     }
 
     /// Record an answer to these heads, dropping windows that have ended.
-    pub(crate) fn note(&mut self, key: (String, Channel, Plane), heads: u64, now: Instant) {
+    pub(crate) fn note(
+        &mut self,
+        key: (Option<AuthorKey>, Channel, Plane),
+        heads: u64,
+        now: Instant,
+    ) {
         self.windows
             .retain(|_, served| now.duration_since(served.since) < Self::WINDOW);
         let served = self.windows.entry(key).or_insert_with(|| Served {
@@ -523,7 +533,7 @@ impl ServeBudget {
 /// asked, and our heads and change count at that ask.
 #[derive(Debug)]
 struct Round {
-    peer: String,
+    peer: AuthorKey,
     at: Instant,
     heads: u64,
     changes: usize,
@@ -532,7 +542,7 @@ struct Round {
 /// A peer whose heads showed it is ahead of us.
 #[derive(Debug, Clone)]
 struct Waiting {
-    pubkey: String,
+    key: AuthorKey,
     author: Nickname,
     heads: Vec<String>,
     noted: Instant,
@@ -574,14 +584,14 @@ impl FastRounds {
     /// [`FAST_ROUND_ACTIVE_MS`].
     fn may_ask(
         &self,
-        peer: &str,
+        peer: &AuthorKey,
         channel: Channel,
         heads: u64,
         changes: usize,
         now: Instant,
     ) -> bool {
         self.rounds.get(&channel).is_none_or(|round| {
-            if round.peer == peer {
+            if round.peer == *peer {
                 let quiet = now.duration_since(self.quiet_since(channel, round));
                 let answered = changes.saturating_sub(round.changes) >= antientropy_max_resend();
                 (round.heads != heads && answered) || quiet >= Self::MIN_INTERVAL
@@ -593,7 +603,7 @@ impl FastRounds {
 
     fn note_asked(
         &mut self,
-        peer: String,
+        peer: AuthorKey,
         channel: Channel,
         heads: u64,
         changes: usize,
@@ -646,7 +656,7 @@ impl FastRounds {
     fn note_ahead(
         &mut self,
         channel: Channel,
-        pubkey: String,
+        key: AuthorKey,
         author: Nickname,
         heads: Vec<String>,
         now: Instant,
@@ -654,12 +664,12 @@ impl FastRounds {
         let ahead = self.ahead.entry(channel).or_default();
         ahead.retain(|peer| Self::fresh(peer, now));
         let peer = Waiting {
-            pubkey,
+            key,
             author,
             heads,
             noted: now,
         };
-        if let Some(known) = ahead.iter_mut().find(|known| known.pubkey == peer.pubkey) {
+        if let Some(known) = ahead.iter_mut().find(|known| known.key == peer.key) {
             *known = peer;
         } else if ahead.len() < FAST_ROUND_AHEAD_MAX {
             ahead.push(peer);
@@ -688,8 +698,8 @@ impl FastRounds {
         now: Instant,
         ours: u64,
         holds: impl Fn(&[String]) -> bool,
-        reachable: impl Fn(&str) -> bool,
-    ) -> Option<(String, Nickname)> {
+        reachable: impl Fn(&AuthorKey) -> bool,
+    ) -> Option<(AuthorKey, Nickname)> {
         let waiting = self.rounds.get(&channel).is_some_and(|round| {
             now.duration_since(self.quiet_since(channel, round))
                 < Duration::from_millis(FAST_ROUND_RETRY_MS)
@@ -700,19 +710,16 @@ impl FastRounds {
         if waiting {
             return None;
         }
-        let candidates: Vec<&Waiting> = ahead
-            .iter()
-            .filter(|peer| reachable(&peer.pubkey))
-            .collect();
+        let candidates: Vec<&Waiting> = ahead.iter().filter(|peer| reachable(&peer.key)).collect();
         let round_index =
-            round.and_then(|round| candidates.iter().position(|peer| peer.pubkey == round.peer));
+            round.and_then(|round| candidates.iter().position(|peer| peer.key == round.peer));
         let progress = round.is_none_or(|round| round.heads != ours);
         let pick = match round_index {
             Some(index) if progress => candidates.get(index),
             Some(index) => candidates.get((index + 1) % candidates.len()),
             None => candidates.first(),
         };
-        pick.map(|peer| (peer.pubkey.clone(), peer.author.clone()))
+        pick.map(|peer| (peer.key, peer.author.clone()))
     }
 
     /// Whether a direct round runs for `channel`: we asked a peer within
@@ -741,22 +748,22 @@ async fn ask_back(
     if state.doc(channel).holds_heads(&body.heads) {
         return;
     }
+    // A digest that passed the signature gate has a key. One without it names no peer to ask.
+    let Some(key) = digest.author_key() else {
+        return;
+    };
     let now = Instant::now();
-    state.fast_rounds.note_ahead(
-        channel,
-        digest.pubkey.clone(),
-        digest.author.clone(),
-        body.heads,
-        now,
-    );
+    state
+        .fast_rounds
+        .note_ahead(channel, key, digest.author.clone(), body.heads, now);
     if state.fast_rounds.may_ask(
-        &digest.pubkey,
+        &key,
         channel,
         heads_key_of(state, channel),
         state.doc(channel).change_count(),
         now,
     ) {
-        ask(channel, &digest.pubkey, &digest.author, state, ctx).await;
+        ask(channel, &key, &digest.author, state, ctx).await;
     } else {
         tracing::debug!(me = %ctx.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
     }
@@ -788,10 +795,10 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
             .filter(|peer| state.doc(channel).holds_heads(&peer.heads))
             .map(|peer| peer.heads.as_slice())
             .collect();
-        let reachable: Vec<&str> = ahead
+        let reachable: Vec<AuthorKey> = ahead
             .iter()
-            .filter(|peer| crate::transport::unicast_answer_target(&peer.pubkey, state).is_some())
-            .map(|peer| peer.pubkey.as_str())
+            .filter(|peer| crate::transport::unicast_answer_target(&peer.key, state).is_some())
+            .map(|peer| peer.key)
             .collect();
         let ours = heads_key_of(state, channel);
         let target = state.fast_rounds.retry_target(
@@ -799,12 +806,12 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
             now,
             ours,
             |heads| held.contains(&heads),
-            |pubkey| reachable.contains(&pubkey),
+            |key| reachable.contains(key),
         );
-        let Some((pubkey, author)) = target else {
+        let Some((key, author)) = target else {
             continue;
         };
-        if ask(channel, &pubkey, &author, state, ctx).await {
+        if ask(channel, &key, &author, state, ctx).await {
             tracing::debug!(me = %ctx.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }
     }
@@ -815,12 +822,12 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
 /// it. Returns whether it went out.
 async fn ask(
     channel: Channel,
-    pubkey: &str,
+    key: &AuthorKey,
     author: &Nickname,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> bool {
-    let Some(eid) = crate::transport::unicast_answer_target(pubkey, state) else {
+    let Some(eid) = crate::transport::unicast_answer_target(key, state) else {
         return false;
     };
     let origin = DigestOrigin {
@@ -845,7 +852,7 @@ async fn ask(
     let changes = state.doc(channel).change_count();
     state
         .fast_rounds
-        .note_asked(pubkey.to_owned(), channel, ours_key, changes, now);
+        .note_asked(*key, channel, ours_key, changes, now);
     tracing::debug!(me = %ctx.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
     true
 }
@@ -896,8 +903,10 @@ pub(crate) async fn handle_state_digest(
     }
     let now = Instant::now();
     let heads = heads_key(message);
-    let serve = |plane| (message.pubkey.clone(), channel, plane);
-    let target = crate::transport::unicast_answer_target(&message.pubkey, state);
+    let serve = |plane| (message.author_key(), channel, plane);
+    let target = message
+        .author_key()
+        .and_then(|key| crate::transport::unicast_answer_target(&key, state));
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -995,24 +1004,24 @@ mod budget_tests {
     use std::time::Duration;
 
     use super::{FastRounds, Plane, ServeBudget};
-    use crate::protocol::Channel;
-    use crate::testing::nick;
+    use crate::protocol::{AuthorKey, Channel};
+    use crate::testing::{author_of, nick};
     use crate::util::clock::Instant;
     use crate::util::tuning::{
         ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE_MS, FAST_ROUND_RETRY_MS,
         antientropy_max_resend,
     };
 
-    fn key() -> (String, Channel, Plane) {
-        ("asker".to_owned(), Channel::State, Plane::Unicast)
+    fn key() -> (Option<AuthorKey>, Channel, Plane) {
+        (Some(author_of("asker")), Channel::State, Plane::Unicast)
     }
 
     #[test]
     fn the_serve_budget_takes_new_heads_up_to_its_count() {
         let now = Instant::now();
         let mut budget = ServeBudget::default();
-        let gossip = ("asker".to_owned(), Channel::State, Plane::Gossip);
-        budget.note(gossip.clone(), 1, now);
+        let gossip = (Some(author_of("asker")), Channel::State, Plane::Gossip);
+        budget.note(gossip, 1, now);
         assert!(
             !budget.admits(&gossip, 2, now),
             "one gossip answer per window"
@@ -1052,25 +1061,25 @@ mod budget_tests {
         let channel = Channel::State;
         let early_heads = vec!["e".to_owned()];
         let alice_heads = vec!["a".to_owned()];
-        rounds.note_ahead(channel, "early".to_owned(), nick("early"), early_heads, now);
+        rounds.note_ahead(channel, author_of("early"), nick("early"), early_heads, now);
         rounds.note_ahead(
             channel,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             alice_heads.clone(),
             now,
         );
-        rounds.note_asked("alice".to_owned(), channel, 1, 0, now);
+        rounds.note_asked(author_of("alice"), channel, 1, 0, now);
         let never_held = |_: &[String]| false;
-        let all_reachable = |_: &str| true;
+        let all_reachable = |_: &AuthorKey| true;
         let moved = 2;
         let pick = |fast: &mut FastRounds,
                     at,
                     ours,
                     holds: &dyn Fn(&[String]) -> bool,
-                    reachable: &dyn Fn(&str) -> bool| {
+                    reachable: &dyn Fn(&AuthorKey) -> bool| {
             fast.retry_target(channel, at, ours, holds, reachable)
-                .map(|(pubkey, _)| pubkey)
+                .map(|(key, _)| key)
         };
 
         let soon = now + Duration::from_millis(100);
@@ -1081,25 +1090,25 @@ mod budget_tests {
         );
         let quiet = now + Duration::from_millis(500);
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &never_held, &all_reachable).as_deref(),
-            Some("alice"),
+            pick(&mut rounds, quiet, moved, &never_held, &all_reachable),
+            Some(author_of("alice")),
             "the round's peer first, while it brings progress"
         );
         assert_eq!(
-            pick(&mut rounds, quiet, 1, &never_held, &all_reachable).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, 1, &never_held, &all_reachable),
+            Some(author_of("early")),
             "no progress since the last ask: the next peer"
         );
-        let alice_away = |pubkey: &str| pubkey != "alice";
+        let alice_away = |key: &AuthorKey| *key != author_of("alice");
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &never_held, &alice_away).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, moved, &never_held, &alice_away),
+            Some(author_of("early")),
             "else one reachable now"
         );
         let alice_held = |heads: &[String]| heads == alice_heads.as_slice();
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &alice_held, &all_reachable).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, moved, &alice_held, &all_reachable),
+            Some(author_of("early")),
             "alice is no longer ahead"
         );
         let stale = now + Duration::from_secs(61);
@@ -1133,7 +1142,7 @@ mod budget_tests {
         state.meshed = true;
         state
             .fast_rounds
-            .note_asked("holder".to_owned(), Channel::State, 1, 0, Instant::now());
+            .note_asked(author_of("holder"), Channel::State, 1, 0, Instant::now());
         let (mesh, author) = (MeshId::from("test"), nick("late"));
 
         let before = state.idle.broadcasts;
@@ -1241,21 +1250,21 @@ mod budget_tests {
         let mut rounds = FastRounds::default();
         rounds.note_ahead(
             state,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             vec!["a".to_owned()],
             t0,
         );
-        rounds.note_asked("alice".to_owned(), state, 1, 0, t0);
+        rounds.note_asked(author_of("alice"), state, 1, 0, t0);
         rounds.note_change(state, t0 + ms(150));
         assert!(
-            !rounds.may_ask("alice", state, 1, 0, t0 + ms(250)),
+            !rounds.may_ask(&author_of("alice"), state, 1, 0, t0 + ms(250)),
             "the same heads 100 ms after a change"
         );
         rounds.note_change(state, t0 + ms(300));
         let retry = |fast: &mut FastRounds, at| {
             fast.retry_target(state, at, 1, |_| false, |_| true)
-                .map(|(pubkey, _)| pubkey)
+                .map(|(key, _)| key)
         };
         assert_eq!(
             retry(&mut rounds, t0 + ms(450)),
@@ -1264,7 +1273,7 @@ mod budget_tests {
         );
         assert_eq!(
             retry(&mut rounds, t0 + ms(750)),
-            Some("alice".to_owned()),
+            Some(author_of("alice")),
             "quiet for 450 ms"
         );
     }
@@ -1279,12 +1288,12 @@ mod budget_tests {
         let mut rounds = FastRounds::default();
         rounds.note_ahead(
             state,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             vec!["a".to_owned()],
             t0,
         );
-        rounds.note_asked("alice".to_owned(), state, 1, 0, t0);
+        rounds.note_asked(author_of("alice"), state, 1, 0, t0);
         let later = t0 + ms(FAST_ROUND_ACTIVE_MS + FAST_ROUND_RETRY_MS);
         let mut at = t0;
         while at < later {
@@ -1293,8 +1302,8 @@ mod budget_tests {
         }
         let target = rounds
             .retry_target(state, later, 1, |_| false, |_| true)
-            .map(|(pubkey, _)| pubkey);
-        assert_eq!(target, Some("alice".to_owned()));
+            .map(|(key, _)| key);
+        assert_eq!(target, Some(author_of("alice")));
     }
 
     #[test]
@@ -1303,39 +1312,39 @@ mod budget_tests {
         let full = antientropy_max_resend();
         let mut rounds = FastRounds::default();
         let state = Channel::State;
-        assert!(rounds.may_ask("holder", state, 1, 0, now));
-        rounds.note_asked("holder".to_owned(), state, 1, 0, now);
+        assert!(rounds.may_ask(&author_of("holder"), state, 1, 0, now));
+        rounds.note_asked(author_of("holder"), state, 1, 0, now);
         assert!(rounds.active(state, now));
         assert!(!rounds.active(Channel::Meta, now));
         assert!(
-            !rounds.may_ask("holder", state, 1, 0, now),
+            !rounds.may_ask(&author_of("holder"), state, 1, 0, now),
             "the same heads at once"
         );
         assert!(
-            !rounds.may_ask("holder", state, 2, 5, now),
+            !rounds.may_ask(&author_of("holder"), state, 2, 5, now),
             "new heads after a partial answer wait"
         );
         assert!(
-            rounds.may_ask("holder", state, 2, full, now),
+            rounds.may_ask(&author_of("holder"), state, 2, full, now),
             "new heads after a full answer at once"
         );
         assert!(
-            !rounds.may_ask("other", state, 2, full, now),
+            !rounds.may_ask(&author_of("other"), state, 2, full, now),
             "another peer while the round runs"
         );
         assert!(
-            rounds.may_ask("other", Channel::Meta, 2, full, now),
+            rounds.may_ask(&author_of("other"), Channel::Meta, 2, full, now),
             "another channel"
         );
         let later = now + Duration::from_millis(250);
         assert!(
-            rounds.may_ask("holder", state, 1, 0, later),
+            rounds.may_ask(&author_of("holder"), state, 1, 0, later),
             "the same heads after the interval"
         );
         let quiet = now + Duration::from_secs(2);
         assert!(!rounds.active(state, quiet));
         assert!(
-            rounds.may_ask("other", state, 2, full, quiet),
+            rounds.may_ask(&author_of("other"), state, 2, full, quiet),
             "another peer once the round is quiet"
         );
     }
