@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use habilis_network_util::clock;
 
-use super::DedupKey;
 use super::identity::{self, Identity};
 use super::mesh::MeshId;
 use super::nickname::Nickname;
+use super::{AuthorKey, DedupKey};
 use crate::newtype::string_newtype;
 
 mod body;
@@ -782,6 +782,13 @@ impl Message {
     #[must_use]
     pub fn content_hash_hex(&self) -> String {
         identity::content_hash_hex(&self.canonical_bytes())
+    }
+
+    /// The key that signed this message, or `None` for an unsigned message. A message that
+    /// passed [`verify_signature_with`](Self::verify_signature_with) always has one.
+    #[must_use]
+    pub fn author_key(&self) -> Option<AuthorKey> {
+        AuthorKey::from_hex(&self.pubkey)
     }
 
     /// The 16-byte dedup / anti-entropy key (`SHA-256(pubkey ‖ id)[..16]`).

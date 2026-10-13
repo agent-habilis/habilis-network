@@ -812,3 +812,11 @@ fn a_key_with_no_signature_parses_and_does_not_verify() {
     assert_eq!(serde_json::to_string(&parsed).unwrap(), KEY_ONLY_WIRE);
     assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
 }
+
+#[test]
+fn author_key_is_the_pubkey_field_or_none() {
+    let signed = Message::parse(SIGNED_WIRE.as_bytes()).unwrap();
+    assert_eq!(signed.author_key().unwrap().to_string(), SIGNED_PUBKEY);
+    let unsigned = Message::parse(UNSIGNED_WIRE.as_bytes()).unwrap();
+    assert!(unsigned.author_key().is_none());
+}
