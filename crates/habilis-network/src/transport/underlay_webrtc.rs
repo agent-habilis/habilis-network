@@ -189,7 +189,7 @@ fn neighbors_of(
 ) -> Vec<(EndpointId, iroh::EndpointAddr)> {
     let mut neighbors: Vec<(EndpointId, iroh::EndpointAddr)> = Vec::new();
     for member in state.peer_endpoints.values().map(|addr| addr.id) {
-        if let Some(addr) = multihop.underlay_addr_of(member) {
+        if let Some(addr) = multihop.underlay_addr_of(habilis_network_iroh_multihop_transport::AppId::new(member)) {
             neighbors.push((member, addr));
         }
     }

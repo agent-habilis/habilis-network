@@ -4,7 +4,9 @@
 
 use std::net::SocketAddr;
 
-use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
+use habilis_network_iroh_multihop_transport::{
+    AppId, HandleConfig, MultihopHandle, underlay_secret,
+};
 use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench};
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::presets;
 use habilis_network_iroh_webrtc_transport::iroh::protocol::Router;
@@ -85,10 +87,10 @@ pub(crate) async fn ladder_multihop_direct(args: &Args) -> Outcome {
         let bob = node(secret(2)).await?;
         alice
             .handle
-            .feed_topology(alice.handle.link_vector(vec![(bob.id, COST)]));
+            .feed_topology(alice.handle.link_vector(vec![(AppId::new(bob.id), COST)]));
         alice
             .handle
-            .feed_topology(bob.handle.link_vector(vec![(alice.id, COST)]));
+            .feed_topology(bob.handle.link_vector(vec![(AppId::new(alice.id), COST)]));
         let _router = Router::builder(bob.app.clone())
             .accept(BENCH_ALPN, Bench)
             .spawn();
@@ -107,9 +109,12 @@ pub(crate) async fn ladder_multihop_third(args: &Args) -> Outcome {
         // Every member learns the vector of every other, as gossip does in a mesh: a hop resolves
         // the next hop's address from the vector that hop signed.
         let vectors = [
-            alice.handle.link_vector(vec![(third_id, COST)]),
-            third.link_vector(vec![(alice.id, COST), (bob.id, COST)]),
-            bob.handle.link_vector(vec![(third_id, COST)]),
+            alice.handle.link_vector(vec![(AppId::new(third_id), COST)]),
+            third.link_vector(vec![
+                (AppId::new(alice.id), COST),
+                (AppId::new(bob.id), COST),
+            ]),
+            bob.handle.link_vector(vec![(AppId::new(third_id), COST)]),
         ];
         for handle in [&alice.handle, &third, &bob.handle] {
             for vector in &vectors {

@@ -16,7 +16,7 @@ use habilis_network_iroh_gossip_transport::memory::MemoryHub;
 use habilis_network_iroh_gossip_transport::{
     GOSSIP_TRANSPORT_ID, GossipHandle, ReceiveLoop, Stats, gossip_addr, spawn_receive_loop,
 };
-use habilis_network_iroh_multihop_transport::underlay_path_selector;
+use habilis_network_iroh_multihop_transport::{UnderlayId, underlay_path_selector};
 use habilis_network_iroh_webrtc_transport::bench::{BENCH_ALPN, Bench, rtt_samples};
 use habilis_network_iroh_webrtc_transport::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Connection, presets};
@@ -158,7 +158,7 @@ async fn start_flood() -> Result<Flood, String> {
             .relay_mode(RelayMode::Disabled)
             .clear_ip_transports()
             .add_custom_transport(handles[index].custom_transport())
-            .path_selector(underlay_path_selector(key.public()))
+            .path_selector(underlay_path_selector(UnderlayId::new(key.public())))
             .address_lookup(lookups[index].clone());
         for bind in binds {
             builder = builder
@@ -315,7 +315,7 @@ async fn endpoint(key: &SecretKey, handle: &GossipHandle) -> Result<Endpoint, St
         .bind_addr(loopback)
         .map_err(|error| format!("bind address refused: {error:#}"))?
         .add_custom_transport(handle.custom_transport())
-        .path_selector(underlay_path_selector(key.public()))
+        .path_selector(underlay_path_selector(UnderlayId::new(key.public())))
         .bind()
         .await
         .map_err(|error| format!("bind failed: {error:#}"))

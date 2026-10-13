@@ -507,7 +507,12 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
         return;
     }
     state.last_advertised = Some(links.clone());
-    let vector = handle.link_vector(links);
+    let vector = handle.link_vector(
+        links
+            .iter()
+            .map(|&(id, cost)| (habilis_network_iroh_multihop_transport::AppId::new(id), cost))
+            .collect(),
+    );
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
     // source a route (`route_to(self, …)` would always be empty).
@@ -1522,13 +1527,13 @@ mod route_wake_tests {
         assert!(me.feed_topology(dst.link_vector(vec![])));
         assert!(me.feed_topology(me.link_vector(vec![(dst.app_id(), 1), (via.app_id(), 1)])));
         state.multihop = Some(me.clone());
-        state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id()));
-        state.path_kinds.insert(dst.app_id(), PathKind::Relay);
+        state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id().get()));
+        state.path_kinds.insert(dst.app_id().get(), PathKind::Relay);
 
         nudge_climbing_pairs(&mut state, &ctx, true);
         let direct = state
             .route_dialed
-            .get(&dst.app_id())
+            .get(&dst.app_id().get())
             .cloned()
             .expect("the direct route is dialed");
 
@@ -1537,7 +1542,7 @@ mod route_wake_tests {
 
         let dialed = state
             .route_dialed
-            .get(&dst.app_id())
+            .get(&dst.app_id().get())
             .cloned()
             .expect("a route is dialed");
         assert_ne!(dialed, direct, "the route through the third is dialed");

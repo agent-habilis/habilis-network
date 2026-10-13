@@ -62,7 +62,7 @@ use std::sync::{Arc, RwLock};
 
 use iroh::address_lookup::AddressLookup;
 use iroh::endpoint::transports::{CustomTransport, PathSelector};
-use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointAddr, SecretKey};
 use n0_future::time::{Duration, Instant};
 
 pub use addr::{Route, RouteHop};
@@ -328,8 +328,8 @@ impl MultihopHandle {
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
     #[must_use]
-    pub fn route_addr(&self, dst: EndpointId) -> Option<iroh_base::CustomAddr> {
-        let chosen = self.inner.chooser.choose(AppId::new(dst))?;
+    pub fn route_addr(&self, dst: AppId) -> Option<iroh_base::CustomAddr> {
+        let chosen = self.inner.chooser.choose(dst)?;
         tracing::debug!(target: "habilis_lookup", me = %self.inner.self_id.fmt_short(), remote = %dst.fmt_short(), first_hop_skipped = chosen.skipped, hops = %chosen.route.describe(), "multihop route chosen (route_addr)");
         Some(chosen.route.encode())
     }
@@ -340,11 +340,11 @@ impl MultihopHandle {
     /// left alone.
     #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
-    pub fn refuse_hop_for_test(&self, hop: EndpointId) {
+    pub fn refuse_hop_for_test(&self, hop: AppId) {
         if let Some(underlay) = self.underlay_addr_of(hop) {
             self.inner
                 .forwarder
-                .refuse_hop_for_test(UnderlayId::new(underlay.id), AppId::new(hop));
+                .refuse_hop_for_test(UnderlayId::new(underlay.id), hop);
         }
     }
 
@@ -357,11 +357,9 @@ impl MultihopHandle {
     #[must_use]
     pub fn underlay_paths_for_test(
         &self,
-        underlay_id: EndpointId,
+        underlay_id: UnderlayId,
     ) -> Option<Vec<(iroh::TransportAddr, bool)>> {
-        self.inner
-            .forwarder
-            .writer_paths(UnderlayId::new(underlay_id))
+        self.inner.forwarder.writer_paths(underlay_id)
     }
 
     /// Woken when the relay rule starts to refuse a hop, and when it admits one
@@ -381,7 +379,7 @@ impl MultihopHandle {
         clippy::must_use_candidate,
         reason = "the returned 'removed' flag is advisory; ignoring it is valid"
     )]
-    pub fn remove_origin(&self, origin: EndpointId) -> bool {
+    pub fn remove_origin(&self, origin: AppId) -> bool {
         self.inner
             .topology
             .write()
@@ -392,8 +390,8 @@ impl MultihopHandle {
     /// The application endpoint id this handle stamps as the hop identity of
     /// every cell it originates.
     #[must_use]
-    pub fn app_id(&self) -> EndpointId {
-        self.inner.self_id.get()
+    pub fn app_id(&self) -> AppId {
+        self.inner.self_id
     }
 
     /// The cost that this handle advertises for each link that leaves it
@@ -414,20 +412,15 @@ impl MultihopHandle {
     /// refused by the gate, for longer than the configured deadline. They are not
     /// advertised as links.
     #[must_use]
-    pub fn stuck_hops(&self) -> Vec<EndpointId> {
-        self.inner
-            .forwarder
-            .stuck_hops()
-            .into_iter()
-            .map(AppId::get)
-            .collect()
+    pub fn stuck_hops(&self) -> Vec<AppId> {
+        self.inner.forwarder.stuck_hops()
     }
 
     /// The id of this node's underlay endpoint: the key derived by
     /// [`underlay_secret`], not the application endpoint's.
     #[must_use]
-    pub fn underlay_id(&self) -> EndpointId {
-        self.inner.underlay.id()
+    pub fn underlay_id(&self) -> UnderlayId {
+        UnderlayId::new(self.inner.underlay.id())
     }
 
     /// The ports this node's underlay endpoint is bound on, for a test that
@@ -449,12 +442,12 @@ impl MultihopHandle {
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
     #[must_use]
-    pub fn underlay_addr_of(&self, origin: EndpointId) -> Option<EndpointAddr> {
+    pub fn underlay_addr_of(&self, origin: AppId) -> Option<EndpointAddr> {
         self.inner
             .topology
             .read()
             .expect("topology lock poisoned")
-            .underlay_of(AppId::new(origin))
+            .underlay_of(origin)
     }
 
     /// How many cells this node passed on for other nodes. Cells it sends for
@@ -476,13 +469,12 @@ impl MultihopHandle {
     /// # Panics
     /// If the routing-table lock is poisoned by a panic in another thread.
     #[must_use]
-    pub fn app_id_of(&self, underlay_id: EndpointId) -> Option<EndpointId> {
+    pub fn app_id_of(&self, underlay_id: UnderlayId) -> Option<AppId> {
         self.inner
             .topology
             .read()
             .expect("topology lock poisoned")
-            .app_id_of(UnderlayId::new(underlay_id))
-            .map(AppId::get)
+            .app_id_of(underlay_id)
     }
 
     /// This node's current underlay dial address, for advertising to peers so
@@ -500,7 +492,7 @@ impl MultihopHandle {
     /// last one this handle made, so a restart with the same key never loses to
     /// the vectors it sent before.
     #[must_use]
-    pub fn link_vector(&self, mut links: Vec<(EndpointId, u32)>) -> LinkVector {
+    pub fn link_vector(&self, mut links: Vec<(AppId, u32)>) -> LinkVector {
         let stuck = self.stuck_hops();
         links.retain(|(neighbour, _)| !stuck.contains(neighbour));
         let now = topology::wall_clock_ms();
@@ -545,7 +537,7 @@ impl MultihopHandle {
             .topology
             .read()
             .expect("topology lock poisoned")
-            .view(self.inner.self_id.get())
+            .view(self.inner.self_id)
     }
 
     /// The custom transport factory, for `Builder::add_custom_transport`.
@@ -576,8 +568,8 @@ impl MultihopHandle {
 /// them. The handle does not exist yet when the underlay is built, hence a free
 /// function. For `Builder::path_selector`.
 #[must_use]
-pub fn underlay_path_selector(underlay_id: EndpointId) -> Arc<dyn PathSelector> {
-    Arc::new(MultihopLadder::new(underlay_id))
+pub fn underlay_path_selector(underlay_id: UnderlayId) -> Arc<dyn PathSelector> {
+    Arc::new(MultihopLadder::new(underlay_id.get()))
 }
 
 #[cfg(test)]
@@ -585,7 +577,7 @@ mod tests {
     use std::time::Duration;
 
     use iroh::endpoint::presets;
-    use iroh::{Endpoint, EndpointId, RelayMode, SecretKey};
+    use iroh::{Endpoint, RelayMode, SecretKey};
 
     use super::{AppId, HandleConfig, MultihopHandle, UnderlayId, underlay_secret};
     use crate::addr::{Route, RouteHop};
@@ -811,7 +803,7 @@ mod tests {
             MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
                 .expect("underlay on the derived key");
         assert_eq!(
-            handle.underlay_addr_of(other.public()),
+            handle.underlay_addr_of(AppId::new(other.public())),
             None,
             "no vector yet"
         );
@@ -825,10 +817,14 @@ mod tests {
         );
         assert!(handle.feed_topology(vector));
         assert_eq!(
-            handle.underlay_addr_of(other.public()),
+            handle.underlay_addr_of(AppId::new(other.public())),
             Some(their_underlay)
         );
-        assert_eq!(handle.underlay_addr_of(me.public()), None, "not our own");
+        assert_eq!(
+            handle.underlay_addr_of(AppId::new(me.public())),
+            None,
+            "not our own"
+        );
     }
 
     /// A handle whose underlay can only reach other underlays through the relay.
@@ -853,14 +849,14 @@ mod tests {
     /// A handle on a loopback underlay that knows two node-disjoint routes to
     /// `dst`: a short one, `short -> dst`, and a long one, `long_a -> long_b -> dst`.
     /// Returns the handle and the hops, each as `(app id, underlay id)`.
-    async fn handle_with_two_routes() -> (MultihopHandle, [(EndpointId, EndpointId); 4]) {
+    async fn handle_with_two_routes() -> (MultihopHandle, [(AppId, UnderlayId); 4]) {
         let me = SecretKey::from_bytes(&[61; 32]);
         let handle =
             MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
                 .expect("underlay on the derived key");
         let nodes = [62_u8, 63, 64, 65].map(|seed| SecretKey::from_bytes(&[seed; 32]));
-        let [short, long_a, long_b, dst] = nodes.each_ref().map(SecretKey::public);
-        let advertise = |node: &SecretKey, links: Vec<(EndpointId, u32)>| {
+        let [short, long_a, long_b, dst] = nodes.each_ref().map(|node| AppId::new(node.public()));
+        let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
             let underlay = iroh::EndpointAddr::new(underlay_secret(node).public());
             handle.feed_topology(crate::LinkVector::signed(
                 node,
@@ -874,15 +870,18 @@ mod tests {
         advertise(&nodes[2], vec![(dst, 1)]);
         advertise(&nodes[3], vec![]);
         assert!(handle.feed_topology(handle.link_vector(vec![(short, 1), (long_a, 1)])));
-        let hops = nodes.map(|node| (node.public(), underlay_secret(&node).public()));
+        let hops = nodes.map(|node| {
+            (
+                AppId::new(node.public()),
+                UnderlayId::new(underlay_secret(&node).public()),
+            )
+        });
         (handle, hops)
     }
 
-    fn first_hop_of(handle: &MultihopHandle, dst: EndpointId) -> EndpointId {
+    fn first_hop_of(handle: &MultihopHandle, dst: AppId) -> AppId {
         let addr = handle.route_addr(dst).expect("a route to dst");
-        Route::decode(&addr).expect("a route").hops()[0]
-            .app_id
-            .get()
+        Route::decode(&addr).expect("a route").hops()[0].app_id
     }
 
     #[tokio::test]
@@ -898,7 +897,7 @@ mod tests {
         handle
             .inner
             .forwarder
-            .refuse_hop_for_test(UnderlayId::new(short_underlay), AppId::new(short));
+            .refuse_hop_for_test(short_underlay, short);
         assert!(
             handle.stuck_hops().is_empty(),
             "refused now, not past the deadline: the link vector still names the hop"
@@ -919,7 +918,7 @@ mod tests {
             SecretKey::from_bytes(&[72; 32]),
             SecretKey::from_bytes(&[73; 32]),
         );
-        let advertise = |node: &SecretKey, links: Vec<(EndpointId, u32)>| {
+        let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
             handle.feed_topology(crate::LinkVector::signed(
                 node,
                 crate::topology::wall_clock_ms(),
@@ -927,39 +926,41 @@ mod tests {
                 links,
             ));
         };
-        advertise(&via, vec![(dst.public(), 1)]);
+        advertise(&via, vec![(AppId::new(dst.public()), 1)]);
         advertise(&dst, vec![]);
-        assert!(
-            handle.feed_topology(handle.link_vector(vec![(dst.public(), 1), (via.public(), 1)]))
-        );
-        assert_eq!(first_hop_of(&handle, dst.public()), dst.public(), "direct");
+        assert!(handle.feed_topology(handle.link_vector(vec![
+            (AppId::new(dst.public()), 1),
+            (AppId::new(via.public()), 1),
+        ])));
+        let dst_id = AppId::new(dst.public());
+        assert_eq!(first_hop_of(&handle, dst_id), dst_id, "direct");
 
         handle.inner.forwarder.refuse_hop_for_test(
             UnderlayId::new(underlay_secret(&dst).public()),
             AppId::new(dst.public()),
         );
-        let addr = handle.route_addr(dst.public()).expect("a route to dst");
-        let hops: Vec<EndpointId> = Route::decode(&addr)
+        let addr = handle.route_addr(dst_id).expect("a route to dst");
+        let hops: Vec<AppId> = Route::decode(&addr)
             .expect("a route")
             .hops()
             .iter()
-            .map(|hop| hop.app_id.get())
+            .map(|hop| hop.app_id)
             .collect();
-        assert_eq!(hops, vec![via.public(), dst.public()]);
+        assert_eq!(hops, vec![AppId::new(via.public()), dst_id]);
     }
 
     /// A handle that knows a native route to `dst` of three hops (`a1`, `a2`, `dst`) and a route
     /// of two hops through a browser (`tab`), whose own links cost ten times a native link
     /// (decision D5). Returns the handle and the hops as `(app id, underlay id)`.
-    async fn handle_with_a_native_and_a_browser_route()
-    -> (MultihopHandle, [(EndpointId, EndpointId); 4]) {
+    async fn handle_with_a_native_and_a_browser_route() -> (MultihopHandle, [(AppId, UnderlayId); 4])
+    {
         let me = SecretKey::from_bytes(&[91; 32]);
         let handle =
             MultihopHandle::new(&me, loopback_underlay(&me).await, HandleConfig::default())
                 .expect("underlay on the derived key");
         let nodes = [92_u8, 93, 94, 95].map(|seed| SecretKey::from_bytes(&[seed; 32]));
-        let [a1, a2, tab, dst] = nodes.each_ref().map(SecretKey::public);
-        let advertise = |node: &SecretKey, links: Vec<(EndpointId, u32)>| {
+        let [a1, a2, tab, dst] = nodes.each_ref().map(|node| AppId::new(node.public()));
+        let advertise = |node: &SecretKey, links: Vec<(AppId, u32)>| {
             let underlay = iroh::EndpointAddr::new(underlay_secret(node).public());
             handle.feed_topology(crate::LinkVector::signed(
                 node,
@@ -973,7 +974,12 @@ mod tests {
         advertise(&nodes[2], vec![(dst, 100)]);
         advertise(&nodes[3], vec![]);
         assert!(handle.feed_topology(handle.link_vector(vec![(a1, 10), (tab, 10)])));
-        let hops = nodes.map(|node| (node.public(), underlay_secret(&node).public()));
+        let hops = nodes.map(|node| {
+            (
+                AppId::new(node.public()),
+                UnderlayId::new(underlay_secret(&node).public()),
+            )
+        });
         (handle, hops)
     }
 
@@ -1002,10 +1008,7 @@ mod tests {
     async fn the_browser_route_is_chosen_when_the_only_native_first_hop_is_refused() {
         let (handle, [(a1, a1_underlay), _, (tab, _), (dst, _)]) =
             handle_with_a_native_and_a_browser_route().await;
-        handle
-            .inner
-            .forwarder
-            .refuse_hop_for_test(UnderlayId::new(a1_underlay), AppId::new(a1));
+        handle.inner.forwarder.refuse_hop_for_test(a1_underlay, a1);
         assert_eq!(
             first_hop_of(&handle, dst),
             tab,
@@ -1020,7 +1023,7 @@ mod tests {
         handle
             .inner
             .forwarder
-            .refuse_hop_for_test(UnderlayId::new(tab_underlay), AppId::new(tab));
+            .refuse_hop_for_test(tab_underlay, tab);
         assert_eq!(first_hop_of(&handle, dst), a1);
     }
 
@@ -1033,7 +1036,7 @@ mod tests {
         let first_hop_resolved = || async {
             let mut answers = handle
                 .address_lookup()
-                .resolve(dst)
+                .resolve(dst.get())
                 .expect("the lookup answers");
             let item = answers.next().await.expect("an item").expect("no error");
             let custom = item
@@ -1047,15 +1050,13 @@ mod tests {
                     custom.clone()
                 })
                 .expect("a custom address");
-            Route::decode(&custom).expect("a route").hops()[0]
-                .app_id
-                .get()
+            Route::decode(&custom).expect("a route").hops()[0].app_id
         };
         assert_eq!(first_hop_resolved().await, short);
         handle
             .inner
             .forwarder
-            .refuse_hop_for_test(UnderlayId::new(short_underlay), AppId::new(short));
+            .refuse_hop_for_test(short_underlay, short);
         assert_eq!(
             first_hop_resolved().await,
             long_a,
@@ -1088,10 +1089,11 @@ mod tests {
             MultihopHandle::new(bob, loopback_underlay(bob).await, HandleConfig::default())
                 .expect("a handle");
         for handle in [&alice_handle, &bob_handle] {
+            let app = |key: &SecretKey| AppId::new(key.public());
             for (node, links) in [
-                (alice, vec![(carol.public(), 1)]),
-                (carol, vec![(alice.public(), 1), (bob.public(), 1)]),
-                (bob, vec![(carol.public(), 1)]),
+                (alice, vec![(app(carol), 1)]),
+                (carol, vec![(app(alice), 1), (app(bob), 1)]),
+                (bob, vec![(app(carol), 1)]),
             ] {
                 handle.feed_topology(crate::LinkVector::signed(
                     node,
@@ -1103,14 +1105,22 @@ mod tests {
         }
 
         // Alice dials Bob; Bob gets the cell and builds the way back from it.
-        let forward = Route::decode(&alice_handle.route_addr(bob.public()).expect("a route"))
-            .expect("a route");
+        let forward = Route::decode(
+            &alice_handle
+                .route_addr(AppId::new(bob.public()))
+                .expect("a route"),
+        )
+        .expect("a route");
         let stamp = alice_handle.inner.transport.self_hop();
         let way_back = Route::reverse_from(forward.hops(), stamp).expect("a legal route");
 
         // Bob's own route to Alice, as his address lookup would hand it to iroh.
-        let dialed = Route::decode(&bob_handle.route_addr(alice.public()).expect("a route"))
-            .expect("a route");
+        let dialed = Route::decode(
+            &bob_handle
+                .route_addr(AppId::new(alice.public()))
+                .expect("a route"),
+        )
+        .expect("a route");
         assert_eq!(
             way_back.encode(),
             dialed.encode(),
@@ -1168,11 +1178,11 @@ mod tests {
         handle
             .inner
             .forwarder
-            .refuse_hop_for_test(UnderlayId::new(short_underlay), AppId::new(short));
+            .refuse_hop_for_test(short_underlay, short);
         handle
             .inner
             .forwarder
-            .refuse_hop_for_test(UnderlayId::new(long_underlay), AppId::new(long_a));
+            .refuse_hop_for_test(long_underlay, long_a);
         assert_eq!(first_hop_of(&handle, dst), short);
     }
 
@@ -1187,7 +1197,7 @@ mod tests {
             relay_only_handle(&alice, &url).await,
             relay_only_handle(&bob, &url).await,
         );
-        let (first_id, second_id) = (alice.public(), bob.public());
+        let (first_id, second_id) = (AppId::new(alice.public()), AppId::new(bob.public()));
         assert_eq!(
             first.link_vector(vec![(second_id, 10)]).links.len(),
             1,
@@ -1201,8 +1211,8 @@ mod tests {
 
         // Traffic each way: the gate refuses it, since only the relay is open.
         let hop = |handle: &MultihopHandle, id| RouteHop {
-            app_id: AppId::new(id),
-            underlay_id: UnderlayId::new(handle.underlay_id()),
+            app_id: id,
+            underlay_id: handle.underlay_id(),
         };
         for (from, from_id, to, to_id) in [
             (&first, first_id, &second, second_id),

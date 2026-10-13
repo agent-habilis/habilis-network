@@ -813,7 +813,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
                     );
                     return false;
                 }
-                if bound != Some(vector.origin()) {
+                if bound != Some(vector.origin().get()) {
                     tracing::debug!(target: "habilis_network::gossip",
                         author = %message.author,
                         "dropping multihop link-state: its origin is not the endpoint bound to its author"
@@ -2704,7 +2704,7 @@ mod first_contact_tests {
         state.multihop = Some(ours.clone());
 
         let vector_body =
-            crate::gossip::json_body(&theirs.link_vector(vec![(other_key.public(), 10)]))
+            crate::gossip::json_body(&theirs.link_vector(vec![(habilis_network_iroh_multihop_transport::AppId::new(other_key.public()), 10)]))
                 .expect("a vector serializes");
         let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body);
         assert!(
@@ -3114,7 +3114,7 @@ mod link_state_tests {
         let mut state = fresh_state();
         state.multihop = Some(ours.clone());
 
-        let body = crate::gossip::json_body(&theirs.link_vector(vec![(bob.public(), 10)]))
+        let body = crate::gossip::json_body(&theirs.link_vector(vec![(habilis_network_iroh_multihop_transport::AppId::new(bob.public()), 10)]))
             .expect("a vector serializes");
         let message_from = |author: &str| {
             Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
@@ -3219,7 +3219,7 @@ mod left_tests {
         let mut state = fresh_state();
         state.multihop = Some(handle.clone());
         let leaver = nick("leaver");
-        state.note_peer_endpoint(leaver.clone(), EndpointAddr::new(leaver_handle.app_id()));
+        state.note_peer_endpoint(leaver.clone(), EndpointAddr::new(leaver_handle.app_id().get()));
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
@@ -3438,6 +3438,10 @@ mod parked_link_state_tests {
         handle: &MultihopHandle,
         links: Vec<(iroh::EndpointId, u32)>,
     ) -> Message {
+        let links = links
+            .into_iter()
+            .map(|(id, cost)| (habilis_network_iroh_multihop_transport::AppId::new(id), cost))
+            .collect();
         let body =
             crate::gossip::json_body(&handle.link_vector(links)).expect("a vector serializes");
         Message::new_link_state(&MeshId::from("test"), &nick(author), body)

@@ -1949,7 +1949,7 @@ impl EventLoopState {
         vector: habilis_network_iroh_multihop_transport::LinkVector,
         bound: EndpointId,
     ) {
-        if vector.origin() != bound {
+        if vector.origin().get() != bound {
             tracing::debug!(target: "habilis_network::gossip",
                 "dropping parked multihop link-state: its origin is not the endpoint bound to its author"
             );

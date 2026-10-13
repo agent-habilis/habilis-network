@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use iroh::{EndpointAddr, EndpointId, SecretKey};
+use iroh::{EndpointAddr, SecretKey};
 use iroh_base::Signature;
 use n0_future::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
@@ -80,12 +80,12 @@ impl LinkVector {
         secret: &SecretKey,
         seq: u64,
         underlay: EndpointAddr,
-        links: Vec<(EndpointId, u32)>,
+        links: Vec<(AppId, u32)>,
     ) -> Self {
         let origin = AppId::new(secret.public());
         let links: Vec<(AppId, LinkMetric)> = links
             .into_iter()
-            .map(|(id, cost)| (AppId::new(id), LinkMetric::new(cost)))
+            .map(|(id, cost)| (id, LinkMetric::new(cost)))
             .collect();
         let sig = secret.sign(&signing_bytes(&origin, seq, &underlay, &links));
         Self {
@@ -99,8 +99,8 @@ impl LinkVector {
 
     /// The endpoint id that made this vector and signed it.
     #[must_use]
-    pub fn origin(&self) -> EndpointId {
-        self.origin.get()
+    pub fn origin(&self) -> AppId {
+        self.origin
     }
 
     /// Whether the origin signed exactly these fields.
@@ -232,8 +232,8 @@ impl Topology {
 
     /// Drop an origin's advertised links (e.g. when the peer leaves the mesh) and
     /// remember its highest `seq`. Returns whether anything was removed.
-    pub fn remove(&mut self, origin: EndpointId) -> bool {
-        self.remove_at(AppId::new(origin), Instant::now())
+    pub fn remove(&mut self, origin: AppId) -> bool {
+        self.remove_at(origin, Instant::now())
     }
 
     fn remove_at(&mut self, origin: AppId, now: Instant) -> bool {
@@ -336,7 +336,7 @@ impl Topology {
     /// of view — every metric-labelled edge assembled from the held vectors, plus
     /// which node is "us". Backs the `topology` IPC query.
     #[must_use]
-    pub fn view(&self, self_id: EndpointId) -> TopologyView {
+    pub fn view(&self, self_id: AppId) -> TopologyView {
         let edges = self
             .vectors
             .values()
@@ -414,7 +414,7 @@ mod tests {
             &secret_of(origin),
             seq,
             EndpointAddr::new(origin.get()),
-            links.iter().map(|(to, cost)| (to.get(), *cost)).collect(),
+            links.iter().map(|(to, cost)| (*to, *cost)).collect(),
         )
     }
 
@@ -442,7 +442,7 @@ mod tests {
             !ingest(&mut store, forged),
             "a vector the origin did not sign is refused"
         );
-        assert!(store.view(other.get()).edges.is_empty());
+        assert!(store.view(other).edges.is_empty());
     }
 
     #[test]
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(store.expire_older_than(later), 1);
         assert!(
             store
-                .view(na.get())
+                .view(na)
                 .edges
                 .iter()
                 .all(|edge| edge.from == na.to_string()),
@@ -542,7 +542,7 @@ mod tests {
         let (na, nb) = (eid(1), eid(2));
         let mut store = Topology::default();
         assert!(ingest(&mut store, vector(nb, 7_000, &[(na, 1)])));
-        assert!(store.remove(nb.get()), "Left removes the vector");
+        assert!(store.remove(nb), "Left removes the vector");
         assert!(
             !ingest(&mut store, vector(nb, 7_000, &[(na, 1)])),
             "refused after Left"
@@ -563,7 +563,7 @@ mod tests {
         assert!(store.ingest_at(vector(nb, 1_000, &[(na, 1)]), start, 1_000));
         assert_eq!(store.expire_older_than(start + secs(46)), 1);
         assert!(store.ingest_at(vector(nb, 47_000, &[(na, 1)]), start + secs(47), 47_000));
-        assert_eq!(store.view(na.get()).edges.len(), 1);
+        assert_eq!(store.view(na).edges.len(), 1);
     }
 
     #[test]
@@ -595,7 +595,7 @@ mod tests {
             ingest(&mut store, vector(nb, 100_050, &[(na, 5)])),
             "the first vector after the restart is above the last one before it"
         );
-        assert_eq!(store.view(na.get()).edges[0].metric, 5);
+        assert_eq!(store.view(na).edges[0].metric, 5);
     }
 
     #[test]
@@ -801,10 +801,7 @@ mod tests {
         }
         assert_eq!(best_route(&store, alice, bob), Some(vec![carol, bob]));
 
-        assert!(
-            store.remove(carol.get()),
-            "carol leaves: her vector is gone"
-        );
+        assert!(store.remove(carol), "carol leaves: her vector is gone");
         assert_eq!(best_route(&store, alice, bob), Some(vec![tab, bob]));
         assert_eq!(
             best_cost(&store, alice, bob),
