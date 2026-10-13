@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use habilis_network_util::clock;
 
+use super::DedupKey;
 use super::identity::{self, Identity};
 use super::mesh::MeshId;
 use super::nickname::Nickname;
@@ -788,7 +789,7 @@ impl Message {
     /// than the sender-chosen id, so a forged message reusing a victim's id
     /// cannot suppress the genuine one. See [`identity::dedup_key16`].
     #[must_use]
-    pub fn dedup_key(&self) -> [u8; 16] {
+    pub fn dedup_key(&self) -> DedupKey {
         identity::dedup_key16(&self.pubkey, &self.id.as_uuid_bytes())
     }
 

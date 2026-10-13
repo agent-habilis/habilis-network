@@ -22,6 +22,8 @@ use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
+use crate::DedupKey;
+
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
 /// this key trust-on-first-use by receivers, so it is not stored here.
@@ -100,14 +102,14 @@ pub fn content_hash_hex(bytes: &[u8]) -> String {
 /// the content) preserves the fresh-id re-announce path (a new id ⇒ a new
 /// key ⇒ not falsely deduped).
 #[must_use]
-pub(crate) fn dedup_key16(pubkey: &str, id_bytes: &[u8; 16]) -> [u8; 16] {
+pub(crate) fn dedup_key16(pubkey: &str, id_bytes: &[u8; 16]) -> DedupKey {
     let mut hasher = Sha256::new();
     hasher.update(pubkey.as_bytes());
     hasher.update(id_bytes);
     let digest = hasher.finalize();
     let mut key = [0u8; 16];
     key.copy_from_slice(&digest[..16]);
-    key
+    DedupKey::from_bytes(key)
 }
 
 // ── wire encoding ──────────────────────────────────────────────────────
@@ -247,11 +249,11 @@ mod tests {
         let mut id = [0u8; 16];
         id[15] = 1;
         assert_eq!(
-            encode_hex(&dedup_key16(pubkey, &id)),
+            encode_hex(dedup_key16(pubkey, &id).as_bytes()),
             "c7ba26a2ed0d21f0e8913dd8b4456086"
         );
         assert_eq!(
-            encode_hex(&dedup_key16("", &id)),
+            encode_hex(dedup_key16("", &id).as_bytes()),
             "7c3ccd10bb7ec37b46d37926ae627426"
         );
     }

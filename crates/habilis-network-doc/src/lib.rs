@@ -34,7 +34,7 @@ use automerge::{
 };
 use serde_json::{Map, Value};
 
-use habilis_network_protocol::{Message, Nickname};
+use habilis_network_protocol::{DedupKey, Message, Nickname};
 use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX};
 
 /// Matches the receive path these drops happen on, so a reader filtering the
@@ -133,7 +133,7 @@ pub struct MeshDoc {
     /// Unbounded, so every caller that ingests other authors' frames must drain
     /// it after each ingest, as the receive path does. A local write cannot
     /// orphan and never adds to it.
-    dropped: Vec<[u8; 16]>,
+    dropped: Vec<DedupKey>,
     /// This channel's per-peer write gate, when it has one (`meta` does; `state`
     /// is free-form and carries no per-peer identity, so it does not).
     gate: Option<SelfWriteGate>,
@@ -523,7 +523,7 @@ impl MeshDoc {
 
     /// The dedup keys of the orphan frames dropped since the last call, for the
     /// receive path to forget.
-    pub fn take_dropped(&mut self) -> Vec<[u8; 16]> {
+    pub fn take_dropped(&mut self) -> Vec<DedupKey> {
         std::mem::take(&mut self.dropped)
     }
 
@@ -824,7 +824,7 @@ mod tests {
     use super::wire::change_body;
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
     use automerge::Change;
-    use habilis_network_protocol::{Channel, MeshId, Message, Nickname};
+    use habilis_network_protocol::{Channel, DedupKey, MeshId, Message, Nickname};
     use serde_json::{Value, json};
     use std::collections::HashSet;
 
@@ -1265,8 +1265,8 @@ mod tests {
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let mut sink = deliver(&chain, &tail, 100);
-        let dropped: HashSet<[u8; 16]> = sink.take_dropped().into_iter().collect();
-        let let_go: HashSet<[u8; 16]> = chain[100 + DOC_PENDING_AUTHOR_MAX..]
+        let dropped: HashSet<DedupKey> = sink.take_dropped().into_iter().collect();
+        let let_go: HashSet<DedupKey> = chain[100 + DOC_PENDING_AUTHOR_MAX..]
             .iter()
             .map(Message::dedup_key)
             .collect();

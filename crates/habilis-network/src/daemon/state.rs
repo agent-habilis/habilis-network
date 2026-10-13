@@ -14,7 +14,7 @@ use super::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
-use crate::protocol::{Message, MessageId, Nickname, ShardGroup};
+use crate::protocol::{DedupKey, Message, MessageId, Nickname, ShardGroup};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
@@ -554,7 +554,7 @@ pub struct EventLoopState {
     /// twice; `mark_seen` drops the repeat before it reaches the log /
     /// inbound push channel / agent. Bounded (`SEEN_IDS_CAP`, 2× the message log)
     /// so it always covers the retention window.
-    pub(crate) seen: BoundedFifoSet<[u8; 16]>,
+    pub(crate) seen: BoundedFifoSet<DedupKey>,
     /// User messages sent before we had a real-peer link (no gossip
     /// path yet — a bare `broadcast` would be a lost one-shot). Drained in
     /// FIFO order once `meshed` flips, each routed through the send decision;

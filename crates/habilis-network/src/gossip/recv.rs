@@ -1786,7 +1786,7 @@ mod retain_own_broadcast_tests {
     use super::retain_own_broadcast;
     use crate::daemon::message_log::{MissingQuery, WindowRange};
     use crate::daemon::state::EventLoopState;
-    use crate::protocol::{MeshId, Message, Nickname};
+    use crate::protocol::{DedupKey, MeshId, Message, Nickname};
 
     fn joined(state: &EventLoopState, author: &str) -> Message {
         Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author))
@@ -1891,7 +1891,7 @@ mod retain_own_broadcast_tests {
 
         // We advertise what we hold; they compute what we are missing.
         let window = us.message_log.recent_window(64).expect("non-empty log");
-        let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
+        let have: HashSet<DedupKey> = window.ids.into_iter().collect();
         let offered = them.message_log.missing_in_window(MissingQuery {
             range: WindowRange {
                 lo: window.lo,

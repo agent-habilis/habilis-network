@@ -767,7 +767,10 @@ fn a_signed_message_keeps_its_wire_form() {
         parsed.content_hash_hex(),
         "2e680fcb3a8d77ef027e722046200cf0b07c8d77d7572b7e0712556bfaf76e0e"
     );
-    assert_eq!(hex(&parsed.dedup_key()), "c7ba26a2ed0d21f0e8913dd8b4456086");
+    assert_eq!(
+        hex(parsed.dedup_key().as_bytes()),
+        "c7ba26a2ed0d21f0e8913dd8b4456086"
+    );
 }
 
 /// Golden: a message with no `pubkey` key and no `sig` key parses, reads as unsigned, and does

@@ -28,9 +28,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::message_log::{DigestWindow, KEY_MIN, MissingQuery, WindowRange};
+use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::{Channel, MeshId, Message, Nickname};
+use crate::protocol::{Channel, DedupKey, MeshId, Message, Nickname};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
     ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN_SECS,
@@ -54,19 +54,20 @@ struct WireWindow {
     ids: String,
 }
 
-fn encode_key(key: &[u8; 16]) -> String {
-    bs58::encode(key).into_string()
+fn encode_key(key: &DedupKey) -> String {
+    bs58::encode(key.as_bytes()).into_string()
 }
 
-fn decode_key(text: &str) -> Option<[u8; 16]> {
-    bs58::decode(text).into_vec().ok()?.try_into().ok()
+fn decode_key(text: &str) -> Option<DedupKey> {
+    let bytes: [u8; 16] = bs58::decode(text).into_vec().ok()?.try_into().ok()?;
+    Some(DedupKey::from_bytes(bytes))
 }
 
 impl WireWindow {
     fn encode(window: &DigestWindow) -> Self {
         let mut packed = Vec::with_capacity(window.ids.len() * 16);
         for id in &window.ids {
-            packed.extend_from_slice(id);
+            packed.extend_from_slice(id.as_bytes());
         }
         WireWindow {
             lo: window.lo.0,
@@ -87,7 +88,7 @@ impl WireWindow {
 
     /// Decode the packed ids into a set, or `None` if the Base58 / length
     /// is malformed.
-    fn decode_ids(&self) -> Option<HashSet<[u8; 16]>> {
+    fn decode_ids(&self) -> Option<HashSet<DedupKey>> {
         let raw = bs58::decode(&self.ids).into_vec().ok()?;
         if raw.len() % 16 != 0 {
             return None;
@@ -97,7 +98,7 @@ impl WireWindow {
                 .map(|chunk| {
                     let mut id = [0u8; 16];
                     id.copy_from_slice(chunk);
-                    id
+                    DedupKey::from_bytes(id)
                 })
                 .collect(),
         )
@@ -173,7 +174,7 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     // earlier of the two: a message of that second with a smaller id key than
     // the first one we hold sorts before it, and is in range.
     let floor = |window: &mut DigestWindow| {
-        window.lo = (state.joined_at.min(window.lo.0), KEY_MIN);
+        window.lo = (state.joined_at.min(window.lo.0), DedupKey::MIN);
     };
     if newest.from_start {
         floor(&mut newest);
@@ -251,7 +252,7 @@ pub(crate) fn handle_digest(message: &Message, state: &mut EventLoopState, me: &
         );
         return;
     }
-    let mut have: HashSet<[u8; 16]> = HashSet::new();
+    let mut have: HashSet<DedupKey> = HashSet::new();
     for window in &body.windows {
         if let Some(ids) = window.decode_ids() {
             have.extend(ids);
@@ -1351,7 +1352,7 @@ mod tests {
     use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
-    use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
+    use crate::protocol::{Channel, DedupKey, MeshId, Message, MessageBody, Nickname};
     use crate::testing::{fresh_state, nick};
 
     fn members(count: usize) -> Vec<Nickname> {
@@ -1406,8 +1407,8 @@ mod tests {
     /// ids, so every message of the holder is a gap.
     fn digest_of_an_empty_log(asker: &Nickname) -> Message {
         let window = DigestWindow {
-            lo: (0, crate::daemon::message_log::KEY_MIN),
-            hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
+            lo: (0, DedupKey::MIN),
+            hi: (i64::MAX, DedupKey::MAX),
             ids: Vec::new(),
             from_start: true,
         };
@@ -1687,10 +1688,12 @@ mod tests {
     /// would silently break cross-node reconciliation.
     #[test]
     fn wire_window_round_trips_ids() {
-        let ids: Vec<[u8; 16]> = (0..5u8).map(|seed| [seed; 16]).collect();
+        let ids: Vec<DedupKey> = (0..5u8)
+            .map(|seed| DedupKey::from_bytes([seed; 16]))
+            .collect();
         let window = DigestWindow {
-            lo: (1, crate::daemon::message_log::KEY_MIN),
-            hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
+            lo: (1, DedupKey::MIN),
+            hi: (i64::MAX, DedupKey::MAX),
             ids: ids.clone(),
             from_start: false,
         };
@@ -1792,7 +1795,7 @@ mod tests {
     /// computes it.
     fn answer(node: &mut EventLoopState, holder: &MessageLog) -> HashSet<String> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let have: HashSet<[u8; 16]> = windows
+        let have: HashSet<DedupKey> = windows
             .iter()
             .flat_map(|window| window.decode_ids().expect("our own encoding"))
             .collect();
@@ -1862,7 +1865,7 @@ mod tests {
         mut budget: usize,
     ) -> Vec<Message> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let mut have: HashSet<[u8; 16]> = windows
+        let mut have: HashSet<DedupKey> = windows
             .iter()
             .flat_map(|window| window.decode_ids().expect("our own encoding"))
             .collect();
@@ -2168,16 +2171,16 @@ mod tests {
             windows: vec![
                 WireWindow {
                     lo: 100,
-                    lo_key: encode_key(&[3; 16]),
+                    lo_key: encode_key(&DedupKey::from_bytes([3; 16])),
                     hi: i64::MAX,
-                    hi_key: encode_key(&[u8::MAX; 16]),
+                    hi_key: encode_key(&DedupKey::MAX),
                     ids: bs58::encode([7u8; 16]).into_string(),
                 },
                 WireWindow {
                     lo: 10,
-                    lo_key: encode_key(&[1; 16]),
+                    lo_key: encode_key(&DedupKey::from_bytes([1; 16])),
                     hi: 50,
-                    hi_key: encode_key(&[2; 16]),
+                    hi_key: encode_key(&DedupKey::from_bytes([2; 16])),
                     // Two *distinct* 16-byte ids (identical halves would
                     // dedup to one in the decoded set).
                     ids: {
@@ -2202,15 +2205,18 @@ mod tests {
     #[test]
     fn a_digest_body_keeps_its_wire_form() {
         let newest = DigestWindow {
-            lo: (1_700_000_100, [0x03; 16]),
-            hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
-            ids: vec![[0x11; 16], [0x22; 16]],
+            lo: (1_700_000_100, DedupKey::from_bytes([0x03; 16])),
+            hi: (i64::MAX, DedupKey::MAX),
+            ids: vec![
+                DedupKey::from_bytes([0x11; 16]),
+                DedupKey::from_bytes([0x22; 16]),
+            ],
             from_start: false,
         };
         let older = DigestWindow {
-            lo: (1_700_000_000, crate::daemon::message_log::KEY_MIN),
-            hi: (1_700_000_099, [0x04; 16]),
-            ids: vec![[0x33; 16]],
+            lo: (1_700_000_000, DedupKey::MIN),
+            hi: (1_700_000_099, DedupKey::from_bytes([0x04; 16])),
+            ids: vec![DedupKey::from_bytes([0x33; 16])],
             from_start: true,
         };
         let body = crate::gossip::json_body(&DigestBody {
@@ -2229,12 +2235,21 @@ mod tests {
 
         let back: DigestBody = serde_json::from_str(wire).expect("the literal parses");
         let open_end = back.windows[0].range().expect("the keys decode");
-        assert_eq!(open_end.lo, (1_700_000_100, [0x03; 16]));
-        assert_eq!(open_end.hi, (i64::MAX, [u8::MAX; 16]));
+        assert_eq!(
+            open_end.lo,
+            (1_700_000_100, DedupKey::from_bytes([0x03; 16]))
+        );
+        assert_eq!(open_end.hi, (i64::MAX, DedupKey::MAX));
         let ids = back.windows[0].decode_ids().expect("the ids decode");
-        assert_eq!(ids, HashSet::from([[0x11; 16], [0x22; 16]]));
+        assert_eq!(
+            ids,
+            HashSet::from([
+                DedupKey::from_bytes([0x11; 16]),
+                DedupKey::from_bytes([0x22; 16])
+            ])
+        );
         let closed = back.windows[1].range().expect("the keys decode");
-        assert_eq!(closed.lo, (1_700_000_000, [0; 16]));
-        assert_eq!(closed.hi, (1_700_000_099, [0x04; 16]));
+        assert_eq!(closed.lo, (1_700_000_000, DedupKey::MIN));
+        assert_eq!(closed.hi, (1_700_000_099, DedupKey::from_bytes([0x04; 16])));
     }
 }

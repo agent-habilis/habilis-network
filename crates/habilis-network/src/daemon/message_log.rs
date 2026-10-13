@@ -1,26 +1,20 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::sole_addressee;
-use crate::protocol::{Message, Nickname};
+use crate::protocol::{DedupKey, Message, Nickname};
 use crate::util::clock;
 
 /// Where a message sits in the log's total order: its timestamp, then its id
 /// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
 /// second, so the timestamp alone cannot say which side of a window's edge a
 /// message is on; the key breaks every tie.
-pub(crate) type Bound = (i64, [u8; 16]);
-
-/// The lowest id key. With [`KEY_MAX`] it makes a bound that takes in every
-/// message of its second.
-pub(crate) const KEY_MIN: [u8; 16] = [0; 16];
-/// The highest id key.
-pub(crate) const KEY_MAX: [u8; 16] = [u8::MAX; 16];
+pub(crate) type Bound = (i64, DedupKey);
 
 /// The smallest bound that sorts after `bound`.
 fn bound_after((timestamp, key): Bound) -> Bound {
-    match u128::from_be_bytes(key).checked_add(1) {
-        Some(next) => (timestamp, next.to_be_bytes()),
-        None => (timestamp.saturating_add(1), KEY_MIN),
+    match u128::from_be_bytes(key.to_bytes()).checked_add(1) {
+        Some(next) => (timestamp, DedupKey::from_bytes(next.to_be_bytes())),
+        None => (timestamp.saturating_add(1), DedupKey::MIN),
     }
 }
 
@@ -33,7 +27,7 @@ fn bound_after((timestamp, key): Bound) -> Bound {
 pub(crate) struct DigestWindow {
     pub lo: Bound,
     pub hi: Bound,
-    pub ids: Vec<[u8; 16]>,
+    pub ids: Vec<DedupKey>,
     /// The window holds the first message of the log: nothing sorts before it.
     pub from_start: bool,
 }
@@ -52,8 +46,8 @@ pub(crate) struct WindowRange {
 #[cfg(test)]
 pub(crate) fn seconds(lo: i64, hi: i64) -> WindowRange {
     WindowRange {
-        lo: (lo, KEY_MIN),
-        hi: (hi, KEY_MAX),
+        lo: (lo, DedupKey::MIN),
+        hi: (hi, DedupKey::MAX),
     }
 }
 
@@ -64,7 +58,7 @@ pub(crate) fn seconds(lo: i64, hi: i64) -> WindowRange {
 #[derive(Clone, Copy)]
 pub(crate) struct MissingQuery<'a> {
     pub range: WindowRange,
-    pub have: &'a HashSet<[u8; 16]>,
+    pub have: &'a HashSet<DedupKey>,
     pub max: usize,
     pub requester: &'a Nickname,
 }
@@ -89,7 +83,7 @@ pub struct MessageLog {
     /// and both mutation sites are in [`Self::push`], so it cannot drift.
     per_author: HashMap<String, usize>,
     /// The dedup key of every held message, so a frame that is pushed twice is held once.
-    keys: HashSet<[u8; 16]>,
+    keys: HashSet<DedupKey>,
 }
 
 impl MessageLog {
@@ -288,9 +282,9 @@ impl MessageLog {
         let settled = Self::settled_len(&bounds);
         let mut window = Self::cut(&bounds, settled.saturating_sub(recent), recent, true)?;
         window.hi = if settled == bounds.len() {
-            (i64::MAX, KEY_MAX)
+            (i64::MAX, DedupKey::MAX)
         } else {
-            (clock::unix_secs(), KEY_MAX)
+            (clock::unix_secs(), DedupKey::MAX)
         };
         Some(window)
     }
@@ -332,7 +326,7 @@ impl MessageLog {
             let first = settled + (start - newest_start);
             let mut window = Self::cut(&bounds, first, max, true)?;
             if first + window.ids.len() == bounds.len() {
-                window.hi = (i64::MAX, KEY_MAX);
+                window.hi = (i64::MAX, DedupKey::MAX);
             }
             Some(window)
         }
@@ -407,12 +401,12 @@ fn eviction_key(msg: &Message) -> (i64, &str, Option<u64>, &str) {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{Message, MessageLog, MissingQuery, Nickname, WindowRange};
+    use super::{DedupKey, Message, MessageLog, MissingQuery, Nickname, WindowRange};
 
     /// A whole-log gap query for `requester` with nothing already held — the
     /// shape every gate test wants.
     fn all_missing_for<'a>(
-        have: &'a HashSet<[u8; 16]>,
+        have: &'a HashSet<DedupKey>,
         max: usize,
         requester: &'a Nickname,
     ) -> MissingQuery<'a> {
@@ -468,7 +462,7 @@ mod tests {
     /// of the same log, and is re-sent to a node that already has it.
     fn assert_range_matches_ids(log: &MessageLog) {
         for window in every_window(log) {
-            let listed: HashSet<[u8; 16]> = window.ids.iter().copied().collect();
+            let listed: HashSet<DedupKey> = window.ids.iter().copied().collect();
             for message in &log.messages {
                 if in_range(message, &window) {
                     assert!(
@@ -602,7 +596,7 @@ mod tests {
         assert_eq!((window.lo.0, window.hi.0), (10, 50));
 
         // The holder answers that window with the gap.
-        let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
+        let have: HashSet<DedupKey> = window.ids.into_iter().collect();
         let gap = holder.missing_in_window(MissingQuery {
             range: WindowRange {
                 lo: window.lo,
@@ -627,7 +621,7 @@ mod tests {
         }
         let max = 7;
         let len = log.len();
-        let mut advertised: HashSet<[u8; 16]> = HashSet::new();
+        let mut advertised: HashSet<DedupKey> = HashSet::new();
         let mut cursor = 0usize;
         // ceil(50/7) = 8 rounds covers the cycle; loop a little extra.
         for _ in 0..16 {
@@ -646,7 +640,7 @@ mod tests {
             log.push(msg_at(&ts.to_string(), ts));
         }
         // The receiver already has the ts=30 message.
-        let have: HashSet<[u8; 16]> = log
+        let have: HashSet<DedupKey> = log
             .window_at(2, 1)
             .expect("ts=30 window")
             .ids
@@ -740,7 +734,7 @@ mod tests {
         }
         let window = requester.recent_window(50).expect("non-empty");
         assert_eq!(window.hi.0, i64::MAX, "newest window must be open-ended");
-        let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
+        let have: HashSet<DedupKey> = window.ids.into_iter().collect();
         let offered: HashSet<String> = holder
             .missing_in_window(MissingQuery {
                 range: WindowRange {
