@@ -453,12 +453,12 @@ pub struct Message {
     /// computed locally (`content_hash_hex`), never transmitted. See
     /// `docs/history-integrity.md`.
     pub seq: Option<u64>,
-    pub prev: Option<String>,
+    pub prev: Option<ContentHash>,
     /// Cross-author DAG (Phase 3), `Msg` only: content hashes of the DAG
     /// tips this author had seen when authoring — the causal links. Signed.
     /// Empty for the very first message / messages with no observed
     /// predecessor. See `docs/history-integrity.md`.
-    pub parents: Vec<String>,
+    pub parents: Vec<ContentHash>,
     /// Shard header: present only on a message that is one slice of a body
     /// too large for a single message (see [`Shard`]). `None` on an ordinary
     /// message, so its wire form is unchanged. Signed like every other field.
@@ -546,9 +546,9 @@ struct WireOut<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    prev: &'a Option<String>,
-    #[serde(skip_serializing_if = "<[String]>::is_empty")]
-    parents: &'a [String],
+    prev: &'a Option<ContentHash>,
+    #[serde(skip_serializing_if = "<[ContentHash]>::is_empty")]
+    parents: &'a [ContentHash],
     #[serde(skip_serializing_if = "Option::is_none")]
     shard: &'a Option<Shard>,
     ext: &'a serde_json::Value,
@@ -618,14 +618,16 @@ impl TryFrom<WireIn> for Message {
         if !wire.sig.is_empty() && !is_lower_hex(&wire.sig, 64) {
             return Err("malformed signature");
         }
-        if let Some(prev) = &wire.prev
-            && !is_lower_hex(prev, 32)
-        {
-            return Err("malformed prev hash");
-        }
-        if wire.parents.iter().any(|hash| !is_lower_hex(hash, 32)) {
-            return Err("malformed parent hash");
-        }
+        let prev = wire
+            .prev
+            .as_deref()
+            .map(|hash| ContentHash::from_hex(hash).ok_or("malformed prev hash"))
+            .transpose()?;
+        let parents = wire
+            .parents
+            .iter()
+            .map(|hash| ContentHash::from_hex(hash).ok_or("malformed parent hash"))
+            .collect::<Result<Vec<_>, _>>()?;
         let signer = match (key, wire.sig.is_empty()) {
             (None, true) => None,
             (Some(_), true) => return Err("pubkey without a signature"),
@@ -645,8 +647,8 @@ impl TryFrom<WireIn> for Message {
             body: wire.body,
             signer,
             seq: wire.seq,
-            prev: wire.prev,
-            parents: wire.parents,
+            prev,
+            parents,
             shard: wire.shard,
             ext: wire.ext,
         })
@@ -927,7 +929,7 @@ impl Message {
             None => field(&[]),
         }
         match &self.prev {
-            Some(value) => field(value.as_bytes()),
+            Some(value) => field(&value.hex()),
             None => field(&[]),
         }
         // Parents (DAG causal links) are signed too. Serialized as their
@@ -943,11 +945,6 @@ impl Message {
     /// This message's content hash (SHA-256 of [`Message::canonical_bytes`], hex) —
     /// the id used by another author's `prev` backlink and by fork
     /// detection. Recomputed locally on receive; never trusted off the wire.
-    #[must_use]
-    pub fn content_hash_hex(&self) -> String {
-        self.content_hash().to_string()
-    }
-
     /// This message's content hash, as the typed value that the DAG and the fork index key on.
     #[must_use]
     pub fn content_hash(&self) -> ContentHash {
@@ -975,7 +972,7 @@ impl Message {
     /// `Msg` (`None` at `seq 0`). Consuming-builder so it composes with
     /// [`signed`](Self::signed): `Message::new_app(..).with_chain(..).signed(..)`.
     #[must_use]
-    pub fn with_chain(mut self, seq: u64, prev: Option<String>) -> Self {
+    pub fn with_chain(mut self, seq: u64, prev: Option<ContentHash>) -> Self {
         self.seq = Some(seq);
         self.prev = prev;
         self
@@ -985,7 +982,7 @@ impl Message {
     /// seen when authoring) before signing. Consuming-builder, composes
     /// with [`with_chain`](Self::with_chain) and [`signed`](Self::signed).
     #[must_use]
-    pub fn with_parents(mut self, parents: Vec<String>) -> Self {
+    pub fn with_parents(mut self, parents: Vec<ContentHash>) -> Self {
         self.parents = parents;
         self
     }
@@ -1077,8 +1074,8 @@ impl Message {
 #[derive(Debug)]
 pub struct ChainCtx {
     pub seq: u64,
-    pub prev: Option<String>,
-    pub parents: Vec<String>,
+    pub prev: Option<ContentHash>,
+    pub parents: Vec<ContentHash>,
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]

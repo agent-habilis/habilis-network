@@ -365,6 +365,7 @@ mod signing {
 
 mod chain {
     use super::super::{Message, MessageKind};
+    use crate::ContentHash;
     use crate::identity::Identity;
 
     fn msg(body: &str) -> Message {
@@ -373,20 +374,20 @@ mod chain {
 
     #[test]
     fn chained_message_carries_seq_prev_and_verifies() {
-        let prev = "a".repeat(64);
+        let prev = ContentHash::from_bytes([0xaa; 32]);
         let signed = msg("hi")
-            .with_chain(5, Some(prev.clone()))
+            .with_chain(5, Some(prev))
             .signed(&Identity::generate());
         assert_eq!(signed.seq, Some(5));
-        assert_eq!(signed.prev.as_deref(), Some(prev.as_str()));
+        assert_eq!(signed.prev, Some(prev));
         assert!(signed.verify_signature());
     }
 
     #[test]
     fn content_hash_is_stable_and_64_hex() {
         let stamped = msg("x").with_chain(0, None);
-        assert_eq!(stamped.content_hash_hex(), stamped.content_hash_hex());
-        assert_eq!(stamped.content_hash_hex().len(), 64);
+        assert_eq!(stamped.content_hash(), stamped.content_hash());
+        assert_eq!(stamped.content_hash().to_string().len(), 64);
     }
 
     #[test]
@@ -395,7 +396,7 @@ mod chain {
         // seq hash differently, so a receiver can prove the fork.
         let alpha = msg("alpha").with_chain(1, None);
         let beta = msg("beta").with_chain(1, None);
-        assert_ne!(alpha.content_hash_hex(), beta.content_hash_hex());
+        assert_ne!(alpha.content_hash(), beta.content_hash());
     }
 
     #[test]
@@ -407,7 +408,10 @@ mod chain {
 
     #[test]
     fn parents_are_signed_and_round_trip() {
-        let parents = vec!["a".repeat(64), "b".repeat(64)];
+        let parents = vec![
+            ContentHash::from_bytes([0xaa; 32]),
+            ContentHash::from_bytes([0xbb; 32]),
+        ];
         let signed = msg("hi")
             .with_chain(1, None)
             .with_parents(parents.clone())
@@ -421,9 +425,9 @@ mod chain {
     #[test]
     fn tampering_parents_breaks_signature() {
         let mut signed = msg("hi")
-            .with_parents(vec!["a".repeat(64)])
+            .with_parents(vec![ContentHash::from_bytes([0xaa; 32])])
             .signed(&Identity::generate());
-        signed.parents.push("b".repeat(64));
+        signed.parents.push(ContentHash::from_bytes([0xbb; 32]));
         assert!(!signed.verify_signature(), "parents are signed");
     }
 }
@@ -785,7 +789,7 @@ fn a_signed_message_keeps_its_wire_form() {
     assert_eq!(serde_json::to_string(&parsed).unwrap(), SIGNED_WIRE);
     assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
     assert_eq!(
-        parsed.content_hash_hex(),
+        parsed.content_hash().to_string(),
         "2e680fcb3a8d77ef027e722046200cf0b07c8d77d7572b7e0712556bfaf76e0e"
     );
     assert_eq!(
@@ -804,7 +808,7 @@ fn a_message_with_no_key_fields_parses_as_unsigned() {
     assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
     assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
     assert_eq!(
-        parsed.content_hash_hex(),
+        parsed.content_hash().to_string(),
         "7c4c2cb3f17ce751fec8a53c2d01198b424ce71aad8f5eb5747541222bd4c263"
     );
 }

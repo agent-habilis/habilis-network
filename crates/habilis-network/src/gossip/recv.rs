@@ -1004,14 +1004,7 @@ fn retain_and_index(
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
         }
         // Fold into the DAG tip set; flag a backdated timestamp.
-        // The wire carries each parent as text that `parse` checked; the typed list is built
-        // here until `Message::parents` holds hashes itself.
-        let parents: Vec<ContentHash> = message
-            .parents
-            .iter()
-            .filter_map(|parent| ContentHash::from_hex(parent))
-            .collect();
-        if state.note_dag(hash, &parents, message.timestamp) {
+        if state.note_dag(hash, &message.parents, message.timestamp) {
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, "message timestamp precedes a referenced parent; possible backdating");
         }
     }

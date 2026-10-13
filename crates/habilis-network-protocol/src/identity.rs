@@ -96,15 +96,6 @@ pub(crate) fn verify(pubkey: &PublicKey, bytes: &[u8], signature: &Signature) ->
     pubkey.verify(bytes, signature).is_ok()
 }
 
-/// SHA-256 content hash of `bytes`, lowercase hex — the self-certifying
-/// message id used by the per-author backlink (`prev`) and (Phase 3) the
-/// cross-author DAG. Computed from a message's canonical bytes, so it is
-/// recomputable by any receiver and never has to be trusted off the wire.
-#[must_use]
-pub fn content_hash_hex(bytes: &[u8]) -> String {
-    to_hex(&Sha256::digest(bytes))
-}
-
 /// A 16-byte dedup / anti-entropy key binding an author's public key to a
 /// message id: `SHA-256(pubkey ‖ id)[..16]`. Dedup and the digest key on
 /// this, not the bare id, so a peer that signs its own message under a
