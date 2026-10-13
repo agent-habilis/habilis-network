@@ -122,7 +122,7 @@ mod tests {
     fn known_mesh_id() -> String {
         use crate::mesh::{Mesh, MeshConfig, MeshName};
         Mesh::new(
-            [1u8; 32],
+            crate::crypto::Seed::from_bytes([1u8; 32]),
             MeshName::new("test").unwrap(),
             MeshConfig::loopback(),
         )
@@ -155,7 +155,7 @@ mod tests {
     fn invite_only_mesh() -> crate::mesh::Mesh {
         use crate::mesh::{Mesh, MeshConfig, MeshName};
         let mut mesh = Mesh::new(
-            [5u8; 32],
+            crate::crypto::Seed::from_bytes([5u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
         );

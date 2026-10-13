@@ -1,8 +1,9 @@
 use super::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy};
+use crate::crypto::Seed;
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
 
-fn dummy_seed() -> [u8; SEED_LEN] {
-    [7u8; SEED_LEN]
+fn dummy_seed() -> Seed {
+    Seed::from_bytes([7u8; SEED_LEN])
 }
 
 fn dummy_name() -> MeshName {
@@ -43,7 +44,7 @@ fn round_trip_loopback() {
 #[test]
 fn round_trip_public_preset() {
     let mesh = Mesh::new(
-        [0xABu8; SEED_LEN],
+        Seed::from_bytes([0xABu8; SEED_LEN]),
         dummy_name(),
         MeshConfig::public_preset(),
     );
@@ -124,8 +125,18 @@ fn seed_drives_rendezvous_identity() {
 
 #[test]
 fn different_seeds_yield_different_ids() {
-    let one = Mesh::new([1u8; SEED_LEN], dummy_name(), MeshConfig::loopback()).to_string();
-    let two = Mesh::new([2u8; SEED_LEN], dummy_name(), MeshConfig::loopback()).to_string();
+    let one = Mesh::new(
+        Seed::from_bytes([1u8; SEED_LEN]),
+        dummy_name(),
+        MeshConfig::loopback(),
+    )
+    .to_string();
+    let two = Mesh::new(
+        Seed::from_bytes([2u8; SEED_LEN]),
+        dummy_name(),
+        MeshConfig::loopback(),
+    )
+    .to_string();
     assert_ne!(one, two);
 }
 
@@ -406,6 +417,7 @@ mod prop {
     };
 
     use super::{Mesh, MeshConfig, MeshName, SEED_LEN};
+    use crate::crypto::Seed;
 
     fn arb_seed() -> impl Strategy<Value = [u8; SEED_LEN]> {
         uniform32(0u8..)
@@ -437,7 +449,7 @@ mod prop {
             name in arb_name(),
             config in arb_config(),
         ) {
-            let mesh = Mesh::new(seed, name.clone(), config.clone());
+            let mesh = Mesh::new(Seed::from_bytes(seed), name.clone(), config.clone());
             let decoded: Mesh = mesh.to_string().parse().expect("decode failed");
             prop_assert_eq!(decoded.seed(), mesh.seed());
             prop_assert_eq!(decoded.name, mesh.name);
@@ -446,7 +458,7 @@ mod prop {
 
         #[test]
         fn prop_bare_base58(seed in arb_seed(), name in arb_name()) {
-            let id = Mesh::new(seed, name, MeshConfig::loopback()).to_string();
+            let id = Mesh::new(Seed::from_bytes(seed), name, MeshConfig::loopback()).to_string();
             prop_assert!(!id.contains("://"));
             prop_assert!(id.is_ascii());
             prop_assert!(!id.is_empty());
@@ -458,7 +470,7 @@ mod prop {
             name in arb_name(),
             config in arb_config(),
         ) {
-            let mesh = Mesh::new(seed, name, config);
+            let mesh = Mesh::new(Seed::from_bytes(seed), name, config);
             prop_assert_eq!(mesh.to_string(), mesh.to_string());
         }
 
@@ -469,8 +481,8 @@ mod prop {
             name in arb_name(),
         ) {
             prop_assume!(seed_a != seed_b);
-            let one = Mesh::new(seed_a, name.clone(), MeshConfig::loopback()).to_string();
-            let two = Mesh::new(seed_b, name, MeshConfig::loopback()).to_string();
+            let one = Mesh::new(Seed::from_bytes(seed_a), name.clone(), MeshConfig::loopback()).to_string();
+            let two = Mesh::new(Seed::from_bytes(seed_b), name, MeshConfig::loopback()).to_string();
             prop_assert_ne!(one, two);
         }
     }

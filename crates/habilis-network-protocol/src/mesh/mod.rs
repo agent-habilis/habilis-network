@@ -170,14 +170,9 @@ impl fmt::Debug for Mesh {
 }
 
 impl Mesh {
-    #[must_use]
-    pub fn new(seed: [u8; SEED_LEN], name: MeshName, config: MeshConfig) -> Self {
-        Self::from_seed(Seed::from_bytes(seed), name, config)
-    }
-
     /// A mesh with the wire `seed` of its id.
     #[must_use]
-    pub fn from_seed(seed: Seed, name: MeshName, config: MeshConfig) -> Self {
+    pub fn new(seed: Seed, name: MeshName, config: MeshConfig) -> Self {
         Mesh {
             name,
             seed,

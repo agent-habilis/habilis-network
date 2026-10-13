@@ -55,7 +55,7 @@ const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/dom
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::new(
-        *DIRECTORY_BASE_SEED.derive(directory.as_bytes()).as_bytes(),
+        Seed::from_bytes(*DIRECTORY_BASE_SEED.derive(directory.as_bytes()).as_bytes()),
         directory.clone(),
         directory_config(lookups),
     )
