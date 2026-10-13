@@ -15,7 +15,7 @@ use n0_future::time::{Duration, Instant, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::addr::{Route, RouteHop};
-use crate::graph::Graph;
+use crate::graph::{Graph, Leg, Link};
 use crate::metric::LinkMetric;
 
 /// How long a vector stays without a newer one, unless the handle says otherwise.
@@ -292,9 +292,9 @@ impl Topology {
     /// we can't reach), so the returned list may be shorter than `max_paths` or
     /// empty.
     #[must_use]
-    pub fn route_to(&self, src: EndpointId, dst: EndpointId, max_paths: usize) -> Vec<Route> {
+    pub fn route_to(&self, leg: Leg, max_paths: usize) -> Vec<Route> {
         self.graph()
-            .disjoint_paths(src, dst, max_paths)
+            .disjoint_paths(leg, max_paths)
             .iter()
             .filter_map(|path| self.route_of(path))
             .collect()
@@ -306,13 +306,12 @@ impl Topology {
     #[must_use]
     pub(crate) fn route_to_avoiding_first_hops(
         &self,
-        src: EndpointId,
-        dst: EndpointId,
+        leg: Leg,
         refused: &std::collections::HashSet<EndpointId>,
     ) -> Option<Route> {
         let path = self
             .graph()
-            .shortest_path_avoiding_first_hops(src, dst, refused)?;
+            .shortest_path_avoiding_first_hops(leg, refused)?;
         self.route_of(&path)
     }
 
@@ -361,7 +360,11 @@ impl Topology {
         for held in self.vectors.values() {
             let vector = &held.vector;
             for (neighbor, metric) in &vector.links {
-                graph.insert_link(vector.origin, *neighbor, *metric);
+                graph.insert_link(Link {
+                    from: vector.origin,
+                    to: *neighbor,
+                    cost: *metric,
+                });
             }
         }
         graph
@@ -389,7 +392,7 @@ pub struct TopologyEdge {
 mod tests {
     use n0_future::time::{Duration, Instant};
 
-    use super::{LinkVector, Topology};
+    use super::{Leg, LinkVector, Topology};
     use iroh::{EndpointAddr, EndpointId, SecretKey};
 
     fn eid(seed: u8) -> EndpointId {
@@ -497,7 +500,7 @@ mod tests {
             "no edge of the crashed peer is left"
         );
         assert!(
-            store.route_to(na, nb, 1).is_empty(),
+            store.route_to(Leg { src: na, dst: nb }, 1).is_empty(),
             "its underlay is gone too"
         );
     }
@@ -612,7 +615,7 @@ mod tests {
         ingest(&mut store, vector(na, 1, &[(nb, 1)]));
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[]));
-        let before = store.route_to(na, nc, 1)[0].encode();
+        let before = store.route_to(Leg { src: na, dst: nc }, 1)[0].encode();
 
         let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
         let moved = EndpointAddr::new(nc)
@@ -622,7 +625,7 @@ mod tests {
             &mut store,
             LinkVector::signed(&secret_of(nc), 2, moved, Vec::new())
         ));
-        let after = store.route_to(na, nc, 1)[0].encode();
+        let after = store.route_to(Leg { src: na, dst: nc }, 1)[0].encode();
         assert_eq!(before, after, "the same route, the same bytes");
     }
 
@@ -634,7 +637,7 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(na, nd, 3);
+        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
         assert_eq!(routes.len(), 1);
         assert_eq!(
             routes[0]
@@ -680,7 +683,7 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         // nc never advertised its own vector, so its underlay addr is unknown.
         assert!(
-            store.route_to(na, nc, 3).is_empty(),
+            store.route_to(Leg { src: na, dst: nc }, 3).is_empty(),
             "missing hop underlay ⇒ no usable route"
         );
     }
@@ -693,7 +696,7 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nc, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(na, nd, 3);
+        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
         assert_eq!(
             routes.len(),
             1,
@@ -717,7 +720,7 @@ mod tests {
         ingest(&mut store, vector(nb, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nc, 1, &[(nd, 1)]));
         ingest(&mut store, vector(nd, 1, &[]));
-        let routes = store.route_to(na, nd, 3);
+        let routes = store.route_to(Leg { src: na, dst: nd }, 3);
         assert_eq!(routes.len(), 2, "both diamond arms");
         assert_ne!(routes[0].hops()[0].app_id, routes[1].hops()[0].app_id);
     }
@@ -733,7 +736,7 @@ mod tests {
     /// The application ids of the hops of the best route from `src` to `dst`.
     fn best_route(store: &Topology, src: EndpointId, dst: EndpointId) -> Option<Vec<EndpointId>> {
         store
-            .route_to(src, dst, 1)
+            .route_to(Leg { src, dst }, 1)
             .first()
             .map(|route| route.hops().iter().map(|hop| hop.app_id).collect())
     }
@@ -742,7 +745,7 @@ mod tests {
     fn best_cost(store: &Topology, src: EndpointId, dst: EndpointId) -> Option<u32> {
         store
             .graph()
-            .shortest_path(src, dst)
+            .shortest_path(Leg { src, dst })
             .map(|path| path.cost.get())
     }
 
@@ -768,7 +771,7 @@ mod tests {
         let (store, [src, n1, n2, dst, tab]) = native_and_browser_routes(BROWSER_COST);
         assert_eq!(best_route(&store, src, dst), Some(vec![n1, n2, dst]));
         assert_eq!(best_cost(&store, src, dst), Some(3 * NATIVE_COST));
-        let both = store.route_to(src, dst, 2);
+        let both = store.route_to(Leg { src, dst }, 2);
         assert_eq!(both.len(), 2, "the browser route is still a route");
         assert_eq!(both[1].hops()[0].app_id, tab);
 

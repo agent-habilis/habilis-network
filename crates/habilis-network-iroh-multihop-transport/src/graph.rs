@@ -20,6 +20,26 @@ pub(crate) struct Graph {
     adj: HashMap<EndpointId, Vec<(EndpointId, LinkMetric)>>,
 }
 
+/// The two ends of a route: the node a cell starts at and the node it must reach.
+///
+/// One struct for the pair, because both are an `EndpointId` and a call that swaps
+/// them compiles and routes the wrong way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Leg {
+    /// Where the route starts.
+    pub src: EndpointId,
+    /// Where the route must arrive.
+    pub dst: EndpointId,
+}
+
+/// A directed link `from -> to` and what it costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Link {
+    pub(crate) from: EndpointId,
+    pub(crate) to: EndpointId,
+    pub(crate) cost: LinkMetric,
+}
+
 /// A computed source route: the ordered hops **after** the source, up to and
 /// including the destination (`[first_hop, …, dst]`), and the path's total cost.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +52,8 @@ impl Graph {
     /// Record a usable directed link `from -> to`. An unusable
     /// ([`LinkMetric::INFINITE`]) cost is dropped — an unusable link is the same
     /// as an absent one.
-    pub(crate) fn insert_link(&mut self, from: EndpointId, to: EndpointId, cost: LinkMetric) {
+    pub(crate) fn insert_link(&mut self, link: Link) {
+        let Link { from, to, cost } = link;
         if cost.is_usable() {
             self.adj.entry(from).or_default().push((to, cost));
         }
@@ -41,8 +62,8 @@ impl Graph {
     /// Shortest path from `src` to `dst` by total [`LinkMetric`], or `None` when
     /// `dst` is unreachable.
     #[cfg(test)]
-    pub(crate) fn shortest_path(&self, src: EndpointId, dst: EndpointId) -> Option<Path> {
-        self.shortest_path_avoiding(src, dst, &HashSet::new())
+    pub(crate) fn shortest_path(&self, leg: Leg) -> Option<Path> {
+        self.shortest_path_avoiding(leg, &HashSet::new())
     }
 
     /// Up to `k` **node-disjoint** paths from `src` to `dst`, shortest first.
@@ -50,16 +71,11 @@ impl Graph {
     /// Interior-disjoint so one dead hop can't sever two routes at once
     /// (`src`/`dst` are shared by construction). Stops early when no further
     /// disjoint path exists.
-    pub(crate) fn disjoint_paths(
-        &self,
-        src: EndpointId,
-        dst: EndpointId,
-        max_paths: usize,
-    ) -> Vec<Path> {
+    pub(crate) fn disjoint_paths(&self, leg: Leg, max_paths: usize) -> Vec<Path> {
         let mut paths = Vec::new();
         let mut blocked: HashSet<EndpointId> = HashSet::new();
         for _ in 0..max_paths {
-            let Some(path) = self.shortest_path_avoiding(src, dst, &blocked) else {
+            let Some(path) = self.shortest_path_avoiding(leg, &blocked) else {
                 break;
             };
             // Interior hops = every hop except the final destination.
@@ -82,34 +98,28 @@ impl Graph {
     /// `src` is refused or leads nowhere.
     pub(crate) fn shortest_path_avoiding_first_hops(
         &self,
-        src: EndpointId,
-        dst: EndpointId,
+        leg: Leg,
         refused: &HashSet<EndpointId>,
     ) -> Option<Path> {
-        self.shortest_path_with(src, dst, &HashSet::new(), refused)
+        self.shortest_path_with(leg, &HashSet::new(), refused)
     }
 
     /// Dijkstra that treats every node in `blocked` as absent — the primitive
     /// behind node-disjoint search. `dst` is never blocked even if the caller
     /// lists it.
-    fn shortest_path_avoiding(
-        &self,
-        src: EndpointId,
-        dst: EndpointId,
-        blocked: &HashSet<EndpointId>,
-    ) -> Option<Path> {
-        self.shortest_path_with(src, dst, blocked, &HashSet::new())
+    fn shortest_path_avoiding(&self, leg: Leg, blocked: &HashSet<EndpointId>) -> Option<Path> {
+        self.shortest_path_with(leg, blocked, &HashSet::new())
     }
 
     /// Dijkstra with both rules: `blocked` nodes are absent, and the links from
     /// `src` to a node in `refused_first` are absent.
     fn shortest_path_with(
         &self,
-        src: EndpointId,
-        dst: EndpointId,
+        leg: Leg,
         blocked: &HashSet<EndpointId>,
         refused_first: &HashSet<EndpointId>,
     ) -> Option<Path> {
+        let Leg { src, dst } = leg;
         let mut best: HashMap<EndpointId, LinkMetric> = HashMap::new();
         let mut prev: HashMap<EndpointId, EndpointId> = HashMap::new();
         let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
@@ -123,7 +133,7 @@ impl Graph {
         while let Some(HeapEntry { cost, node }) = heap.pop() {
             if node == dst {
                 return Some(Path {
-                    hops: reconstruct(&prev, src, dst),
+                    hops: reconstruct(&prev, leg),
                     cost,
                 });
             }
@@ -201,11 +211,8 @@ fn relax(
 
 /// Walk `prev` from `dst` back to `src`, returning the hops after `src` in
 /// forward order (`[first_hop, …, dst]`).
-fn reconstruct(
-    prev: &HashMap<EndpointId, EndpointId>,
-    src: EndpointId,
-    dst: EndpointId,
-) -> Vec<EndpointId> {
+fn reconstruct(prev: &HashMap<EndpointId, EndpointId>, leg: Leg) -> Vec<EndpointId> {
+    let Leg { src, dst } = leg;
     let mut hops = vec![dst];
     let mut cur = dst;
     while let Some(&parent) = prev.get(&cur) {
@@ -252,7 +259,7 @@ impl PartialOrd for HeapEntry {
 mod tests {
     use iroh::{EndpointId, SecretKey};
 
-    use super::{Graph, LinkMetric};
+    use super::{Graph, Leg, Link, LinkMetric};
 
     fn eid(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
@@ -260,8 +267,17 @@ mod tests {
 
     /// A bidirectional link `left <-> right` of equal cost each way.
     fn link(graph: &mut Graph, left: EndpointId, right: EndpointId, cost: u32) {
-        graph.insert_link(left, right, LinkMetric::new(cost));
-        graph.insert_link(right, left, LinkMetric::new(cost));
+        let cost = LinkMetric::new(cost);
+        graph.insert_link(Link {
+            from: left,
+            to: right,
+            cost,
+        });
+        graph.insert_link(Link {
+            from: right,
+            to: left,
+            cost,
+        });
     }
 
     #[test]
@@ -273,7 +289,7 @@ mod tests {
         link(&mut graph, via, dst, 1);
         let refusing = |nodes: &[EndpointId]| nodes.iter().copied().collect();
 
-        let path = |refused| graph.shortest_path_avoiding_first_hops(src, dst, &refused);
+        let path = |refused| graph.shortest_path_avoiding_first_hops(Leg { src, dst }, &refused);
         assert_eq!(path(refusing(&[])).expect("direct").hops, vec![dst]);
         assert_eq!(
             path(refusing(&[dst])).expect("through via").hops,
@@ -304,7 +320,7 @@ mod tests {
         link(&mut graph, src, via, 5);
         let refused = std::iter::once(via).collect();
         let path = graph
-            .shortest_path_avoiding_first_hops(src, dst, &refused)
+            .shortest_path_avoiding_first_hops(Leg { src, dst }, &refused)
             .expect("a route");
         assert_eq!(path.hops, vec![near, via, dst]);
     }
@@ -315,7 +331,9 @@ mod tests {
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 5);
         link(&mut graph, nb, nc, 7);
-        let path = graph.shortest_path(na, nc).expect("reachable");
+        let path = graph
+            .shortest_path(Leg { src: na, dst: nc })
+            .expect("reachable");
         assert_eq!(path.hops, vec![nb, nc]);
         assert_eq!(path.cost, LinkMetric::new(12));
     }
@@ -328,7 +346,9 @@ mod tests {
         link(&mut graph, nb, nc, 1);
         link(&mut graph, nc, nd, 1);
         link(&mut graph, na, nd, 1);
-        let path = graph.shortest_path(na, nd).expect("reachable");
+        let path = graph
+            .shortest_path(Leg { src: na, dst: nd })
+            .expect("reachable");
         assert_eq!(path.hops, vec![nd]);
         assert_eq!(path.cost, LinkMetric::new(1));
     }
@@ -341,7 +361,9 @@ mod tests {
         link(&mut graph, nb, nc, 1);
         link(&mut graph, nc, nd, 1);
         link(&mut graph, na, nd, 10);
-        let path = graph.shortest_path(na, nd).expect("reachable");
+        let path = graph
+            .shortest_path(Leg { src: na, dst: nd })
+            .expect("reachable");
         assert_eq!(path.hops, vec![nb, nc, nd]);
         assert_eq!(path.cost, LinkMetric::new(3));
     }
@@ -351,15 +373,26 @@ mod tests {
         let (na, nb, lonely) = (eid(1), eid(2), eid(9));
         let mut graph = Graph::default();
         link(&mut graph, na, nb, 1);
-        assert!(graph.shortest_path(na, lonely).is_none());
+        assert!(
+            graph
+                .shortest_path(Leg {
+                    src: na,
+                    dst: lonely
+                })
+                .is_none()
+        );
     }
 
     #[test]
     fn infinite_links_are_dropped() {
         let (na, nb) = (eid(1), eid(2));
         let mut graph = Graph::default();
-        graph.insert_link(na, nb, LinkMetric::INFINITE);
-        assert!(graph.shortest_path(na, nb).is_none());
+        graph.insert_link(Link {
+            from: na,
+            to: nb,
+            cost: LinkMetric::INFINITE,
+        });
+        assert!(graph.shortest_path(Leg { src: na, dst: nb }).is_none());
     }
 
     #[test]
@@ -371,7 +404,7 @@ mod tests {
         link(&mut graph, nb, nd, 1);
         link(&mut graph, na, nc, 1);
         link(&mut graph, nc, nd, 1);
-        let paths = graph.disjoint_paths(na, nd, 2);
+        let paths = graph.disjoint_paths(Leg { src: na, dst: nd }, 2);
         assert_eq!(paths.len(), 2, "both diamond arms are available");
         assert_ne!(paths[0].hops[0], paths[1].hops[0]);
         for path in &paths {
@@ -385,7 +418,7 @@ mod tests {
         let mut graph = Graph::default();
         link(&mut graph, na, nr, 1);
         link(&mut graph, nr, nd, 1);
-        let paths = graph.disjoint_paths(na, nd, 3);
+        let paths = graph.disjoint_paths(Leg { src: na, dst: nd }, 3);
         assert_eq!(
             paths.len(),
             1,

@@ -65,6 +65,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use n0_future::time::{Duration, Instant};
 
 pub use addr::{Route, RouteHop};
+pub use graph::Leg;
 
 /// What the data path of a node counted: a test reads them to tell where cells go.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

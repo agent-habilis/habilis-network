@@ -16,6 +16,7 @@ use iroh::endpoint_info::{EndpointData, EndpointInfo};
 use n0_future::{boxed::BoxStream, stream};
 
 use crate::addr::Route;
+use crate::graph::Leg;
 use crate::topology::Topology;
 use crate::underlay::Forwarder;
 
@@ -80,13 +81,17 @@ impl RouteChooser {
     pub(crate) fn choose(&self, dst: EndpointId) -> Option<Chosen> {
         let refused: HashSet<EndpointId> = self.forwarder.refusing_hops().into_iter().collect();
         let topology = self.topology.read().expect("topology lock poisoned");
-        let shortest = topology.route_to(self.self_id, dst, 1).into_iter().next();
+        let leg = Leg {
+            src: self.self_id,
+            dst,
+        };
+        let shortest = topology.route_to(leg, 1).into_iter().next();
         let first_is_refused = shortest
             .as_ref()
             .and_then(|route| route.hops().first())
             .is_some_and(|hop| refused.contains(&hop.app_id));
         if first_is_refused
-            && let Some(route) = topology.route_to_avoiding_first_hops(self.self_id, dst, &refused)
+            && let Some(route) = topology.route_to_avoiding_first_hops(leg, &refused)
         {
             return Some(Chosen {
                 route,
