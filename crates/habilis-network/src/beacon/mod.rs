@@ -127,6 +127,9 @@ pub(crate) struct Rendezvous {
     /// slot in. The peer endpoint has its own pair, which says nothing about
     /// who depends on the beacon. `None` where the beacon carries no lane.
     lane: RendezvousLane,
+    /// The members that linked to this beacon, as its gossip task saw them come up. The holder
+    /// reads them: a member that it does not know is a sign that another group may exist.
+    arrivals: mpsc::Receiver<EndpointId>,
 }
 
 /// A beacon's `WebRTC` answerer and the table that admits its sessions.
@@ -220,6 +223,15 @@ impl Rendezvous {
         self.endpoint.set_alpns(Vec::new());
     }
 
+    /// The members that linked to this beacon since the last call.
+    pub(crate) fn take_arrivals(&mut self) -> Vec<EndpointId> {
+        let mut arrived = Vec::new();
+        while let Ok(id) = self.arrivals.try_recv() {
+            arrived.push(id);
+        }
+        arrived
+    }
+
     /// A beacon holding `endpoint` whose answerer is `lane`, for a test that
     /// needs a held beacon without a claim.
     #[cfg(test)]
@@ -229,6 +241,7 @@ impl Rendezvous {
             monitor: None,
             endpoint,
             lane,
+            arrivals: mpsc::channel(1).1,
         }
     }
 
@@ -1300,6 +1313,8 @@ async fn claim_holder(
     let monitor_homed = params.bootstrap_relay.is_some();
     let monitor_rung_tx = params.rung_tx.clone();
     let rendezvous_endpoint = endpoint.clone();
+    // A bounded channel and `try_send`: a sign that is lost to a burst is one of many.
+    let (arrivals_tx, arrivals) = mpsc::channel(32);
 
     let task = n0_future::task::spawn(async move {
         use futures_util::StreamExt as _;
@@ -1322,8 +1337,13 @@ async fn claim_holder(
         let _gossip = gossip;
         let (_sender, mut receiver) = topic.split();
         // App payloads are discarded — this node only relays the gossip
-        // overlay. Ends when the topic terminally closes.
-        while receiver.next().await.is_some() {}
+        // overlay. Who links to it is reported to the holder, which reads it as a sign of
+        // another group. Ends when the topic terminally closes.
+        while let Some(event) = receiver.next().await {
+            if let Ok(iroh_gossip::api::Event::NeighborUp(id)) = event {
+                let _ = arrivals_tx.try_send(id);
+            }
+        }
     });
 
     // Relay liveness/discovery, off this gossip task: never stops
@@ -1339,6 +1359,7 @@ async fn claim_holder(
         monitor,
         endpoint: rendezvous_endpoint,
         lane,
+        arrivals,
     });
     Held::Claimed
 }
@@ -1931,6 +1952,7 @@ mod tests {
             monitor: None,
             endpoint,
             lane: None,
+            arrivals: tokio::sync::mpsc::channel(1).1,
         }
     }
 
@@ -2049,6 +2071,7 @@ mod tests {
                 monitor: Some(monitor),
                 endpoint,
                 lane: None,
+                arrivals: tokio::sync::mpsc::channel(1).1,
             };
 
             rendezvous.shed_and_wait().await;
@@ -2318,6 +2341,7 @@ mod tests {
             monitor: None,
             endpoint: endpoint.clone(),
             lane: None,
+            arrivals: tokio::sync::mpsc::channel(1).1,
         });
 
         assert!(!releasable(&mut slot), "a live beacon is not releasable");
@@ -2446,6 +2470,74 @@ mod tests {
         assert!(
             linked,
             "the holder never reached its own rendezvous: nothing registered its address, and with every lookup off nothing can resolve it"
+        );
+    }
+
+    /// The holder learns who links to its beacon. The re-check of a holder that knows no member
+    /// is an hour or two out, and a member that arrives is the sign that it must look sooner.
+    #[tokio::test]
+    async fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
+        use futures_util::StreamExt as _;
+        use iroh_gossip::api::Event;
+
+        let params = public_params();
+        let peer = loopback_endpoint().await;
+        let (gossip, router, _book) = crate::lookup::build_mesh(
+            peer.clone(),
+            crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            None,
+            None,
+            Vec::new(),
+            false,
+            false,
+        );
+        let (sender, mut receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+        assert!(
+            ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
+            "a public rendezvous is claimed when no probe is asked for"
+        );
+        sender
+            .join_peers(vec![params.id])
+            .await
+            .expect("ask the gossip to join the rendezvous");
+        let linked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match receiver.next().await {
+                    Some(Ok(Event::NeighborUp(id))) if id == params.id => return,
+                    Some(_) => {}
+                    None => std::future::pending::<()>().await,
+                }
+            }
+        })
+        .await
+        .is_ok();
+        let mut arrivals = Vec::new();
+        if let Some(held) = beacon.as_mut() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while arrivals.is_empty() {
+                    arrivals.extend(held.take_arrivals());
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+        }
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        let _ = router.shutdown().await;
+        assert!(linked, "the member never linked to the beacon");
+        assert!(
+            arrivals.contains(&peer.id()),
+            "the beacon did not report the member that linked to it"
         );
     }
 

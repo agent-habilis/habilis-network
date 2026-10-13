@@ -758,6 +758,14 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         // from the one place that owns it, so that no path that claims or sheds
         // the beacon has to remember to say so.
         state.hosts_rendezvous = rendezvous.is_some();
+        // A member that links to our beacon and that we do not know is a sign of another group.
+        if let Some(held) = rendezvous.as_mut() {
+            for arrived in held.take_arrivals() {
+                if arrived != endpoint.id() && !state.known_endpoints.contains(&arrived) {
+                    state.note_second_group_sign(endpoint.id(), Instant::now());
+                }
+            }
+        }
         // Said in our `PeerInfo` from here, for the same reason: no claim or shed path has to
         // remember to send it again.
         if state.hosts_rendezvous != state.beacon_flag_flooded {

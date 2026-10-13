@@ -574,6 +574,9 @@ pub struct EventLoopState {
     /// rival started within seconds of us; later rounds run the steady
     /// jittered cadence.
     pub(crate) rival_recheck_rounds: u32,
+    /// When a sign of a second group last brought the re-check forward
+    /// ([`Self::note_second_group_sign`]).
+    pub(crate) second_group_sign_at: Option<Instant>,
     /// Consecutive due sheds held back because a data-channel peer depends
     /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
     /// fresh claim (`beacon_arm::schedule_rival_recheck`).
@@ -997,6 +1000,7 @@ impl EventLoopState {
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
+            second_group_sign_at: None,
             rival_recheck_deferrals: 0,
             beacon_closing: None,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
@@ -1391,6 +1395,34 @@ impl EventLoopState {
                     .map_or(pushed, |due| due.max(pushed)),
             );
         }
+    }
+
+    /// A sign that another group of this mesh may exist: a member that we do not know linked to
+    /// our beacon, or the LAN named a member that we are not linked to.
+    ///
+    /// A holder that has found no member re-checks its rendezvous only every hour or two, and two
+    /// such holders of one room can stay apart that long. The sign brings the next re-check to
+    /// the fast base and starts the rounds from it again, so a node that nobody approaches keeps
+    /// its long wait. A sign counts once per steady interval: a burst of arrivals must not shed
+    /// the beacon again and again.
+    pub(crate) fn note_second_group_sign(&mut self, own: EndpointId, now: Instant) {
+        let Some(due) = self.next_rival_recheck.filter(|_| self.hosts_rendezvous) else {
+            return;
+        };
+        let spacing = Duration::from_secs(crate::util::tuning::rival_recheck_meshed_secs());
+        if self
+            .second_group_sign_at
+            .is_some_and(|at| now.saturating_duration_since(at) < spacing)
+        {
+            return;
+        }
+        let brisk = now + super::beacon_arm::next_recheck_delay(0, self.peers.len(), own);
+        if due <= brisk {
+            return;
+        }
+        self.second_group_sign_at = Some(now);
+        self.rival_recheck_rounds = 0;
+        self.next_rival_recheck = Some(brisk);
     }
 
     /// Whether some member is known to hold the rendezvous.
@@ -2159,6 +2191,97 @@ mod tests {
         assert!(next > now, "a steady round out, not due");
         assert_eq!(state.rival_recheck_rounds, 2, "the rounds stay");
         assert_eq!(state.rival_recheck_deferrals, 1, "the deferrals stay");
+    }
+
+    /// The longest wait that the first round of a re-check can have: its fast base plus the
+    /// offset of the id.
+    fn brisk_wait() -> Duration {
+        Duration::from_secs(
+            crate::util::tuning::rival_recheck_first_secs()
+                + crate::util::tuning::RIVAL_RECHECK_OFFSET_SPAN_SECS,
+        )
+    }
+
+    /// A holder that has found no member has a re-check an hour or two out. A sign that another
+    /// group may exist is all it has to go on: the re-check comes back to the fast base, and the
+    /// rounds start from it again.
+    #[test]
+    fn a_sign_of_a_second_group_brings_the_re_check_to_the_brisk_base() {
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        state.rival_recheck_rounds = 7;
+        let now = Instant::now();
+        state.next_rival_recheck = Some(now + Duration::from_hours(1));
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        let next = state.next_rival_recheck.expect("a re-check is armed");
+        assert!(
+            next <= now + brisk_wait(),
+            "the re-check is due within the fast base"
+        );
+        assert_eq!(state.rival_recheck_rounds, 0, "the rounds start again");
+    }
+
+    /// A burst of members that arrive must not shed the beacon again and again.
+    #[test]
+    fn a_second_sign_inside_one_steady_interval_changes_nothing() {
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        state.next_rival_recheck = Some(far);
+        state.note_second_group_sign(endpoint_id(1), now);
+        assert!(
+            state.next_rival_recheck.is_some_and(|next| next < far),
+            "the first sign counts"
+        );
+
+        state.next_rival_recheck = Some(far);
+        state.rival_recheck_rounds = 3;
+        state.note_second_group_sign(endpoint_id(1), now + Duration::from_secs(10));
+
+        assert_eq!(state.next_rival_recheck, Some(far));
+        assert_eq!(state.rival_recheck_rounds, 3);
+    }
+
+    #[test]
+    fn a_sign_changes_nothing_while_we_do_not_hold_the_beacon() {
+        let mut state = fresh_state();
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        state.next_rival_recheck = Some(far);
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        assert_eq!(state.next_rival_recheck, Some(far));
+    }
+
+    /// A loopback room has no re-check, and the creator never has one: a sign arms nothing.
+    #[test]
+    fn a_sign_arms_no_re_check_where_none_applies() {
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        state.next_rival_recheck = None;
+
+        state.note_second_group_sign(endpoint_id(1), Instant::now());
+
+        assert_eq!(state.next_rival_recheck, None);
+    }
+
+    #[test]
+    fn a_sign_does_not_push_out_a_re_check_that_is_due_sooner() {
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        state.rival_recheck_rounds = 4;
+        let now = Instant::now();
+        let soon = now + Duration::from_secs(1);
+        state.next_rival_recheck = Some(soon);
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        assert_eq!(state.next_rival_recheck, Some(soon));
+        assert_eq!(state.rival_recheck_rounds, 4);
     }
 
     /// A flag is remembered only from a proven sender that is not us, and moves our re-check

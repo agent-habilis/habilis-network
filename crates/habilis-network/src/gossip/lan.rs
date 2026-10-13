@@ -116,6 +116,9 @@ pub(crate) async fn on_lan_event(
     match event {
         LanEvent::Seen(addr) => {
             let linked = state.linked_endpoints.contains(&addr.id);
+            if !linked {
+                state.note_second_group_sign(ctx.endpoint.id(), Instant::now());
+            }
             if state.lan_grafts.plan(&addr, linked, Instant::now()) {
                 ask(addr, state, ctx).await;
             }
@@ -302,6 +305,49 @@ mod tests {
             2,
             "the member is asked again once its wait is over"
         );
+    }
+
+    /// A member of this mesh that the LAN names and that is not a neighbor is a sign that
+    /// another group of the mesh may exist: the re-check of a holder comes back to its fast base.
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn a_member_of_the_lan_that_is_not_a_neighbor_is_a_sign_of_a_second_group() {
+        use crate::lookup::LanEvent;
+        use crate::testing::LaneNode;
+
+        let node = LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        state.hosts_rendezvous = true;
+        let far = Instant::now() + Duration::from_hours(1);
+        state.next_rival_recheck = Some(far);
+
+        super::on_lan_event(LanEvent::Seen(member(1)), &mut state, &ctx).await;
+
+        assert!(
+            state.next_rival_recheck.is_some_and(|next| next < far),
+            "the re-check came back from an hour out"
+        );
+    }
+
+    #[cfg(feature = "host")]
+    #[tokio::test]
+    async fn a_member_of_the_lan_that_is_a_neighbor_is_no_sign() {
+        use crate::lookup::LanEvent;
+        use crate::testing::LaneNode;
+
+        let node = LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        state.hosts_rendezvous = true;
+        let far = Instant::now() + Duration::from_hours(1);
+        state.next_rival_recheck = Some(far);
+        let addr = member(1);
+        state.linked_endpoints.insert(addr.id);
+
+        super::on_lan_event(LanEvent::Seen(addr), &mut state, &ctx).await;
+
+        assert_eq!(state.next_rival_recheck, Some(far));
     }
 
     #[test]
