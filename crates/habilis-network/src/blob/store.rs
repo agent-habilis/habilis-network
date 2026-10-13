@@ -13,7 +13,9 @@ use anyhow::{Context, Result};
 
 use crate::util::consts::MAX_BLOB_STORE_BYTES;
 
-use super::{ContentId, HASH_LEN, SECRET_LEN};
+use crate::protocol::crypto::BlobSecret;
+
+use super::{ContentId, HASH_LEN};
 
 /// One spooled blob: the metadata the fetch path needs, plus the spool path to
 /// stream from. No bytes are held.
@@ -23,11 +25,11 @@ pub(crate) struct BlobEntry {
     /// The value the producer compares a presented token against
     /// (constant-time): the raw bearer secret, or — when the blob is
     /// password-protected — the Argon2id stretch of the ticket's public salt.
-    pub secret: [u8; SECRET_LEN],
+    pub secret: BlobSecret,
     /// The public salt the ticket carries (equal to `secret` when not
     /// passworded). Retained so a deduped re-registration mints a ticket that
     /// still matches this entry's compare `secret`.
-    ticket_secret: [u8; SECRET_LEN],
+    ticket_secret: BlobSecret,
     /// Whether the minted ticket is password-protected.
     password: bool,
     content_id: ContentId,
@@ -39,15 +41,15 @@ pub(crate) struct BlobEntry {
 /// carries, the value the fetch handshake is compared against (equal to the salt
 /// when not passworded, its Argon2id stretch otherwise), and the password flag.
 pub(crate) struct NewSecret {
-    pub ticket_secret: [u8; SECRET_LEN],
-    pub compare_secret: [u8; SECRET_LEN],
+    pub ticket_secret: BlobSecret,
+    pub compare_secret: BlobSecret,
     pub password: bool,
 }
 
 /// What a registration hands back for building the ticket: the public salt the
 /// ticket carries and whether it is password-protected.
 pub(crate) struct Registered {
-    pub ticket_secret: [u8; SECRET_LEN],
+    pub ticket_secret: BlobSecret,
     pub password: bool,
 }
 
@@ -108,7 +110,7 @@ impl BlobStore {
         } = meta;
         if let Some(entry) = self.map.get(&sha256) {
             return Ok(Registered {
-                ticket_secret: entry.ticket_secret,
+                ticket_secret: entry.ticket_secret.clone(),
                 password: entry.password,
             });
         }
@@ -122,8 +124,8 @@ impl BlobStore {
             BlobEntry {
                 path: dest,
                 size,
-                secret: secret.compare_secret,
-                ticket_secret: secret.ticket_secret,
+                secret: secret.compare_secret.clone(),
+                ticket_secret: secret.ticket_secret.clone(),
                 password: secret.password,
                 content_id,
                 seq,
@@ -131,7 +133,7 @@ impl BlobStore {
         );
         self.evict_to_budget();
         Ok(Registered {
-            ticket_secret: secret.ticket_secret,
+            ticket_secret: secret.ticket_secret.clone(),
             password: secret.password,
         })
     }
@@ -146,7 +148,7 @@ impl BlobStore {
     /// re-offloading content it already holds.
     pub(crate) fn registered(&self, hash: &[u8; HASH_LEN]) -> Option<Registered> {
         self.map.get(hash).map(|entry| Registered {
-            ticket_secret: entry.ticket_secret,
+            ticket_secret: entry.ticket_secret.clone(),
             password: entry.password,
         })
     }
@@ -235,6 +237,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::{BlobStore, ContentMeta};
     use crate::blob::{ContentId, HASH_LEN, SECRET_LEN};
+    use crate::protocol::crypto::BlobSecret;
     use rand::RngCore;
     use std::fs;
     use std::path::PathBuf;
@@ -251,8 +254,8 @@ mod tests {
     /// A passwordless capability: the ticket secret is also the compare secret.
     fn plain_secret(secret: [u8; SECRET_LEN]) -> super::NewSecret {
         super::NewSecret {
-            ticket_secret: secret,
-            compare_secret: secret,
+            ticket_secret: BlobSecret::from_bytes(secret),
+            compare_secret: BlobSecret::from_bytes(secret),
             password: false,
         }
     }
@@ -276,7 +279,7 @@ mod tests {
                 &plain_secret([9u8; SECRET_LEN]),
             )
             .unwrap();
-        assert_eq!(registered.ticket_secret, [9u8; SECRET_LEN]);
+        assert_eq!(registered.ticket_secret.as_bytes(), &[9u8; SECRET_LEN]);
         assert!(!registered.password);
 
         let entry = store.get(&hash).expect("entry present");
@@ -316,9 +319,10 @@ mod tests {
                 &plain_secret([2u8; SECRET_LEN]),
             )
             .unwrap();
-        assert_eq!(first.ticket_secret, [1u8; SECRET_LEN]);
+        assert_eq!(first.ticket_secret.as_bytes(), &[1u8; SECRET_LEN]);
         assert_eq!(
-            second.ticket_secret, first.ticket_secret,
+            second.ticket_secret.as_bytes(),
+            first.ticket_secret.as_bytes(),
             "dedup must return the first registration's secret"
         );
 

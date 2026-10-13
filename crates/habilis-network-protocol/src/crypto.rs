@@ -231,6 +231,33 @@ pub(crate) fn password_verifier(key: &[u8; 32]) -> [u8; PASSWORD_VERIFIER_LEN] {
     out
 }
 
+/// The 32-byte bearer secret of a ticket. Whoever holds it can redeem the
+/// ticket, so `Debug` prints no byte, and the type has no `PartialEq`: compare
+/// two with [`ct_eq`] on [`Self::as_bytes`], which does not stop at the first
+/// byte that differs.
+#[derive(Clone)]
+pub struct BlobSecret([u8; 32]);
+
+impl BlobSecret {
+    /// Wrap 32 raw bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes, borrowed.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for BlobSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BlobSecret(***)")
+    }
+}
+
 /// The 32 bytes a bridge consumer presents on connect and a producer
 /// expects: the raw ticket secret (no password), or its Argon2id stretch
 /// salted by the secret (passworded) — same wire size either way, so a
@@ -248,7 +275,7 @@ impl TicketAuth {
     /// an application minting its own ticket kind passes its own label through
     /// [`Self::derive`] rather than reusing this one.
     #[must_use]
-    pub fn blob(secret: &[u8; 32], password: Option<&Password>) -> Self {
+    pub fn blob(secret: &BlobSecret, password: Option<&Password>) -> Self {
         Self::derive(secret, password, b"blob-ticket")
     }
 
@@ -259,14 +286,14 @@ impl TicketAuth {
     /// distinct per kind; reusing another kind's label collapses the separation
     /// [`Self::blob`] documents.
     #[must_use]
-    pub fn derive(secret: &[u8; 32], password: Option<&Password>, label: &[u8]) -> Self {
+    pub fn derive(secret: &BlobSecret, password: Option<&Password>, label: &[u8]) -> Self {
         match password {
             Some(password) => Self {
-                token: stretch_password(password, secret, label),
+                token: stretch_password(password, secret.as_bytes(), label),
                 password_protected: true,
             },
             None => Self {
-                token: *secret,
+                token: *secret.as_bytes(),
                 password_protected: false,
             },
         }
@@ -490,8 +517,9 @@ mod password_tests {
     /// here breaks each passworded ticket that exists outside the code.
     #[test]
     fn derive_token_matches_the_golden_bytes() {
-        use super::TicketAuth;
-        let auth = TicketAuth::derive(&[3u8; 32], Some(&pw("hunter2")), b"blob-ticket");
+        use super::{BlobSecret, TicketAuth};
+        let secret = BlobSecret::from_bytes([3u8; 32]);
+        let auth = TicketAuth::derive(&secret, Some(&pw("hunter2")), b"blob-ticket");
         assert!(auth.password_protected);
         assert_eq!(
             hex(&auth.token),
@@ -508,9 +536,17 @@ mod password_tests {
     }
 
     #[test]
+    fn blob_secret_debug_never_prints_a_byte() {
+        use super::BlobSecret;
+        let secret = BlobSecret::from_bytes([9u8; 32]);
+        assert_eq!(format!("{secret:?}"), "BlobSecret(***)");
+        assert_eq!(secret.as_bytes(), &[9u8; 32]);
+    }
+
+    #[test]
     fn ticket_tokens_are_domain_separated_by_label() {
-        use super::TicketAuth;
-        let secret = [3u8; 32];
+        use super::{BlobSecret, TicketAuth};
+        let secret = BlobSecret::from_bytes([3u8; 32]);
         let password = pw("hunter2");
         let blob = TicketAuth::blob(&secret, Some(&password)).token;
         // Stands in for any application-minted kind (the application's bridge passes
@@ -521,10 +557,10 @@ mod password_tests {
             "the same password+secret must yield different tokens per ticket kind"
         );
         // Without a password both are the raw secret (no stretch, no label).
-        assert_eq!(TicketAuth::blob(&secret, None).token, secret);
+        assert_eq!(TicketAuth::blob(&secret, None).token, [3u8; 32]);
         assert_eq!(
             TicketAuth::derive(&secret, None, b"other-ticket").token,
-            secret
+            [3u8; 32]
         );
     }
 }

@@ -20,7 +20,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::Mutex;
 
 use crate::lookup::build_endpoint;
-use crate::protocol::crypto::{Password, TicketAuth, ct_eq};
+use crate::protocol::crypto::{BlobSecret, Password, TicketAuth, ct_eq};
 use crate::protocol::mesh::LookupOpts;
 use crate::util::consts::MAX_BLOB_BYTES;
 
@@ -197,16 +197,21 @@ impl BlobServer {
         if let Some(existing) = self.store.lock().await.registered(&sha256) {
             return Ok(ticket(existing));
         }
-        let mut salt = [0u8; SECRET_LEN];
-        rand::rng().fill_bytes(&mut salt);
+        let mut salt_bytes = [0u8; SECRET_LEN];
+        rand::rng().fill_bytes(&mut salt_bytes);
+        let salt = BlobSecret::from_bytes(salt_bytes);
         let compare = match self.password.clone() {
             Some(password) => {
                 // ~100ms of Argon2id off the async worker (mirrors mesh join).
-                tokio::task::spawn_blocking(move || TicketAuth::blob(&salt, Some(&password)).token)
-                    .await
-                    .context("blob token stretch task panicked")?
+                let stretch_salt = salt.clone();
+                let token = tokio::task::spawn_blocking(move || {
+                    TicketAuth::blob(&stretch_salt, Some(&password)).token
+                })
+                .await
+                .context("blob token stretch task panicked")?;
+                BlobSecret::from_bytes(token)
             }
-            None => salt,
+            None => salt.clone(),
         };
         let registered = self.store.lock().await.snapshot(
             path,
@@ -343,7 +348,9 @@ async fn serve_stream(
         let guard = store.lock().await;
         match guard.get(&hash) {
             None => None,
-            Some(entry) if ct_eq(&token, &entry.secret) => Some((entry.path.clone(), entry.size)),
+            Some(entry) if ct_eq(&token, entry.secret.as_bytes()) => {
+                Some((entry.path.clone(), entry.size))
+            }
             Some(_) => {
                 conn.close(BAD_SECRET.into(), b"bad secret");
                 return Ok(());

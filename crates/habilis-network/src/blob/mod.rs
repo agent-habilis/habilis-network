@@ -429,7 +429,8 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.secret = [0u8; super::SECRET_LEN]; // forge a wrong bearer secret
+        // Forge a wrong bearer secret.
+        ticket.secret = crate::protocol::crypto::BlobSecret::from_bytes([0u8; super::SECRET_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),

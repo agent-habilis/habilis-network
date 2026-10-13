@@ -120,7 +120,7 @@ fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<[u8; S
         (true, Some(pw)) => Ok(TicketAuth::blob(&ticket.secret, Some(pw)).token),
         (true, None) => bail!("this blob ticket is password-protected — pass --password"),
         (false, Some(_)) => bail!("this blob ticket has no password — drop --password"),
-        (false, None) => Ok(ticket.secret),
+        (false, None) => Ok(*ticket.secret.as_bytes()),
     }
 }
 

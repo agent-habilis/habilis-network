@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use iroh::EndpointAddr;
 
 use crate::protocol::base58check::{self, take_array};
+use crate::protocol::crypto::BlobSecret;
 use crate::protocol::mesh::LookupOpts;
 use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 
@@ -38,7 +39,7 @@ const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 #[derive(Debug)]
 pub struct BlobTicket {
     pub addr: EndpointAddr,
-    pub secret: [u8; SECRET_LEN],
+    pub secret: BlobSecret,
     pub sha256: [u8; HASH_LEN],
     pub size: u64,
     pub lookups: LookupOpts,
@@ -59,7 +60,7 @@ impl BlobTicket {
     /// Panics if an internal invariant is violated.
     pub fn encode(&self) -> String {
         let mut payload = Vec::with_capacity(SECRET_LEN + 1 + HASH_LEN + 8 + 64);
-        payload.extend_from_slice(&self.secret);
+        payload.extend_from_slice(self.secret.as_bytes());
         let mut flags = 0u8;
         if self.password {
             flags |= PASSWORD_BIT;
@@ -111,8 +112,9 @@ impl BlobTicket {
         }
         let payload = &framed[2..];
         let mut pos = 0;
-        let secret =
-            take_array::<SECRET_LEN>(payload, &mut pos).context("ticket missing secret")?;
+        let secret = BlobSecret::from_bytes(
+            take_array::<SECRET_LEN>(payload, &mut pos).context("ticket missing secret")?,
+        );
         let flags = *payload.get(pos).context("ticket missing flags")?;
         pos += 1;
         let password = flags & PASSWORD_BIT != 0;
@@ -143,6 +145,7 @@ impl BlobTicket {
 mod tests {
     use super::BlobTicket;
     use crate::blob::{HASH_LEN, SECRET_LEN};
+    use crate::protocol::crypto::BlobSecret;
     use crate::protocol::mesh::LookupOpts;
     use iroh::{EndpointAddr, SecretKey};
 
@@ -154,7 +157,7 @@ mod tests {
     fn sample(password: bool) -> BlobTicket {
         BlobTicket {
             addr: sample_addr(3),
-            secret: [9u8; SECRET_LEN],
+            secret: BlobSecret::from_bytes([9u8; SECRET_LEN]),
             sha256: [7u8; HASH_LEN],
             size: 1_234_567,
             lookups: LookupOpts::public_preset(),
@@ -171,7 +174,7 @@ mod tests {
         assert!(!encoded.contains("://"));
         let decoded = BlobTicket::decode(&encoded).expect("decode");
         assert_eq!(decoded.addr.id, ticket.addr.id);
-        assert_eq!(decoded.secret, [9u8; SECRET_LEN]);
+        assert_eq!(decoded.secret.as_bytes(), &[9u8; SECRET_LEN]);
         assert_eq!(decoded.sha256, [7u8; HASH_LEN]);
         assert_eq!(decoded.size, 1_234_567);
         assert_eq!(decoded.lookups, LookupOpts::public_preset());
@@ -192,7 +195,7 @@ mod tests {
         let decoded = BlobTicket::decode(GOLDEN).expect("decode");
         let expected = sample(false);
         assert_eq!(decoded.addr, expected.addr);
-        assert_eq!(decoded.secret, expected.secret);
+        assert_eq!(decoded.secret.as_bytes(), expected.secret.as_bytes());
         assert_eq!(decoded.sha256, expected.sha256);
         assert_eq!(decoded.size, expected.size);
         assert_eq!(decoded.lookups, expected.lookups);
@@ -263,6 +266,17 @@ mod tests {
 
         assert!(crate::protocol::InviteTicket::decode(&blob).is_err());
         assert!(BlobTicket::decode(&invite).is_err());
+    }
+
+    #[test]
+    fn debug_never_prints_the_secret() {
+        // The derive prints a byte array in decimal, so the check is against
+        // the decimal text of the secret, not against its hex.
+        let shown = format!("{:?}", sample(false));
+        assert!(
+            !shown.contains(&format!("{:?}", [9u8; SECRET_LEN])),
+            "the bearer secret leaked through Debug: {shown}"
+        );
     }
 
     #[test]
