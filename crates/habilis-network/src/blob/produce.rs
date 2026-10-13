@@ -18,6 +18,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::lookup::build_endpoint;
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
@@ -197,10 +198,9 @@ impl BlobServer {
         if let Some(existing) = self.store.lock().await.claim(&sha256, &content_id) {
             return Ok(ticket(existing));
         }
-        let mut salt_bytes = [0u8; SECRET_LEN];
-        rand::rng().fill_bytes(&mut salt_bytes);
-        let salt = TicketSecret::from_bytes(salt_bytes);
-        zeroize::Zeroize::zeroize(&mut salt_bytes);
+        let mut salt_bytes = Zeroizing::new([0u8; SECRET_LEN]);
+        rand::rng().fill_bytes(&mut *salt_bytes);
+        let salt = TicketSecret::from_bytes(*salt_bytes);
         let compare = match self.password.clone() {
             Some(password) => {
                 // ~100ms of Argon2id off the async worker (mirrors mesh join).
@@ -332,21 +332,19 @@ async fn serve_stream(
     store: &Mutex<BlobStore>,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
-    let mut request = [0u8; HASH_LEN + SECRET_LEN];
+    let mut request = Zeroizing::new([0u8; HASH_LEN + SECRET_LEN]);
     // Still inside the pre-auth deadline: a peer that opens a stream and then
     // sends 63 bytes is the same parked task as one that sends none.
-    match tokio::time::timeout_at(deadline, recv.read_exact(&mut request)).await {
+    match tokio::time::timeout_at(deadline, recv.read_exact(&mut *request)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) | Err(_) => return Ok(()),
     }
     let mut hash_bytes = [0u8; HASH_LEN];
     hash_bytes.copy_from_slice(&request[..HASH_LEN]);
     let hash = BlobDigest::from_bytes(hash_bytes);
-    let mut token_bytes = [0u8; SECRET_LEN];
+    let mut token_bytes = Zeroizing::new([0u8; SECRET_LEN]);
     token_bytes.copy_from_slice(&request[HASH_LEN..]);
-    let token = TicketSecret::from_bytes(token_bytes);
-    zeroize::Zeroize::zeroize(&mut token_bytes);
-    zeroize::Zeroize::zeroize(&mut request);
+    let token = TicketSecret::from_bytes(*token_bytes);
 
     // Resolve under the lock, then release it before streaming from disk.
     let served = {
