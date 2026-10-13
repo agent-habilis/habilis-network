@@ -34,7 +34,7 @@ enum StateOp {
     /// UTF-8 bytes of a plaintext `change` body — so neither the automerge
     /// change nor the human-readable `m` delta is exposed on the wire. A relay
     /// or a captured frame (no key) sees only opaque bytes; every mesh member
-    /// holds the key and decrypts. See [`encrypt_body`]/[`decrypt_body`].
+    /// holds the key and decrypts. See [`encrypt_body_with_key`]/[`decrypt_body_with_key`].
     Enc {
         #[serde(rename = "d")]
         data: String,
@@ -71,7 +71,7 @@ pub fn change_body(change: &[u8], merge: Option<&Value>) -> anyhow::Result<Messa
 /// Decode a channel-event body back to raw automerge change bytes. `None` for a
 /// non-`change` body (a legacy `merge`, an `enc` envelope, or anything that
 /// doesn't parse) — such a body is a no-op on the automerge doc. Call
-/// [`decrypt_body`] first for a passworded mesh's `enc` bodies.
+/// [`decrypt_body_with_key`] first for a passworded mesh's `enc` bodies.
 #[must_use]
 pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
     match serde_json::from_str::<StateOp>(body).ok()? {
@@ -97,15 +97,6 @@ pub fn encrypt_body_with_key(
     MessageBody::new(json).map_err(|error| anyhow::anyhow!("{error}"))
 }
 
-/// [`encrypt_body_with_key`] for a caller that still holds the key as a raw
-/// array.
-///
-/// # Errors
-/// Serialization or `MessageBody` validation of the envelope fails.
-pub fn encrypt_body(plain: &MessageBody, key: &[u8; 32]) -> anyhow::Result<MessageBody> {
-    encrypt_body_with_key(plain, &SymmetricKey::from_bytes(*key))
-}
-
 /// Recover the plaintext body string. With a `key` (passworded mesh) the body
 /// **must** be a sealed `enc` envelope: it is opened, and any non-`enc` body is
 /// rejected (`None`) so cleartext can never slip past the encryption guarantee.
@@ -128,16 +119,6 @@ pub fn decrypt_body_with_key(body: &str, key: Option<&SymmetricKey>) -> Option<S
             None => Some(body.to_owned()),
         },
     }
-}
-
-/// [`decrypt_body_with_key`] for a caller that still holds the key as a raw
-/// array.
-#[must_use]
-pub fn decrypt_body(body: &str, key: Option<&[u8; 32]>) -> Option<String> {
-    decrypt_body_with_key(
-        body,
-        key.map(|bytes| SymmetricKey::from_bytes(*bytes)).as_ref(),
-    )
 }
 
 #[cfg(test)]
@@ -166,7 +147,7 @@ mod tests {
             !enc.as_str().contains("board"),
             "the merge delta must not leak into the ciphertext body"
         );
-        // decrypt_body recovers the exact plaintext body, which then parses.
+        // decrypt_body_with_key recovers the exact plaintext body, which then parses.
         let recovered = decrypt_body_with_key(enc.as_str(), Some(&key)).expect("decrypt");
         assert_eq!(recovered, plain.as_str());
         assert_eq!(parse_change_body(&recovered), Some(vec![1u8, 2, 3, 4]));

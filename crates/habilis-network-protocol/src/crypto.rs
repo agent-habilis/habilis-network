@@ -73,7 +73,7 @@ pub(crate) fn topic_seed(topic: &str) -> Seed {
 /// # Panics
 /// If `label` exceeds 255 bytes; labels are short internal constants.
 #[must_use]
-pub fn derive_secret(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
+pub(crate) fn derive_secret(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN);
     hasher.update([

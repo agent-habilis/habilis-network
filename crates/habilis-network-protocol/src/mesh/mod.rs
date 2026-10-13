@@ -251,14 +251,7 @@ impl Mesh {
     /// The Argon2id-stretched password key, once a password has been applied
     /// (`set_password`/`apply_password`) — `None` for a passwordless mesh. The
     /// daemon retains this to key the state/meta channel encryption; it is the
-    /// same value every derivation switches onto ([`Self::effective_seed`]).
-    #[must_use]
-    pub fn stretched_key(&self) -> Option<[u8; SEED_LEN]> {
-        self.mesh_key().map(|key| *key.as_bytes())
-    }
-
-    /// The same key as [`Self::stretched_key`], as a [`SymmetricKey`] that
-    /// wipes itself on drop.
+    /// same value every derivation switches onto, and it wipes itself on drop.
     #[must_use]
     pub fn mesh_key(&self) -> Option<SymmetricKey> {
         match &self.secret {
