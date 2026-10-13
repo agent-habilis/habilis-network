@@ -25,6 +25,7 @@
 use crate::topic::TopicId;
 use iroh_base::{EndpointId, SecretKey};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::mesh::MeshName;
 use habilis_network_util::consts::{
@@ -84,6 +85,81 @@ pub fn derive_secret(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+/// The random 32 bytes that a mesh id carries, and the salts of the key
+/// derivations. Whoever holds it can join an open mesh, so `Debug` prints no
+/// byte; unlike [`SymmetricKey`] it is `Copy` and comparable, because it is
+/// public material of the id and not a key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Seed([u8; 32]);
+
+impl Seed {
+    /// Wrap 32 raw bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes, borrowed.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Derive an independent [`SymmetricKey`] for `label`. The same bytes as
+    /// [`derive_secret`], with a wiped output.
+    ///
+    /// # Panics
+    /// If `label` exceeds 255 bytes; labels are short internal constants.
+    #[must_use]
+    pub fn derive(&self, label: &[u8]) -> SymmetricKey {
+        SymmetricKey::from_bytes(derive_secret(&self.0, label))
+    }
+}
+
+impl std::fmt::Debug for Seed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Seed(***)")
+    }
+}
+
+/// A 32-byte key that encrypts, wraps or derives: the stretched password key,
+/// the invite root, and each key derived from them. Its bytes are wiped on
+/// drop, `Debug` prints no byte, and the type has no `PartialEq`: compare two
+/// with [`ct_eq`] on [`Self::as_bytes`].
+#[derive(Clone)]
+pub struct SymmetricKey(Zeroizing<[u8; 32]>);
+
+impl SymmetricKey {
+    /// Wrap 32 raw bytes. The array passed in is a copy that the caller still
+    /// holds: keep it in a [`Zeroizing`] when it is a secret.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// The raw bytes, borrowed.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Derive an independent [`SymmetricKey`] for `label`. The same bytes as
+    /// [`derive_secret`], with a wiped output.
+    ///
+    /// # Panics
+    /// If `label` exceeds 255 bytes; labels are short internal constants.
+    #[must_use]
+    pub fn derive(&self, label: &[u8]) -> Self {
+        Self::from_bytes(derive_secret(&self.0, label))
+    }
+}
+
+impl std::fmt::Debug for SymmetricKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SymmetricKey(***)")
+    }
 }
 
 /// The shared rendezvous endpoint secret key. Every member that
@@ -394,6 +470,32 @@ mod derive_secret_tests {
         assert_eq!(
             derive_secret(&SEED_A, b"rendezvous"),
             derive_secret(&SEED_A, b"rendezvous")
+        );
+    }
+
+    #[test]
+    fn derive_hashes_the_same_bytes_as_derive_secret() {
+        use super::{Seed, SymmetricKey};
+        let seed = Seed::from_bytes(SEED_A);
+        assert_eq!(
+            seed.derive(b"state-doc").as_bytes(),
+            &derive_secret(&SEED_A, b"state-doc")
+        );
+        // A key derives from the same bytes the way a seed does.
+        let key = SymmetricKey::from_bytes(SEED_A);
+        assert_eq!(
+            key.derive(b"broadcast").as_bytes(),
+            seed.derive(b"broadcast").as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_seed_and_a_symmetric_key_print_no_byte() {
+        use super::{Seed, SymmetricKey};
+        assert_eq!(format!("{:?}", Seed::from_bytes(SEED_A)), "Seed(***)");
+        assert_eq!(
+            format!("{:?}", SymmetricKey::from_bytes(SEED_A)),
+            "SymmetricKey(***)"
         );
     }
 
