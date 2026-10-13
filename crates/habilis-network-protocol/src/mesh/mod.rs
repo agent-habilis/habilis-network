@@ -134,7 +134,7 @@ enum MeshSecret {
         /// The Ed25519 issuer **private** key — the mint authority, held only
         /// by the creator's live session, so a restart ends minting. `None` on
         /// a redeemer, which can join but never mint.
-        issuer: Option<SecretKey>,
+        issuer: Option<Box<SecretKey>>,
     },
 }
 
@@ -304,7 +304,7 @@ impl Mesh {
         self.config.issuer_pubkey = Some(*issuer.public().as_bytes());
         self.secret = MeshSecret::Invite {
             root: SymmetricKey::from_bytes(*root),
-            issuer: Some(issuer),
+            issuer: Some(Box::new(issuer)),
         };
     }
 
@@ -318,7 +318,7 @@ impl Mesh {
     /// The issuer private key, for signing a minted invite (creator only).
     pub(crate) fn issuer_secret(&self) -> Option<&SecretKey> {
         match &self.secret {
-            MeshSecret::Invite { issuer, .. } => issuer.as_ref(),
+            MeshSecret::Invite { issuer, .. } => issuer.as_deref(),
             MeshSecret::Open | MeshSecret::Password(_) => None,
         }
     }
