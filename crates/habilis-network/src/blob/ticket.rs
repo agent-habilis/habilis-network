@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use iroh::EndpointAddr;
 
 use crate::protocol::base58check::{self, take_array};
-use crate::protocol::crypto::BlobSecret;
+use crate::protocol::crypto::TicketSecret;
 use crate::protocol::mesh::LookupOpts;
 use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 
@@ -39,7 +39,7 @@ const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 #[derive(Debug)]
 pub struct BlobTicket {
     pub addr: EndpointAddr,
-    pub secret: BlobSecret,
+    pub secret: TicketSecret,
     pub sha256: BlobDigest,
     pub size: u64,
     pub lookups: LookupOpts,
@@ -107,7 +107,7 @@ impl BlobTicket {
         }
         let payload = &framed[2..];
         let mut pos = 0;
-        let secret = BlobSecret::from_bytes(
+        let secret = TicketSecret::from_bytes(
             take_array::<SECRET_LEN>(payload, &mut pos).context("ticket missing secret")?,
         );
         let flags = *payload.get(pos).context("ticket missing flags")?;
@@ -142,7 +142,7 @@ impl BlobTicket {
 mod tests {
     use super::BlobTicket;
     use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
-    use crate::protocol::crypto::BlobSecret;
+    use crate::protocol::crypto::TicketSecret;
     use crate::protocol::mesh::LookupOpts;
     use iroh::{EndpointAddr, SecretKey};
 
@@ -154,7 +154,7 @@ mod tests {
     fn sample(password: bool) -> BlobTicket {
         BlobTicket {
             addr: sample_addr(3),
-            secret: BlobSecret::from_bytes([9u8; SECRET_LEN]),
+            secret: TicketSecret::from_bytes([9u8; SECRET_LEN]),
             sha256: BlobDigest::from_bytes([7u8; HASH_LEN]),
             size: 1_234_567,
             lookups: LookupOpts::public_preset(),

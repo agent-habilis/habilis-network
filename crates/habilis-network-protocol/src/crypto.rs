@@ -246,9 +246,9 @@ pub(crate) fn password_verifier(key: &[u8; 32]) -> [u8; PASSWORD_VERIFIER_LEN] {
 /// let _ = TicketAuth::blob(&raw, None);
 /// ```
 #[derive(Clone)]
-pub struct BlobSecret([u8; 32]);
+pub struct TicketSecret([u8; 32]);
 
-impl BlobSecret {
+impl TicketSecret {
     /// Wrap 32 raw bytes.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
@@ -262,9 +262,9 @@ impl BlobSecret {
     }
 }
 
-impl std::fmt::Debug for BlobSecret {
+impl std::fmt::Debug for TicketSecret {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("BlobSecret(***)")
+        formatter.write_str("TicketSecret(***)")
     }
 }
 
@@ -285,7 +285,7 @@ impl TicketAuth {
     /// an application minting its own ticket kind passes its own label through
     /// [`Self::derive`] rather than reusing this one.
     #[must_use]
-    pub fn blob(secret: &BlobSecret, password: Option<&Password>) -> Self {
+    pub fn blob(secret: &TicketSecret, password: Option<&Password>) -> Self {
         Self::derive(secret, password, b"blob-ticket")
     }
 
@@ -296,7 +296,7 @@ impl TicketAuth {
     /// distinct per kind; reusing another kind's label collapses the separation
     /// [`Self::blob`] documents.
     #[must_use]
-    pub fn derive(secret: &BlobSecret, password: Option<&Password>, label: &[u8]) -> Self {
+    pub fn derive(secret: &TicketSecret, password: Option<&Password>, label: &[u8]) -> Self {
         match password {
             Some(password) => Self {
                 token: stretch_password(password, secret.as_bytes(), label),
@@ -527,8 +527,8 @@ mod password_tests {
     /// here breaks each passworded ticket that exists outside the code.
     #[test]
     fn derive_token_matches_the_golden_bytes() {
-        use super::{BlobSecret, TicketAuth};
-        let secret = BlobSecret::from_bytes([3u8; 32]);
+        use super::{TicketAuth, TicketSecret};
+        let secret = TicketSecret::from_bytes([3u8; 32]);
         let auth = TicketAuth::derive(&secret, Some(&pw("hunter2")), b"blob-ticket");
         assert!(auth.password_protected);
         assert_eq!(
@@ -547,16 +547,16 @@ mod password_tests {
 
     #[test]
     fn blob_secret_debug_never_prints_a_byte() {
-        use super::BlobSecret;
-        let secret = BlobSecret::from_bytes([9u8; 32]);
-        assert_eq!(format!("{secret:?}"), "BlobSecret(***)");
+        use super::TicketSecret;
+        let secret = TicketSecret::from_bytes([9u8; 32]);
+        assert_eq!(format!("{secret:?}"), "TicketSecret(***)");
         assert_eq!(secret.as_bytes(), &[9u8; 32]);
     }
 
     #[test]
     fn ticket_tokens_are_domain_separated_by_label() {
-        use super::{BlobSecret, TicketAuth};
-        let secret = BlobSecret::from_bytes([3u8; 32]);
+        use super::{TicketAuth, TicketSecret};
+        let secret = TicketSecret::from_bytes([3u8; 32]);
         let password = pw("hunter2");
         let blob = TicketAuth::blob(&secret, Some(&password)).token;
         // Stands in for any application-minted kind (the application's bridge passes

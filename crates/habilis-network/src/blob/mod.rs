@@ -464,7 +464,7 @@ mod tests {
             .await
             .unwrap();
         // Forge a wrong bearer secret.
-        ticket.secret = crate::protocol::crypto::BlobSecret::from_bytes([0u8; super::SECRET_LEN]);
+        ticket.secret = crate::protocol::crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),

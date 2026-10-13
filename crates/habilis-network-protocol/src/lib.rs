@@ -46,7 +46,7 @@ mod wordlist;
 /// root and never inherits.
 pub use iroh_base;
 
-pub use crypto::{BlobSecret, Password, TicketAuth, ct_eq};
+pub use crypto::{Password, TicketAuth, TicketSecret, ct_eq};
 pub use dedup_key::DedupKey;
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{

@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 
 use crate::util::consts::MAX_BLOB_STORE_BYTES;
 
-use crate::protocol::crypto::BlobSecret;
+use crate::protocol::crypto::TicketSecret;
 
 use super::{BlobDigest, ContentId};
 
@@ -25,11 +25,11 @@ pub(crate) struct BlobEntry {
     /// The value the producer compares a presented token against
     /// (constant-time): the raw bearer secret, or — when the blob is
     /// password-protected — the Argon2id stretch of the ticket's public salt.
-    pub secret: BlobSecret,
+    pub secret: TicketSecret,
     /// The public salt the ticket carries (equal to `secret` when not
     /// passworded). Retained so a deduped re-registration mints a ticket that
     /// still matches this entry's compare `secret`.
-    ticket_secret: BlobSecret,
+    ticket_secret: TicketSecret,
     /// Whether the minted ticket is password-protected.
     password: bool,
     content_id: ContentId,
@@ -41,15 +41,15 @@ pub(crate) struct BlobEntry {
 /// carries, the value the fetch handshake is compared against (equal to the salt
 /// when not passworded, its Argon2id stretch otherwise), and the password flag.
 pub(crate) struct NewSecret {
-    pub ticket_secret: BlobSecret,
-    pub compare_secret: BlobSecret,
+    pub ticket_secret: TicketSecret,
+    pub compare_secret: TicketSecret,
     pub password: bool,
 }
 
 /// What a registration hands back for building the ticket: the public salt the
 /// ticket carries and whether it is password-protected.
 pub(crate) struct Registered {
-    pub ticket_secret: BlobSecret,
+    pub ticket_secret: TicketSecret,
     pub password: bool,
 }
 
@@ -227,7 +227,7 @@ fn snapshot_file(src: &Path, dest: &Path) -> Result<()> {
 mod tests {
     use super::{BlobStore, ContentMeta};
     use crate::blob::{BlobDigest, ContentId, HASH_LEN, SECRET_LEN};
-    use crate::protocol::crypto::BlobSecret;
+    use crate::protocol::crypto::TicketSecret;
     use rand::RngCore;
     use std::fs;
     use std::path::PathBuf;
@@ -244,8 +244,8 @@ mod tests {
     /// A passwordless capability: the ticket secret is also the compare secret.
     fn plain_secret(secret: [u8; SECRET_LEN]) -> super::NewSecret {
         super::NewSecret {
-            ticket_secret: BlobSecret::from_bytes(secret),
-            compare_secret: BlobSecret::from_bytes(secret),
+            ticket_secret: TicketSecret::from_bytes(secret),
+            compare_secret: TicketSecret::from_bytes(secret),
             password: false,
         }
     }

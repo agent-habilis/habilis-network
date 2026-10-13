@@ -20,7 +20,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::Mutex;
 
 use crate::lookup::build_endpoint;
-use crate::protocol::crypto::{BlobSecret, Password, TicketAuth, ct_eq};
+use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
 use crate::protocol::mesh::LookupOpts;
 use crate::util::consts::MAX_BLOB_BYTES;
 
@@ -199,7 +199,7 @@ impl BlobServer {
         }
         let mut salt_bytes = [0u8; SECRET_LEN];
         rand::rng().fill_bytes(&mut salt_bytes);
-        let salt = BlobSecret::from_bytes(salt_bytes);
+        let salt = TicketSecret::from_bytes(salt_bytes);
         let compare = match self.password.clone() {
             Some(password) => {
                 // ~100ms of Argon2id off the async worker (mirrors mesh join).
@@ -209,7 +209,7 @@ impl BlobServer {
                 })
                 .await
                 .context("blob token stretch task panicked")?;
-                BlobSecret::from_bytes(token)
+                TicketSecret::from_bytes(token)
             }
             None => salt.clone(),
         };
