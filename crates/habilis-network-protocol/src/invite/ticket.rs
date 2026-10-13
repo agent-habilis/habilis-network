@@ -10,6 +10,7 @@
 //! *plaintext* root, so a redeemer decrypts first, then verifies.
 
 use std::fmt;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use iroh_base::{PublicKey, Signature};
@@ -19,7 +20,7 @@ use crate::crypto::{self, Password, SymmetricKey};
 use crate::identity;
 use crate::mesh::Mesh;
 use crate::seal;
-use habilis_network_util::clock;
+use habilis_network_util::clock::UnixSecs;
 use zeroize::Zeroizing;
 
 /// Framing version. Bumped only on a breaking framing change.
@@ -42,8 +43,8 @@ const SIG_DOMAIN: &[u8] = b"habilis-mesh/invite/v1";
 #[derive(Clone, PartialEq, Eq)]
 pub struct InviteTicket {
     mesh_hash: String,
-    /// Unix seconds after which the invite is refused, or `0` for no expiry.
-    expiry: i64,
+    /// The point after which the invite is refused, or [`UnixSecs::ZERO`] for no expiry.
+    expiry: UnixSecs,
     password: bool,
     sig: [u8; 64],
     /// The 32-byte root in the clear, or its `seal_symmetric` blob when
@@ -67,7 +68,7 @@ impl fmt::Debug for InviteTicket {
 
 /// The exact bytes the issuer signs / a redeemer verifies: a domain tag, the
 /// published mesh hash, the plaintext root, and the expiry.
-fn signing_bytes(mesh_hash: &str, root: &SymmetricKey, expiry: i64) -> Vec<u8> {
+fn signing_bytes(mesh_hash: &str, root: &SymmetricKey, expiry: UnixSecs) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(SIG_DOMAIN.len() + mesh_hash.len() + 32 + 8);
     bytes.extend_from_slice(SIG_DOMAIN);
     bytes.extend_from_slice(mesh_hash.as_bytes());
@@ -90,8 +91,8 @@ pub fn mint(mesh: &Mesh, ttl_secs: Option<u64>, password: Option<&Password>) -> 
     let root = mesh.invite_key().context("not an invite-only mesh")?;
     let mesh_hash = mesh.to_string();
     let expiry = match ttl_secs {
-        None | Some(0) => 0,
-        Some(ttl) => clock::unix_secs().saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)),
+        None | Some(0) => UnixSecs::ZERO,
+        Some(ttl) => UnixSecs::now() + Duration::from_secs(ttl),
     };
     let signature = issuer_secret.sign(&signing_bytes(&mesh_hash, root, expiry));
     let root_field = match password {
@@ -158,7 +159,7 @@ impl InviteTicket {
         let payload = &framed[2..];
         let mut pos = 0;
         let expiry =
-            i64::from_le_bytes(take_array::<8>(payload, &mut pos).context("missing expiry")?);
+            UnixSecs::from_le_bytes(take_array::<8>(payload, &mut pos).context("missing expiry")?);
         let flags = *payload.get(pos).context("missing flags")?;
         pos += 1;
         let password = flags & PASSWORD_BIT != 0;
@@ -207,7 +208,7 @@ impl InviteTicket {
         ) {
             bail!("invalid invite signature — not creator-minted, or tampered");
         }
-        if self.expiry != 0 && clock::unix_secs() >= self.expiry {
+        if self.expiry != UnixSecs::ZERO && UnixSecs::now() >= self.expiry {
             bail!("this invite has expired");
         }
         mesh.apply_invite(root);
@@ -239,9 +240,12 @@ impl InviteTicket {
 /// slice is too short.
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{InviteTicket, mint, signing_bytes};
     use crate::crypto::{Password, Seed};
     use crate::mesh::{Mesh, MeshConfig, MeshName};
+    use habilis_network_util::clock::UnixSecs;
     use iroh_base::SecretKey;
 
     fn pw(text: &str) -> Password {
@@ -286,7 +290,7 @@ mod tests {
     fn fixed_ticket() -> InviteTicket {
         InviteTicket {
             mesh_hash: "fixed-mesh-hash".to_owned(),
-            expiry: 1_700_000_000,
+            expiry: UnixSecs::from_secs(1_700_000_000),
             password: true,
             sig: [5u8; 64],
             root_field: vec![6u8; 32],
@@ -337,6 +341,16 @@ mod tests {
         }
     }
 
+    /// A ttl that does not fit the range saturates the expiry at the last point: the invite is
+    /// valid, and its signed bytes carry that point.
+    #[test]
+    fn a_ttl_past_the_range_saturates_the_expiry() {
+        let mesh = creator();
+        let ticket = minted(&mesh, Some(u64::MAX), None);
+        assert_eq!(ticket.expiry, UnixSecs::MAX);
+        assert!(ticket.redeem(None).is_ok());
+    }
+
     // ── "only the creator can mint" ───────────────────────────────────────
 
     #[test]
@@ -381,7 +395,7 @@ mod tests {
         let mesh = creator();
         let hash = mesh.to_string();
         let root = mesh.invite_key().unwrap().clone();
-        let expiry = habilis_network_util::clock::unix_secs() + 3600;
+        let expiry = UnixSecs::now() + Duration::from_hours(1);
         let attacker = SecretKey::from_bytes(&[9u8; 32]);
         let forged = InviteTicket {
             mesh_hash: hash.clone(),
@@ -404,7 +418,7 @@ mod tests {
         // which covers it — so a bearer can't lengthen their own invite.
         let mesh = creator();
         let mut ticket = minted(&mesh, Some(3600), None);
-        ticket.expiry = i64::MAX;
+        ticket.expiry = UnixSecs::MAX;
         assert!(ticket.redeem(None).is_err());
     }
 
@@ -428,7 +442,7 @@ mod tests {
         let mesh = creator();
         let hash = mesh.to_string();
         let root = mesh.invite_key().unwrap().clone();
-        let past = habilis_network_util::clock::unix_secs() - 100;
+        let past = UnixSecs::now() - Duration::from_secs(100);
         let issuer = mesh.issuer_secret().unwrap().clone();
         let expired = InviteTicket {
             mesh_hash: hash.clone(),
