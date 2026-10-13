@@ -27,8 +27,8 @@ use crate::util::consts::MAX_BLOB_BYTES;
 use super::store::BlobStore;
 use super::ticket::BlobTicket;
 use super::{
-    BAD_SECRET, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN, UNKNOWN_BLOB,
-    wait_online,
+    BAD_SECRET, BlobDigest, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN,
+    UNKNOWN_BLOB, wait_online,
 };
 
 /// What one fetch may cost before the requester has proved anything.
@@ -338,8 +338,9 @@ async fn serve_stream(
         Ok(Ok(())) => {}
         Ok(Err(_)) | Err(_) => return Ok(()),
     }
-    let mut hash = [0u8; HASH_LEN];
-    hash.copy_from_slice(&request[..HASH_LEN]);
+    let mut hash_bytes = [0u8; HASH_LEN];
+    hash_bytes.copy_from_slice(&request[..HASH_LEN]);
+    let hash = BlobDigest::from_bytes(hash_bytes);
     let mut token = [0u8; SECRET_LEN];
     token.copy_from_slice(&request[HASH_LEN..]);
 
@@ -392,7 +393,7 @@ async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
 
 /// Read + SHA-256-hash a file off the async runtime (`spawn_blocking`), never
 /// loading it whole. Returns the digest and byte length.
-async fn hash_file(path: PathBuf) -> Result<([u8; HASH_LEN], u64)> {
+async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
     tokio::task::spawn_blocking(move || {
         let mut file = std::fs::File::open(&path)
             .with_context(|| format!("opening {} failed", path.display()))?;
@@ -412,7 +413,7 @@ async fn hash_file(path: PathBuf) -> Result<([u8; HASH_LEN], u64)> {
         let digest = hasher.finalize();
         let mut sha256 = [0u8; HASH_LEN];
         sha256.copy_from_slice(&digest);
-        Ok((sha256, size))
+        Ok((BlobDigest::from_bytes(sha256), size))
     })
     .await
     .context("blob hash task panicked")?

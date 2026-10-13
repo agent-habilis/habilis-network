@@ -15,7 +15,7 @@ use crate::util::consts::MAX_BLOB_STORE_BYTES;
 
 use crate::protocol::crypto::BlobSecret;
 
-use super::{ContentId, HASH_LEN};
+use super::{BlobDigest, ContentId};
 
 /// One spooled blob: the metadata the fetch path needs, plus the spool path to
 /// stream from. No bytes are held.
@@ -56,7 +56,7 @@ pub(crate) struct Registered {
 /// The content identity of a file being snapshotted into the store —
 /// [`BlobStore::snapshot`]'s content-addressing key plus its owning task.
 pub(crate) struct ContentMeta {
-    pub(crate) sha256: [u8; HASH_LEN],
+    pub(crate) sha256: BlobDigest,
     pub(crate) size: u64,
     pub(crate) content_id: ContentId,
 }
@@ -65,7 +65,7 @@ pub(crate) struct ContentMeta {
 /// outbound inputs and produced outputs — content-addressed, never replicated.
 pub(crate) struct BlobStore {
     spool_dir: PathBuf,
-    map: HashMap<[u8; HASH_LEN], BlobEntry>,
+    map: HashMap<BlobDigest, BlobEntry>,
     total_bytes: u64,
     next_seq: u64,
 }
@@ -114,7 +114,7 @@ impl BlobStore {
                 password: entry.password,
             });
         }
-        let dest = self.spool_dir.join(hex_encode(&sha256));
+        let dest = self.spool_dir.join(sha256.to_string());
         snapshot_file(src, &dest)?;
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -139,14 +139,14 @@ impl BlobStore {
     }
 
     /// The entry for `hash`, if spooled.
-    pub(crate) fn get(&self, hash: &[u8; HASH_LEN]) -> Option<&BlobEntry> {
+    pub(crate) fn get(&self, hash: &BlobDigest) -> Option<&BlobEntry> {
         self.map.get(hash)
     }
 
     /// The ticket fields for an already-spooled blob (a content-addressed dedup
     /// hit), or `None`. Lets the producer skip the ~100ms password stretch when
     /// re-offloading content it already holds.
-    pub(crate) fn registered(&self, hash: &[u8; HASH_LEN]) -> Option<Registered> {
+    pub(crate) fn registered(&self, hash: &BlobDigest) -> Option<Registered> {
         self.map.get(hash).map(|entry| Registered {
             ticket_secret: entry.ticket_secret.clone(),
             password: entry.password,
@@ -156,7 +156,7 @@ impl BlobStore {
     /// Drop every blob owned by `content_id` (called from the task idle-timeout
     /// sweep), unlinking its spool file.
     pub(crate) fn evict_content(&mut self, content_id: &ContentId) {
-        let doomed: Vec<[u8; HASH_LEN]> = self
+        let doomed: Vec<BlobDigest> = self
             .map
             .iter()
             .filter(|(_, entry)| &entry.content_id == content_id)
@@ -182,7 +182,7 @@ impl BlobStore {
         }
     }
 
-    fn remove(&mut self, hash: &[u8; HASH_LEN]) {
+    fn remove(&mut self, hash: &BlobDigest) {
         if let Some(entry) = self.map.remove(hash) {
             self.total_bytes = self.total_bytes.saturating_sub(entry.size);
             let _ = fs::remove_file(&entry.path);
@@ -223,20 +223,10 @@ fn snapshot_file(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Lowercase hex of `bytes` — the spool filename for a content hash.
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::{BlobStore, ContentMeta};
-    use crate::blob::{ContentId, HASH_LEN, SECRET_LEN};
+    use crate::blob::{BlobDigest, ContentId, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::BlobSecret;
     use rand::RngCore;
     use std::fs;
@@ -267,7 +257,7 @@ mod tests {
         fs::write(&src, vec![7u8; 4096]).unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = [1u8; HASH_LEN];
+        let hash = BlobDigest::from_bytes([1u8; HASH_LEN]);
         let registered = store
             .snapshot(
                 &src,
@@ -296,7 +286,7 @@ mod tests {
         fs::write(&src, b"same content").unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = [2u8; HASH_LEN];
+        let hash = BlobDigest::from_bytes([2u8; HASH_LEN]);
         let first = store
             .snapshot(
                 &src,
@@ -350,7 +340,7 @@ mod tests {
         fs::write(&src, b"bye").unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = [3u8; HASH_LEN];
+        let hash = BlobDigest::from_bytes([3u8; HASH_LEN]);
         let task = ContentId::new("blob-test-content");
         store
             .snapshot(

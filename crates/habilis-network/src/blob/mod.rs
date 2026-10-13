@@ -125,6 +125,40 @@ pub const SECRET_LEN: usize = 32;
 /// Length of the SHA-256 content hash that addresses a blob.
 pub const HASH_LEN: usize = 32;
 
+/// The SHA-256 of a blob's bytes: the name it is stored, ticketed and fetched
+/// under. Prints as lowercase hex, the same text as its spool file name.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlobDigest([u8; HASH_LEN]);
+
+impl BlobDigest {
+    /// Wrap the 32 bytes of a SHA-256.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes, borrowed.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for BlobDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in &self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for BlobDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "BlobDigest({self})")
+    }
+}
+
 /// Fetch stream close code: the presented bearer secret matched no blob's secret.
 pub(crate) const BAD_SECRET: u32 = 1;
 
@@ -450,7 +484,8 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.sha256 = [0xabu8; super::HASH_LEN]; // a hash the store doesn't hold
+        // A hash the store does not hold.
+        ticket.sha256 = super::BlobDigest::from_bytes([0xabu8; super::HASH_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),

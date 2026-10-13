@@ -70,7 +70,7 @@ where
     let (mut send, mut recv) = conn.open_bi().await?;
 
     // Request: sha256 ‖ secret, then done sending.
-    send.write_all(&ticket.sha256).await?;
+    send.write_all(ticket.sha256.as_bytes()).await?;
     send.write_all(token).await?;
     let _ = send.finish();
 
@@ -107,7 +107,7 @@ where
     out.flush().await?;
 
     let digest = hasher.finalize();
-    if digest.as_slice() != ticket.sha256 {
+    if digest.as_slice() != ticket.sha256.as_bytes() {
         bail!("content hash mismatch — the fetched bytes are not what the ticket promised");
     }
     Ok(())

@@ -18,7 +18,7 @@ use crate::protocol::crypto::BlobSecret;
 use crate::protocol::mesh::LookupOpts;
 use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 
-use super::{HASH_LEN, SECRET_LEN};
+use super::{BlobDigest, HASH_LEN, SECRET_LEN};
 
 /// Framing version. Bumped only on a breaking framing change; an unknown
 /// version is rejected on decode.
@@ -40,7 +40,7 @@ const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 pub struct BlobTicket {
     pub addr: EndpointAddr,
     pub secret: BlobSecret,
-    pub sha256: [u8; HASH_LEN],
+    pub sha256: BlobDigest,
     pub size: u64,
     pub lookups: LookupOpts,
     /// Password-protected: the consumer must present the Argon2id stretch of the
@@ -69,7 +69,7 @@ impl BlobTicket {
             flags |= RELAY_TRANSPORT_BIT;
         }
         payload.push(flags);
-        payload.extend_from_slice(&self.sha256);
+        payload.extend_from_slice(self.sha256.as_bytes());
         payload.extend_from_slice(&self.size.to_le_bytes());
         self.lookups.encode_into(&mut payload);
         let addr_json = serde_json::to_vec(&endpoint_addr_to_json(&self.addr))
@@ -87,12 +87,7 @@ impl BlobTicket {
     /// (`src/blob/store.rs`).
     #[must_use]
     pub fn sha256_hex(&self) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::with_capacity(self.sha256.len() * 2);
-        for byte in &self.sha256 {
-            let _ = write!(out, "{byte:02x}");
-        }
-        out
+        self.sha256.to_string()
     }
 
     /// Decode a bare base58 blob ticket.
@@ -119,7 +114,9 @@ impl BlobTicket {
         pos += 1;
         let password = flags & PASSWORD_BIT != 0;
         let relay_transport = flags & RELAY_TRANSPORT_BIT != 0;
-        let sha256 = take_array::<HASH_LEN>(payload, &mut pos).context("ticket missing hash")?;
+        let sha256 = BlobDigest::from_bytes(
+            take_array::<HASH_LEN>(payload, &mut pos).context("ticket missing hash")?,
+        );
         let size_bytes = take_array::<8>(payload, &mut pos).context("ticket missing size")?;
         let size = u64::from_le_bytes(size_bytes);
         let lookups = LookupOpts::decode_from(payload, &mut pos)?;
@@ -144,7 +141,7 @@ impl BlobTicket {
 #[cfg(test)]
 mod tests {
     use super::BlobTicket;
-    use crate::blob::{HASH_LEN, SECRET_LEN};
+    use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::BlobSecret;
     use crate::protocol::mesh::LookupOpts;
     use iroh::{EndpointAddr, SecretKey};
@@ -158,7 +155,7 @@ mod tests {
         BlobTicket {
             addr: sample_addr(3),
             secret: BlobSecret::from_bytes([9u8; SECRET_LEN]),
-            sha256: [7u8; HASH_LEN],
+            sha256: BlobDigest::from_bytes([7u8; HASH_LEN]),
             size: 1_234_567,
             lookups: LookupOpts::public_preset(),
             password,
@@ -175,7 +172,7 @@ mod tests {
         let decoded = BlobTicket::decode(&encoded).expect("decode");
         assert_eq!(decoded.addr.id, ticket.addr.id);
         assert_eq!(decoded.secret.as_bytes(), &[9u8; SECRET_LEN]);
-        assert_eq!(decoded.sha256, [7u8; HASH_LEN]);
+        assert_eq!(decoded.sha256, BlobDigest::from_bytes([7u8; HASH_LEN]));
         assert_eq!(decoded.size, 1_234_567);
         assert_eq!(decoded.lookups, LookupOpts::public_preset());
         assert!(!decoded.password);
