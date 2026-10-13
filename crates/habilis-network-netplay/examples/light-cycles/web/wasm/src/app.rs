@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 
+use habilis_network::protocol::{AuthorKey, Nickname};
 use serde::Serialize;
 
 use habilis_network_netplay::{
@@ -58,7 +59,7 @@ impl Config for LightCycles {
     type State = World;
     /// The peer's signed public key. Never the nickname — the protocol
     /// treats those as cosmetic and explicitly non-unique.
-    type Address = String;
+    type Address = AuthorKey;
 }
 
 type Session = P2PSession<LightCycles, MeshTransport<LightCycles>>;
@@ -113,11 +114,11 @@ pub struct Game {
     session: Option<Session>,
     descriptor: Option<RoundDescriptor>,
     world: World,
-    my_nick: String,
+    my_nick: Nickname,
     /// Public key -> nickname, learned from lobby presence. `BTreeMap`
     /// rather than `HashMap` out of habit for anything a peer might
     /// iterate — see the determinism contract.
-    nicks: BTreeMap<String, String>,
+    nicks: BTreeMap<AuthorKey, Nickname>,
     match_number: u64,
     /// The direction the player is steering toward. Sticky: it is held
     /// state, not an event, which is what makes the session's "predict by
@@ -130,13 +131,13 @@ pub struct Game {
     /// The last reason the lobby refused to start, if it still stands.
     blocked: Option<String>,
     /// Who was in the lobby when [`Game::drain_events`] last ran.
-    known: BTreeMap<String, String>,
+    known: BTreeMap<AuthorKey, Nickname>,
     pending_events: Vec<GameEvent>,
 }
 
 impl Game {
     #[must_use]
-    pub fn new(transport: MeshTransport<LightCycles>, my_nick: String) -> Self {
+    pub fn new(transport: MeshTransport<LightCycles>, my_nick: Nickname) -> Self {
         Self {
             transport,
             lobby: None,
@@ -198,7 +199,11 @@ impl Game {
             match_number: self.match_number,
             world: self.world.clone(),
             roster,
-            my_pubkey: self.transport.local_pubkey().unwrap_or_default(),
+            my_pubkey: self
+                .transport
+                .local_pubkey()
+                .map(|key| key.to_string())
+                .unwrap_or_default(),
             present: self.lobby.as_ref().map_or(1, |lobby| lobby.present().len()),
             waiting: self.session.is_none(),
             desynced: self.desynced,
@@ -216,7 +221,9 @@ impl Game {
     }
 
     fn nick_for(&self, pubkey: &str) -> &str {
-        self.nicks.get(pubkey).map_or("?", String::as_str)
+        AuthorKey::from_hex(pubkey)
+            .and_then(|key| self.nicks.get(&key))
+            .map_or("?", Nickname::as_str)
     }
 
     /// Announce ourselves, fold in whatever arrived, and remember names.
@@ -245,21 +252,21 @@ impl Game {
         // would otherwise show "players ready" for a match that can never
         // start.
         self.blocked = lobby.blocker().map(|reason| reason.to_string());
-        let present: BTreeMap<String, String> = lobby.present().into_iter().collect();
+        let present: BTreeMap<AuthorKey, Nickname> = lobby.present().into_iter().collect();
         for (pubkey, nick) in &present {
             if !self.known.contains_key(pubkey) {
                 self.pending_events.push(GameEvent::Joined {
-                    pubkey: pubkey.clone(),
-                    nick: nick.clone(),
+                    pubkey: pubkey.to_string(),
+                    nick: nick.to_string(),
                 });
             }
-            self.nicks.insert(pubkey.clone(), nick.clone());
+            self.nicks.insert(*pubkey, nick.clone());
         }
         for (pubkey, nick) in &self.known {
             if !present.contains_key(pubkey) {
                 self.pending_events.push(GameEvent::Left {
-                    pubkey: pubkey.clone(),
-                    nick: nick.clone(),
+                    pubkey: pubkey.to_string(),
+                    nick: nick.to_string(),
                 });
             }
         }
@@ -310,7 +317,8 @@ impl Game {
         // `derive` sorts, and the lobby's player list is already sorted by
         // public key, so roster index `i` is session handle `i`. Every
         // mapping between the two downstream relies on that.
-        let descriptor = RoundDescriptor::derive(agreed.session_id.get(), agreed.players.clone());
+        let roster = agreed.players.iter().map(ToString::to_string).collect();
+        let descriptor = RoundDescriptor::derive(agreed.session_id.get(), roster);
         self.world = World::spawn(&descriptor);
         self.descriptor = Some(descriptor);
         self.session = Some(session);
@@ -354,9 +362,9 @@ impl Game {
             Some(since) => self.ticks.saturating_sub(since) >= REMATCH_GRACE_TICKS,
         };
         let present = lobby.present();
-        let lowest = present.first().is_some_and(|(pubkey, _)| {
-            self.transport.local_pubkey().as_deref() == Some(pubkey.as_str())
-        });
+        let lowest = present
+            .first()
+            .is_some_and(|(pubkey, _)| self.transport.local_pubkey() == Some(*pubkey));
         idle && present.len() >= 2 && lowest
     }
 
