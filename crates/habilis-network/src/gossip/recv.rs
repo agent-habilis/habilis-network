@@ -502,7 +502,10 @@ pub(crate) async fn ingest(
     // only our own signing key identifies our own echoed broadcasts. The hex
     // pubkey is computed once at loop setup (`ctx.our_pubkey`), so this is a
     // string compare, not a key-derivation + allocation per message.
-    if message.pubkey == ctx.our_pubkey {
+    if message
+        .author_key()
+        .is_some_and(|key| key.matches_hex(ctx.our_pubkey))
+    {
         return;
     }
     if dropped_by_test_hook(state, &message) {

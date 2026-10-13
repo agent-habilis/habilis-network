@@ -426,8 +426,8 @@ mod tests {
                 corr: None,
                 body: MessageBody::from(body),
             },
-        );
-        message.pubkey = author_of(name).to_string();
+        )
+        .with_unverified_key(author_of(name));
         message.shard = Some(shard);
         message
     }

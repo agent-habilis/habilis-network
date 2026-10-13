@@ -767,12 +767,12 @@ mod tests {
     fn a_far_future_stamp_does_not_make_a_message_unevictable() {
         let mut log = MessageLog::new(4);
         for index in 0..4 {
-            let mut flood = msg_at(&format!("flood{index}"), i64::MAX);
-            flood.pubkey = "ff".repeat(32);
+            let flood = msg_at(&format!("flood{index}"), i64::MAX)
+                .with_unverified_key(AuthorKey::from_bytes([0xff; 32]));
             log.push(flood);
         }
-        let mut honest = msg_at("honest", 1_700_000_000);
-        honest.pubkey = "aa".repeat(32);
+        let honest =
+            msg_at("honest", 1_700_000_000).with_unverified_key(AuthorKey::from_bytes([0xaa; 32]));
         let evicted = log.push(honest);
         assert!(
             evicted.is_some_and(|msg| msg.body.as_str() != "honest"),
@@ -794,8 +794,8 @@ mod tests {
         // fires repeatedly and each author is both added and dropped.
         for step in 0..60i64 {
             let author = ["aa", "bb", "cc"][usize::try_from(step).expect("fits") % 3];
-            let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step);
-            message.pubkey = author.repeat(32);
+            let message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step)
+                .with_unverified_key(AuthorKey::from_hex(&author.repeat(32)).expect("hex"));
             log.push(message);
 
             let mut recounted: HashMap<Option<AuthorKey>, usize> = HashMap::new();
@@ -822,8 +822,8 @@ mod tests {
             let mut batch = Vec::new();
             for (index, author) in authors.iter().enumerate() {
                 for step in 0..4i64 {
-                    let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step);
-                    message.pubkey = author.repeat(32);
+                    let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step)
+                        .with_unverified_key(AuthorKey::from_hex(&author.repeat(32)).expect("hex"));
                     // One author also stamps far ahead, the shape that used to
                     // buy immunity.
                     if index == 0 {

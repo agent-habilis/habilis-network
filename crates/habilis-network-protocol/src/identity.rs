@@ -19,12 +19,12 @@
 
 use std::fmt;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use crate::DedupKey;
+use crate::{AuthorKey, DedupKey};
 
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
@@ -104,9 +104,12 @@ pub fn content_hash_hex(bytes: &[u8]) -> String {
 /// the content) preserves the fresh-id re-announce path (a new id ⇒ a new
 /// key ⇒ not falsely deduped).
 #[must_use]
-pub(crate) fn dedup_key16(pubkey: &str, id_bytes: &[u8; 16]) -> DedupKey {
+pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> DedupKey {
     let mut hasher = Sha256::new();
-    hasher.update(pubkey.as_bytes());
+    // The hex text of the key, as the signed bytes carry it; nothing for an unsigned message.
+    if let Some(author) = author {
+        hasher.update(author.to_string().as_bytes());
+    }
     hasher.update(id_bytes);
     let digest = hasher.finalize();
     let mut key = [0u8; 16];
@@ -123,20 +126,6 @@ pub(crate) fn dedup_key16(pubkey: &str, id_bytes: &[u8; 16]) -> DedupKey {
 #[must_use]
 pub fn encode_pubkey(pubkey: &PublicKey) -> String {
     to_hex(pubkey.as_bytes())
-}
-
-/// Parse a hex public key from the wire. Errors on bad hex or length, or
-/// a point that is not a valid Ed25519 key.
-pub(crate) fn decode_pubkey(hex: &str) -> Result<PublicKey> {
-    let bytes: [u8; 32] = from_hex(hex)?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
-    PublicKey::from_bytes(&bytes).context("invalid Ed25519 public key")
-}
-
-#[must_use]
-pub(crate) fn encode_sig(signature: &Signature) -> String {
-    to_hex(&signature.to_bytes())
 }
 
 /// Parse a hex Ed25519 signature (64 bytes) from the wire.
@@ -209,10 +198,8 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Identity, decode_pubkey, decode_sig, dedup_key16, encode_hex, encode_pubkey, encode_sig,
-        verify,
-    };
+    use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
+    use crate::AuthorKey;
 
     #[test]
     fn sign_verify_round_trip() {
@@ -243,14 +230,15 @@ mod tests {
         let identity = Identity::generate();
         let hex = encode_pubkey(&identity.public());
         assert_eq!(hex.len(), 64);
-        assert_eq!(decode_pubkey(&hex).unwrap(), identity.public());
+        let key = AuthorKey::from_hex(&hex).unwrap();
+        assert_eq!(key.public_key(), Some(identity.public()));
     }
 
     #[test]
     fn sig_hex_round_trip() {
         let identity = Identity::generate();
         let sig = identity.sign(b"x");
-        let hex = encode_sig(&sig);
+        let hex = encode_hex(&sig.to_bytes());
         assert_eq!(hex.len(), 128);
         assert!(verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()));
     }
@@ -263,11 +251,11 @@ mod tests {
         let mut id = [0u8; 16];
         id[15] = 1;
         assert_eq!(
-            encode_hex(dedup_key16(pubkey, &id).as_bytes()),
+            encode_hex(dedup_key16(AuthorKey::from_hex(pubkey).as_ref(), &id).as_bytes()),
             "c7ba26a2ed0d21f0e8913dd8b4456086"
         );
         assert_eq!(
-            encode_hex(dedup_key16("", &id).as_bytes()),
+            encode_hex(dedup_key16(None, &id).as_bytes()),
             "7c3ccd10bb7ec37b46d37926ae627426"
         );
     }
@@ -287,8 +275,8 @@ mod tests {
 
     #[test]
     fn decode_rejects_bad_hex() {
-        assert!(decode_pubkey("zz").is_err());
-        assert!(decode_pubkey("abc").is_err()); // odd length
+        assert!(AuthorKey::from_hex("zz").is_none());
+        assert!(AuthorKey::from_hex("abc").is_none()); // odd length
         assert!(decode_sig("00").is_err()); // wrong length
     }
 
@@ -299,9 +287,9 @@ mod tests {
         // 4 bytes) positioned so a 2-byte slice splits it used to panic on a
         // non-char-boundary slice — a one-message remote DoS reachable from
         // `verify_signature`. It must now decode byte-wise and return `Err`.
-        assert!(decode_pubkey("aéa").is_err());
+        assert!(AuthorKey::from_hex("aéa").is_none());
         assert!(decode_sig("aéa").is_err());
         // Pure multibyte input of even byte length, too.
-        assert!(decode_pubkey("€€").is_err()); // 6 bytes, all continuation/non-hex
+        assert!(AuthorKey::from_hex("€€").is_none()); // 6 bytes, all continuation/non-hex
     }
 }

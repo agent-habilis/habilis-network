@@ -11,6 +11,7 @@ use std::fmt;
 use anyhow::{Context, Result, bail};
 #[cfg(any(test, feature = "test-fixtures"))]
 use bytes::Bytes;
+use iroh_base::Signature;
 use serde::{Deserialize, Serialize};
 
 use habilis_network_util::clock;
@@ -427,54 +428,230 @@ fn empty_body() -> MessageBody {
 ///
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
 /// `ext`: free-form object for experimental/future fields; parsers MUST ignore unknown keys inside it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Message {
-    #[serde(rename = "v")]
     pub version: String,
     pub id: MessageId,
-    #[serde(flatten)]
     pub kind: MessageKind,
     pub mesh: MeshId,
     pub author: Nickname,
     /// Unix timestamp (seconds, UTC).
-    #[serde(rename = "ts")]
     pub timestamp: i64,
     pub body: MessageBody,
-    /// Author's Ed25519 public key (lowercase hex), and the detached
-    /// signature over the message's [canonical bytes](Message::canonical_bytes).
-    /// Empty on an unsigned message: the empty fields are skipped, which is
-    /// also the **canonical pre-signing form** that [`Message::canonical_bytes`] hashes
-    /// (the signature cannot cover itself). Real outbound traffic is always
-    /// signed on the broadcast path, and the receive path drops anything that
-    /// fails verification. See `docs/history-integrity.md`.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub pubkey: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub sig: String,
+    /// Author's Ed25519 public key and the detached signature over the message's
+    /// [canonical bytes](Message::canonical_bytes), always together: a message has both or
+    /// neither. `None` is the unsigned message: its key and signature are skipped on the wire,
+    /// which is also the **canonical pre-signing form** that [`Message::canonical_bytes`] hashes
+    /// (the signature cannot cover itself). Real outbound traffic is always signed on the
+    /// broadcast path, and the receive path drops anything that fails verification. See
+    /// `docs/history-integrity.md`.
+    pub signer: Option<Signed>,
     /// Per-author hash-linked log (Phase 2), set on `Msg` only: `seq` is
     /// this author's monotonic counter and `prev` the content hash of their
     /// previous `Msg` (`None` at `seq 0`). Both are signed. Plumbing /
     /// presence kinds leave them `None`. The message's own content hash is
     /// computed locally (`content_hash_hex`), never transmitted. See
     /// `docs/history-integrity.md`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev: Option<String>,
     /// Cross-author DAG (Phase 3), `Msg` only: content hashes of the DAG
     /// tips this author had seen when authoring — the causal links. Signed.
     /// Empty for the very first message / messages with no observed
     /// predecessor. See `docs/history-integrity.md`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parents: Vec<String>,
     /// Shard header: present only on a message that is one slice of a body
     /// too large for a single message (see [`Shard`]). `None` on an ordinary
     /// message, so its wire form is unchanged. Signed like every other field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shard: Option<Shard>,
     /// Extension escape hatch. Add experimental fields here; stable fields get promoted to top-level.
-    #[serde(default = "default_ext")]
     pub ext: serde_json::Value,
+}
+
+/// The key that signed a message and its signature. The two are one value, so a message cannot
+/// carry a key with no signature, or a signature with no key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Signed {
+    key: AuthorKey,
+    sig: Signature,
+}
+
+impl Signed {
+    /// Pair a key with the signature it made. Nothing checks it here: [`Message::verify_signature_with`]
+    /// does.
+    #[must_use]
+    pub const fn new(key: AuthorKey, sig: Signature) -> Self {
+        Self { key, sig }
+    }
+
+    /// The key that signed.
+    #[must_use]
+    pub const fn key(&self) -> AuthorKey {
+        self.key
+    }
+
+    /// The detached signature.
+    #[must_use]
+    pub const fn signature(&self) -> &Signature {
+        &self.sig
+    }
+}
+
+/// A [`Message`] as the wire has it, read: every field a string or a plain value, so that one
+/// place ([`Message::try_from`]) decides what a well-formed message is.
+#[derive(Deserialize)]
+struct WireIn {
+    #[serde(rename = "v")]
+    version: String,
+    id: MessageId,
+    #[serde(flatten)]
+    kind: MessageKind,
+    mesh: MeshId,
+    author: Nickname,
+    #[serde(rename = "ts")]
+    timestamp: i64,
+    body: MessageBody,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
+    #[serde(default)]
+    seq: Option<u64>,
+    #[serde(default)]
+    prev: Option<String>,
+    #[serde(default)]
+    parents: Vec<String>,
+    #[serde(default)]
+    shard: Option<Shard>,
+    #[serde(default = "default_ext")]
+    ext: serde_json::Value,
+}
+
+/// A [`Message`] as the wire has it, written. The field order is the order of the JSON text.
+#[derive(Serialize)]
+struct WireOut<'a> {
+    #[serde(rename = "v")]
+    version: &'a str,
+    id: &'a MessageId,
+    #[serde(flatten)]
+    kind: &'a MessageKind,
+    mesh: &'a MeshId,
+    author: &'a Nickname,
+    #[serde(rename = "ts")]
+    timestamp: i64,
+    body: &'a MessageBody,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pubkey: Option<HexOut<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sig: Option<HexOut<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prev: &'a Option<String>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    parents: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shard: &'a Option<Shard>,
+    ext: &'a serde_json::Value,
+}
+
+/// Bytes written as lowercase hex, straight into the serializer.
+struct HexOut<'a>(&'a [u8]);
+
+impl Serialize for HexOut<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct Hex<'a>(&'a [u8]);
+        impl fmt::Display for Hex<'_> {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                identity::write_hex(formatter, self.0)
+            }
+        }
+        serializer.collect_str(&Hex(self.0))
+    }
+}
+
+impl Serialize for Message {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let signer = self.signer.as_ref();
+        let sig_bytes = signer.map(|signed| signed.sig.to_bytes());
+        WireOut {
+            version: &self.version,
+            id: &self.id,
+            kind: &self.kind,
+            mesh: &self.mesh,
+            author: &self.author,
+            timestamp: self.timestamp,
+            body: &self.body,
+            pubkey: signer.map(|signed| HexOut(signed.key.as_bytes())),
+            sig: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
+            seq: self.seq,
+            prev: &self.prev,
+            parents: &self.parents,
+            shard: &self.shard,
+            ext: &self.ext,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = WireIn::deserialize(deserializer)?;
+        Message::try_from(wire).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<WireIn> for Message {
+    type Error = &'static str;
+
+    /// Shape-check the history-integrity fields at the boundary, so a crafted
+    /// value never reaches signature verification or the fork/DAG indexes
+    /// (which key on `prev`/`parents` as content hashes). An empty `pubkey` and an empty `sig`
+    /// is the canonical unsigned form — the receive path drops anything that
+    /// then fails verification; a *present* key/sig/hash must be well-formed
+    /// lowercase hex of the right length (Ed25519 pubkey 32B, signature 64B,
+    /// SHA-256 hash 32B). A key with no signature, and a signature with no key, are errors:
+    /// no sender emits either, and a message cannot hold one.
+    fn try_from(wire: WireIn) -> Result<Self, Self::Error> {
+        if !wire.pubkey.is_empty() && !is_lower_hex(&wire.pubkey, 32) {
+            return Err("malformed pubkey");
+        }
+        if !wire.sig.is_empty() && !is_lower_hex(&wire.sig, 64) {
+            return Err("malformed signature");
+        }
+        if let Some(prev) = &wire.prev
+            && !is_lower_hex(prev, 32)
+        {
+            return Err("malformed prev hash");
+        }
+        if wire.parents.iter().any(|hash| !is_lower_hex(hash, 32)) {
+            return Err("malformed parent hash");
+        }
+        let signer = match (wire.pubkey.is_empty(), wire.sig.is_empty()) {
+            (true, true) => None,
+            (false, true) => return Err("pubkey without a signature"),
+            (true, false) => return Err("signature without a pubkey"),
+            (false, false) => {
+                let key = AuthorKey::from_hex(&wire.pubkey).ok_or("malformed pubkey")?;
+                let sig = identity::decode_sig(&wire.sig).map_err(|_| "malformed signature")?;
+                Some(Signed::new(key, sig))
+            }
+        };
+        Ok(Message {
+            version: wire.version,
+            id: wire.id,
+            kind: wire.kind,
+            mesh: wire.mesh,
+            author: wire.author,
+            timestamp: wire.timestamp,
+            body: wire.body,
+            signer,
+            seq: wire.seq,
+            prev: wire.prev,
+            parents: wire.parents,
+            shard: wire.shard,
+            ext: wire.ext,
+        })
+    }
 }
 
 /// Is `value` exactly `bytes * 2` lowercase-hex characters — the canonical
@@ -506,8 +683,7 @@ impl Message {
             author: author.clone(),
             timestamp: clock::unix_secs(),
             body,
-            pubkey: String::new(),
-            sig: String::new(),
+            signer: None,
             seq: None,
             prev: None,
             parents: Vec::new(),
@@ -687,32 +863,11 @@ impl Message {
         if data.len() > MAX_MESSAGE_SIZE {
             bail!("message too large");
         }
-        let msg: Message = serde_json::from_slice(data).context("failed to parse message JSON")?;
-        if msg.version != VERSION {
-            bail!("unsupported protocol version: {}", msg.version);
+        let wire: WireIn = serde_json::from_slice(data).context("failed to parse message JSON")?;
+        if wire.version != VERSION {
+            bail!("unsupported protocol version: {}", wire.version);
         }
-        // Shape-check the history-integrity fields at the boundary, so a crafted
-        // value never reaches signature verification or the fork/DAG indexes
-        // (which key on `prev`/`parents` as content hashes). Empty `pubkey`/`sig`
-        // is the canonical unsigned form — the receive path drops anything that
-        // then fails verification; a *present* key/sig/hash must be well-formed
-        // lowercase hex of the right length (Ed25519 pubkey 32B, signature 64B,
-        // SHA-256 hash 32B).
-        if !msg.pubkey.is_empty() && !is_lower_hex(&msg.pubkey, 32) {
-            bail!("malformed pubkey");
-        }
-        if !msg.sig.is_empty() && !is_lower_hex(&msg.sig, 64) {
-            bail!("malformed signature");
-        }
-        if let Some(prev) = &msg.prev
-            && !is_lower_hex(prev, 32)
-        {
-            bail!("malformed prev hash");
-        }
-        if msg.parents.iter().any(|hash| !is_lower_hex(hash, 32)) {
-            bail!("malformed parent hash");
-        }
-        Ok(msg)
+        Message::try_from(wire).map_err(|reason| anyhow::anyhow!(reason))
     }
 
     /// Parse a gossip payload that may end in the trailer of a resend (see
@@ -736,6 +891,12 @@ impl Message {
     /// # Panics
     /// If a field exceeds `u32::MAX` bytes; the wire cap makes that unreachable.
     pub fn canonical_bytes(&self) -> Vec<u8> {
+        self.canonical_with_key(self.author_key().as_ref())
+    }
+
+    /// [`Self::canonical_bytes`] as if the author key were `key`. The signature is not in
+    /// the signed bytes, so a message under signing has the key and not yet the signature.
+    fn canonical_with_key(&self, key: Option<&AuthorKey>) -> Vec<u8> {
         const DOMAIN: &[u8] = b"habilis-mesh/msg";
         let mut buf = Vec::new();
         let mut field = |bytes: &[u8]| {
@@ -754,7 +915,8 @@ impl Message {
         field(self.author.as_str().as_bytes());
         field(&self.timestamp.to_le_bytes());
         field(self.body.as_str().as_bytes());
-        field(self.pubkey.as_bytes());
+        // The hex text of the key, not its 32 bytes: the text is what every signature covers.
+        field(key.map(AuthorKey::to_string).unwrap_or_default().as_bytes());
         // `seq`/`prev` are signed too. `None` encodes as a zero-length field
         // (distinct from `Some(0)`, which is 8 bytes), so a plumbing message
         // and a `seq 0` message never collide.
@@ -788,7 +950,7 @@ impl Message {
     /// passed [`verify_signature_with`](Self::verify_signature_with) always has one.
     #[must_use]
     pub fn author_key(&self) -> Option<AuthorKey> {
-        AuthorKey::from_hex(&self.pubkey)
+        self.signer.map(|signed| signed.key)
     }
 
     /// The 16-byte dedup / anti-entropy key (`SHA-256(pubkey ‖ id)[..16]`).
@@ -797,7 +959,7 @@ impl Message {
     /// cannot suppress the genuine one. See [`identity::dedup_key16`].
     #[must_use]
     pub fn dedup_key(&self) -> DedupKey {
-        identity::dedup_key16(&self.pubkey, &self.id.as_uuid_bytes())
+        identity::dedup_key16(self.author_key().as_ref(), &self.id.as_uuid_bytes())
     }
 
     /// Stamp the per-author log fields before signing (`Msg` only). `seq`
@@ -851,8 +1013,9 @@ impl Message {
     /// the construction expression (`Message::new_app(..).signed(&id)`).
     #[must_use]
     pub fn signed(mut self, identity: &Identity) -> Self {
-        self.pubkey = identity::encode_pubkey(&identity.public());
-        self.sig = identity::encode_sig(&identity.sign(&self.canonical_bytes()));
+        let key = AuthorKey::from_bytes(*identity.public().as_bytes());
+        let sig = identity.sign(&self.canonical_with_key(Some(&key)));
+        self.signer = Some(Signed::new(key, sig));
         self
     }
 
@@ -879,16 +1042,13 @@ impl Message {
     /// meaningful.
     #[must_use]
     pub fn verify_signature_with(&self, canonical: &[u8]) -> bool {
-        if self.pubkey.is_empty() || self.sig.is_empty() {
-            return false;
-        }
-        let (Ok(pubkey), Ok(sig)) = (
-            identity::decode_pubkey(&self.pubkey),
-            identity::decode_sig(&self.sig),
-        ) else {
+        let Some(signed) = &self.signer else {
             return false;
         };
-        identity::verify(&pubkey, canonical, &sig)
+        let Some(public) = signed.key.public_key() else {
+            return false;
+        };
+        identity::verify(&public, canonical, &signed.sig)
     }
 }
 
@@ -965,6 +1125,14 @@ pub fn build_msg_bytes(
 
 #[cfg(any(test, feature = "test-fixtures"))]
 impl Message {
+    /// This message claiming `key` as its author, with a signature that does not verify: for a
+    /// test that needs a message with an author key and never checks the signature.
+    #[must_use]
+    pub fn with_unverified_key(mut self, key: AuthorKey) -> Self {
+        self.signer = Some(Signed::new(key, Signature::from_bytes(&[0u8; 64])));
+        self
+    }
+
     #[must_use]
     pub fn fixture(kind: MessageKind, body: &str) -> Self {
         Message {
@@ -975,8 +1143,7 @@ impl Message {
             author: "alice-bot".into(),
             timestamp: 1_700_000_000,
             body: body.into(),
-            pubkey: String::new(),
-            sig: String::new(),
+            signer: None,
             seq: None,
             prev: None,
             parents: Vec::new(),

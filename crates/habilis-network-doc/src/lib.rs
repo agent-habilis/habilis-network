@@ -854,14 +854,15 @@ mod tests {
     /// signature is `gossip::ingest`'s job.
     fn frame(who: &Nickname, bytes: &[u8]) -> Message {
         let change = Change::from_bytes(bytes.to_vec()).expect("a change");
-        let mut frame = Message::new_channel_event(
+        let actor = AuthorKey::from_hex(&change.actor_id().to_hex_string())
+            .expect("a test actor is 32 bytes");
+        Message::new_channel_event(
             &MeshId::from("test"),
             who,
             change_body(bytes, None).expect("body"),
             Channel::State,
-        );
-        frame.pubkey = change.actor_id().to_hex_string();
-        frame
+        )
+        .with_unverified_key(actor)
     }
 
     /// Author a merge on `doc` (build + ingest, as the daemon does) and return
@@ -1159,7 +1160,7 @@ mod tests {
         assert!(
             sink.pending
                 .values()
-                .any(|entry| entry.frame.pubkey == "11".repeat(32)),
+                .any(|entry| entry.frame.author_key() == Some(AuthorKey::from_bytes([0x11; 32]))),
             "the honest orphan survived: the newcomer is refused, not an incumbent evicted"
         );
     }
@@ -1336,8 +1337,8 @@ mod tests {
             .build_change(&json!({"a": "forged"}), &alice_key)
             .expect("merge applies")
             .expect("merge is not a no-op");
-        let mut forged = frame(&mallory, &forged);
-        forged.pubkey = "bb".repeat(32);
+        let forged =
+            frame(&mallory, &forged).with_unverified_key(AuthorKey::from_bytes([0xbb; 32]));
         assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
         assert_eq!(sink.pending_stats().0, 0);
 
@@ -1357,8 +1358,8 @@ mod tests {
             .build_change(&json!({"a": "forged"}), &alice_key)
             .expect("merge applies")
             .expect("merge is not a no-op");
-        let mut forged = frame(&nick("mallory"), &orphan);
-        forged.pubkey = "bb".repeat(32);
+        let forged =
+            frame(&nick("mallory"), &orphan).with_unverified_key(AuthorKey::from_bytes([0xbb; 32]));
 
         let mut sink = MeshDoc::new_ungated();
         assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
@@ -1438,9 +1439,9 @@ mod tests {
         let (wire, _plain) = author_doc
             .compose_wire_body(&bytes, Some(&merge))
             .expect("compose");
-        let mut carrier =
-            Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State);
-        carrier.pubkey = AuthorKey::from_bytes(pad_seed(alice.as_str().as_bytes())).to_string();
+        let carrier =
+            Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State)
+                .with_unverified_key(AuthorKey::from_bytes(pad_seed(alice.as_str().as_bytes())));
         assert!(
             !carrier.body.as_str().contains("value"),
             "the plaintext value must not appear on the wire"

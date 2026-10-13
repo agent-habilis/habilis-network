@@ -2929,10 +2929,8 @@ mod tests {
         // attack. Distinct pubkeys ⇒ distinct `dedup_key`s.
         let mut state = fresh_state();
         let id = MessageId::random();
-        let mut victim = msg_with_id(&id);
-        victim.pubkey = "aa".repeat(32);
-        let mut attacker = msg_with_id(&id);
-        attacker.pubkey = "bb".repeat(32);
+        let victim = msg_with_id(&id).with_unverified_key(AuthorKey::from_bytes([0xaa; 32]));
+        let attacker = msg_with_id(&id).with_unverified_key(AuthorKey::from_bytes([0xbb; 32]));
         assert!(!state.mark_seen(&victim), "victim's message is fresh");
         assert!(
             !state.mark_seen(&attacker),

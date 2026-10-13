@@ -232,10 +232,17 @@ fn parse_rejects_malformed_integrity_fields() {
             "should reject: {extra}"
         );
     }
-    // A well-formed (if unverifiable) 64-hex pubkey still parses — shape
-    // only; the signature gate is a separate, later check.
-    let ok = base(&format!(r#","pubkey":"{}""#, "ab".repeat(32)));
+    // A well-formed (if unverifiable) 64-hex pubkey with a 128-hex signature still parses —
+    // shape only; the signature gate is a separate, later check.
+    let ok = base(&format!(
+        r#","pubkey":"{}","sig":"{}""#,
+        "ab".repeat(32),
+        "cd".repeat(64)
+    ));
     assert!(Message::parse(ok.as_bytes()).is_ok());
+    // A pubkey alone no longer parses: a message holds a key and its signature, or neither.
+    let key_only = base(&format!(r#","pubkey":"{}""#, "ab".repeat(32)));
+    assert!(Message::parse(key_only.as_bytes()).is_err());
 }
 
 #[test]
@@ -272,7 +279,7 @@ mod signing {
     fn signed_message_verifies() {
         let msg =
             Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").signed(&identity());
-        assert!(!msg.pubkey.is_empty() && !msg.sig.is_empty());
+        assert!(msg.signer.is_some());
         assert!(msg.verify_signature());
     }
 
@@ -326,7 +333,7 @@ mod signing {
         let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").signed(&identity());
         let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
         assert!(parsed.verify_signature());
-        assert_eq!(parsed.pubkey, msg.pubkey);
+        assert_eq!(parsed.signer, msg.signer);
     }
 
     #[test]
@@ -760,7 +767,7 @@ fn a_signed_message_keeps_its_wire_form() {
         parsed.verify_signature(),
         "the literal carries a valid signature"
     );
-    assert_eq!(parsed.pubkey, SIGNED_PUBKEY);
+    assert_eq!(parsed.author_key().unwrap().to_string(), SIGNED_PUBKEY);
     assert_eq!(serde_json::to_string(&parsed).unwrap(), SIGNED_WIRE);
     assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
     assert_eq!(
@@ -778,8 +785,7 @@ fn a_signed_message_keeps_its_wire_form() {
 #[test]
 fn a_message_with_no_key_fields_parses_as_unsigned() {
     let parsed = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
-    assert_eq!(parsed.pubkey, "");
-    assert_eq!(parsed.sig, "");
+    assert!(parsed.signer.is_none());
     assert!(!parsed.verify_signature());
     assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
     assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
@@ -794,29 +800,23 @@ fn a_message_with_no_key_fields_parses_as_unsigned() {
 #[test]
 fn empty_key_fields_parse_as_unsigned_and_serialize_without_the_keys() {
     let parsed = Message::parse(EMPTY_KEYS_WIRE.as_bytes()).expect("empty key fields parse");
-    assert_eq!(parsed.pubkey, "");
-    assert_eq!(parsed.sig, "");
+    assert!(parsed.signer.is_none());
     assert!(!parsed.verify_signature());
     assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
     assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
 }
 
-/// Golden: a key with no signature parses and does not verify. Its signed bytes are those of the
-/// signed message, because `sig` is not part of them.
+/// A key with no signature is a parse error, and so is a signature with no key: a message holds
+/// both or neither. This is a decision of wave 2 (the parser only: no sender emits either, so
+/// no emitted byte moves). Before it, the key-only literal parsed, kept the key, and did not
+/// verify.
 #[test]
-fn a_key_with_no_signature_parses_and_does_not_verify() {
-    let parsed = Message::parse(KEY_ONLY_WIRE.as_bytes()).expect("a key with no sig parses");
-    assert_eq!(parsed.pubkey, SIGNED_PUBKEY);
-    assert_eq!(parsed.sig, "");
-    assert!(!parsed.verify_signature());
-    assert_eq!(serde_json::to_string(&parsed).unwrap(), KEY_ONLY_WIRE);
-    assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
-}
+fn a_key_with_no_signature_is_rejected_and_so_is_a_signature_with_no_key() {
+    let no_sig = Message::parse(KEY_ONLY_WIRE.as_bytes()).expect_err("a key with no signature");
+    assert_eq!(no_sig.to_string(), "pubkey without a signature");
 
-#[test]
-fn author_key_is_the_pubkey_field_or_none() {
-    let signed = Message::parse(SIGNED_WIRE.as_bytes()).unwrap();
-    assert_eq!(signed.author_key().unwrap().to_string(), SIGNED_PUBKEY);
-    let unsigned = Message::parse(UNSIGNED_WIRE.as_bytes()).unwrap();
-    assert!(unsigned.author_key().is_none());
+    let sig_only = SIGNED_WIRE.replace(&format!(r#""pubkey":"{SIGNED_PUBKEY}","#), "");
+    assert!(!sig_only.contains("pubkey"));
+    let no_key = Message::parse(sig_only.as_bytes()).expect_err("a signature with no key");
+    assert_eq!(no_key.to_string(), "signature without a pubkey");
 }
