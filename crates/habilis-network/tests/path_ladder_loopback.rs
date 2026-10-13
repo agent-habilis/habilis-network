@@ -154,7 +154,14 @@ impl Member {
     /// Wait until the selected rung to `peer` is `expected`, or fail with the
     /// last rung read.
     async fn expect_rung(&self, peer: &str, expected: &str, step: &str) {
-        tracing::info!(target: "ladder_test", "STEP {step}: waiting for {expected}");
+        self.expect_rung_in(peer, &[expected], step).await;
+    }
+
+    /// Wait until the selected rung to `peer` is one of `expected`, and say which one it was.
+    /// A step that the engine passes through by itself, and whose resting rung is the next
+    /// one, names both: a poll can miss a state that lasts a few hundred ms.
+    async fn expect_rung_in(&self, peer: &str, expected: &[&str], step: &str) -> &'static str {
+        tracing::info!(target: "ladder_test", "STEP {step}: waiting for one of {expected:?}");
         let started = Instant::now();
         let mut seen = None;
         while started.elapsed() < STEP_DEADLINE {
@@ -163,12 +170,14 @@ impl Member {
             if seen != before {
                 tracing::info!(target: "ladder_test", "STEP {step}: rung {seen:?} after {:?}", started.elapsed());
             }
-            if seen == Some(expected) {
-                return;
+            if let Some(rung) = seen
+                && expected.contains(&rung)
+            {
+                return rung;
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        panic!("{step}: expected the rung {expected}, the last rung read was {seen:?}");
+        panic!("{step}: expected one of the rungs {expected:?}, the last rung read was {seen:?}");
     }
 }
 
@@ -286,13 +295,18 @@ async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     alice.block_ip_to(bob.ports()).await;
     bob.block_ip_to(alice.ports()).await;
     // The offer decision reads the selected path, which is still IP for a moment
-    // after the block: ask only once the pair is on the relay.
-    alice
-        .expect_rung("bob", "relay", "IP blocked, before the offer")
+    // after the block: ask only once the pair has left IP. The engine offers a session by
+    // itself as soon as its watcher reports the relay, so the relay lasts a few hundred ms and
+    // a poll can see WebRTC next: offer only when the relay was seen, and never again to a pair
+    // that is already on WebRTC (an offer resets its proof and offers a second time).
+    let left_ip = alice
+        .expect_rung_in("bob", &["relay", "webrtc"], "IP blocked, before the offer")
         .await;
-    // Only the lower id offers; each side asks, so the right one does.
-    alice.offer_session("bob").await;
-    bob.offer_session("alice").await;
+    if left_ip == "relay" {
+        // Only the lower id offers; each side asks, so the right one does.
+        alice.offer_session("bob").await;
+        bob.offer_session("alice").await;
+    }
     alice
         .expect_rung("bob", "webrtc", "IP blocked, session offered")
         .await;
