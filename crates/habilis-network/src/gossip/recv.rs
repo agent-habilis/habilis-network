@@ -1335,8 +1335,7 @@ fn decrypt_broadcast(message: &mut Message, state: &EventLoopState) -> Option<Me
     // cleartext or tampered — drop it, but say so (mirroring the directed-drop
     // warn) rather than vanishing silently. A generic `send_app` broadcast that
     // did not mesh-key-seal its body lands here; see `send_app`'s doc.
-    let Some(plain) = crate::doc::wire::decrypt_body_with_key(message.body.as_str(), Some(key))
-    else {
+    let Some(plain) = crate::doc::wire::decrypt_body(message.body.as_str(), Some(key)) else {
         tracing::warn!(target: "habilis_network::gossip",
             author = %message.author,
             "dropping a broadcast body that failed mesh-key decryption (cleartext on a passworded mesh?)"

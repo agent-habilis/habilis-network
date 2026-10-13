@@ -259,7 +259,7 @@ impl MeshDoc {
             // Passwordless: parse directly — no decrypt indirection, no clone.
             None => wire::parse_change_body(frame.body.as_str()),
             Some(key) => {
-                let plain = wire::decrypt_body_with_key(frame.body.as_str(), Some(key))?;
+                let plain = wire::decrypt_body(frame.body.as_str(), Some(key))?;
                 wire::parse_change_body(&plain)
             }
         }
@@ -282,7 +282,7 @@ impl MeshDoc {
     )> {
         let plain = wire::change_body(change, merge)?;
         let wire = match self.key.as_ref() {
-            Some(key) => wire::encrypt_body_with_key(&plain, key)?,
+            Some(key) => wire::encrypt_body(&plain, key)?,
             None => plain.clone(),
         };
         Ok((wire, plain))
@@ -293,7 +293,7 @@ impl MeshDoc {
     /// then surfaces the original (opaque) frame.
     #[must_use]
     pub fn surface_body(&self, frame: &Message) -> Option<String> {
-        wire::decrypt_body_with_key(frame.body.as_str(), self.key.as_ref())
+        wire::decrypt_body(frame.body.as_str(), self.key.as_ref())
     }
 
     /// This channel's automerge heads, Base58-encoded — the compact frontier a
@@ -914,7 +914,7 @@ mod tests {
     /// this pins the open path and the envelope shape, and there is no golden for the encrypt path.
     #[test]
     fn a_fixed_enc_body_opens_to_its_plaintext_change() {
-        use super::wire::{decrypt_body_with_key, parse_change_body};
+        use super::wire::{decrypt_body, parse_change_body};
 
         let plain = r#"{"k":"change","c":"2VfUX","m":{"board":"x"}}"#;
         assert_eq!(
@@ -928,7 +928,7 @@ mod tests {
             r#"qCBUwXKpBHZmAAM8zFEEiGKEzMZY7dcnQnuXjCcerUr3F"}"#,
         );
         let key = SymmetricKey::from_bytes([3u8; 32]);
-        let recovered = decrypt_body_with_key(enc, Some(&key)).expect("the key opens the body");
+        let recovered = decrypt_body(enc, Some(&key)).expect("the key opens the body");
         assert_eq!(recovered, plain);
         assert_eq!(parse_change_body(&recovered), Some(vec![1u8, 2, 3, 4]));
     }
