@@ -623,10 +623,10 @@ pub struct EventLoopState {
     /// seen at each `Msg` `seq`. A *different* hash at an already-seen
     /// `(pubkey, seq)` is cryptographic proof of equivocation → a `fork`
     /// event. Order-independent (gossip delivers out of order).
-    pub(crate) author_seqs: HashMap<String, HashMap<u64, String>>,
+    pub(crate) author_seqs: HashMap<AuthorKey, HashMap<u64, String>>,
     /// Author pubkeys already flagged as forked, so one `fork` event fires
     /// per offending key rather than per message.
-    pub(crate) forked: HashSet<String>,
+    pub(crate) forked: HashSet<AuthorKey>,
     /// Cross-author DAG (Phase 3): `by_hash` maps each known `Msg`'s content
     /// hash to its timestamp (for the `ts ≥ max(parents.ts)` backdating
     /// rule); `dag_heads` is the current tip set (hashes with no observed
@@ -1644,8 +1644,8 @@ impl EventLoopState {
     /// which is cryptographic proof the author equivocated (signed two
     /// conflicting messages at one seq). Order-independent. The caller emits
     /// a `fork` event on `true`; the message itself is still processed.
-    pub(crate) fn note_msg_seq(&mut self, pubkey: &str, seq: u64, hash: String) -> bool {
-        let seen = self.author_seqs.entry(pubkey.to_owned()).or_default();
+    pub(crate) fn note_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: String) -> bool {
+        let seen = self.author_seqs.entry(*author).or_default();
         match seen.get(&seq) {
             Some(existing) if *existing != hash => {} // conflict → fall through
             Some(_) => return false,                  // same message, already recorded
@@ -1655,7 +1655,7 @@ impl EventLoopState {
             }
         }
         // Equivocation: flag the key, returning true only on first detection.
-        self.forked.insert(pubkey.to_owned())
+        self.forked.insert(*author)
     }
 
     /// The `parents` to stamp on the next `Msg` we author: the current DAG
@@ -1707,14 +1707,14 @@ impl EventLoopState {
     /// evicting the twin we did **not** record must not clear the recorded
     /// evidence, or a later anti-entropy resend of the still-retained twin
     /// would re-detect the equivocation as a fresh first sighting.
-    pub fn forget_msg_seq(&mut self, pubkey: &str, seq: u64, hash: &str) {
-        if let Some(seqs) = self.author_seqs.get_mut(pubkey)
+    pub fn forget_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: &str) {
+        if let Some(seqs) = self.author_seqs.get_mut(author)
             && seqs.get(&seq).is_some_and(|recorded| recorded == hash)
         {
             seqs.remove(&seq);
             if seqs.is_empty() {
-                self.author_seqs.remove(pubkey);
-                self.forked.remove(pubkey);
+                self.author_seqs.remove(author);
+                self.forked.remove(author);
             }
         }
     }
@@ -2021,7 +2021,7 @@ mod tests {
         TokioInstant,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-    use crate::testing::{endpoint_id, fresh_state, fresh_state_with_book, nick};
+    use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
 
     fn lower_and_higher() -> (EndpointId, EndpointId) {
         let first = endpoint_id(1);
@@ -2515,18 +2515,18 @@ mod tests {
     #[test]
     fn note_msg_seq_detects_equivocation_once() {
         let mut state = fresh_state();
-        let key = "alice-key";
+        let key = author_of("alice-key");
         // First sighting at a seq → recorded, no fork.
-        assert!(!state.note_msg_seq(key, 0, "hashA".into()));
+        assert!(!state.note_msg_seq(&key, 0, "hashA".into()));
         // Same message again (same hash) → no fork.
-        assert!(!state.note_msg_seq(key, 0, "hashA".into()));
+        assert!(!state.note_msg_seq(&key, 0, "hashA".into()));
         // Different hash at the SAME seq → fork, reported exactly once.
         assert!(
-            state.note_msg_seq(key, 0, "hashB".into()),
+            state.note_msg_seq(&key, 0, "hashB".into()),
             "conflict is a fork"
         );
         assert!(
-            !state.note_msg_seq(key, 0, "hashC".into()),
+            !state.note_msg_seq(&key, 0, "hashC".into()),
             "already flagged: one event per key"
         );
     }
@@ -2534,26 +2534,29 @@ mod tests {
     #[test]
     fn note_msg_seq_is_per_key_and_per_seq() {
         let mut state = fresh_state();
-        assert!(!state.note_msg_seq("alice", 0, "h0".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 0, "h0".into()));
         // A new seq for the same author is just the next entry, not a fork.
-        assert!(!state.note_msg_seq("alice", 1, "h1".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 1, "h1".into()));
         // A different key reusing seq 0 with its own hash is independent.
-        assert!(!state.note_msg_seq("bob", 0, "other".into()));
+        assert!(!state.note_msg_seq(&author_of("bob"), 0, "other".into()));
         // But a conflict on alice's seq 0 still fires.
-        assert!(state.note_msg_seq("alice", 0, "h0-prime".into()));
+        assert!(state.note_msg_seq(&author_of("alice"), 0, "h0-prime".into()));
     }
 
     #[test]
     fn forget_msg_seq_prunes_author_and_fork_flag() {
         let mut state = fresh_state();
-        state.note_msg_seq("alice", 0, "h0".into());
-        assert!(state.note_msg_seq("alice", 0, "h0-prime".into()), "fork");
-        assert!(state.forked.contains("alice"));
-        // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
-        state.forget_msg_seq("alice", 0, "h0");
-        assert!(!state.author_seqs.contains_key("alice"));
+        state.note_msg_seq(&author_of("alice"), 0, "h0".into());
         assert!(
-            !state.forked.contains("alice"),
+            state.note_msg_seq(&author_of("alice"), 0, "h0-prime".into()),
+            "fork"
+        );
+        assert!(state.forked.contains(&author_of("alice")));
+        // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
+        state.forget_msg_seq(&author_of("alice"), 0, "h0");
+        assert!(!state.author_seqs.contains_key(&author_of("alice")));
+        assert!(
+            !state.forked.contains(&author_of("alice")),
             "fork flag pruned with author"
         );
     }
@@ -2564,19 +2567,25 @@ mod tests {
         // NOT record must not clear the recorded slot / fork flag — otherwise a
         // later resend of the still-retained twin re-detects the fork as new.
         let mut state = fresh_state();
-        state.note_msg_seq("alice", 0, "recorded".into());
-        assert!(state.note_msg_seq("alice", 0, "twin".into()), "fork fires");
-        assert!(state.forked.contains("alice"));
-        // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
-        state.forget_msg_seq("alice", 0, "twin");
+        state.note_msg_seq(&author_of("alice"), 0, "recorded".into());
         assert!(
-            state.author_seqs.contains_key("alice"),
+            state.note_msg_seq(&author_of("alice"), 0, "twin".into()),
+            "fork fires"
+        );
+        assert!(state.forked.contains(&author_of("alice")));
+        // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
+        state.forget_msg_seq(&author_of("alice"), 0, "twin");
+        assert!(
+            state.author_seqs.contains_key(&author_of("alice")),
             "recorded slot retained"
         );
-        assert!(state.forked.contains("alice"), "fork flag retained");
+        assert!(
+            state.forked.contains(&author_of("alice")),
+            "fork flag retained"
+        );
         // A resend of the recorded twin does not re-fire the fork (already
         // flagged), proving the evidence survived the eviction.
-        assert!(!state.note_msg_seq("alice", 0, "twin".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 0, "twin".into()));
     }
 
     #[test]

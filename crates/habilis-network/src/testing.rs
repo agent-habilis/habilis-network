@@ -9,9 +9,17 @@ use std::sync::Arc;
 use iroh::{EndpointId, SecretKey};
 
 use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
-use crate::protocol::Nickname;
 use crate::protocol::identity::Identity;
+use crate::protocol::{AuthorKey, Nickname};
 use crate::util::clock::Instant;
+
+/// The key of the test author `name`: its bytes, zero-padded to 32. Two names keep the order
+/// that their bytes have, and a test reads the name back in a failure message.
+pub(crate) fn author_of(name: &str) -> AuthorKey {
+    let mut bytes = [0u8; 32];
+    bytes[..name.len()].copy_from_slice(name.as_bytes());
+    AuthorKey::from_bytes(bytes)
+}
 
 /// A bare state with a fresh identity: no state file, no secrets, no per-peer
 /// gate. The starting point for a test that only cares about one field.

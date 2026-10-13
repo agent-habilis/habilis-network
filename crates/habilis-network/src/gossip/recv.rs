@@ -994,11 +994,12 @@ fn retain_and_index(
         // is cryptographic proof of equivocation — surface a `fork` once per
         // offending key (order-independent; we keep both).
         if let Some(seq) = message.seq
-            && state.note_msg_seq(&message.pubkey, seq, hash.clone())
+            && let Some(author) = message.author_key()
+            && state.note_msg_seq(&author, seq, hash.clone())
         {
             ctx.sink.emit(NodeEvent::Fork {
                 nickname: message.author.clone(),
-                pubkey: message.pubkey.clone(),
+                pubkey: author.to_string(),
                 seq,
             });
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
@@ -1017,8 +1018,10 @@ pub(super) fn push_to_log(state: &mut EventLoopState, message: Message) {
     if let Some(evicted) = state.message_log.push(message) {
         let evicted_hash = evicted.content_hash_hex();
         state.forget_hash(&evicted_hash);
-        if let Some(seq) = evicted.seq {
-            state.forget_msg_seq(&evicted.pubkey, seq, &evicted_hash);
+        if let Some(seq) = evicted.seq
+            && let Some(author) = evicted.author_key()
+        {
+            state.forget_msg_seq(&author, seq, &evicted_hash);
         }
     }
 }
