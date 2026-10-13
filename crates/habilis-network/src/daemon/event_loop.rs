@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
-use crate::protocol::{AuthorKey, MeshId, Message, Nickname};
+use crate::protocol::{AuthorKey, MeshId, Message, Nickname, UnixSecs};
 use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
@@ -1204,16 +1204,16 @@ struct TickAnchors {
     sweep: Instant,
     heal: Instant,
     antientropy: Instant,
-    alive_wall: i64,
-    sweep_wall: i64,
-    heal_wall: i64,
-    antientropy_wall: i64,
+    alive_wall: UnixSecs,
+    sweep_wall: UnixSecs,
+    heal_wall: UnixSecs,
+    antientropy_wall: UnixSecs,
 }
 
 impl TickAnchors {
     fn now() -> Self {
         let mono = Instant::now();
-        let wall = crate::util::clock::unix_secs();
+        let wall = UnixSecs::now();
         Self {
             alive: mono,
             sweep: mono,
