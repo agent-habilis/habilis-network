@@ -12,6 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// arithmetic can go negative without wrapping. The simulation itself starts
 /// at [`Frame::ZERO`].
 ///
+/// The default is [`Frame::ZERO`], not [`Frame::NULL`].
+///
 /// A frame plus a count is a frame, and a frame minus a frame is a count. A
 /// frame plus a frame is not defined, so the two cannot be confused with the
 /// delays and the windows that are plain integers beside them.
