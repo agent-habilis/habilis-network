@@ -20,7 +20,7 @@ use rand::RngCore as _;
 use serde::Deserialize;
 
 use crate::code;
-use crate::hash::{ID_LEN, SECRET_LEN, StreamHash};
+use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
 
@@ -167,8 +167,8 @@ impl StreamNode {
                 addr: self.endpoint.addr(),
                 lookups: self.lookups.clone(),
                 transport: self.transport,
-                id,
-                secret,
+                id: StreamId::from_bytes(id),
+                secret: StreamSecret::from_bytes(secret),
             },
             Arc::clone(&self.registry),
         )
