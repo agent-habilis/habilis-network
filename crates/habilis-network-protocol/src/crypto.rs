@@ -234,7 +234,8 @@ pub(crate) fn password_verifier(key: &[u8; 32]) -> [u8; PASSWORD_VERIFIER_LEN] {
 /// The 32-byte bearer secret of a ticket. Whoever holds it can redeem the
 /// ticket, so `Debug` prints no byte, and the type has no `PartialEq`: compare
 /// two with [`ct_eq`] on [`Self::as_bytes`], which does not stop at the first
-/// byte that differs.
+/// byte that differs. Its bytes are wiped on drop (best-effort: a copy that
+/// a caller made from [`Self::as_bytes`] is not tracked).
 ///
 /// A raw array is not a secret, so a swap with another 32-byte value does not
 /// compile:
@@ -259,6 +260,12 @@ impl TicketSecret {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+impl Drop for TicketSecret {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
 
@@ -555,6 +562,13 @@ mod password_tests {
         let secret = TicketSecret::from_bytes([9u8; 32]);
         assert_eq!(format!("{secret:?}"), "TicketSecret(***)");
         assert_eq!(secret.as_bytes(), &[9u8; 32]);
+    }
+
+    // `unsafe_code` is denied, so a test cannot read the freed bytes: this
+    // checks that the type has a destructor, which is the wipe.
+    #[test]
+    fn a_ticket_secret_has_a_destructor_that_wipes_it() {
+        assert!(std::mem::needs_drop::<super::TicketSecret>());
     }
 
     #[test]
