@@ -191,7 +191,10 @@ impl StateFile {
         {
             obj.insert(key.clone(), value.clone());
         }
-        obj.insert("last_updated".into(), clock::unix_secs().into());
+        obj.insert(
+            "last_updated".into(),
+            clock::UnixSecs::now().as_secs().into(),
+        );
         let mut json = serde_json::to_vec(&obj).map_err(std::io::Error::other)?;
         json.push(b'\n');
 
