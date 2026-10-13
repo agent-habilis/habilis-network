@@ -195,7 +195,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 
 - Write the type by hand in the shape of `TopicId`. Do not use a macro, except the existing `string_newtype!` for validated strings.
 - Make the field private.
-- Give the type a `const fn from_bytes` or a `const fn new`.
+- Give the type a `const fn from_bytes` or a `const fn new`, where the field allows it. A `SymmetricKey` cannot be const, because it holds a `Zeroizing` value.
 - Mark each getter `#[must_use]`.
 - Add no dependency for a newtype.
 
@@ -245,6 +245,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `TicketSecret` | `habilis-network-protocol/src/crypto.rs` | The bearer secret of a ticket, and the token that a consumer presents. Wiped on drop. |
 | `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup and anti-entropy key of a message. |
 | `AuthorKey` | `habilis-network-protocol/src/author_key.rs` | The public key of the author of a message. |
+| `Signed` | `habilis-network-protocol/src/message/mod.rs` | The pair of an `AuthorKey` and its signature. A message holds both or neither. |
 | `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The hash of a message that `prev` and `parents` link to. |
 | `BlobDigest` | `habilis-network/src/blob/mod.rs` | The SHA-256 of a blob. |
 | `StreamId`, `StreamSecret` | `habilis-network-stream/src/hash.rs` | The public id and the bearer secret of a stream. |

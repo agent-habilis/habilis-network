@@ -389,8 +389,14 @@ Divergences from upstream, in the order they were made.
       `msg.pubkey` is gone. Read the key with `msg.author_key()`.
     - `bridge/ticket.rs:183`: a `BlobTicket` literal holds a `TicketSecret` and a
       `BlobDigest`.
-    - `a2a/send.rs:300`: `ops::doc::encrypt_body` is `encrypt_body_with_key` and takes a
-      `&SymmetricKey`.
+    - `a2a/send.rs:362` and `a2a/card.rs:403,410` (agent-gossip `main`):
+      `ops::doc::encrypt_body` takes a `&SymmetricKey`. Wrap the key once, with
+      `SymmetricKey::from_bytes`.
+    - `a2a/send.rs:31,34,51-53,169-170,370,384,438,506` and `harness/adversarial.rs:410`
+      (agent-gossip `main`): `Message::prev` and `Message::parents` hold `ContentHash`;
+      `content_hash_hex()` is `content_hash()`, and `.to_string()` gives the text. `forget_hash`,
+      `advance_chain`, `note_dag`, `chain_head`, `dag_parents`, `note_msg_seq` and
+      `forget_msg_seq` take or return a `ContentHash`.
     - `harness/bench.rs:64`, `benches/hot_paths.rs:30`: `crypto::derive_secret` is crate-private.
       Derive with `Seed::derive`.
     - `bridge/ticket.rs:170`, `harness/bench.rs:86`, `cli/doctor.rs:612`: `Mesh::new` takes a

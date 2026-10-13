@@ -333,20 +333,30 @@ published to a registry; pin it with
   returns `Option<SymmetricKey>`. `crypto::derive_secret` is crate-private: derive with
   `Seed::derive` or `SymmetricKey::derive`. `seal_symmetric` and `open_symmetric` take a
   `&SymmetricKey`. `seal_to_body` takes the `x25519_dalek::PublicKey` of the recipient, and
-  `Identity::seal_public` returns one. The doc crate's `encrypt_body` and `decrypt_body` are
-  `encrypt_body_with_key` and `decrypt_body_with_key`, and take a `SymmetricKey`; so does
-  `MeshDoc::with_key`, and `ops::doc` re-exports `encrypt_body_with_key`. The state, meta and
+  `Identity::seal_public` returns one. The doc crate's `encrypt_body` and `decrypt_body` take a
+  `&SymmetricKey` in place of a `&[u8; 32]`, and so does `MeshDoc::with_key`. The state, meta and
   broadcast keys of the daemon are `SymmetricKey`, and `EventLoopState::broadcast_key` returns
   `Option<&SymmetricKey>`. Every derived byte stays the same.
+- **Breaking:** `Password` has no `PartialEq` and no `Eq`. Nothing compared two passwords, and an
+  equality that stops at the first byte that differs is a timing oracle.
+- **Breaking:** the hash of a message has a type. `Message::prev` is `Option<ContentHash>` and
+  `Message::parents` is `Vec<ContentHash>`, as are `with_chain`, `with_parents`, `ChainCtx::prev`
+  and `ChainCtx::parents`. `Message::content_hash()` replaces `Message::content_hash_hex`, and
+  `identity::content_hash_hex` is removed. `ContentHash` prints as its 64 lowercase hex
+  characters. `EventLoopState::advance_chain`, `chain_head`, `dag_parents`, `note_dag`,
+  `forget_hash`, `note_msg_seq` and `forget_msg_seq` take or return a `ContentHash`. The wire and
+  the signed bytes keep the hex text, and `parse` keeps its errors for a malformed `prev` or
+  parent.
 - **Breaking:** `HandlerCtx::our_pubkey` is an `AuthorKey` (it was `&str`).
   `MeshDoc::changes_since_not_by` takes `Option<&AuthorKey>`.
 - **Breaking:** the netplay lobby and mesh transport hold an `AuthorKey` and a `Nickname` in
   place of strings. `MeshTransport` is bound to `Address = AuthorKey`. `Lobby::new`,
   `Lobby::on_message` and `Lobby::present`, `LobbyError::DuplicateNickname`, `LobbyMessage` and
   `StartedMatch::players` take the typed values; `MeshTransport::local_pubkey`, `drain_lobby`,
-  `knows` and `known_peers` too. A `Start` message whose `players` list holds a text that is not
-  a lowercase 64-character hex key is refused whole. The bytes of the messages, the order of
-  the roster and `session_id_for` do not change.
+  `knows` and `known_peers` too. Two parser effects: a `Start` message whose `players` list holds
+  a text that is not a lowercase 64-character hex key is refused whole, and a `Present` whose
+  `nick` `Nickname::new` refuses is dropped. The bytes of the messages, the order of the roster
+  and `session_id_for` do not change.
 
 ### Fixed
 
