@@ -1007,9 +1007,9 @@ impl Message {
         serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
     }
 
-    /// Sign this message with `identity`, filling `pubkey` then `sig`.
-    /// `pubkey` is set before the canonical bytes are computed so the key
-    /// is part of what is signed; consuming-builder style so it composes in
+    /// Sign this message with `identity`, setting [`signer`](Self::signer).
+    /// The key is part of the signed bytes, so they are computed with the key
+    /// and before the signature exists; consuming-builder style so it composes in
     /// the construction expression (`Message::new_app(..).signed(&id)`).
     #[must_use]
     pub fn signed(mut self, identity: &Identity) -> Self {
@@ -1019,11 +1019,11 @@ impl Message {
         self
     }
 
-    /// Verify the detached signature against the embedded `pubkey` over the
-    /// canonical bytes. `false` if either field is absent/malformed or the
-    /// signature does not match — never panics. (Whether `pubkey` is the
-    /// *expected* identity for this `author` is the receiver's TOFU check,
-    /// separate from this cryptographic check.)
+    /// Verify the detached signature against the embedded key over the
+    /// canonical bytes. `false` if the message is unsigned, the key is not a
+    /// point of the curve, or the signature does not match — never panics.
+    /// (Whether the key is the *expected* identity for this `author` is the
+    /// receiver's TOFU check, separate from this cryptographic check.)
     /// Convenience wrapper that computes the canonical bytes itself. The hot
     /// receive path uses [`verify_signature_with`](Self::verify_signature_with)
     /// to share one `canonical_bytes()` with the content hash; this form is
