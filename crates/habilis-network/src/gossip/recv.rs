@@ -16,9 +16,8 @@ use crate::daemon::state::{DirectState, EventLoopState};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
-use crate::protocol::identity;
 use crate::protocol::message::MessageBody;
-use crate::protocol::{Channel, Message, MessageKind, Nickname, PresenceSubtype};
+use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
@@ -989,13 +988,13 @@ fn retain_and_index(
         return;
     }
     if class.is_some_and(|cls| cls.chained) {
-        let hash = identity::content_hash_hex(canonical);
+        let hash = ContentHash::of(canonical);
         // A second, *different* content hash at an already-seen `(pubkey, seq)`
         // is cryptographic proof of equivocation — surface a `fork` once per
         // offending key (order-independent; we keep both).
         if let Some(seq) = message.seq
             && let Some(author) = message.author_key()
-            && state.note_msg_seq(&author, seq, hash.clone())
+            && state.note_msg_seq(&author, seq, hash)
         {
             ctx.sink.emit(NodeEvent::Fork {
                 nickname: message.author.clone(),
@@ -1005,7 +1004,14 @@ fn retain_and_index(
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
         }
         // Fold into the DAG tip set; flag a backdated timestamp.
-        if state.note_dag(hash, &message.parents, message.timestamp) {
+        // The wire carries each parent as text that `parse` checked; the typed list is built
+        // here until `Message::parents` holds hashes itself.
+        let parents: Vec<ContentHash> = message
+            .parents
+            .iter()
+            .filter_map(|parent| ContentHash::from_hex(parent))
+            .collect();
+        if state.note_dag(hash, &parents, message.timestamp) {
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, "message timestamp precedes a referenced parent; possible backdating");
         }
     }
@@ -1016,7 +1022,7 @@ fn retain_and_index(
 /// indexes bounded with the log window as the push evicts.
 pub(super) fn push_to_log(state: &mut EventLoopState, message: Message) {
     if let Some(evicted) = state.message_log.push(message) {
-        let evicted_hash = evicted.content_hash_hex();
+        let evicted_hash = evicted.content_hash();
         state.forget_hash(&evicted_hash);
         if let Some(seq) = evicted.seq
             && let Some(author) = evicted.author_key()

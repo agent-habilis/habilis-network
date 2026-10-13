@@ -19,7 +19,7 @@ use habilis_network_util::clock;
 use super::identity::{self, Identity};
 use super::mesh::MeshId;
 use super::nickname::Nickname;
-use super::{AuthorKey, DedupKey};
+use super::{AuthorKey, ContentHash, DedupKey};
 use crate::newtype::string_newtype;
 
 mod body;
@@ -945,7 +945,13 @@ impl Message {
     /// detection. Recomputed locally on receive; never trusted off the wire.
     #[must_use]
     pub fn content_hash_hex(&self) -> String {
-        identity::content_hash_hex(&self.canonical_bytes())
+        self.content_hash().to_string()
+    }
+
+    /// This message's content hash, as the typed value that the DAG and the fork index key on.
+    #[must_use]
+    pub fn content_hash(&self) -> ContentHash {
+        ContentHash::of(&self.canonical_bytes())
     }
 
     /// The key that signed this message, or `None` for an unsigned message. A message that

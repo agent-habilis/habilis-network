@@ -15,7 +15,7 @@ use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
 use crate::protocol::{
-    AuthorKey, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
+    AuthorKey, ContentHash, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
 };
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
@@ -623,12 +623,12 @@ pub struct EventLoopState {
     /// last sent `Msg` (`None` until the first). Advanced on every send so
     /// our `Msg` stream is a `seq`+`prev` hash chain.
     pub(crate) self_seq: u64,
-    pub(crate) self_prev: Option<String>,
+    pub(crate) self_prev: Option<ContentHash>,
     /// Phase 2 fork detection: per author pubkey (hex), the content hash
     /// seen at each `Msg` `seq`. A *different* hash at an already-seen
     /// `(pubkey, seq)` is cryptographic proof of equivocation → a `fork`
     /// event. Order-independent (gossip delivers out of order).
-    pub(crate) author_seqs: HashMap<AuthorKey, HashMap<u64, String>>,
+    pub(crate) author_seqs: HashMap<AuthorKey, HashMap<u64, ContentHash>>,
     /// Author pubkeys already flagged as forked, so one `fork` event fires
     /// per offending key rather than per message.
     pub(crate) forked: HashSet<AuthorKey>,
@@ -637,8 +637,8 @@ pub struct EventLoopState {
     /// rule); `dag_heads` is the current tip set (hashes with no observed
     /// child) — the `parents` stamped on the next `Msg` we author. Both are
     /// pruned alongside the message-log eviction.
-    pub(crate) by_hash: HashMap<String, i64>,
-    pub(crate) dag_heads: HashSet<String>,
+    pub(crate) by_hash: HashMap<ContentHash, i64>,
+    pub(crate) dag_heads: HashSet<ContentHash>,
     /// When the last *verified* inbound gossip message arrived — the
     /// starvation watchdog's signal. Keyed on messages, not neighbor
     /// events: the roster-collapse showed links can look alive (or flap)
@@ -1643,7 +1643,7 @@ impl EventLoopState {
     /// which is cryptographic proof the author equivocated (signed two
     /// conflicting messages at one seq). Order-independent. The caller emits
     /// a `fork` event on `true`; the message itself is still processed.
-    pub(crate) fn note_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: String) -> bool {
+    pub(crate) fn note_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: ContentHash) -> bool {
         let seen = self.author_seqs.entry(*author).or_default();
         match seen.get(&seq) {
             Some(existing) if *existing != hash => {} // conflict → fall through
@@ -1661,8 +1661,8 @@ impl EventLoopState {
     /// tips, sorted (deterministic) and capped to [`MAX_DAG_PARENTS`] to
     /// bound message size. Usually a single head on a quiet mesh.
     #[must_use]
-    pub fn dag_parents(&self) -> Vec<String> {
-        let mut heads: Vec<String> = self.dag_heads.iter().cloned().collect();
+    pub fn dag_parents(&self) -> Vec<ContentHash> {
+        let mut heads: Vec<ContentHash> = self.dag_heads.iter().copied().collect();
         heads.sort_unstable();
         heads.truncate(MAX_DAG_PARENTS);
         heads
@@ -1674,7 +1674,7 @@ impl EventLoopState {
     /// to flag). Updates `by_hash` and moves the tip set: the named parents
     /// are no longer tips, and `hash` becomes one. Unknown parents are left
     /// alone (the set converges via anti-entropy).
-    pub fn note_dag(&mut self, hash: String, parents: &[String], ts: i64) -> bool {
+    pub fn note_dag(&mut self, hash: ContentHash, parents: &[ContentHash], ts: i64) -> bool {
         let mut backdated = false;
         for parent in parents {
             if let Some(&parent_ts) = self.by_hash.get(parent)
@@ -1684,14 +1684,14 @@ impl EventLoopState {
             }
             self.dag_heads.remove(parent);
         }
-        self.by_hash.insert(hash.clone(), ts);
+        self.by_hash.insert(hash, ts);
         self.dag_heads.insert(hash);
         backdated
     }
 
     /// Prune an evicted message's content hash from the DAG indexes, keeping
     /// `by_hash`/`dag_heads` bounded alongside the message-log `VecDeque`.
-    pub fn forget_hash(&mut self, hash: &str) {
+    pub fn forget_hash(&mut self, hash: &ContentHash) {
         self.by_hash.remove(hash);
         self.dag_heads.remove(hash);
     }
@@ -1706,7 +1706,7 @@ impl EventLoopState {
     /// evicting the twin we did **not** record must not clear the recorded
     /// evidence, or a later anti-entropy resend of the still-retained twin
     /// would re-detect the equivocation as a fresh first sighting.
-    pub fn forget_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: &str) {
+    pub fn forget_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: &ContentHash) {
         if let Some(seqs) = self.author_seqs.get_mut(author)
             && seqs.get(&seq).is_some_and(|recorded| recorded == hash)
         {
@@ -1820,7 +1820,7 @@ impl EventLoopState {
 
     /// Stamp the next position on this author's hash chain, advancing it.
     /// `prev` is the content hash of the message just authored.
-    pub fn advance_chain(&mut self, prev: String) {
+    pub fn advance_chain(&mut self, prev: ContentHash) {
         self.self_seq += 1;
         self.self_prev = Some(prev);
     }
@@ -1828,8 +1828,8 @@ impl EventLoopState {
     /// This author's current chain position — the `seq` the next message takes
     /// and the hash it points back to.
     #[must_use]
-    pub fn chain_head(&self) -> (u64, Option<&str>) {
-        (self.self_seq, self.self_prev.as_deref())
+    pub fn chain_head(&self) -> (u64, Option<ContentHash>) {
+        (self.self_seq, self.self_prev)
     }
 
     /// Arm a ping round, replacing any already in flight.
@@ -2018,8 +2018,8 @@ mod tests {
         KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
         TokioInstant,
     };
-    use crate::protocol::AuthorKey;
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
+    use crate::protocol::{AuthorKey, ContentHash};
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
 
     fn lower_and_higher() -> (EndpointId, EndpointId) {
@@ -2525,21 +2525,26 @@ mod tests {
         message
     }
 
+    /// A content hash for a test: the hash of the name.
+    fn hash_of(name: &str) -> ContentHash {
+        ContentHash::of(name.as_bytes())
+    }
+
     #[test]
     fn note_msg_seq_detects_equivocation_once() {
         let mut state = fresh_state();
         let key = author_of("alice-key");
         // First sighting at a seq → recorded, no fork.
-        assert!(!state.note_msg_seq(&key, 0, "hashA".into()));
+        assert!(!state.note_msg_seq(&key, 0, hash_of("hashA")));
         // Same message again (same hash) → no fork.
-        assert!(!state.note_msg_seq(&key, 0, "hashA".into()));
+        assert!(!state.note_msg_seq(&key, 0, hash_of("hashA")));
         // Different hash at the SAME seq → fork, reported exactly once.
         assert!(
-            state.note_msg_seq(&key, 0, "hashB".into()),
+            state.note_msg_seq(&key, 0, hash_of("hashB")),
             "conflict is a fork"
         );
         assert!(
-            !state.note_msg_seq(&key, 0, "hashC".into()),
+            !state.note_msg_seq(&key, 0, hash_of("hashC")),
             "already flagged: one event per key"
         );
     }
@@ -2547,26 +2552,26 @@ mod tests {
     #[test]
     fn note_msg_seq_is_per_key_and_per_seq() {
         let mut state = fresh_state();
-        assert!(!state.note_msg_seq(&author_of("alice"), 0, "h0".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 0, hash_of("h0")));
         // A new seq for the same author is just the next entry, not a fork.
-        assert!(!state.note_msg_seq(&author_of("alice"), 1, "h1".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 1, hash_of("h1")));
         // A different key reusing seq 0 with its own hash is independent.
-        assert!(!state.note_msg_seq(&author_of("bob"), 0, "other".into()));
+        assert!(!state.note_msg_seq(&author_of("bob"), 0, hash_of("other")));
         // But a conflict on alice's seq 0 still fires.
-        assert!(state.note_msg_seq(&author_of("alice"), 0, "h0-prime".into()));
+        assert!(state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")));
     }
 
     #[test]
     fn forget_msg_seq_prunes_author_and_fork_flag() {
         let mut state = fresh_state();
-        state.note_msg_seq(&author_of("alice"), 0, "h0".into());
+        state.note_msg_seq(&author_of("alice"), 0, hash_of("h0"));
         assert!(
-            state.note_msg_seq(&author_of("alice"), 0, "h0-prime".into()),
+            state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")),
             "fork"
         );
         assert!(state.forked.contains(&author_of("alice")));
         // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
-        state.forget_msg_seq(&author_of("alice"), 0, "h0");
+        state.forget_msg_seq(&author_of("alice"), 0, &hash_of("h0"));
         assert!(!state.author_seqs.contains_key(&author_of("alice")));
         assert!(
             !state.forked.contains(&author_of("alice")),
@@ -2580,14 +2585,14 @@ mod tests {
         // NOT record must not clear the recorded slot / fork flag — otherwise a
         // later resend of the still-retained twin re-detects the fork as new.
         let mut state = fresh_state();
-        state.note_msg_seq(&author_of("alice"), 0, "recorded".into());
+        state.note_msg_seq(&author_of("alice"), 0, hash_of("recorded"));
         assert!(
-            state.note_msg_seq(&author_of("alice"), 0, "twin".into()),
+            state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")),
             "fork fires"
         );
         assert!(state.forked.contains(&author_of("alice")));
         // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
-        state.forget_msg_seq(&author_of("alice"), 0, "twin");
+        state.forget_msg_seq(&author_of("alice"), 0, &hash_of("twin"));
         assert!(
             state.author_seqs.contains_key(&author_of("alice")),
             "recorded slot retained"
@@ -2598,43 +2603,45 @@ mod tests {
         );
         // A resend of the recorded twin does not re-fire the fork (already
         // flagged), proving the evidence survived the eviction.
-        assert!(!state.note_msg_seq(&author_of("alice"), 0, "twin".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")));
     }
 
     #[test]
     fn note_dag_moves_tip_set() {
         let mut state = fresh_state();
         // First message (no parents) becomes the sole tip.
-        assert!(!state.note_dag("h1".into(), &[], 100));
-        assert_eq!(state.dag_parents(), vec!["h1".to_string()]);
+        assert!(!state.note_dag(hash_of("h1"), &[], 100));
+        assert_eq!(state.dag_parents(), vec![hash_of("h1")]);
         // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
-        assert!(!state.note_dag("h2".into(), &["h1".to_string()], 101));
-        assert_eq!(state.dag_parents(), vec!["h2".to_string()]);
+        assert!(!state.note_dag(hash_of("h2"), &[hash_of("h1")], 101));
+        assert_eq!(state.dag_parents(), vec![hash_of("h2")]);
     }
 
     #[test]
     fn note_dag_keeps_concurrent_tips() {
         let mut state = fresh_state();
-        state.note_dag("a".into(), &[], 1);
-        state.note_dag("b".into(), &[], 1); // concurrent: no shared parent
-        assert_eq!(state.dag_parents(), vec!["a".to_string(), "b".to_string()]);
+        state.note_dag(hash_of("a"), &[], 1);
+        state.note_dag(hash_of("b"), &[], 1); // concurrent: no shared parent
+        let mut both = vec![hash_of("a"), hash_of("b")];
+        both.sort();
+        assert_eq!(state.dag_parents(), both, "both tips, in hash order");
     }
 
     #[test]
     fn note_dag_flags_backdating() {
         let mut state = fresh_state();
-        state.note_dag("parent".into(), &[], 200);
+        state.note_dag(hash_of("parent"), &[], 200);
         // Child claims an earlier timestamp than a parent it references.
-        assert!(state.note_dag("child".into(), &["parent".to_string()], 100));
+        assert!(state.note_dag(hash_of("child"), &[hash_of("parent")], 100));
         // A forward timestamp is fine.
-        assert!(!state.note_dag("ok".into(), &["parent".to_string()], 300));
+        assert!(!state.note_dag(hash_of("ok"), &[hash_of("parent")], 300));
     }
 
     #[test]
     fn forget_hash_prunes_dag() {
         let mut state = fresh_state();
-        state.note_dag("h".into(), &[], 1);
-        state.forget_hash("h");
+        state.note_dag(hash_of("h"), &[], 1);
+        state.forget_hash(&hash_of("h"));
         assert!(state.dag_parents().is_empty());
     }
 
