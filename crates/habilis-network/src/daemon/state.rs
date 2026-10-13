@@ -577,6 +577,8 @@ pub struct EventLoopState {
     /// When a sign of a second group last brought the re-check forward
     /// ([`Self::note_second_group_sign`]).
     pub(crate) second_group_sign_at: Option<Instant>,
+    /// When the member last said that every rung of its ladder is held by another process.
+    pub(crate) no_rung_noted_at: Option<Instant>,
     /// Consecutive due sheds held back because a data-channel peer depends
     /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
     /// fresh claim (`beacon_arm::schedule_rival_recheck`).
@@ -1001,6 +1003,7 @@ impl EventLoopState {
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
             second_group_sign_at: None,
+            no_rung_noted_at: None,
             rival_recheck_deferrals: 0,
             beacon_closing: None,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),

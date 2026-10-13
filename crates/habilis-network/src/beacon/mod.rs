@@ -1062,7 +1062,11 @@ async fn build_rendezvous_endpoint(
         }
     }
     tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "no rendezvous ladder rung taken; staying peer");
-    Walk::Nothing
+    if params.bind_ports.is_empty() {
+        Walk::Nothing
+    } else {
+        Walk::NoRung
+    }
 }
 
 /// What [`build_rendezvous_endpoint`] ended with.
@@ -1074,6 +1078,9 @@ enum Walk {
     Rival,
     /// No rung was taken, and no holder was read.
     Nothing,
+    /// Every rung is held by another process, each read as foreign or silent for the whole
+    /// window.
+    NoRung,
 }
 
 /// What a call of [`ensure_holder`] left behind.
@@ -1084,8 +1091,11 @@ pub(crate) enum Held {
     /// The ladder walk read a live holder of our mesh that is not this member. Only a private
     /// ladder reads one inline; a public member learns it from its probe verdict.
     Rival,
-    /// Nothing changed: the beacon is held already, a probe is out, or no rung was free.
+    /// Nothing changed: the beacon is held already, or a probe is out.
     Idle,
+    /// Every rung of the ladder is held by another process: no member can serve the rendezvous
+    /// until one lets go.
+    NoRung,
 }
 
 /// Idempotent: a no-op while we co-host and the task is alive;
@@ -1261,8 +1271,9 @@ async fn claim_holder(
         // Private: a rung is taken by the beacon of our own mesh. Joiners reach it by an
         // identity-checked dial; whether this member must go to it is the caller's to say.
         Walk::Rival => return Held::Rival,
-        // Public: the endpoint build failed. Private: every ladder rung is foreign, or the
-        // probe endpoint could not be built. Nothing to do; the next tick retries.
+        Walk::NoRung => return Held::NoRung,
+        // Public: the endpoint build failed. Private: a rung is read, or waits for its probe.
+        // Nothing to do; the next tick retries.
         Walk::Nothing => return Held::Idle,
     };
 
@@ -1776,6 +1787,57 @@ mod tests {
             Held::Claimed,
             "a foreign rung is passed at once"
         );
+    }
+
+    /// Every rung of the ladder is held by another process: the walk says so, and does not stay
+    /// "idle" as it does while a probe is out. A member that cannot serve the rendezvous and
+    /// cannot reach one is in a state that the loop must be able to report.
+    #[tokio::test]
+    async fn a_walk_that_reads_every_rung_as_taken_says_so() {
+        use super::{Held, RungReport, RungWatch, walk_ladder};
+        use crate::lookup::ProbeAnswer;
+
+        let (first_socket, first_ports) = ladder_of_two();
+        let (second_socket, second_ports) = ladder_of_two();
+        let (first, second) = (first_ports[0], second_ports[0]);
+        let mut params = public_params();
+        params.bind_ports = vec![first, second];
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+        let mut rungs = RungWatch::detached();
+        let now = crate::util::clock::Instant::now();
+        for port in [first, second] {
+            rungs.note(
+                RungReport {
+                    port,
+                    answer: ProbeAnswer::Foreign,
+                },
+                now,
+            );
+        }
+
+        let walked = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+
+        let bound = beacon.is_some();
+        peer.close().await;
+        drop((first_socket, second_socket));
+        assert_eq!(
+            walked,
+            Held::NoRung,
+            "a ladder that is taken whole is not a walk that waits for a probe"
+        );
+        assert!(!bound);
     }
 
     /// The walk of a claim tick does not wait for a rung that does not answer. The caller is the

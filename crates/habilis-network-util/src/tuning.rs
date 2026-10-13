@@ -417,6 +417,15 @@ pub const RECLAIM_WINDOW_SECS: u64 = 6;
 /// Cadence of the fast reclaim burst while the window (above) is open.
 pub const RECLAIM_INTERVAL_MS: u64 = 400;
 
+/// How often a member repeats that every port of its room's ladder is held by other processes
+/// (`daemon::beacon_arm`: the warning and the event of the app).
+///
+/// The walk runs at every heal tick and at every tick of the reclaim burst, and the state does
+/// not change in between. A line every heal tick is 240 lines an hour in the log and in the
+/// terminal of the user, who can do nothing about it but free a port. Five minutes says it again
+/// often enough for a session that was started later or a scrolled screen.
+pub const NO_RUNG_REPEAT_SECS: u64 = 300;
+
 /// Max remembered `quiet` (silence-evicted but maybe-returning) peers.
 /// `quiet` is drained only when a peer returns, so without a cap a churn / sybil
 /// stream of one-shot nicknames would grow it without bound — the one unbounded
