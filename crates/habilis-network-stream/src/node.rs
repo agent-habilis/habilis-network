@@ -162,16 +162,15 @@ impl StreamNode {
         let mut secret = [0; SECRET_LEN];
         rand::rng().fill_bytes(&mut id);
         rand::rng().fill_bytes(&mut secret);
-        Producer::new(
-            StreamHash {
-                addr: self.endpoint.addr(),
-                lookups: self.lookups.clone(),
-                transport: self.transport,
-                id: StreamId::from_bytes(id),
-                secret: StreamSecret::from_bytes(secret),
-            },
-            Arc::clone(&self.registry),
-        )
+        let hash = StreamHash {
+            addr: self.endpoint.addr(),
+            lookups: self.lookups.clone(),
+            transport: self.transport,
+            id: StreamId::from_bytes(id),
+            secret: StreamSecret::from_bytes(secret),
+        };
+        zeroize::Zeroize::zeroize(&mut secret);
+        Producer::new(hash, Arc::clone(&self.registry))
     }
 
     /// Take the consumer slot of the stream behind `hash`.

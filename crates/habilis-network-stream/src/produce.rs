@@ -164,10 +164,9 @@ async fn read_header(conn: &Connection) -> Result<(SendStream, (StreamId, Stream
     let mut secret = [0; SECRET_LEN];
     recv.read_exact(&mut id).await?;
     recv.read_exact(&mut secret).await?;
-    Ok((
-        send,
-        (StreamId::from_bytes(id), StreamSecret::from_bytes(secret)),
-    ))
+    let header = (StreamId::from_bytes(id), StreamSecret::from_bytes(secret));
+    zeroize::Zeroize::zeroize(&mut secret);
+    Ok((send, header))
 }
 
 /// One stream's writing end. It admits exactly one consumer.
