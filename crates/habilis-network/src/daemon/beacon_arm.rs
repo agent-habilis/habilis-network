@@ -130,18 +130,28 @@ pub(super) async fn maybe_cohost(
     // public shed is on a timer that backs off; here the question is positive and cheap, so it
     // is asked on every heal tick, and nothing is asked of a holder on the first rung. The
     // answer is a reading in `state.rungs`, which the walk after the shed reads as ours.
+    //
+    // The same tick asks whether the rung that this holder serves still answers: a beacon that
+    // stopped answering keeps its rung, nobody else claims it, and the members that joined
+    // through it hold other links. It sheds at the second check that does not answer, never at
+    // the first, and claims again.
     if let Some(held) = current.as_ref()
         && !arm.params.bind_ports.is_empty()
-        && let Some(own) = held
-            .rung_in(&arm.params.bind_ports)
-            .filter(|rung| *rung > 0)
-        && state
-            .rungs
-            .lower_rung_that_answers(arm.params, ctx.endpoint.id(), own)
-            .is_some()
+        && let Some(own) = held.rung_in(&arm.params.bind_ports)
+        && let Some(&own_port) = arm.params.bind_ports.get(own)
     {
-        shed_beacon(state, arm.params, current);
-        return;
+        let node = ctx.endpoint.id();
+        let stopped = state.rungs.own_rung_failed(arm.params, node, own_port);
+        let yields = own > 0
+            && state
+                .rungs
+                .lower_rung_that_answers(arm.params, node, own)
+                .is_some();
+        if stopped || yields {
+            state.rungs.own_check_done();
+            shed_beacon(state, arm.params, current);
+            return;
+        }
     }
     if may_cohost(arm.policy, state.meshed, arm.started) {
         // A member that keeps finding the rival probes less often; the reclaim window is not held back.
@@ -285,6 +295,23 @@ fn shed_beacon(
     state.rendezvous_linked = false;
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
+}
+
+/// Tests only: make the beacon stop answering, if a test asked for it (`Request::StallBeacon`).
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(super) fn stall_on_request(
+    state: &mut EventLoopState,
+    rendezvous: Option<&beacon::Rendezvous>,
+) {
+    if std::mem::take(&mut state.stall_requested)
+        && let Some(held) = rendezvous
+    {
+        tracing::info!(
+            target: "habilis_network::gossip",
+            "beacon stalled at the request of a test"
+        );
+        held.stall();
+    }
 }
 
 /// Tests only: shed the beacon now, if a test asked for it (`Request::ShedBeacon`), as the check
@@ -1271,6 +1298,52 @@ mod tests {
         }
         drop(silent);
         holder.close().await;
+    }
+
+    /// A beacon that stopped answering keeps its rung. The holder notices at the second check
+    /// that does not answer, and not at the first: a busy moment must not take a healthy beacon
+    /// from the members that joined through it.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_holder_whose_beacon_stops_answering_sheds_at_the_second_check_and_not_the_first() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+        holder
+            .rendezvous
+            .as_ref()
+            .expect("the holder holds its rung")
+            .stall();
+
+        holder.heal_tick().await;
+        let kept_at_the_first = holder.rendezvous.is_some();
+        holder.state.rungs.expire_readings();
+        holder.heal_tick().await;
+        let shed_at_the_second = holder.rendezvous.is_none();
+
+        holder.close().await;
+        assert!(
+            kept_at_the_first,
+            "one check that does not answer shed the beacon"
+        );
+        assert!(
+            shed_at_the_second,
+            "the beacon stopped answering at two checks and was kept"
+        );
+    }
+
+    /// A beacon that answers is never shed by the check of its own rung, however many ticks
+    /// read it: the count of checks that did not answer starts again at every answer.
+    #[tokio::test]
+    async fn a_holder_whose_beacon_answers_is_kept_by_the_check_of_its_own_rung() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+
+        for _ in 0..3 {
+            holder.heal_tick().await;
+            holder.state.rungs.expire_readings();
+        }
+
+        let kept = holder.rendezvous.is_some();
+        holder.close().await;
+        assert!(kept, "a beacon that answers was shed by its own check");
     }
 
     /// A holder that shed because a lower rung answered stays a peer of that rung, even when its

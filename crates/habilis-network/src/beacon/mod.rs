@@ -212,6 +212,14 @@ impl Rendezvous {
         }
     }
 
+    /// Tests only: make this beacon stop answering and keep its rung. The endpoint stays bound and
+    /// the co-host task stays alive, as a stopped process or a wedged accept loop leaves them;
+    /// no connection of the gossip ALPN is taken any more.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) fn stall(&self) {
+        self.endpoint.set_alpns(Vec::new());
+    }
+
     /// A beacon holding `endpoint` whose answerer is `lane`, for a test that
     /// needs a held beacon without a claim.
     #[cfg(test)]
@@ -685,6 +693,10 @@ pub(crate) struct RungWatch {
     /// longer than one heal tick is dead (the loop that would have noted it, or the runtime, is
     /// gone) and the rung is asked again.
     in_flight: BTreeMap<u16, Instant>,
+    /// How many consecutive checks of our own rung did not answer as ours, and the reading that
+    /// was counted last, so that one reading is one check however often a tick reads it.
+    own_misses: u32,
+    own_counted: Option<Instant>,
     reports: mpsc::UnboundedSender<RungReport>,
 }
 
@@ -693,6 +705,8 @@ impl RungWatch {
         Self {
             readings: BTreeMap::new(),
             in_flight: BTreeMap::new(),
+            own_misses: 0,
+            own_counted: None,
             reports,
         }
     }
@@ -742,6 +756,60 @@ impl RungWatch {
     /// Forget every reading: the ladder is ours now.
     fn forget(&mut self) {
         self.readings.clear();
+        self.own_misses = 0;
+        self.own_counted = None;
+    }
+
+    /// Whether the holder of the beacon on `own_port` should shed it: its own rung did not answer
+    /// as ours at two consecutive checks, and never at one, so that a busy moment does not take a
+    /// healthy beacon from the members that joined through it. A check is a probe task dialing
+    /// the rung from a throwaway endpoint, one attempt, never blind; a reading that says ours
+    /// resets the count.
+    ///
+    /// What it does not see: a beacon whose endpoint answers while its gossip is wedged.
+    pub(crate) fn own_rung_failed(
+        &mut self,
+        params: &RendezvousParams,
+        node: EndpointId,
+        own_port: u16,
+    ) -> bool {
+        match self.reading(own_port, Instant::now()) {
+            RungRead::Ours => {
+                self.own_misses = 0;
+                self.own_counted = None;
+                false
+            }
+            RungRead::Unknown => {
+                self.ask(params, node, own_port, false);
+                false
+            }
+            RungRead::Foreign | RungRead::SilentLongEnough | RungRead::Silent => {
+                let read_at = self.readings.get(&own_port).map(|reading| reading.read_at);
+                if read_at != self.own_counted {
+                    self.own_misses = self.own_misses.saturating_add(1);
+                    self.own_counted = read_at;
+                }
+                self.own_misses >= 2
+            }
+        }
+    }
+
+    /// The count of the checks of our own rung is over: the beacon was shed.
+    pub(crate) fn own_check_done(&mut self) {
+        self.own_misses = 0;
+        self.own_counted = None;
+    }
+
+    /// Tests only: every reading is older than a heal tick, as when one has passed.
+    #[cfg(test)]
+    pub(crate) fn expire_readings(&mut self) {
+        let long_ago = Duration::from_secs(heal_interval_secs()).saturating_mul(2);
+        for reading in self.readings.values_mut() {
+            reading.read_at = reading
+                .read_at
+                .checked_sub(long_ago)
+                .unwrap_or(reading.read_at);
+        }
     }
 
     fn reading(&self, port: u16, now: Instant) -> RungRead {

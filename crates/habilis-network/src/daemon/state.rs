@@ -510,6 +510,10 @@ pub struct EventLoopState {
     /// shed does (`Request::ShedBeacon`).
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) shed_requested: bool,
+    /// Tests only: the beacon stops answering at the top of the next turn of the loop
+    /// (`Request::StallBeacon`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) stall_requested: bool,
     /// What this node already asked of the members it heard on the LAN.
     pub(crate) lan_grafts: crate::gossip::lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
@@ -965,6 +969,8 @@ impl EventLoopState {
             rungs: crate::beacon::RungWatch::detached(),
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             shed_requested: false,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            stall_requested: false,
             lan_grafts: crate::gossip::lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,

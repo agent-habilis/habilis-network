@@ -270,6 +270,13 @@ impl Member {
         self.membership.node.endpoint_id().fmt_short().to_string()
     }
 
+    async fn stall_beacon(&self) {
+        self.membership
+            .request(|reply| Request::StallBeacon { reply })
+            .await
+            .expect("the loop answers");
+    }
+
     async fn shed_beacon(&self) {
         self.membership
             .request(|reply| Request::ShedBeacon { reply })
@@ -648,6 +655,33 @@ async fn start_burst_on_a_host_that_answers_late(
     Ok(merged)
 }
 
+/// The holder of the beacon stops answering and keeps its rung: a stopped process, a wedged
+/// accept loop. Nobody else claims, because the rung is taken, and the members that joined
+/// through it hold other links. A joiner that comes later must still find a beacon: the holder
+/// has to notice, shed, and serve again.
+async fn holder_whose_beacon_stops_answering(
+    round: &Round,
+    members: &mut Vec<Member>,
+) -> Result<Duration, String> {
+    one_by_one(round, members, 2).await?;
+    let bound = round.beacons().len();
+    members[0].stall_beacon().await;
+    let started = Instant::now();
+    while round.beacons().len() <= bound {
+        if started.elapsed() >= Duration::from_secs(45) {
+            return Err(
+                "no beacon was bound again inside 45 s after the holder of the rung stopped answering"
+                    .to_owned(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let mesh = members[0].mesh_id();
+    open_joiners(members, &mesh, &nicks("late", 1)).await;
+    let all: Vec<&Member> = members.iter().collect();
+    become_one_mesh(&all, MERGE_DEADLINE).await
+}
+
 async fn finish(round: Round, members: Vec<Member>, verdict: Result<Duration, String>) {
     for member in members {
         member.leave().await;
@@ -765,5 +799,15 @@ async fn a_start_burst_on_a_host_that_answers_late_binds_no_second_rung() {
     let round = Round::begin("burst-answers-late");
     let mut members = Vec::new();
     let verdict = start_burst_on_a_host_that_answers_late(&round, &mut members).await;
+    finish(round, members, verdict).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn a_holder_whose_beacon_stops_answering_serves_again_and_a_joiner_finds_it() {
+    let _serial = SERIAL.lock().await;
+    let round = Round::begin("holder-stalled");
+    let mut members = Vec::new();
+    let verdict = holder_whose_beacon_stops_answering(&round, &mut members).await;
     finish(round, members, verdict).await;
 }

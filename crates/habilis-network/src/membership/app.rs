@@ -138,6 +138,12 @@ pub enum Request {
         addr: std::net::SocketAddr,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: make the beacon of this node stop answering while it keeps its rung, as a
+    /// stopped process or a wedged accept loop does. Nothing happens when it holds no beacon.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    StallBeacon {
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: shed the beacon of this node at once, as a rival re-check shed does, and leave
     /// the node to re-claim or to read the holder that is there. Nothing happens when it holds no
     /// beacon.
@@ -541,6 +547,12 @@ impl NodeDriver for MembershipApp {
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
                 true
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::StallBeacon { reply } => {
+                state.stall_requested = true;
+                let _ = reply.send(());
+                false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::ShedBeacon { reply } => {

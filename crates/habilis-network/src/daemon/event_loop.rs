@@ -752,6 +752,8 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     loop {
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
         super::beacon_arm::shed_on_request(&mut state, &rendezvous_params, &mut rendezvous);
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        super::beacon_arm::stall_on_request(&mut state, rendezvous.as_ref());
         // Whether this process hosts the beacon is read here, once per turn,
         // from the one place that owns it, so that no path that claims or sheds
         // the beacon has to remember to say so.
