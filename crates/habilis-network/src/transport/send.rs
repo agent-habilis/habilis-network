@@ -166,7 +166,7 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
 /// holder that hears a digest answers it: the asker's link count bounds how
 /// many answers reach its unicast inbox. `None` means answer on gossip.
 pub(crate) fn unicast_answer_target(signer: &str, state: &EventLoopState) -> Option<EndpointId> {
-    let signer = crate::transport::endpoint_proof::signer_bytes(signer)?;
+    let signer = crate::protocol::AuthorKey::from_hex(signer)?;
     let eid = state
         .proven_endpoints
         .get(&signer)
@@ -934,7 +934,7 @@ mod tests {
     /// Record, as a verified `PeerInfo` proof would, that the signing key
     /// `pubkey` (hex) owns `endpoint`.
     fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
-        let signer = crate::transport::endpoint_proof::signer_bytes(pubkey).expect("a 32-byte key");
+        let signer = crate::protocol::AuthorKey::from_hex(pubkey).expect("a 32-byte key");
         let linked = state.linked_endpoints.clone();
         state.proven_endpoints.insert(signer, endpoint, &linked);
     }

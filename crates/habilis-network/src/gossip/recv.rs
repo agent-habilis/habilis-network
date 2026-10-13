@@ -1510,10 +1510,8 @@ async fn handle_peer_info(
     // The only binding a digest's answer may follow: this signer proved it
     // owns `peer_id`. A `PeerInfo` arrives many times, so a known pair is not
     // checked again.
-    if let (Some(signer), Some(proof)) = (
-        crate::transport::endpoint_proof::signer_bytes(&message.pubkey),
-        parsed["proof"].as_str(),
-    ) && state.proven_endpoints.get(&signer) != Some(peer_id)
+    if let (Some(signer), Some(proof)) = (message.author_key(), parsed["proof"].as_str())
+        && state.proven_endpoints.get(&signer) != Some(peer_id)
         && crate::transport::endpoint_proof::verifies(peer_id, ctx.mesh, &signer, proof)
     {
         state
@@ -1522,7 +1520,7 @@ async fn handle_peer_info(
     }
     // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
     // endpoint is believed.
-    if let Some(signer) = crate::transport::endpoint_proof::signer_bytes(&message.pubkey) {
+    if let Some(signer) = message.author_key() {
         let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
         state.note_rival_beacon_flag(
             ctx.endpoint.id(),
@@ -2614,10 +2612,11 @@ mod first_contact_tests {
     /// carries it but is signed by another key must bind nothing.
     #[tokio::test]
     async fn a_peer_info_binds_its_signer_only_with_the_endpoints_proof() {
+        use crate::protocol::AuthorKey;
         use crate::protocol::identity::encode_pubkey;
         use crate::protocol::message::MessageBody;
         use crate::protocol::peer_addr::endpoint_addr_to_json;
-        use crate::transport::endpoint_proof::{sign, signer_bytes};
+        use crate::transport::endpoint_proof::sign;
 
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2625,7 +2624,7 @@ mod first_contact_tests {
         let bob_endpoint = bob_endpoint_key.public();
         let bob = Identity::generate();
         let stranger = Identity::generate();
-        let bob_signer = signer_bytes(&encode_pubkey(&bob.public())).expect("a 32-byte key");
+        let bob_signer = AuthorKey::from_hex(&encode_pubkey(&bob.public())).expect("a 32-byte key");
         let peer_info = |proof: Option<&str>, signed_by: &Identity| {
             let mut json = endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
             if let Some(proof) = proof {
@@ -2645,7 +2644,7 @@ mod first_contact_tests {
         )
         .await;
         let stranger_signer =
-            signer_bytes(&encode_pubkey(&stranger.public())).expect("a 32-byte key");
+            AuthorKey::from_hex(&encode_pubkey(&stranger.public())).expect("a 32-byte key");
         assert_eq!(
             state.proven_endpoints.get(&stranger_signer),
             None,

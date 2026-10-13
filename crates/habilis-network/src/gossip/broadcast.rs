@@ -355,7 +355,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
             crate::transport::endpoint_proof::sign(
                 ctx.endpoint.secret_key(),
                 ctx.mesh,
-                state.identity.public().as_bytes(),
+                &crate::protocol::AuthorKey::from_bytes(*state.identity.public().as_bytes()),
             )
         })
         .clone();

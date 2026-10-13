@@ -560,10 +560,24 @@ mod tests {
         let now = crate::util::clock::Instant::now();
         assert!(super::may_probe_to_claim(&state), "no holder known: probe");
 
-        state.note_rival_beacon_flag(own, [9u8; 32], holder, true, true, now);
+        state.note_rival_beacon_flag(
+            own,
+            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+            holder,
+            true,
+            true,
+            now,
+        );
         assert!(!super::may_probe_to_claim(&state), "a holder is known");
 
-        state.note_rival_beacon_flag(own, [9u8; 32], holder, true, false, now);
+        state.note_rival_beacon_flag(
+            own,
+            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+            holder,
+            true,
+            false,
+            now,
+        );
         assert!(super::may_probe_to_claim(&state), "it let go: probe again");
     }
 
@@ -578,7 +592,7 @@ mod tests {
 
         state.note_rival_beacon_flag(
             own,
-            [9u8; 32],
+            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
             holder,
             true,
             true,

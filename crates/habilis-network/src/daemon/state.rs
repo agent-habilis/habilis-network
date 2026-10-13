@@ -410,7 +410,7 @@ pub struct EventLoopState {
     /// key and the endpoint that key proved. A `PeerInfo` of the same signer without the flag,
     /// or the roster removal of the member, takes it out again. While it is not empty and we do
     /// not hold the rendezvous, we do not probe to claim it.
-    pub(crate) rival_holders: HashMap<[u8; 32], EndpointId>,
+    pub(crate) rival_holders: HashMap<AuthorKey, EndpointId>,
     /// How many links to other members make this node release the rendezvous.
     /// A field, not a constant, so a test can set it.
     pub(crate) rendezvous_release_links: usize,
@@ -1316,7 +1316,7 @@ impl EventLoopState {
     pub(crate) fn note_rival_beacon_flag(
         &mut self,
         own: EndpointId,
-        signer: [u8; 32],
+        signer: AuthorKey,
         sender: EndpointId,
         proven: bool,
         flag: bool,
@@ -2020,6 +2020,7 @@ mod tests {
         KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
         TokioInstant,
     };
+    use crate::protocol::AuthorKey;
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
 
@@ -2042,7 +2043,7 @@ mod tests {
         state.hosts_rendezvous = true;
         let now = Instant::now();
 
-        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, now);
+        state.note_rival_beacon_flag(high, AuthorKey::from_bytes([9u8; 32]), low, true, true, now);
 
         assert!(state.yield_to_lower);
         assert_eq!(state.next_rival_recheck, Some(now));
@@ -2059,7 +2060,7 @@ mod tests {
         state.rival_recheck_deferrals = 1;
         let now = Instant::now();
 
-        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, now);
+        state.note_rival_beacon_flag(low, AuthorKey::from_bytes([9u8; 32]), high, true, true, now);
 
         assert!(!state.yield_to_lower);
         let next = state
@@ -2075,7 +2076,7 @@ mod tests {
     #[test]
     fn a_flag_that_does_not_count_changes_nothing() {
         let (low, high) = lower_and_higher();
-        let signer = [9u8; 32];
+        let signer = AuthorKey::from_bytes([9u8; 32]);
         let now = Instant::now();
 
         let mut no_flag = fresh_state();
@@ -2104,7 +2105,14 @@ mod tests {
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
 
-        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from_bytes([9u8; 32]),
+            low,
+            true,
+            true,
+            Instant::now(),
+        );
 
         assert!(state.rival_holder_known());
         assert!(!state.yield_to_lower);
@@ -2120,13 +2128,20 @@ mod tests {
         state.hosts_rendezvous = true;
         let first = Instant::now();
 
-        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, first);
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from_bytes([9u8; 32]),
+            high,
+            true,
+            true,
+            first,
+        );
         let pushed = state.next_rival_recheck;
         assert!(pushed.is_some_and(|due| due > first), "pushed out once");
 
         state.note_rival_beacon_flag(
             low,
-            [9u8; 32],
+            AuthorKey::from_bytes([9u8; 32]),
             high,
             true,
             true,
@@ -2149,7 +2164,7 @@ mod tests {
         let far = now + Duration::from_secs(100_000);
         state.next_rival_recheck = Some(far);
 
-        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, now);
+        state.note_rival_beacon_flag(low, AuthorKey::from_bytes([9u8; 32]), high, true, true, now);
 
         assert_eq!(state.next_rival_recheck, Some(far));
     }
@@ -2159,7 +2174,7 @@ mod tests {
     #[test]
     fn a_holder_stops_counting_when_it_drops_the_flag_or_leaves() {
         let (low, high) = lower_and_higher();
-        let signer = [9u8; 32];
+        let signer = AuthorKey::from_bytes([9u8; 32]);
         let mut state = fresh_state();
         state.note_rival_beacon_flag(high, signer, low, true, true, Instant::now());
         assert!(state.rival_holder_known());
