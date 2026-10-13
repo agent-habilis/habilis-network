@@ -200,7 +200,7 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
 /// window format sends one every round, and the two builds never repair each
 /// other's gaps: without this line nothing tells the user why.
 fn report_unreadable_digest(message: &Message, state: &mut EventLoopState) {
-    if state.report_unreadable_digest(&message.pubkey, Instant::now()) {
+    if state.report_unreadable_digest(message.author_key(), Instant::now()) {
         tracing::warn!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -244,7 +244,7 @@ pub(crate) fn handle_digest(message: &Message, state: &mut EventLoopState, me: &
     // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
     // small frame into that much flooding from every member that hears it —
     // the cost scaling with the mesh rather than with the sender.
-    if !state.admit_digest(&message.pubkey, Instant::now()) {
+    if !state.admit_digest(message.author_key(), Instant::now()) {
         tracing::debug!(
             target: "habilis_network::gossip",
             author = %message.author,

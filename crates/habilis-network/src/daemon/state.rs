@@ -284,9 +284,9 @@ pub struct EventLoopState {
     regraft_at: HashMap<EndpointId, Instant>,
     /// When each author's digest was last served. Keyed on the pubkey rather
     /// than the nickname, which an author picks freely.
-    digest_serves: Cooldown<String>,
+    digest_serves: Cooldown<Option<AuthorKey>>,
     /// When we last reported an author whose digest we could not read.
-    digest_unreadable: Cooldown<String>,
+    digest_unreadable: Cooldown<Option<AuthorKey>>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
     pub(crate) resend_outbox: crate::transport::ResendOutbox,
@@ -1868,11 +1868,11 @@ impl EventLoopState {
     /// so without a per-peer gate a single crafted digest buys that from every
     /// member — an amplifier that grows with the mesh. Serving at most one per
     /// window per author bounds it to the honest cadence.
-    pub fn admit_digest(&mut self, pubkey: &str, now: Instant) -> bool {
-        if self.digest_serves.on_cooldown(&pubkey.to_owned(), now) {
+    pub fn admit_digest(&mut self, author: Option<AuthorKey>, now: Instant) -> bool {
+        if self.digest_serves.on_cooldown(&author, now) {
             return false;
         }
-        self.digest_serves.note(pubkey.to_owned(), now);
+        self.digest_serves.note(author, now);
         true
     }
 
@@ -1898,8 +1898,7 @@ impl EventLoopState {
     /// Whether to report that this author's digest could not be read: once per
     /// author per window. The author runs a build with another digest format, or
     /// sends garbage; either way the two never repair each other's gaps.
-    pub fn report_unreadable_digest(&mut self, pubkey: &str, now: Instant) -> bool {
-        let author = pubkey.to_owned();
+    pub fn report_unreadable_digest(&mut self, author: Option<AuthorKey>, now: Instant) -> bool {
         if self.digest_unreadable.on_cooldown(&author, now) {
             return false;
         }
@@ -2875,20 +2874,20 @@ mod tests {
         let mut state = fresh_state();
         let now = Instant::now();
         assert!(
-            state.report_unreadable_digest("aa", now),
+            state.report_unreadable_digest(Some(author_of("aa")), now),
             "the first is reported"
         );
         assert!(
-            !state.report_unreadable_digest("aa", now + Duration::from_secs(10)),
+            !state.report_unreadable_digest(Some(author_of("aa")), now + Duration::from_secs(10)),
             "the same author every round is one line, not one line per round"
         );
         assert!(
-            state.report_unreadable_digest("bb", now),
+            state.report_unreadable_digest(Some(author_of("bb")), now),
             "another author is reported on its own"
         );
         assert!(
             state.report_unreadable_digest(
-                "aa",
+                Some(author_of("aa")),
                 now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
             ),
             "the author is reported again after the window"
@@ -2902,17 +2901,23 @@ mod tests {
         let window =
             Duration::from_secs(habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS);
 
-        assert!(state.admit_digest("aa", now), "the first is served");
         assert!(
-            !state.admit_digest("aa", now),
+            state.admit_digest(Some(author_of("aa")), now),
+            "the first is served"
+        );
+        assert!(
+            !state.admit_digest(Some(author_of("aa")), now),
             "a second digest inside the window must not buy another round of resends"
         );
         assert!(
-            state.admit_digest("bb", now),
+            state.admit_digest(Some(author_of("bb")), now),
             "one peer's flood must not deny another peer service"
         );
         assert!(
-            state.admit_digest("aa", now + window + Duration::from_millis(1)),
+            state.admit_digest(
+                Some(author_of("aa")),
+                now + window + Duration::from_millis(1)
+            ),
             "the honest cadence resumes after the window"
         );
     }
