@@ -97,6 +97,16 @@ impl StreamHash {
         base58check::encode(&framed)
     }
 
+    /// The bytes a consumer sends first on the stream it opens: `id ‖ secret`.
+    /// The producer reads them back in the same order.
+    #[must_use]
+    pub(crate) fn header_bytes(&self) -> [u8; ID_LEN + SECRET_LEN] {
+        let mut header = [0; ID_LEN + SECRET_LEN];
+        header[..ID_LEN].copy_from_slice(&self.id);
+        header[ID_LEN..].copy_from_slice(&self.secret);
+        header
+    }
+
     /// Decode a bare Base58Check token.
     ///
     /// # Errors
@@ -221,6 +231,16 @@ mod tests {
         assert_eq!(
             StreamHash::decode(GOLDEN).expect("decodes"),
             sample(policy(true, true, true))
+        );
+    }
+
+    #[test]
+    fn header_bytes_are_the_id_then_the_secret() {
+        let mut expected = vec![1; ID_LEN];
+        expected.extend_from_slice(&[2; SECRET_LEN]);
+        assert_eq!(
+            sample(TransportPolicy::default()).header_bytes().as_slice(),
+            expected.as_slice()
         );
     }
 

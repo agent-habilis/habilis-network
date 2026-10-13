@@ -225,8 +225,7 @@ impl StreamNode {
             bail!(Refused::RelayRefused);
         }
         let (mut send, recv) = conn.open_bi().await.context("opening the stream")?;
-        send.write_all(&hash.id).await?;
-        send.write_all(&hash.secret).await?;
+        send.write_all(&hash.header_bytes()).await?;
         send.finish()?;
         Ok(Reader::new(conn, recv))
     }
