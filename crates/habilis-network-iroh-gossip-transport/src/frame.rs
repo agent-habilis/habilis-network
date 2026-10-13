@@ -86,15 +86,6 @@ impl Frame<'_> {
     }
 }
 
-/// Write `datagram` as a frame from `src` to `dst`: [`Frame::encode`] for a caller that
-/// holds the three values apart. Two ids of one type in a row, so a swap compiles.
-///
-/// # Errors
-/// The datagram is empty or longer than [`MAX_DATAGRAM_LEN`].
-pub fn encode(dst: EndpointId, src: EndpointId, datagram: &[u8]) -> Result<Bytes, EncodeError> {
-    Frame { dst, src, datagram }.encode()
-}
-
 /// Read a frame.
 ///
 /// # Errors
