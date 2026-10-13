@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use iroh_base::{PublicKey, SecretKey, Signature};
 
 use crate::base58check::{self, take_array};
-use crate::crypto::{self, Password};
+use crate::crypto::{self, Password, SymmetricKey};
 use crate::identity;
 use crate::mesh::Mesh;
 use crate::seal;
@@ -66,11 +66,11 @@ impl fmt::Debug for InviteTicket {
 
 /// The exact bytes the issuer signs / a redeemer verifies: a domain tag, the
 /// published mesh hash, the plaintext root, and the expiry.
-fn signing_bytes(mesh_hash: &str, root: &[u8; 32], expiry: i64) -> Vec<u8> {
+fn signing_bytes(mesh_hash: &str, root: &SymmetricKey, expiry: i64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(SIG_DOMAIN.len() + mesh_hash.len() + 32 + 8);
     bytes.extend_from_slice(SIG_DOMAIN);
     bytes.extend_from_slice(mesh_hash.as_bytes());
-    bytes.extend_from_slice(root);
+    bytes.extend_from_slice(root.as_bytes());
     bytes.extend_from_slice(&expiry.to_le_bytes());
     bytes
 }
@@ -86,20 +86,20 @@ pub fn mint(mesh: &Mesh, ttl_secs: Option<u64>, password: Option<&Password>) -> 
     let issuer_secret = mesh
         .issuer_secret()
         .context("only the creator can mint invites (this session holds no issuer key)")?;
-    let root = *mesh.invite_key().context("not an invite-only mesh")?;
+    let root = mesh.invite_key().context("not an invite-only mesh")?;
     let mesh_hash = mesh.to_string();
     let expiry = match ttl_secs {
         None | Some(0) => 0,
         Some(ttl) => clock::unix_secs().saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)),
     };
     let signature =
-        SecretKey::from_bytes(issuer_secret).sign(&signing_bytes(&mesh_hash, &root, expiry));
+        SecretKey::from_bytes(issuer_secret).sign(&signing_bytes(&mesh_hash, root, expiry));
     let root_field = match password {
         Some(password) => {
             let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
-            seal::seal_symmetric(&wrap_key, &root)
+            seal::seal_symmetric(wrap_key.as_bytes(), root.as_bytes())
         }
-        None => root.to_vec(),
+        None => root.as_bytes().to_vec(),
     };
     let ticket = InviteTicket {
         mesh_hash,
@@ -214,19 +214,21 @@ impl InviteTicket {
         Ok(mesh)
     }
 
-    fn unwrap_root(&self, mesh: &Mesh, password: Option<&Password>) -> Result<[u8; 32]> {
+    fn unwrap_root(&self, mesh: &Mesh, password: Option<&Password>) -> Result<SymmetricKey> {
         let raw = match (self.password, password) {
             (true, Some(password)) => {
                 let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
-                seal::open_symmetric(&wrap_key, &self.root_field)
+                seal::open_symmetric(wrap_key.as_bytes(), &self.root_field)
                     .context("wrong password or corrupt invite")?
             }
             (true, None) => bail!("this invite is password-protected — pass --password"),
             (false, Some(_)) => bail!("this invite has no password — drop --password"),
             (false, None) => self.root_field.clone(),
         };
-        raw.try_into()
-            .map_err(|_| anyhow!("invite root is not 32 bytes"))
+        let bytes: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| anyhow!("invite root is not 32 bytes"))?;
+        Ok(SymmetricKey::from_bytes(bytes))
     }
 }
 
@@ -375,7 +377,7 @@ mod tests {
         // creator-only rather than any-member.
         let mesh = creator();
         let hash = mesh.to_string();
-        let root = *mesh.invite_key().unwrap();
+        let root = mesh.invite_key().unwrap().clone();
         let expiry = habilis_network_util::clock::unix_secs() + 3600;
         let attacker = SecretKey::from_bytes(&[9u8; 32]);
         let forged = InviteTicket {
@@ -385,7 +387,7 @@ mod tests {
             sig: attacker
                 .sign(&signing_bytes(&hash, &root, expiry))
                 .to_bytes(),
-            root_field: root.to_vec(),
+            root_field: root.as_bytes().to_vec(),
         };
         assert!(
             forged.redeem(None).is_err(),
@@ -422,7 +424,7 @@ mod tests {
         // signature is valid, but the local-clock check still refuses it.
         let mesh = creator();
         let hash = mesh.to_string();
-        let root = *mesh.invite_key().unwrap();
+        let root = mesh.invite_key().unwrap().clone();
         let past = habilis_network_util::clock::unix_secs() - 100;
         let issuer = SecretKey::from_bytes(mesh.issuer_secret().unwrap());
         let expired = InviteTicket {
@@ -430,7 +432,7 @@ mod tests {
             expiry: past,
             password: false,
             sig: issuer.sign(&signing_bytes(&hash, &root, past)).to_bytes(),
-            root_field: root.to_vec(),
+            root_field: root.as_bytes().to_vec(),
         };
         let error = expired.redeem(None).unwrap_err().to_string();
         assert!(error.contains("expired"), "got: {error}");

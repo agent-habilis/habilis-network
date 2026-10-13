@@ -52,14 +52,14 @@ const TOPIC_DOMAIN: &[u8] = b"habilis-mesh/topic-seed/v1";
 /// paths are case-sensitive and Unicode case-folding is platform-dependent, so
 /// either would silently break convergence across machines.
 #[must_use]
-pub(crate) fn topic_seed(topic: &str) -> [u8; 32] {
+pub(crate) fn topic_seed(topic: &str) -> Seed {
     let mut hasher = Sha256::new();
     hasher.update(TOPIC_DOMAIN);
     hasher.update(topic.trim().as_bytes());
     let digest = hasher.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
-    out
+    Seed::from_bytes(out)
 }
 
 /// Derive an independent 32-byte secret for `label` from the mesh
@@ -162,20 +162,39 @@ impl std::fmt::Debug for SymmetricKey {
     }
 }
 
+/// What every derivation of a mesh keys on: the wire [`Seed`] of an open
+/// mesh, or the [`SymmetricKey`] that a password or an invite put in its
+/// place. Two types feed one derivation because a mesh has one or the other,
+/// never both, and the derivations are the same hash over either.
+#[derive(Clone, Copy)]
+pub(crate) enum Keying<'a> {
+    Wire(&'a Seed),
+    Secret(&'a SymmetricKey),
+}
+
+impl Keying<'_> {
+    fn bytes(&self) -> &[u8; 32] {
+        match self {
+            Self::Wire(seed) => seed.as_bytes(),
+            Self::Secret(key) => key.as_bytes(),
+        }
+    }
+}
+
 /// The shared rendezvous endpoint secret key. Every member that
 /// co-hosts the rendezvous binds an iroh endpoint to this key, so the
 /// node id is stable and joiner-computable. `SecretKey::from_bytes` is
 /// infallible — any 32 bytes is a valid Ed25519 secret.
 #[must_use]
-pub fn rendezvous_secret(seed: &[u8; 32]) -> SecretKey {
-    SecretKey::from_bytes(&derive_secret(seed, b"rendezvous"))
+pub(crate) fn rendezvous_secret(source: Keying<'_>) -> SecretKey {
+    SecretKey::from_bytes(&derive_secret(source.bytes(), b"rendezvous"))
 }
 
 /// The well-known rendezvous `EndpointId` (public key of
 /// [`rendezvous_secret`]). Bootstrap target for every joiner.
 #[must_use]
-pub(crate) fn rendezvous_id(seed: &[u8; 32]) -> EndpointId {
-    rendezvous_secret(seed).public()
+pub(crate) fn rendezvous_id(source: Keying<'_>) -> EndpointId {
+    rendezvous_secret(source).public()
 }
 
 /// Number of deterministic loopback ports derived per mesh. A single
@@ -195,10 +214,10 @@ pub(crate) const RENDEZVOUS_LADDER: usize = 8;
 /// # Panics
 /// Never in practice: the derived port stays within `u16` by construction.
 #[must_use]
-pub(crate) fn rendezvous_ports(seed: &[u8; 32]) -> [u16; RENDEZVOUS_LADDER] {
+pub(crate) fn rendezvous_ports(source: Keying<'_>) -> [u16; RENDEZVOUS_LADDER] {
     const LOW: u32 = 1024;
     const SPAN: u32 = 65535 - LOW + 1; // 64512
-    let digest = derive_secret(seed, b"port");
+    let digest = derive_secret(source.bytes(), b"port");
     std::array::from_fn(|index| {
         let raw = u32::from(u16::from_le_bytes([
             digest[2 * index],
@@ -273,8 +292,8 @@ fn stretch_password(password: &Password, salt_seed: &[u8; 32], label: &[u8]) -> 
 /// rendezvous, port ladder) switches from the wire seed onto this value, so
 /// holding the mesh id without the password computes nothing reachable.
 #[must_use]
-pub(crate) fn stretch_mesh_password(password: &Password, seed: &[u8; 32]) -> [u8; 32] {
-    stretch_password(password, seed, b"password")
+pub(crate) fn stretch_mesh_password(password: &Password, seed: &Seed) -> SymmetricKey {
+    SymmetricKey::from_bytes(stretch_password(password, seed.as_bytes(), b"password"))
 }
 
 /// The 32-byte key that wraps an invite ticket's root secret when the mesh's
@@ -286,8 +305,12 @@ pub(crate) fn stretch_mesh_password(password: &Password, seed: &[u8; 32]) -> [u8
 /// `seal_symmetric`ed under this key, so a redeemer without the password can't
 /// recover it — bullet: a leaked invite still needs the password.
 #[must_use]
-pub(crate) fn invite_wrap_key(password: &Password, salt: &[u8; 32]) -> [u8; 32] {
-    stretch_password(password, salt, b"invite-ticket")
+pub(crate) fn invite_wrap_key(password: &Password, salt: &Seed) -> SymmetricKey {
+    SymmetricKey::from_bytes(stretch_password(
+        password,
+        salt.as_bytes(),
+        b"invite-ticket",
+    ))
 }
 
 /// Length of the password verifier carried in a passworded mesh hash.
@@ -300,8 +323,8 @@ pub(crate) const PASSWORD_VERIFIER_LEN: usize = 16;
 /// through a second one-way step, so the verifier reveals neither the
 /// password nor the effective seed.
 #[must_use]
-pub(crate) fn password_verifier(key: &[u8; 32]) -> [u8; PASSWORD_VERIFIER_LEN] {
-    let digest = derive_secret(key, b"password-verify");
+pub(crate) fn password_verifier(key: &SymmetricKey) -> [u8; PASSWORD_VERIFIER_LEN] {
+    let digest = derive_secret(key.as_bytes(), b"password-verify");
     let mut out = [0u8; PASSWORD_VERIFIER_LEN];
     out.copy_from_slice(&digest[..PASSWORD_VERIFIER_LEN]);
     out
@@ -440,9 +463,9 @@ pub fn ct_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
 /// # Panics
 /// If `config_bytes` exceeds 65535 bytes; a mesh config encodes well within that.
 #[must_use]
-pub(crate) fn derive_topic_id(seed: &[u8; 32], name: &MeshName, config_bytes: &[u8]) -> TopicId {
+pub(crate) fn derive_topic_id(source: Keying<'_>, name: &MeshName, config_bytes: &[u8]) -> TopicId {
     let mut hasher = Sha256::new();
-    hasher.update(derive_secret(seed, b"topic"));
+    hasher.update(derive_secret(source.bytes(), b"topic"));
     hasher.update([name.len_u8()]);
     hasher.update(name.as_bytes());
     let config_len =
@@ -458,8 +481,8 @@ pub(crate) fn derive_topic_id(seed: &[u8; 32], name: &MeshName, config_bytes: &[
 #[cfg(test)]
 mod derive_secret_tests {
     use super::{
-        RENDEZVOUS_LADDER, derive_secret, rendezvous_id, rendezvous_ports, rendezvous_secret,
-        topic_seed,
+        Keying, RENDEZVOUS_LADDER, Seed, derive_secret, rendezvous_id, rendezvous_ports,
+        rendezvous_secret, topic_seed,
     };
 
     const SEED_A: [u8; 32] = [7u8; 32];
@@ -527,24 +550,37 @@ mod derive_secret_tests {
 
     #[test]
     fn rendezvous_id_is_stable_for_a_seed() {
-        assert_eq!(rendezvous_id(&SEED_A), rendezvous_id(&SEED_A));
-        assert_ne!(rendezvous_id(&SEED_A), rendezvous_id(&SEED_B));
+        assert_eq!(
+            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
+            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A)))
+        );
+        assert_ne!(
+            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
+            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_B)))
+        );
     }
 
     #[test]
     fn rendezvous_id_matches_secret_public() {
-        assert_eq!(rendezvous_id(&SEED_A), rendezvous_secret(&SEED_A).public());
+        assert_eq!(
+            rendezvous_id(Keying::Wire(&Seed::from_bytes(SEED_A))),
+            rendezvous_secret(Keying::Wire(&Seed::from_bytes(SEED_A))).public()
+        );
     }
 
     #[test]
     fn rendezvous_ports_are_in_range_stable_and_seed_specific() {
-        let ladder = rendezvous_ports(&SEED_A);
+        let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A)));
         assert_eq!(ladder.len(), RENDEZVOUS_LADDER);
         assert!(ladder.iter().all(|&port| port >= 1024));
-        assert_eq!(ladder, rendezvous_ports(&SEED_A), "stable for a seed");
+        assert_eq!(
+            ladder,
+            rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A))),
+            "stable for a seed"
+        );
         assert_ne!(
-            rendezvous_ports(&SEED_A),
-            rendezvous_ports(&SEED_B),
+            rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A))),
+            rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_B))),
             "different seeds get different ladders"
         );
     }
@@ -574,14 +610,14 @@ mod derive_secret_tests {
         // A topic seed lives under TOPIC_DOMAIN; it must not coincide with a
         // labelled derivation off some other seed for any plausible collision.
         assert_ne!(
-            topic_seed("rendezvous"),
-            derive_secret(&SEED_A, b"rendezvous")
+            topic_seed("rendezvous").as_bytes(),
+            &derive_secret(&SEED_A, b"rendezvous")
         );
     }
 
     #[test]
     fn rendezvous_ports_rungs_are_near_certainly_distinct() {
-        let ladder = rendezvous_ports(&SEED_A);
+        let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A)));
         let unique: std::collections::HashSet<_> = ladder.iter().collect();
         // A rare in-ladder dup is harmless, but the fixed test seed
         // must not regress into a degenerate all-same ladder.
@@ -591,7 +627,7 @@ mod derive_secret_tests {
 
 #[cfg(test)]
 mod password_tests {
-    use super::{Password, derive_secret, password_verifier, stretch_mesh_password};
+    use super::{Password, Seed, derive_secret, password_verifier, stretch_mesh_password};
 
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
@@ -602,19 +638,28 @@ mod password_tests {
 
     #[test]
     fn stretch_is_deterministic_and_separates_by_password_and_seed() {
-        let key = stretch_mesh_password(&pw("hunter2"), &SEED_A);
-        assert_eq!(key, stretch_mesh_password(&pw("hunter2"), &SEED_A));
-        assert_ne!(key, stretch_mesh_password(&pw("hunter3"), &SEED_A));
-        assert_ne!(key, stretch_mesh_password(&pw("hunter2"), &SEED_B));
+        let seed_a = Seed::from_bytes(SEED_A);
+        let seed_b = Seed::from_bytes(SEED_B);
+        let key = stretch_mesh_password(&pw("hunter2"), &seed_a);
+        let same = stretch_mesh_password(&pw("hunter2"), &seed_a);
+        assert_eq!(key.as_bytes(), same.as_bytes());
+        let other_password = stretch_mesh_password(&pw("hunter3"), &seed_a);
+        assert_ne!(key.as_bytes(), other_password.as_bytes());
+        let other_seed = stretch_mesh_password(&pw("hunter2"), &seed_b);
+        assert_ne!(key.as_bytes(), other_seed.as_bytes());
     }
 
     #[test]
     fn verifier_is_not_the_key_and_not_a_topic_or_rendezvous_input() {
-        let key = stretch_mesh_password(&pw("hunter2"), &SEED_A);
+        let key = stretch_mesh_password(&pw("hunter2"), &Seed::from_bytes(SEED_A));
         let verifier = password_verifier(&key);
-        assert_ne!(&key[..16], &verifier[..], "verifier must be one-way");
         assert_ne!(
-            &derive_secret(&key, b"topic")[..16],
+            &key.as_bytes()[..16],
+            &verifier[..],
+            "verifier must be one-way"
+        );
+        assert_ne!(
+            &derive_secret(key.as_bytes(), b"topic")[..16],
             &verifier[..],
             "verifier must not collide with a derivation label"
         );
@@ -631,10 +676,10 @@ mod password_tests {
     fn channel_keys_are_domain_separated() {
         // The state/meta/broadcast content keys are all derived from the same
         // stretched mesh key but must never collide.
-        let mesh_key = stretch_mesh_password(&pw("hunter2"), &SEED_A);
-        let state = derive_secret(&mesh_key, b"state-doc");
-        let meta = derive_secret(&mesh_key, b"meta-doc");
-        let broadcast = derive_secret(&mesh_key, b"broadcast");
+        let mesh_key = stretch_mesh_password(&pw("hunter2"), &Seed::from_bytes(SEED_A));
+        let state = derive_secret(mesh_key.as_bytes(), b"state-doc");
+        let meta = derive_secret(mesh_key.as_bytes(), b"meta-doc");
+        let broadcast = derive_secret(mesh_key.as_bytes(), b"broadcast");
         assert_ne!(state, meta);
         assert_ne!(state, broadcast);
         assert_ne!(meta, broadcast);
@@ -706,7 +751,7 @@ mod password_tests {
 
 #[cfg(test)]
 mod topic_tests {
-    use super::{MeshName, derive_topic_id};
+    use super::{Keying, MeshName, Seed, derive_topic_id};
 
     fn name(text: &str) -> MeshName {
         MeshName::new(text).unwrap()
@@ -718,8 +763,8 @@ mod topic_tests {
     #[test]
     fn deterministic_for_same_input() {
         let seed = [42u8; 32];
-        let first = derive_topic_id(&seed, &name("team"), CFG_A);
-        let second = derive_topic_id(&seed, &name("team"), CFG_A);
+        let first = derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_A);
+        let second = derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_A);
         assert_eq!(first, second);
     }
 
@@ -728,8 +773,16 @@ mod topic_tests {
         let seed_a = [1u8; 32];
         let seed_b = [42u8; 32];
         assert_ne!(
-            derive_topic_id(&seed_a, &name("team"), CFG_A),
-            derive_topic_id(&seed_b, &name("team"), CFG_A)
+            derive_topic_id(
+                Keying::Wire(&Seed::from_bytes(seed_a)),
+                &name("team"),
+                CFG_A
+            ),
+            derive_topic_id(
+                Keying::Wire(&Seed::from_bytes(seed_b)),
+                &name("team"),
+                CFG_A
+            )
         );
     }
 
@@ -737,8 +790,8 @@ mod topic_tests {
     fn different_names_produce_different_topics() {
         let seed = [1u8; 32];
         assert_ne!(
-            derive_topic_id(&seed, &name("alpha"), CFG_A),
-            derive_topic_id(&seed, &name("beta"), CFG_A)
+            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("alpha"), CFG_A),
+            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("beta"), CFG_A)
         );
     }
 
@@ -746,8 +799,8 @@ mod topic_tests {
     fn different_config_produces_different_topics() {
         let seed = [1u8; 32];
         assert_ne!(
-            derive_topic_id(&seed, &name("team"), CFG_A),
-            derive_topic_id(&seed, &name("team"), CFG_B),
+            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_A),
+            derive_topic_id(Keying::Wire(&Seed::from_bytes(seed)), &name("team"), CFG_B),
             "config is mixed into the topic, so it cannot diverge across members"
         );
     }

@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::derive_secret;
+use crate::crypto::Seed;
 use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
 use crate::{MeshId, MessageBody};
 use habilis_network_util::clock::Instant;
@@ -40,7 +40,7 @@ use habilis_network_util::clock::Instant;
 /// orphans every existing directory (a wire-incompatible directory change).
 /// The literal must be exactly 32 bytes to fit `[u8; 32]` (the `derive_secret`
 /// seed width) — keep any future rename to that length.
-const DIRECTORY_BASE_SEED: [u8; 32] = *b"habilis-mesh/directory/domain/v1";
+const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/domain/v1");
 
 /// The well-known [`Mesh`] for a directory, reached over `lookups`. Both
 /// The advertise and discover paths both call this; the
@@ -55,7 +55,7 @@ const DIRECTORY_BASE_SEED: [u8; 32] = *b"habilis-mesh/directory/domain/v1";
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::new(
-        derive_secret(&DIRECTORY_BASE_SEED, directory.as_bytes()),
+        *DIRECTORY_BASE_SEED.derive(directory.as_bytes()).as_bytes(),
         directory.clone(),
         directory_config(lookups),
     )

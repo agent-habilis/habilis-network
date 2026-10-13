@@ -48,7 +48,7 @@ fn round_trip_public_preset() {
         MeshConfig::public_preset(),
     );
     let decoded: Mesh = mesh.to_string().parse().unwrap();
-    assert_eq!(decoded.seed(), &[0xABu8; SEED_LEN]);
+    assert_eq!(decoded.seed().as_bytes(), &[0xABu8; SEED_LEN]);
     assert_eq!(decoded.config, mesh.config);
     assert!(!decoded.is_loopback());
     assert_eq!(decoded.network_label(), "public");
@@ -224,7 +224,11 @@ fn golden_passwordless_id_and_topic_are_pinned() {
         mesh.to_string(),
         "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH"
     );
-    let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
+    let topic = super::crypto::derive_topic_id(
+        super::crypto::Keying::Wire(mesh.seed()),
+        &mesh.name,
+        &mesh.config_bytes(),
+    );
     assert_eq!(
         format!("{topic:?}"),
         "TopicId(1898d0078596295e6f69e42e9284e139d69921f2db46026b16611a924e65bd1d)"
@@ -240,7 +244,11 @@ fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
     let mesh: Mesh = older.parse().expect("an older id decodes");
     assert!(!mesh.config.transport.gossip, "it has no gossip");
     assert_eq!(mesh.to_string(), older, "and it keeps its id");
-    let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
+    let topic = super::crypto::derive_topic_id(
+        super::crypto::Keying::Wire(mesh.seed()),
+        &mesh.name,
+        &mesh.config_bytes(),
+    );
     assert_eq!(
         format!("{topic:?}"),
         "TopicId(0efae5467ad7c26c9b6a3f0a64a97d1799412ac891282711077401b8ecd8c0e7)"
