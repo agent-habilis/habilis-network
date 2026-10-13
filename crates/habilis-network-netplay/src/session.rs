@@ -21,6 +21,7 @@
 use crate::config::Config;
 use crate::error::RollbackError;
 use crate::frame::{Frame, NULL_FRAME};
+use crate::handle::PlayerHandle;
 use crate::protocol::{PeerEvent, PeerProtocol, PeerState};
 use crate::request::Request;
 use crate::sync::Sync;
@@ -70,7 +71,7 @@ pub struct P2PSession<T: Config, X: Transport<T>> {
     sync: Sync<T>,
     peers: Vec<PeerProtocol<T>>,
     transport: X,
-    local_handle: usize,
+    local_handle: PlayerHandle,
     state: SessionState,
     events: Vec<Event<T::Address>>,
     /// Frames to skip so peers can catch up, from [`TimeSync`].
@@ -122,18 +123,18 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
     /// index into `players`.
     pub fn new(
         players: Vec<T::Address>,
-        local_handle: usize,
+        local_handle: PlayerHandle,
         transport: X,
         max_prediction: usize,
         input_delay: usize,
         magic: u32,
     ) -> Result<Self, RollbackError> {
-        if local_handle >= players.len() {
+        if local_handle.index() >= players.len() {
             return Err(RollbackError::InvalidPlayer(local_handle));
         }
         let num_players = players.len();
         tracing::debug!(
-            local_handle,
+            local_handle = local_handle.index(),
             num_players,
             magic,
             input_delay,
@@ -143,6 +144,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
         let peers = players
             .into_iter()
             .enumerate()
+            .map(|(index, addr)| (PlayerHandle::new(index), addr))
             .filter(|(handle, _)| *handle != local_handle)
             .map(|(handle, addr)| PeerProtocol::new(addr, handle, magic))
             .collect();

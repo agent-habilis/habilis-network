@@ -28,6 +28,7 @@
 use crate::config::Config;
 use crate::error::RollbackError;
 use crate::frame::{Frame, InputStatus, NULL_FRAME};
+use crate::handle::PlayerHandle;
 use crate::input_queue::InputQueue;
 use crate::request::{Request, StateCell};
 use crate::saved_states::SavedStates;
@@ -67,11 +68,11 @@ impl<T: Config> Sync<T> {
         num_players: usize,
         max_prediction: usize,
         input_delay: usize,
-        local_handle: usize,
+        local_handle: PlayerHandle,
     ) -> Self {
         let mut input_queues: Vec<InputQueue<T>> =
             (0..num_players).map(|_| InputQueue::new()).collect();
-        if let Some(local) = input_queues.get_mut(local_handle) {
+        if let Some(local) = input_queues.get_mut(local_handle.index()) {
             local.set_frame_delay(input_delay);
         }
         Self {
@@ -109,7 +110,7 @@ impl<T: Config> Sync<T> {
     /// remote inputs catch up.
     pub(crate) fn add_local_input(
         &mut self,
-        player: usize,
+        player: PlayerHandle,
         input: T::Input,
     ) -> Result<Frame, RollbackError> {
         if self.frames_ahead() >= self.max_prediction {
@@ -117,7 +118,7 @@ impl<T: Config> Sync<T> {
         }
         let queue = self
             .input_queues
-            .get_mut(player)
+            .get_mut(player.index())
             .ok_or(RollbackError::InvalidPlayer(player))?;
         Ok(queue.add_input(self.current_frame, input))
     }
@@ -128,13 +129,13 @@ impl<T: Config> Sync<T> {
     /// [`RollbackError::InvalidPlayer`] if `player` is out of range.
     pub(crate) fn add_remote_input(
         &mut self,
-        player: usize,
+        player: PlayerHandle,
         frame: Frame,
         input: T::Input,
     ) -> Result<(), RollbackError> {
         let queue = self
             .input_queues
-            .get_mut(player)
+            .get_mut(player.index())
             .ok_or(RollbackError::InvalidPlayer(player))?;
         queue.add_input(frame, input);
         Ok(())
@@ -246,12 +247,13 @@ mod tests {
     use super::Sync;
     use crate::error::RollbackError;
     use crate::frame::{InputStatus, NULL_FRAME};
+    use crate::handle::PlayerHandle;
     use crate::request::Request;
     use crate::testutil::{TestGame, TestInput, TestRunner};
 
     /// Two players, generous prediction window, no input delay.
     fn session() -> Sync<TestGame> {
-        Sync::<TestGame>::new(2, 8, 0, 0)
+        Sync::<TestGame>::new(2, 8, 0, PlayerHandle::new(0))
     }
 
     /// Advance one frame the way a real caller does.
@@ -270,11 +272,11 @@ mod tests {
         let mut runner = TestRunner::new();
 
         for frame in 0..4 {
-            sync.add_local_input(0, TestInput(1))
+            sync.add_local_input(PlayerHandle::new(0), TestInput(1))
                 .expect("under the limit");
             // Player 1's input arrives on time and is always the same, so
             // every prediction holds.
-            sync.add_remote_input(1, frame, TestInput(2))
+            sync.add_remote_input(PlayerHandle::new(1), frame, TestInput(2))
                 .expect("valid player");
             step(&mut sync, &mut runner);
         }
@@ -292,15 +294,15 @@ mod tests {
         let mut runner = TestRunner::new();
 
         // Frame 0 with both real inputs.
-        sync.add_local_input(0, TestInput(1))
+        sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("under the limit");
-        sync.add_remote_input(1, 0, TestInput(10))
+        sync.add_remote_input(PlayerHandle::new(1), 0, TestInput(10))
             .expect("valid player");
         step(&mut sync, &mut runner);
 
         // Frames 1 and 2 run with player 1 predicted as 10.
         for _ in 0..2 {
-            sync.add_local_input(0, TestInput(1))
+            sync.add_local_input(PlayerHandle::new(0), TestInput(1))
                 .expect("under the limit");
             step(&mut sync, &mut runner);
         }
@@ -308,7 +310,7 @@ mod tests {
         assert_eq!(runner.advanced, vec![0, 1, 2]);
 
         // Player 1's real frame-1 input turns out different.
-        sync.add_remote_input(1, 1, TestInput(20))
+        sync.add_remote_input(PlayerHandle::new(1), 1, TestInput(20))
             .expect("valid player");
         let mut requests = Vec::new();
         sync.check_simulation(&mut requests);
@@ -326,20 +328,20 @@ mod tests {
         let mut sync = session();
         let mut runner = TestRunner::new();
 
-        sync.add_local_input(0, TestInput(0))
+        sync.add_local_input(PlayerHandle::new(0), TestInput(0))
             .expect("under the limit");
-        sync.add_remote_input(1, 0, TestInput(1))
+        sync.add_remote_input(PlayerHandle::new(1), 0, TestInput(1))
             .expect("valid player");
         step(&mut sync, &mut runner);
         for _ in 0..2 {
-            sync.add_local_input(0, TestInput(0))
+            sync.add_local_input(PlayerHandle::new(0), TestInput(0))
                 .expect("under the limit");
             step(&mut sync, &mut runner);
         }
 
         // Correct frame 1 only; frame 2 is still unknown and must be
         // re-predicted from the *corrected* frame 1, not the old guess.
-        sync.add_remote_input(1, 1, TestInput(5))
+        sync.add_remote_input(PlayerHandle::new(1), 1, TestInput(5))
             .expect("valid player");
         let mut requests = Vec::new();
         sync.check_simulation(&mut requests);
@@ -351,17 +353,17 @@ mod tests {
 
     #[test]
     fn the_prediction_limit_stops_the_caller_rather_than_guessing_further() {
-        let mut sync = Sync::<TestGame>::new(2, 3, 0, 0);
+        let mut sync = Sync::<TestGame>::new(2, 3, 0, PlayerHandle::new(0));
         let mut runner = TestRunner::new();
 
         // Player 1 never sends anything, so nothing is ever confirmed.
         for _ in 0..3 {
-            sync.add_local_input(0, TestInput(1))
+            sync.add_local_input(PlayerHandle::new(0), TestInput(1))
                 .expect("within the window");
             step(&mut sync, &mut runner);
         }
         assert_eq!(
-            sync.add_local_input(0, TestInput(1)),
+            sync.add_local_input(PlayerHandle::new(0), TestInput(1)),
             Err(RollbackError::PredictionLimit),
             "past the window the session must stall, not guess deeper"
         );
@@ -369,20 +371,23 @@ mod tests {
 
     #[test]
     fn confirming_frames_reopens_the_prediction_window() {
-        let mut sync = Sync::<TestGame>::new(2, 3, 0, 0);
+        let mut sync = Sync::<TestGame>::new(2, 3, 0, PlayerHandle::new(0));
         let mut runner = TestRunner::new();
 
         for _ in 0..3 {
-            sync.add_local_input(0, TestInput(1))
+            sync.add_local_input(PlayerHandle::new(0), TestInput(1))
                 .expect("within the window");
             step(&mut sync, &mut runner);
         }
-        assert!(sync.add_local_input(0, TestInput(1)).is_err());
+        assert!(
+            sync.add_local_input(PlayerHandle::new(0), TestInput(1))
+                .is_err()
+        );
 
         sync.confirm_through(1);
         assert_eq!(sync.last_confirmed_frame(), 1);
         assert_eq!(sync.frames_ahead(), 2);
-        sync.add_local_input(0, TestInput(1))
+        sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("confirmation made room again");
     }
 
@@ -390,19 +395,19 @@ mod tests {
     fn an_unknown_player_handle_is_an_error_not_a_panic() {
         let mut sync = session();
         assert_eq!(
-            sync.add_local_input(9, TestInput(0)),
-            Err(RollbackError::InvalidPlayer(9))
+            sync.add_local_input(PlayerHandle::new(9), TestInput(0)),
+            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9)))
         );
         assert_eq!(
-            sync.add_remote_input(9, 0, TestInput(0)),
-            Err(RollbackError::InvalidPlayer(9))
+            sync.add_remote_input(PlayerHandle::new(9), 0, TestInput(0)),
+            Err(RollbackError::InvalidPlayer(PlayerHandle::new(9)))
         );
     }
 
     #[test]
     fn inputs_are_reported_as_confirmed_or_predicted_honestly() {
         let mut sync = session();
-        sync.add_local_input(0, TestInput(1))
+        sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("under the limit");
         let inputs = sync.synchronize_inputs();
         assert_eq!(inputs[0].1, InputStatus::Confirmed, "our own input is real");

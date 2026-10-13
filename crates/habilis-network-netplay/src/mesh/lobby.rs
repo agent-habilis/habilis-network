@@ -32,6 +32,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::handle::PlayerHandle;
+
 /// A lobby packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LobbyMessage {
@@ -94,7 +96,7 @@ pub struct StartedMatch {
     /// Public keys in handle order. Identical on every peer.
     pub players: Vec<String>,
     /// This peer's own handle.
-    pub local_handle: usize,
+    pub local_handle: PlayerHandle,
 }
 
 /// One peer we have heard from.
@@ -277,7 +279,11 @@ impl Lobby {
         {
             return;
         }
-        let Some(local_handle) = players.iter().position(|key| *key == self.my_pubkey) else {
+        let Some(local_handle) = players
+            .iter()
+            .position(|key| *key == self.my_pubkey)
+            .map(PlayerHandle::new)
+        else {
             return;
         };
         // A replacement at the *same* epoch is the tie-break resolving a
@@ -287,7 +293,7 @@ impl Lobby {
         tracing::debug!(
             epoch,
             session_id,
-            local_handle,
+            local_handle = local_handle.index(),
             players = players.len(),
             replaced = self
                 .started
@@ -372,7 +378,7 @@ fn session_id_for(players: &[String], proposer: &str, epoch: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lobby, LobbyError, LobbyMessage, session_id_for};
+    use super::{Lobby, LobbyError, LobbyMessage, PlayerHandle, session_id_for};
 
     fn raw(message: &LobbyMessage) -> String {
         serde_json::to_string(message).expect("a lobby message serializes")
@@ -468,8 +474,12 @@ mod tests {
         let bob_match = bob.started().expect("bob adopted it");
         assert_eq!(alice_match.players, bob_match.players);
         assert_eq!(alice_match.session_id, bob_match.session_id);
-        assert_eq!(alice_match.local_handle, 0, "aaa sorts first");
-        assert_eq!(bob_match.local_handle, 1);
+        assert_eq!(
+            alice_match.local_handle,
+            PlayerHandle::new(0),
+            "aaa sorts first"
+        );
+        assert_eq!(bob_match.local_handle, PlayerHandle::new(1));
     }
 
     #[test]

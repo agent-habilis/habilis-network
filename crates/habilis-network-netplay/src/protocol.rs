@@ -11,6 +11,7 @@
 
 use crate::config::Config;
 use crate::frame::{Frame, NULL_FRAME};
+use crate::handle::PlayerHandle;
 use crate::time_sync::{TimeSync, frame_advantage};
 use crate::transport::{Body, InputPacket, Message};
 
@@ -78,7 +79,7 @@ pub(crate) enum PeerEvent {
 pub(crate) struct PeerProtocol<T: Config> {
     pub(crate) addr: T::Address,
     /// Which player handle this peer drives.
-    pub(crate) handle: usize,
+    pub(crate) handle: PlayerHandle,
     state: PeerState,
     /// Our session nonce, stamped on everything we send.
     magic: u32,
@@ -133,7 +134,7 @@ impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
 }
 
 impl<T: Config> PeerProtocol<T> {
-    pub(crate) fn new(addr: T::Address, handle: usize, magic: u32) -> Self {
+    pub(crate) fn new(addr: T::Address, handle: PlayerHandle, magic: u32) -> Self {
         Self {
             addr,
             handle,
@@ -206,7 +207,7 @@ impl<T: Config> PeerProtocol<T> {
         self.silent_ticks = self.silent_ticks.saturating_add(1);
         if self.state != PeerState::Disconnected && self.silent_ticks > DISCONNECT_TIMEOUT_TICKS {
             tracing::debug!(
-                handle = self.handle,
+                handle = self.handle.index(),
                 silent_ticks = self.silent_ticks,
                 was = ?self.state,
                 "peer went silent past the disconnect timeout"
@@ -280,7 +281,7 @@ impl<T: Config> PeerProtocol<T> {
         self.stale_token_drops = self.stale_token_drops.saturating_add(1);
         if self.stale_token_drops.is_power_of_two() {
             tracing::debug!(
-                handle = self.handle,
+                handle = self.handle.index(),
                 expected = self.sync_token,
                 received = token,
                 roundtrips_left = self.roundtrips_left,
@@ -309,7 +310,7 @@ impl<T: Config> PeerProtocol<T> {
                 // wedged handshake produces thousands a second.
                 if self.foreign_magic_drops.is_power_of_two() {
                     tracing::debug!(
-                        handle = self.handle,
+                        handle = self.handle.index(),
                         expected = known,
                         received = message.magic,
                         drops = self.foreign_magic_drops,
@@ -324,7 +325,7 @@ impl<T: Config> PeerProtocol<T> {
                     if self.state == PeerState::Syncing && *token == self.sync_token =>
                 {
                     tracing::debug!(
-                        handle = self.handle,
+                        handle = self.handle.index(),
                         remote_magic = message.magic,
                         "latched the peer's session nonce"
                     );
@@ -352,7 +353,7 @@ impl<T: Config> PeerProtocol<T> {
                     self.unlatched_drops = self.unlatched_drops.saturating_add(1);
                     if self.unlatched_drops.is_power_of_two() {
                         tracing::debug!(
-                            handle = self.handle,
+                            handle = self.handle.index(),
                             received = message.magic,
                             drops = self.unlatched_drops,
                             "dropped a packet before the peer answered this session's handshake"
@@ -396,7 +397,7 @@ impl<T: Config> PeerProtocol<T> {
                     // time: this reply is the proof the last one arrived.
                     self.since_sync_request = 0;
                     tracing::debug!(
-                        handle = self.handle,
+                        handle = self.handle.index(),
                         roundtrips_left = self.roundtrips_left,
                         "sync round trip"
                     );
@@ -425,7 +426,7 @@ impl<T: Config> PeerProtocol<T> {
                     && packet.start_frame > self.last_received_frame + 1
                 {
                     tracing::trace!(
-                        handle = self.handle,
+                        handle = self.handle.index(),
                         start_frame = packet.start_frame,
                         last_received_frame = self.last_received_frame,
                         "dropped an input packet that would leave a hole"
@@ -478,6 +479,7 @@ impl<T: Config> PeerProtocol<T> {
 mod tests {
     use super::{Body, PeerProtocol, PeerState, SYNC_RESEND_EVERY_TICKS};
     use crate::frame::NULL_FRAME;
+    use crate::handle::PlayerHandle;
     use crate::testutil::TestGame;
     use crate::transport::Message;
 
@@ -501,7 +503,7 @@ mod tests {
     }
 
     fn syncing_peer() -> PeerProtocol<TestGame> {
-        PeerProtocol::<TestGame>::new("peer".to_owned(), 1, 0xabcd_1234)
+        PeerProtocol::<TestGame>::new("peer".to_owned(), PlayerHandle::new(1), 0xabcd_1234)
     }
 
     /// How many sync requests one tick produced.
