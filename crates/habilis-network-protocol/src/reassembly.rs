@@ -89,15 +89,15 @@ pub struct ReassemblyStore {
 }
 
 impl ReassemblyStore {
-    /// Buffer one shard of `author`; when it completes its group, synthesize and return
+    /// Buffer one shard; when it completes its group, synthesize and return
     /// the logical message and free the group's budget. The caller keys
-    /// surfacing-once separately (`reassembled_groups`). `author` is the key that signed
-    /// `shard_msg`, which the caller took from a message that passed verification.
+    /// surfacing-once separately (`reassembled_groups`). A message with no shard header,
+    /// or with no author key, is dropped: a shard that passed the signature gate has both.
     ///
     /// # Panics
     /// Never: the group that just completed is by construction still stored.
-    pub fn ingest(&mut self, author: AuthorKey, shard_msg: &Message, now: Instant) -> ShardIngest {
-        let Some(shard) = shard_msg.shard.as_ref() else {
+    pub fn ingest(&mut self, shard_msg: &Message, now: Instant) -> ShardIngest {
+        let (Some(shard), Some(author)) = (shard_msg.shard.as_ref(), shard_msg.author_key()) else {
             return ShardIngest::Dropped;
         };
         let key: GroupKey = (author, shard.group.clone());
@@ -243,12 +243,14 @@ impl ReassemblyStore {
         )
     }
 
-    /// Drop `author`'s partial group and release its budget — the log-backed
-    /// completion path calls this after finishing a group the store had only
-    /// a fragment of (e.g. post-TTL, when dedup let just one healed shard
-    /// re-ingest).
-    pub fn forget(&mut self, author: &AuthorKey, group: &ShardGroup) {
-        self.evict(&(*author, group.clone()));
+    /// Drop the partial group that `shard_msg` belongs to (its author's group) and release
+    /// its budget — the log-backed completion path calls this after finishing a group the
+    /// store had only a fragment of (e.g. post-TTL, when dedup let just one healed shard
+    /// re-ingest). A message with no shard header or no author key names no group.
+    pub fn forget(&mut self, shard_msg: &Message) {
+        if let (Some(shard), Some(author)) = (shard_msg.shard.as_ref(), shard_msg.author_key()) {
+            self.evict(&(author, shard.group.clone()));
+        }
     }
 
     /// The big (unlogged) groups that stalled long enough to ask their author
@@ -433,7 +435,7 @@ mod tests {
     }
 
     fn ingest(store: &mut ReassemblyStore, msg: &Message, now: Instant) -> ShardIngest {
-        store.ingest(msg.author_key().expect("a test shard has a key"), msg, now)
+        store.ingest(msg, now)
     }
 
     #[test]

@@ -1493,18 +1493,16 @@ impl EventLoopState {
         if self.reassembled_groups.contains(&shard.group) {
             return None;
         }
-        // A message that reaches reassembly passed the signature gate, so it has a key.
-        let author = trigger.author_key()?;
-        match self.reassembly.ingest(author, trigger, Instant::now()) {
+        match self.reassembly.ingest(trigger, Instant::now()) {
             super::reassembly::ShardIngest::Complete(logical) => {
                 self.reassembled_groups.insert(shard.group.clone());
                 Some(*logical)
             }
             super::reassembly::ShardIngest::Buffered | super::reassembly::ShardIngest::Dropped => {
-                let logical = self.reassemble_from_log(&author, trigger)?;
+                let logical = self.reassemble_from_log(trigger)?;
                 // The store may still hold a partial buffer for this group
                 // (e.g. just the trigger, post-TTL) — release its budget.
-                self.reassembly.forget(&author, &shard.group);
+                self.reassembly.forget(trigger);
                 self.reassembled_groups.insert(shard.group.clone());
                 Some(logical)
             }
@@ -1514,14 +1512,16 @@ impl EventLoopState {
     /// The log-backed completion path for a **small** (logged) group: scan
     /// the message log for this author's shards and synthesize when every
     /// slot is present. Mirrors the store's synthesis exactly.
-    fn reassemble_from_log(&self, author: &AuthorKey, trigger: &Message) -> Option<Message> {
+    fn reassemble_from_log(&self, trigger: &Message) -> Option<Message> {
         let shard = trigger.shard.as_ref()?;
+        // A message that reaches reassembly passed the signature gate, so it has a key.
+        let author = trigger.author_key()?;
         if !crate::protocol::message::shard_fits_log(trigger) {
             return None;
         }
         let slots = self
             .message_log
-            .collect_shards(&shard.group, author, shard.total);
+            .collect_shards(&shard.group, &author, shard.total);
         if slots.iter().any(Option::is_none) {
             return None; // a shard is still missing
         }
