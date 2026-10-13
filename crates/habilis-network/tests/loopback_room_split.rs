@@ -11,8 +11,14 @@
 //! - **C**: the creator leaves at once, two joiners start together, and the rung probe of
 //!   both reads "not ours" (`Request::BlindRungProbes`). The one that binds second takes
 //!   the next rung and holds a beacon of its own. Two joiners follow, one by one.
-//! - **D**: the same as C with eight joiners after the two, so that each holder has three
-//!   links or more by the time the holders could meet.
+//! - **D**: two released holders, with no IP block. Case E's setup gives a room of five old
+//!   members that hold their claims back, and a new holder with four joiners of its own, both
+//!   sides released. Then one old member, with three links or more, reads its rung probe as
+//!   "not ours" and binds the next rung: a holder on a higher rung, with two meshes that share
+//!   no link. The engine must merge them by itself.
+//! - **F**: D, and the holder on the higher rung sheds its beacon (`Request::ShedBeacon`)
+//!   instead of waiting for the engine to do it. The merge then needs only that a member that
+//!   reads a holder of another mesh goes to it.
 //!
 //! - **E**: the one-by-one path. The creator leaves while five old members, each with three
 //!   links or more, hold their claims back (`Request::HoldClaims`). A joiner starts and takes
@@ -244,6 +250,13 @@ impl Member {
         self.membership.node.endpoint_id().fmt_short().to_string()
     }
 
+    async fn shed_beacon(&self) {
+        self.membership
+            .request(|reply| Request::ShedBeacon { reply })
+            .await
+            .expect("the loop answers");
+    }
+
     async fn hold_claims(&self, hold: bool) {
         self.membership
             .request(|reply| Request::HoldClaims { hold, reply })
@@ -252,8 +265,19 @@ impl Member {
     }
 
     async fn blind_rung_probes(&self) {
+        self.set_blind_rung_probes(true).await;
+    }
+
+    /// The reading of the host is true again. The false reading of a loaded host is a moment, not
+    /// a state of the member: a hook that stayed would make a holder that sheds read "foreign"
+    /// again at its next walk and bind the same rung again, which no host does for long.
+    async fn unblind_rung_probes(&self) {
+        self.set_blind_rung_probes(false).await;
+    }
+
+    async fn set_blind_rung_probes(&self, blind: bool) {
         self.membership
-            .request(|reply| Request::BlindRungProbes { blind: true, reply })
+            .request(|reply| Request::BlindRungProbes { blind, reply })
             .await
             .expect("the loop answers");
     }
@@ -423,6 +447,43 @@ async fn four_joiners_together_after_a_long_run(
     become_one_mesh(&all, MERGE_DEADLINE).await
 }
 
+/// Two meshes of one room, each with a holder, and every member released: E's setup, then one
+/// old member that binds the next rung because its probe reads "not ours". The old members hold
+/// their claims back but that one, so that the only second holder is the one that the test
+/// names. The member at index 0 is the holder on the higher rung when this returns.
+async fn two_released_holders(round: &Round, members: &mut Vec<Member>) -> Result<(), String> {
+    one_by_one(round, members, 5).await?;
+    wait_for_releases(round, 5).await?;
+    for member in members.iter() {
+        member.hold_claims(true).await;
+    }
+    let creator = members.remove(0);
+    let mesh = creator.mesh_id();
+    creator.leave().await;
+
+    let first = Member::open("late-first", Some(&mesh)).await;
+    let first_id = first.short_id();
+    members.push(first);
+    wait_for_rung_of(round, &first_id).await?;
+    open_joiners(members, &mesh, &nicks("late-after", 4)).await;
+    // The five old members, and the new holder with four joiners that released: nine releases.
+    wait_for_releases(round, 9).await?;
+    let old = members[0].peers().await;
+    let new = members[members.len() - 1].peers().await;
+    if old != 4 || new != 4 {
+        return Err(format!(
+            "precondition: the two meshes are not apart, an old member counts {old} peers and a new one {new}, each should count 4"
+        ));
+    }
+
+    let second = &members[0];
+    second.blind_rung_probes().await;
+    second.hold_claims(false).await;
+    wait_for_rung_of(round, &second.short_id()).await?;
+    second.unblind_rung_probes().await;
+    Ok(())
+}
+
 /// The creator mints the room and leaves, so that no beacon holds a rung. `starters`
 /// joiners start together and every one of them reads its rung probe as "not ours". Then
 /// `late` joiners come one by one. Every member must see every other.
@@ -446,6 +507,11 @@ async fn blind_starters(
     .await;
     for member in &opened {
         member.blind_rung_probes().await;
+    }
+    // The creator, the starter that took rung 0 and the starter that read it as foreign.
+    wait_for_beacons(round, 1 + starters).await?;
+    for member in &opened {
+        member.unblind_rung_probes().await;
     }
     members.extend(opened);
     open_joiners(members, &mesh, &nicks("late", late)).await;
@@ -492,11 +558,34 @@ async fn two_starters_that_read_their_rung_as_foreign_become_one_mesh() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by cargo task matrix"]
-async fn holders_with_three_links_or_more_that_read_their_rung_as_foreign_become_one_mesh() {
+async fn a_holder_on_a_higher_rung_with_links_enough_joins_the_lower_holder() {
     let _serial = SERIAL.lock().await;
-    let round = Round::begin("ten-members-two-blind-starters");
+    let round = Round::begin("higher-holder");
     let mut members = Vec::new();
-    let verdict = blind_starters(&round, &mut members, 2, 8).await;
+    let verdict = match two_released_holders(&round, &mut members).await {
+        Ok(()) => {
+            let all: Vec<&Member> = members.iter().collect();
+            become_one_mesh(&all, MERGE_DEADLINE).await
+        }
+        Err(text) => Err(text),
+    };
+    finish(round, members, verdict).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn a_holder_with_links_enough_that_shed_its_beacon_joins_the_other_holder() {
+    let _serial = SERIAL.lock().await;
+    let round = Round::begin("shed-holder");
+    let mut members = Vec::new();
+    let verdict = match two_released_holders(&round, &mut members).await {
+        Ok(()) => {
+            members[0].shed_beacon().await;
+            let all: Vec<&Member> = members.iter().collect();
+            become_one_mesh(&all, MERGE_DEADLINE).await
+        }
+        Err(text) => Err(text),
+    };
     finish(round, members, verdict).await;
 }
 

@@ -503,6 +503,10 @@ pub struct EventLoopState {
     /// before any old member does", which a heal tick of a few seconds would otherwise win.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) claims_held: bool,
+    /// Tests only: the beacon is shed at the top of the next turn of the loop, as a re-check
+    /// shed does (`Request::ShedBeacon`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) shed_requested: bool,
     /// What this node already asked of the members it heard on the LAN.
     pub(crate) lan_grafts: crate::gossip::lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
@@ -955,6 +959,8 @@ impl EventLoopState {
             linkstate_held: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             claims_held: false,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            shed_requested: false,
             lan_grafts: crate::gossip::lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,
@@ -1292,8 +1298,7 @@ impl EventLoopState {
         let addr = self.peer_endpoints.remove(nick)?;
         self.graft_backoff.reset(addr.id);
         self.proven_endpoints.forget_endpoint(addr.id);
-        self.rival_holders
-            .retain(|_, endpoint| *endpoint != addr.id);
+        self.forget_rival_holder(addr.id);
         self.direct.remove(&addr.id);
         self.path_watchers.remove(&addr.id);
         self.path_kinds.remove(&addr.id);
@@ -1395,6 +1400,38 @@ impl EventLoopState {
                 .rendezvous_comeback_until
                 .is_some_and(|until| Instant::now() < until)
             || self.linked_endpoints.len() < self.rendezvous_release_links
+    }
+
+    /// A live holder of the rendezvous was read, and it is not us: a ladder walk answered "ours",
+    /// or a probe found a beacon. If no member of our mesh is known to host it, the holder is
+    /// outside our mesh, and a node that let go of the rendezvous on purpose would never learn of
+    /// it: it owes a return, which the heal tick pays with a join. Nothing is owed while we host
+    /// it, while we still hold the link, while we want the rendezvous anyway (so a joiner under
+    /// the release count gets no longer visit), or while a holder of our own mesh is known: that
+    /// is the healthy case, and every released member reads it on every heal tick.
+    ///
+    /// Owing makes [`Self::rendezvous_wanted`] true, so the next read owes nothing more: the debt
+    /// is paid by the link, or it runs out after its window and the next read owes it once again.
+    pub(crate) fn note_holder_outside_mesh(&mut self, now: Instant) {
+        if self.rendezvous_linked || self.rendezvous_wanted() || self.rival_holder_known() {
+            return;
+        }
+        tracing::info!(
+            target: "habilis_network::gossip",
+            links = self.linked_endpoints.len(),
+            "a holder of the rendezvous that no member of our mesh hosts: owe a return"
+        );
+        self.owe_rendezvous_return(now);
+        // The graft is the reclaim ticker's: it re-grafts within `RECLAIM_INTERVAL_MS`, where
+        // the heal tick would come round up to a heal interval later.
+        self.arm_reclaim(now);
+    }
+
+    /// The claim of `endpoint` to hold the rendezvous is void: the member is gone, or silent.
+    /// A holder that crashes never sends a `PeerInfo` without the flag, so the flag is dropped
+    /// with the member, whatever else is remembered of it.
+    pub(crate) fn forget_rival_holder(&mut self, endpoint: EndpointId) {
+        self.rival_holders.retain(|_, holder| *holder != endpoint);
     }
 
     /// A return to the rendezvous is owed from now, for
@@ -2127,6 +2164,102 @@ mod tests {
         assert!(state.rival_holder_known());
         assert!(!state.yield_to_lower);
         assert_eq!(state.next_rival_recheck, None);
+    }
+
+    /// A member that let go of the rendezvous and reads a holder that no member of its mesh hosts
+    /// owes a return, and the debt opens the reclaim window that pays it.
+    #[test]
+    fn a_holder_outside_the_mesh_owes_a_return_to_a_released_member() {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        assert!(!state.rendezvous_wanted(), "enough links: it let go");
+
+        state.note_holder_outside_mesh(Instant::now());
+
+        assert!(state.rendezvous_wanted(), "a return is owed");
+        assert!(state.reclaim_until.is_some(), "the reclaim ticker pays it");
+    }
+
+    /// The healthy case, which every released member reads on every heal tick: the holder is a
+    /// member of our own mesh, and its flag is known. Nothing is owed, or the mesh would visit the
+    /// rendezvous for ever.
+    #[test]
+    fn a_holder_of_our_own_mesh_owes_nothing() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, Instant::now());
+        assert!(state.rival_holder_known());
+
+        state.note_holder_outside_mesh(Instant::now());
+
+        assert!(state.rendezvous_comeback_until.is_none());
+        assert!(!state.rendezvous_wanted());
+    }
+
+    /// A member that still holds the link, or hosts the beacon, or wants the rendezvous anyway
+    /// (it has fewer links than the release count) owes nothing: a joiner would otherwise stay
+    /// a dwell longer at every start.
+    #[test]
+    fn a_member_that_has_the_link_or_wants_it_anyway_owes_no_return() {
+        let mut linked = fresh_state();
+        linked.rendezvous_release_links = 1;
+        linked.linked_endpoints.insert(endpoint_id(1));
+        linked.rendezvous_linked = true;
+        linked.note_holder_outside_mesh(Instant::now());
+        assert!(
+            linked.rendezvous_comeback_until.is_none(),
+            "it holds the link"
+        );
+
+        let mut host = fresh_state();
+        host.rendezvous_release_links = 1;
+        host.linked_endpoints.insert(endpoint_id(1));
+        host.hosts_rendezvous = true;
+        host.note_holder_outside_mesh(Instant::now());
+        assert!(host.rendezvous_comeback_until.is_none(), "it hosts it");
+
+        let mut joiner = fresh_state();
+        joiner.note_holder_outside_mesh(Instant::now());
+        assert!(
+            joiner.rendezvous_comeback_until.is_none(),
+            "it wants it anyway"
+        );
+    }
+
+    /// A debt that is owed is not moved by the next read: the window runs out on its own, and a
+    /// read after it owes once again. Without this a node that reads the holder on every heal
+    /// tick would hold the debt open for ever.
+    #[test]
+    fn a_second_read_inside_the_window_does_not_move_it() {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        let first = Instant::now();
+        state.note_holder_outside_mesh(first);
+        let due = state.rendezvous_comeback_until;
+        assert!(due.is_some());
+
+        state.note_holder_outside_mesh(first + Duration::from_secs(5));
+
+        assert_eq!(state.rendezvous_comeback_until, due);
+    }
+
+    /// A holder that crashes never says that it let go. Its flag goes with the member.
+    #[test]
+    fn the_flag_of_a_forgotten_member_is_dropped() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.note_rival_beacon_flag(high, [1u8; 32], low, true, true, Instant::now());
+        state.note_rival_beacon_flag(high, [2u8; 32], endpoint_id(7), true, true, Instant::now());
+
+        state.forget_rival_holder(low);
+
+        assert!(state.rival_holder_known(), "the other holder stays");
+        state.forget_rival_holder(endpoint_id(7));
+        assert!(!state.rival_holder_known());
     }
 
     /// A holder that sends its flag again and again must not keep our re-check away: the push

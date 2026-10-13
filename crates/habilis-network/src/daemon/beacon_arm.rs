@@ -132,8 +132,8 @@ pub(super) async fn maybe_cohost(
         if would_probe && probe.is_none() && !state.probe_backoff.due(Instant::now()) {
             return;
         }
-        let claimed = may_probe_to_claim(state)
-            && beacon::ensure(
+        let held = if may_probe_to_claim(state) {
+            beacon::ensure_holder(
                 arm.params,
                 ctx.endpoint,
                 &state.address_book,
@@ -141,12 +141,19 @@ pub(super) async fn maybe_cohost(
                 probes_before_claim(arm.policy),
                 probe,
             )
-            .await;
-        if claimed {
-            schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
-            // The new rendezvous never dials us; the reclaim tick re-grafts it.
-            state.arm_reclaim(Instant::now());
-            offer_to_the_new_holder(state, ctx);
+            .await
+        } else {
+            beacon::Held::Idle
+        };
+        match held {
+            beacon::Held::Claimed => {
+                schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
+                // The new rendezvous never dials us; the reclaim tick re-grafts it.
+                state.arm_reclaim(Instant::now());
+                offer_to_the_new_holder(state, ctx);
+            }
+            beacon::Held::Rival => state.note_holder_outside_mesh(Instant::now()),
+            beacon::Held::Idle => {}
         }
     }
 }
@@ -160,9 +167,13 @@ pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, ctx: &HandlerC
 /// A probe found a holder of the rendezvous that is not us ("staying peer"): the holder changed for
 /// this member too. The round that it started while nobody held the rendezvous cannot find the
 /// holder, so it is ended and the offer is made anew, as at a claim.
+///
+/// It is also a holder that no member of our mesh may be known to host: the member then owes a
+/// return to it ([`EventLoopState::note_holder_outside_mesh`]).
 pub(super) fn note_rival_holds(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     state.cancel_rendezvous_round();
     offer_to_the_new_holder(state, ctx);
+    state.note_holder_outside_mesh(Instant::now());
 }
 
 /// Fast event-driven failover: while the post-`NeighborDown` reclaim
@@ -198,8 +209,8 @@ pub(super) async fn maybe_reclaim(
             .reclaim_until
             .is_some_and(|deadline| Instant::now() < deadline)
     {
-        let claimed = may_probe_to_claim(state)
-            && beacon::ensure(
+        let held = if may_probe_to_claim(state) {
+            beacon::ensure_holder(
                 arm.params,
                 ctx.endpoint,
                 &state.address_book,
@@ -207,11 +218,18 @@ pub(super) async fn maybe_reclaim(
                 probes_before_claim(arm.policy),
                 probe,
             )
-            .await;
-        if claimed {
-            schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
-            offer_to_the_new_holder(state, ctx);
-            return;
+            .await
+        } else {
+            beacon::Held::Idle
+        };
+        match held {
+            beacon::Held::Claimed => {
+                schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
+                offer_to_the_new_holder(state, ctx);
+                return;
+            }
+            beacon::Held::Rival => state.note_holder_outside_mesh(Instant::now()),
+            beacon::Held::Idle => {}
         }
         if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
             && crate::transport::webrtc::rendezvous_graftable(state)
@@ -223,6 +241,36 @@ pub(super) async fn maybe_reclaim(
             crate::gossip::heal::tick_heal(arm.params.id, ctx.sender).await;
         }
     }
+}
+
+/// Tests only: shed the beacon now, if a test asked for it (`Request::ShedBeacon`). It does what
+/// a rival re-check shed does after the decision: the endpoint is closed, the address of the
+/// shed beacon leaves the book, and the reclaim window opens, so that the next walk reads
+/// whoever holds the rung.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(super) fn shed_on_request(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    rendezvous: &mut Option<beacon::Rendezvous>,
+) {
+    if !std::mem::take(&mut state.shed_requested) {
+        return;
+    }
+    let Some(held) = rendezvous.take() else {
+        return;
+    };
+    tracing::info!(
+        target: "habilis_network::gossip",
+        "beacon shed at the request of a test"
+    );
+    state.beacon_closing = Some(held.shed_then());
+    state.next_rival_recheck = None;
+    state.cancel_rendezvous_round();
+    state.address_book.remove_endpoint_info(params.id);
+    super::setup::register_rendezvous(&state.address_book, params);
+    state.rendezvous_linked = false;
+    state.forget_rendezvous_verdict();
+    state.arm_reclaim(Instant::now());
 }
 
 /// Whether a reclaim tick that did not claim should re-graft.
@@ -797,6 +845,160 @@ mod tests {
             window_open,
             "a heal-tick claim left the reclaim window closed: our rendezvous never dials us, so nothing links it until the next heal tick"
         );
+    }
+
+    /// One heal-tick claim attempt of a meshed `Deferred` member while somebody else holds the only
+    /// rung of the ladder. `configure` sets the member's state before the tick. Returns the state
+    /// after it, and whether the member still holds no beacon.
+    async fn heal_tick_beside_a_foreign_holder(
+        configure: impl FnOnce(&mut crate::daemon::state::EventLoopState),
+    ) -> (crate::daemon::state::EventLoopState, bool) {
+        use iroh_gossip::net::Gossip;
+
+        use super::{CohostArm, maybe_cohost};
+        use crate::daemon::ctx::HandlerCtx;
+        use crate::gossip::event::SilentSink;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::mesh::LookupOpts;
+        use crate::testing::{fresh_state, nick};
+        use crate::transport::MeshSender;
+        use crate::util::clock::Instant;
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let secret = iroh::SecretKey::generate();
+        let params = crate::beacon::RendezvousParams {
+            topic_id: iroh_gossip::proto::TopicId::from_bytes([6u8; 32]),
+            id: secret.public(),
+            secret,
+            bind_ports: vec![port],
+            lookups: LookupOpts::loopback(),
+            relay_transport: false,
+            bootstrap_relay: None,
+            rung_tx: tokio::sync::watch::channel(None).0,
+        };
+
+        // The holder: another member of the same room, on the only rung.
+        let holder_endpoint = loopback_endpoint().await;
+        let holder_book = crate::lookup::address_book(&holder_endpoint);
+        let mut held = None;
+        let mut holder_probe = None;
+        assert!(
+            crate::beacon::ensure(
+                &params,
+                &holder_endpoint,
+                &holder_book,
+                &mut held,
+                false,
+                &mut holder_probe,
+            )
+            .await,
+            "the holder claims the free rung"
+        );
+
+        let endpoint = loopback_endpoint().await;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let (gossip_sender, _receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+        let sender = MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let author = nick("member");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: params.id,
+            external_msg_tx: None,
+            sink: &sink,
+        };
+
+        let mut state = fresh_state();
+        state.meshed = true;
+        configure(&mut state);
+        let mut rendezvous = None;
+        let mut probe = None;
+        let arm = CohostArm {
+            policy: CoHostPolicy::Deferred,
+            params: &params,
+            started: Instant::now(),
+        };
+        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        let holds_nothing = rendezvous.is_none();
+
+        if let Some(cohosted) = rendezvous.take() {
+            cohosted.shed_and_wait().await;
+        }
+        if let Some(held) = held.take() {
+            held.shed_and_wait().await;
+        }
+        endpoint.close().await;
+        holder_endpoint.close().await;
+        (state, holds_nothing)
+    }
+
+    /// The one-by-one path: the holder left, a joiner took the free rung, and the old members
+    /// have links enough to have let go of the rendezvous. Their ladder walk reads "ours" and used
+    /// to return nothing, so nothing was owed and nothing was grafted, for ever. Now a member that
+    /// reads a holder that none of its mesh hosts owes a return.
+    #[tokio::test]
+    async fn a_released_member_that_reads_a_holder_outside_its_mesh_owes_a_return() {
+        let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|state| {
+            state.rendezvous_release_links = 1;
+            state
+                .linked_endpoints
+                .insert(crate::testing::endpoint_id(1));
+        }))
+        .await;
+
+        assert!(holds_nothing, "the rung is served: the member stays a peer");
+        assert!(
+            state.rendezvous_wanted(),
+            "the walk read a holder that none of the mesh hosts, and nothing was owed: the member \
+             has links enough, so no graft ever follows"
+        );
+    }
+
+    /// The healthy case, read on every heal tick by every released member: the holder is a member
+    /// of the mesh and its flag is known. Nothing is owed.
+    #[tokio::test]
+    async fn a_released_member_that_knows_the_holder_of_its_mesh_owes_nothing() {
+        let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|state| {
+            state.rendezvous_release_links = 1;
+            state
+                .linked_endpoints
+                .insert(crate::testing::endpoint_id(1));
+            state
+                .rival_holders
+                .insert([9u8; 32], crate::testing::endpoint_id(2));
+        }))
+        .await;
+
+        assert!(holds_nothing);
+        assert!(state.rendezvous_comeback_until.is_none());
+        assert!(!state.rendezvous_wanted());
+    }
+
+    /// A joiner that has fewer links than the release count wants the rendezvous anyway. It owes
+    /// nothing, and so its first visit is not made a dwell longer.
+    #[tokio::test]
+    async fn a_joiner_under_the_release_count_owes_no_return() {
+        let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|_| {})).await;
+
+        assert!(holds_nothing);
+        assert!(state.rendezvous_comeback_until.is_none());
     }
 
     /// The book kept the address of every beacon that this process held under the id, so a dial to

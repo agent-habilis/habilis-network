@@ -741,6 +741,8 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     let mut address_changes = endpoint.watch_addr().stream_updates_only();
 
     loop {
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        super::beacon_arm::shed_on_request(&mut state, &rendezvous_params, &mut rendezvous);
         // Whether this process hosts the beacon is read here, once per turn,
         // from the one place that owns it, so that no path that claims or sheds
         // the beacon has to remember to say so.

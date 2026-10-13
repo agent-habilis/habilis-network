@@ -659,10 +659,7 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
 /// rung; on `AddrInUse`, probe — *ours* ⇒ `None` (stay a peer),
 /// *foreign* ⇒ next rung. `None` also covers public build failure /
 /// every rung foreign-squatted (≈0); the next tick retries.
-async fn build_rendezvous_endpoint(
-    params: &RendezvousParams,
-    node: EndpointId,
-) -> Option<(Endpoint, RendezvousLane)> {
+async fn build_rendezvous_endpoint(params: &RendezvousParams, node: EndpointId) -> Walk {
     let lookups = beacon_lookups(params);
     if params.answers_jsep() {
         // The public probe-before-claim that used to run here — the analog
@@ -697,7 +694,9 @@ async fn build_rendezvous_endpoint(
         } else {
             tracing::debug!(target: "habilis_network::beacon", "public beacon endpoint build failed; next tick retries");
         }
-        return endpoint.map(|endpoint| (endpoint, Some((webrtc, admission))));
+        return endpoint.map_or(Walk::Nothing, |endpoint| {
+            Walk::Bound(endpoint, Some((webrtc, admission)))
+        });
     }
     // Built on the first contended rung and reused for the rest of the
     // walk, then closed. A throwaway identity, for the reason
@@ -706,6 +705,7 @@ async fn build_rendezvous_endpoint(
     // connection and drop the real one when the probe closes.
     let mut prober: Option<Endpoint> = None;
     let mut verdict: Option<(Endpoint, RendezvousLane)> = None;
+    let mut read_ours = false;
     for &port in &params.bind_ports {
         if let Ok(endpoint) = build_endpoint(
             &lookups,
@@ -739,6 +739,7 @@ async fn build_rendezvous_endpoint(
         };
         if !rung_probes_are_blind(node) && rung_serves_our_mesh(prober, params.id, port).await {
             tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung already serves our beacon; staying peer");
+            read_ours = true;
             break;
         }
         tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung squatted by a foreign mesh; trying next rung");
@@ -752,7 +753,34 @@ async fn build_rendezvous_endpoint(
     if verdict.is_none() {
         tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "no rendezvous ladder rung taken; staying peer");
     }
-    verdict
+    match verdict {
+        Some((endpoint, lane)) => Walk::Bound(endpoint, lane),
+        None if read_ours => Walk::Rival,
+        None => Walk::Nothing,
+    }
+}
+
+/// What [`build_rendezvous_endpoint`] ended with.
+enum Walk {
+    /// A rung was free (or, public, the endpoint was built): the beacon can stand up on it.
+    Bound(Endpoint, RendezvousLane),
+    /// A rung was taken and its listener answered as the beacon of our own mesh: a holder exists,
+    /// and it is not this member.
+    Rival,
+    /// No rung was taken, and no holder was read.
+    Nothing,
+}
+
+/// What a call of [`ensure_holder`] left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Held {
+    /// This call stood up the rendezvous: a `None`/dead to live transition.
+    Claimed,
+    /// The ladder walk read a live holder of our mesh that is not this member. Only a private
+    /// ladder reads one inline; a public member learns it from its probe verdict.
+    Rival,
+    /// Nothing changed: the beacon is held already, a probe is out, or no rung was free.
+    Idle,
 }
 
 /// Idempotent: a no-op while we co-host and the task is alive;
@@ -785,8 +813,22 @@ pub(crate) async fn ensure(
     probe_first: bool,
     probe: &mut Option<RivalProbe>,
 ) -> bool {
+    ensure_holder(params, peer, peer_book, current, probe_first, probe).await == Held::Claimed
+}
+
+/// [`ensure`], and it says what the ladder walk read when it did not claim: a live holder of our
+/// own mesh that is not this member ([`Held::Rival`]). The caller owes a return to it, if it has
+/// let go of the rendezvous and no member of its mesh is known to hold it.
+pub(crate) async fn ensure_holder(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    current: &mut Option<Rendezvous>,
+    probe_first: bool,
+    probe: &mut Option<RivalProbe>,
+) -> Held {
     if !releasable(current) {
-        return false;
+        return Held::Idle;
     }
     // Public probe-before-claim. Skipped for the eager origin
     // (`probe_first == false`): it has no peers to collide with and must be
@@ -796,9 +838,9 @@ pub(crate) async fn ensure(
         if probe.is_none() {
             *probe = spawn_rival_probe(params, peer.id()).await;
         }
-        return false;
+        return Held::Idle;
     }
-    claim(params, peer, peer_book, current).await
+    claim_holder(params, peer, peer_book, current).await
 }
 
 /// Whether a holder lets go of its beacon for a rival holder it has read: the lower member id
@@ -862,12 +904,24 @@ async fn claim(
     peer_book: &iroh::address_lookup::memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
 ) -> bool {
-    let Some((endpoint, lane)) = build_rendezvous_endpoint(params, peer.id()).await else {
-        // Public: endpoint build failed. Private: every ladder rung is
-        // occupied — our mesh's beacon(s) already exist on the ladder
-        // (joiners reach them by identity-checked dial). Either way,
-        // nothing to do; the next tick retries.
-        return false;
+    claim_holder(params, peer, peer_book, current).await == Held::Claimed
+}
+
+/// [`claim`], with what the walk read when it did not bind.
+async fn claim_holder(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    current: &mut Option<Rendezvous>,
+) -> Held {
+    let (endpoint, lane) = match build_rendezvous_endpoint(params, peer.id()).await {
+        Walk::Bound(endpoint, lane) => (endpoint, lane),
+        // Private: a rung is taken by the beacon of our own mesh. Joiners reach it by an
+        // identity-checked dial; whether this member must go to it is the caller's to say.
+        Walk::Rival => return Held::Rival,
+        // Public: the endpoint build failed. Private: every ladder rung is foreign, or the
+        // probe endpoint could not be built. Nothing to do; the next tick retries.
+        Walk::Nothing => return Held::Idle,
     };
 
     // The rendezvous pseudo-node's active view is overlay plumbing, not the
@@ -957,7 +1011,7 @@ async fn claim(
         endpoint: rendezvous_endpoint,
         lane,
     });
-    true
+    Held::Claimed
 }
 
 #[cfg(test)]
@@ -967,6 +1021,67 @@ mod tests {
         ensure, foreign_sessions, holder_entry, oneshot, probe_verdict, releasable,
         rendezvous_addr, spawn_rival_probe, verdict_of, watch, yields_to,
     };
+
+    /// A free rung is claimed, and a taken rung of our own mesh is read as a holder that is not us.
+    /// The second answer used to be `false`, the same as "nothing happened".
+    #[tokio::test]
+    async fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
+        use super::{Held, ensure_holder};
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let mut params = public_params();
+        params.bind_ports = vec![port];
+
+        let first = loopback_endpoint().await;
+        let first_book = crate::lookup::address_book(&first);
+        let mut first_beacon = None;
+        let mut first_probe = None;
+        let claimed = ensure_holder(
+            &params,
+            &first,
+            &first_book,
+            &mut first_beacon,
+            false,
+            &mut first_probe,
+        )
+        .await;
+
+        let second = loopback_endpoint().await;
+        let second_book = crate::lookup::address_book(&second);
+        let mut second_beacon = None;
+        let mut second_probe = None;
+        let read = ensure_holder(
+            &params,
+            &second,
+            &second_book,
+            &mut second_beacon,
+            false,
+            &mut second_probe,
+        )
+        .await;
+        let held_again = ensure_holder(
+            &params,
+            &first,
+            &first_book,
+            &mut first_beacon,
+            false,
+            &mut first_probe,
+        )
+        .await;
+
+        if let Some(held) = first_beacon.take() {
+            held.shed_and_wait().await;
+        }
+        first.close().await;
+        second.close().await;
+        assert_eq!(claimed, Held::Claimed, "a free rung is claimed");
+        assert_eq!(read, Held::Rival, "a taken rung of our mesh is a holder");
+        assert!(second_beacon.is_none(), "and it is not claimed");
+        assert_eq!(held_again, Held::Idle, "a held beacon changes nothing");
+    }
 
     #[test]
     fn the_holder_with_the_lower_member_id_keeps_the_beacon() {

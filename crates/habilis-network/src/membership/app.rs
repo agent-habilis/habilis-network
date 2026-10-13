@@ -138,6 +138,13 @@ pub enum Request {
         addr: std::net::SocketAddr,
         reply: oneshot::Sender<()>,
     },
+    /// Tests only: shed the beacon of this node at once, as a rival re-check shed does, and leave
+    /// the node to re-claim or to read the holder that is there. Nothing happens when it holds no
+    /// beacon.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    ShedBeacon {
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: hold this node's rendezvous claims back (`hold`), or let it claim again. A held
     /// node claims on no heal tick and in no reclaim window, and its links are untouched. A test
     /// holds the old members of a room so that a late joiner takes the free rung first.
@@ -534,6 +541,12 @@ impl NodeDriver for MembershipApp {
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
                 true
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::ShedBeacon { reply } => {
+                state.shed_requested = true;
+                let _ = reply.send(());
+                false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::HoldClaims { hold, reply } => {

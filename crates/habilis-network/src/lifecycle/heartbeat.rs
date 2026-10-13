@@ -55,6 +55,11 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         state.last_seen.remove(nick.as_str());
         if state.peers.remove(nick.as_str()) {
             state.write_peer_count();
+            // Remembered as a quiet peer, but no longer a holder: its flag was last said before it
+            // went silent, and a crashed holder never says it again.
+            if let Some(endpoint) = state.peer_endpoints.get(nick.as_str()).map(|addr| addr.id) {
+                state.forget_rival_holder(endpoint);
+            }
             if state.surfaced.remove(nick.as_str()) {
                 // A peer we knew went silent: a partition may have split the
                 // mesh, and the rendezvous is where its islands meet again. A
@@ -179,6 +184,38 @@ mod tests {
         tick_sweep(&mut state, &SilentSink);
 
         assert!(state.rendezvous_comeback_until.is_none());
+    }
+
+    /// A holder that crashed or was killed never sends a `PeerInfo` without the flag. The sweep
+    /// keeps its binding (a quiet peer returns), and must drop its claim to hold the rendezvous:
+    /// a flag that stays known shuts every debt to a new holder for as long as it lives.
+    #[test]
+    fn the_flag_of_an_evicted_holder_is_forgotten() {
+        let mut state = fresh_state();
+        let holder = crate::testing::endpoint_id(7);
+        state
+            .peer_endpoints
+            .insert(nick("lost-heron"), iroh::EndpointAddr::new(holder));
+        state.rival_holders.insert([4u8; 32], holder);
+        assert!(state.rival_holder_known());
+        let expired_at = Instant::now()
+            .checked_sub(Duration::from_secs(alive_timeout_secs() + 10))
+            .unwrap();
+        state.last_seen.insert(nick("lost-heron"), expired_at);
+        state.peers.insert(nick("lost-heron"));
+        state.surfaced.insert(nick("lost-heron"));
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains("lost-heron"),
+            "it is remembered as quiet"
+        );
+        assert!(
+            state.peer_endpoints.contains_key("lost-heron"),
+            "its binding stays, a quiet peer returns"
+        );
+        assert!(!state.rival_holder_known(), "its claim to hold is void");
     }
 
     #[test]
