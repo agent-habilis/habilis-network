@@ -48,7 +48,7 @@ mod wordlist;
 pub use iroh_base;
 
 pub use author_key::AuthorKey;
-pub use crypto::{Password, TicketAuth, TicketSecret, ct_eq};
+pub use crypto::{Password, Seed, SymmetricKey, TicketAuth, TicketSecret, ct_eq};
 pub use dedup_key::DedupKey;
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
