@@ -1,20 +1,19 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::sole_addressee;
-use crate::protocol::{AuthorKey, DedupKey, Message, Nickname};
-use crate::util::clock;
+use crate::protocol::{AuthorKey, DedupKey, Message, Nickname, UnixSecs};
 
 /// Where a message sits in the log's total order: its timestamp, then its id
 /// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
 /// second, so the timestamp alone cannot say which side of a window's edge a
 /// message is on; the key breaks every tie.
-pub(crate) type Bound = (i64, DedupKey);
+pub(crate) type Bound = (UnixSecs, DedupKey);
 
 /// The smallest bound that sorts after `bound`.
 fn bound_after((timestamp, key): Bound) -> Bound {
     match u128::from_be_bytes(key.to_bytes()).checked_add(1) {
         Some(next) => (timestamp, DedupKey::from_bytes(next.to_be_bytes())),
-        None => (timestamp.saturating_add(1), DedupKey::MIN),
+        None => (timestamp + std::time::Duration::from_secs(1), DedupKey::MIN),
     }
 }
 
@@ -44,7 +43,7 @@ pub(crate) struct WindowRange {
 
 /// A range of whole seconds: every message from second `lo` to second `hi`.
 #[cfg(test)]
-pub(crate) fn seconds(lo: i64, hi: i64) -> WindowRange {
+pub(crate) fn seconds(lo: UnixSecs, hi: UnixSecs) -> WindowRange {
     WindowRange {
         lo: (lo, DedupKey::MIN),
         hi: (hi, DedupKey::MAX),
@@ -222,7 +221,7 @@ impl MessageLog {
         let mut bounds: Vec<Bound> = self
             .messages
             .iter()
-            .map(|msg| (msg.timestamp, msg.dedup_key()))
+            .map(|msg| (UnixSecs::from_secs(msg.timestamp), msg.dedup_key()))
             .collect();
         bounds.sort_unstable();
         bounds
@@ -264,7 +263,7 @@ impl MessageLog {
     /// ones. If every message is ahead, it is the local clock that is wrong,
     /// and all of them count.
     fn settled_len(bounds: &[Bound]) -> usize {
-        let now = clock::unix_secs();
+        let now = UnixSecs::now();
         match bounds.partition_point(|(timestamp, _)| *timestamp <= now) {
             0 => bounds.len(),
             settled => settled,
@@ -284,9 +283,9 @@ impl MessageLog {
         let settled = Self::settled_len(&bounds);
         let mut window = Self::cut(&bounds, settled.saturating_sub(recent), recent, true)?;
         window.hi = if settled == bounds.len() {
-            (i64::MAX, DedupKey::MAX)
+            (UnixSecs::MAX, DedupKey::MAX)
         } else {
-            (clock::unix_secs(), DedupKey::MAX)
+            (UnixSecs::now(), DedupKey::MAX)
         };
         Some(window)
     }
@@ -328,7 +327,7 @@ impl MessageLog {
             let first = settled + (start - newest_start);
             let mut window = Self::cut(&bounds, first, max, true)?;
             if first + window.ids.len() == bounds.len() {
-                window.hi = (i64::MAX, DedupKey::MAX);
+                window.hi = (UnixSecs::MAX, DedupKey::MAX);
             }
             Some(window)
         }
@@ -351,7 +350,7 @@ impl MessageLog {
             .rev()
             .filter(|msg| {
                 let key = msg.dedup_key();
-                let bound = (msg.timestamp, key);
+                let bound = (UnixSecs::from_secs(msg.timestamp), key);
                 bound >= range.lo
                     && bound <= range.hi
                     && !have.contains(&key)
@@ -403,7 +402,9 @@ fn eviction_key(msg: &Message) -> (i64, Option<AuthorKey>, Option<u64>, &str) {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{AuthorKey, DedupKey, Message, MessageLog, MissingQuery, Nickname, WindowRange};
+    use super::{
+        AuthorKey, DedupKey, Message, MessageLog, MissingQuery, Nickname, UnixSecs, WindowRange,
+    };
 
     /// A whole-log gap query for `requester` with nothing already held — the
     /// shape every gate test wants.
@@ -413,7 +414,7 @@ mod tests {
         requester: &'a Nickname,
     ) -> MissingQuery<'a> {
         MissingQuery {
-            range: super::seconds(0, i64::MAX),
+            range: super::seconds(UnixSecs::ZERO, UnixSecs::MAX),
             have,
             max,
             requester,
@@ -480,7 +481,7 @@ mod tests {
     }
 
     fn in_range(message: &Message, window: &super::DigestWindow) -> bool {
-        let bound = (message.timestamp, message.dedup_key());
+        let bound = (UnixSecs::from_secs(message.timestamp), message.dedup_key());
         bound >= window.lo && bound <= window.hi
     }
 
@@ -562,11 +563,11 @@ mod tests {
         }
         // A middle slice of 2, starting at index 1 (ts=20).
         let window = log.window_at(1, 2).expect("non-empty window");
-        assert_eq!((window.lo.0, window.hi.0), (20, 30));
+        assert_eq!((window.lo.0.as_secs(), window.hi.0.as_secs()), (20, 30));
         assert_eq!(window.ids.len(), 2);
         // A max wider than the log starting at 0 covers everything.
         let full = log.window_at(0, 100).expect("non-empty window");
-        assert_eq!((full.lo.0, full.hi.0), (10, 50));
+        assert_eq!((full.lo.0.as_secs(), full.hi.0.as_secs()), (10, 50));
         assert_eq!(full.ids.len(), 5);
         // Past the end ⇒ None.
         assert!(log.window_at(5, 2).is_none());
@@ -595,7 +596,7 @@ mod tests {
             advertiser.push(frames[index].clone());
         }
         let window = advertiser.window_at(0, 10).expect("non-empty window");
-        assert_eq!((window.lo.0, window.hi.0), (10, 50));
+        assert_eq!((window.lo.0.as_secs(), window.hi.0.as_secs()), (10, 50));
 
         // The holder answers that window with the gap.
         let have: HashSet<DedupKey> = window.ids.into_iter().collect();
@@ -649,7 +650,7 @@ mod tests {
             .into_iter()
             .collect();
         let gap = log.missing_in_window(MissingQuery {
-            range: super::seconds(20, 40),
+            range: super::seconds(UnixSecs::from_secs(20), UnixSecs::from_secs(40)),
             have: &have,
             max: 10,
             requester: &nick(ANYONE),
@@ -735,7 +736,11 @@ mod tests {
             }
         }
         let window = requester.recent_window(50).expect("non-empty");
-        assert_eq!(window.hi.0, i64::MAX, "newest window must be open-ended");
+        assert_eq!(
+            window.hi.0,
+            UnixSecs::MAX,
+            "newest window must be open-ended"
+        );
         let have: HashSet<DedupKey> = window.ids.into_iter().collect();
         let offered: HashSet<String> = holder
             .missing_in_window(MissingQuery {

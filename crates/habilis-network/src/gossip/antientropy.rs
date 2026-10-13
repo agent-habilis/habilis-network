@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname};
+use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
     ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN_SECS,
@@ -70,9 +70,9 @@ impl WireWindow {
             packed.extend_from_slice(id.as_bytes());
         }
         WireWindow {
-            lo: window.lo.0,
+            lo: window.lo.0.as_secs(),
             lo_key: encode_key(&window.lo.1),
-            hi: window.hi.0,
+            hi: window.hi.0.as_secs(),
             hi_key: encode_key(&window.hi.1),
             ids: bs58::encode(packed).into_string(),
         }
@@ -81,8 +81,8 @@ impl WireWindow {
     /// The window's bounds, or `None` if a key is malformed.
     fn range(&self) -> Option<WindowRange> {
         Some(WindowRange {
-            lo: (self.lo, decode_key(&self.lo_key)?),
-            hi: (self.hi, decode_key(&self.hi_key)?),
+            lo: (UnixSecs::from_secs(self.lo), decode_key(&self.lo_key)?),
+            hi: (UnixSecs::from_secs(self.hi), decode_key(&self.hi_key)?),
         })
     }
 
@@ -174,7 +174,7 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     // earlier of the two: a message of that second with a smaller id key than
     // the first one we hold sorts before it, and is in range.
     let floor = |window: &mut DigestWindow| {
-        window.lo = (state.joined_at.as_secs().min(window.lo.0), DedupKey::MIN);
+        window.lo = (state.joined_at.min(window.lo.0), DedupKey::MIN);
     };
     if newest.from_start {
         floor(&mut newest);
@@ -1420,8 +1420,8 @@ mod tests {
     /// ids, so every message of the holder is a gap.
     fn digest_of_an_empty_log(asker: &Nickname) -> Message {
         let window = DigestWindow {
-            lo: (0, DedupKey::MIN),
-            hi: (i64::MAX, DedupKey::MAX),
+            lo: (UnixSecs::ZERO, DedupKey::MIN),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: Vec::new(),
             from_start: true,
         };
@@ -1705,8 +1705,8 @@ mod tests {
             .map(|seed| DedupKey::from_bytes([seed; 16]))
             .collect();
         let window = DigestWindow {
-            lo: (1, DedupKey::MIN),
-            hi: (i64::MAX, DedupKey::MAX),
+            lo: (UnixSecs::from_secs(1), DedupKey::MIN),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: ids.clone(),
             from_start: false,
         };
@@ -2218,8 +2218,11 @@ mod tests {
     #[test]
     fn a_digest_body_keeps_its_wire_form() {
         let newest = DigestWindow {
-            lo: (1_700_000_100, DedupKey::from_bytes([0x03; 16])),
-            hi: (i64::MAX, DedupKey::MAX),
+            lo: (
+                UnixSecs::from_secs(1_700_000_100),
+                DedupKey::from_bytes([0x03; 16]),
+            ),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: vec![
                 DedupKey::from_bytes([0x11; 16]),
                 DedupKey::from_bytes([0x22; 16]),
@@ -2227,8 +2230,11 @@ mod tests {
             from_start: false,
         };
         let older = DigestWindow {
-            lo: (1_700_000_000, DedupKey::MIN),
-            hi: (1_700_000_099, DedupKey::from_bytes([0x04; 16])),
+            lo: (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN),
+            hi: (
+                UnixSecs::from_secs(1_700_000_099),
+                DedupKey::from_bytes([0x04; 16]),
+            ),
             ids: vec![DedupKey::from_bytes([0x33; 16])],
             from_start: true,
         };
@@ -2250,9 +2256,12 @@ mod tests {
         let open_end = back.windows[0].range().expect("the keys decode");
         assert_eq!(
             open_end.lo,
-            (1_700_000_100, DedupKey::from_bytes([0x03; 16]))
+            (
+                UnixSecs::from_secs(1_700_000_100),
+                DedupKey::from_bytes([0x03; 16])
+            )
         );
-        assert_eq!(open_end.hi, (i64::MAX, DedupKey::MAX));
+        assert_eq!(open_end.hi, (UnixSecs::MAX, DedupKey::MAX));
         let ids = back.windows[0].decode_ids().expect("the ids decode");
         assert_eq!(
             ids,
@@ -2262,7 +2271,16 @@ mod tests {
             ])
         );
         let closed = back.windows[1].range().expect("the keys decode");
-        assert_eq!(closed.lo, (1_700_000_000, DedupKey::MIN));
-        assert_eq!(closed.hi, (1_700_000_099, DedupKey::from_bytes([0x04; 16])));
+        assert_eq!(
+            closed.lo,
+            (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN)
+        );
+        assert_eq!(
+            closed.hi,
+            (
+                UnixSecs::from_secs(1_700_000_099),
+                DedupKey::from_bytes([0x04; 16])
+            )
+        );
     }
 }
