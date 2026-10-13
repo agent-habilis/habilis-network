@@ -11,7 +11,9 @@
 //! room at the same moment, many rounds in a row, and checks that they become one mesh.
 //! `crates/habilis-network/tests/loopback_room_split.rs` starts a loopback room one member
 //! at a time, and with a rung probe that reads "not ours", and checks the same.
-//! Every test of the six files is `#[ignore]`, because each stands up several real members
+//! `crates/habilis-network/tests/periodic_return_loopback.rs` shortens the period of the return to
+//! the rendezvous, and checks that a member that let go of it comes back and lets go again.
+//! Every test of the seven files is `#[ignore]`, because each stands up several real members
 //! and must not run next to another test, so a full run takes a while. The gate runs two
 //! cells by name (a row of [`crate::gate::STEPS`]). This task runs them all, and the nightly
 //! workflow runs this task.
@@ -25,13 +27,14 @@ use crate::TaskOutcome;
 use crate::util::output;
 
 /// The test binaries of the run, in order. Each is `#[ignore]` throughout.
-const TESTS: [&str; 6] = [
+const TESTS: [&str; 7] = [
     "send_ladder_matrix",
     "d11_gate_loopback",
     "gossip_only",
     "first_broadcast_after_join_loopback",
     "simultaneous_topic_start",
     "loopback_room_split",
+    "periodic_return_loopback",
 ];
 
 pub(crate) fn run(sh: &Shell, list: bool) -> TaskOutcome {

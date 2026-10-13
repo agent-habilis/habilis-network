@@ -228,6 +228,7 @@ pub struct Tuning {
     pub rival_recheck_secs: u64,
     pub rival_recheck_meshed_secs: u64,
     pub rival_recheck_alone_secs: u64,
+    pub rendezvous_periodic_return_secs: u64,
     pub topic_mdns_only: bool,
 }
 
@@ -251,6 +252,7 @@ impl Tuning {
         rival_recheck_secs: RIVAL_RECHECK_SECS,
         rival_recheck_meshed_secs: RIVAL_RECHECK_MESHED_SECS,
         rival_recheck_alone_secs: RIVAL_RECHECK_ALONE_SECS,
+        rendezvous_periodic_return_secs: RENDEZVOUS_PERIODIC_RETURN_SECS,
         topic_mdns_only: false,
     };
 }
@@ -769,6 +771,19 @@ pub const CAP_REFUSAL_COOLDOWN_MAX_SECS: u64 = 300;
 /// gossip view, and the introduction takes a few round trips; a visit shorter
 /// than that would find no one.
 pub const RENDEZVOUS_DWELL_SECS: u64 = 30;
+
+/// How long a node that let go of the rendezvous on purpose waits before it wants it again, at
+/// the least. Islands of a split mesh that each hold links enough have no other reason to visit the
+/// rendezvous, where they meet. A node adds up to half of this from its id, so that n members cost
+/// about n / period visits a minute, and not n at once. A wider spread for very large rooms is a
+/// tuning choice: raise this value.
+pub const RENDEZVOUS_PERIODIC_RETURN_SECS: u64 = 600;
+
+/// The live value, after any override of [`RENDEZVOUS_PERIODIC_RETURN_SECS`]. Clamped to `>= 1`.
+#[must_use]
+pub fn rendezvous_periodic_return_secs() -> u64 {
+    current().rendezvous_periodic_return_secs.max(1)
+}
 
 /// How long an owed return to the rendezvous lasts. A node that is refused at
 /// the rendezvous, or finds it gone, offers again for this long and then stops:

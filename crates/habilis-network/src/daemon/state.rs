@@ -23,7 +23,19 @@ use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED_SECS, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
     RECLAIM_WINDOW_SECS, REGRAFT_AFTER_MS, RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
+    rendezvous_periodic_return_secs,
 };
+
+/// How long after it let go of the rendezvous a node wants it again. Every node waits the same
+/// period, plus a share of up to half of it that the id of the node fixes: the pubkey bytes are
+/// uniform, so n members do not come back together.
+fn rendezvous_return_after(local: EndpointId) -> Duration {
+    let period = rendezvous_periodic_return_secs();
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&local.as_bytes()[..8]);
+    let share_ms = u64::from_le_bytes(prefix) % (period * 500).max(1);
+    Duration::from_secs(period) + Duration::from_millis(share_ms)
+}
 
 /// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
 /// re-link throttle (`relink`) and of the `PeerInfo` flood gate.
@@ -382,6 +394,11 @@ pub struct EventLoopState {
     /// is then no loss, so nothing re-grafts it or arms a reclaim for it.
     /// Cleared when the link comes back.
     pub(crate) rendezvous_released: bool,
+    /// When a node that let go of the rendezvous on purpose wants it again, although it holds
+    /// links enough: one period after the release, plus a share from its id. A mesh that split
+    /// into islands, each with links enough, has no other reason to visit the rendezvous, which
+    /// is the one place where the islands meet. Cleared when the link comes back.
+    pub(crate) rendezvous_return_due: Option<Instant>,
     /// A return to the rendezvous is owed, until this instant, although this
     /// node holds enough links to others. Set when a silent roster peer is
     /// swept on a node that is not linked to it (a partition may have split the
@@ -933,6 +950,7 @@ impl EventLoopState {
             gossip_open: true,
             rendezvous_linked: false,
             rendezvous_released: false,
+            rendezvous_return_due: None,
             rendezvous_comeback_until: None,
             rendezvous_dwell_until: None,
             hosts_rendezvous: false,
@@ -1402,13 +1420,17 @@ impl EventLoopState {
 
     /// Whether this node should hold, or come back to, the rendezvous link:
     /// while it has fewer than [`Self::rendezvous_release_links`] links to
-    /// others, while a return is owed, and always on the node that hosts it.
+    /// others, while a return is owed or the periodic return fell due, and always on the node
+    /// that hosts it.
     /// Every graft and offer to the rendezvous is gated on this one answer.
     pub(crate) fn rendezvous_wanted(&self) -> bool {
         self.hosts_rendezvous
             || self
                 .rendezvous_comeback_until
                 .is_some_and(|until| Instant::now() < until)
+            || self
+                .rendezvous_return_due
+                .is_some_and(|due| Instant::now() >= due)
             || self.linked_endpoints.len() < self.rendezvous_release_links
     }
 
@@ -1456,10 +1478,13 @@ impl EventLoopState {
     pub(crate) fn note_rendezvous_link_up(&mut self, now: Instant) {
         self.rendezvous_linked = true;
         self.rendezvous_released = false;
-        self.rendezvous_dwell_until = self
-            .rendezvous_comeback_until
+        let periodic_visit = self
+            .rendezvous_return_due
             .take()
-            .map(|_| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
+            .is_some_and(|due| now >= due);
+        let owed_visit = self.rendezvous_comeback_until.take().is_some();
+        self.rendezvous_dwell_until = (owed_visit || periodic_visit)
+            .then(|| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
     }
 
     /// Whether this node holds the rendezvous link, has not let go of it yet, is
@@ -1484,6 +1509,7 @@ impl EventLoopState {
     /// read, so that one reads as a choice.
     pub(crate) fn mark_rendezvous_released(&mut self, local: EndpointId) {
         self.rendezvous_released = true;
+        self.rendezvous_return_due = Some(Instant::now() + rendezvous_return_after(local));
         tracing::info!(
             target: "habilis_network::gossip",
             local = %local.fmt_short(),
@@ -2562,6 +2588,98 @@ mod tests {
         state.mark_rendezvous_released(endpoint_id(9));
 
         assert!(!state.should_release_rendezvous(Instant::now()));
+    }
+
+    /// A mesh that split into islands, each with links enough, never visits the rendezvous on its
+    /// own: nothing is owed and no link is below the count. Each node comes back once in a long
+    /// while, and the beacon introduces the islands to each other.
+    #[test]
+    fn a_node_that_let_go_wants_the_rendezvous_again_when_its_return_falls_due() {
+        let mut state = two_link_node();
+        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        state.rendezvous_linked = false;
+        assert!(
+            !state.rendezvous_wanted(),
+            "it let go a moment ago: no visit yet"
+        );
+        assert!(
+            state.rendezvous_return_due.is_some(),
+            "a release sets the time of its return"
+        );
+
+        state.rendezvous_return_due = Some(Instant::now());
+
+        assert!(
+            state.rendezvous_wanted(),
+            "a return that fell due is wanted although the links are enough"
+        );
+    }
+
+    #[test]
+    fn the_return_of_a_node_that_let_go_falls_due_one_period_later_at_the_earliest() {
+        let period = Duration::from_secs(crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN_SECS);
+        for seed in 1..=8 {
+            let after = super::rendezvous_return_after(endpoint_id(seed));
+            assert!(
+                after >= period,
+                "seed {seed}: {after:?} is before the period"
+            );
+            assert!(
+                after <= period + period / 2,
+                "seed {seed}: {after:?} is later than half a period more"
+            );
+        }
+        assert_ne!(
+            super::rendezvous_return_after(endpoint_id(1)),
+            super::rendezvous_return_after(endpoint_id(2)),
+            "two members do not come back together"
+        );
+    }
+
+    #[test]
+    fn a_visit_that_the_period_asked_for_lasts_its_dwell_time_before_the_node_lets_go() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let now = Instant::now();
+        state.rendezvous_return_due = Some(now);
+
+        state.note_rendezvous_link_up(now);
+
+        assert!(
+            !state.should_release_rendezvous(now),
+            "the visit lasts its dwell time: the beacon needs it to introduce the islands"
+        );
+        let after_dwell = now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS);
+        assert!(state.should_release_rendezvous(after_dwell));
+    }
+
+    #[test]
+    fn a_link_that_comes_up_before_the_return_is_due_asks_for_no_dwell() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let now = Instant::now();
+
+        state.note_rendezvous_link_up(now);
+
+        assert!(state.should_release_rendezvous(now));
+    }
+
+    #[test]
+    fn a_link_that_comes_back_ends_the_wait_for_the_return() {
+        let mut state = two_link_node();
+        state.mark_rendezvous_released(endpoint_id(9));
+        assert!(state.rendezvous_return_due.is_some());
+
+        state.note_rendezvous_link_up(Instant::now());
+
+        assert!(state.rendezvous_return_due.is_none());
     }
 
     #[test]
