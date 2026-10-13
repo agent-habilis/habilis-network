@@ -327,6 +327,26 @@ published to a registry; pin it with
   builds, native and web, move at once.
 - **Breaking:** `LinkMetric` in the multihop transport has a private field. Build one with
   `LinkMetric::new` and read it with `LinkMetric::get`. The serde form is the same number.
+- **Breaking:** key material has types. `Seed` is the wire seed of a mesh id and the salt of a
+  derivation, and `SymmetricKey` is a key that encrypts, wraps or derives, wiped on drop, with
+  no `PartialEq`. `Mesh::new` takes a `Seed`. `Mesh::stretched_key` is `Mesh::mesh_key`, which
+  returns `Option<SymmetricKey>`. `crypto::derive_secret` is crate-private: derive with
+  `Seed::derive` or `SymmetricKey::derive`. `seal_symmetric` and `open_symmetric` take a
+  `&SymmetricKey`. `seal_to_body` takes the `x25519_dalek::PublicKey` of the recipient, and
+  `Identity::seal_public` returns one. The doc crate's `encrypt_body` and `decrypt_body` are
+  `encrypt_body_with_key` and `decrypt_body_with_key`, and take a `SymmetricKey`; so does
+  `MeshDoc::with_key`, and `ops::doc` re-exports `encrypt_body_with_key`. The state, meta and
+  broadcast keys of the daemon are `SymmetricKey`, and `EventLoopState::broadcast_key` returns
+  `Option<&SymmetricKey>`. Every derived byte stays the same.
+- **Breaking:** `HandlerCtx::our_pubkey` is an `AuthorKey` (it was `&str`).
+  `MeshDoc::changes_since_not_by` takes `Option<&AuthorKey>`.
+- **Breaking:** the netplay lobby and mesh transport hold an `AuthorKey` and a `Nickname` in
+  place of strings. `MeshTransport` is bound to `Address = AuthorKey`. `Lobby::new`,
+  `Lobby::on_message` and `Lobby::present`, `LobbyError::DuplicateNickname`, `LobbyMessage` and
+  `StartedMatch::players` take the typed values; `MeshTransport::local_pubkey`, `drain_lobby`,
+  `knows` and `known_peers` too. A `Start` message whose `players` list holds a text that is not
+  a lowercase 64-character hex key is refused whole. The bytes of the messages, the order of
+  the roster and `session_id_for` do not change.
 
 ### Fixed
 

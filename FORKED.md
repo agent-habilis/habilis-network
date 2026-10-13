@@ -389,6 +389,14 @@ Divergences from upstream, in the order they were made.
       `msg.pubkey` is gone. Read the key with `msg.author_key()`.
     - `bridge/ticket.rs:183`: a `BlobTicket` literal holds a `TicketSecret` and a
       `BlobDigest`.
+    - `a2a/send.rs:300`: `ops::doc::encrypt_body` is `encrypt_body_with_key` and takes a
+      `&SymmetricKey`.
+    - `harness/bench.rs:64`, `benches/hot_paths.rs:30`: `crypto::derive_secret` is crate-private.
+      Derive with `Seed::derive`.
+    - `bridge/ticket.rs:170`, `harness/bench.rs:86`, `cli/doctor.rs:612`: `Mesh::new` takes a
+      `Seed`.
+    - `a2a/node.rs:261`, `a2a/rpc.rs:314`: `Identity::seal_public()` returns an
+      `x25519_dalek::PublicKey`. Encode `seal_public().as_bytes()`.
 
 ## Fork pins — where each one lives, and why
 
