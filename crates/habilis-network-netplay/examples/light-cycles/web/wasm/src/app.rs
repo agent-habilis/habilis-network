@@ -23,7 +23,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use habilis_network_netplay::{
-    Config, Event, Lobby, MeshTransport, P2PSession, Request, SessionState, StartedMatch,
+    Config, Event, Lobby, MeshTransport, P2PSession, Request, SessionState, StartedMatch, Tick,
+    TickSpan,
 };
 
 use crate::grid::{Dir, Input};
@@ -231,7 +232,7 @@ impl Game {
         let Some(lobby) = self.lobby.as_mut() else {
             return;
         };
-        let now = u64::from(self.ticks);
+        let now = Tick::new(u64::from(self.ticks));
         for (pubkey, raw) in self.transport.drain_lobby() {
             lobby.on_message(&pubkey, &raw, now);
         }
@@ -239,7 +240,7 @@ impl Game {
         // and a restarted one comes back under a new public key rather
         // than reclaiming its old entry. Without this the roster only
         // grows and the next match is proposed with a ghost in it.
-        lobby.expire(now, u64::from(PRESENCE_EVERY_TICKS) * 12);
+        lobby.expire(now, TickSpan::new(u64::from(PRESENCE_EVERY_TICKS) * 12));
         // Asked of every peer, not just whichever one proposes: the other
         // would otherwise show "players ready" for a match that can never
         // start.
@@ -280,7 +281,7 @@ impl Game {
         let Some(agreed) = self.lobby.as_ref().and_then(Lobby::started) else {
             return;
         };
-        if agreed.epoch <= self.match_number {
+        if agreed.epoch.get() <= self.match_number {
             return;
         }
         let agreed = agreed.clone();
@@ -295,7 +296,7 @@ impl Game {
             clippy::cast_possible_truncation,
             reason = "deliberately the low half of the session id; see above"
         )]
-        let magic = agreed.session_id as u32;
+        let magic = agreed.session_id.get() as u32;
         let Ok(session) = P2PSession::new(
             agreed.players.clone(),
             agreed.local_handle,
@@ -309,11 +310,11 @@ impl Game {
         // `derive` sorts, and the lobby's player list is already sorted by
         // public key, so roster index `i` is session handle `i`. Every
         // mapping between the two downstream relies on that.
-        let descriptor = RoundDescriptor::derive(agreed.session_id, agreed.players.clone());
+        let descriptor = RoundDescriptor::derive(agreed.session_id.get(), agreed.players.clone());
         self.world = World::spawn(&descriptor);
         self.descriptor = Some(descriptor);
         self.session = Some(session);
-        self.match_number = agreed.epoch;
+        self.match_number = agreed.epoch.get();
         self.decided_since = None;
         self.desynced = false;
         self.steer = None;

@@ -71,8 +71,8 @@ pub use error::RollbackError;
 pub use frame::{Frame, InputStatus};
 pub use handle::PlayerHandle;
 pub use mesh::{
-    LOBBY_TAG, Lobby, LobbyError, MeshTransport, Outbound, ROLLBACK_TAG, RollbackDriver,
-    StartedMatch,
+    Epoch, LOBBY_TAG, Lobby, LobbyError, MeshTransport, Outbound, ROLLBACK_TAG, RollbackDriver,
+    SessionId, StartedMatch, Tick, TickSpan,
 };
 pub use protocol::PeerState;
 pub use request::{Request, StateCell};

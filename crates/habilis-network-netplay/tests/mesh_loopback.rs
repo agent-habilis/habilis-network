@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use habilis_network_netplay::{
     Config, Event, Lobby, MeshTransport, P2PSession, Request, RollbackDriver, RollbackError,
-    SessionState,
+    SessionState, Tick,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -143,7 +143,7 @@ impl Player {
         }
         let lobby = self.lobby.as_mut().expect("just ensured");
         for (pubkey, raw) in transport.drain_lobby() {
-            lobby.on_message(&pubkey, &raw, tick as u64);
+            lobby.on_message(&pubkey, &raw, Tick::new(tick as u64));
         }
         if tick.is_multiple_of(10) {
             transport.broadcast_lobby(&lobby.presence());
@@ -174,7 +174,7 @@ impl Player {
                 2,
                 // Scoped to this match, so a straggler from a previous one
                 // cannot be mistaken for live input.
-                u32::try_from(session_id & 0xFFFF_FFFF).unwrap_or(1),
+                u32::try_from(session_id.get() & 0xFFFF_FFFF).unwrap_or(1),
             )
             .expect("the handle came from our own player list"),
         );

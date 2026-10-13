@@ -16,7 +16,8 @@
 use std::collections::BTreeMap;
 
 use habilis_network_netplay::{
-    Config, Event, Lobby, MeshTransport, P2PSession, Request, SessionState, StartedMatch,
+    Config, Event, Lobby, MeshTransport, P2PSession, Request, SessionId, SessionState,
+    StartedMatch, Tick, TickSpan,
 };
 
 use crate::grid::{Dir, Input};
@@ -107,7 +108,7 @@ pub struct Game {
     /// The session id the live session was built against. The epoch alone
     /// cannot say: the lobby's tie-break can settle on another match at the
     /// same epoch, and then this is what disagrees with `Lobby::started`.
-    playing_session_id: Option<u64>,
+    playing_session_id: Option<SessionId>,
     /// The direction the player is steering toward. Sticky: it is held
     /// state, not an event, which is what makes the session's "predict by
     /// repeating the last input" guess the right one.
@@ -214,7 +215,7 @@ impl Game {
         let Some(lobby) = self.lobby.as_mut() else {
             return;
         };
-        let now = u64::from(self.ticks);
+        let now = Tick::new(u64::from(self.ticks));
         for (pubkey, raw) in self.transport.drain_lobby() {
             lobby.on_message(&pubkey, &raw, now);
         }
@@ -222,7 +223,7 @@ impl Game {
         // and a restarted one comes back under a new public key rather
         // than reclaiming its old entry. Without this the roster only
         // grows and the next match is proposed with a ghost in it.
-        lobby.expire(now, u64::from(PRESENCE_EVERY_TICKS) * 12);
+        lobby.expire(now, TickSpan::new(u64::from(PRESENCE_EVERY_TICKS) * 12));
         // Asked of every peer, not just whichever one proposes: the other
         // would otherwise show "players ready" for a match that can never
         // start.
@@ -247,7 +248,7 @@ impl Game {
         let Some(agreed) = self.lobby.as_ref().and_then(Lobby::started) else {
             return;
         };
-        if agreed.epoch <= self.match_number {
+        if agreed.epoch.get() <= self.match_number {
             // The lobby's tie-break can swap the agreed match at the *same*
             // epoch, and this declines to follow it: the session is already
             // built against the old id. Logged because the result is a pair
@@ -259,9 +260,9 @@ impl Game {
                 && self.playing_session_id != Some(agreed.session_id)
             {
                 tracing::debug!(
-                    epoch = agreed.epoch,
-                    agreed = agreed.session_id,
-                    playing = self.playing_session_id,
+                    epoch = agreed.epoch.get(),
+                    agreed = agreed.session_id.get(),
+                    playing = self.playing_session_id.map(SessionId::get),
                     "the lobby moved to another match at this epoch; keeping the built one"
                 );
             }
@@ -279,7 +280,7 @@ impl Game {
             clippy::cast_possible_truncation,
             reason = "deliberately the low half of the session id; see above"
         )]
-        let magic = agreed.session_id as u32;
+        let magic = agreed.session_id.get() as u32;
         let Ok(session) = P2PSession::new(
             agreed.players.clone(),
             agreed.local_handle,
@@ -293,11 +294,11 @@ impl Game {
         // `derive` sorts, and the lobby's player list is already sorted by
         // public key, so roster index `i` is session handle `i`. Every
         // mapping between the two downstream relies on that.
-        let descriptor = RoundDescriptor::derive(agreed.session_id, agreed.players.clone());
+        let descriptor = RoundDescriptor::derive(agreed.session_id.get(), agreed.players.clone());
         self.world = World::spawn(&descriptor);
         self.descriptor = Some(descriptor);
         self.session = Some(session);
-        self.match_number = agreed.epoch;
+        self.match_number = agreed.epoch.get();
         self.playing_session_id = Some(agreed.session_id);
         self.decided_since = None;
         self.desynced = false;
