@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::config::Config;
-use crate::frame::{Frame, InputStatus, NULL_FRAME};
+use crate::frame::{Frame, InputStatus};
 
 /// A slot the game saves a frame's state into, and the session loads it back
 /// out of.
@@ -39,7 +39,7 @@ impl<S> Clone for StateCell<S> {
 impl<S> Default for StateCell<S> {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(CellInner {
-            frame: NULL_FRAME,
+            frame: Frame::NULL,
             state: None,
             checksum: None,
         })))
@@ -76,7 +76,7 @@ impl<S> StateCell<S> {
         inner.checksum = checksum;
     }
 
-    /// The frame this cell holds, or [`NULL_FRAME`] if it is empty.
+    /// The frame this cell holds, or [`Frame::NULL`] if it is empty.
     ///
     /// # Panics
     /// If the cell's lock is poisoned.

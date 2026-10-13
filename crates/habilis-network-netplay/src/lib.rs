@@ -68,7 +68,7 @@ mod transport;
 
 pub use config::Config;
 pub use error::RollbackError;
-pub use frame::{Frame, InputStatus, NULL_FRAME};
+pub use frame::{Frame, InputStatus};
 pub use handle::PlayerHandle;
 pub use mesh::{
     LOBBY_TAG, Lobby, LobbyError, MeshTransport, Outbound, ROLLBACK_TAG, RollbackDriver,

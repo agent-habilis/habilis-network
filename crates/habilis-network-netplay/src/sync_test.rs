@@ -125,8 +125,8 @@ impl<T: Config> SyncTestSession<T> {
         self.sync.confirm_through(frame);
 
         let mut requests = Vec::new();
-        let rollback_to = frame - Frame::try_from(self.check_distance).unwrap_or(Frame::MAX);
-        if rollback_to >= 0 {
+        let rollback_to = frame - i32::try_from(self.check_distance).unwrap_or(i32::MAX);
+        if rollback_to >= Frame::ZERO {
             self.sync.force_rollback(rollback_to, &mut requests);
         }
         requests.push(self.sync.save_current_state());
@@ -141,8 +141,9 @@ impl<T: Config> SyncTestSession<T> {
     /// the first time, recording it if this is the first time.
     fn harvest_checksums(&mut self) -> Result<(), RollbackError> {
         let current = self.sync.current_frame();
-        let oldest = current - Frame::try_from(self.check_distance + 1).unwrap_or(Frame::MAX);
-        for frame in oldest.max(0)..=current {
+        let oldest = current - i32::try_from(self.check_distance + 1).unwrap_or(i32::MAX);
+        for number in oldest.max(Frame::ZERO).get()..=current.get() {
+            let frame = Frame::new(number);
             let Some(cell) = self.sync.saved_state(frame) else {
                 continue;
             };
@@ -165,7 +166,7 @@ impl<T: Config> SyncTestSession<T> {
         }
         // Frames older than the rollback window can never be re-simulated,
         // so their checksums are dead weight.
-        self.history = self.history.split_off(&oldest.max(0));
+        self.history = self.history.split_off(&oldest.max(Frame::ZERO));
         Ok(())
     }
 

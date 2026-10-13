@@ -27,7 +27,7 @@
 
 use crate::config::Config;
 use crate::error::RollbackError;
-use crate::frame::{Frame, InputStatus, NULL_FRAME};
+use crate::frame::{Frame, InputStatus};
 use crate::handle::PlayerHandle;
 use crate::input_queue::InputQueue;
 use crate::request::{Request, StateCell};
@@ -79,8 +79,8 @@ impl<T: Config> Sync<T> {
             input_queues,
             saved_states: SavedStates::new(max_prediction),
             max_prediction,
-            current_frame: 0,
-            last_confirmed_frame: NULL_FRAME,
+            current_frame: Frame::ZERO,
+            last_confirmed_frame: Frame::NULL,
         }
     }
 
@@ -96,7 +96,7 @@ impl<T: Config> Sync<T> {
     /// Once this reaches `max_prediction` the session must stall rather than
     /// guess further — there would be no saved state left to roll back to.
     pub(crate) fn frames_ahead(&self) -> usize {
-        if self.last_confirmed_frame == NULL_FRAME {
+        if self.last_confirmed_frame == Frame::NULL {
             return usize::try_from(self.current_frame).unwrap_or(0);
         }
         usize::try_from(self.current_frame - self.last_confirmed_frame).unwrap_or(0)
@@ -178,21 +178,21 @@ impl<T: Config> Sync<T> {
     }
 
     /// The earliest frame any player's real input contradicted our guess, or
-    /// [`NULL_FRAME`] if every guess is still holding.
+    /// [`Frame::NULL`] if every guess is still holding.
     fn first_incorrect_frame(&self) -> Frame {
         self.input_queues
             .iter()
             .map(InputQueue::first_incorrect_frame)
-            .filter(|frame| *frame != NULL_FRAME)
+            .filter(|frame| *frame != Frame::NULL)
             .min()
-            .unwrap_or(NULL_FRAME)
+            .unwrap_or(Frame::NULL)
     }
 
     /// If a prediction turned out wrong, emit the requests that undo and
     /// redo the affected frames. Appends nothing when everything held up.
     pub(crate) fn check_simulation(&mut self, requests: &mut Vec<Request<T>>) {
         let seek_to = self.first_incorrect_frame();
-        if seek_to == NULL_FRAME {
+        if seek_to == Frame::NULL {
             return;
         }
         self.adjust_simulation(seek_to, requests);
@@ -246,7 +246,7 @@ impl<T: Config> Sync<T> {
 mod tests {
     use super::Sync;
     use crate::error::RollbackError;
-    use crate::frame::{InputStatus, NULL_FRAME};
+    use crate::frame::{Frame, InputStatus};
     use crate::handle::PlayerHandle;
     use crate::request::Request;
     use crate::testutil::{TestGame, TestInput, TestRunner};
@@ -276,7 +276,7 @@ mod tests {
                 .expect("under the limit");
             // Player 1's input arrives on time and is always the same, so
             // every prediction holds.
-            sync.add_remote_input(PlayerHandle::new(1), frame, TestInput(2))
+            sync.add_remote_input(PlayerHandle::new(1), Frame::new(frame), TestInput(2))
                 .expect("valid player");
             step(&mut sync, &mut runner);
         }
@@ -284,7 +284,11 @@ mod tests {
         let mut requests = Vec::new();
         sync.check_simulation(&mut requests);
         assert!(requests.is_empty(), "nothing was mispredicted");
-        assert_eq!(runner.advanced, vec![0, 1, 2, 3], "each frame ran once");
+        assert_eq!(
+            runner.advanced,
+            vec![Frame::new(0), Frame::new(1), Frame::new(2), Frame::new(3)],
+            "each frame ran once"
+        );
         assert_eq!(runner.state.value, 4 * (1 + 2));
     }
 
@@ -296,7 +300,7 @@ mod tests {
         // Frame 0 with both real inputs.
         sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("under the limit");
-        sync.add_remote_input(PlayerHandle::new(1), 0, TestInput(10))
+        sync.add_remote_input(PlayerHandle::new(1), Frame::new(0), TestInput(10))
             .expect("valid player");
         step(&mut sync, &mut runner);
 
@@ -307,10 +311,13 @@ mod tests {
             step(&mut sync, &mut runner);
         }
         assert_eq!(runner.state.value, 11 + 11 + 11);
-        assert_eq!(runner.advanced, vec![0, 1, 2]);
+        assert_eq!(
+            runner.advanced,
+            vec![Frame::new(0), Frame::new(1), Frame::new(2)]
+        );
 
         // Player 1's real frame-1 input turns out different.
-        sync.add_remote_input(PlayerHandle::new(1), 1, TestInput(20))
+        sync.add_remote_input(PlayerHandle::new(1), Frame::new(1), TestInput(20))
             .expect("valid player");
         let mut requests = Vec::new();
         sync.check_simulation(&mut requests);
@@ -318,9 +325,22 @@ mod tests {
 
         // Frames 1 and 2 were re-simulated, and the total now reflects the
         // real input rather than the guess.
-        assert_eq!(runner.advanced, vec![0, 1, 2, 1, 2]);
+        assert_eq!(
+            runner.advanced,
+            vec![
+                Frame::new(0),
+                Frame::new(1),
+                Frame::new(2),
+                Frame::new(1),
+                Frame::new(2)
+            ]
+        );
         assert_eq!(runner.state.value, 11 + 21 + 21);
-        assert_eq!(sync.current_frame(), 3, "we end up where we started");
+        assert_eq!(
+            sync.current_frame(),
+            Frame::new(3),
+            "we end up where we started"
+        );
     }
 
     #[test]
@@ -330,7 +350,7 @@ mod tests {
 
         sync.add_local_input(PlayerHandle::new(0), TestInput(0))
             .expect("under the limit");
-        sync.add_remote_input(PlayerHandle::new(1), 0, TestInput(1))
+        sync.add_remote_input(PlayerHandle::new(1), Frame::new(0), TestInput(1))
             .expect("valid player");
         step(&mut sync, &mut runner);
         for _ in 0..2 {
@@ -341,7 +361,7 @@ mod tests {
 
         // Correct frame 1 only; frame 2 is still unknown and must be
         // re-predicted from the *corrected* frame 1, not the old guess.
-        sync.add_remote_input(PlayerHandle::new(1), 1, TestInput(5))
+        sync.add_remote_input(PlayerHandle::new(1), Frame::new(1), TestInput(5))
             .expect("valid player");
         let mut requests = Vec::new();
         sync.check_simulation(&mut requests);
@@ -384,8 +404,8 @@ mod tests {
                 .is_err()
         );
 
-        sync.confirm_through(1);
-        assert_eq!(sync.last_confirmed_frame(), 1);
+        sync.confirm_through(Frame::new(1));
+        assert_eq!(sync.last_confirmed_frame(), Frame::new(1));
         assert_eq!(sync.frames_ahead(), 2);
         sync.add_local_input(PlayerHandle::new(0), TestInput(1))
             .expect("confirmation made room again");
@@ -399,7 +419,7 @@ mod tests {
             Err(RollbackError::InvalidPlayer(PlayerHandle::new(9)))
         );
         assert_eq!(
-            sync.add_remote_input(PlayerHandle::new(9), 0, TestInput(0)),
+            sync.add_remote_input(PlayerHandle::new(9), Frame::new(0), TestInput(0)),
             Err(RollbackError::InvalidPlayer(PlayerHandle::new(9)))
         );
     }
@@ -418,7 +438,7 @@ mod tests {
         );
         assert_eq!(
             sync.last_added_frames().collect::<Vec<_>>(),
-            vec![0, NULL_FRAME]
+            vec![Frame::new(0), Frame::NULL]
         );
     }
 }

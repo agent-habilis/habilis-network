@@ -17,7 +17,8 @@ impl Runner {
     }
 
     fn checksum(state: &State) -> u128 {
-        u128::from(state.value.cast_unsigned()) ^ (u128::from(state.frame.cast_unsigned()) << 64)
+        u128::from(state.value.cast_unsigned())
+            ^ (u128::from(state.frame.get().cast_unsigned()) << 64)
     }
 
     pub(crate) fn handle(&mut self, request: Request<Game>) {

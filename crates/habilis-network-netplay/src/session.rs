@@ -20,7 +20,7 @@
 
 use crate::config::Config;
 use crate::error::RollbackError;
-use crate::frame::{Frame, NULL_FRAME};
+use crate::frame::Frame;
 use crate::handle::PlayerHandle;
 use crate::protocol::{PeerEvent, PeerProtocol, PeerState};
 use crate::request::Request;
@@ -156,7 +156,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
             state: SessionState::Synchronizing,
             events: Vec::new(),
             skip_frames: 0,
-            last_checksum_frame: NULL_FRAME,
+            last_checksum_frame: Frame::NULL,
             local_input: None,
             unaddressed_drops: 0,
         })
@@ -302,7 +302,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
             self.sync.confirm_through(self.sync.current_frame());
             return;
         };
-        if confirmed != NULL_FRAME {
+        if confirmed != Frame::NULL {
             self.sync.confirm_through(confirmed);
         }
     }
@@ -346,7 +346,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
         // left in place for the retry.
         let frame = self.sync.add_local_input(self.local_handle, input)?;
         self.local_input = None;
-        if frame != NULL_FRAME {
+        if frame != Frame::NULL {
             for peer in &mut self.peers {
                 peer.send_input(frame, input);
             }
@@ -370,7 +370,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
     /// turns a silent divergence into a reported one.
     pub fn publish_checksum(&mut self) {
         let frame = self.sync.last_confirmed_frame();
-        if frame == NULL_FRAME || frame == self.last_checksum_frame {
+        if frame == Frame::NULL || frame == self.last_checksum_frame {
             return;
         }
         let Some(cell) = self.sync.saved_state(frame) else {

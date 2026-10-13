@@ -1,15 +1,91 @@
 //! Frame numbering.
 
+use std::ops::{Add, AddAssign, Sub};
+
+use serde::{Deserialize, Serialize};
+
 /// A simulation frame number.
 ///
-/// Signed, so [`NULL_FRAME`] can be a sentinel and so "how far ahead am I"
+/// Signed, so [`Frame::NULL`] can be a sentinel and so "how far ahead am I"
 /// arithmetic can go negative without wrapping. The simulation itself starts
-/// at frame `0`.
-pub type Frame = i32;
+/// at [`Frame::ZERO`].
+///
+/// A frame plus a count is a frame, and a frame minus a frame is a count. A
+/// frame plus a frame is not defined, so the two cannot be confused with the
+/// delays and the windows that are plain integers beside them.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct Frame(i32);
 
-/// "No frame" — an empty slot, an un-started queue, or the absence of a
-/// misprediction. Distinct from frame `0`, which is a real frame.
-pub const NULL_FRAME: Frame = -1;
+impl Frame {
+    /// "No frame" — an empty slot, an un-started queue, or the absence of a
+    /// misprediction. Distinct from [`Frame::ZERO`], which is a real frame.
+    pub const NULL: Self = Self(-1);
+
+    /// The first frame of a simulation.
+    pub const ZERO: Self = Self(0);
+
+    /// The largest frame number.
+    pub const MAX: Self = Self(i32::MAX);
+
+    /// The frame with number `number`.
+    #[must_use]
+    pub const fn new(number: i32) -> Self {
+        Self(number)
+    }
+
+    /// The frame number.
+    #[must_use]
+    pub const fn get(self) -> i32 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Frame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Add<i32> for Frame {
+    type Output = Self;
+
+    fn add(self, count: i32) -> Self {
+        Self(self.0 + count)
+    }
+}
+
+impl AddAssign<i32> for Frame {
+    fn add_assign(&mut self, count: i32) {
+        self.0 += count;
+    }
+}
+
+impl Sub<i32> for Frame {
+    type Output = Self;
+
+    fn sub(self, count: i32) -> Self {
+        Self(self.0 - count)
+    }
+}
+
+impl Sub for Frame {
+    type Output = i32;
+
+    fn sub(self, other: Self) -> i32 {
+        self.0 - other.0
+    }
+}
+
+impl TryFrom<Frame> for usize {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(frame: Frame) -> Result<Self, Self::Error> {
+        Self::try_from(frame.0)
+    }
+}
 
 /// Whether the input handed to the simulation for a frame is the real thing
 /// or a guess.

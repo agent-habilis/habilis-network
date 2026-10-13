@@ -85,7 +85,7 @@ fn a_long_run_stays_stable() {
             runner.handle(request);
         }
     }
-    assert_eq!(runner.state.frame, 400);
+    assert_eq!(runner.state.frame, Frame::new(400));
     let expected: i64 = script
         .iter()
         .map(|(left, right)| i64::from(*left) + i64::from(*right))
