@@ -783,11 +783,6 @@ impl Contest {
     }
 }
 
-/// [`Contest::own_yields`] for a caller that holds the two ids apart.
-pub(crate) fn yields_to(own: EndpointId, other: EndpointId) -> bool {
-    Contest { own, rival: other }.own_yields()
-}
-
 /// Apply an off-loop probe's verdict: claim the rendezvous if it is free.
 ///
 /// Re-checks the beacon slot first, because up to [`HEAL_PROBE_SECS`] passed
