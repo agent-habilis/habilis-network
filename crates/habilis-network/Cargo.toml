@@ -56,6 +56,7 @@ iroh-test-utils = [
     "dep:iroh-relay",
     "iroh-relay/server",
     "habilis-network-iroh-webrtc-transport/test-hooks",
+    "habilis-network-iroh-multihop-transport?/test-hooks",
 ]
 # Off by default. The blob-offload side-channel: a `habilis-mesh/blob/1` ALPN
 # server, a ticket, and fetch/offload, for handing a peer a payload too large to
@@ -76,6 +77,11 @@ blob = ["host"]
 # builds unconditionally: IpcMessage is in the event loop signatures, so
 # gating it needs ipc.rs split by dependency first.)
 default = ["host", "mdns", "dht"]
+# The multihop transport: reach a peer with no direct path through other peers.
+# On under `host`, and the only way the crate is in the graph. The crate builds
+# for wasm32 (a gate row checks it), so a browser build can turn this on without
+# `host`. Nothing in the browser endpoint uses it yet.
+multihop = ["dep:habilis-network-iroh-multihop-transport"]
 # Both need real UDP sockets, so each implies `host`.
 mdns = ["host", "dep:iroh-mdns-address-lookup"]
 dht = ["host", "dep:iroh-mainline-address-lookup"]
@@ -94,7 +100,7 @@ host = [
     "habilis-network-protocol/host",
     "habilis-network-doc/host",
     "habilis-network-logging/host",
-    "dep:habilis-network-iroh-multihop-transport",
+    "multihop",
     "dep:interprocess",
     "dep:libc",
     # Base tokio is the portable floor (`sync`, `macros`, `time`, `rt`); these
@@ -127,8 +133,11 @@ web-time.workspace = true
 n0-future.workspace = true
 # The multi-hop iroh custom transport: reach a peer with no direct path by
 # relaying its QUIC packets through intermediate peers. Registered on the
-# peer endpoint (the `--multihop` flag).
+# peer endpoint (the mesh policy's `multihop`).
 habilis-network-iroh-multihop-transport = { workspace = true, optional = true }
+# Gossip as an iroh custom transport. The recursion rule of the connection hook needs it; the
+# transport itself is wired by Phase 6 step 10.
+habilis-network-iroh-gossip-transport = { workspace = true }
 # Leaf crate: runtime dirs, clock, tuning dials, bounded containers, build stamp.
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["async-io"] }
 # Wire vocabulary: messages, mesh ids, nicknames, identity, sealing, invites.
@@ -167,6 +176,8 @@ interprocess = { version = "2", features = ["tokio"], optional = true }
 [dev-dependencies]
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["test-fixtures", "async-io"] }
 habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false, features = ["test-fixtures"] }
+# `MultihopHandle::refuse_hop_for_test`: the event loop's test makes the gate refuse a hop.
+habilis-network-iroh-multihop-transport = { workspace = true, features = ["test-hooks"] }
 
 # The WebRTC lane is not optional: it is the browser's only way onto the mesh.
 # Only the backend differs by target — str0m natively, the platform's own
@@ -190,7 +201,7 @@ iroh = { workspace = true, features = [
 iroh-gossip.workspace = true
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "c814688e6c0967b2764efe7159059d1d68c4b2f4", default-features = false, optional = true }
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "0e7cdb4cd73952c49699cd7ae971a1fc2982b866", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:
 # iroh's defaults (portmapper, fast-apple-datapath, metrics) are host-only and
@@ -223,3 +234,7 @@ wasm-bindgen-test = "0.3"
 [[example]]
 name = "mesh_peer"
 required-features = ["host"]
+
+[[example]]
+name = "mesh_peer_load"
+required-features = ["host", "iroh-test-utils"]

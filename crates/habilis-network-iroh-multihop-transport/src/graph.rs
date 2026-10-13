@@ -75,6 +75,20 @@ impl Graph {
         paths
     }
 
+    /// Shortest path from `src` to `dst` that does not leave `src` over a link to
+    /// a node in `refused`: the edges `src -> r` are absent. It is a rule on edges
+    /// and not on nodes, since `dst` can itself be a refused first hop (a direct
+    /// link), and a node rule never blocks `dst`. `None` when every way out of
+    /// `src` is refused or leads nowhere.
+    pub(crate) fn shortest_path_avoiding_first_hops(
+        &self,
+        src: EndpointId,
+        dst: EndpointId,
+        refused: &HashSet<EndpointId>,
+    ) -> Option<Path> {
+        self.shortest_path_with(src, dst, &HashSet::new(), refused)
+    }
+
     /// Dijkstra that treats every node in `blocked` as absent — the primitive
     /// behind node-disjoint search. `dst` is never blocked even if the caller
     /// lists it.
@@ -83,6 +97,18 @@ impl Graph {
         src: EndpointId,
         dst: EndpointId,
         blocked: &HashSet<EndpointId>,
+    ) -> Option<Path> {
+        self.shortest_path_with(src, dst, blocked, &HashSet::new())
+    }
+
+    /// Dijkstra with both rules: `blocked` nodes are absent, and the links from
+    /// `src` to a node in `refused_first` are absent.
+    fn shortest_path_with(
+        &self,
+        src: EndpointId,
+        dst: EndpointId,
+        blocked: &HashSet<EndpointId>,
+        refused_first: &HashSet<EndpointId>,
     ) -> Option<Path> {
         let mut best: HashMap<EndpointId, LinkMetric> = HashMap::new();
         let mut prev: HashMap<EndpointId, EndpointId> = HashMap::new();
@@ -106,6 +132,9 @@ impl Graph {
                 continue;
             }
             for (next, edge) in self.adj.get(&node).into_iter().flatten() {
+                if node == src && refused_first.contains(next) {
+                    continue;
+                }
                 let candidate = RelaxEdge {
                     node,
                     cost,
@@ -233,6 +262,51 @@ mod tests {
     fn link(graph: &mut Graph, left: EndpointId, right: EndpointId, cost: u32) {
         graph.insert_link(left, right, LinkMetric(cost));
         graph.insert_link(right, left, LinkMetric(cost));
+    }
+
+    #[test]
+    fn a_link_from_the_source_to_a_refused_node_is_skipped_also_when_it_is_the_destination() {
+        let (src, via, dst) = (eid(1), eid(2), eid(3));
+        let mut graph = Graph::default();
+        link(&mut graph, src, dst, 1);
+        link(&mut graph, src, via, 1);
+        link(&mut graph, via, dst, 1);
+        let refusing = |nodes: &[EndpointId]| nodes.iter().copied().collect();
+
+        let path = |refused| graph.shortest_path_avoiding_first_hops(src, dst, &refused);
+        assert_eq!(path(refusing(&[])).expect("direct").hops, vec![dst]);
+        assert_eq!(
+            path(refusing(&[dst])).expect("through via").hops,
+            vec![via, dst],
+            "the direct link is a refused first hop: the destination itself"
+        );
+        assert_eq!(
+            path(refusing(&[via])).expect("direct").hops,
+            vec![dst],
+            "a refused node that is not on the shortest path changes nothing"
+        );
+        assert_eq!(
+            path(refusing(&[dst, via])),
+            None,
+            "every way out of the source is refused"
+        );
+    }
+
+    #[test]
+    fn a_refused_first_hop_is_still_a_hop_in_the_middle_of_a_route() {
+        // Only the links from the source are refused: `via` can carry the route
+        // on from a later node, since the rule reads the first hop alone.
+        let (src, near, via, dst) = (eid(1), eid(2), eid(3), eid(4));
+        let mut graph = Graph::default();
+        link(&mut graph, src, near, 1);
+        link(&mut graph, near, via, 1);
+        link(&mut graph, via, dst, 1);
+        link(&mut graph, src, via, 5);
+        let refused = std::iter::once(via).collect();
+        let path = graph
+            .shortest_path_avoiding_first_hops(src, dst, &refused)
+            .expect("a route");
+        assert_eq!(path.hops, vec![near, via, dst]);
     }
 
     #[test]

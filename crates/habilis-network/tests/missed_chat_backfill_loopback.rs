@@ -92,7 +92,7 @@ impl NodeDriver for Chat {
         frame.timestamp += AHEAD_SECS;
         let frame = frame.signed(ctx.identity);
         let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
-        habilis_network::ops::deliver(&frame, bytes, state, ctx.sender)
+        let _ = habilis_network::ops::deliver(&frame, bytes, state, ctx.sender)
             .await
             .expect("a meshed node broadcasts");
         // The sender keeps its own frame, as a chat app does, so any peer late
@@ -181,13 +181,13 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
         SetupParams {
             author: nick(name),
             max_peers: 16,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),
             runtime_base: None,
             state_file: None,
             sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,

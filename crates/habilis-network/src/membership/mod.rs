@@ -10,6 +10,10 @@ mod app;
 mod event;
 mod join;
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use app::Rung;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use app::UnknownPeer;
 pub use app::{
     DEPARTURE_GRACE, INBOUND_CAP, Inbound, MAX_MSG, MSG_TAG, MembershipApp, Request, msg_body,
     msg_fits, parse_to,

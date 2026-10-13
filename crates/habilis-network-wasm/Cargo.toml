@@ -23,8 +23,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow.workspace = true
 # `--no-default-features`: the portable half only — no `host`, no IPC
-# listener, no state file, nothing a browser has no equivalent of.
-habilis-network = { path = "../habilis-network", default-features = false }
+# listener, no state file, nothing a browser has no equivalent of. `multihop`: the tab relays
+# and takes routes through other members, over its WebRTC sessions and the relay (it has no IP).
+habilis-network = { path = "../habilis-network", default-features = false, features = ["multihop"] }
 # The byte streams behind the `StreamNode` class.
 habilis-network-stream = { path = "../habilis-network-stream" }
 serde_json.workspace = true

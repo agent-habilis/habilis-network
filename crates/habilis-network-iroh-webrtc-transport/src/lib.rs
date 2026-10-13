@@ -76,7 +76,9 @@ mod liveness;
 #[cfg(any(feature = "native", feature = "web"))]
 mod selector;
 #[cfg(feature = "test-hooks")]
-pub use selector::block_ip_paths;
+pub use habilis_network_iroh_transport_util::{Rung, expected_rung};
+#[cfg(feature = "test-hooks")]
+pub use selector::{block_ip_paths, block_ip_to, block_rung, block_rung_to};
 mod signaling;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
@@ -209,7 +211,7 @@ impl WebRtcHandle {
     /// alone is not enough.
     #[must_use]
     pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
-        std::sync::Arc::new(selector::WebRtcPreferred)
+        std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
     }
 
     /// Attach a negotiated session for `remote`.
@@ -236,10 +238,24 @@ impl WebRtcHandle {
         self.inner.session_count()
     }
 
+    /// The remote ids of every live session.
+    #[must_use]
+    pub fn live_peer_ids(&self) -> Vec<iroh_base::EndpointId> {
+        self.inner.live_peer_ids()
+    }
+
     /// Tear down the session for `remote`, if any.
     #[must_use]
     pub fn detach(&self, remote: &iroh_base::EndpointId) -> bool {
         self.inner.detach(remote)
+    }
+
+    /// Tests only: abort every session without a close. See
+    /// `WebRtcTransport::abort_sessions`.
+    #[cfg(feature = "test-hooks")]
+    #[must_use]
+    pub fn abort_sessions(&self) -> usize {
+        self.inner.abort_sessions()
     }
 }
 
@@ -269,7 +285,7 @@ impl WebRtcHandle {
     /// alone is not enough.
     #[must_use]
     pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
-        std::sync::Arc::new(selector::WebRtcPreferred)
+        std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
     }
 
     /// Attach a negotiated browser session for `remote`.

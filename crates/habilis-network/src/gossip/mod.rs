@@ -13,7 +13,9 @@ pub(crate) mod app;
 mod broadcast;
 pub(crate) mod event;
 pub(crate) mod heal;
+pub(crate) mod lan;
 mod recv;
+pub(crate) mod split;
 
 use iroh::endpoint::TransportAddrUsage;
 use iroh::{Endpoint, EndpointId, RelayUrl, TransportAddr};
@@ -35,10 +37,11 @@ const _: () = assert!(
     "MAX_MESSAGE_SIZE leaves too little headroom under iroh-gossip's DEFAULT_MAX_MESSAGE_SIZE"
 );
 
-pub(crate) use broadcast::broadcast_peer_info;
 pub use broadcast::{
-    StateMergeParams, broadcast_msg, broadcast_state_merge, send_app, unicast_farewell,
+    StateMergeParams, app_frame, broadcast_msg, broadcast_state_merge, send_app, start_ping_round,
+    unicast_farewell,
 };
+pub(crate) use broadcast::{broadcast_peer_info, send_second_probe};
 
 /// Serialize `value` as the JSON body of a control frame, or `None` when it
 /// will not fit a [`MessageBody`](crate::protocol::MessageBody).
@@ -53,7 +56,8 @@ pub(crate) fn json_body<T: serde::Serialize>(value: &T) -> Option<crate::protoco
     crate::protocol::MessageBody::new(json).ok()
 }
 pub(crate) use recv::{
-    drain_dead_receiver, flush_pending, handle_gossip_event, ingest, retain_own_broadcast,
+    drain_dead_receiver, drain_queued, flush_pending, handle_gossip_event, ingest, requeue_failed,
+    retain_own_broadcast,
 };
 
 /// Which transport paths to a peer are active: direct (IP or a custom

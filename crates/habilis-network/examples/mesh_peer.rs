@@ -181,6 +181,7 @@ async fn run_peer(
         SetupParams {
             author: author.clone(),
             max_peers: 16,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),
@@ -189,7 +190,6 @@ async fn run_peer(
             runtime_base: None,
             state_file: None,
             sink: Arc::new(SilentSink),
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: Some(Arc::clone(&live)),

@@ -7,12 +7,12 @@ use anyhow::{Context, Result, bail};
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
-use habilis_network::net::TransportOpts;
 use habilis_network::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, PROBE_DEADLINE, SignalAdmission,
-    WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc, dial_signal, pair_needs_lane,
-    wait_direct,
+    WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc, dial_signal, is_cap_refusal,
+    pair_needs_lane, wait_direct,
 };
+use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
     Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, Transport, TransportPolicy,
 };
@@ -40,7 +40,8 @@ pub struct StreamOpts {
     /// loopback node.
     pub lookup: Vec<Lookup>,
     /// What may carry bytes: any of `udp`, `webrtc`, `relay`, with `udp` or
-    /// `webrtc` among them. Empty ⇒ `udp,webrtc`.
+    /// `webrtc` among them. Empty ⇒ `udp,webrtc`. `multihop` and `gossip` are refused: a
+    /// stream is one direct lane, and its node never joins a gossip mesh.
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Empty is the default ladder.
     pub relay_urls: Vec<String>,
@@ -57,9 +58,8 @@ pub struct StreamNode {
     transport: TransportPolicy,
     transports: TransportOpts,
     ice: IceProfile,
-    /// The producers this node has opened, by address. One lookup for all of
-    /// them, so a node that opens many streams does not grow its address book
-    /// by one lookup service per open.
+    /// The address book of the endpoint: the producers this node has opened, and
+    /// the peers of its WebRTC sessions.
     producers: MemoryLookup,
 }
 
@@ -70,11 +70,21 @@ impl StreamNode {
     /// Conflicting or invalid options, a loopback node in a browser, or an
     /// endpoint that fails to bind.
     pub async fn bind(opts: &StreamOpts) -> Result<Self> {
-        let config = MeshConfig::resolve(
-            &opts.lookup,
-            relay_ladder(&opts.relay_urls)?,
-            &opts.transport,
-        )?;
+        anyhow::ensure!(
+            !opts.transport.contains(&Transport::Multihop),
+            "a stream has no multihop: it is one direct lane"
+        );
+        anyhow::ensure!(
+            !opts.transport.contains(&Transport::Gossip),
+            "a stream has no gossip: its node never joins a gossip mesh"
+        );
+        // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
+        let list = if opts.transport.is_empty() {
+            &[Transport::Udp, Transport::WebRtc][..]
+        } else {
+            &opts.transport
+        };
+        let config = MeshConfig::resolve(&opts.lookup, relay_ladder(&opts.relay_urls)?, list)?;
         let transports = TransportOpts::default().within(&config.transport);
         Self::bind_with(config.lookups, config.transport, transports).await
     }
@@ -97,6 +107,7 @@ impl StreamNode {
         #[cfg(target_arch = "wasm32")]
         habilis_network::runtime::refuse_in_browser(&lookups, transport, transports)?;
         let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports).await?;
+        let producers = address_book(&endpoint);
         let registry = Arc::new(Registry::default());
         let ice = IceProfile {
             host_only: lookups.is_loopback(),
@@ -114,6 +125,7 @@ impl StreamNode {
                 WebRtcSignalAcceptor::new(
                     webrtc.clone(),
                     endpoint.clone(),
+                    producers.clone(),
                     endpoint.id(),
                     SignalAdmission::new(MAX_DIRECT_PEERS),
                     ice,
@@ -121,8 +133,6 @@ impl StreamNode {
             );
         }
         let router = router.spawn();
-        let producers = MemoryLookup::new();
-        endpoint.address_lookup()?.add(producers.clone());
         Ok(Self {
             endpoint,
             router,
@@ -183,17 +193,26 @@ impl StreamNode {
         if needs_lane && !can_lane && !relay_ok {
             bail!(Refused::RelayRefused);
         }
-        self.producers.add_endpoint_info(hash.addr.clone());
+        add_peer_addr(&self.producers, hash.addr.clone());
         // The WebRTC lane first: the connect below then finds the session's
         // path in the address book and can start on the data channel, rather
         // than on the relay a later attach would have to move it off.
         if can_lane
             && needs_lane
             && !self.webrtc.has_session(&hash.addr.id)
-            && let Err(error) =
-                dial_signal(&self.endpoint, hash.addr.clone(), &self.webrtc, self.ice).await
+            && let Err(error) = dial_signal(
+                &self.endpoint,
+                &self.producers,
+                hash.addr.clone(),
+                &self.webrtc,
+                self.ice,
+            )
+            .await
             && !relay_ok
         {
+            if is_cap_refusal(&error) {
+                bail!(Refused::AtCap);
+            }
             return Err(error.context("opening a WebRTC lane to the producer"));
         }
         let conn = self
@@ -237,6 +256,51 @@ mod tests {
     use habilis_network::runtime::refuse_in_browser;
 
     use super::*;
+
+    // A stream is one direct lane: a list that names `multihop` is refused
+    // before anything binds.
+    #[tokio::test]
+    async fn a_stream_node_refuses_multihop() {
+        let opts = StreamOpts {
+            transport: vec![Transport::Udp, Transport::Multihop],
+            ..StreamOpts::default()
+        };
+        let refused = StreamNode::bind(&opts)
+            .await
+            .expect_err("multihop is refused");
+        assert!(
+            refused.to_string().contains("no multihop"),
+            "the error names the reason: {refused}"
+        );
+    }
+
+    // A stream node never joins a gossip mesh: a list that names `gossip` is refused too.
+    #[tokio::test]
+    async fn a_stream_node_refuses_gossip() {
+        let opts = StreamOpts {
+            transport: vec![Transport::Udp, Transport::Gossip],
+            ..StreamOpts::default()
+        };
+        let refused = StreamNode::bind(&opts)
+            .await
+            .expect_err("gossip is refused");
+        assert!(
+            refused.to_string().contains("no gossip"),
+            "the error names the reason: {refused}"
+        );
+    }
+
+    // The mesh default has `multihop`. An empty list for a stream must not take it.
+    #[tokio::test]
+    async fn an_empty_list_is_udp_and_webrtc_for_a_stream() {
+        let node = StreamNode::bind(&StreamOpts::default())
+            .await
+            .expect("bind a loopback node");
+        let policy = node.transport;
+        assert!(policy.udp && policy.webrtc, "udp and webrtc are on");
+        assert!(!policy.multihop, "multihop is off");
+        node.endpoint.close().await;
+    }
 
     // A browser has no UDP, so a list without `webrtc` leaves relay payload as
     // its only path: without `relay` in the list, nothing carries its bytes.

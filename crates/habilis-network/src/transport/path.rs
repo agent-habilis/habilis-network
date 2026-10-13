@@ -22,7 +22,62 @@ pub const PROBE_DEADLINE: Duration = Duration::from_secs(15);
 /// Close code an inbound gossip connection gets when the relay is lookup
 /// only and no direct path was selected within the deadline. Distinct from
 /// the blob lane's code so a log reader can tell the two refusals apart.
-pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = 4;
+pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = super::webrtc::close_code::GOSSIP_RELAY_REFUSED;
+
+/// Close code of a gossip connection whose selected path is the gossip rung. Such a
+/// connection would carry, inside gossip frames, the gossip that the frames need.
+pub(crate) const GOSSIP_RECURSION_REFUSED_CODE: u32 =
+    super::webrtc::close_code::GOSSIP_ON_GOSSIP_PATH;
+
+static GOSSIP_RECURSION_CLOSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many gossip connections the recursion rule closed since the process started: a total,
+/// not a delta. A count that grows without bound is a pair that dials again after each close.
+pub(crate) fn gossip_recursion_closes() -> u64 {
+    GOSSIP_RECURSION_CLOSES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+static GOSSIP_CONNS: std::sync::Mutex<Vec<iroh::endpoint::WeakConnectionHandle>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Tests only: remember a gossip connection, so that [`close_gossip_links_to`] can close it. The
+/// list is shared by every member of the process. A connection has two ends and a close on one ends
+/// both, so a test names the remote of the end it closes.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn track_gossip_conn(conn: &Connection) {
+    let mut conns = GOSSIP_CONNS.lock().expect("gossip conns poisoned");
+    conns.retain(|weak| weak.upgrade().is_some());
+    conns.push(conn.weak_handle());
+}
+
+/// Tests only: close every live gossip connection whose remote is `remote`, as a lost link does.
+/// Returns how many it closed.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn close_gossip_links_to(remote: iroh::EndpointId) -> usize {
+    const TEST_CLOSE_CODE: u32 = 0x7e57;
+    let conns = GOSSIP_CONNS.lock().expect("gossip conns poisoned");
+    conns
+        .iter()
+        .filter_map(iroh::endpoint::WeakConnectionHandle::upgrade)
+        .filter(|conn| conn.remote_id() == remote && conn.close_reason().is_none())
+        .map(|conn| conn.close(TEST_CLOSE_CODE.into(), b"closed by a test"))
+        .count()
+}
+
+/// Close `conn` with [`GOSSIP_RECURSION_REFUSED_CODE`] once its selected path is the gossip
+/// rung, now or after a path change. Unconditional: it reads no mesh policy.
+pub(crate) fn watch_gossip_recursion(conn: &Connection) {
+    let remote = conn.remote_id();
+    habilis_network_iroh_gossip_transport::watch_recursion(
+        conn,
+        GOSSIP_RECURSION_REFUSED_CODE,
+        move || {
+            GOSSIP_RECURSION_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is the gossip rung");
+        },
+    );
+}
 
 /// Whether iroh's selected path to the remote is not the relay: a direct UDP
 /// path, or a custom transport (`WebRTC`, multihop), which is peer to peer as
@@ -41,6 +96,23 @@ pub(crate) fn selected_is_ip(conn: &Connection) -> bool {
         .iter()
         .find(iroh::endpoint::Path::is_selected)
         .is_some_and(|path| path.is_ip())
+}
+
+/// The rung of iroh's selected path on `conn`, for a test that shows a node
+/// stepping down the ladder: `ip`, `webrtc`, `multihop` or `relay`. `None`
+/// while no path is selected yet.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn selected_rung(conn: &Connection) -> Option<&'static str> {
+    use super::probe::{PathKind, selected_kind};
+
+    match selected_kind(conn) {
+        PathKind::Ip => Some("ip"),
+        PathKind::WebRtc => Some("webrtc"),
+        PathKind::Multihop => Some("multihop"),
+        PathKind::Gossip => Some("gossip"),
+        PathKind::Relay => Some("relay"),
+        PathKind::None => None,
+    }
 }
 
 /// Whether payload may go out on `conn` under the mesh's transport policy.
@@ -70,25 +142,42 @@ pub(crate) async fn wait_ip(conn: &Connection, deadline: Duration) -> bool {
     wait_selected(conn, deadline, selected_is_ip).await
 }
 
+/// How a wait for a selected path ended.
+#[derive(Debug, PartialEq, Eq)]
+enum PathWait {
+    Selected,
+    /// The connection closed first: the other end gave up, which is not a refusal.
+    Closed,
+    TimedOut,
+}
+
 async fn wait_selected(
     conn: &Connection,
     deadline: Duration,
     selected: fn(&Connection) -> bool,
 ) -> bool {
+    wait_selected_outcome(conn, deadline, selected).await == PathWait::Selected
+}
+
+async fn wait_selected_outcome(
+    conn: &Connection,
+    deadline: Duration,
+    selected: fn(&Connection) -> bool,
+) -> PathWait {
     let mut events = conn.path_events();
     let proven = async {
         loop {
             if selected(conn) {
-                return true;
+                return PathWait::Selected;
             }
             if events.next().await.is_none() {
-                return false;
+                return PathWait::Closed;
             }
         }
     };
     n0_future::time::timeout(deadline, proven)
         .await
-        .unwrap_or(false)
+        .unwrap_or(PathWait::TimedOut)
 }
 
 /// The hold every inbound lane applies before reading a byte: with the relay
@@ -102,9 +191,21 @@ pub async fn refuse_unless_direct(
     deadline: Duration,
     close_code: u32,
 ) -> bool {
-    if relay_transport || wait_direct(conn, deadline).await {
-        tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "payload path admitted");
-        return true;
+    let outcome = if relay_transport {
+        PathWait::Selected
+    } else {
+        wait_selected_outcome(conn, deadline, selected_is_direct).await
+    };
+    match outcome {
+        PathWait::Selected => {
+            tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "payload path admitted");
+            return true;
+        }
+        PathWait::Closed => {
+            tracing::debug!(target: LOG_TARGET, remote = %conn.remote_id(), "dialer closed before a path was selected");
+            return false;
+        }
+        PathWait::TimedOut => {}
     }
     // The paths iroh held at refusal time, because "which paths existed and
     // which was selected" is the whole diagnosis when a link that should
@@ -144,4 +245,89 @@ pub(crate) async fn refuse_relayed(
         return Ok(());
     }
     anyhow::bail!("{RELAY_REFUSED}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use iroh::{Endpoint, RelayMode, endpoint::presets};
+
+    use super::{Connection, PathWait, wait_selected_outcome};
+
+    const ALPN: &[u8] = b"test/path-wait";
+
+    async fn loopback_endpoint() -> Endpoint {
+        Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![ALPN.to_vec()])
+            .bind_addr(
+                "127.0.0.1:0"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("loopback"),
+            )
+            .expect("valid bind addr")
+            .bind()
+            .await
+            .expect("bind a loopback endpoint")
+    }
+
+    /// A connection between two loopback endpoints: the dialer's end and the accepted end. The
+    /// endpoints come back too: a dropped endpoint closes its connections.
+    async fn connected() -> (Endpoint, Endpoint, Connection, Connection) {
+        let server = loopback_endpoint().await;
+        let client = loopback_endpoint().await;
+        let accepting = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .accept()
+                    .await
+                    .expect("an incoming connection")
+                    .await
+                    .expect("the connection is accepted")
+            })
+        };
+        let dialed = client
+            .connect(server.addr(), ALPN)
+            .await
+            .expect("the dial succeeds");
+        (
+            client,
+            server,
+            dialed,
+            accepting.await.expect("the accept task ends"),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_dialer_that_closes_while_the_wait_runs_is_not_a_timeout() {
+        let (_client, _server, dialed, accepted) = connected().await;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            dialed.close(0u32.into(), b"gave up");
+        });
+
+        let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| false).await;
+
+        assert_eq!(outcome, PathWait::Closed);
+    }
+
+    #[tokio::test]
+    async fn a_wait_with_no_path_and_no_close_times_out() {
+        let (_client, _server, _dialed, accepted) = connected().await;
+
+        let outcome = wait_selected_outcome(&accepted, Duration::from_millis(300), |_| false).await;
+
+        assert_eq!(outcome, PathWait::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn a_selected_path_ends_the_wait_at_once() {
+        let (_client, _server, _dialed, accepted) = connected().await;
+
+        let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| true).await;
+
+        assert_eq!(outcome, PathWait::Selected);
+    }
 }

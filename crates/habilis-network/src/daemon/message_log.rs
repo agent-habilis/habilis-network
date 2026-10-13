@@ -2,26 +2,59 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::sole_addressee;
 use crate::protocol::{Message, Nickname};
+use crate::util::clock;
 
-/// One anti-entropy digest window: the inclusive `[lo, hi]` timestamp
-/// range it covers and the compact (raw 16-byte UUID) ids the sender holds
-/// in that range. The bounds let a receiver re-send only **in-window** gaps,
-/// so advertising a sub-window of a large log never makes peers perpetually
-/// re-send the out-of-window remainder.
-pub(crate) struct DigestWindow {
-    pub lo: i64,
-    pub hi: i64,
-    pub ids: Vec<[u8; 16]>,
+/// Where a message sits in the log's total order: its timestamp, then its id
+/// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
+/// second, so the timestamp alone cannot say which side of a window's edge a
+/// message is on; the key breaks every tie.
+pub(crate) type Bound = (i64, [u8; 16]);
+
+/// The lowest id key. With [`KEY_MAX`] it makes a bound that takes in every
+/// message of its second.
+pub(crate) const KEY_MIN: [u8; 16] = [0; 16];
+/// The highest id key.
+pub(crate) const KEY_MAX: [u8; 16] = [u8::MAX; 16];
+
+/// The smallest bound that sorts after `bound`.
+fn bound_after((timestamp, key): Bound) -> Bound {
+    match u128::from_be_bytes(key).checked_add(1) {
+        Some(next) => (timestamp, next.to_be_bytes()),
+        None => (timestamp.saturating_add(1), KEY_MIN),
+    }
 }
 
-/// Inclusive `[lo, hi]` timestamp bounds to filter by — the shape shared by a
+/// One anti-entropy digest window: the inclusive `[lo, hi]` range of
+/// [`Bound`]s it covers and the compact (raw 16-byte UUID) ids the sender holds
+/// in that range. The window is a contiguous slice of the log in bound order, so
+/// the ids it lists are **every** message the sender holds in the range. A
+/// receiver can then re-send only real gaps, and advertising a sub-window of a
+/// large log never makes peers perpetually re-send what the sender already has.
+pub(crate) struct DigestWindow {
+    pub lo: Bound,
+    pub hi: Bound,
+    pub ids: Vec<[u8; 16]>,
+    /// The window holds the first message of the log: nothing sorts before it.
+    pub from_start: bool,
+}
+
+/// Inclusive `[lo, hi]` bounds to filter by — the shape shared by a
 /// [`DigestWindow`] and a wire-decoded digest window entry (the anti-entropy
 /// caller's own type), grouped so [`MessageLog::missing_in_window`] doesn't
 /// need either concrete type by name.
 #[derive(Clone, Copy)]
 pub(crate) struct WindowRange {
-    pub lo: i64,
-    pub hi: i64,
+    pub lo: Bound,
+    pub hi: Bound,
+}
+
+/// A range of whole seconds: every message from second `lo` to second `hi`.
+#[cfg(test)]
+pub(crate) fn seconds(lo: i64, hi: i64) -> WindowRange {
+    WindowRange {
+        lo: (lo, KEY_MIN),
+        hi: (hi, KEY_MAX),
+    }
 }
 
 /// One gap query against the log: the window to search, the ids the requester
@@ -55,6 +88,8 @@ pub struct MessageLog {
     /// counter updates already know. The map is the *only* derived state here,
     /// and both mutation sites are in [`Self::push`], so it cannot drift.
     per_author: HashMap<String, usize>,
+    /// The dedup key of every held message, so a frame that is pushed twice is held once.
+    keys: HashSet<[u8; 16]>,
 }
 
 impl MessageLog {
@@ -63,6 +98,7 @@ impl MessageLog {
             capacity,
             messages: VecDeque::with_capacity(capacity),
             per_author: HashMap::new(),
+            keys: HashSet::new(),
         }
     }
 
@@ -74,8 +110,14 @@ impl MessageLog {
     /// mesh-wide retained set well-defined: peers agree on which messages
     /// survive, so anti-entropy recovery converges on one set instead of the
     /// union of divergent arrival-order windows. The returned eviction lets
-    /// callers prune side indexes keyed by it (the DAG `by_hash`, fork map).
+    /// callers prune side indexes keyed by it (the DAG `by_hash`, fork map). A message whose
+    /// dedup key is already held is not added, and nothing is evicted.
     pub fn push(&mut self, msg: Message) -> Option<Message> {
+        // A frame that is already held is held once: two paths that retain the same frame
+        // (an author that logs its own send and a consumer that pushes it too) cost a lookup.
+        if !self.keys.insert(msg.dedup_key()) {
+            return None;
+        }
         *self.per_author.entry(msg.pubkey.clone()).or_default() += 1;
         self.messages.push_back(msg);
         if self.messages.len() <= self.capacity {
@@ -83,6 +125,9 @@ impl MessageLog {
         }
         let victim = self.eviction_index();
         let evicted = self.messages.remove(victim);
+        if let Some(gone) = &evicted {
+            self.keys.remove(&gone.dedup_key());
+        }
         if let Some(gone) = &evicted
             && let Some(held) = self.per_author.get_mut(&gone.pubkey)
         {
@@ -136,6 +181,7 @@ impl MessageLog {
             .expect("the fullest author holds at least one message")
     }
 
+    #[cfg(any(test, feature = "iroh-test-utils"))]
     pub(crate) fn len(&self) -> usize {
         self.messages.len()
     }
@@ -169,62 +215,131 @@ impl MessageLog {
         slots
     }
 
-    /// A contiguous window of the log: up to `max` messages starting at
-    /// index `start`, with their inclusive `[lo, hi]` timestamp bounds and
-    /// compact ids. `None` if the log is empty or `start` is past the end.
-    pub(crate) fn window_at(&self, start: usize, max: usize) -> Option<DigestWindow> {
-        let slice: Vec<&Message> = self.messages.iter().skip(start).take(max).collect();
-        // The extent of the slice, not its ends: the log is in arrival order,
-        // which is not timestamp order, so the first and last entries bound
-        // nothing. A bound that excludes an id the window lists makes every
-        // holder answer "nothing missing" for the gap around it.
-        let lo = slice.iter().map(|msg| msg.timestamp).min()?;
-        let hi = slice.iter().map(|msg| msg.timestamp).max()?;
-        let ids = slice.iter().map(|msg| msg.dedup_key()).collect();
-        Some(DigestWindow { lo, hi, ids })
+    /// The keys of the log in bound order: the order windows are cut in. The log
+    /// itself is in arrival order, which is not the same on every node, so a
+    /// window cut from it would cover a different set on each.
+    ///
+    /// This sorts the whole log, and one digest calls it up to three times. At
+    /// `MESSAGE_LOG_SIZE` entries every `ANTIENTROPY_INTERVAL_SECS` that costs
+    /// nothing that matters. Look at it before a log a hundred times larger.
+    fn bounds(&self) -> Vec<Bound> {
+        let mut bounds: Vec<Bound> = self
+            .messages
+            .iter()
+            .map(|msg| (msg.timestamp, msg.dedup_key()))
+            .collect();
+        bounds.sort_unstable();
+        bounds
     }
 
-    /// The newest `recent` messages as an **open-ended** digest window
-    /// (`hi = i64::MAX`): "I hold everything from `lo` onward except the
-    /// gaps not in `ids`." This is what drives reconnect recovery — a peer
-    /// that froze advertises it, and holders re-send every *newer* message
-    /// it lacks (a closed `hi` would never cover messages past the sender's
-    /// own newest). `None` only if the log is empty.
+    /// A contiguous window of the log in bound order: up to `max` messages
+    /// starting at position `start`, bounded by the first and the last of them,
+    /// so the ids it lists are every message the log holds in `[lo, hi]`. `None`
+    /// if the log is empty or `start` is past the end.
+    #[cfg(test)]
+    pub(crate) fn window_at(&self, start: usize, max: usize) -> Option<DigestWindow> {
+        Self::cut(&self.bounds(), start, max, false)
+    }
+
+    /// With `reach_back`, `lo` is the first bound after the message before the
+    /// slice instead of the first message of the slice. Windows cut one after
+    /// the other then tile the log. Without it, a message that the peer
+    /// lacks and that sorts between two windows lies in neither range, and no
+    /// digest ever asks for it.
+    fn cut(bounds: &[Bound], start: usize, max: usize, reach_back: bool) -> Option<DigestWindow> {
+        let slice = bounds.get(start..)?;
+        let slice = &slice[..slice.len().min(max)];
+        let mut lo = *slice.first()?;
+        if reach_back && start > 0 {
+            lo = bound_after(bounds[start - 1]);
+        }
+        Some(DigestWindow {
+            lo,
+            hi: *slice.last()?,
+            ids: slice.iter().map(|(_, key)| *key).collect(),
+            from_start: start == 0,
+        })
+    }
+
+    /// How many of `bounds` are stamped at or before the local clock. A sender
+    /// stamps its own messages and nothing bounds how far ahead, so a message
+    /// stamped ahead of the clock sorts above every honest one. Those are
+    /// left out of the newest window and reached by the sweep like the old
+    /// ones. If every message is ahead, it is the local clock that is wrong,
+    /// and all of them count.
+    fn settled_len(bounds: &[Bound]) -> usize {
+        let now = clock::unix_secs();
+        match bounds.partition_point(|(timestamp, _)| *timestamp <= now) {
+            0 => bounds.len(),
+            settled => settled,
+        }
+    }
+
+    /// The newest `recent` messages that the local clock allows, as a digest
+    /// window: "I hold everything from `lo` onward except the gaps not in
+    /// `ids`." This is what drives reconnect recovery: a peer that froze
+    /// advertises it, and holders re-send every *newer* message it lacks. With
+    /// no message stamped ahead of the clock, `hi` is past every message, so that
+    /// a message newer than our own newest is covered. With one, `hi` stops at
+    /// the clock, or the window would cover messages that it does not list.
+    /// `None` only if the log is empty.
     pub(crate) fn recent_window(&self, recent: usize) -> Option<DigestWindow> {
-        let start = self.len().saturating_sub(recent);
-        let mut window = self.window_at(start, recent)?;
-        window.hi = i64::MAX;
+        let bounds = self.bounds();
+        let settled = Self::settled_len(&bounds);
+        let mut window = Self::cut(&bounds, settled.saturating_sub(recent), recent, true)?;
+        window.hi = if settled == bounds.len() {
+            (i64::MAX, KEY_MAX)
+        } else {
+            (clock::unix_secs(), KEY_MAX)
+        };
         Some(window)
     }
 
-    /// Number of messages older than the newest `recent` — the portion the
-    /// rolling [`older_window`](Self::older_window) sweeps.
+    /// Number of messages outside the newest window: the portion the rolling
+    /// [`older_window`](Self::older_window) sweeps. It holds the old messages
+    /// and the ones stamped ahead of the clock.
     pub(crate) fn older_len(&self, recent: usize) -> usize {
-        self.len().saturating_sub(recent)
+        let bounds = self.bounds();
+        bounds.len() - Self::settled_len(&bounds).min(recent)
     }
 
-    /// A rolling **closed** window over the older portion (everything before
-    /// the newest `recent`): up to `max` ids starting at `start` *within*
+    /// A rolling **closed** window over the older portion (everything outside
+    /// the newest window): up to `max` ids starting at `start` *within*
     /// that portion, with exact `[lo, hi]` bounds so receivers reconcile
-    /// deep interior gaps without re-sending the out-of-window remainder.
-    /// `None` when there is no older portion (`len <= recent`).
+    /// deep interior gaps without re-sending the out-of-window remainder. A
+    /// window never crosses the newest window: it stops where the newest begins.
+    /// `None` when there is no older portion.
     pub(crate) fn older_window(
         &self,
         recent: usize,
         start: usize,
         max: usize,
     ) -> Option<DigestWindow> {
-        let older_len = self.older_len(recent);
+        let bounds = self.bounds();
+        let settled = Self::settled_len(&bounds);
+        let newest_start = settled.saturating_sub(recent);
+        let older_len = bounds.len() - (settled - newest_start);
         if older_len == 0 {
             return None;
         }
         let start = start % older_len;
-        let count = max.min(older_len - start);
-        self.window_at(start, count)
+        if start < newest_start {
+            Self::cut(&bounds, start, max.min(newest_start - start), true)
+        } else {
+            // The last window of the log is open-ended, as the newest is when
+            // nothing is ahead of the clock: a message above the last one that we
+            // hold is covered too.
+            let first = settled + (start - newest_start);
+            let mut window = Self::cut(&bounds, first, max, true)?;
+            if first + window.ids.len() == bounds.len() {
+                window.hi = (i64::MAX, KEY_MAX);
+            }
+            Some(window)
+        }
     }
 
     /// Up to `max` of our messages (newest first) within the `[lo, hi]`
-    /// timestamp window whose compact id is **not** in `have`, and which
+    /// window whose compact id is **not** in `have`, and which
     /// `requester` is entitled to — the in-window gap to re-send so a peer that
     /// advertised that window recovers what it missed. Out-of-window messages
     /// are never re-sent.
@@ -239,9 +354,11 @@ impl MessageLog {
             .iter()
             .rev()
             .filter(|msg| {
-                msg.timestamp >= range.lo
-                    && msg.timestamp <= range.hi
-                    && !have.contains(&msg.dedup_key())
+                let key = msg.dedup_key();
+                let bound = (msg.timestamp, key);
+                bound >= range.lo
+                    && bound <= range.hi
+                    && !have.contains(&key)
                     && resendable_to(msg, requester)
             })
             .take(max)
@@ -300,10 +417,7 @@ mod tests {
         requester: &'a Nickname,
     ) -> MissingQuery<'a> {
         MissingQuery {
-            range: WindowRange {
-                lo: 0,
-                hi: i64::MAX,
-            },
+            range: super::seconds(0, i64::MAX),
             have,
             max,
             requester,
@@ -321,6 +435,95 @@ mod tests {
                 body: crate::protocol::MessageBody::from(id),
             },
         )
+    }
+
+    /// A log of `count` messages in an arrival order that is not timestamp
+    /// order, spread over `seconds` distinct timestamps.
+    fn shuffled_log(count: usize, seconds: usize) -> MessageLog {
+        let mut log = MessageLog::new(1000);
+        for index in 0..count {
+            // 7 is coprime to every count used here, so this visits each
+            // message once, in a scrambled order.
+            let slot = (index * 7) % count;
+            log.push(msg_at(
+                &format!("m{slot}"),
+                1_700_000_000 + i64::try_from(slot % seconds).expect("small"),
+            ));
+        }
+        log
+    }
+
+    /// Every window a digest could send: the newest, and the older portion swept
+    /// 70 ids at a time, as the cursor does across rounds.
+    fn every_window(log: &MessageLog) -> Vec<super::DigestWindow> {
+        let mut windows = vec![log.recent_window(70).expect("a non-empty log")];
+        for start in (0..log.older_len(70)).step_by(70) {
+            windows.extend(log.older_window(70, start, 70));
+        }
+        windows
+    }
+
+    /// A window's range must hold exactly the messages whose ids it lists: a
+    /// message inside the range and not listed reads as a gap to every holder
+    /// of the same log, and is re-sent to a node that already has it.
+    fn assert_range_matches_ids(log: &MessageLog) {
+        for window in every_window(log) {
+            let listed: HashSet<[u8; 16]> = window.ids.iter().copied().collect();
+            for message in &log.messages {
+                if in_range(message, &window) {
+                    assert!(
+                        listed.contains(&message.dedup_key()),
+                        "{:?} is inside [{:?}, {:?}] but not listed",
+                        message.body.as_str(),
+                        window.lo.0,
+                        window.hi.0
+                    );
+                }
+            }
+        }
+    }
+
+    fn in_range(message: &Message, window: &super::DigestWindow) -> bool {
+        let bound = (message.timestamp, message.dedup_key());
+        bound >= window.lo && bound <= window.hi
+    }
+
+    #[test]
+    fn a_window_lists_every_message_inside_its_range() {
+        // 300 messages in 12 seconds: about 25 per second, scrambled.
+        assert_range_matches_ids(&shuffled_log(300, 12));
+    }
+
+    #[test]
+    fn a_second_with_more_messages_than_a_window_is_still_listed() {
+        // The join burst: every message in one second, far past the 70 a window
+        // lists.
+        assert_range_matches_ids(&shuffled_log(300, 1));
+    }
+
+    /// The same frame pushed twice is held once, and the digest lists it once.
+    #[test]
+    fn a_frame_pushed_twice_is_held_once() {
+        let mut log = MessageLog::new(10);
+        let frame = msg_at("once", 10);
+        assert!(log.push(frame.clone()).is_none());
+        assert!(log.push(frame.clone()).is_none());
+        assert_eq!(log.len(), 1);
+        let window = log.window_at(0, 1).expect("one message");
+        assert_eq!(window.ids, vec![frame.dedup_key()]);
+    }
+
+    /// A key leaves the index with its message: a frame that was evicted can be held again.
+    #[test]
+    fn an_evicted_frame_can_be_held_again() {
+        let mut log = MessageLog::new(1);
+        assert!(log.push(msg_at("first", 10)).is_none());
+        let evicted = log.push(msg_at("second", 20)).expect("the log is full");
+        assert!(
+            log.push(evicted).is_some(),
+            "the evicted frame is new again, so the push evicts one of the two"
+        );
+        assert_eq!(log.len(), 1);
     }
 
     /// A message tagged with an explicit timestamp, for window tests.
@@ -363,11 +566,11 @@ mod tests {
         }
         // A middle slice of 2, starting at index 1 (ts=20).
         let window = log.window_at(1, 2).expect("non-empty window");
-        assert_eq!((window.lo, window.hi), (20, 30));
+        assert_eq!((window.lo.0, window.hi.0), (20, 30));
         assert_eq!(window.ids.len(), 2);
         // A max wider than the log starting at 0 covers everything.
         let full = log.window_at(0, 100).expect("non-empty window");
-        assert_eq!((full.lo, full.hi), (10, 50));
+        assert_eq!((full.lo.0, full.hi.0), (10, 50));
         assert_eq!(full.ids.len(), 5);
         // Past the end ⇒ None.
         assert!(log.window_at(5, 2).is_none());
@@ -396,7 +599,7 @@ mod tests {
             advertiser.push(frames[index].clone());
         }
         let window = advertiser.window_at(0, 10).expect("non-empty window");
-        assert_eq!((window.lo, window.hi), (10, 50));
+        assert_eq!((window.lo.0, window.hi.0), (10, 50));
 
         // The holder answers that window with the gap.
         let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
@@ -450,7 +653,7 @@ mod tests {
             .into_iter()
             .collect();
         let gap = log.missing_in_window(MissingQuery {
-            range: WindowRange { lo: 20, hi: 40 },
+            range: super::seconds(20, 40),
             have: &have,
             max: 10,
             requester: &nick(ANYONE),
@@ -536,7 +739,7 @@ mod tests {
             }
         }
         let window = requester.recent_window(50).expect("non-empty");
-        assert_eq!(window.hi, i64::MAX, "newest window must be open-ended");
+        assert_eq!(window.hi.0, i64::MAX, "newest window must be open-ended");
         let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
         let offered: HashSet<String> = holder
             .missing_in_window(MissingQuery {

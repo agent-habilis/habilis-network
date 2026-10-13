@@ -115,10 +115,9 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
     ///
     /// `loggable: false` is a correctness requirement, not a preference:
     /// a `true` here would enter every input frame into the engine's message
-    /// log and its anti-entropy repair, and since `send_app` never logs our
-    /// *own* broadcasts, peers would re-send them to us forever with no way
-    /// to acknowledge. That runaway is the reason this crate never touches
-    /// gossip. It lives in the library so a consumer cannot get it wrong.
+    /// log and its anti-entropy repair. A frame of this crate is also always
+    /// directed, and `send_app` keeps only a broadcast frame of its own.
+    /// It lives in the library so a consumer cannot get it wrong.
     fn classify(&self, message: &WireMessage) -> AppClass {
         let tag = message.kind.app_tag().map(AppTag::as_str);
         let ours = matches!(tag, Some(ROLLBACK_TAG | LOBBY_TAG));
@@ -213,7 +212,11 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     );
                     return false;
                 };
-                send(state, ctx, ROLLBACK_TAG, Some(nickname), payload).await
+                let Some(frame) = frame_for(ctx, ROLLBACK_TAG, Some(nickname), payload) else {
+                    return false;
+                };
+                let class = self.classify(&frame);
+                send(state, ctx, frame, class).await
             }
             Outbound::Lobby { payload } => {
                 // Addressed to every roster member individually — never a
@@ -228,12 +231,37 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     .collect();
                 let mut delivered = false;
                 for peer in peers {
-                    delivered |= send(state, ctx, LOBBY_TAG, Some(peer), payload.clone()).await;
+                    let Some(frame) = frame_for(ctx, LOBBY_TAG, Some(peer), payload.clone()) else {
+                        continue;
+                    };
+                    let class = self.classify(&frame);
+                    delivered |= send(state, ctx, frame, class).await;
                 }
                 delivered
             }
         }
     }
+}
+
+/// The frame of one `send_app`, or `None` for a tag or a payload the wire refuses.
+fn frame_for(
+    ctx: &HandlerCtx<'_>,
+    tag: &str,
+    to: Option<Nickname>,
+    payload: String,
+) -> Option<WireMessage> {
+    let (Ok(tag), Ok(body)) = (AppTag::new(tag), MessageBody::new(payload)) else {
+        return None;
+    };
+    Some(habilis_network::ops::app_frame(
+        ctx,
+        AppFrameParams {
+            tag,
+            to,
+            corr: None,
+            body,
+        },
+    ))
 }
 
 /// One `send_app`, with the failure swallowed.
@@ -244,23 +272,10 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
 async fn send(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    tag: &str,
-    to: Option<Nickname>,
-    payload: String,
+    frame: WireMessage,
+    class: AppClass,
 ) -> bool {
-    let (Ok(tag), Ok(body)) = (AppTag::new(tag), MessageBody::new(payload)) else {
-        return false;
-    };
-    habilis_network::ops::send_app(
-        state,
-        ctx,
-        AppFrameParams {
-            tag,
-            to,
-            corr: None,
-            body,
-        },
-    )
-    .await
-    .is_ok()
+    habilis_network::ops::send_app(state, ctx, frame, class)
+        .await
+        .is_ok()
 }

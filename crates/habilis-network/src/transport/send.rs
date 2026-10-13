@@ -1,38 +1,75 @@
 //! The single send decision. Every outbound message funnels through
 //! [`deliver`]: a broadcast (no sole addressee) rides gossip, structurally; a
 //! directed message goes over the unicast connection only — warm pooled
-//! connection first, inline dial otherwise — and gossip never carries it. The
+//! connection first, a dial on a task of its own otherwise — and gossip never carries it. The
 //! bytes are the same canonical wire `Message` on both planes, so the
 //! receiver's path is identical either way.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use iroh::EndpointId;
+use tokio::sync::oneshot;
 
-use super::pool::WarmSend;
+use super::outbox::Resend;
+use super::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
 use crate::daemon::state::EventLoopState;
 use crate::protocol::message::sole_addressee;
 use crate::protocol::{Message, Nickname};
 use crate::transport::MeshSender;
 
+/// What [`deliver`] did with a frame.
+#[derive(Debug)]
+#[must_use = "a dropped Pending handle loses the verdict of the send"]
+pub enum Delivered {
+    /// Sent, or handed to a warm connection: nothing is left to wait for.
+    Done,
+    /// A unicast leg runs on a task of its own. Its outcome comes through the handle.
+    Pending(PendingSend),
+}
+
+/// The outcome of a send that runs on a task. A caller that needs the verdict awaits it off its
+/// event loop. Dropping it does not cancel the send: a failure is then only logged.
+pub type PendingSend = oneshot::Receiver<Result<()>>;
+
 /// Route one already-signed, already-serialized message. `bytes` MUST be
 /// `msg.serialize()` — the same wire form gossip uses.
 ///
+/// It returns at once: it never waits on a dial, on the wait for a direct path, or on a write.
+/// A broadcast, a frame held for a direct path, a refused frame, and a send to a warm connection
+/// give their verdict here. A directed message to a cold peer is sent by a task, and the verdict
+/// comes through [`Delivered::Pending`].
+///
 /// # Errors
-/// Propagates a gossip broadcast failure or a unicast dial/send failure. A
-/// directed message whose addressee has no dialable endpoint (its `PeerInfo`
+/// Propagates a gossip broadcast failure, a refused path, or a cold peer on the dial-failure
+/// cooldown. A directed message whose addressee has no dialable endpoint (its `PeerInfo`
 /// hasn't arrived, or its advertised endpoint is the rendezvous pseudo-node)
 /// is undeliverable — the error names which; callers retry once a real
-/// endpoint is learned.
+/// endpoint is learned. A dial or a write that fails comes through the handle.
 pub async fn deliver(
     msg: &Message,
     bytes: Bytes,
     state: &EventLoopState,
     sender: &MeshSender,
-) -> Result<()> {
+) -> Result<Delivered> {
+    match resolve(msg, bytes, state)? {
+        Resend::Broadcast(bytes) => {
+            broadcast(sender, bytes).await?;
+            Ok(Delivered::Done)
+        }
+        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool).await,
+    }
+}
+
+/// The routing decision of [`deliver`], without the send: which plane carries
+/// `msg`, so that a caller that must not wait can queue it for another task.
+///
+/// # Errors
+/// The same as [`deliver`] for a message that has no path now: held for a
+/// direct path, or its addressee has no known endpoint.
+pub(crate) fn resolve(msg: &Message, bytes: Bytes, state: &EventLoopState) -> Result<Resend> {
     match route(msg, state) {
-        Route::Broadcast => broadcast(sender, bytes).await,
-        Route::Unicast(eid) => send_unicast(eid, bytes, state).await,
+        Route::Broadcast => Ok(Resend::Broadcast(bytes)),
+        Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
         Route::Held(eid) => Err(HeldForDirect { eid }.into()),
         Route::Undeliverable => {
             let addressee = sole_addressee(&msg.kind);
@@ -70,8 +107,6 @@ pub async fn deliver(
 ///   moments ago reads the same way until its path is selected, for up to
 ///   the path-select budget.
 /// - it is cold and on the per-peer dial-failure cooldown.
-/// - it is cold and a background dial or batch send to it is already in
-///   flight.
 /// - the gossip broadcast failed.
 ///
 /// A `false` send is not queued: the caller tries again later.
@@ -91,20 +126,7 @@ pub async fn deliver_in_background(
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> bool {
-    match route(msg, state) {
-        Route::Broadcast => broadcast(sender, bytes).await.is_ok(),
-        Route::Unicast(eid) => match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
-            WarmSend::Sent => true,
-            WarmSend::Cold => {
-                state
-                    .unicast_pool
-                    .dial_and_send_in_background(eid, bytes)
-                    .await
-            }
-            WarmSend::Refused => false,
-        },
-        Route::Held(_) | Route::Undeliverable => false,
-    }
+    deliver(msg, bytes, state, sender).await.is_ok()
 }
 
 /// The chosen transport for a message — a **pure** decision so both planes are
@@ -172,6 +194,27 @@ impl std::fmt::Display for HeldForDirect {
 
 impl std::error::Error for HeldForDirect {}
 
+/// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
+/// a send could not dial it without one. So is a frame held for a pair that lost its direct path
+/// and reads as the relay. Call this when a send failed with [`HeldForDirect`]; any other error,
+/// and a peer that has an IP path and no relay reading, change nothing.
+pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
+    let Some(held) = error.downcast_ref::<HeldForDirect>() else {
+        return;
+    };
+    let needs_lane = state
+        .peer_endpoints
+        .values()
+        .find(|addr| addr.id == held.eid)
+        .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport));
+    // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
+    // offer again, so the parked frame asks.
+    let reads_as_relay = state.pair_path_kind(held.eid) == Some(super::probe::PathKind::Relay);
+    if needs_lane || reads_as_relay {
+        state.want_lane_session(held.eid, crate::util::clock::Instant::now());
+    }
+}
+
 /// Whether a directed frame to `eid` is parked right now: the relay is lookup
 /// only and no direct path to the peer is proven yet. An unprobed peer is
 /// held too — the alive tick probes every known peer, so the hold is short.
@@ -234,17 +277,35 @@ fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
 
 /// Warm pooled connection first (steady state, no dial — an optimistic
 /// fire-and-forget handoff; a write that fails on a dead connection redials
-/// and resends once in the background); a cold peer is dialed inline, and the
-/// dial error is the send's outcome — there is no fallback.
-async fn send_unicast(eid: EndpointId, bytes: Bytes, state: &EventLoopState) -> Result<()> {
-    let pool = state.unicast_pool.clone();
+/// and resends once in the background). A cold peer is dialed on a task of its own, so that the
+/// caller never waits on the dial, the path wait or the write. The dial error is the send's
+/// outcome, through the handle — there is no fallback. A cold peer on the dial-failure cooldown is
+/// refused at once.
+async fn send_unicast(eid: EndpointId, bytes: Bytes, pool: &UnicastPool) -> Result<Delivered> {
     match pool.send_if_warm(eid, bytes.clone()).await {
-        WarmSend::Sent => Ok(()),
+        WarmSend::Sent => Ok(Delivered::Done),
         WarmSend::Refused => Err(anyhow::anyhow!("{}", super::RELAY_REFUSED)),
-        WarmSend::Cold => pool
-            .dial_and_send(eid, bytes)
-            .await
-            .with_context(|| format!("unicast dial to {eid} failed")),
+        WarmSend::Cold => {
+            if pool.is_cooling(eid).await {
+                return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
+                    .context(format!("unicast dial to {eid} failed")));
+            }
+            // The guard of the dial of this peer is taken here, before the spawn: a second send
+            // finds this dial in flight even when it ends at once.
+            let registration = pool.register_dial(eid);
+            let (outcome_tx, outcome) = oneshot::channel();
+            let pool = pool.clone();
+            n0_future::task::spawn(async move {
+                let sent = pool
+                    .send_registered(registration, eid, bytes)
+                    .await
+                    .with_context(|| format!("unicast dial to {eid} failed"));
+                if let Err(Err(error)) = outcome_tx.send(sent) {
+                    tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
+                }
+            });
+            Ok(Delivered::Pending(outcome))
+        }
     }
 }
 
@@ -292,10 +353,10 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, lane_for, route};
+    use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
-    use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody};
+    use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody, MessageId};
 
     fn mesh() -> MeshId {
         MeshId::from("test")
@@ -323,7 +384,7 @@ mod tests {
 
     /// A directed frame addressed to `bob` — a `Pong` is the simplest one.
     fn directed_msg() -> Message {
-        Message::new_pong(&mesh(), &nick("alice"), nick("bob"))
+        Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
     }
 
     fn open_broadcast() -> Message {
@@ -337,6 +398,90 @@ mod tests {
                 body: body(),
             },
         )
+    }
+
+    // ── lane peers ────────────────────────────────────────────────────
+
+    /// A lane peer: no IP address, only a relay. On a mesh whose relay is lookup only, a frame to
+    /// it is held, and holding it is what asks for its session.
+    fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.local_udp_transport = true;
+        let bob = endpoint_id(1);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+        );
+        (state, bob)
+    }
+
+    /// A cold send to a lane peer with no session holds the frame and marks the session wanted.
+    #[test]
+    fn a_frame_held_for_a_lane_peer_marks_its_session_wanted() {
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        let now = crate::util::clock::Instant::now();
+        assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
+
+        let error = resolve(&directed_msg(), Bytes::from_static(b"hi"), &state)
+            .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(state.lane_session_wanted(bob, now), "the held frame asks");
+    }
+
+    /// A peer with an IP path is held too on a lookup-only relay, but its direct path comes
+    /// from the probe, so no session is wanted for it.
+    #[test]
+    fn a_frame_held_for_a_peer_with_an_ip_path_does_not_want_a_session() {
+        let (mut state, bob) = state_knowing_bob();
+        state.direct.remove(&bob);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
+        );
+        state.local_udp_transport = true;
+
+        let error = resolve(&directed_msg(), Bytes::from_static(b"hi"), &state)
+            .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+    }
+
+    /// A pair that had a direct path and lost it reads as the relay. Its parked frame asks for a
+    /// session even though the pair has an IP address: a failed offer leaves the pair on the
+    /// relay with nobody to offer again, and the next parked frame renews the want.
+    #[test]
+    fn a_frame_held_for_a_pair_that_reads_as_relay_wants_a_session() {
+        use crate::daemon::state::DirectState;
+        use crate::transport::probe::PathKind;
+
+        let (mut state, bob) = state_knowing_bob();
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
+        );
+        state.local_udp_transport = true;
+        state.direct.insert(bob, DirectState::RelayOnly);
+        state.path_kinds.insert(bob, PathKind::Relay);
+
+        let error = resolve(&directed_msg(), Bytes::from_static(b"hi"), &state)
+            .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+    }
+
+    /// On a mesh whose relay carries payload, the cold send to a lane peer is not held: it goes
+    /// over the relay, and the climb opens the session later.
+    #[test]
+    fn on_a_payload_relay_the_cold_send_to_a_lane_peer_is_not_held() {
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        state.relay_transport = true;
+
+        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
     }
 
     // ── the p2p path ──────────────────────────────────────────────────
@@ -415,7 +560,7 @@ mod tests {
         state
             .direct
             .insert(bob_addr.id, crate::daemon::state::DirectState::Direct);
-        crate::lookup::add_peer_addr(endpoint, bob_addr.clone()).expect("register bob");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(endpoint), bob_addr.clone());
         state.peer_endpoints.insert(nick("bob"), bob_addr);
         state
     }
@@ -511,7 +656,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(first, "the first send starts the dial");
-        assert!(!second, "the second send finds the dial in flight");
+        assert!(second, "the second send waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
     }
 
@@ -530,7 +675,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(sent, "the background send starts the dial");
-        assert!(!replied, "the reply finds the dial in flight");
+        assert!(replied, "the reply waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
     }
 
@@ -622,7 +767,7 @@ mod tests {
                 body: body(),
             },
         );
-        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"));
+        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random());
         assert_eq!(route(&req, &state), Route::Unicast(bob));
         assert_eq!(route(&pong, &state), Route::Unicast(bob));
     }

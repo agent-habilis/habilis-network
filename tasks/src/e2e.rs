@@ -25,6 +25,8 @@ mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
 #[cfg(feature = "mesh")]
+mod multihop;
+#[cfg(feature = "mesh")]
 mod page;
 mod server;
 #[cfg(feature = "mesh")]
@@ -140,6 +142,10 @@ enum Suite {
     /// page, over a local relay: bytes in on one side, the same bytes out on
     /// the other, each side as producer once.
     Stream,
+    /// A tab reached through a native hop: two native peers and a tab on one mesh with
+    /// `multihop`, the tab and one native refused a direct session, so that their messages
+    /// have to cross the other native.
+    Multihop,
 }
 
 /// Which wasm build a cell runs.
@@ -291,6 +297,7 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
     }
     match args.suite {
         Suite::Mesh => mesh::run(args),
+        Suite::Multihop => multihop::run(args),
         Suite::Stream => stream::run(args),
         Suite::Chat | Suite::Matrix | Suite::Loopback => chat::run(args),
     }
@@ -305,7 +312,10 @@ fn run_engine_suite(_: &Args) -> TaskOutcome {
 }
 
 pub(crate) fn run(args: &Args) -> TaskOutcome {
-    if matches!(args.suite, Suite::Mesh | Suite::Chat | Suite::Stream) {
+    if matches!(
+        args.suite,
+        Suite::Mesh | Suite::Chat | Suite::Stream | Suite::Multihop
+    ) {
         return run_engine_suite(args);
     }
 

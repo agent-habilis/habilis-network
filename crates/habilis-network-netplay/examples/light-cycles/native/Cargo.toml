@@ -26,3 +26,7 @@ missing_debug_implementations = "warn"
 pedantic = { level = "warn", priority = -1 }
 wildcard_enum_match_arm = "warn"
 module_name_repetitions = "allow"
+# The repo's `clippy.toml` lists the Tokio calls that panic in a browser, and clippy finds it from here
+# too. These crates are native only, where Tokio's timers are right, so the lint stays off, as in the
+# root workspace.
+disallowed_methods = "allow"

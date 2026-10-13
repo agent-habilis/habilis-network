@@ -124,21 +124,44 @@ pub(super) async fn maybe_cohost(
     probe: &mut Option<beacon::RivalProbe>,
 ) {
     if may_cohost(arm.policy, state.meshed, arm.started) {
-        let claimed = beacon::ensure(
-            arm.params,
-            ctx.endpoint,
-            current,
-            probes_before_claim(arm.policy),
-            probe,
-        )
-        .await;
+        // A member that keeps finding the rival probes less often; the reclaim window is not held back.
+        let would_probe = arm.params.bind_ports.is_empty() && probes_before_claim(arm.policy);
+        if would_probe && probe.is_none() && !state.probe_backoff.due(Instant::now()) {
+            return;
+        }
+        let claimed = may_probe_to_claim(state)
+            && beacon::ensure(
+                arm.params,
+                ctx.endpoint,
+                &state.address_book,
+                current,
+                probes_before_claim(arm.policy),
+                probe,
+            )
+            .await;
         if claimed {
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
             // The new rendezvous never dials us; the reclaim tick re-grafts it.
             state.arm_reclaim(Instant::now());
+            offer_to_the_new_holder(state, ctx);
         }
     }
 }
+/// Offer to our new beacon at once, to the address that the claim just registered. The round of
+/// this member that was started while nobody held the rendezvous was ended by
+/// [`schedule_rival_recheck`].
+pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    crate::transport::webrtc::offer_rendezvous_off_tick(state, ctx);
+}
+
+/// A probe found a holder of the rendezvous that is not us ("staying peer"): the holder changed for
+/// this member too. The round that it started while nobody held the rendezvous cannot find the
+/// holder, so it is ended and the offer is made anew, as at a claim.
+pub(super) fn note_rival_holds(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    state.cancel_rendezvous_round();
+    offer_to_the_new_holder(state, ctx);
+}
+
 /// Fast event-driven failover: while the post-`NeighborDown` reclaim
 /// window is open, retry the rendezvous claim so a survivor takes the
 /// freed port in ~1s instead of waiting for the 15s heal tick. A no-op
@@ -169,19 +192,22 @@ pub(super) async fn maybe_reclaim(
             .reclaim_until
             .is_some_and(|deadline| Instant::now() < deadline)
     {
-        let claimed = beacon::ensure(
-            arm.params,
-            ctx.endpoint,
-            current,
-            probes_before_claim(arm.policy),
-            probe,
-        )
-        .await;
+        let claimed = may_probe_to_claim(state)
+            && beacon::ensure(
+                arm.params,
+                ctx.endpoint,
+                &state.address_book,
+                current,
+                probes_before_claim(arm.policy),
+                probe,
+            )
+            .await;
         if claimed {
             schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
+            offer_to_the_new_holder(state, ctx);
             return;
         }
-        if regrafts_rendezvous(state.rendezvous_linked)
+        if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
             && crate::transport::webrtc::rendezvous_graftable(state)
         {
             tracing::info!(
@@ -202,8 +228,11 @@ pub(super) async fn maybe_reclaim(
 /// (`beacon::claim`), so our side re-grafts it like any other. That is the
 /// condition [`super::heal::run_heal`] gates its own re-graft on; this one
 /// just gets there sooner.
-fn regrafts_rendezvous(rendezvous_linked: bool) -> bool {
-    !rendezvous_linked
+///
+/// And only a node that wants the rendezvous: one with enough links to others
+/// let it go on purpose, and a graft here would undo that.
+fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool {
+    !rendezvous_linked && rendezvous_wanted
 }
 /// Whether this session's beacon is subject to the periodic rival
 /// re-check shed: any **public** co-host that had to *probe* for the
@@ -312,18 +341,35 @@ pub(super) fn defer_shed(dependents: usize, deferrals: u32) -> bool {
     dependents > 0 && deferrals < MAX_SHED_DEFERRALS
 }
 
+/// Whether a member that does not hold the rendezvous may probe it in order to claim it. Not
+/// while it knows a holder: its own shed makes the shared id read free for a moment, and a claim
+/// on that reading stands up the second holder again.
+pub(super) fn may_probe_to_claim(state: &EventLoopState) -> bool {
+    !state.rival_holder_known()
+}
+
+/// A probe that was already in flight when a holder became known must not decide a claim.
+pub(super) fn verdict_after_known_holders(found_rival: bool, state: &EventLoopState) -> bool {
+    found_rival || state.rival_holder_known()
+}
+
 /// Arm the next rival re-check after a fresh claim (a `None` → live
 /// `beacon::ensure` transition). No-op for sessions the shed doesn't
 /// apply to, so every claim site can call it unconditionally. A fresh claim
 /// is a new beacon, so it also starts with the full shed wait: a beacon
 /// replaced without a shed would otherwise inherit its predecessor's count.
+///
+/// The one funnel every claim passes, so it also ends the round of this member that was started
+/// while nobody held the rendezvous: that round cannot find the beacon just claimed.
 pub(super) fn schedule_rival_recheck(
     state: &mut EventLoopState,
     policy: CoHostPolicy,
     params: &beacon::RendezvousParams,
     endpoint: &Endpoint,
 ) {
+    state.cancel_rendezvous_round();
     state.rival_recheck_deferrals = 0;
+    state.yield_to_lower = false;
     if !rival_recheck_applies(policy, params.bind_ports.is_empty()) {
         return;
     }
@@ -346,6 +392,7 @@ pub(super) fn shed_rival_beacon_if_due(
     state: &mut EventLoopState,
     arm: &CohostArm<'_>,
     rendezvous: &mut Option<beacon::Rendezvous>,
+    peer: EndpointId,
 ) -> bool {
     if rendezvous.is_none() || !rival_recheck_applies(arm.policy, arm.params.bind_ports.is_empty())
     {
@@ -359,14 +406,19 @@ pub(super) fn shed_rival_beacon_if_due(
     }
     let dependents = rendezvous
         .as_ref()
-        .map_or(0, beacon::Rendezvous::dependents);
-    if defer_shed(dependents, state.rival_recheck_deferrals) {
+        .map_or_else(beacon::Dependents::default, |held| held.dependents(peer));
+    if !state.yield_to_lower && defer_shed(dependents.count(), state.rival_recheck_deferrals) {
         state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
         state.next_rival_recheck =
             Some(Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()));
         tracing::info!(
             target: "habilis_network::gossip",
-            dependents,
+            node = %peer.fmt_short(),
+            dependents = dependents.count(),
+            dependent_ids = ?dependents.foreign_ids(),
+            live_ids = ?dependents.live_ids(),
+            own_ids = ?dependents.own_ids(),
+            in_flight = dependents.in_flight,
             deferrals = state.rival_recheck_deferrals,
             "beacon rival re-check deferred: a data-channel peer is hanging off this beacon"
         );
@@ -375,18 +427,27 @@ pub(super) fn shed_rival_beacon_if_due(
     state.rival_recheck_deferrals = 0;
     tracing::info!(
         target: "habilis_network::gossip",
+        node = %peer.fmt_short(),
+        yield_to_lower = state.yield_to_lower,
         "beacon rival re-check: releasing the rendezvous to re-probe for a same-id co-host"
     );
+    state.yield_to_lower = false;
     // `shed`, not a plain drop: the graceful endpoint close turns the
     // peer's link to its own dead beacon into an immediate
     // `NeighborDown` instead of a zombie that only dies at the QUIC idle
     // timeout — the zombie both stalls the post-shed re-graft and leaves
     // a poisoned pool entry under the shared id.
     if let Some(held) = rendezvous.take() {
-        held.shed();
+        state.beacon_closing = Some(held.shed_then());
     }
     state.next_rival_recheck = None;
     state.rival_recheck_rounds = state.rival_recheck_rounds.saturating_add(1);
+    // A round that was running against our own beacon now has nothing to find.
+    state.cancel_rendezvous_round();
+    // The book still names the beacon just shed; the next holder writes its own address. What the
+    // mesh registered for the id by itself (a relay rung) is written back.
+    state.address_book.remove_endpoint_info(arm.params.id);
+    super::setup::register_rendezvous(&state.address_book, arm.params);
     // Don't wait for that `NeighborDown` either — clear the link flag now
     // (mirroring the hard resume edge), or a yielding node's heal ticks
     // idle on "rendezvous linked" instead of grafting the rival's beacon.
@@ -482,9 +543,93 @@ mod tests {
         assert!(!super::shed_rival_beacon_if_due(
             &mut state,
             &arm,
-            &mut rendezvous
+            &mut rendezvous,
+            iroh::SecretKey::generate().public(),
         ));
         assert!(rendezvous.is_some(), "the beacon is still held");
+    }
+
+    /// A member that knows a holder and holds nothing does not probe to claim: its own shed makes
+    /// the shared id read free for a moment, and a claim on that reading stands up the second
+    /// holder again. The holder's `PeerInfo` without the flag ends it.
+    #[test]
+    fn a_known_holder_keeps_us_from_probing_to_claim() {
+        let mut state = crate::testing::fresh_state();
+        let own = iroh::SecretKey::generate().public();
+        let holder = iroh::SecretKey::generate().public();
+        let now = crate::util::clock::Instant::now();
+        assert!(super::may_probe_to_claim(&state), "no holder known: probe");
+
+        state.note_rival_beacon_flag(own, [9u8; 32], holder, true, true, now);
+        assert!(!super::may_probe_to_claim(&state), "a holder is known");
+
+        state.note_rival_beacon_flag(own, [9u8; 32], holder, true, false, now);
+        assert!(super::may_probe_to_claim(&state), "it let go: probe again");
+    }
+
+    /// A probe that was already out when the holder became known reads the id as free. It must
+    /// not decide a claim.
+    #[test]
+    fn a_probe_that_read_free_does_not_claim_while_a_holder_is_known() {
+        let mut state = crate::testing::fresh_state();
+        let own = iroh::SecretKey::generate().public();
+        let holder = iroh::SecretKey::generate().public();
+        assert!(!super::verdict_after_known_holders(false, &state));
+
+        state.note_rival_beacon_flag(
+            own,
+            [9u8; 32],
+            holder,
+            true,
+            true,
+            crate::util::clock::Instant::now(),
+        );
+
+        assert!(
+            super::verdict_after_known_holders(false, &state),
+            "free is read as held"
+        );
+        assert!(super::verdict_after_known_holders(true, &state));
+    }
+
+    /// A lower holder in our overlay already settled who keeps the rendezvous, so a tab on this
+    /// beacon must not hold the release back: the tab re-dials, and two holders that each
+    /// kept a tab would stay split.
+    #[tokio::test]
+    async fn a_due_shed_does_not_wait_when_a_lower_holder_was_seen() {
+        let params = public_params();
+        let arm = super::CohostArm {
+            policy: CoHostPolicy::EagerProbed,
+            params: &params,
+            started: crate::util::clock::Instant::now(),
+        };
+        let mut state = crate::testing::fresh_state();
+        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        state.yield_to_lower = true;
+        let (mut rendezvous, _round) =
+            beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
+
+        assert!(super::shed_rival_beacon_if_due(
+            &mut state,
+            &arm,
+            &mut rendezvous,
+            iroh::SecretKey::generate().public(),
+        ));
+        assert!(rendezvous.is_none(), "the beacon was released");
+        assert!(!state.yield_to_lower, "the release uses the request up");
+    }
+
+    /// A yield request belongs to the beacon it was made for: a new claim starts clean.
+    #[tokio::test]
+    async fn a_new_claim_forgets_a_yield_request() {
+        let params = public_params();
+        let endpoint = loopback_endpoint().await;
+        let mut state = crate::testing::fresh_state();
+        state.yield_to_lower = true;
+
+        super::schedule_rival_recheck(&mut state, CoHostPolicy::EagerProbed, &params, &endpoint);
+
+        assert!(!state.yield_to_lower);
     }
 
     /// A beacon claimed after another went without a shed (a co-host task
@@ -508,7 +653,12 @@ mod tests {
         let (mut rendezvous, _round) = beacon_with_a_negotiating_tab(&params, endpoint);
         state.next_rival_recheck = Some(crate::util::clock::Instant::now());
         assert!(
-            !super::shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous),
+            !super::shed_rival_beacon_if_due(
+                &mut state,
+                &arm,
+                &mut rendezvous,
+                iroh::SecretKey::generate().public()
+            ),
             "the new beacon's first due shed must wait for its tab"
         );
         assert!(rendezvous.is_some(), "the beacon is still held");
@@ -533,11 +683,15 @@ mod tests {
     #[test]
     fn a_reclaim_tick_regrafts_only_when_the_link_is_lost() {
         assert!(
-            regrafts_rendezvous(false),
+            regrafts_rendezvous(false, true),
             "link lost: the case that stalled, and the only way a beacon we hold gets linked"
         );
         assert!(
-            !regrafts_rendezvous(true),
+            !regrafts_rendezvous(false, false),
+            "a link let go of on purpose must stay let go of"
+        );
+        assert!(
+            !regrafts_rendezvous(true, true),
             "a live link must not be re-dialled — both heal legs dial GOSSIP_ALPN, and the \
              beacon adopting the new one flaps the healthy link once per tick"
         );
@@ -636,6 +790,271 @@ mod tests {
         assert!(
             window_open,
             "a heal-tick claim left the reclaim window closed: our rendezvous never dials us, so nothing links it until the next heal tick"
+        );
+    }
+
+    /// The book kept the address of every beacon that this process held under the id, so a dial to
+    /// the id tried the ports of beacons that were gone (the N=2 round: a claim-time offer that hung
+    /// for the whole connect bound while the next offer took 37 ms). A shed takes the entry out.
+    #[tokio::test]
+    async fn a_shed_takes_the_address_of_the_shed_beacon_out_of_the_book() {
+        let params = public_params();
+        let arm = super::CohostArm {
+            policy: CoHostPolicy::EagerProbed,
+            params: &params,
+            started: crate::util::clock::Instant::now(),
+        };
+        let endpoint = loopback_endpoint().await;
+        let mut state = crate::testing::fresh_state();
+        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        let old_beacon = iroh::EndpointAddr::new(params.id)
+            .with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
+        crate::lookup::add_peer_addr(&state.address_book, old_beacon);
+        let mut rendezvous = Some(crate::beacon::Rendezvous::for_test(endpoint, None));
+
+        assert!(super::shed_rival_beacon_if_due(
+            &mut state,
+            &arm,
+            &mut rendezvous,
+            iroh::SecretKey::generate().public(),
+        ));
+
+        assert!(
+            state.address_book.get_endpoint_info(params.id).is_none(),
+            "the book still names the beacon that was shed"
+        );
+    }
+
+    /// Every claim passes `schedule_rival_recheck`, the verdict arm of the event loop among them,
+    /// and the claim of the split round came through that arm: it ends the round that ran against
+    /// the missing holder.
+    #[tokio::test]
+    async fn the_claim_funnel_ends_the_round_that_ran_against_the_missing_holder() {
+        let params = public_params();
+        let endpoint = loopback_endpoint().await;
+        let mut state = crate::testing::fresh_state();
+        state.rendezvous_id = Some(params.id);
+        let hub = crate::lookup::new_webrtc_handle(endpoint.id());
+        let held_round = state
+            .webrtc_admission
+            .try_admit(params.id, &hub)
+            .expect("a free slot");
+        let epoch = held_round.epoch();
+        let task = n0_future::task::spawn(async move {
+            let _held_round = held_round;
+            std::future::pending::<()>().await;
+        });
+        state
+            .webrtc_admission
+            .track(params.id, epoch, task.abort_handle());
+        assert_eq!(state.webrtc_admission.in_flight(), 1);
+
+        super::schedule_rival_recheck(&mut state, CoHostPolicy::EagerProbed, &params, &endpoint);
+
+        let round_running = state.webrtc_admission.in_flight() != 0;
+        endpoint.close().await;
+        assert!(
+            !round_running,
+            "the round that ran against the missing holder still holds the slot of the rendezvous"
+        );
+    }
+
+    /// An offer to the rendezvous that started while nobody held it never finds the beacon that
+    /// this member claims next, and held the slot for the whole round deadline (observed: a
+    /// split of two members that stayed 25 s or more with `not negotiating with the rendezvous
+    /// reason=InFlight`). The claim ends it.
+    #[tokio::test]
+    async fn a_claim_ends_the_offer_that_ran_against_the_missing_holder() {
+        use iroh_gossip::net::Gossip;
+
+        use super::{CohostArm, maybe_cohost};
+        use crate::daemon::ctx::HandlerCtx;
+        use crate::gossip::event::SilentSink;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::mesh::LookupOpts;
+        use crate::testing::{fresh_state, nick};
+        use crate::transport::MeshSender;
+        use crate::util::clock::Instant;
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let secret = iroh::SecretKey::generate();
+        let params = crate::beacon::RendezvousParams {
+            topic_id: iroh_gossip::proto::TopicId::from_bytes([5u8; 32]),
+            id: secret.public(),
+            secret,
+            bind_ports: vec![port],
+            lookups: LookupOpts::loopback(),
+            relay_transport: false,
+            bootstrap_relay: None,
+            rung_tx: tokio::sync::watch::channel(None).0,
+        };
+
+        let endpoint = crate::lookup::build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            crate::lookup::TransportHandles::default(),
+        )
+        .await
+        .expect("loopback endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let (gossip_sender, _receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+        let sender = MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let author = nick("holder");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: params.id,
+            external_msg_tx: None,
+            sink: &sink,
+        };
+
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.rendezvous_id = Some(params.id);
+        let hub = crate::lookup::new_webrtc_handle(endpoint.id());
+        let held_round = state
+            .webrtc_admission
+            .try_admit(params.id, &hub)
+            .expect("a free slot");
+        let epoch = held_round.epoch();
+        let task = n0_future::task::spawn(async move {
+            let _held_round = held_round;
+            std::future::pending::<()>().await;
+        });
+        state
+            .webrtc_admission
+            .track(params.id, epoch, task.abort_handle());
+        let mut rendezvous = None;
+        let mut probe = None;
+        let arm = CohostArm {
+            policy: CoHostPolicy::Deferred,
+            params: &params,
+            started: Instant::now(),
+        };
+        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        let claimed = rendezvous.is_some();
+        let offer_running = state.webrtc_admission.in_flight() != 0;
+
+        if let Some(held) = rendezvous.take() {
+            held.shed_and_wait().await;
+        }
+        endpoint.close().await;
+        assert!(claimed, "a meshed Deferred member claims a free rung");
+        assert!(
+            !offer_running,
+            "the offer that ran against the missing holder still holds the slot of the rendezvous: every offer to our new beacon is refused InFlight until the round deadline"
+        );
+    }
+
+    /// A member whose probe finds the holder (the N=3 round: "staying peer" at 48.69 s) did not
+    /// claim, so the claim funnel never ran for it: its round from before the holder stays until
+    /// the connect bound. The held verdict ends it.
+    #[tokio::test]
+    async fn a_held_verdict_ends_the_round_that_ran_against_the_missing_holder() {
+        use iroh_gossip::net::Gossip;
+
+        use super::note_rival_holds;
+        use crate::daemon::ctx::HandlerCtx;
+        use crate::gossip::event::SilentSink;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::mesh::LookupOpts;
+        use crate::testing::{fresh_state, nick};
+        use crate::transport::MeshSender;
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let secret = iroh::SecretKey::generate();
+        let params = crate::beacon::RendezvousParams {
+            topic_id: iroh_gossip::proto::TopicId::from_bytes([5u8; 32]),
+            id: secret.public(),
+            secret,
+            bind_ports: vec![port],
+            lookups: LookupOpts::loopback(),
+            relay_transport: false,
+            bootstrap_relay: None,
+            rung_tx: tokio::sync::watch::channel(None).0,
+        };
+
+        let endpoint = crate::lookup::build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            crate::lookup::TransportHandles::default(),
+        )
+        .await
+        .expect("loopback endpoint");
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let (gossip_sender, _receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+        let sender = MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let author = nick("holder");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: params.id,
+            external_msg_tx: None,
+            sink: &sink,
+        };
+
+        let mut state = fresh_state();
+        state.rendezvous_id = Some(params.id);
+        let hub = crate::lookup::new_webrtc_handle(endpoint.id());
+        let held_round = state
+            .webrtc_admission
+            .try_admit(params.id, &hub)
+            .expect("a free slot");
+        let epoch = held_round.epoch();
+        let task = n0_future::task::spawn(async move {
+            let _held_round = held_round;
+            std::future::pending::<()>().await;
+        });
+        state
+            .webrtc_admission
+            .track(params.id, epoch, task.abort_handle());
+        assert_eq!(state.webrtc_admission.in_flight(), 1);
+
+        note_rival_holds(&mut state, &ctx);
+
+        let round_running = state.webrtc_admission.in_flight() != 0;
+        endpoint.close().await;
+        assert!(
+            !round_running,
+            "the round that ran against the missing holder still holds the slot of the rendezvous"
         );
     }
 

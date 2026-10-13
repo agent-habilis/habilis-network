@@ -17,7 +17,7 @@ use std::io::Write as _;
 use std::process::Command;
 
 use crate::TaskOutcome;
-use crate::util::{output, repo_root};
+use crate::util::{output, repo_root, target_dir};
 
 /// Capabilities for the browser the runner will drive.
 ///
@@ -43,7 +43,7 @@ pub(super) fn run(binary: &str, env: &BTreeMap<String, String>) -> TaskOutcome {
           the driving to wasm-bindgen-test-runner, which speaks WebDriver)"
     })?;
 
-    let caps = repo_root().join("target").join("webdriver.json");
+    let caps = target_dir()?.join("webdriver.json");
     if let Some(parent) = caps.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;

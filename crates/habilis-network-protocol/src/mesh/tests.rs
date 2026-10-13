@@ -203,7 +203,8 @@ fn passworded_mesh_refuses_to_derive_without_the_password() {
 #[test]
 fn golden_passwordless_id_and_topic_are_pinned() {
     // Byte-for-byte pin on a passwordless id and its topic. Neither is
-    // allowed to move by accident; if this fails and you did not mean to
+    // allowed to move by accident (both moved once on purpose: mesh id
+    // version 2 writes the transport policy as its own byte); if this fails and you did not mean to
     // change the encoding, the format regressed.
     //
     // The two constants are pinned against different accidents and do not
@@ -221,12 +222,28 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset());
     assert_eq!(
         mesh.to_string(),
-        "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1"
+        "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH"
     );
     let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
     assert_eq!(
         format!("{topic:?}"),
-        "TopicId(05fe8948f1b086f29f24c6b1b2092f86209d290956e25f84451fadd688aef8c1)"
+        "TopicId(1898d0078596295e6f69e42e9284e139d69921f2db46026b16611a924e65bd1d)"
+    );
+}
+
+// The golden id and topic of a mesh that an older build made (the default had no gossip). The id
+// decodes, gossip reads as off, and the id and the topic come out the same: nothing that exists
+// moves when the default turns gossip on.
+#[test]
+fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
+    let older = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqay2YxkRe";
+    let mesh: Mesh = older.parse().expect("an older id decodes");
+    assert!(!mesh.config.transport.gossip, "it has no gossip");
+    assert_eq!(mesh.to_string(), older, "and it keeps its id");
+    let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
+    assert_eq!(
+        format!("{topic:?}"),
+        "TopicId(0efae5467ad7c26c9b6a3f0a64a97d1799412ac891282711077401b8ecd8c0e7)"
     );
 }
 
@@ -295,10 +312,61 @@ fn truncated_bytes_rejected() {
 }
 
 #[test]
+fn a_mesh_id_carries_the_transport_policy_for_every_list() {
+    use super::lookup::Lookup;
+    use super::transport::Transport::{Gossip, Multihop, Relay, Udp, WebRtc};
+    let lists: [&[super::transport::Transport]; 10] = [
+        &[],
+        &[Udp],
+        &[WebRtc],
+        &[Udp, WebRtc],
+        &[Udp, Multihop],
+        &[Udp, WebRtc, Multihop],
+        &[Udp, Multihop, Relay],
+        &[Udp, WebRtc, Multihop, Relay],
+        &[Udp, Gossip],
+        &[Udp, WebRtc, Multihop, Gossip],
+    ];
+    let mut seen: Vec<(TransportPolicy, String)> = Vec::new();
+    for list in lists {
+        let config = MeshConfig::resolve(&[Lookup::Relay], None, list).expect("a valid list");
+        let id = Mesh::new(dummy_seed(), dummy_name(), config.clone()).to_string();
+        let decoded: Mesh = id.parse().expect("the id decodes");
+        assert_eq!(decoded.config, config, "{list:?}");
+        // Same policy, same id; a different policy, a different id.
+        for (policy, other) in &seen {
+            assert_eq!(*policy == config.transport, *other == id, "{list:?}");
+        }
+        seen.push((config.transport, id));
+    }
+    // An empty list is the default, `udp,webrtc,multihop,gossip`. A list names what it carries:
+    // the same list without `gossip` is not the default.
+    let policy = |list: &[super::transport::Transport]| {
+        MeshConfig::resolve(&[Lookup::Relay], None, list)
+            .unwrap()
+            .transport
+    };
+    assert_eq!(policy(&[]), policy(&[Udp, WebRtc, Multihop, Gossip]));
+    assert_ne!(policy(&[]), policy(&[Udp, WebRtc, Multihop]));
+}
+
+#[test]
+fn a_version_1_mesh_id_is_rejected_with_upgrade() {
+    let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback());
+    let mut bytes = mesh.encode_bytes();
+    bytes[0] = 1; // the format before the transport policy had its own byte
+    let error = Mesh::decode_bytes(&bytes).expect_err("a version 1 id is refused");
+    assert!(
+        error.to_string().contains("upgrade"),
+        "the error must tell the member what to do: {error}"
+    );
+}
+
+#[test]
 fn unknown_version_rejected() {
     let mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::loopback());
     let mut bytes = mesh.encode_bytes();
-    bytes[0] = 2; // an unknown version byte
+    bytes[0] = 3; // an unknown version byte
     assert!(Mesh::decode_bytes(&bytes).is_err());
 }
 

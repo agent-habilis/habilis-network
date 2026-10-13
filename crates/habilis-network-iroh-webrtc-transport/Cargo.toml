@@ -68,8 +68,9 @@ bench = []
 
 # Tests only. A process-wide switch that stops the path selector from choosing
 # an IP path, so a test can take UDP away from a live connection: iroh has no
-# way to close one path.
-test-hooks = []
+# way to close one path. The tables live in `habilis-network-iroh-transport-util`,
+# which every selector of the workspace reads.
+test-hooks = ["habilis-network-iroh-transport-util/test-hooks"]
 
 [dependencies]
 # ── protocol half: always compiled, wasm-clean ───────────────────────────
@@ -88,6 +89,9 @@ tracing.workspace = true
 # CustomSender traits both backends implement; the workspace entry turns it on.
 iroh = { workspace = true, optional = true }
 habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util", optional = true }
+# The clock of `bench::rtt_samples` and the timers of the browser test: `std::time::Instant`
+# panics in a browser. Already in the dependency closure via iroh on both targets.
+n0-future.workspace = true
 # `RecvMeta` appears in the `CustomEndpoint::poll_recv` signature.
 noq-udp = { workspace = true, optional = true }
 n0-watcher = { workspace = true, optional = true }
@@ -130,13 +134,12 @@ web-sys = { workspace = true, optional = true, features = [
 ] }
 
 [dev-dependencies]
-tokio.workspace = true
+# `process` and `io-util` for the `session_cost` example, which drives a peer process over pipes.
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "io-util", "io-std"] }
+serde_json.workspace = true
+habilis-network-util = { path = "../habilis-network-util" }
 n0-error = "1"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-# The browser test's timers and its concurrent JSEP join. Already in the
-# dependency closure via iroh on both targets; named here so the test target
-# does not rely on that.
-n0-future.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
@@ -175,3 +178,8 @@ required-features = ["web", "bench"]
 [[test]]
 name = "browser_matrix"
 required-features = ["web", "bench"]
+
+# The cost of one WebRTC session in the process that holds it; see the header of the example.
+[[example]]
+name = "session_cost"
+required-features = ["native"]

@@ -46,6 +46,7 @@ pub(crate) async fn handle_gossip_event(
         Some(Ok(Event::NeighborUp(node_id))) => {
             let (conn, relay) = conn_path(ctx.endpoint, node_id).await;
             tracing::info!(target: "habilis_network::gossip",
+                local = %ctx.endpoint.id().fmt_short(),
                 endpoint_id = %node_id,
                 is_rendezvous = node_id == ctx.rendezvous_id,
                 conn = conn.label(),
@@ -56,22 +57,21 @@ pub(crate) async fn handle_gossip_event(
             // first link is the rendezvous relay, and `joined` is a
             // one-shot — sending it before any link exists loses it.
             // Later neighbors only get a `PeerInfo` re-send, and only once
-            // per cooldown window per endpoint: a flapping link must not
+            // per window since any flood: a flapping link must not
             // re-flood our address to the whole mesh on every up-transition
             // (the residual amplifier behind the soak's `neighbor up` storm).
             let now = Instant::now();
             if state.announced {
-                if state.peerinfo_on_cooldown(node_id, now) {
-                    tracing::debug!(target: "habilis_network::gossip", endpoint_id = %node_id, "skipped PeerInfo re-flood (cooldown)");
-                } else {
+                if state.neighbor_up_refloods_peerinfo(now) {
                     broadcast_peer_info(state, ctx).await;
-                    state.note_peerinfo(node_id, now);
                     state.last_sent_at = now;
+                } else {
+                    state.defer_peerinfo();
+                    tracing::debug!(target: "habilis_network::gossip", endpoint_id = %node_id, "held back the PeerInfo re-flood (window)");
                 }
             } else {
                 announce_arrival(state, ctx).await;
                 state.announced = true;
-                state.note_peerinfo(node_id, now);
                 state.last_sent_at = now;
                 tracing::info!(target: "habilis_network::gossip", "announced arrival on first gossip link");
             }
@@ -84,7 +84,10 @@ pub(crate) async fn handle_gossip_event(
                 // Re-arms the healer's probe gate: while this is true the
                 // heal tick must not connect-probe the rendezvous (the
                 // probe would supersede this very link on the beacon).
-                state.rendezvous_linked = true;
+                // The link is up: a return that was owed is paid (and the visit
+                // lasts its dwell time), and the next `NeighborDown` is a loss
+                // again until we release it anew.
+                state.note_rendezvous_link_up(Instant::now());
                 state.rendezvous_session_stale = false;
                 state.rendezvous_offer_fallback = false;
                 // This link settles the arbitration: someone holds the port
@@ -98,7 +101,11 @@ pub(crate) async fn handle_gossip_event(
                 // used to insert here optimistically — before any link
                 // formed — leaving permanent ghosts that suppressed
                 // both; see the 2026-06-12 roster-collapse review.)
-                state.linked_endpoints.insert(node_id);
+                state.link(node_id);
+                // A new neighbor: the underlay may owe it a session, and may take
+                // its signal.
+                #[cfg(feature = "multihop")]
+                crate::transport::underlay_webrtc::tick_now(state);
                 if state.relay_transport {
                     state.observe_path(node_id, conn);
                 } else {
@@ -106,6 +113,12 @@ pub(crate) async fn handle_gossip_event(
                     // only on a selected non-relay path, so a link up is the
                     // proof; `conn_path` cannot see which path is selected.
                     state.direct.insert(node_id, DirectState::Direct);
+                }
+                // A frame parked across a gap in the links waits for the next link:
+                // `meshed` stays set through the gap, so the first-link edge below
+                // does not come again, and a `PeerInfo` may not either.
+                if state.meshed && !state.pending_outbound.is_empty() {
+                    flush_pending(state, ctx, "link up").await;
                 }
                 // First link to a *real* peer: now (and only now) can
                 // user content actually be delivered. Flush anything
@@ -135,37 +148,32 @@ pub(crate) async fn handle_gossip_event(
                     // (the app's card dial hint); see `NodeApp::on_meshed`.
                     app.on_meshed(state, ctx).await;
                 }
+                // The vector names the address of our underlay, and a neighbor that holds it
+                // can offer a session at once: it does not wait for the 15 s tick, which would
+                // leave the first session for the moment that the relay watcher closes the
+                // links that stayed on the relay.
+                #[cfg(feature = "multihop")]
+                crate::daemon::event_loop::linkstate_now(state, ctx).await;
+                super::heal::release_rendezvous_if_due(state, ctx).await;
             }
         }
         Some(Ok(Event::NeighborDown(node_id))) => {
             let is_rendezvous = node_id == ctx.rendezvous_id;
-            tracing::info!(target: "habilis_network::gossip", endpoint_id = %node_id, is_rendezvous, "gossip neighbor down");
+            tracing::info!(target: "habilis_network::gossip", local = %ctx.endpoint.id().fmt_short(), endpoint_id = %node_id, is_rendezvous, "gossip neighbor down");
             if is_rendezvous {
-                state.rendezvous_linked = false;
-                // The holder is gone, so the identity is up for arbitration
-                // again and any earlier reading of it is spent.
-                state.forget_rendezvous_verdict();
-                // A shed beacon takes its session table with it (the rival
-                // re-check releases and re-claims the rendezvous on a fresh
-                // endpoint), so a held session is stale the moment the link
-                // drops — and admission would refuse every re-offer with
-                // `HaveSession`. Drop it so the next heal tick offers anew.
-                if let Some(handle) = state.webrtc.as_ref()
-                    && handle.detach(&node_id)
-                {
-                    tracing::debug!(target: "habilis_network::gossip", "detached the stale rendezvous webrtc session");
-                }
-                // Re-offer now rather than on the next heal tick: every
-                // saved interval halves the relink cycle a beacon shed costs
-                // a webrtc-shaped peer.
-                crate::transport::webrtc::offer_rendezvous_off_tick(state, ctx);
+                rendezvous_neighbor_down(state, ctx, node_id);
             } else {
                 state.unlink(node_id);
+                let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
+                state.plan_regraft_on_link_loss(node_id, Instant::now(), spread);
+                if let Some(addr) = state.relay_race_on_link_loss(node_id, Instant::now()) {
+                    crate::transport::webrtc::negotiate_session(state, ctx, node_id, addr);
+                }
             }
             if arms_reclaim(
-                is_rendezvous,
+                is_rendezvous && !state.rendezvous_released,
                 state.linked_endpoints.len(),
-                state.rendezvous_linked,
+                !state.rendezvous_linked && state.rendezvous_wanted(),
             ) {
                 state.arm_reclaim(Instant::now());
                 tracing::info!(target: "habilis_network::gossip",
@@ -181,9 +189,10 @@ pub(crate) async fn handle_gossip_event(
             }
         }
         Some(Ok(Event::Lagged)) => {
-            // Upstream closes a lagging subscriber outright (its docs:
-            // "close and re-open"), so a terminal `None` follows; the
-            // heal arm's resubscribe handles the re-open.
+            // Upstream reports the lag and keeps the subscription open (it
+            // does not close it, whatever its docs say): the split counts it
+            // on the transport handle, and this arm only tells the user. A
+            // terminal `None` is another event, handled below.
             ctx.sink.emit(NodeEvent::Info(
                 "Event stream lagged, some messages may have been missed".to_owned(),
             ));
@@ -214,6 +223,44 @@ pub(crate) async fn handle_gossip_event(
     }
 }
 
+/// The rendezvous neighbour went down. A link we let go of on purpose is no
+/// loss: there is nothing to detach, to offer again, or to re-graft, and the
+/// rule that released it also says when to come back.
+///
+/// A `NeighborDown` that the beacon's own HyParView caused (it drops a random
+/// member when its view is full) reads as a loss here and arms a reclaim on a
+/// node with links enough. That costs one probe, and is left as it is.
+fn rendezvous_neighbor_down(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    node_id: iroh::EndpointId,
+) {
+    state.rendezvous_linked = false;
+    // The holder is gone, so the identity is up for arbitration
+    // again and any earlier reading of it is spent.
+    state.forget_rendezvous_verdict();
+    if state.rendezvous_released {
+        return;
+    }
+    // The holder is gone, so a round that is still dialling it is moot, and its slot would refuse
+    // the re-offer below for the rest of the round deadline.
+    state.cancel_rendezvous_round();
+    // A shed beacon takes its session table with it (the rival
+    // re-check releases and re-claims the rendezvous on a fresh
+    // endpoint), so a held session is stale the moment the link
+    // drops — and admission would refuse every re-offer with
+    // `HaveSession`. Drop it so the next heal tick offers anew.
+    if let Some(handle) = state.webrtc.as_ref()
+        && handle.detach(&node_id)
+    {
+        tracing::debug!(target: "habilis_network::gossip", "detached the stale rendezvous webrtc session");
+    }
+    // Re-offer now rather than on the next heal tick: every
+    // saved interval halves the relink cycle a beacon shed costs
+    // a webrtc-shaped peer.
+    crate::transport::webrtc::offer_rendezvous_off_tick(state, ctx);
+}
+
 /// Whether a `NeighborDown` should arm the fast reclaim burst — the
 /// event-driven half of beacon failover, as opposed to waiting out a heal
 /// tick.
@@ -221,10 +268,13 @@ pub(crate) async fn handle_gossip_event(
 /// Three signals, all meaning "there may be no beacon and we could be the one
 /// to stand it up":
 ///
-/// - `is_rendezvous` — the link we lost *was* the beacon.
+/// - `rendezvous_lost` — the link we lost *was* the beacon, and we did not let
+///   it go on purpose.
 /// - `links_left == 0` — that was our last tracked peer; we are isolated.
-/// - `!rendezvous_linked` — we hold no live beacon link at all. This is the
-///   case the first two miss and the one the kill-the-producer drill lives in:
+/// - `!rendezvous_linked` — we hold no live beacon link at all, and want one
+///   (`rendezvous_wanted`: a node with enough links to others has let go of it
+///   on purpose). This is the case the first two miss and the one the
+///   kill-the-producer drill lives in:
 ///   two tabs plus an origin, the origin dies, and each tab is still linked to
 ///   the other. Not isolated, and the tab that meshed via the origin's *peer*
 ///   endpoint never had a rendezvous link to lose — so nothing armed, and
@@ -238,8 +288,16 @@ pub(crate) async fn handle_gossip_event(
 /// because it was dialing an id it had no way to resolve; see
 /// `beacon::spawn_rival_probe`. **This widening is only safe with that fix**:
 /// a convergence-time probe now finds the origin's beacon and nobody binds.
-fn arms_reclaim(is_rendezvous: bool, links_left: usize, rendezvous_linked: bool) -> bool {
-    is_rendezvous || links_left == 0 || !rendezvous_linked
+///
+/// Losing the rendezvous arms it even when this node has links enough to be
+/// done with the beacon: it may be dead, and failover needs someone to notice.
+/// Losing a link we released on purpose is no loss, and arms nothing.
+fn arms_reclaim(
+    rendezvous_lost: bool,
+    links_left: usize,
+    beacon_wanted_but_unlinked: bool,
+) -> bool {
+    rendezvous_lost || links_left == 0 || beacon_wanted_but_unlinked
 }
 
 /// Drain the message payloads a dead subscription buffered before its
@@ -260,9 +318,17 @@ pub(crate) async fn drain_dead_receiver(
     let mut recovered = 0usize;
     loop {
         match receiver.next().now_or_never() {
-            Some(Some(Ok(Event::Received(incoming)))) => {
-                ingest(incoming.content, state, app, ctx).await;
-                recovered += 1;
+            Some(Some(item @ Ok(Event::Received(_)))) => {
+                // A buffered frame goes to the transport, as in the split: it is not a message.
+                if super::split::route_and_deliver(&item, state.gossip_handle.as_ref())
+                    != super::split::Route::Data
+                {
+                    continue;
+                }
+                if let Ok(Event::Received(incoming)) = item {
+                    ingest(incoming.content, state, app, ctx).await;
+                    recovered += 1;
+                }
             }
             // Skip stale membership events / errors; stop on a terminal
             // `None` (the stream's actual end) or an empty buffer.
@@ -276,10 +342,36 @@ pub(crate) async fn drain_dead_receiver(
     );
 }
 
+/// Hand to the app the mesh messages that the old subscription already queued for it, before
+/// the resubscribe drops that queue. The loop does not read the queue while the topic is marked
+/// closed, yet the old splitter keeps filling it until its receiver is dropped, and the gossip
+/// layer has counted each message as delivered: the queue holds the only copy. A message that
+/// arrives after this drain and before the drop is the residue; the resend repairs it (see
+/// `transport::outbox` and the nonce of the resend).
+pub(crate) async fn drain_queued<S>(
+    receiver: &mut super::split::MeshReceiver<S>,
+    state: &mut EventLoopState,
+    app: &mut dyn NodeApp,
+    ctx: &HandlerCtx<'_>,
+) {
+    use futures_util::FutureExt as _;
+    let mut recovered = 0usize;
+    while let Some(Some(item)) = receiver.next().now_or_never() {
+        if let Ok(Event::Received(incoming)) = item {
+            ingest(incoming.content, state, app, ctx).await;
+            recovered += 1;
+        }
+    }
+    tracing::info!(target: "habilis_network::gossip",
+        recovered,
+        "drained the messages that the old subscription had queued"
+    );
+}
+
 /// Drain `pending_outbound` onto the wire, in order. Runs on the meshed
 /// edges — the first real-peer `NeighborUp`, and a degraded node's first
 /// inbound message after a fault (starvation recovery / resume) — and again
-/// on a later `PeerInfo` arrival while frames remain buffered: a frame that
+/// on every later `NeighborUp` and `PeerInfo` arrival while frames remain buffered: a frame that
 /// fails to deliver (typically a directed frame whose addressee's endpoint
 /// isn't known yet at the first flush) is re-buffered for that retry, not
 /// dropped.
@@ -294,16 +386,20 @@ pub(crate) async fn flush_pending(
         // Re-route each frame through the send decision rather than blanket-
         // broadcasting: a directed frame buffered while unmeshed must still
         // take unicast, never the gossip flood.
-        let Err(error) = crate::transport::deliver(&msg, bytes.clone(), state, ctx.sender).await
-        else {
-            delivered += 1;
-            continue;
-        };
-        if state.pending_outbound.push((msg, bytes)) {
-            requeued += 1;
-            tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not deliverable yet; requeued");
-        } else {
-            tracing::warn!(target: "habilis_network::gossip", %error, "buffered outbound message undeliverable and the buffer is full; dropped");
+        match crate::transport::deliver(&msg, bytes.clone(), state, ctx.sender).await {
+            Ok(crate::transport::Delivered::Done) => delivered += 1,
+            Ok(crate::transport::Delivered::Pending(handle)) => {
+                delivered += 1;
+                watch_flush(handle, msg, bytes, state.flush_failed.clone());
+            }
+            Err(error) => {
+                if requeue(state, ctx, msg, bytes) {
+                    requeued += 1;
+                    tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not deliverable yet; requeued");
+                } else {
+                    tracing::warn!(target: "habilis_network::gossip", %error, "buffered outbound message undeliverable and the buffer is full; dropped");
+                }
+            }
         }
     }
     tracing::info!(target: "habilis_network::gossip",
@@ -312,6 +408,75 @@ pub(crate) async fn flush_pending(
         edge,
         "meshed: flushed buffered messages"
     );
+}
+
+/// A flushed frame whose unicast leg runs on a task. If the dial or the write fails, the frame goes
+/// back to the loop through `failed`, which buffers it again as a flush does for a frame that cannot
+/// be delivered yet: a failed dial never loses a buffered frame.
+fn watch_flush(
+    handle: crate::transport::PendingSend,
+    msg: Message,
+    bytes: Bytes,
+    failed: tokio::sync::mpsc::UnboundedSender<(Message, Bytes)>,
+) {
+    n0_future::task::spawn(async move {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(target: "habilis_network::gossip", %error, "buffered outbound message not delivered; requeued");
+                let _ = failed.send((msg, bytes));
+            }
+            Err(_) => {
+                let _ = failed.send((msg, bytes));
+            }
+        }
+    });
+}
+
+/// A frame of a flush whose dial failed, back on the loop: put it in `pending_outbound` again.
+pub(crate) fn requeue_failed(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    msg: Message,
+    bytes: Bytes,
+) {
+    if !requeue(state, ctx, msg, bytes) {
+        tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
+    }
+}
+
+/// Put a frame that failed to deliver back in `pending_outbound`. A frame that is held for a lane
+/// peer asks for its session, at every flush: a frame that was parked before the peer was known has
+/// no other chance to ask, and without the session the lane pair never links. Returns whether the
+/// frame was kept.
+fn requeue(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, msg: Message, bytes: Bytes) -> bool {
+    super::broadcast::park_and_offer(state, ctx, &msg, &bytes);
+    state.pending_outbound.push((msg, bytes))
+}
+
+/// Tests only: whether the hook that names a frame asked the node to drop this one before the app
+/// reads it, as a full queue between the gossip layer and the loop does.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+fn dropped_by_test_hook(state: &mut EventLoopState, message: &Message) -> bool {
+    use crate::daemon::state::TestDrop;
+    let drops = match &state.test_drop {
+        Some(TestDrop::AppBody(body)) => {
+            matches!(message.kind, MessageKind::App { .. }) && message.body.as_str() == body
+        }
+        Some(TestDrop::StateChange) => matches!(message.kind, MessageKind::State),
+        None => false,
+    };
+    if drops {
+        state.test_drop = None;
+        state.test_drops_fired += 1;
+        tracing::debug!(target: "habilis_network::gossip", "test hook: dropped an inbound frame");
+    }
+    drops
+}
+
+#[cfg(not(all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Message) -> bool {
+    false
 }
 
 /// Validate + dispatch one inbound wire message, regardless of transport. Both
@@ -326,7 +491,7 @@ pub(crate) async fn ingest(
     app: &mut dyn NodeApp,
     ctx: &HandlerCtx<'_>,
 ) {
-    let Ok(mut message) = Message::parse(&content) else {
+    let Ok((mut message, _resend_nonce)) = Message::parse_wire(&content) else {
         ctx.sink
             .emit(NodeEvent::Error("Failed to parse message".to_owned()));
         tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
@@ -338,6 +503,9 @@ pub(crate) async fn ingest(
     // pubkey is computed once at loop setup (`ctx.our_pubkey`), so this is a
     // string compare, not a key-derivation + allocation per message.
     if message.pubkey == ctx.our_pubkey {
+        return;
+    }
+    if dropped_by_test_hook(state, &message) {
         return;
     }
     tracing::trace!(target: "habilis_network::gossip", author = %message.author, "gossip message received");
@@ -519,25 +687,27 @@ async fn dispatch_infra(
             return ControlFlow::Break(());
         }
         MessageKind::Digest => {
-            antientropy::handle_digest(message, state, ctx).await;
+            antientropy::handle_digest(message, state, ctx.author);
             return ControlFlow::Break(());
         }
         MessageKind::Ping => {
             auto_pong(message, state, ctx).await;
             return ControlFlow::Break(());
         }
-        MessageKind::Pong { to } => {
-            // Record arrival for the active round only if addressed to us
-            // and from a known peer — the roster gate bounds the
-            // map and keeps `responded`/`known` honest against a peer that
-            // forges pongs from fabricated authors.
+        MessageKind::Pong { to, probe } => {
+            // Record the RTT for the active round only if addressed to us, from a
+            // known peer, and naming a probe of this round — the roster gate
+            // bounds the map and keeps `responded`/`known` honest against a peer
+            // that forges pongs from fabricated authors, and the probe id drops a
+            // pong that answers a round that is over.
             if to == ctx.author
                 && state.peers.contains(message.author.as_str())
                 && let Some(round) = state.ping_round.as_mut()
             {
-                round
-                    .pongs
-                    .insert(message.author.clone(), TokioInstant::now());
+                let known = round.record_pong(message.author.clone(), probe, TokioInstant::now());
+                if !known {
+                    tracing::debug!(target: "habilis_network::gossip", pong_from = %message.author, "pong names no probe of this round");
+                }
             }
             return ControlFlow::Break(());
         }
@@ -576,7 +746,9 @@ async fn dispatch_infra(
             return ControlFlow::Break(());
         }
         MessageKind::LinkState => {
-            handle_link_state(message, state);
+            if handle_link_state(message, state) {
+                crate::transport::probe::nudge_climbing_pairs(state, ctx, true);
+            }
             return ControlFlow::Break(());
         }
         MessageKind::Presence { subtype } => {
@@ -602,28 +774,68 @@ async fn dispatch_infra(
 /// author's own measured links + underlay address (`body` = a serialized
 /// `LinkVector`) supersede the last vector we held for that origin. Dropped
 /// silently when the multihop transport is off or the body is malformed —
-/// plumbing like the digests, never logged or surfaced.
-fn handle_link_state(message: &Message, state: &mut EventLoopState) {
-    #[cfg(not(feature = "host"))]
+/// plumbing like the digests, never logged or surfaced. Returns whether the topology changed.
+fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
+    #[cfg(not(feature = "multihop"))]
     {
         // No multihop transport off-host: nothing consumes a routing table.
         let _ = (message, state);
+        false
     }
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     {
         let Some(handle) = state.multihop.as_ref() else {
-            return; // multihop off: nothing consumes the routing table
+            return false; // multihop off: nothing consumes the routing table
         };
         match serde_json::from_str::<habilis_network_iroh_multihop_transport::LinkVector>(
             message.body.as_str(),
         ) {
             Ok(vector) => {
+                // A signature proves who made the vector, not that the origin is
+                // a member: anyone holding the mesh id can mint keys. So the
+                // origin must be the endpoint the roster binds to the message's
+                // author, the same binding that routes a directed message. A
+                // peer whose address we have not learned yet is waited for: its
+                // next vector, one interval on, finds the binding.
+                let bound = state
+                    .peer_endpoints
+                    .get(&message.author)
+                    .map(|addr| addr.id);
+                // The `PeerInfo` of the author can be a few milliseconds behind its first
+                // vector: the vector waits for the binding, and is fed when it is written.
+                if bound.is_none() {
+                    let kept = state
+                        .parked_link_states
+                        .park(message.author.clone(), vector);
+                    tracing::debug!(target: "habilis_network::gossip",
+                        author = %message.author,
+                        kept,
+                        "parked multihop link-state: no endpoint is bound to its author yet"
+                    );
+                    return false;
+                }
+                if bound != Some(vector.origin()) {
+                    tracing::debug!(target: "habilis_network::gossip",
+                        author = %message.author,
+                        "dropping multihop link-state: its origin is not the endpoint bound to its author"
+                    );
+                    return false;
+                }
                 let updated = handle.feed_topology(vector);
+                // A vector that waited for this author is older than the one just fed.
+                state.parked_link_states.take(&message.author);
                 tracing::debug!(target: "habilis_network::gossip",
                     author = %message.author,
                     updated,
                     "multihop link-state received"
                 );
+                // The vector holds the underlay address of its origin, which a
+                // neighbor needs before the underlay can offer it a session.
+                #[cfg(feature = "multihop")]
+                if updated {
+                    crate::transport::underlay_webrtc::tick_now(state);
+                }
+                updated
             }
             Err(error) => {
                 tracing::debug!(target: "habilis_network::gossip",
@@ -631,6 +843,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
                     %error,
                     "dropping malformed multihop link-state"
                 );
+                false
             }
         }
     }
@@ -647,7 +860,8 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) {
 /// nobody receives is the right outcome: the pinger's round misses us and
 /// tries again.
 async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
-    let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone()).signed(ctx.identity);
+    let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone(), &message.id)
+        .signed(ctx.identity);
     crate::logging::messages::log_out(&pong);
     let warm_endpoint = state
         .peer_endpoints
@@ -834,6 +1048,24 @@ pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Message
     // Ours by construction, so it can never arrive again — but mark it seen so
     // a peer still running the old resend behaviour is deduped at the gate
     // rather than double-pushed here.
+    state.mark_seen(message);
+    push_to_log(state, message.clone());
+}
+
+/// Keep an app broadcast that this node sent, when the app's class says it is loggable. The same
+/// reason as for [`retain_own_broadcast`]: a peer that holds the frame resends it to its author
+/// on every digest round, forever, if the author's digest never lists it, and the author cannot
+/// serve it to a peer that missed it. The class comes from the app, as at the ingest of a frame
+/// (`retain_and_index`), so an app that does not log its frames keeps none. A directed frame is
+/// not kept: its body is sealed on the way out and only its addressee may be served.
+pub(crate) fn retain_own_app_broadcast(
+    state: &mut EventLoopState,
+    message: &Message,
+    class: &AppClass,
+) {
+    if !class.loggable || class.beat || !matches!(message.kind, MessageKind::App { to: None, .. }) {
+        return;
+    }
     state.mark_seen(message);
     push_to_log(state, message.clone());
 }
@@ -1221,6 +1453,27 @@ async fn greet_new_peer(message: &Message, state: &mut EventLoopState, ctx: &Han
     }
 }
 
+/// The number of links below which a graft that a `PeerInfo` triggers may go
+/// ahead. `members` counts every member of the mesh, this node included.
+///
+/// A mesh that fits in the active view (at most G + 1 members) has room at every
+/// peer and may take the view up to G. In a bigger mesh the rule leaves the last
+/// slot to the paced fill tick (`probe::fill_active_view`).
+///
+/// The rule was made for a graft that was a `Join`: a full peer accepts a `Join` by
+/// evicting a random neighbor, so a graft moved two links. A graft is a low priority
+/// request now, and a full peer refuses it, so that reason is gone. The rule stays
+/// because the measurements of the churn (0.8 link-ups per member per minute at
+/// N = 24 and G = 8) were made with it. Whether to drop it is open: it would let
+/// a `PeerInfo` fill the last slot too, and it needs a new run to show the effect.
+fn peer_info_graft_below(max_peers: usize, members: usize) -> usize {
+    if members <= max_peers.saturating_add(1) {
+        max_peers
+    } else {
+        max_peers.saturating_sub(1).max(1)
+    }
+}
+
 async fn handle_peer_info(
     message: &Message,
     content: Bytes,
@@ -1243,9 +1496,8 @@ async fn handle_peer_info(
     // fresh endpoint replaces the old. The beacon gossips *as* the rendezvous,
     // so it advertises `rendezvous_id` here — record that too, so a joiner can
     // tell its rendezvous link belongs to the beacon's nickname.
-    state
-        .peer_endpoints
-        .insert(message.author.clone(), peer_addr.clone());
+    let changed = state.peer_endpoints.get(&message.author) != Some(&peer_addr);
+    state.bind_peer_endpoint(message.author.clone(), peer_addr.clone());
     // The rendezvous is overlay plumbing, not a dialable member peer:
     // the binding above is recorded, but skip the known-endpoints/re-bridge
     // dial path for it.
@@ -1265,15 +1517,55 @@ async fn handle_peer_info(
             .proven_endpoints
             .insert(signer, peer_id, &state.linked_endpoints);
     }
+    // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
+    // endpoint is believed.
+    if let Some(signer) = crate::transport::endpoint_proof::signer_bytes(&message.pubkey) {
+        let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
+        state.note_rival_beacon_flag(
+            ctx.endpoint.id(),
+            signer,
+            peer_id,
+            proven,
+            parsed["beacon"].as_bool() == Some(true),
+            Instant::now(),
+        );
+    }
     // Remember every advertised peer for the rendezvous-independent
     // re-bridge, and register its address once. Unconditional on link
     // state — a `PeerInfo` normally arrives over an already-formed link,
     // and recovery (`heal::rebridge_known`, the starvation watchdog's
     // precondition) needs the memory precisely *after* that link dies.
     let first_sighting = state.known_endpoints.insert(peer_id);
-    if first_sighting {
-        let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
+    tracing::debug!(
+        target: "habilis_network::gossip",
+        local = %ctx.endpoint.id().fmt_short(),
+        author = %message.author,
+        peer = %peer_id.fmt_short(),
+        first_sighting,
+        relay = ?peer_addr.relay_urls().next(),
+        ip_addrs = ?peer_addr.ip_addrs().collect::<Vec<_>>(),
+        "peerinfo received"
+    );
+    // Every address that is new or differs from the last one of this author is handed to
+    // the endpoint, whatever the link state: a home relay that came late, or an interface
+    // that changed, is learned by a peer that is already linked. `add_endpoint_addr`
+    // makes the address a path of the live connections, so it does not matter whether
+    // it runs before or after the dial that follows; the lookup serves a dial by bare id.
+    // The call goes through two actor inboxes of the endpoint, so the loop never awaits
+    // it. An address with no entry is not given to it: with none known it would start an
+    // Address Lookup and wait for it.
+    if first_sighting || changed {
+        add_peer_addr(&state.address_book, peer_addr.clone());
         state.unicast_pool.note_addr(&peer_addr);
+        if !peer_addr.addrs.is_empty() {
+            let endpoint = ctx.endpoint.clone();
+            let addr = peer_addr.clone();
+            n0_future::task::spawn(async move {
+                if let Err(error) = endpoint.add_endpoint_addr(addr).await {
+                    tracing::debug!(target: "habilis_network::gossip", peer = %peer_id.fmt_short(), %error, "the endpoint did not take the peer address");
+                }
+            });
+        }
     }
     // A buffered directed frame addressed to this author may just have become
     // deliverable — its endpoint binding and dial address are now registered.
@@ -1322,18 +1614,24 @@ async fn handle_peer_info(
     // it. Blocking the graft on the session deadlocks mesh formation — see the
     // note on `negotiate_session`.
     crate::transport::webrtc::negotiate_session(state, ctx, peer_id, peer_addr.clone());
+    // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
+    // rendezvous here, which returned above.
     if !defer_first_dial
-        && state.linked_endpoints.len() < ctx.max_peers
+        && state.linked_endpoints.len()
+            < peer_info_graft_below(ctx.max_peers, state.peer_endpoints.len() + 1)
         && !state.linked_endpoints.contains(&peer_id)
         && !state.relink_on_cooldown(peer_id, now)
+        && !state.graft_blocked(peer_id, now)
     {
         state.note_relink(peer_id, now);
-        let _ = add_peer_addr(ctx.endpoint, peer_addr.clone());
+        add_peer_addr(&state.address_book, peer_addr.clone());
         state.unicast_pool.note_addr(&peer_addr);
         // With the relay lookup only, the graft waits for a proven direct
         // path (`transport::probe`); the loop grafts on the probe's verdict.
         if crate::transport::probe::ensure_direct(state, ctx, peer_id, &peer_addr) {
-            if let Err(error) = ctx.sender.join_peers(vec![peer_id]).await {
+            if let Err(error) =
+                crate::transport::probe::request_graft(state, ctx, peer_id, false).await
+            {
                 tracing::warn!(target: "habilis_network::gossip", endpoint_id = %peer_id, %error, "PeerInfo graft request failed");
             }
         } else {
@@ -1366,6 +1664,10 @@ fn is_loggable(kind: &MessageKind) -> bool {
             subtype: PresenceSubtype::Alive
         } | MessageKind::PeerInfo
             | MessageKind::Digest | MessageKind::StateDigest | MessageKind::MetaDigest
+            // A newer vector replaces this one, and a peer never logs it (its
+            // handler ends before retention), so a copy kept here is one no peer
+            // holds and every digest asks this node for again.
+            | MessageKind::LinkState
             | MessageKind::Ping
             | MessageKind::Pong { .. }
             // Durable state lives in its own un-pruned log, never the chat
@@ -1401,7 +1703,7 @@ mod arms_reclaim_tests {
         // dies, each tab still linked to the other. Not the rendezvous, not
         // isolation — and before this the tab armed nothing and waited out the
         // heal cadence.
-        assert!(arms_reclaim(false, 1, false));
+        assert!(arms_reclaim(false, 1, true));
     }
 
     #[test]
@@ -1409,8 +1711,33 @@ mod arms_reclaim_tests {
         // A peer flapping while the beacon link is live is HyParView doing its
         // job. Arming here is what would make initial convergence pay a bind
         // storm on every non-beacon node.
-        assert!(!arms_reclaim(false, 1, true));
-        assert!(!arms_reclaim(false, 64, true));
+        assert!(!arms_reclaim(false, 1, false));
+        assert!(!arms_reclaim(false, 64, false));
+    }
+
+    #[test]
+    fn a_rendezvous_released_on_purpose_arms_nothing() {
+        // Enough links to others, the beacon let go of by choice: the
+        // `NeighborDown` it causes is not a loss, and nothing may come back.
+        assert!(!arms_reclaim(false, 3, false));
+    }
+
+    #[test]
+    fn a_lost_rendezvous_arms_even_when_the_node_wants_none() {
+        // It may be dead, and failover needs someone to notice.
+        assert!(arms_reclaim(true, 5, false));
+    }
+
+    #[test]
+    fn a_node_with_enough_links_does_not_arm_for_a_beacon_it_does_not_hold() {
+        // Released earlier, and a plain neighbour drops: still no reason to
+        // go back to the rendezvous.
+        assert!(!arms_reclaim(false, 3, false));
+    }
+
+    #[test]
+    fn a_node_below_the_release_count_wants_the_beacon_back() {
+        assert!(arms_reclaim(false, 2, true));
     }
 }
 
@@ -1496,6 +1823,54 @@ mod retain_own_broadcast_tests {
             0,
             "PeerInfo is never logged inbound, so it must not be logged outbound either"
         );
+    }
+
+    fn app_frame(state: &EventLoopState, to: Option<&str>) -> Message {
+        Message::new_app(
+            &MeshId::from("💬test"),
+            &Nickname::from("me"),
+            crate::protocol::message::AppFrameParams {
+                tag: crate::protocol::AppTag::from("app_msg"),
+                to: to.map(Nickname::from),
+                corr: None,
+                body: crate::protocol::MessageBody::from("hello"),
+            },
+        )
+        .signed(&state.identity)
+    }
+
+    fn class(loggable: bool) -> crate::gossip::app::AppClass {
+        crate::gossip::app::AppClass {
+            loggable,
+            beat: false,
+            valid: true,
+            chained: false,
+            sealed: false,
+        }
+    }
+
+    /// An app broadcast that the app logs is held by its author, as at the ingest of a peer: the
+    /// author can serve it to a peer that missed it, and the peers that hold it do not resend it
+    /// to her on every round.
+    #[test]
+    fn an_own_app_broadcast_that_the_app_logs_is_retained() {
+        let mut state = fresh_state();
+        let frame = app_frame(&state, None);
+        super::retain_own_app_broadcast(&mut state, &frame, &class(true));
+        assert_eq!(state.message_log.len(), 1);
+    }
+
+    /// The class is the app's, not the kind's: an app that does not log its frames keeps none, and a
+    /// directed frame is never kept (its body is sealed on the way out, and only its addressee may
+    /// be served).
+    #[test]
+    fn an_own_app_frame_that_the_app_does_not_log_or_that_is_directed_is_not_retained() {
+        let mut state = fresh_state();
+        let broadcast = app_frame(&state, None);
+        super::retain_own_app_broadcast(&mut state, &broadcast, &class(false));
+        let directed = app_frame(&state, Some("you"));
+        super::retain_own_app_broadcast(&mut state, &directed, &class(true));
+        assert_eq!(state.message_log.len(), 0);
     }
 
     /// The end-to-end property, as the two peers actually exchange it: a holder
@@ -1713,6 +2088,7 @@ mod evicted_orphan_tests {
 
 #[cfg(test)]
 mod first_contact_tests {
+    use bytes::Bytes;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
@@ -1806,6 +2182,430 @@ mod first_contact_tests {
         }
     }
 
+    /// A directed frame in the buffer, to a peer that nobody serves: the flush returns at once, the
+    /// dial fails on its task, and the frame comes back to the loop and is buffered again. It is
+    /// not lost, and the loop did not wait for the dial.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pending_frame_whose_dial_fails_is_parked_again() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
+        let bob = iroh::SecretKey::generate().public();
+        let bob_addr = iroh::EndpointAddr::from_parts(
+            bob,
+            [iroh::TransportAddr::Ip(
+                silent.local_addr().expect("silent addr"),
+            )],
+        );
+        crate::lookup::add_peer_addr(
+            &crate::lookup::address_book(&node.endpoint),
+            bob_addr.clone(),
+        );
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.unicast_pool = crate::transport::UnicastPool::new(node.endpoint.clone(), false);
+        state
+            .direct
+            .insert(bob, crate::daemon::state::DirectState::Direct);
+        state.peer_endpoints.insert(nick("bob"), bob_addr);
+        let (failed_tx, mut failed_rx) = tokio::sync::mpsc::unbounded_channel();
+        state.flush_failed = failed_tx;
+        let frame = Message::new_pong(
+            &node.mesh,
+            &node.author,
+            nick("bob"),
+            &crate::protocol::MessageId::random(),
+        );
+        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        assert!(state.pending_outbound.push((frame.clone(), bytes)));
+
+        let started = std::time::Instant::now();
+        super::flush_pending(&mut state, &ctx, "test").await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "the flush waited for the dial"
+        );
+        assert!(
+            state.pending_outbound.take().is_empty(),
+            "the frame was handed to its task, so the buffer is empty until the dial fails"
+        );
+
+        let (failed, returned) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), failed_rx.recv())
+                .await
+                .expect("the failed dial reports back to the loop")
+                .expect("the loop keeps its channel");
+        super::requeue_failed(&mut state, &ctx, failed.clone(), returned);
+
+        let parked = state.pending_outbound.take();
+        assert_eq!(parked.len(), 1, "the frame is in the buffer again");
+        assert_eq!(parked[0].0.id, frame.id, "and it is the same frame");
+    }
+
+    /// Feed one gossip event to the handler, as the loop does.
+    async fn feed(event: Event, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+        handle_gossip_event(Some(Ok(event)), state, &mut Inert, ctx).await;
+    }
+
+    /// A frame parked while the links were down is sent at the next `NeighborUp`. The
+    /// node stays meshed through the gap, so the first-link edge does not come again,
+    /// and no `PeerInfo` arrives to flush it.
+    #[tokio::test]
+    async fn a_frame_parked_across_a_gap_in_the_links_is_sent_at_the_next_neighbor_up() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        feed(Event::NeighborUp(endpoint_id(1)), &mut state, &ctx).await;
+        feed(Event::NeighborDown(endpoint_id(1)), &mut state, &ctx).await;
+        assert!(state.meshed, "the gap does not clear meshed");
+        let frame = Message::new_joined(&node.mesh, &node.author);
+        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        assert!(state.pending_outbound.push((frame, bytes)));
+
+        feed(Event::NeighborUp(endpoint_id(2)), &mut state, &ctx).await;
+
+        assert!(
+            state.pending_outbound.is_empty(),
+            "the parked frame waits for a PeerInfo that may not come"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// An app frame counts the times that it reaches the app.
+    struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl NodeApp for Counting {
+        fn classify(&self, _message: &Message) -> AppClass {
+            AppClass {
+                loggable: false,
+                beat: true,
+                valid: true,
+                chained: false,
+                sealed: false,
+            }
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+    }
+
+    /// A resend of a message that the app already read has a new gossip payload, and the ingest
+    /// of the app still drops it by the id of the message inside: the app sees the frame once.
+    #[tokio::test]
+    async fn a_resend_of_a_known_message_reaches_the_app_once() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut app = Counting(reads.clone());
+        let frame = Message::new_app(
+            &node.mesh,
+            &nick("alice"),
+            crate::protocol::message::AppFrameParams {
+                tag: crate::protocol::AppTag::from("app_msg"),
+                to: None,
+                corr: None,
+                body: MessageBody::from("hello"),
+            },
+        )
+        .signed(&Identity::generate());
+        let original = frame.serialize().expect("serialize");
+        let resend = crate::protocol::message::wire_with_resend_nonce(&original, 42);
+
+        ingest(Bytes::from(original), &mut state, &mut app, &ctx).await;
+        ingest(Bytes::from(resend), &mut state, &mut app, &ctx).await;
+
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the first delivery reaches the app and the resend does not"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// The messages that the old subscription queued reach the app when the topic is swapped.
+    /// The loop does not read the queue while the topic is marked closed, and the gossip layer
+    /// counted each message as delivered, so the queue holds the only copy.
+    #[tokio::test]
+    async fn the_messages_the_old_subscription_queued_reach_the_app_at_the_swap() {
+        use futures_util::stream::{self, StreamExt as _};
+        use iroh_gossip::api::Message as GossipMessage;
+        use iroh_gossip::proto::DeliveryScope;
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let author = Identity::generate();
+        let frames: Vec<Message> = ["ann", "bob", "cat"]
+            .into_iter()
+            .map(|name| Message::new_joined(&node.mesh, &nick(name)).signed(&author))
+            .collect();
+        let (feed_topic, topic_rx) = tokio::sync::mpsc::unbounded_channel();
+        let events = stream::unfold(topic_rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })
+        .boxed();
+        let mut receiver = crate::gossip::split::spawn_split(events, None);
+        for frame in &frames {
+            let content = Bytes::from(frame.serialize().expect("serialize"));
+            let delivered = GossipMessage {
+                content,
+                scope: DeliveryScope::Neighbors,
+                delivered_from: endpoint_id(9),
+            };
+            feed_topic
+                .send(Ok(Event::Received(delivered)))
+                .expect("the splitter reads the topic");
+        }
+        while receiver.high_water() < frames.len() {
+            tokio::task::yield_now().await;
+        }
+
+        super::drain_queued(&mut receiver, &mut state, &mut Inert, &ctx).await;
+
+        for frame in &frames {
+            assert!(
+                state.mark_seen(frame),
+                "{} was queued by the old subscription and never reached the app",
+                frame.author
+            );
+        }
+        node.endpoint.close().await;
+    }
+
+    /// The frame of the field red: a directed frame parked across a gap in the links reaches
+    /// its addressee at the next `NeighborUp`, with no `PeerInfo`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_directed_frame_parked_across_a_gap_in_the_links_is_delivered_at_the_next_neighbor_up()
+     {
+        use iroh::protocol::Router;
+
+        use crate::protocol::MessageId;
+        use crate::transport::{UNICAST_ALPN, UnicastAcceptor, UnicastPool};
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let bob = iroh::Endpoint::builder(presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind bob");
+        let (inbox, mut frames) = tokio::sync::mpsc::channel(8);
+        let router = Router::builder(bob.clone())
+            .accept(
+                UNICAST_ALPN,
+                UnicastAcceptor::with_idle(inbox, false, std::time::Duration::from_mins(1)),
+            )
+            .spawn();
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(&node.endpoint), bob.addr());
+        let mut state = fresh_state();
+        state.unicast_pool = UnicastPool::new(node.endpoint.clone(), false);
+        state.peer_endpoints.insert(nick("bob"), bob.addr());
+        feed(Event::NeighborUp(bob.id()), &mut state, &ctx).await;
+        feed(Event::NeighborDown(bob.id()), &mut state, &ctx).await;
+        assert!(state.meshed, "the gap does not clear meshed");
+        let frame = Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random());
+        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        assert!(state.pending_outbound.push((frame, bytes.clone())));
+
+        feed(Event::NeighborUp(bob.id()), &mut state, &ctx).await;
+
+        let delivered =
+            tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv()).await;
+        assert_eq!(
+            delivered.ok().flatten(),
+            Some(bytes),
+            "bob never got the parked frame"
+        );
+        assert!(state.pending_outbound.is_empty());
+        router.shutdown().await.expect("shutdown");
+        node.endpoint.close().await;
+    }
+
+    /// A node that reaches the release count tells gossip to leave the
+    /// rendezvous and marks the release at once. The leave ends the link by
+    /// itself, whatever the endpoint is, so the mark does not wait for a
+    /// connection to be closed from here: a node that left but was not marked
+    /// would read the `NeighborDown` that follows as a loss and arm a reclaim.
+    /// The link is still up when the mark is made; gossip ends it afterwards.
+    #[tokio::test]
+    async fn reaching_the_release_count_leaves_the_rendezvous_and_marks_it() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 3;
+
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        assert!(state.rendezvous_linked);
+        assert!(
+            !state.rendezvous_released,
+            "below the count: still a visitor"
+        );
+        for seed in 1..=3 {
+            feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
+        }
+
+        assert!(
+            state.rendezvous_released,
+            "gossip was told to leave, so the release is marked"
+        );
+        assert!(
+            state.rendezvous_linked,
+            "gossip ends the link, and the NeighborDown clears this"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// The `NeighborDown` that a release causes is a choice, not a loss: no
+    /// reclaim window opens, and nothing wants the rendezvous back.
+    #[tokio::test]
+    async fn the_neighbor_down_after_a_release_arms_nothing() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 2;
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        for seed in 1..=2 {
+            feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
+        }
+        // Released, as `mark_rendezvous_released` marks it when gossip is told
+        // to leave the rendezvous.
+        state.rendezvous_released = true;
+
+        feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
+
+        assert!(!state.rendezvous_linked);
+        assert!(state.reclaim_until.is_none(), "no loss, no reclaim");
+        assert!(!state.rendezvous_wanted(), "no graft, no offer");
+        node.endpoint.close().await;
+    }
+
+    /// The holder of the rendezvous is gone: a round that is still dialling it holds the slot, and
+    /// the re-offer that follows the `NeighborDown` would be refused `InFlight` for the rest of the
+    /// round deadline.
+    #[tokio::test]
+    async fn losing_the_rendezvous_ends_a_round_that_is_still_dialling_it() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_id = Some(ctx.rendezvous_id);
+        let hub = crate::lookup::new_webrtc_handle(node.endpoint.id());
+        let held_round = state
+            .webrtc_admission
+            .try_admit(ctx.rendezvous_id, &hub)
+            .expect("a free slot");
+        let epoch = held_round.epoch();
+        let task = n0_future::task::spawn(async move {
+            let _held_round = held_round;
+            std::future::pending::<()>().await;
+        });
+        state
+            .webrtc_admission
+            .track(ctx.rendezvous_id, epoch, task.abort_handle());
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        assert_eq!(state.webrtc_admission.in_flight(), 1);
+
+        feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
+
+        let round_running = state.webrtc_admission.in_flight() != 0;
+        node.endpoint.close().await;
+        assert!(
+            !round_running,
+            "the round to the lost holder still holds the slot of the rendezvous"
+        );
+    }
+
+    /// Losing a rendezvous we did not release still arms the reclaim: it may
+    /// be dead, and someone has to stand up the next one.
+    #[tokio::test]
+    async fn losing_a_rendezvous_that_was_not_released_still_arms_the_reclaim() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 3;
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        feed(Event::NeighborUp(endpoint_id(1)), &mut state, &ctx).await;
+
+        feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
+
+        assert!(state.reclaim_until.is_some());
+        assert!(state.rendezvous_wanted(), "below the count: come back");
+        node.endpoint.close().await;
+    }
+
+    /// A node below the count after a release wants the rendezvous again, and
+    /// the link coming back ends the release and the debt.
+    #[tokio::test]
+    async fn the_link_coming_back_clears_the_release_and_the_owed_return() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.rendezvous_released = true;
+        state.owe_rendezvous_return(crate::util::clock::Instant::now());
+
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+
+        assert!(state.rendezvous_linked);
+        assert!(!state.rendezvous_released);
+        assert!(
+            state.rendezvous_comeback_until.is_none(),
+            "the debt is paid"
+        );
+        assert!(
+            state.rendezvous_dwell_until.is_some(),
+            "and the visit lasts its dwell time"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// Two islands, each wide enough to have let go of the rendezvous, are
+    /// split by a block. Neither sees the other, so each sweeps its silent
+    /// neighbours, and that sweep is what sends the island back to the place
+    /// where the islands meet.
+    #[tokio::test]
+    async fn an_island_whose_peers_went_silent_comes_back_to_the_rendezvous() {
+        use crate::testing::nick;
+        use std::time::Duration;
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 3;
+        feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
+        for seed in 1..=3 {
+            feed(Event::NeighborUp(endpoint_id(seed)), &mut state, &ctx).await;
+        }
+        feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
+        assert!(!state.rendezvous_wanted(), "an island of its own, content");
+        assert!(!crate::transport::webrtc::rendezvous_graftable(&state));
+
+        let silent = crate::util::clock::Instant::now()
+            .checked_sub(Duration::from_secs(
+                crate::util::tuning::alive_timeout_secs() + 10,
+            ))
+            .expect("a past instant");
+        state.last_seen.insert(nick("far-side"), silent);
+        state.peers.insert(nick("far-side"));
+        state.surfaced.insert(nick("far-side"));
+        crate::lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
+
+        assert!(state.rendezvous_wanted(), "the sweep owes one return");
+        assert!(
+            crate::transport::webrtc::rendezvous_graftable(&state),
+            "so the heal tick may graft it"
+        );
+        node.endpoint.close().await;
+    }
+
     /// A `PeerInfo` binds its signer to its endpoint only with that endpoint's
     /// proof over that signer. Bob's proof is public on gossip, so a frame that
     /// carries it but is signed by another key must bind nothing.
@@ -1836,7 +2636,7 @@ mod first_contact_tests {
         let mut state = fresh_state();
         super::handle_peer_info(
             &peer_info(Some(&bobs_proof), &stranger),
-            bytes::Bytes::new(),
+            Bytes::new(),
             &mut state,
             &ctx,
         )
@@ -1849,18 +2649,12 @@ mod first_contact_tests {
             "bob's proof, another signer"
         );
 
-        super::handle_peer_info(
-            &peer_info(None, &bob),
-            bytes::Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(None, &bob), Bytes::new(), &mut state, &ctx).await;
         assert_eq!(state.proven_endpoints.get(&bob_signer), None, "no proof");
 
         super::handle_peer_info(
             &peer_info(Some(&bobs_proof), &bob),
-            bytes::Bytes::new(),
+            Bytes::new(),
             &mut state,
             &ctx,
         )
@@ -1871,6 +2665,153 @@ mod first_contact_tests {
             "bob's proof, bob's frame"
         );
         node.endpoint.close().await;
+    }
+
+    /// The first vector of a member goes out when its link comes up, and its `PeerInfo` can be a
+    /// few milliseconds behind it. The vector waits for the binding, and the `PeerInfo` that
+    /// writes the binding feeds it: not the tick, 15 s on, after the relay policy closed the links.
+    #[cfg(feature = "multihop")]
+    #[tokio::test]
+    async fn a_link_vector_that_came_before_the_peer_info_of_its_author_is_fed_by_that_peer_info() {
+        use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
+        use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+
+        use crate::protocol::peer_addr::endpoint_addr_to_json;
+
+        async fn handle_for(secret: &SecretKey) -> MultihopHandle {
+            let underlay = Endpoint::builder(presets::Minimal)
+                .secret_key(underlay_secret(secret))
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind an underlay");
+            MultihopHandle::new(
+                secret,
+                underlay,
+                crate::lookup::multihop_handle_config(false),
+            )
+            .expect("underlay on the derived key")
+        }
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let author_key = SecretKey::generate();
+        let other_key = SecretKey::generate();
+        let ours = handle_for(&SecretKey::generate()).await;
+        let theirs = handle_for(&author_key).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+
+        let vector_body =
+            crate::gossip::json_body(&theirs.link_vector(vec![(other_key.public(), 10)]))
+                .expect("a vector serializes");
+        let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body);
+        assert!(
+            !super::handle_link_state(&vector, &mut state),
+            "no binding yet: nothing is fed"
+        );
+        assert!(ours.topology_view().edges.is_empty());
+
+        let address = endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
+        let address_body = MessageBody::new(address.to_string()).expect("an address body");
+        let peer_info = Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body)
+            .signed(&Identity::generate());
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        assert_eq!(
+            ours.topology_view().edges.len(),
+            1,
+            "the PeerInfo that writes the binding feeds the vector that waited for it"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// The address in the first `PeerInfo` of a peer must reach the endpoint, not only
+    /// a lookup: the endpoint reads a lookup at a dial, and a connection that is live
+    /// gets a path only from the call that hands the address over.
+    #[tokio::test]
+    async fn the_address_of_a_first_peer_info_reaches_the_endpoint() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let peer = iroh::SecretKey::generate().public();
+        let first = iroh::EndpointAddr::new(peer).with_ip_addr(test_ip());
+
+        super::handle_peer_info(&peer_info(&node, &first), Bytes::new(), &mut state, &ctx).await;
+
+        assert!(
+            eventually(|| async { node.endpoint.remote_info(peer).await.is_some() }).await,
+            "the first address reaches the endpoint"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// A peer that is linked is not asked for its address again, so a change of it
+    /// (a home relay that came late, an interface that changed) reaches us only
+    /// through its `PeerInfo`. The endpoint already knows the peer here, so only the
+    /// change is under test: a relay that the peer gained must be handed over too.
+    #[tokio::test]
+    async fn a_linked_peers_changed_address_is_applied() {
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let mut state = fresh_state();
+        let peer = iroh::SecretKey::generate().public();
+        state.link(peer);
+        let relay: iroh::RelayUrl = "https://relay.example".parse().expect("a relay url");
+        let knows_relay = || async {
+            node.endpoint.remote_info(peer).await.is_some_and(|info| {
+                info.addrs().any(
+                    |known| matches!(known.addr(), iroh::TransportAddr::Relay(url) if *url == relay),
+                )
+            })
+        };
+        let first = iroh::EndpointAddr::new(peer).with_ip_addr(test_ip());
+        node.endpoint
+            .add_endpoint_addr(first.clone())
+            .await
+            .expect("the endpoint takes the first address");
+        super::handle_peer_info(&peer_info(&node, &first), Bytes::new(), &mut state, &ctx).await;
+        assert!(!knows_relay().await, "no relay yet");
+
+        let later = first.with_relay_url(relay.clone());
+        super::handle_peer_info(&peer_info(&node, &later), Bytes::new(), &mut state, &ctx).await;
+
+        assert!(
+            eventually(knows_relay).await,
+            "the relay that a linked peer gained reaches the endpoint"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// Polls `check` until it holds or five seconds pass. The endpoint takes an address
+    /// from a task, so the test waits for the effect and not for a time.
+    async fn eventually<F, Fut>(mut check: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if check().await {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        check().await
+    }
+
+    /// An address from a documentation range (RFC 5737): no interface carries it.
+    fn test_ip() -> std::net::SocketAddr {
+        "192.0.2.10:4000".parse().expect("an address")
+    }
+
+    /// A `PeerInfo` of the author `bob` that carries `addr`.
+    fn peer_info(node: &Node, addr: &iroh::EndpointAddr) -> Message {
+        use crate::protocol::message::MessageBody;
+        use crate::protocol::peer_addr::endpoint_addr_to_json;
+
+        let body =
+            MessageBody::new(endpoint_addr_to_json(addr).to_string()).expect("an address body");
+        Message::new_peer_info(&node.mesh, &nick("bob"), body).signed(&Identity::generate())
     }
 
     /// The tie-break defers the first dial to the lower endpoint id. A second
@@ -1898,21 +2839,86 @@ mod first_contact_tests {
         let peer_info =
             Message::new_peer_info(&node.mesh, &nick("lower"), body).signed(&Identity::generate());
 
-        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
         assert!(
             !state.direct.contains_key(&lower),
             "the first sighting defers"
         );
-        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
         assert!(
             !state.direct.contains_key(&lower),
             "the copy right after must not dial"
         );
         state.relink.clear();
-        super::handle_peer_info(&peer_info, bytes::Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
         assert!(
             state.direct.contains_key(&lower),
             "once the cooldown ends, this side dials after all"
+        );
+        node.endpoint.close().await;
+    }
+
+    /// In a mesh of more than G + 1 members a graft meets a peer that may be full,
+    /// and a full peer accepts it by evicting a random neighbor, so the links
+    /// move and none is gained. A `PeerInfo` is the unpaced trigger, and it
+    /// is re-flooded on every link-up, so it feeds a loop of grafts and
+    /// evictions. It therefore leaves one slot free in such a mesh; the paced
+    /// fill tick takes the last one. A mesh that fits in the view has room
+    /// everywhere, so there it still grafts up to G.
+    #[tokio::test]
+    async fn a_peer_info_leaves_one_slot_free_in_a_mesh_larger_than_g_plus_one() {
+        use crate::protocol::message::MessageBody;
+        use crate::protocol::peer_addr::endpoint_addr_to_json;
+
+        let node = Node::spawn().await;
+        let ctx = node.ctx();
+        let max_peers = ctx.max_peers;
+        // Higher than ours, so the first-sighting tie-break does not defer it.
+        let newcomer = loop {
+            let id = iroh::SecretKey::generate().public();
+            if id > node.endpoint.id() {
+                break id;
+            }
+        };
+        let body =
+            MessageBody::new(endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string())
+                .expect("an address body");
+        let peer_info = Message::new_peer_info(&node.mesh, &nick("newcomer"), body)
+            .signed(&Identity::generate());
+        let crowd = |state: &mut EventLoopState, members: usize| {
+            for index in 0..members {
+                let id = iroh::SecretKey::generate().public();
+                state
+                    .peer_endpoints
+                    .insert(nick(&format!("member{index}")), iroh::EndpointAddr::new(id));
+            }
+        };
+        let fill_view = |state: &mut EventLoopState, links: usize| {
+            for _ in 0..links {
+                state
+                    .linked_endpoints
+                    .insert(iroh::SecretKey::generate().public());
+            }
+        };
+
+        // More than G + 1 members, one link short of G: the last slot waits.
+        let mut crowded = fresh_state();
+        crowd(&mut crowded, max_peers + 2);
+        fill_view(&mut crowded, max_peers - 1);
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut crowded, &ctx).await;
+        assert!(
+            !crowded.direct.contains_key(&newcomer),
+            "a mesh larger than G + 1 leaves the last slot to the fill tick"
+        );
+
+        // A mesh that fits in the view has room everywhere: it grafts up to G.
+        let mut small = fresh_state();
+        crowd(&mut small, 3);
+        fill_view(&mut small, 2);
+        super::handle_peer_info(&peer_info, Bytes::new(), &mut small, &ctx).await;
+        assert!(
+            small.direct.contains_key(&newcomer),
+            "a mesh that fits in the view grafts"
         );
         node.endpoint.close().await;
     }
@@ -1974,7 +2980,7 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut app = Inert;
         let newcomer = Identity::generate();
-        let wire = |frame: &Message| bytes::Bytes::from(frame.serialize().expect("serialize"));
+        let wire = |frame: &Message| Bytes::from(frame.serialize().expect("serialize"));
         let heads = || MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
 
         let mut digest_first = fresh_state();
@@ -2050,5 +3056,465 @@ mod first_contact_tests {
             "the heal tick held the timer graft on a private mesh"
         );
         node.endpoint.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "host"))]
+mod link_state_tests {
+    use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+
+    use super::handle_link_state;
+    use crate::protocol::{MeshId, Message};
+    use crate::testing::{fresh_state, nick};
+
+    /// A handle over a loopback underlay on the key derived from `secret`.
+    async fn handle_for(secret: &SecretKey) -> MultihopHandle {
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(secret))
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay");
+        MultihopHandle::new(
+            secret,
+            underlay,
+            crate::lookup::multihop_handle_config(false),
+        )
+        .expect("underlay on the derived key")
+    }
+
+    // A link-state vector is replaced by the next one and is never logged by the
+    // peers that receive it. A node that kept its own would hold messages that no
+    // peer holds, and every digest would ask it for them again: measured at
+    // N = 33, 38% of the vectors a node received were repeats.
+    #[tokio::test]
+    async fn a_link_vector_this_node_broadcast_is_not_retained_in_its_log() {
+        let secret = SecretKey::from_bytes(&[53; 32]);
+        let handle = handle_for(&secret).await;
+        let mut state = fresh_state();
+        let body = crate::gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
+        let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body);
+        super::retain_own_broadcast(&mut state, &message);
+        assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
+    }
+
+    // A signature proves who made a vector, not that the maker is a member, and
+    // the roster binding is what ties an origin to an author.
+    #[tokio::test]
+    async fn a_link_vector_is_taken_in_only_from_the_peer_the_roster_binds_to_its_origin() {
+        let (alice, bob) = (
+            SecretKey::from_bytes(&[51; 32]),
+            SecretKey::from_bytes(&[52; 32]),
+        );
+        let ours = handle_for(&SecretKey::from_bytes(&[50; 32])).await;
+        let theirs = handle_for(&alice).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+
+        let body = crate::gossip::json_body(&theirs.link_vector(vec![(bob.public(), 10)]))
+            .expect("a vector serializes");
+        let message_from = |author: &str| {
+            Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
+        };
+
+        handle_link_state(&message_from("alice-aa"), &mut state);
+        assert!(
+            ours.topology_view().edges.is_empty(),
+            "no address learned for the author yet"
+        );
+
+        state
+            .peer_endpoints
+            .insert(nick("mallory-mm"), EndpointAddr::new(bob.public()));
+        handle_link_state(&message_from("mallory-mm"), &mut state);
+        assert!(
+            ours.topology_view().edges.is_empty(),
+            "an author bound to another endpoint cannot speak for this origin"
+        );
+
+        state
+            .peer_endpoints
+            .insert(nick("alice-aa"), EndpointAddr::new(alice.public()));
+        handle_link_state(&message_from("alice-aa"), &mut state);
+        assert_eq!(
+            ours.topology_view().edges.len(),
+            1,
+            "the bound peer is heard"
+        );
+    }
+}
+
+/// A peer that says goodbye takes the links it advertised with it. Without
+/// that, routes keep running through a peer that left until its vector ages out.
+#[cfg(all(test, feature = "host"))]
+mod left_tests {
+    use iroh::EndpointAddr;
+    use iroh_gossip::net::Gossip;
+
+    use crate::daemon::ctx::HandlerCtx;
+    use crate::daemon::state::EventLoopState;
+    use crate::gossip::app::{AppClass, InboundApp, NodeApp};
+    use crate::gossip::event::SilentSink;
+    use crate::lifecycle::membership::MembershipUpdate;
+    use crate::lifecycle::{PresenceEvent, handle_presence};
+    use crate::lookup::{TransportOpts, build_peer_multihop};
+    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::{MeshId, Message, PresenceSubtype};
+    use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::MeshSender;
+
+    /// A `Left` never reaches the app's frame hook, so it only has to exist.
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl NodeApp for Inert {
+        fn classify(&self, _message: &Message) -> AppClass {
+            AppClass {
+                loggable: false,
+                beat: true,
+                valid: true,
+                chained: false,
+                sealed: false,
+            }
+        }
+
+        async fn on_app_frame(
+            &mut self,
+            _frame: InboundApp<'_>,
+            _state: &mut EventLoopState,
+            _ctx: &HandlerCtx<'_>,
+        ) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_left_takes_its_advertised_links_with_it() {
+        let lookups = LookupOpts::loopback();
+        let (endpoint, handle, _webrtc) =
+            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
+                .await
+                .expect("a multihop peer binds");
+        let (leaver_endpoint, leaver_handle, _leaver_webrtc) =
+            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
+                .await
+                .expect("a second multihop peer binds");
+        let leaver_id = leaver_handle.app_id().to_string();
+        let advertises = |held_by: &habilis_network_iroh_multihop_transport::MultihopHandle| {
+            held_by
+                .topology_view()
+                .edges
+                .iter()
+                .any(|edge| edge.from == leaver_id)
+        };
+
+        // We hear the leaver's links, and the roster binds it to its endpoint.
+        let vector = leaver_handle.link_vector(vec![(handle.app_id(), 1)]);
+        assert!(handle.feed_topology(vector), "the vector is new to us");
+        assert!(advertises(&handle), "its links are in our routing table");
+        let mut state = fresh_state();
+        state.multihop = Some(handle.clone());
+        let leaver = nick("leaver");
+        state.note_peer_endpoint(leaver.clone(), EndpointAddr::new(leaver_handle.app_id()));
+
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([5u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = MeshSender::new(gossip_sender);
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let mesh = MeshId::from("test");
+        let us = nick("us");
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &us,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let message = Message::new_left(&mesh, &leaver);
+        let update = MembershipUpdate {
+            returned: false,
+            joined_new: false,
+        };
+        let mut app = Inert;
+        handle_presence(
+            PresenceEvent {
+                message: &message,
+                subtype: PresenceSubtype::Left,
+                update: &update,
+                surfaceable: false,
+            },
+            &mut state,
+            &mut app,
+            &ctx,
+        )
+        .await;
+
+        assert!(
+            !advertises(&handle),
+            "the leaver's links are still in our routing table after its goodbye"
+        );
+        endpoint.close().await;
+        leaver_endpoint.close().await;
+    }
+
+    /// A node that is not meshed yet still drops the links of a peer that stopped
+    /// advertising: the tick expires first, then returns early.
+    #[tokio::test]
+    async fn a_node_that_is_not_meshed_still_expires_stale_links() {
+        use std::time::Duration;
+
+        use habilis_network_iroh_multihop_transport::{
+            HandleConfig, MultihopHandle, underlay_secret,
+        };
+
+        use crate::daemon::event_loop::linkstate_arm;
+
+        let lookups = LookupOpts::loopback();
+        let (endpoint, _handle, _webrtc) =
+            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
+                .await
+                .expect("a multihop peer binds");
+        // Our own handle, with a short max age so that a test can wait it out.
+        let secret = iroh::SecretKey::generate();
+        let underlay = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(underlay_secret(&secret))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay");
+        let config = HandleConfig {
+            vector_max_age: Duration::from_millis(400),
+            ..HandleConfig::default()
+        };
+        let handle = MultihopHandle::new(&secret, underlay, config).expect("a handle");
+        let (leaver_endpoint, leaver_handle, _leaver_webrtc) =
+            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
+                .await
+                .expect("a second multihop peer binds");
+        let leaver_id = leaver_handle.app_id().to_string();
+        let advertises = |held_by: &MultihopHandle| {
+            held_by
+                .topology_view()
+                .edges
+                .iter()
+                .any(|edge| edge.from == leaver_id)
+        };
+        let vector = leaver_handle.link_vector(vec![(handle.app_id(), 1)]);
+        assert!(handle.feed_topology(vector), "the vector is new to us");
+        assert!(advertises(&handle), "its links are in our routing table");
+
+        let mut state = fresh_state();
+        state.multihop = Some(handle.clone());
+        assert!(!state.meshed, "the node is not meshed");
+
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([6u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let sender = MeshSender::new(gossip_sender);
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let mesh = MeshId::from("test");
+        let us = nick("us");
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &us,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+
+        // The leaver says nothing more: wait out the max age, then tick.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        linkstate_arm(&mut state, &ctx).await;
+        assert!(
+            !advertises(&handle),
+            "the stale links are still in the routing table of a node that is not meshed"
+        );
+        endpoint.close().await;
+        leaver_endpoint.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "host"))]
+mod requeue_tests {
+    use bytes::Bytes;
+
+    use super::requeue;
+    use crate::testing::{LaneNode, nick};
+
+    /// A frame is parked before its addressee is known. The peer becomes known with a relay-only
+    /// address, the flush delivers the frame again and it is held: the requeue asks for the session
+    /// and offers it at once, so that the frame does not wait for the next tick of the retry pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frame_parked_before_its_peer_is_known_asks_for_the_session_at_the_flush() {
+        let node = LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        state.meshed = true;
+        let addr = state
+            .peer_endpoints
+            .remove(&nick("bob"))
+            .expect("the fixture knows bob");
+        let frame = node.frame_to_bob();
+        let bytes = Bytes::from_static(b"frame");
+        let now = crate::util::clock::Instant::now();
+        crate::transport::resolve(&frame, bytes.clone(), &state)
+            .expect_err("no endpoint is known for bob yet");
+        assert!(requeue(&mut state, &ctx, frame.clone(), bytes.clone()));
+        assert!(!state.lane_session_wanted(node.bob, now), "bob is unknown");
+        assert_eq!(state.webrtc_admission.in_flight(), 0);
+
+        state.note_peer_endpoint(nick("bob"), addr);
+        crate::transport::resolve(&frame, bytes.clone(), &state)
+            .expect_err("a lookup-only relay holds the frame");
+        assert!(requeue(&mut state, &ctx, frame, bytes));
+
+        assert!(
+            state.lane_session_wanted(node.bob, now),
+            "the requeued frame asks"
+        );
+        assert_eq!(
+            state.webrtc_admission.in_flight(),
+            1,
+            "and the offer is in flight at once"
+        );
+        state.webrtc_admission.close();
+        node.endpoint.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "host"))]
+mod parked_link_state_tests {
+    use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
+
+    use super::handle_link_state;
+    use crate::daemon::state::ParkedLinkStates;
+    use crate::protocol::{MeshId, Message};
+    use crate::testing::{fresh_state, nick};
+
+    async fn handle_for(secret: &SecretKey) -> MultihopHandle {
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(secret))
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay");
+        MultihopHandle::new(
+            secret,
+            underlay,
+            crate::lookup::multihop_handle_config(false),
+        )
+        .expect("underlay on the derived key")
+    }
+
+    fn vector_message(
+        author: &str,
+        handle: &MultihopHandle,
+        links: Vec<(iroh::EndpointId, u32)>,
+    ) -> Message {
+        let body =
+            crate::gossip::json_body(&handle.link_vector(links)).expect("a vector serializes");
+        Message::new_link_state(&MeshId::from("test"), &nick(author), body)
+    }
+
+    // The trust rule is the one of a vector that arrives after its binding: the origin must be
+    // the endpoint that the roster binds to the author.
+    #[tokio::test]
+    async fn a_parked_link_vector_whose_origin_is_not_the_bound_endpoint_is_dropped_at_the_binding()
+    {
+        let (alice, bob) = (
+            SecretKey::from_bytes(&[64; 32]),
+            SecretKey::from_bytes(&[65; 32]),
+        );
+        let ours = handle_for(&SecretKey::from_bytes(&[63; 32])).await;
+        let theirs = handle_for(&alice).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+
+        let message = vector_message("mallory-mm", &theirs, vec![(bob.public(), 10)]);
+        handle_link_state(&message, &mut state);
+        state.bind_peer_endpoint(nick("mallory-mm"), EndpointAddr::new(bob.public()));
+        assert!(
+            ours.topology_view().edges.is_empty(),
+            "an author bound to another endpoint cannot speak for this origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newer_parked_link_vector_replaces_the_older() {
+        let (alice, bob, carol) = (
+            SecretKey::from_bytes(&[67; 32]),
+            SecretKey::from_bytes(&[68; 32]),
+            SecretKey::from_bytes(&[69; 32]),
+        );
+        let ours = handle_for(&SecretKey::from_bytes(&[66; 32])).await;
+        let theirs = handle_for(&alice).await;
+        let mut state = fresh_state();
+        state.multihop = Some(ours.clone());
+
+        let older = vector_message("alice-aa", &theirs, vec![(bob.public(), 10)]);
+        let newer = vector_message(
+            "alice-aa",
+            &theirs,
+            vec![(bob.public(), 10), (carol.public(), 10)],
+        );
+        handle_link_state(&older, &mut state);
+        handle_link_state(&newer, &mut state);
+        state.bind_peer_endpoint(nick("alice-aa"), EndpointAddr::new(alice.public()));
+        assert_eq!(
+            ours.topology_view().edges.len(),
+            2,
+            "the newer vector, with two links, is the one that is fed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_park_holds_one_vector_per_author_up_to_its_cap() {
+        let alice = SecretKey::from_bytes(&[71; 32]);
+        let theirs = handle_for(&alice).await;
+        let vector = theirs.link_vector(Vec::new());
+        let mut parked = ParkedLinkStates::new(2);
+
+        assert!(parked.park(nick("alice-aa"), vector.clone()));
+        assert!(parked.park(nick("bobby-bb"), vector.clone()));
+        assert!(
+            !parked.park(nick("carol-cc"), vector.clone()),
+            "a third author is refused at the cap"
+        );
+        assert!(
+            parked.park(nick("alice-aa"), vector.clone()),
+            "an author that waits is replaced at the cap"
+        );
+        assert!(parked.take(&nick("alice-aa")).is_some());
+        assert!(parked.take(&nick("alice-aa")).is_none(), "taken once");
+        assert!(
+            parked.park(nick("carol-cc"), vector),
+            "a taken vector frees its place"
+        );
     }
 }

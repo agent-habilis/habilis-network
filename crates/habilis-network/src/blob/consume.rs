@@ -12,7 +12,7 @@ use iroh::endpoint::Connection;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
-use crate::lookup::{add_peer_addr, build_peer_endpoint};
+use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
 use crate::protocol::crypto::{Password, TicketAuth};
 use crate::util::consts::MAX_BLOB_BYTES;
 
@@ -40,7 +40,7 @@ where
 {
     let token = auth_token(ticket, password.as_ref())?;
     let endpoint = build_peer_endpoint(&ticket.lookups).await?;
-    add_peer_addr(&endpoint, ticket.addr.clone())?;
+    add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
     let result = fetch_over(&endpoint, ticket, &token, out).await;
     endpoint.close().await;
     result

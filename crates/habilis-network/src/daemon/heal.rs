@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use iroh::{Endpoint, RelayUrl};
+use iroh::RelayUrl;
 use iroh_gossip::api::{GossipReceiver, GossipSender};
 use tokio::sync::watch;
 
@@ -18,6 +18,7 @@ use super::setup;
 use super::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
+use crate::gossip::split::MeshReceiver;
 use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
 use crate::util::tuning::{RESUBSCRIBE_MAX_ATTEMPTS, heal_stall_threshold_secs};
@@ -61,6 +62,9 @@ pub(super) async fn run_heal(
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
     crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
+    // A node that came back to a mesh whose links are all up gets no link
+    // event to release on, so the heal tick checks too.
+    gossip::heal::release_rendezvous_if_due(state, ctx).await;
     let threshold = Duration::from_secs(heal_stall_threshold_secs());
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
     if hard_edge {
@@ -72,8 +76,11 @@ pub(super) async fn run_heal(
         );
         state.note_degraded();
         // The frozen-era link view is stale by definition; clearing this
-        // re-arms the regular tick's probe until a fresh NeighborUp.
+        // re-arms the regular tick's probe until a fresh NeighborUp. Every link
+        // is stale too, so a node that had let go of the rendezvous is owed
+        // one return to it.
         state.rendezvous_linked = false;
+        state.owe_rendezvous_return(Instant::now());
         // A free reading taken before the freeze is stale for the same
         // reason, across the widest gap any of these deadlines can span.
         state.forget_rendezvous_verdict();
@@ -90,7 +97,7 @@ pub(super) async fn run_heal(
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
-        setup::register_rendezvous(ctx.endpoint, params);
+        setup::register_rendezvous(&state.address_book, params);
         if crate::transport::webrtc::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
         }
@@ -103,6 +110,14 @@ pub(super) async fn run_heal(
         tracing::debug!(
             target: "habilis_network::gossip",
             "heal tick: rendezvous linked; idle"
+        );
+    } else if !state.rendezvous_wanted() {
+        // Enough links to others: the rendezvous was let go of on purpose, and
+        // grafting it now would undo that. A node that falls below the count
+        // comes back through the next tick.
+        tracing::debug!(
+            target: "habilis_network::gossip",
+            "heal tick: rendezvous released; idle"
         );
     } else if crate::transport::webrtc::rendezvous_graftable(state) {
         gossip::heal::tick_heal(params.id, ctx.sender).await;
@@ -138,7 +153,7 @@ pub(super) async fn run_heal(
 /// Outcome of one resubscribe attempt (the heal arm drives one per
 /// tick while the gossip stream is down).
 pub(super) enum Resubscribe {
-    Restored(GossipSender, GossipReceiver),
+    Restored(GossipSender, MeshReceiver<GossipReceiver>),
     Pending,
     Fatal,
 }
@@ -157,7 +172,7 @@ pub(super) struct ResubscribeEnv<'a> {
 /// increments.
 pub(super) struct GossipLink<'a> {
     pub(super) sender: &'a mut MeshSender,
-    pub(super) receiver: &'a mut GossipReceiver,
+    pub(super) receiver: &'a mut MeshReceiver<GossipReceiver>,
     pub(super) attempts: &'a mut u32,
 }
 /// One heal-tick turn while the gossip stream is down: attempt the
@@ -180,14 +195,20 @@ pub(super) async fn resubscribe_tick(
     match try_resubscribe(env, state, link.attempts).await {
         Resubscribe::Restored(new_sender, new_receiver) => {
             let mut dead_receiver = std::mem::replace(link.receiver, new_receiver);
+            if let Some(handle) = &state.gossip_handle {
+                handle.attach_gossip(new_sender.clone());
+            }
             link.sender.replace_gossip(new_sender);
             state.gossip_open = true;
             // The dead subscription's link view is void; the fresh one
             // emits its own NeighborUps (and re-arms the probe gate).
             state.rendezvous_linked = false;
             let ctx = env.parts.ctx(link.sender);
-            gossip::drain_dead_receiver(&mut dead_receiver, state, app, &ctx).await;
-            drop(dead_receiver);
+            gossip::drain_queued(&mut dead_receiver, state, app, &ctx).await;
+            // Nothing in the normal path: the guard for a splitter that ended early.
+            if let Some(mut topic_receiver) = dead_receiver.into_dead() {
+                gossip::drain_dead_receiver(&mut topic_receiver, state, app, &ctx).await;
+            }
             gossip::heal::recover_from_starvation(state, &ctx).await;
         }
         Resubscribe::Pending => {}
@@ -210,9 +231,10 @@ pub(super) async fn resubscribe_tick(
     }
     Ok(())
 }
-/// Re-open the gossip topic after its stream terminally ended. The
-/// designed-for remedy, not a workaround: iroh-gossip closes a lagging
-/// subscriber outright and its docs instruct "close and re-open".
+/// Re-open the gossip topic after its stream terminally ended, for example
+/// when the actor dropped the subscription. A lag does not end the stream:
+/// the topic reports it and keeps the subscription (the split counts it),
+/// whatever the docs of iroh-gossip say about closing a lagging subscriber.
 /// Bootstrap is the rendezvous plus every remembered peer so the fresh
 /// subscription re-grafts without waiting for lookups. `Fatal` after
 /// `RESUBSCRIBE_MAX_ATTEMPTS` consecutive failures: a subscribe error
@@ -224,11 +246,11 @@ pub(super) async fn try_resubscribe(
     attempts: &mut u32,
 ) -> Resubscribe {
     let mut bootstrap = Vec::new();
-    if !state.rendezvous_graft_needs_session {
+    if !state.rendezvous_graft_needs_session && state.rendezvous_wanted() {
         bootstrap.push(env.params.id);
     }
     bootstrap.extend(state.known_endpoints.iter().copied());
-    match env.gossip.subscribe(env.params.topic_id, bootstrap).await {
+    match gossip::split::subscribe_mesh(env.gossip, env.params.topic_id, bootstrap).await {
         Ok(topic) => {
             *attempts = 0;
             tracing::warn!(
@@ -239,6 +261,7 @@ pub(super) async fn try_resubscribe(
                 "gossip stream restored; rejoining the mesh".to_owned(),
             ));
             let (sender, receiver) = topic.split();
+            let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
             Resubscribe::Restored(sender, receiver)
         }
         Err(error) => {
@@ -267,7 +290,6 @@ pub(super) async fn try_resubscribe(
 pub(super) fn apply_rung_change(
     state: &mut EventLoopState,
     params: &mut beacon::RendezvousParams,
-    endpoint: &Endpoint,
     rendezvous: &mut Option<beacon::Rendezvous>,
     rung_rx: &watch::Receiver<Option<RelayUrl>>,
 ) {
@@ -282,7 +304,7 @@ pub(super) fn apply_rung_change(
             "bootstrap relay rung changed; re-registering rendezvous and re-homing the beacon"
         );
         params.bootstrap_relay = new;
-        setup::register_rendezvous(endpoint, params);
+        setup::register_rendezvous(&state.address_book, params);
         // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
         // homed on the new rung at the next heal/reclaim tick — `shed`, not a
         // plain drop. The old endpoint is still open and still homed on the

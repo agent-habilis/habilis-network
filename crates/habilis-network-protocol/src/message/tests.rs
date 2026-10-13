@@ -1,6 +1,6 @@
 use super::{
-    AppFrameParams, AppTag, BuildMsgParams, ChainCtx, MeshId, Message, MessageBody, MessageKind,
-    Nickname, PresenceSubtype, build_msg_bytes,
+    AppFrameParams, AppTag, BuildMsgParams, ChainCtx, MeshId, Message, MessageBody, MessageId,
+    MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
 };
 
 fn nick(name: &str) -> Nickname {
@@ -66,13 +66,27 @@ fn test_ping_round_trip() {
     assert_eq!(parsed.body.as_str(), "");
 }
 
+/// A browser builds and signs a link-state advertisement as a native node does: the builder
+/// needs no operating system, so it must exist with the `host` feature off.
+#[test]
+fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
+    let identity = crate::identity::Identity::generate();
+    let msg = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
+        .signed(&identity);
+    assert!(msg.verify_signature());
+    let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
+    assert_eq!(parsed.kind, MessageKind::LinkState);
+    assert_eq!(parsed.body.as_str(), "{}");
+}
+
 #[test]
 fn test_pong_round_trip() {
     let target = nick("pinger-here");
-    let msg = Message::new_pong(&sid(), &nick("word-word"), target.clone());
+    let probe = MessageId::random();
+    let msg = Message::new_pong(&sid(), &nick("word-word"), target.clone(), &probe);
     let bytes = msg.serialize().unwrap();
     let parsed = Message::parse(&bytes).unwrap();
-    assert_eq!(parsed.kind, MessageKind::Pong { to: target });
+    assert_eq!(parsed.kind, MessageKind::Pong { to: target, probe });
     assert_eq!(parsed.body.as_str(), "");
 }
 
@@ -138,7 +152,7 @@ fn test_ext_round_trip() {
 /// A valid UUID for the hand-written wire-JSON fixtures below (the
 /// validating `MessageId` deserialize rejects non-UUID ids).
 const FIXTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
-const FIXTURE_MESH: &str = "2UXAThUkdBAbiJNXvCt4YeMGQ9myFg7gJJZSr3pG3MAGzUwWmmV7D2NgrWBn1";
+const FIXTURE_MESH: &str = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqay2YxkRe";
 
 #[test]
 fn test_unknown_ext_fields_ignored() {
@@ -592,4 +606,65 @@ mod prop {
             }
         }
     }
+}
+
+#[test]
+fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
+    let identity = super::identity::Identity::generate();
+    let msg = Message::new_app(
+        &sid(),
+        &nick("word-word"),
+        AppFrameParams {
+            tag: AppTag::from("app_msg"),
+            to: None,
+            corr: None,
+            body: MessageBody::from("Hello, world!"),
+        },
+    )
+    .signed(&identity);
+    let frame = msg.serialize().unwrap();
+
+    let first = super::wire_with_resend_nonce(&frame, 7);
+    let second = super::wire_with_resend_nonce(&frame, 8);
+
+    assert_ne!(first, second, "each nonce gives the payload a new name");
+    assert_ne!(first, frame);
+    assert_eq!(first.len(), frame.len() + super::RESEND_TRAILER_LEN);
+    let (parsed, nonce) = Message::parse_wire(&first).unwrap();
+    assert_eq!(nonce, Some(7));
+    assert_eq!(parsed.id, msg.id);
+    assert!(
+        parsed.verify_signature_with(&parsed.canonical_bytes()),
+        "the signature does not cover the trailer"
+    );
+    let (plain, no_nonce) = Message::parse_wire(&frame).unwrap();
+    assert_eq!(no_nonce, None);
+    assert_eq!(plain.id, msg.id);
+}
+
+#[test]
+fn a_reader_without_the_trailer_fails_closed_on_a_resend() {
+    let msg = Message::new_alive(&sid(), &nick("word-word"));
+    let frame = msg.serialize().unwrap();
+    let wire = super::wire_with_resend_nonce(&frame, 1);
+    assert!(
+        Message::parse(&wire).is_err(),
+        "Message::parse must reject the trailer, not skip it"
+    );
+}
+
+#[test]
+fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
+    let msg = Message::new_alive(&sid(), &nick("word-word"));
+    let mut frame = msg.serialize().unwrap();
+    // JSON whitespace pads the frame up to the cap.
+    frame.resize(habilis_network_util::consts::MAX_MESSAGE_SIZE, b' ');
+    let wire = super::wire_with_resend_nonce(&frame, u64::MAX);
+    assert_eq!(
+        wire.len(),
+        habilis_network_util::consts::MAX_MESSAGE_SIZE + super::RESEND_TRAILER_LEN
+    );
+    let (parsed, nonce) = Message::parse_wire(&wire).unwrap();
+    assert_eq!(nonce, Some(u64::MAX));
+    assert_eq!(parsed.id, msg.id);
 }

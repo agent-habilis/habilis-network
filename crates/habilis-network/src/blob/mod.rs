@@ -11,6 +11,11 @@
 //! consumer is the application's job (it is a short string, so a single
 //! [`crate::gossip::send_app`] frame carries it).
 //!
+//! A mesh with only the gossip rung does not carry blobs. The producer and the consumer each
+//! bind an endpoint of their own with no custom transport, and the gossip transport lives on
+//! the member endpoint alone, so a fetch needs an IP path (or the relay, when the mesh allows
+//! it for payload).
+//!
 //! Raw bytes, not text: unlike a frame body, nothing here is UTF-8-constrained or
 //! re-encoded, and the transfer streams in bounded chunks so memory stays flat
 //! regardless of size.
@@ -162,6 +167,49 @@ mod tests {
             "habilis-network-blob-spool-{}",
             rand::rng().next_u64()
         ))
+    }
+
+    /// A tripwire on the source, not a test of the endpoint: `Endpoint::addr` does not list a
+    /// custom transport, so nothing here can read what an endpoint holds. The gossip transport
+    /// lives on the member endpoint, and `TransportHandles::default()` is what says that an
+    /// endpoint gets no handle. The blob server passes it to `build_endpoint`, and the consumer
+    /// goes through `build_peer_endpoint`, which passes the same. Neither can hold a gossip
+    /// handle, so a blob fetch cannot ride the gossip rung. A change to either call fails here
+    /// and asks for a new decision.
+    #[test]
+    fn a_blob_endpoint_is_built_with_no_custom_transport() {
+        let defaults = crate::lookup::TransportHandles::default();
+        assert!(defaults.gossip.is_none() && defaults.webrtc.is_none());
+
+        let server = include_str!("produce.rs");
+        let start = server
+            .find("async fn start_with_limits")
+            .expect("the server builder");
+        let built = &server[start..];
+        let call = &built[built.find("build_endpoint(").expect("the server builds")..];
+        let args: String = call[..call.find(".await?").expect("the call ends")]
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(
+            args.ends_with("crate::lookup::TransportHandles::default(),)"),
+            "the blob server must pass no transport handle: {args}"
+        );
+
+        let consumer = include_str!("consume.rs");
+        assert!(
+            consumer.contains("build_peer_endpoint(&ticket.lookups)"),
+            "the blob consumer must build its endpoint with the peer builder"
+        );
+        let lookup = include_str!("../lookup/mod.rs");
+        let peer = &lookup[lookup
+            .find("pub async fn build_peer_endpoint")
+            .expect("the peer builder")..];
+        assert!(
+            peer[..peer.find("\n}").expect("the builder ends")]
+                .contains("TransportHandles::default()"),
+            "the peer builder must pass no handle"
+        );
     }
 
     /// Start a loopback producer serving `payload`, fetch it back over a second

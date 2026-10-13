@@ -199,6 +199,13 @@ impl Member {
             .expect("merged");
     }
 
+    async fn endpoint_id(&self) -> iroh::EndpointId {
+        self.membership
+            .request(|reply| Request::EndpointId { reply })
+            .await
+            .expect("the loop answers")
+    }
+
     async fn block_udp(&self, blocked: bool) {
         self.membership
             .request(|reply| Request::BlockUdp { blocked, reply })
@@ -246,6 +253,25 @@ async fn linked_pair(relay: &RelayUrl, transport: Vec<Transport>) -> (Member, Me
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     (alice, bob)
+}
+
+/// [`linked_pair`] again, until bob's endpoint id has the order given: the ids are random, and
+/// only the lower id has a path watcher, so a test of the race names the order it is about.
+async fn linked_pair_ordered(
+    relay: &RelayUrl,
+    transport: Vec<Transport>,
+    bob_is_higher: bool,
+) -> (Member, Member) {
+    for _ in 0..20 {
+        let (alice, bob) = linked_pair(relay, transport.clone()).await;
+        if (alice.endpoint_id().await < bob.endpoint_id().await) == bob_is_higher {
+            return (alice, bob);
+        }
+        let _ = alice.membership.node.leave().await;
+        let _ = bob.membership.node.leave().await;
+        log_buffer().lock().expect("no poison").clear();
+    }
+    panic!("no draw of ids gave bob the order (higher: {bob_is_higher}) in 20 tries");
 }
 
 /// Broadcast, a directed message and a state merge, each checked on the far
@@ -362,13 +388,34 @@ async fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
 /// Payload flows in every stage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pair_races_again_when_udp_drops_and_detaches_when_it_returns() {
+    pair_races_again_when_udp_drops(None).await;
+}
+
+/// The same cycle with the order of the ids fixed: bob sends the one directed message, so only
+/// bob holds a pooled connection, and the lower id has the only path watcher. With bob as the
+/// higher id nobody watches, and the engine must see the loss from the admission table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pair_races_again_when_udp_drops_and_bob_has_the_higher_id() {
+    pair_races_again_when_udp_drops(Some(true)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pair_races_again_when_udp_drops_and_bob_has_the_lower_id() {
+    pair_races_again_when_udp_drops(Some(false)).await;
+}
+
+async fn pair_races_again_when_udp_drops(bob_is_higher: Option<bool>) {
     let _serial = serial().lock().await;
     init_logging();
     let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
         .await
         .expect("local relay");
 
-    let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::Udp, Transport::WebRtc]).await;
+    let transport = vec![Transport::Udp, Transport::WebRtc];
+    let (mut alice, mut bob) = match bob_is_higher {
+        Some(higher) => linked_pair_ordered(&relay, transport, higher).await,
+        None => linked_pair(&relay, transport).await,
+    };
     every_lane_carries(&mut alice, &mut bob).await;
     let attached = || logs().matches("webrtc session attached (offerer)").count();
     let before = attached();
