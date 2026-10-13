@@ -55,8 +55,8 @@ pub(crate) struct Registered {
 }
 
 /// The content identity of a file being snapshotted into the store —
-/// [`BlobStore::snapshot`]'s content-addressing key plus the content group
-/// that offloads it, which becomes one of the blob's owners.
+/// [`BlobStore::snapshot`]'s content-addressing key plus the content group it
+/// is offloaded under, which becomes one of the blob's owners.
 pub(crate) struct ContentMeta {
     pub(crate) sha256: [u8; HASH_LEN],
     pub(crate) size: u64,
@@ -178,7 +178,8 @@ impl BlobStore {
         }
     }
 
-    /// Unlink oldest-first until the store is within `MAX_BLOB_STORE_BYTES`.
+    /// Unlink the least recently registered or claimed blob first, until the
+    /// store is within `MAX_BLOB_STORE_BYTES`.
     fn evict_to_budget(&mut self) {
         while self.total_bytes > MAX_BLOB_STORE_BYTES {
             let Some(oldest) = self
