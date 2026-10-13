@@ -126,6 +126,16 @@ pub(super) async fn maybe_cohost(
     if state.claims_are_held() {
         return;
     }
+    // A loopback holder above the first rung yields it when a lower rung answers as our mesh. The
+    // public shed is on a timer that backs off; here the question is positive and cheap, so it
+    // is asked on every heal tick, and nothing is asked of a holder on the first rung.
+    if let Some(held) = current.as_ref()
+        && !arm.params.bind_ports.is_empty()
+        && beacon::lower_rung_is_live(arm.params, held, ctx.endpoint.id()).await
+    {
+        shed_beacon(state, arm.params, current);
+        return;
+    }
     if may_cohost(arm.policy, state.meshed, arm.started) {
         // A member that keeps finding the rival probes less often; the reclaim window is not held back.
         let would_probe = arm.params.bind_ports.is_empty() && probes_before_claim(arm.policy);
@@ -243,25 +253,20 @@ pub(super) async fn maybe_reclaim(
     }
 }
 
-/// Tests only: shed the beacon now, if a test asked for it (`Request::ShedBeacon`). It does what
-/// a rival re-check shed does after the decision: the endpoint is closed, the address of the
-/// shed beacon leaves the book, and the reclaim window opens, so that the next walk reads
-/// whoever holds the rung.
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-pub(super) fn shed_on_request(
+/// Let go of the beacon at once and read the ladder again: the endpoint is closed, the address of
+/// the shed beacon leaves the book, and the reclaim window opens, so that the next walk reads
+/// whoever holds a rung (and claims the lowest free one when nobody does).
+fn shed_beacon(
     state: &mut EventLoopState,
     params: &beacon::RendezvousParams,
     rendezvous: &mut Option<beacon::Rendezvous>,
 ) {
-    if !std::mem::take(&mut state.shed_requested) {
-        return;
-    }
     let Some(held) = rendezvous.take() else {
         return;
     };
     tracing::info!(
         target: "habilis_network::gossip",
-        "beacon shed at the request of a test"
+        "beacon shed: a lower rung of the ladder answers as our mesh"
     );
     state.beacon_closing = Some(held.shed_then());
     state.next_rival_recheck = None;
@@ -271,6 +276,19 @@ pub(super) fn shed_on_request(
     state.rendezvous_linked = false;
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
+}
+
+/// Tests only: shed the beacon now, if a test asked for it (`Request::ShedBeacon`), as the check
+/// of the lower rungs does after its decision.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(super) fn shed_on_request(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    rendezvous: &mut Option<beacon::Rendezvous>,
+) {
+    if std::mem::take(&mut state.shed_requested) {
+        shed_beacon(state, params, rendezvous);
+    }
 }
 
 /// Whether a reclaim tick that did not claim should re-graft.
@@ -306,8 +324,12 @@ fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool
 ///
 /// Still excluded: `Eager` (the mesh origin owns the identity from t=0, and
 /// shedding it would churn the only beacon a cold mesh has), `Never` (claims
-/// nothing), and every loopback mesh — a port ladder arbitrates atomically at
-/// bind time (`AddrInUse` + identity probe), so no split exists to fix there.
+/// nothing), and every loopback mesh. A port ladder arbitrates atomically at
+/// bind time, but the identity probe that follows a failed bind can read a
+/// loaded host wrongly, and two holders then serve one mesh. The loopback
+/// repair is not this timer: a holder above the first rung asks, on every heal
+/// tick, whether a lower rung answers as our mesh, and yields on a positive
+/// answer only (`maybe_cohost`, `beacon::lower_rung_is_live`).
 pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
     matches!(policy, CoHostPolicy::EagerProbed | CoHostPolicy::Deferred) && public
 }
@@ -999,6 +1021,219 @@ mod tests {
 
         assert!(holds_nothing);
         assert!(state.rendezvous_comeback_until.is_none());
+    }
+
+    /// The state of one holder on a two-rung ladder, and the means to run a heal tick on it. The
+    /// first rung is taken by a beacon of another mesh while this member walks, so that it binds
+    /// the second; the first rung is then free, or served by another member of this mesh.
+    struct HolderOnTheSecondRung {
+        params: crate::beacon::RendezvousParams,
+        endpoint: iroh::Endpoint,
+        rendezvous: Option<crate::beacon::Rendezvous>,
+        probe: Option<crate::beacon::RivalProbe>,
+        first_port: u16,
+        state: crate::daemon::state::EventLoopState,
+    }
+
+    impl HolderOnTheSecondRung {
+        async fn new() -> Self {
+            let free_port = || {
+                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .and_then(|socket| socket.local_addr())
+                    .expect("a free loopback port")
+                    .port()
+            };
+            let (first_port, second_port) = (free_port(), free_port());
+            let secret = iroh::SecretKey::generate();
+            let params = crate::beacon::RendezvousParams {
+                topic_id: iroh_gossip::proto::TopicId::from_bytes([8u8; 32]),
+                id: secret.public(),
+                secret,
+                bind_ports: vec![first_port, second_port],
+                lookups: crate::protocol::mesh::LookupOpts::loopback(),
+                relay_transport: false,
+                bootstrap_relay: None,
+                rung_tx: tokio::sync::watch::channel(None).0,
+            };
+            // A beacon of another mesh holds the first rung: this member reads it as foreign and
+            // binds the second.
+            let other_secret = iroh::SecretKey::generate();
+            let other = crate::beacon::RendezvousParams {
+                topic_id: iroh_gossip::proto::TopicId::from_bytes([9u8; 32]),
+                id: other_secret.public(),
+                secret: other_secret,
+                bind_ports: vec![first_port],
+                lookups: crate::protocol::mesh::LookupOpts::loopback(),
+                relay_transport: false,
+                bootstrap_relay: None,
+                rung_tx: tokio::sync::watch::channel(None).0,
+            };
+            let other_endpoint = loopback_endpoint().await;
+            let other_book = crate::lookup::address_book(&other_endpoint);
+            let mut other_beacon = None;
+            let mut other_probe = None;
+            assert!(
+                crate::beacon::ensure(
+                    &other,
+                    &other_endpoint,
+                    &other_book,
+                    &mut other_beacon,
+                    false,
+                    &mut other_probe,
+                )
+                .await,
+                "the other mesh claims the first rung"
+            );
+
+            let endpoint = loopback_endpoint().await;
+            let book = crate::lookup::address_book(&endpoint);
+            let mut rendezvous = None;
+            let mut probe = None;
+            assert!(
+                crate::beacon::ensure(
+                    &params,
+                    &endpoint,
+                    &book,
+                    &mut rendezvous,
+                    false,
+                    &mut probe
+                )
+                .await,
+                "the member walks past the foreign rung and binds the second"
+            );
+            if let Some(held) = other_beacon.take() {
+                held.shed_and_wait().await;
+            }
+            other_endpoint.close().await;
+            let mut state = crate::testing::fresh_state();
+            state.meshed = true;
+            Self {
+                params,
+                endpoint,
+                rendezvous,
+                probe,
+                first_port,
+                state,
+            }
+        }
+
+        /// A member of this mesh takes the first rung, which the foreign beacon left free.
+        async fn another_member_takes_the_first_rung(
+            &self,
+        ) -> (iroh::Endpoint, crate::beacon::Rendezvous) {
+            let member = loopback_endpoint().await;
+            let book = crate::lookup::address_book(&member);
+            let mut beacon = None;
+            let mut probe = None;
+            assert!(
+                crate::beacon::ensure(&self.params, &member, &book, &mut beacon, false, &mut probe)
+                    .await,
+                "a member of the mesh binds the first rung"
+            );
+            (member, beacon.expect("it holds the beacon"))
+        }
+
+        /// One heal tick of this holder.
+        async fn heal_tick(&mut self) {
+            use iroh_gossip::net::Gossip;
+
+            use super::{CohostArm, maybe_cohost};
+            use crate::daemon::ctx::HandlerCtx;
+            use crate::gossip::event::SilentSink;
+            use crate::protocol::MeshId;
+            use crate::protocol::identity::{Identity, encode_pubkey};
+            use crate::testing::nick;
+            use crate::transport::MeshSender;
+            use crate::util::clock::Instant;
+
+            let gossip = Gossip::builder().spawn(self.endpoint.clone());
+            let (gossip_sender, _receiver) = gossip
+                .subscribe(self.params.topic_id, Vec::new())
+                .await
+                .expect("subscribe without a bootstrap")
+                .split();
+            let sender = MeshSender::new(gossip_sender);
+            let mesh = MeshId::from("test");
+            let author = nick("holder");
+            let identity = Identity::generate();
+            let our_pubkey = encode_pubkey(&identity.public());
+            let sink = SilentSink;
+            let ctx = HandlerCtx {
+                sender: &sender,
+                endpoint: &self.endpoint,
+                mesh: &mesh,
+                author: &author,
+                identity: &identity,
+                our_pubkey: &our_pubkey,
+                max_peers: 16,
+                rendezvous_id: self.params.id,
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let arm = CohostArm {
+                policy: CoHostPolicy::Deferred,
+                params: &self.params,
+                started: Instant::now(),
+            };
+            maybe_cohost(
+                &mut self.state,
+                &ctx,
+                &arm,
+                &mut self.rendezvous,
+                &mut self.probe,
+            )
+            .await;
+        }
+
+        async fn close(mut self) {
+            if let Some(held) = self.rendezvous.take() {
+                held.shed_and_wait().await;
+            }
+            self.endpoint.close().await;
+        }
+    }
+
+    /// A holder on a rung above a live one yields it. A split of two beacons on one ladder came
+    /// from a rung probe that timed out, and nothing on a loopback ladder ever repaired it: the
+    /// holder on the higher rung stayed for ever.
+    #[tokio::test]
+    async fn a_holder_on_a_higher_rung_sheds_when_a_lower_rung_answers_as_our_mesh() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+        let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
+
+        holder.heal_tick().await;
+
+        let shed = holder.rendezvous.is_none();
+        holder.close().await;
+        lower_beacon.shed_and_wait().await;
+        lower_endpoint.close().await;
+        assert!(
+            shed,
+            "a member of our mesh serves the first rung, and the holder on the second kept its bind"
+        );
+    }
+
+    /// Silence is not an answer. A lower rung that nobody serves, or whose listener says nothing,
+    /// never makes the holder shed: a wrong reading of a loaded host would otherwise take the
+    /// beacon away from every member that joined through it.
+    #[tokio::test]
+    async fn a_lower_rung_that_does_not_answer_never_makes_the_holder_shed() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+        for _ in 0..2 {
+            holder.heal_tick().await;
+            assert!(holder.rendezvous.is_some(), "the first rung is free");
+        }
+        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, holder.first_port))
+            .expect("the first rung, taken by a socket that says nothing");
+        for _ in 0..2 {
+            holder.heal_tick().await;
+            assert!(
+                holder.rendezvous.is_some(),
+                "the first rung is silent: nothing answers, and silence is no reading"
+            );
+        }
+        drop(silent);
+        holder.close().await;
     }
 
     /// The book kept the address of every beacon that this process held under the id, so a dial to

@@ -188,6 +188,27 @@ impl Rendezvous {
             })
     }
 
+    /// The index of the rung in `ladder` that this beacon is bound on: `0` is the first rung that a
+    /// joiner tries. `None` when it is bound on none of them (a public beacon).
+    fn rung_in(&self, ladder: &[u16]) -> Option<usize> {
+        // A browser binds no socket, so it holds no rung of a loopback ladder.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (self, ladder);
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let bound: Vec<u16> = self
+                .endpoint
+                .bound_sockets()
+                .iter()
+                .map(SocketAddr::port)
+                .collect();
+            ladder.iter().position(|port| bound.contains(port))
+        }
+    }
+
     /// A beacon holding `endpoint` whose answerer is `lane`, for a test that
     /// needs a held beacon without a claim.
     #[cfg(test)]
@@ -629,6 +650,57 @@ fn rung_probes_are_blind(member: EndpointId) -> bool {
         let _ = member;
         false
     }
+}
+
+/// Whether a rung **below** the one that `held` is bound on answers as the beacon of our own mesh.
+///
+/// Joiners walk the ladder from its first rung, so the holder on the lowest live rung is the one
+/// they reach, and a holder above it is a second hub for the same mesh. It yields it, and the
+/// answer that makes it yield is positive only: a rung that nobody serves, that refuses, or that
+/// says nothing is *unknown*, and a holder never gives up its bind on an unknown. The claim walk
+/// reads a silence as "foreign" and binds, because it must decide; this check can wait for the
+/// next heal tick, so it need not.
+///
+/// One attempt per rung, capped at `RENDEZVOUS_PROBE_SECS`, from a throwaway endpoint (see
+/// [`rung_serves_our_mesh`] for why it must not be the member's own). A rung that nobody holds
+/// refuses at once. Inline on the heal tick, like the claim walk, and only for a holder that is
+/// above the first rung.
+pub(crate) async fn lower_rung_is_live(
+    params: &RendezvousParams,
+    held: &Rendezvous,
+    node: EndpointId,
+) -> bool {
+    let Some(own) = held.rung_in(&params.bind_ports).filter(|rung| *rung > 0) else {
+        return false;
+    };
+    let lookups = beacon_lookups(params);
+    let prober = match build_endpoint(
+        &lookups,
+        None,
+        None,
+        Vec::new(),
+        TransportHandles::default(),
+    )
+    .await
+    {
+        Ok(prober) => prober,
+        Err(error) => {
+            tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), %error, "lower rung check: probe endpoint build failed; next tick retries");
+            return false;
+        }
+    };
+    let mut live = false;
+    for &port in params.bind_ports.iter().take(own) {
+        let addr = EndpointAddr::new(params.id)
+            .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        if probe_connect(&prober, addr, Duration::from_secs(RENDEZVOUS_PROBE_SECS)).await {
+            tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "a lower rung answers as the beacon of our mesh");
+            live = true;
+            break;
+        }
+    }
+    prober.close().await;
+    live
 }
 
 /// The beacon mirrors the peer's *address-lookups* (so a joiner

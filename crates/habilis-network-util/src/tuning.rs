@@ -620,16 +620,17 @@ pub const RENDEZVOUS_PROBE_SECS: u64 = 1;
 /// answer is believed.
 ///
 /// One shot is not enough, and the reason is asymmetric: a false
-/// *negative* here is not a slow retry, it is a **permanent** split.
+/// *negative* here is not a slow retry, it is a second beacon.
 /// `probe_connect` reports a rejected dial and a timed-out dial as the
 /// same `false`, and `beacon::build_rendezvous_endpoint` reads that
 /// `false` as a positive finding of "foreign" — which authorizes it to
-/// bind a rung of its own. Two beacons then serve one mesh forever,
-/// because the loopback path deliberately has no rival-recheck repair
-/// (`daemon::beacon_arm::rival_recheck_applies` is `false` whenever
-/// `bind_ports` is non-empty, on the premise that bind-time arbitration
-/// is atomic — true of the bind, not of the bind *plus a network probe
-/// with a timeout*).
+/// bind a rung of its own. Two beacons then serve one mesh, until the
+/// holder on the higher rung reads a positive answer from a lower one and
+/// yields it: a loopback holder asks on every heal tick
+/// (`beacon::lower_rung_is_live`), and acts on a positive answer only. A
+/// probe that read the host wrongly once is repaired within a tick; one that
+/// keeps reading it wrongly keeps the second beacon for as long as the host
+/// is slow.
 ///
 /// Retrying rather than lengthening the single window is the cheaper
 /// half of the fix: same worst case, but it also covers a transient
