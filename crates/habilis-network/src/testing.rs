@@ -65,42 +65,68 @@ pub(crate) fn silent_relay_rung() -> (std::net::TcpListener, iroh::RelayUrl) {
     (silent, rung)
 }
 
+/// The logs that a test captured from its own thread, see [`LogCapture::start`].
+#[cfg(feature = "multihop")]
+#[derive(Clone, Default)]
+pub(crate) struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[cfg(feature = "multihop")]
+impl LogCapture {
+    /// Capture every event up to `level` that the calling thread logs, until the guard drops.
+    pub(crate) fn start(level: tracing::Level) -> (Self, tracing::subscriber::DefaultGuard) {
+        // While one dispatcher is the only one registered, `tracing` answers the interest of a
+        // callsite from the default of the thread that hits it first. A parallel test thread
+        // with no default of its own then caches "never" on a callsite that this capture
+        // needs, and the event is dropped. A second dispatcher, kept for the whole process,
+        // makes `tracing` ask every registered dispatcher instead.
+        static SECOND_DISPATCHER: std::sync::OnceLock<tracing::Dispatch> =
+            std::sync::OnceLock::new();
+        SECOND_DISPATCHER
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+        let capture = Self::default();
+        let writer = capture.clone();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(level)
+                .finish(),
+        );
+        (capture, guard)
+    }
+
+    /// Everything that was captured so far.
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+#[cfg(feature = "multihop")]
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Run `body` on a fresh current-thread runtime, drop the runtime as
 /// returning from `main` does, and return every ERROR logged meanwhile. That
 /// drop is where iroh logs `Endpoint dropped without calling` for an endpoint
 /// a task still held open.
 #[cfg(feature = "host")]
 pub(crate) fn errors_through_runtime_drop(body: impl Future<Output = ()>) -> String {
-    #[derive(Clone, Default)]
-    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("log buffer").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let logs = Captured::default();
-    let writer = logs.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .with_max_level(tracing::Level::ERROR)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (logs, _guard) = LogCapture::start(tracing::Level::ERROR);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a runtime");
     runtime.block_on(body);
     drop(runtime);
-    let logs = logs.0.lock().expect("log buffer");
-    String::from_utf8_lossy(&logs).into_owned()
+    logs.text()
 }
 
 /// A real endpoint with a `WebRTC` handle, a gossip sender and everything a [`HandlerCtx`] borrows,
@@ -193,5 +219,46 @@ impl LaneNode {
             nick("bob"),
             &crate::protocol::MessageId::random(),
         )
+    }
+}
+
+/// A capture must see an event even when a thread with no subscriber of its own hit the same
+/// callsite first. Run it alone in its process (`--exact`): then the capture is the only
+/// dispatcher there is, the case that `tracing` answers from the calling thread's default alone.
+#[cfg(feature = "multihop")]
+mod log_capture_tests {
+    use super::LogCapture;
+
+    fn first_event() {
+        tracing::debug!(target: "log-capture-test", "first event");
+    }
+
+    fn second_event() {
+        tracing::debug!(target: "log-capture-test", "second event");
+    }
+
+    fn third_event() {
+        tracing::debug!(target: "log-capture-test", "third event");
+    }
+
+    #[test]
+    fn an_event_that_a_thread_without_a_subscriber_hit_first_still_reaches_the_capture() {
+        let (logs, _guard) = LogCapture::start(tracing::Level::DEBUG);
+        std::thread::spawn(|| {
+            first_event();
+            second_event();
+            third_event();
+        })
+        .join()
+        .expect("the other thread runs");
+        first_event();
+        second_event();
+        third_event();
+        let text = logs.text();
+        let seen = ["first event", "second event", "third event"]
+            .iter()
+            .filter(|line| text.contains(**line))
+            .count();
+        assert_eq!(seen, 3, "the capture saw {seen} of 3 events: {text}");
     }
 }

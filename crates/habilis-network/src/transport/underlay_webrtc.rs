@@ -628,31 +628,9 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("log buffer").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn the_gate_refuses_a_signal_from_an_endpoint_that_is_not_a_neighbor() {
-        let logs = Captured::default();
-        let writer = logs.clone();
-        let _log_guard = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .with_max_level(tracing::Level::DEBUG)
-                .finish(),
-        );
+        let (logs, _log_guard) = crate::testing::LogCapture::start(tracing::Level::DEBUG);
         let server = loopback_endpoint().await;
         let allowed = Allowed::default();
         let acceptor = WebRtcSignalAcceptor::new(
@@ -679,7 +657,7 @@ mod tests {
             .await
             .expect("the gate closes the connection of a stranger");
         assert_eq!(closed_with(&reason), Some(9), "{reason:?}");
-        let logged = String::from_utf8_lossy(&logs.0.lock().expect("log buffer")).into_owned();
+        let logged = logs.text();
         assert!(
             logged.contains("underlay signal refused") && logged.contains(&client.id().to_string()),
             "the refusal names the peer and the reason: {logged}"
