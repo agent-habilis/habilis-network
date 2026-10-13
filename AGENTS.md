@@ -245,6 +245,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `TicketSecret` | `habilis-network-protocol/src/crypto.rs` | The bearer secret of a ticket, and the token that a consumer presents. Wiped on drop. |
 | `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup and anti-entropy key of a message. |
 | `AuthorKey` | `habilis-network-protocol/src/author_key.rs` | The public key of the author of a message. |
+| `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The hash of a message that `prev` and `parents` link to. |
 | `BlobDigest` | `habilis-network/src/blob/mod.rs` | The SHA-256 of a blob. |
 | `StreamId`, `StreamSecret` | `habilis-network-stream/src/hash.rs` | The public id and the bearer secret of a stream. |
 | `PlayerHandle`, `Frame` | `habilis-network-netplay/src/handle.rs`, `frame.rs` | A roster slot and a simulation frame. |
@@ -252,4 +253,4 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `LinkMetric` | `habilis-network-iroh-multihop-transport/src/metric.rs` | The cost of a link. |
 | `ChunkHash`, `Root` | `habilis-network-chunks/src/lib.rs` | A chunk hash and the root of a chunk tree. |
 
-**Gap.** `ContentHash` (the hash of a message that `prev` and `parents` link to) and `UnixSecs` (a Unix time in seconds) are not in yet. Add each row to the table above in the last commit of the branch.
+**Gap.** `UnixSecs` (a Unix time in seconds) is not in yet. Add its row to the table above in the last commit of the branch.
