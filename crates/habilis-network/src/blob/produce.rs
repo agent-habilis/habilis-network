@@ -343,6 +343,7 @@ async fn serve_stream(
     let mut token_bytes = [0u8; SECRET_LEN];
     token_bytes.copy_from_slice(&request[HASH_LEN..]);
     let token = TicketSecret::from_bytes(token_bytes);
+    zeroize::Zeroize::zeroize(&mut request);
 
     // Resolve under the lock, then release it before streaming from disk.
     let served = {
