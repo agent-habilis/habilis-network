@@ -102,6 +102,15 @@ impl fmt::Debug for StreamSecret {
 }
 
 /// A decoded stream hash.
+///
+/// The id and the secret have the same kind of bytes and different types, so a
+/// swap does not compile:
+///
+/// ```compile_fail,E0308
+/// fn swap(mut hash: habilis_network_stream::StreamHash) {
+///     hash.id = hash.secret;
+/// }
+/// ```
 #[derive(Clone)]
 pub struct StreamHash {
     /// The producer's endpoint: its id, its relay, and its direct addresses.

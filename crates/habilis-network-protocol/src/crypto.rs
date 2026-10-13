@@ -235,6 +235,16 @@ pub(crate) fn password_verifier(key: &[u8; 32]) -> [u8; PASSWORD_VERIFIER_LEN] {
 /// ticket, so `Debug` prints no byte, and the type has no `PartialEq`: compare
 /// two with [`ct_eq`] on [`Self::as_bytes`], which does not stop at the first
 /// byte that differs.
+///
+/// A raw array is not a secret, so a swap with another 32-byte value does not
+/// compile:
+///
+/// ```compile_fail,E0308
+/// use habilis_network_protocol::TicketAuth;
+///
+/// let raw = [0u8; 32];
+/// let _ = TicketAuth::blob(&raw, None);
+/// ```
 #[derive(Clone)]
 pub struct BlobSecret([u8; 32]);
 
