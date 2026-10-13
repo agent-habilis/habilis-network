@@ -338,6 +338,9 @@ Peers then see an immediate neighbor-down event instead of an idle timeout.
 
 A message is compact one-line JSON.
 The envelope carries a version, an id, a kind, the mesh id, the author nickname, a timestamp, the body, the author public key, and a detached Ed25519 signature.
+On the wire these are two text fields, `pubkey` and `sig`.
+In memory they are one optional pair, `Message::signer`, so a message has both or neither.
+The parser rejects a key with no signature and a signature with no key.
 The signature covers the canonical form of the message with the key and signature fields empty.
 Unknown keys must be ignored, which leaves room for extension.
 
@@ -671,6 +674,7 @@ In this repository:
 - `crates/habilis-network/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
 - `FORKED.md` — fork provenance and the pin contract.
 - `crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
+- `AGENTS.md` — the concept glossary, the layer invariants, the logging pins, and the rules for newtypes.
 - Per-crate READMEs under `crates/*/README.md`.
 
-Referenced from code but kept upstream: `AGENTS.md` (concept glossary), `docs/mesh-hash.md`, and `docs/history-integrity.md`.
+Referenced from code but kept upstream: `docs/mesh-hash.md` and `docs/history-integrity.md`.
