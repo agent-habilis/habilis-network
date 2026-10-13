@@ -141,7 +141,11 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
         let Some(tag) = frame.message.kind.app_tag().map(AppTag::as_str) else {
             return false;
         };
-        let pubkey = frame.message.pubkey.clone();
+        let pubkey = frame
+            .message
+            .author_key()
+            .map(|key| key.to_string())
+            .unwrap_or_default();
 
         // Learn the pubkey -> nickname pairing from any frame. The signed
         // pubkey is the identity; the nickname is only how `send_app`
