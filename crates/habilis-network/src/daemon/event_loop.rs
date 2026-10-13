@@ -482,6 +482,12 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
     if let Some(handle) = state.multihop.as_ref() {
         handle.expire_stale();
     }
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    {
+        if state.linkstate_held {
+            return;
+        }
+    }
     if !state.meshed || state.multihop.is_none() {
         return;
     }

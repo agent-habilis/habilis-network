@@ -140,6 +140,15 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// Hold this member's link-vector back (`true`), which also withdraws its own vector from its
+    /// routing table, or let it go (`false`), which advertises at once.
+    async fn hold_link_state(&self, hold: bool) {
+        self.membership
+            .request(|reply| Request::HoldLinkState { hold, reply })
+            .await
+            .expect("the loop answers");
+    }
+
     /// Whether this member's multihop topology has a route to `peer` now.
     async fn has_route(&self, peer: &str) -> bool {
         self.membership
@@ -269,14 +278,12 @@ async fn a_node_steps_down_the_ladder_and_climbs_back() {
 /// first link-state comes 15 s after a member starts). Nothing then dials the
 /// pair, since it already has a session and so makes no offer.
 ///
-/// The test forces the order instead of waiting for it: it attaches the session
-/// at once with `Request::OfferSession`, then blocks `WebRTC`, all within the
-/// first seconds. It needs the mesh to be young. Right before the block it asks
-/// whether alice has a route to bob, and again after the loss is observed, since
-/// a route can appear in between. If she has one, the order was not forced, and
-/// the test skips: it logs the reason and returns. A skip prints only under
-/// `--nocapture` and reads as a pass in `cargo test --workspace`, so only the
-/// manual loop (count the passes and the skips) proves the fix.
+/// The test forces the order by construction: alice's link-vector is held back and
+/// withdrawn from her own table (`Request::HoldLinkState`), so that she has no route for as
+/// long as the hold lasts, however old the mesh is. It attaches the session with
+/// `Request::OfferSession`, blocks `WebRTC`, and lets the vector go only after the loss
+/// is observed. The two asserts that no route exists hold by construction: a failure of
+/// either is a fault of the hook, not a reason to skip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     init_logging();
@@ -292,6 +299,11 @@ async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     );
     alice.expect_rung("bob", "ip", "nothing blocked").await;
 
+    alice.hold_link_state(true).await;
+    assert!(
+        !alice.has_route("bob").await,
+        "alice has a route to bob although her link-vector is withdrawn"
+    );
     alice.block_ip_to(bob.ports()).await;
     bob.block_ip_to(alice.ports()).await;
     // The offer decision reads the selected path, which is still IP for a moment
@@ -311,13 +323,6 @@ async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
         .expect_rung("bob", "webrtc", "IP blocked, session offered")
         .await;
 
-    if alice.has_route("bob").await {
-        eprintln!(
-            "SKIPPED: alice has a route to bob before the block, so the order was not \
-             forced and a pass would not show the fix. Run it again on a quieter host."
-        );
-        return;
-    }
     alice.block_rung(Rung::WebRtc, true).await;
     let lost_at = Instant::now();
     while !matches!(alice.rung_to("bob").await, Some("relay" | "multihop")) {
@@ -328,13 +333,12 @@ async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     tokio::time::sleep(Duration::from_secs(1)).await;
-    if alice.has_route("bob").await {
-        eprintln!(
-            "SKIPPED: alice has a route to bob after the loss, so the order was not \
-             forced and a pass would not show the fix. Run it again on a quieter host."
-        );
-        return;
-    }
+    assert!(
+        !alice.has_route("bob").await,
+        "alice has a route to bob after the loss although her link-vector is withdrawn"
+    );
+    // The first link-vector comes now, after the loss: the order that failed one run in twenty.
+    alice.hold_link_state(false).await;
     alice
         .expect_rung("bob", "multihop", "WebRTC lost before any route")
         .await;

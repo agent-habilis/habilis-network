@@ -269,6 +269,21 @@ pub enum Request {
         peer: String,
         reply: oneshot::Sender<bool>,
     },
+    /// Tests only: hold this node's link-vector back, or let it go. Holding withdraws the vector
+    /// that this node advertised from its own routing table, so that it has no outgoing edge and
+    /// no route, and no tick or link event advertises one until it is let go. Letting go
+    /// advertises at once. The others keep the last vector that they heard for up to three
+    /// advertisement intervals, so the hold is for seconds: a test uses it to force the order
+    /// "a path is lost before any route exists", where it would otherwise wait for it.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    HoldLinkState {
+        hold: bool,
+        reply: oneshot::Sender<()>,
+    },
     /// Tests only: the multihop view of this node as one line: its edges, and for each
     /// member the open paths of the writer connection toward its underlay, or that there
     /// is none. A writer toward a member exists only if this node sent cells to it: one
@@ -679,6 +694,23 @@ impl NodeDriver for MembershipApp {
                     };
                     let _ = reply.send(rung);
                 });
+                false
+            }
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            Request::HoldLinkState { hold, reply } => {
+                state.linkstate_held = hold;
+                state.last_advertised = None;
+                if hold && let Some(handle) = state.multihop() {
+                    let _ = handle.remove_origin(handle.app_id());
+                }
+                if !hold {
+                    crate::daemon::event_loop::linkstate_arm(state, ctx).await;
+                }
+                let _ = reply.send(());
                 false
             }
             #[cfg(all(

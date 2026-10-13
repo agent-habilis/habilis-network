@@ -490,6 +490,14 @@ pub struct EventLoopState {
     /// first is not held back until the tick. See `event_loop::linkstate_now`.
     #[cfg(feature = "multihop")]
     pub(crate) last_advertised: Option<Vec<(EndpointId, u32)>>,
+    /// Tests only: while set, this node advertises no link-vector, on the tick or on a link
+    /// event. A test sets it to force the order "the path is lost before any route exists".
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "multihop",
+        not(target_arch = "wasm32")
+    ))]
+    pub(crate) linkstate_held: bool,
     /// What this node already asked of the members it heard on the LAN.
     pub(crate) lan_grafts: crate::gossip::lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
@@ -934,6 +942,12 @@ impl EventLoopState {
             parked_link_states: ParkedLinkStates::default(),
             #[cfg(feature = "multihop")]
             last_advertised: None,
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "multihop",
+                not(target_arch = "wasm32")
+            ))]
+            linkstate_held: false,
             lan_grafts: crate::gossip::lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,
