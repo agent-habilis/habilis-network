@@ -275,7 +275,7 @@ impl std::fmt::Debug for TicketSecret {
 /// passworded ticket.
 #[derive(Clone)]
 pub struct TicketAuth {
-    pub token: [u8; 32],
+    pub token: TicketSecret,
     pub password_protected: bool,
 }
 
@@ -299,11 +299,15 @@ impl TicketAuth {
     pub fn derive(secret: &TicketSecret, password: Option<&Password>, label: &[u8]) -> Self {
         match password {
             Some(password) => Self {
-                token: stretch_password(password, secret.as_bytes(), label),
+                token: TicketSecret::from_bytes(stretch_password(
+                    password,
+                    secret.as_bytes(),
+                    label,
+                )),
                 password_protected: true,
             },
             None => Self {
-                token: *secret.as_bytes(),
+                token: secret.clone(),
                 password_protected: false,
             },
         }
@@ -532,7 +536,7 @@ mod password_tests {
         let auth = TicketAuth::derive(&secret, Some(&pw("hunter2")), b"blob-ticket");
         assert!(auth.password_protected);
         assert_eq!(
-            hex(&auth.token),
+            hex(auth.token.as_bytes()),
             "824798ec30b0b968447a543d55adf59dd4a8a8a2218a9833409ce313edd258cf"
         );
     }
@@ -546,7 +550,7 @@ mod password_tests {
     }
 
     #[test]
-    fn blob_secret_debug_never_prints_a_byte() {
+    fn ticket_secret_debug_never_prints_a_byte() {
         use super::TicketSecret;
         let secret = TicketSecret::from_bytes([9u8; 32]);
         assert_eq!(format!("{secret:?}"), "TicketSecret(***)");
@@ -563,14 +567,17 @@ mod password_tests {
         // its own label); only the label differs.
         let other = TicketAuth::derive(&secret, Some(&password), b"other-ticket").token;
         assert_ne!(
-            blob, other,
+            blob.as_bytes(),
+            other.as_bytes(),
             "the same password+secret must yield different tokens per ticket kind"
         );
         // Without a password both are the raw secret (no stretch, no label).
-        assert_eq!(TicketAuth::blob(&secret, None).token, [3u8; 32]);
+        assert_eq!(TicketAuth::blob(&secret, None).token.as_bytes(), &[3u8; 32]);
         assert_eq!(
-            TicketAuth::derive(&secret, None, b"other-ticket").token,
-            [3u8; 32]
+            TicketAuth::derive(&secret, None, b"other-ticket")
+                .token
+                .as_bytes(),
+            &[3u8; 32]
         );
     }
 }

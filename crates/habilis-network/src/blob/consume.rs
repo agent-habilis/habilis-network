@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
 use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
-use crate::protocol::crypto::{Password, TicketAuth};
+use crate::protocol::crypto::{Password, TicketAuth, TicketSecret};
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::ticket::BlobTicket;
@@ -49,7 +49,7 @@ where
 async fn fetch_over<W>(
     endpoint: &Endpoint,
     ticket: &BlobTicket,
-    token: &[u8; SECRET_LEN],
+    token: &TicketSecret,
     out: &mut W,
 ) -> Result<()>
 where
@@ -71,7 +71,7 @@ where
 
     // Request: sha256 ‖ secret, then done sending.
     send.write_all(ticket.sha256.as_bytes()).await?;
-    send.write_all(token).await?;
+    send.write_all(token.as_bytes()).await?;
     let _ = send.finish();
 
     // Response: size(u64) ‖ <size bytes>. A refusal closes the connection with a
@@ -115,12 +115,12 @@ where
 
 /// The 32-byte auth token opening the fetch stream: the raw secret, or its
 /// Argon2id stretch when the ticket is password-protected.
-fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<[u8; SECRET_LEN]> {
+fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<TicketSecret> {
     match (ticket.password, password) {
         (true, Some(pw)) => Ok(TicketAuth::blob(&ticket.secret, Some(pw)).token),
         (true, None) => bail!("this blob ticket is password-protected — pass --password"),
         (false, Some(_)) => bail!("this blob ticket has no password — drop --password"),
-        (false, None) => Ok(*ticket.secret.as_bytes()),
+        (false, None) => Ok(ticket.secret.clone()),
     }
 }
 

@@ -204,12 +204,11 @@ impl BlobServer {
             Some(password) => {
                 // ~100ms of Argon2id off the async worker (mirrors mesh join).
                 let stretch_salt = salt.clone();
-                let token = tokio::task::spawn_blocking(move || {
+                tokio::task::spawn_blocking(move || {
                     TicketAuth::blob(&stretch_salt, Some(&password)).token
                 })
                 .await
-                .context("blob token stretch task panicked")?;
-                TicketSecret::from_bytes(token)
+                .context("blob token stretch task panicked")?
             }
             None => salt.clone(),
         };
@@ -341,15 +340,16 @@ async fn serve_stream(
     let mut hash_bytes = [0u8; HASH_LEN];
     hash_bytes.copy_from_slice(&request[..HASH_LEN]);
     let hash = BlobDigest::from_bytes(hash_bytes);
-    let mut token = [0u8; SECRET_LEN];
-    token.copy_from_slice(&request[HASH_LEN..]);
+    let mut token_bytes = [0u8; SECRET_LEN];
+    token_bytes.copy_from_slice(&request[HASH_LEN..]);
+    let token = TicketSecret::from_bytes(token_bytes);
 
     // Resolve under the lock, then release it before streaming from disk.
     let served = {
         let guard = store.lock().await;
         match guard.get(&hash) {
             None => None,
-            Some(entry) if ct_eq(&token, entry.secret.as_bytes()) => {
+            Some(entry) if ct_eq(token.as_bytes(), entry.secret.as_bytes()) => {
                 Some((entry.path.clone(), entry.size))
             }
             Some(_) => {
