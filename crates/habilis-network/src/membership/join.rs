@@ -89,6 +89,19 @@ pub struct Membership {
     pub inbound: mpsc::Receiver<Inbound>,
 }
 
+/// Tests only: whether a member that is set up now has its rung probes blind from its first walk.
+/// [`Request::BlindRungProbes`] can only reach a member that is up, after its startup walk ran.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+static NEW_MEMBERS_ARE_BLIND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Tests only: make every member that [`join`] sets up from now on blind (`blind`), or not. The
+/// dial is process-wide, so a test turns it on around the opens that it means and off again.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub fn blind_new_members(blind: bool) {
+    NEW_MEMBERS_ARE_BLIND.store(blind, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Resolve `opts`, stand the mesh up, and spawn the event loop.
 ///
 /// The single setup ritual every embedding runs. A browser and a terminal reach
@@ -163,6 +176,12 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
     )
     .await
     .context("setting up the mesh")?;
+
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    if NEW_MEMBERS_ARE_BLIND.load(std::sync::atomic::Ordering::SeqCst) {
+        // Before the loop is spawned, so that the startup walk is blind too.
+        crate::beacon::set_blind_rung_probes(config.endpoint.id(), true);
+    }
 
     // `handle_signals: false` — this is a library inside somebody else's
     // process, unlike a CLI that owns its own: installing process-wide ctrl-c /

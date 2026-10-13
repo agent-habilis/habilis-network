@@ -1135,9 +1135,44 @@ pub async fn probe_connect(
     target: impl Into<EndpointAddr>,
     timeout: Duration,
 ) -> bool {
+    probe_answer(endpoint, target, timeout).await == ProbeAnswer::Ours
+}
+
+/// What a connect-probe found at an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeAnswer {
+    /// The connection opened: the listener presented the identity that was asked for.
+    Ours,
+    /// The handshake failed on the identity: our own verifier rejected the key that the listener
+    /// presented ([`CERTIFICATE_ALERTS`]), or iroh could not read an identity from it. This, and
+    /// only this, proves that what answers is not the mesh that was asked for.
+    Foreign,
+    /// A listener answered and ended the dial without proving an identity: a close, a refusal, a
+    /// reset, a version mismatch, an alert that is not about the key (a holder of our own mesh
+    /// that is bound and not serving yet answers `no_application_protocol`, which the server
+    /// sends before its certificate), or a transport error. A busy, closing or starting holder
+    /// of our own mesh sends these, so they say nothing about the mesh: a caller reads them as
+    /// silence.
+    Refused,
+    /// Nothing answered inside the timeout, or there was nothing to dial. A port that nobody is
+    /// bound on reads the same: UDP does not tell. A host too loaded to answer reads the same.
+    NoAnswer,
+}
+
+/// [`probe_connect`] with the failure told apart: a listener that answered and refused is not a
+/// listener that said nothing, and a listener that failed the identity is not one that refused.
+/// A caller that must not act on silence (a bind cannot be taken back) acts on
+/// [`ProbeAnswer::Foreign`] only and waits on [`ProbeAnswer::Refused`] and
+/// [`ProbeAnswer::NoAnswer`].
+pub(crate) async fn probe_answer(
+    endpoint: &Endpoint,
+    target: impl Into<EndpointAddr>,
+    timeout: Duration,
+) -> ProbeAnswer {
     let addr: EndpointAddr = target.into();
     let started = crate::util::clock::Instant::now();
-    let connected = match n0_future::time::timeout(
+    let mut failure = None;
+    let answer = match n0_future::time::timeout(
         timeout,
         endpoint.connect(addr.clone(), GOSSIP_ALPN),
     )
@@ -1150,10 +1185,15 @@ pub async fn probe_connect(
             // release the connection immediately instead of via its own
             // error path.
             conn.close(0u32.into(), b"probe");
-            true
+            ProbeAnswer::Ours
         }
-        _ => false,
+        Ok(Err(error)) => {
+            failure = Some(error.to_string());
+            answer_of_connect_error(&error)
+        }
+        Err(_) => ProbeAnswer::NoAnswer,
     };
+    let connected = answer == ProbeAnswer::Ours;
     // `?addr`: a loopback/private direct addr means a *local*
     // rendezvous co-host (self-partition signature); relay/public is
     // the cross-machine path. `elapsed_ms` exposes a slow relay
@@ -1167,9 +1207,71 @@ pub async fn probe_connect(
     if connected {
         tracing::debug!(target: "habilis_network::lookup", connected, elapsed_ms, addr = ?addr, "rendezvous connect-probe finished");
     } else {
-        tracing::info!(target: "habilis_network::lookup", connected, elapsed_ms, addr = ?addr, "rendezvous connect-probe finished");
+        tracing::info!(target: "habilis_network::lookup", connected, elapsed_ms, ?answer, ?failure, addr = ?addr, "rendezvous connect-probe finished");
     }
-    connected
+    answer
+}
+
+/// The TLS alerts that a certificate verifier raises about the key of the peer, by alert number
+/// (QUIC carries each as crypto error `0x100` plus the alert). `unknown_ca` 48 is the one that
+/// this mesh produces: our verifier returns `InvalidCertificate(UnknownIssuer)` for another key
+/// (iroh `tls/verifier.rs`), and rustls sends that as `UnknownCA` (rustls 0.23 `error.rs`,
+/// `From<CertificateError> for AlertDescription`). The others are the alerts of the same verifier family: `bad_certificate`
+/// 42 (`NotValidForName`), `unsupported_certificate` 43, `certificate_revoked` 44,
+/// `certificate_expired` 45, `certificate_unknown` 46 and `decrypt_error` 51 (a bad signature).
+/// Every other alert, `no_application_protocol` 120 included, is sent before a certificate is
+/// seen and proves nothing about the identity.
+const CERTIFICATE_ALERTS: [u8; 7] = [48, 42, 43, 44, 45, 46, 51];
+
+/// A dial that ended in an error: a handshake that failed on the identity is
+/// [`ProbeAnswer::Foreign`], a listener that closed or refused is [`ProbeAnswer::Refused`], and
+/// every other failure said nothing.
+fn answer_of_connect_error(error: &iroh::endpoint::ConnectError) -> ProbeAnswer {
+    use iroh::endpoint::{AuthenticationError, ConnectError, ConnectingError};
+
+    match error {
+        ConnectError::Connecting {
+            source: ConnectingError::ConnectionError { source, .. },
+            ..
+        }
+        | ConnectError::Connection { source, .. } => answer_of_connection_error(source),
+        ConnectError::Connecting {
+            source:
+                ConnectingError::HandshakeFailure {
+                    source: AuthenticationError::RemoteId { .. },
+                    ..
+                },
+            ..
+        } => ProbeAnswer::Foreign,
+        ConnectError::Connecting {
+            source: ConnectingError::HandshakeFailure { .. },
+            ..
+        } => ProbeAnswer::Refused,
+        ConnectError::Connect { .. } | ConnectError::Connecting { .. } | _ => ProbeAnswer::NoAnswer,
+    }
+}
+
+fn answer_of_connection_error(error: &iroh::endpoint::ConnectionError) -> ProbeAnswer {
+    use iroh::endpoint::{ConnectionError, TransportErrorCode};
+
+    match error {
+        // Foreign is what our own verifier said about the key of the peer, nothing else.
+        ConnectionError::TransportError(failure)
+            if CERTIFICATE_ALERTS
+                .iter()
+                .any(|&alert| failure.code == TransportErrorCode::crypto(alert)) =>
+        {
+            ProbeAnswer::Foreign
+        }
+        ConnectionError::TransportError(_)
+        | ConnectionError::ConnectionClosed(_)
+        | ConnectionError::ApplicationClosed(_)
+        | ConnectionError::Reset
+        | ConnectionError::VersionMismatch => ProbeAnswer::Refused,
+        ConnectionError::TimedOut
+        | ConnectionError::LocallyClosed
+        | ConnectionError::CidsExhausted => ProbeAnswer::NoAnswer,
+    }
 }
 
 /// Build an iroh-gossip instance and a Router that accepts incoming gossip connections.
@@ -2063,6 +2165,179 @@ mod tests {
         );
         endpoint.close().await;
         stranger.close().await;
+    }
+
+    /// The window of a starting holder: the rung is bound with an empty ALPN list and its router
+    /// has not set `GOSSIP_ALPN` yet (`build_endpoint` gives a rung exactly this before
+    /// `Router::spawn`). A dial on `GOSSIP_ALPN` then fails on the ALPN, which a listener sends
+    /// before any certificate: it proves nothing about the identity, so the probe must not
+    /// answer `Foreign`, which makes a walk bind a second rung.
+    #[tokio::test]
+    async fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
+        use std::net::SocketAddr;
+
+        use iroh::{EndpointAddr, SecretKey};
+
+        use super::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer};
+
+        let secret = SecretKey::generate();
+        let id = secret.public();
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let holder = build_endpoint(
+            &LookupOpts::loopback(),
+            Some(secret),
+            Some(port),
+            Vec::new(),
+            TransportHandles::default(),
+        )
+        .await
+        .expect("a bound rung without a router");
+        let driving = holder.clone();
+        let task = n0_future::task::spawn(async move {
+            while let Some(incoming) = driving.accept().await {
+                if let Ok(accepting) = incoming.accept() {
+                    let _ = accepting.await;
+                }
+            }
+        });
+        let prober = build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            TransportHandles::default(),
+        )
+        .await
+        .expect("a prober");
+        let addr = EndpointAddr::new(id)
+            .with_ip_addr(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)));
+
+        let answer = probe_answer(&prober, addr, std::time::Duration::from_secs(2)).await;
+
+        prober.close().await;
+        holder.close().await;
+        task.abort();
+        assert_ne!(
+            answer,
+            ProbeAnswer::Foreign,
+            "a holder of our mesh that has no ALPN yet is not another mesh"
+        );
+        assert_ne!(
+            answer,
+            ProbeAnswer::Ours,
+            "a dial that failed on the ALPN did not open"
+        );
+    }
+
+    /// A listener of the identity that was asked for, which refuses every connection (a beacon that
+    /// is saturated or going down does the same), is not another mesh: its refusal proves nothing
+    /// about the identity, so the probe must not answer `Foreign`, which makes a walk bind a rung.
+    #[tokio::test]
+    async fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
+        use std::net::SocketAddr;
+
+        use iroh::EndpointAddr;
+        use iroh::SecretKey;
+        use iroh_gossip::net::GOSSIP_ALPN;
+
+        use super::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer};
+
+        let secret = SecretKey::generate();
+        let id = secret.public();
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let listener = build_endpoint(
+            &LookupOpts::loopback(),
+            Some(secret),
+            Some(port),
+            vec![GOSSIP_ALPN.to_vec()],
+            TransportHandles::default(),
+        )
+        .await
+        .expect("a listener of our identity");
+        let refusing = listener.clone();
+        let task = n0_future::task::spawn(async move {
+            while let Some(incoming) = refusing.accept().await {
+                incoming.refuse();
+            }
+        });
+        let prober = build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            TransportHandles::default(),
+        )
+        .await
+        .expect("a prober");
+        let addr = EndpointAddr::new(id)
+            .with_ip_addr(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)));
+
+        let answer = probe_answer(&prober, addr, std::time::Duration::from_secs(2)).await;
+
+        prober.close().await;
+        listener.close().await;
+        task.abort();
+        assert_ne!(
+            answer,
+            ProbeAnswer::Foreign,
+            "a listener that refused is not another mesh: it proved no identity"
+        );
+        assert_ne!(answer, ProbeAnswer::Ours, "a refused dial did not open");
+    }
+
+    /// What each way a dial can end proves: only the verdict of our verifier on the key is another
+    /// mesh. An alert that is sent before a certificate (`no_application_protocol`, from a holder
+    /// of our own mesh whose router has not set its ALPN yet), a close, a reset and a version
+    /// mismatch say nothing of the identity; a local failure says nothing.
+    #[test]
+    fn every_way_a_dial_ends_is_read_by_what_it_proves() {
+        use iroh::endpoint::{ConnectionError, TransportError, TransportErrorCode};
+
+        use super::{ProbeAnswer, answer_of_connection_error};
+
+        let alert = |code: u8| {
+            ConnectionError::TransportError(TransportError::new(
+                TransportErrorCode::crypto(code),
+                String::new(),
+            ))
+        };
+        let unknown_ca = alert(48);
+        let no_application_protocol = alert(120);
+        let handshake_failure = alert(40);
+        assert_eq!(
+            answer_of_connection_error(&unknown_ca),
+            ProbeAnswer::Foreign,
+            "the verifier rejected the key"
+        );
+        for refused in [
+            no_application_protocol,
+            handshake_failure,
+            ConnectionError::Reset,
+            ConnectionError::VersionMismatch,
+        ] {
+            assert_eq!(
+                answer_of_connection_error(&refused),
+                ProbeAnswer::Refused,
+                "{refused:?}"
+            );
+        }
+        for silent in [
+            ConnectionError::TimedOut,
+            ConnectionError::LocallyClosed,
+            ConnectionError::CidsExhausted,
+        ] {
+            assert_eq!(
+                answer_of_connection_error(&silent),
+                ProbeAnswer::NoAnswer,
+                "{silent:?}"
+            );
+        }
     }
 
     #[tokio::test]

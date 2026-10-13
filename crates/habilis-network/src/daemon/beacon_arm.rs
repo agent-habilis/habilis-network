@@ -128,10 +128,17 @@ pub(super) async fn maybe_cohost(
     }
     // A loopback holder above the first rung yields it when a lower rung answers as our mesh. The
     // public shed is on a timer that backs off; here the question is positive and cheap, so it
-    // is asked on every heal tick, and nothing is asked of a holder on the first rung.
+    // is asked on every heal tick, and nothing is asked of a holder on the first rung. The
+    // answer is a reading in `state.rungs`, which the walk after the shed reads as ours.
     if let Some(held) = current.as_ref()
         && !arm.params.bind_ports.is_empty()
-        && beacon::lower_rung_is_live(arm.params, held, ctx.endpoint.id()).await
+        && let Some(own) = held
+            .rung_in(&arm.params.bind_ports)
+            .filter(|rung| *rung > 0)
+        && state
+            .rungs
+            .lower_rung_that_answers(arm.params, ctx.endpoint.id(), own)
+            .is_some()
     {
         shed_beacon(state, arm.params, current);
         return;
@@ -143,13 +150,14 @@ pub(super) async fn maybe_cohost(
             return;
         }
         let held = if may_probe_to_claim(state) {
-            beacon::ensure_holder(
+            beacon::walk_ladder(
                 arm.params,
                 ctx.endpoint,
                 &state.address_book,
                 current,
                 probes_before_claim(arm.policy),
                 probe,
+                &mut state.rungs,
             )
             .await
         } else {
@@ -220,13 +228,14 @@ pub(super) async fn maybe_reclaim(
             .is_some_and(|deadline| Instant::now() < deadline)
     {
         let held = if may_probe_to_claim(state) {
-            beacon::ensure_holder(
+            beacon::walk_ladder(
                 arm.params,
                 ctx.endpoint,
                 &state.address_book,
                 current,
                 probes_before_claim(arm.policy),
                 probe,
+                &mut state.rungs,
             )
             .await
         } else {
@@ -329,7 +338,7 @@ fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool
 /// loaded host wrongly, and two holders then serve one mesh. The loopback
 /// repair is not this timer: a holder above the first rung asks, on every heal
 /// tick, whether a lower rung answers as our mesh, and yields on a positive
-/// answer only (`maybe_cohost`, `beacon::lower_rung_is_live`).
+/// answer only (`maybe_cohost`, `beacon::lower_rung_that_answers`).
 pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
     matches!(policy, CoHostPolicy::EagerProbed | CoHostPolicy::Deferred) && public
 }
@@ -950,6 +959,8 @@ mod tests {
         let mut state = fresh_state();
         state.meshed = true;
         configure(&mut state);
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        state.rungs = crate::beacon::RungWatch::new(reports);
         let mut rendezvous = None;
         let mut probe = None;
         let arm = CohostArm {
@@ -957,7 +968,18 @@ mod tests {
             params: &params,
             started: Instant::now(),
         };
-        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        // The walk asks the probe tasks and returns; the loop notes their reports and walks
+        // again. This does what the loop does.
+        for _ in 0..4 {
+            maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+            if !state.rungs.waiting() {
+                break;
+            }
+            match tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await {
+                Ok(Some(report)) => state.rungs.note(report, Instant::now()),
+                Ok(None) | Err(_) => break,
+            }
+        }
         let holds_nothing = rendezvous.is_none();
 
         if let Some(cohosted) = rendezvous.take() {
@@ -1033,6 +1055,7 @@ mod tests {
         probe: Option<crate::beacon::RivalProbe>,
         first_port: u16,
         state: crate::daemon::state::EventLoopState,
+        arrivals: tokio::sync::mpsc::UnboundedReceiver<crate::beacon::RungReport>,
     }
 
     impl HolderOnTheSecondRung {
@@ -1107,6 +1130,8 @@ mod tests {
             other_endpoint.close().await;
             let mut state = crate::testing::fresh_state();
             state.meshed = true;
+            let (reports, arrivals) = tokio::sync::mpsc::unbounded_channel();
+            state.rungs = crate::beacon::RungWatch::new(reports);
             Self {
                 params,
                 endpoint,
@@ -1114,6 +1139,7 @@ mod tests {
                 probe,
                 first_port,
                 state,
+                arrivals,
             }
         }
 
@@ -1175,14 +1201,25 @@ mod tests {
                 params: &self.params,
                 started: Instant::now(),
             };
-            maybe_cohost(
-                &mut self.state,
-                &ctx,
-                &arm,
-                &mut self.rendezvous,
-                &mut self.probe,
-            )
-            .await;
+            // The check and the walk ask the probe tasks and return; the loop notes their reports
+            // and walks again. This does what the loop does.
+            for _ in 0..4 {
+                maybe_cohost(
+                    &mut self.state,
+                    &ctx,
+                    &arm,
+                    &mut self.rendezvous,
+                    &mut self.probe,
+                )
+                .await;
+                if !self.state.rungs.waiting() {
+                    break;
+                }
+                match tokio::time::timeout(Duration::from_secs(5), self.arrivals.recv()).await {
+                    Ok(Some(report)) => self.state.rungs.note(report, Instant::now()),
+                    Ok(None) | Err(_) => break,
+                }
+            }
         }
 
         async fn close(mut self) {
@@ -1234,6 +1271,38 @@ mod tests {
         }
         drop(silent);
         holder.close().await;
+    }
+
+    /// A holder that shed because a lower rung answered stays a peer of that rung, even when its
+    /// own probe of the rung then reads silence. A host that stays slow made the probe of the
+    /// walk read "not ours" over and over: the walk bound the rung it had just shed, the check of
+    /// the next tick shed it again, and the member flapped for ever without ever merging.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_holder_that_shed_for_a_live_lower_rung_stays_a_peer_when_its_probe_is_silent() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+        let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
+        crate::beacon::set_blind_rung_probes(holder.endpoint.id(), true);
+
+        holder.heal_tick().await;
+        let shed = holder.rendezvous.is_none();
+        // The close of the shed beacon is done before the walk, or it would find its own rung
+        // still bound and read that as a foreign squat.
+        if let Some(closed) = holder.state.beacon_closing.take() {
+            let _ = closed.await;
+        }
+        holder.heal_tick().await;
+        let peer = holder.rendezvous.is_none();
+
+        crate::beacon::set_blind_rung_probes(holder.endpoint.id(), false);
+        holder.close().await;
+        lower_beacon.shed_and_wait().await;
+        lower_endpoint.close().await;
+        assert!(shed, "the first tick reads the lower rung and sheds");
+        assert!(
+            peer,
+            "the walk that followed read the rung that had just answered as foreign, and bound the rung it shed"
+        );
     }
 
     /// The book kept the address of every beacon that this process held under the id, so a dial to

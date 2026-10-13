@@ -9,8 +9,9 @@
 //! - **B**: the beacon holder leaves after every member released the rendezvous, then two
 //!   joiners arrive by id.
 //! - **C**: the creator leaves at once, two joiners start together, and the rung probe of
-//!   both reads "not ours" (`Request::BlindRungProbes`). The one that binds second takes
-//!   the next rung and holds a beacon of its own. Two joiners follow, one by one.
+//!   both reads silence (`Request::BlindRungProbes`). One of them binds the first rung. The
+//!   other stays a peer of it: silence does not bind a second rung. Two joiners follow, one by
+//!   one.
 //! - **D**: two released holders, with no IP block. Case E's setup gives a room of five old
 //!   members that hold their claims back, and a new holder with four joiners of its own, both
 //!   sides released. Then one old member, with three links or more, reads its rung probe as
@@ -138,6 +139,25 @@ impl Round {
             .lines()
             .filter(|line| line.contains("beacon assumed: bound rendezvous ladder rung"))
             .map(|line| (field(line, "node="), field(line, "port=")))
+            .collect()
+    }
+
+    /// How many times the member with the short id `node` read a lower rung that answered as the
+    /// beacon of its mesh: each one is a shed of its beacon.
+    fn lower_rung_answers_of(&self, node: &str) -> usize {
+        self.log()
+            .lines()
+            .filter(|line| line.contains("a lower rung answers as the beacon of our mesh"))
+            .filter(|line| field(line, "node=") == node)
+            .count()
+    }
+
+    /// The ports that the members with the short ids `nodes` bound a beacon on.
+    fn ports_bound_by(&self, nodes: &[String]) -> BTreeSet<String> {
+        self.beacons()
+            .into_iter()
+            .filter(|(node, _)| nodes.contains(node))
+            .map(|(_, port)| port)
             .collect()
     }
 
@@ -335,6 +355,18 @@ async fn wait_for_rung_of(round: &Round, node: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The members `nodes` must hold beacons on two different rungs: a round whose second beacon
+/// shared the rung of the first would not have run the path that the case is about.
+fn two_distinct_rungs(round: &Round, nodes: &[String]) -> Result<(), String> {
+    let ports = round.ports_bound_by(nodes);
+    if ports.len() < 2 {
+        return Err(format!(
+            "the blind path did not run: one rung only, {ports:?} for {nodes:?}"
+        ));
+    }
+    Ok(())
+}
+
 async fn wait_for_releases(round: &Round, count: usize) -> Result<(), String> {
     let started = Instant::now();
     while round.members_released_with_enough_links() < count {
@@ -480,13 +512,39 @@ async fn two_released_holders(round: &Round, members: &mut Vec<Member>) -> Resul
     second.blind_rung_probes().await;
     second.hold_claims(false).await;
     wait_for_rung_of(round, &second.short_id()).await?;
+    two_distinct_rungs(round, &[first_id, second.short_id()])?;
     second.unblind_rung_probes().await;
     Ok(())
 }
 
+/// Makes every member that is opened while it lives blind from the first probe of its startup
+/// walk, and ends that when it drops: a panic in an open must not leave every later case blind.
+struct BlindNewMembers;
+
+impl BlindNewMembers {
+    fn on() -> Self {
+        membership::blind_new_members(true);
+        Self
+    }
+}
+
+impl Drop for BlindNewMembers {
+    fn drop(&mut self) {
+        membership::blind_new_members(false);
+    }
+}
+
+/// Open the starters together, each blind from its first probe. A hook that is set after the
+/// open comes after a walk that read the truth, and that walk is the one that the cases are about.
+async fn open_starters_blind(names: &[String], mesh: &str) -> Vec<Member> {
+    let _blind = BlindNewMembers::on();
+    futures_util::future::join_all(names.iter().map(|nick| Member::open(nick, Some(mesh)))).await
+}
+
 /// The creator mints the room and leaves, so that no beacon holds a rung. `starters`
-/// joiners start together and every one of them reads its rung probe as "not ours". Then
-/// `late` joiners come one by one. Every member must see every other.
+/// joiners start together and every one of them reads its rung probe as silence. One of them
+/// binds the first rung and the others stay its peers. Then `late` joiners come one by one.
+/// Every member must see every other, and no starter binds a second rung.
 async fn blind_starters(
     round: &Round,
     members: &mut Vec<Member>,
@@ -499,24 +557,95 @@ async fn blind_starters(
     creator.leave().await;
 
     let names = nicks("starter", starters);
-    let opened = futures_util::future::join_all(
-        names
-            .iter()
-            .map(|nick| Member::open(nick, Some(mesh.as_str()))),
-    )
-    .await;
-    for member in &opened {
-        member.blind_rung_probes().await;
-    }
-    // The creator, the starter that took rung 0 and the starter that read it as foreign.
-    wait_for_beacons(round, 1 + starters).await?;
+    let opened = open_starters_blind(&names, &mesh).await;
+    // The creator, and the one starter that took rung 0.
+    wait_for_beacons(round, 2).await?;
     for member in &opened {
         member.unblind_rung_probes().await;
     }
     members.extend(opened);
     open_joiners(members, &mesh, &nicks("late", late)).await;
     let all: Vec<&Member> = members.iter().collect();
-    become_one_mesh(&all, MERGE_DEADLINE).await
+    let merged = become_one_mesh(&all, MERGE_DEADLINE).await?;
+    let bound = round.beacons().len();
+    if bound != 2 {
+        return Err(format!(
+            "the mesh merged after {merged:?}, but {bound} beacons were bound: the creator's and more rungs than the room needs"
+        ));
+    }
+    Ok(merged)
+}
+
+/// Case C with the blind hook left on, the form of a host that stays slow: the second starter
+/// reads its rung probe as silence at every walk. It must stay a peer of the first starter and
+/// merge, bind no second rung and shed nothing.
+async fn starters_that_stay_blind(
+    round: &Round,
+    members: &mut Vec<Member>,
+) -> Result<Duration, String> {
+    let creator = Member::open("creator", None).await;
+    wait_for_beacons(round, 1).await?;
+    let mesh = creator.mesh_id();
+    creator.leave().await;
+
+    let names = nicks("starter", 2);
+    let opened = open_starters_blind(&names, &mesh).await;
+    // The creator, and the one starter that took rung 0.
+    wait_for_beacons(round, 2).await?;
+    let ids: Vec<String> = opened.iter().map(Member::short_id).collect();
+    members.extend(opened);
+    open_joiners(members, &mesh, &nicks("late", 2)).await;
+    let all: Vec<&Member> = members.iter().collect();
+    let merged = become_one_mesh(&all, MERGE_DEADLINE).await?;
+    let sheds: usize = ids
+        .iter()
+        .map(|node| round.lower_rung_answers_of(node))
+        .sum();
+    if sheds > 0 {
+        return Err(format!(
+            "the mesh merged after {merged:?}, but the blind starters shed their beacon {sheds} times"
+        ));
+    }
+    let bound = round.beacons().len();
+    if bound != 2 {
+        return Err(format!(
+            "the mesh merged after {merged:?}, but {bound} beacons were bound: the creator's and more rungs than the room needs"
+        ));
+    }
+    Ok(merged)
+}
+
+/// A start burst on a host that answers late: the room has no holder, two joiners start
+/// together and read every rung probe as silence for 3 s, which is less than the 6 s that a
+/// rung must stay silent to be bound. Then the host answers. No second rung may be bound, and
+/// the room is one mesh. A walk that reads the silence of a loaded host as foreign binds the next
+/// rung at the first walk, and the room has two beacons that no probe could tell apart.
+async fn start_burst_on_a_host_that_answers_late(
+    round: &Round,
+    members: &mut Vec<Member>,
+) -> Result<Duration, String> {
+    let creator = Member::open("creator", None).await;
+    wait_for_beacons(round, 1).await?;
+    let mesh = creator.mesh_id();
+    creator.leave().await;
+
+    let names = nicks("starter", 2);
+    let opened = open_starters_blind(&names, &mesh).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    for member in &opened {
+        member.unblind_rung_probes().await;
+    }
+    members.extend(opened);
+    open_joiners(members, &mesh, &nicks("late", 2)).await;
+    let all: Vec<&Member> = members.iter().collect();
+    let merged = become_one_mesh(&all, MERGE_DEADLINE).await?;
+    let bound = round.beacons().len();
+    if bound != 2 {
+        return Err(format!(
+            "the mesh merged after {merged:?}, but {bound} beacons were bound: the creator's and one more rung than the room needs"
+        ));
+    }
+    Ok(merged)
 }
 
 async fn finish(round: Round, members: Vec<Member>, verdict: Result<Duration, String>) {
@@ -548,7 +677,7 @@ async fn joiners_after_the_beacon_holder_left_meet_the_old_members() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by cargo task matrix"]
-async fn two_starters_that_read_their_rung_as_foreign_become_one_mesh() {
+async fn two_starters_that_read_their_rung_as_silent_join_one_mesh() {
     let _serial = SERIAL.lock().await;
     let round = Round::begin("two-blind-starters");
     let mut members = Vec::new();
@@ -616,5 +745,25 @@ async fn four_joiners_started_together_meet_a_long_running_room_after_its_creato
     let round = Round::begin("burst-creator-left");
     let mut members = Vec::new();
     let verdict = four_joiners_together_after_a_long_run(&round, &mut members, true).await;
+    finish(round, members, verdict).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn two_starters_that_stay_blind_bind_one_rung_and_become_one_mesh() {
+    let _serial = SERIAL.lock().await;
+    let round = Round::begin("two-blind-starters-persistent");
+    let mut members = Vec::new();
+    let verdict = starters_that_stay_blind(&round, &mut members).await;
+    finish(round, members, verdict).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn a_start_burst_on_a_host_that_answers_late_binds_no_second_rung() {
+    let _serial = SERIAL.lock().await;
+    let round = Round::begin("burst-answers-late");
+    let mut members = Vec::new();
+    let verdict = start_burst_on_a_host_that_answers_late(&round, &mut members).await;
     finish(round, members, verdict).await;
 }

@@ -503,6 +503,9 @@ pub struct EventLoopState {
     /// before any old member does", which a heal tick of a few seconds would otherwise win.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) claims_held: bool,
+    /// What this node knows of the busy rungs of a private ladder, and the probe tasks that find
+    /// out more. The claim walk and the check of the lower rungs read it and never wait.
+    pub(crate) rungs: crate::beacon::RungWatch,
     /// Tests only: the beacon is shed at the top of the next turn of the loop, as a re-check
     /// shed does (`Request::ShedBeacon`).
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -959,6 +962,7 @@ impl EventLoopState {
             linkstate_held: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             claims_held: false,
+            rungs: crate::beacon::RungWatch::detached(),
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             shed_requested: false,
             lan_grafts: crate::gossip::lan::LanGrafts::default(),
