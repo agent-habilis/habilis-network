@@ -34,7 +34,7 @@ use automerge::{
 };
 use serde_json::{Map, Value};
 
-use habilis_network_protocol::{DedupKey, Message, Nickname};
+use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname};
 use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX};
 
 /// Matches the receive path these drops happen on, so a reader filtering the
@@ -314,15 +314,21 @@ impl MeshDoc {
     /// is never sent — every replica constructs it locally.
     #[must_use]
     pub fn changes_since(&self, have: &[String], max: usize) -> Vec<Message> {
-        self.changes_since_not_by(have, "", max)
+        self.changes_since_not_by(have, None, max)
     }
 
-    /// [`Self::changes_since`] without the frames signed by `pubkey`: a peer
+    /// [`Self::changes_since`] without the frames signed by `author`: a peer
     /// holds every change it signed, since a change's actor is its signer's
     /// key and a session key lives no longer than its document. Skipped
-    /// before the cap, so the budget goes to what the peer can lack.
+    /// before the cap, so the budget goes to what the peer can lack. `None`
+    /// skips nothing.
     #[must_use]
-    pub fn changes_since_not_by(&self, have: &[String], pubkey: &str, max: usize) -> Vec<Message> {
+    pub fn changes_since_not_by(
+        &self,
+        have: &[String],
+        author: Option<&AuthorKey>,
+        max: usize,
+    ) -> Vec<Message> {
         let have: Vec<ChangeHash> = have
             .iter()
             .filter_map(|encoded| decode_hash(encoded))
@@ -331,7 +337,9 @@ impl MeshDoc {
             .get_changes(&have)
             .into_iter()
             .filter_map(|change| self.frames.get(&change.hash()))
-            .filter(|frame| pubkey.is_empty() || frame.pubkey != pubkey)
+            .filter(|frame| {
+                author.is_none_or(|skipped| frame.author_key().as_ref() != Some(skipped))
+            })
             .take(max)
             .cloned()
             .collect()
@@ -395,20 +403,23 @@ impl MeshDoc {
         let Ok(change) = Change::from_bytes(bytes) else {
             return Ingested::Ignored;
         };
-        if change.actor_id().to_hex_string() != frame.pubkey {
+        let Some(author) = frame
+            .author_key()
+            .filter(|author| change.actor_id().to_bytes() == author.as_bytes().as_slice())
+        else {
             tracing::warn!(
                 target: LOG_TARGET,
                 author = %frame.author,
                 "dropping a channel change whose actor is not its signer's key"
             );
             return Ingested::Ignored;
-        }
+        };
         let hash = change.hash();
         if self.applied.contains(&hash) {
             return Ingested::Duplicate;
         }
         if !self.deps_satisfied(change.deps()) {
-            return self.buffer_orphan(hash, change, frame);
+            return self.buffer_orphan(author, hash, change, frame);
         }
         // Hoisted above the gate so the two share one hydration: nothing
         // mutates the document between them, and `doc_json` over the whole
@@ -475,12 +486,18 @@ impl MeshDoc {
     /// authors would let one hostile stream push a joiner's honest backfill out
     /// of the buffer, which is the failure the ceiling exists to prevent. Both
     /// mirror the reassembly store.
-    fn buffer_orphan(&mut self, hash: ChangeHash, change: Change, frame: &Message) -> Ingested {
+    fn buffer_orphan(
+        &mut self,
+        author: AuthorKey,
+        hash: ChangeHash,
+        change: Change,
+        frame: &Message,
+    ) -> Ingested {
         if self.pending.contains_key(&hash) {
             return Ingested::Buffered;
         }
-        if self.pending_by(&frame.pubkey) >= DOC_PENDING_AUTHOR_MAX
-            && let Some((victim, victim_seq)) = self.highest_of(&frame.pubkey)
+        if self.pending_by(&author) >= DOC_PENDING_AUTHOR_MAX
+            && let Some((victim, victim_seq)) = self.highest_of(&author)
         {
             if change.seq() >= victim_seq {
                 tracing::warn!(
@@ -527,23 +544,23 @@ impl MeshDoc {
         std::mem::take(&mut self.dropped)
     }
 
-    /// How many orphans this pubkey has buffered. Scanned rather than counted
+    /// How many orphans this author key has buffered. Scanned rather than counted
     /// in a second map: `pending` is bounded, and one source of truth cannot
     /// drift from itself.
-    fn pending_by(&self, pubkey: &str) -> usize {
+    fn pending_by(&self, author: &AuthorKey) -> usize {
         self.pending
             .values()
-            .filter(|entry| entry.frame.pubkey == pubkey)
+            .filter(|entry| entry.frame.author_key().as_ref() == Some(author))
             .count()
     }
 
-    /// This pubkey's highest-seq orphan and its seq, the latest arrival among
-    /// equals. Keyed on the pubkey rather than the nickname, which an author
+    /// This author key's highest-seq orphan and its seq, the latest arrival among
+    /// equals. Keyed on the key rather than the nickname, which an author
     /// picks freely.
-    fn highest_of(&self, pubkey: &str) -> Option<(ChangeHash, u64)> {
+    fn highest_of(&self, author: &AuthorKey) -> Option<(ChangeHash, u64)> {
         self.pending
             .iter()
-            .filter(|(_, entry)| entry.frame.pubkey == pubkey)
+            .filter(|(_, entry)| entry.frame.author_key().as_ref() == Some(author))
             .max_by_key(|(_, entry)| (entry.change.seq(), entry.arrival))
             .map(|(hash, entry)| (*hash, entry.change.seq()))
     }
@@ -553,9 +570,9 @@ impl MeshDoc {
     #[cfg(any(test, feature = "adversarial"))]
     #[must_use]
     pub fn pending_stats(&self) -> (usize, usize) {
-        let mut per_author: HashMap<&str, usize> = HashMap::new();
+        let mut per_author: HashMap<Option<AuthorKey>, usize> = HashMap::new();
         for entry in self.pending.values() {
-            *per_author.entry(entry.frame.pubkey.as_str()).or_default() += 1;
+            *per_author.entry(entry.frame.author_key()).or_default() += 1;
         }
         (
             self.pending.len(),
@@ -824,7 +841,7 @@ mod tests {
     use super::wire::change_body;
     use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
     use automerge::Change;
-    use habilis_network_protocol::{Channel, DedupKey, MeshId, Message, Nickname};
+    use habilis_network_protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname};
     use serde_json::{Value, json};
     use std::collections::HashSet;
 
@@ -925,11 +942,20 @@ mod tests {
         author_as(doc, who, who.as_str().as_bytes(), merge)
     }
 
+    /// A test actor seed as the 32 bytes of a signer's key: the seed, zero-padded. Zero padding
+    /// keeps the byte order of any two seeds that are not a prefix of each other, so the order
+    /// automerge settles conflicts by is the one the unpadded seeds had.
+    fn pad_seed(seed: &[u8]) -> [u8; 32] {
+        let mut padded = [0u8; 32];
+        padded[..seed.len()].copy_from_slice(seed);
+        padded
+    }
+
     /// [`author`] with an explicit per-session actor seed, as the daemon
     /// derives from its signing key.
     fn author_as(doc: &mut MeshDoc, who: &Nickname, seed: &[u8], merge: &Value) -> Message {
         let bytes = doc
-            .build_change(merge, seed)
+            .build_change(merge, &pad_seed(seed))
             .expect("merge applies")
             .expect("merge is not a no-op");
         let carrier = frame(who, &bytes);
@@ -1406,7 +1432,7 @@ mod tests {
         let merge = json!({"secret": "value"});
         let author_doc = MeshDoc::new_ungated().with_key(Some(zeroize::Zeroizing::new(key)));
         let bytes = author_doc
-            .build_change(&merge, alice.as_str().as_bytes())
+            .build_change(&merge, &pad_seed(alice.as_str().as_bytes()))
             .expect("builds")
             .expect("not a no-op");
         let (wire, _plain) = author_doc
@@ -1414,7 +1440,7 @@ mod tests {
             .expect("compose");
         let mut carrier =
             Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State);
-        carrier.pubkey = automerge::ActorId::from(alice.as_str().as_bytes()).to_hex_string();
+        carrier.pubkey = AuthorKey::from_bytes(pad_seed(alice.as_str().as_bytes())).to_string();
         assert!(
             !carrier.body.as_str().contains("value"),
             "the plaintext value must not appear on the wire"
@@ -1473,7 +1499,7 @@ mod tests {
         let own_bytes = alice_doc
             .build_change(
                 &json!({"peers": {"alice": {"card": {"name": "alice"}}}}),
-                alice.as_str().as_bytes(),
+                &pad_seed(alice.as_str().as_bytes()),
             )
             .expect("builds")
             .expect("not a no-op");

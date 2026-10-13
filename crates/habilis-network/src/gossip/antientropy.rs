@@ -994,9 +994,11 @@ fn missing_frames(channel: Channel, digest: &Message, state: &EventLoopState) ->
     let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
         return Vec::new();
     };
-    state
-        .doc(channel)
-        .changes_since_not_by(&body.heads, &digest.pubkey, antientropy_max_resend())
+    state.doc(channel).changes_since_not_by(
+        &body.heads,
+        digest.author_key().as_ref(),
+        antientropy_max_resend(),
+    )
 }
 
 #[cfg(test)]
