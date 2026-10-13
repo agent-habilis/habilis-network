@@ -347,6 +347,24 @@ published to a registry; pin it with
   `forget_hash`, `note_msg_seq` and `forget_msg_seq` take or return a `ContentHash`. The wire and
   the signed bytes keep the hex text, and `parse` keeps its errors for a malformed `prev` or
   parent.
+- **Breaking:** a point in time has a type. `UnixSecs` (in `habilis_network_util::clock`, also
+  re-exported by the protocol crate and the engine) holds whole seconds since the epoch.
+  `Message::timestamp` and `Listing::first_seen_unix` are a `UnixSecs`. The expiry of an invite
+  ticket is one, and the wire of the ticket does not change. `clock::unix_secs()` is removed:
+  use `UnixSecs::now()`, and `.as_secs()` for the number. A wire struct converts with
+  `UnixSecs::from_secs` and `as_secs`, so no byte of a message, a signature or a ticket moves.
+- **Breaking:** the two endpoints of a multihop node have a type each. `MultihopHandle::app_id()`
+  is an `AppId` and `underlay_id()` is an `UnderlayId`. `route_addr`, `refuse_hop_for_test`,
+  `remove_origin` and `underlay_addr_of` take an `AppId`. `app_id_of` takes an `UnderlayId` and
+  returns an `AppId`. `underlay_paths_for_test` and `underlay_path_selector` take an
+  `UnderlayId`. `stuck_hops` returns `Vec<AppId>`. `link_vector` and `LinkVector::signed` take
+  `Vec<(AppId, u32)>`, and `LinkVector::origin()` returns an `AppId`. `Topology::remove` and
+  `Topology::view` take an `AppId`. `Topology::route_to` and the graph search take a
+  `Leg { src, dst }` in place of two ids. The route bytes, the vectors and the signatures do not
+  change. A caller wraps an `EndpointId` with `AppId::new` or `UnderlayId::new` and reads one
+  back with `get`.
+- **Breaking:** the free function `frame::encode(dst, src, datagram)` of the gossip transport is
+  removed. Write `Frame { dst, src, datagram }.encode()`.
 - **Breaking:** `HandlerCtx::our_pubkey` is an `AuthorKey` (it was `&str`).
   `MeshDoc::changes_since_not_by` takes `Option<&AuthorKey>`.
 - **Breaking:** the netplay lobby and mesh transport hold an `AuthorKey` and a `Nickname` in

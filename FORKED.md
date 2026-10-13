@@ -365,9 +365,10 @@ Divergences from upstream, in the order they were made.
 28. **Newtypes on the keys, the hashes, and the netplay ids.** A primitive that
     carries a domain meaning became a type, in the shape of `TopicId`: `DedupKey`,
     `AuthorKey`, `Signed`, `TicketSecret`, `BlobDigest`, `StreamId`, `StreamSecret`,
-    `Seed`, `SymmetricKey`, `PlayerHandle`, `Frame`, `Epoch`, `SessionId`, `Tick`,
-    `TickSpan`, and a private field on `LinkMetric`. `AGENTS.md` holds the rules and
-    the list. `CHANGELOG.md` has one entry per break.
+    `Seed`, `SymmetricKey`, `ContentHash`, `UnixSecs`, `PlayerHandle`, `Frame`, `Epoch`,
+    `SessionId`, `Tick`, `TickSpan`, `AppId`, `UnderlayId`, and a private field on
+    `LinkMetric`. `AGENTS.md` holds the rules and the list. `CHANGELOG.md` has one entry
+    per break.
 
     The wire does not change, with two named exceptions: `Message::parse` rejects a
     `pubkey` with no `sig` and the reverse, and netplay's `ack_frame` is an absent
@@ -397,6 +398,15 @@ Divergences from upstream, in the order they were made.
       `content_hash_hex()` is `content_hash()`, and `.to_string()` gives the text. `forget_hash`,
       `advance_chain`, `note_dag`, `chain_head`, `dag_parents`, `note_msg_seq` and
       `forget_msg_seq` take or return a `ContentHash`.
+    - `a2a/send.rs:53`, `output/json.rs:217,490,512,681`, `api/directory.rs:56`
+      (`feat-webmcp`) and `a2a/task.rs:220` (`main`): `Message::timestamp` and
+      `Listing::first_seen_unix` are a `UnixSecs`. Read the number with `as_secs()`, and
+      write an age with `UnixSecs::now().since(timestamp)`. `harness/adversarial.rs:354`
+      sets it with `UnixSecs::from_secs(ts)`.
+    - `output/json.rs:547`, `cli/mod.rs:967` (`feat-webmcp`) and `a2a/task.rs:220` (`main`):
+      `clock::unix_secs()` is removed. Call `UnixSecs::now().as_secs()`.
+    - agent-gossip does not call the multihop handle. A port that does wraps an `EndpointId`
+      with `AppId::new` or `UnderlayId::new`, as `CHANGELOG.md` lists.
     - `harness/bench.rs:64`, `benches/hot_paths.rs:30`: `crypto::derive_secret` is crate-private.
       Derive with `Seed::derive`.
     - `bridge/ticket.rs:170`, `harness/bench.rs:86`, `cli/doctor.rs:612`: `Mesh::new` takes a

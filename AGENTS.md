@@ -207,6 +207,12 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 - Make a secret type wipe its bytes on drop.
 - Hold a raw secret buffer in `Zeroizing` from its creation. A buffer that is wiped by hand leaks on an early return.
 
+### Roles and argument pairs
+
+- Give each role of an id its own type when one node holds two ids of one primitive type. In the multihop transport, `AppId` is the endpoint that the topology and the routes name, and `UnderlayId` is the endpoint that carries the cells and that a forwarder dials. A swap of the two is a compile error.
+- Keep the raw `EndpointId` where it is the id of the iroh layer: `linked_endpoints`, `peer_endpoints`, `path_kinds`, and `route_dialed`. Wrap it with `AppId::new` or `UnderlayId::new` at the call into the multihop transport.
+- Do not write two arguments of one type in a row when a swap changes the result. Name them with a small struct: `Leg { src, dst }`, `Contest { own, rival }`, `GraftTarget { peer, rendezvous }`, and `Frame { dst, src, datagram }`.
+
 ### Options and sentinels
 
 - Key a map by the author with `AuthorKey`. Use `Option<AuthorKey>` only where a fixture can push an unsigned message. Write the reason beside it.
@@ -253,5 +259,8 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `Epoch`, `SessionId`, `Tick`, `TickSpan` | `habilis-network-netplay/src/mesh/lobby.rs` | The match number, the match id, and the lobby clock. |
 | `LinkMetric` | `habilis-network-iroh-multihop-transport/src/metric.rs` | The cost of a link. |
 | `ChunkHash`, `Root` | `habilis-network-chunks/src/lib.rs` | A chunk hash and the root of a chunk tree. |
-
-**Gap.** `UnixSecs` (a Unix time in seconds) is not in yet. Add its row to the table above in the last commit of the branch.
+| `UnixSecs` | `habilis-network-util/src/clock.rs` | A point in time, in whole seconds since the epoch. `Message::timestamp`, `Listing::first_seen_unix`, and the expiry of an invite ticket hold one. A wire struct converts with `as_secs`. |
+| `AppId`, `UnderlayId` | `habilis-network-iroh-multihop-transport/src/role.rs` | The application endpoint and the underlay endpoint of a node. |
+| `Leg` | `habilis-network-iroh-multihop-transport/src/graph.rs` | The two ends of a route, `src` and `dst`, both `AppId`. |
+| `Contest` | `habilis-network/src/beacon/mod.rs` | The two holders of one beacon, `own` and `rival`. |
+| `GraftTarget` | `habilis-network/src/transport/probe.rs` | The peer of a graft and the rendezvous it is told apart from. |
