@@ -146,10 +146,7 @@ impl BlobDigest {
 
 impl std::fmt::Display for BlobDigest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for byte in &self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        crate::protocol::identity::write_hex(formatter, &self.0)
     }
 }
 
@@ -463,7 +460,6 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        // Forge a wrong bearer secret.
         ticket.secret = crate::protocol::crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
         let mut out = Vec::new();
         assert!(
@@ -484,7 +480,6 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        // A hash the store does not hold.
         ticket.sha256 = super::BlobDigest::from_bytes([0xabu8; super::HASH_LEN]);
         let mut out = Vec::new();
         assert!(
