@@ -221,7 +221,7 @@ impl MessageLog {
         let mut bounds: Vec<Bound> = self
             .messages
             .iter()
-            .map(|msg| (UnixSecs::from_secs(msg.timestamp), msg.dedup_key()))
+            .map(|msg| (msg.timestamp, msg.dedup_key()))
             .collect();
         bounds.sort_unstable();
         bounds
@@ -350,7 +350,7 @@ impl MessageLog {
             .rev()
             .filter(|msg| {
                 let key = msg.dedup_key();
-                let bound = (UnixSecs::from_secs(msg.timestamp), key);
+                let bound = (msg.timestamp, key);
                 bound >= range.lo
                     && bound <= range.hi
                     && !have.contains(&key)
@@ -394,7 +394,7 @@ fn resendable_to(msg: &Message, requester: &Nickname) -> bool {
 /// Ranks *within* one author, not across them: because a sender picks these
 /// fields, ordering the whole log by them let one peer stamp its way to
 /// permanent residency. [`MessageLog::eviction_index`] picks the author first.
-fn eviction_key(msg: &Message) -> (i64, Option<AuthorKey>, Option<u64>, &str) {
+fn eviction_key(msg: &Message) -> (UnixSecs, Option<AuthorKey>, Option<u64>, &str) {
     (msg.timestamp, msg.author_key(), msg.seq, msg.id.as_str())
 }
 
@@ -481,7 +481,7 @@ mod tests {
     }
 
     fn in_range(message: &Message, window: &super::DigestWindow) -> bool {
-        let bound = (UnixSecs::from_secs(message.timestamp), message.dedup_key());
+        let bound = (message.timestamp, message.dedup_key());
         bound >= window.lo && bound <= window.hi
     }
 
@@ -526,7 +526,7 @@ mod tests {
     /// A message tagged with an explicit timestamp, for window tests.
     fn msg_at(body: &str, ts: i64) -> Message {
         let mut message = msg(body);
-        message.timestamp = ts;
+        message.timestamp = UnixSecs::from_secs(ts);
         message
     }
 
@@ -542,7 +542,7 @@ mod tests {
                 body: crate::protocol::MessageBody::from(body),
             },
         );
-        message.timestamp = ts;
+        message.timestamp = UnixSecs::from_secs(ts);
         message
     }
 
@@ -832,7 +832,7 @@ mod tests {
                     // One author also stamps far ahead, the shape that used to
                     // buy immunity.
                     if index == 0 {
-                        message.timestamp = i64::MAX - step;
+                        message.timestamp = UnixSecs::from_secs(i64::MAX - step);
                     }
                     batch.push(message);
                 }

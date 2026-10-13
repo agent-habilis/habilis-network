@@ -78,7 +78,7 @@ pub(crate) fn observe(
     // joined is never *surfaced* to the operator/agent. Computed here
     // (not just before the inbound push) because the arrival-surfacing
     // decisions below need it too.
-    let surfaceable = message.timestamp >= state.joined_at.as_secs();
+    let surfaceable = message.timestamp >= state.joined_at;
 
     if update.returned && surfaceable {
         state.surfaced.insert(message.author.clone());

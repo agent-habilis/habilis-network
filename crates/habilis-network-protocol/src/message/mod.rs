@@ -14,7 +14,7 @@ use bytes::Bytes;
 use iroh_base::Signature;
 use serde::{Deserialize, Serialize};
 
-use habilis_network_util::clock;
+use habilis_network_util::clock::UnixSecs;
 
 use super::identity::{self, Identity};
 use super::mesh::MeshId;
@@ -436,7 +436,7 @@ pub struct Message {
     pub mesh: MeshId,
     pub author: Nickname,
     /// Unix timestamp (seconds, UTC).
-    pub timestamp: i64,
+    pub timestamp: UnixSecs,
     pub body: MessageBody,
     /// Author's Ed25519 public key and the detached signature over the message's
     /// [canonical bytes](Message::canonical_bytes), always together: a message has both or
@@ -579,7 +579,7 @@ impl Serialize for Message {
             kind: &self.kind,
             mesh: &self.mesh,
             author: &self.author,
-            timestamp: self.timestamp,
+            timestamp: self.timestamp.as_secs(),
             body: &self.body,
             pubkey: signer.map(|signed| HexOut(signed.key.as_bytes())),
             sig: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
@@ -643,7 +643,7 @@ impl TryFrom<WireIn> for Message {
             kind: wire.kind,
             mesh: wire.mesh,
             author: wire.author,
-            timestamp: wire.timestamp,
+            timestamp: UnixSecs::from_secs(wire.timestamp),
             body: wire.body,
             signer,
             seq: wire.seq,
@@ -682,7 +682,7 @@ impl Message {
             kind,
             mesh: mesh.clone(),
             author: author.clone(),
-            timestamp: clock::unix_secs(),
+            timestamp: UnixSecs::now(),
             body,
             signer: None,
             seq: None,
@@ -1145,7 +1145,7 @@ impl Message {
             kind,
             mesh: MeshId::from("test"),
             author: "alice-bot".into(),
-            timestamp: 1_700_000_000,
+            timestamp: UnixSecs::from_secs(1_700_000_000),
             body: body.into(),
             signer: None,
             seq: None,

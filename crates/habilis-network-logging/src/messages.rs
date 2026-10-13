@@ -91,7 +91,7 @@ fn log(direction: &'static str, msg: &Message) {
                 target: "habilis_network::messages",
                 dir = direction,
                 author = %msg.author,
-                ts = msg.timestamp,
+                ts = msg.timestamp.as_secs(),
                 body = %logged_body(msg),
                 "msg"
             ),
@@ -104,7 +104,7 @@ fn log(direction: &'static str, msg: &Message) {
                     target: "habilis_network::messages",
                     dir = direction,
                     author = %msg.author,
-                    ts = msg.timestamp,
+                    ts = msg.timestamp.as_secs(),
                     to = ?to,
                     kind = %msg.kind,
                     body = %logged_body(msg),
@@ -121,7 +121,7 @@ fn log(direction: &'static str, msg: &Message) {
             target: "habilis_network::messages",
             dir = direction,
             author = %msg.author,
-            ts = msg.timestamp,
+            ts = msg.timestamp.as_secs(),
             presence = %subtype,
             "presence"
         ),
@@ -131,7 +131,7 @@ fn log(direction: &'static str, msg: &Message) {
             target: "habilis_network::messages",
             dir = direction,
             author = %msg.author,
-            ts = msg.timestamp,
+            ts = msg.timestamp.as_secs(),
             channel = %msg.kind,
             body = %logged_body(msg),
             "state"

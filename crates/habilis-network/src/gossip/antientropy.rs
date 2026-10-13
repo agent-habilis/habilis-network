@@ -1666,7 +1666,7 @@ mod tests {
                     body: MessageBody::from(format!("m{index}").as_str()),
                 },
             );
-            message.timestamp = 1_700_000_000 + i64::try_from(index).unwrap();
+            message.timestamp = UnixSecs::from_secs(1_700_000_000 + i64::try_from(index).unwrap());
             log.push(message);
         }
         let newest = log.recent_window(ANTIENTROPY_DIGEST_WINDOW_IDS).unwrap();
@@ -1800,7 +1800,7 @@ mod tests {
                 body: MessageBody::from(body),
             },
         );
-        message.timestamp = timestamp;
+        message.timestamp = UnixSecs::from_secs(timestamp);
         message
     }
 

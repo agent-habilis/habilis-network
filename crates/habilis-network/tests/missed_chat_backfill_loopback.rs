@@ -28,7 +28,7 @@ const BUDGET: Duration = Duration::from_secs(15);
 
 /// A frame stamped this far ahead stays inside a node's window even when the
 /// node joins after it was sent, so the only way to get it is to ask.
-const AHEAD_SECS: i64 = 30;
+const AHEAD_SECS: u64 = 30;
 
 /// Logs every chat frame and records the surfaceable ones it receives.
 #[derive(Clone, Default)]
@@ -89,7 +89,7 @@ impl NodeDriver for Chat {
                 body: MessageBody::new("\"hello\"").expect("a JSON body"),
             },
         );
-        frame.timestamp += AHEAD_SECS;
+        frame.timestamp = frame.timestamp + Duration::from_secs(AHEAD_SECS);
         let frame = frame.signed(ctx.identity);
         let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
         let _ = habilis_network::ops::deliver(&frame, bytes, state, ctx.sender)
