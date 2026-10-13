@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::Seed;
 use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
 use crate::{MeshId, MessageBody};
-use habilis_network_util::clock::Instant;
+use habilis_network_util::clock::{Instant, UnixSecs};
 
 /// Domain-separation seed for every directory. The directory name is
 /// the `derive_secret` *label*; this is the *seed*, so a directory's
@@ -128,10 +128,10 @@ pub struct Listing {
     pub peers: usize,
     /// Local instant of the most recent ad; drives expiry.
     pub last_seen: Instant,
-    /// Unix seconds when this mesh was *first* seen in the directory
-    /// (preserved across re-ads). Carried on the `gossip_found` event so a
-    /// consumer can order or age the listing.
-    pub first_seen_unix: i64,
+    /// When this mesh was *first* seen in the directory (preserved across
+    /// re-ads). Carried on the `gossip_found` event so a consumer can order or
+    /// age the listing.
+    pub first_seen_unix: UnixSecs,
 }
 
 /// The change one [`Listings::note`] made: a newly seen mesh or a
@@ -214,7 +214,7 @@ impl Listings {
                 name: mesh.name,
                 peers: ad.peers,
                 last_seen: now,
-                first_seen_unix: habilis_network_util::clock::unix_secs(),
+                first_seen_unix: UnixSecs::now(),
             },
         );
         Some(ListingChange::Found(mesh_id))
