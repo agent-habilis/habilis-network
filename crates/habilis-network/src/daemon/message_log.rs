@@ -19,7 +19,7 @@ fn bound_after((timestamp, key): Bound) -> Bound {
 }
 
 /// One anti-entropy digest window: the inclusive `[lo, hi]` range of
-/// [`Bound`]s it covers and the compact (raw 16-byte UUID) ids the sender holds
+/// [`Bound`]s it covers and the compact dedup keys the sender holds
 /// in that range. The window is a contiguous slice of the log in bound order, so
 /// the ids it lists are **every** message the sender holds in the range. A
 /// receiver can then re-send only real gaps, and advertising a sub-window of a

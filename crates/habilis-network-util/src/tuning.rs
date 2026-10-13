@@ -89,7 +89,7 @@ pub const MULTIHOP_RELAY_STUCK_SECS: u64 = 20;
 /// reconnect recovery — holders re-send every *newer* message the sender
 /// lacks) and a rolling **closed** older one (`[lo, hi]`, which reconciles
 /// deep interior gaps without re-sending the out-of-window remainder). At
-/// 70 ids each (~140 total) the body packs ids as raw 16-byte UUIDs
+/// 70 ids each (~140 total) the body packs the 16-byte dedup keys
 /// Base58-encoded (~22 chars/id) to ~3.1 KB; plus the `{windows:[…]}` and
 /// message envelope (the mesh id alone is ~80 chars) it stays under
 /// `MAX_MESSAGE_SIZE` (3840) — guarded by the `digest_fits_gossip_cap`

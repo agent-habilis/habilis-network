@@ -2,9 +2,9 @@
 //! messages a node missed while partitioned/asleep/just-joined.
 //!
 //! The digest advertises a **window** of the message log: an inclusive
-//! `[lo, hi]` timestamp range plus the compact ids the sender holds in it
-//! (raw 16-byte UUIDs, Base58-packed, so ~10× more fit one gossip message
-//! than the old 36-char strings). A log larger than one window is swept
+//! `[lo, hi]` timestamp range plus the compact dedup keys the sender holds in
+//! it (`DedupKey`, 16 bytes each, Base58-packed, so ~10× more fit one gossip
+//! message than the old 36-char ids). A log larger than one window is swept
 //! across rounds via a rolling cursor; the `[lo, hi]` bounds let a receiver
 //! re-send only **in-window** gaps, so advertising a sub-window never makes
 //! peers perpetually re-broadcast the out-of-window remainder.
@@ -43,7 +43,7 @@ use super::broadcast_msg;
 
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
-/// its ids packed as raw 16-byte UUIDs, Base58-encoded. The key is what lets an
+/// its dedup keys packed as 16 bytes each, Base58-encoded. The key is what lets an
 /// edge fall inside a second that holds more messages than a window lists.
 #[derive(Serialize, Deserialize)]
 struct WireWindow {
