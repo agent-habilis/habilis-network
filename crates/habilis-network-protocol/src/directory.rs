@@ -55,7 +55,7 @@ const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/dom
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::new(
-        Seed::from_bytes(derive_secret(
+        Seed::from_bytes(*derive_secret(
             DIRECTORY_BASE_SEED.as_bytes(),
             directory.as_bytes(),
         )),
@@ -132,8 +132,8 @@ pub struct Listing {
     /// Local instant of the most recent ad; drives expiry.
     pub last_seen: Instant,
     /// When this mesh was *first* seen in the directory (preserved across
-    /// re-ads). Carried on the `gossip_found` event so a consumer can order or
-    /// age the listing.
+    /// re-ads). Read by the directory API of a consumer, to order or age the
+    /// listing.
     pub first_seen_unix: UnixSecs,
 }
 

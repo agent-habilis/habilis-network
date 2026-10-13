@@ -73,7 +73,7 @@ pub(crate) fn topic_seed(topic: &str) -> Seed {
 /// # Panics
 /// If `label` exceeds 255 bytes; labels are short internal constants.
 #[must_use]
-pub(crate) fn derive_secret(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
+pub(crate) fn derive_secret(seed: &[u8; 32], label: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN);
     hasher.update([
@@ -84,7 +84,7 @@ pub(crate) fn derive_secret(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
     let digest = hasher.finalize();
     let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&digest);
-    *out
+    out
 }
 
 /// The random 32 bytes that a mesh id carries, and the salts of the key
@@ -114,7 +114,7 @@ impl Seed {
     /// If `label` exceeds 255 bytes; labels are short internal constants.
     #[must_use]
     pub fn derive(&self, label: &[u8]) -> SymmetricKey {
-        SymmetricKey::from_bytes(derive_secret(&self.0, label))
+        SymmetricKey::from_bytes(*derive_secret(&self.0, label))
     }
 }
 
@@ -152,7 +152,7 @@ impl SymmetricKey {
     /// If `label` exceeds 255 bytes; labels are short internal constants.
     #[must_use]
     pub fn derive(&self, label: &[u8]) -> Self {
-        Self::from_bytes(derive_secret(&self.0, label))
+        Self::from_bytes(*derive_secret(&self.0, label))
     }
 }
 
@@ -294,7 +294,7 @@ fn stretch_password(password: &Password, salt_seed: &[u8; 32], label: &[u8]) -> 
     let salt = derive_secret(salt_seed, label);
     let mut out = Zeroizing::new([0u8; 32]);
     argon
-        .hash_password_into(password.as_str().as_bytes(), &salt, &mut *out)
+        .hash_password_into(password.as_str().as_bytes(), &*salt, &mut *out)
         .expect("32-byte salt and output are valid argon2 lengths");
     *out
 }
@@ -513,7 +513,7 @@ mod derive_secret_tests {
         let seed = Seed::from_bytes(SEED_A);
         assert_eq!(
             seed.derive(b"state-doc").as_bytes(),
-            &derive_secret(&SEED_A, b"state-doc")
+            &*derive_secret(&SEED_A, b"state-doc")
         );
         // A key derives from the same bytes the way a seed does.
         let key = SymmetricKey::from_bytes(SEED_A);
@@ -622,7 +622,7 @@ mod derive_secret_tests {
         // labelled derivation off some other seed for any plausible collision.
         assert_ne!(
             topic_seed("rendezvous").as_bytes(),
-            &derive_secret(&SEED_A, b"rendezvous")
+            &*derive_secret(&SEED_A, b"rendezvous")
         );
     }
 

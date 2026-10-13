@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn the_seal_secret_is_the_derivation_of_the_identity_seed() {
         let identity = Identity::generate();
-        let by_hand = x25519_dalek::StaticSecret::from(crate::crypto::derive_secret(
+        let by_hand = x25519_dalek::StaticSecret::from(*crate::crypto::derive_secret(
             &identity.secret.to_bytes(),
             super::SEAL_ENC_LABEL,
         ));

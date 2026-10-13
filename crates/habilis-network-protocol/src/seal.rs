@@ -66,7 +66,7 @@ fn seal(recipient_pub: &PublicKey, plaintext: &[u8]) -> Sealed {
     let epk = PublicKey::from(&ephemeral);
     let shared = ephemeral.diffie_hellman(recipient_pub);
 
-    let key = Zeroizing::new(derive_secret(shared.as_bytes(), SEAL_LABEL));
+    let key = derive_secret(shared.as_bytes(), SEAL_LABEL);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key));
     let mut nonce = [0u8; 12];
     rand::rng().fill_bytes(&mut nonce);
@@ -93,7 +93,7 @@ fn seal(recipient_pub: &PublicKey, plaintext: &[u8]) -> Sealed {
 /// ciphertext/nonce.
 fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>> {
     let shared = our_secret.diffie_hellman(&PublicKey::from(sealed.epk));
-    let key = Zeroizing::new(derive_secret(shared.as_bytes(), SEAL_LABEL));
+    let key = derive_secret(shared.as_bytes(), SEAL_LABEL);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key));
     cipher
         .decrypt(
