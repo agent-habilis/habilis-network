@@ -24,7 +24,7 @@ use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use crate::{AuthorKey, DedupKey};
+use crate::{AuthorKey, DedupKey, SymmetricKey};
 
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
@@ -72,10 +72,10 @@ impl Identity {
     /// so the signing key and the encryption key never coincide (no key reuse).
     #[must_use]
     pub fn seal_secret(&self) -> x25519_dalek::StaticSecret {
-        x25519_dalek::StaticSecret::from(super::crypto::derive_secret(
-            &self.secret.to_bytes(),
-            SEAL_ENC_LABEL,
-        ))
+        // The Ed25519 secret goes through a key that wipes itself on drop, not a plain array
+        // left on the stack by every seal and unseal.
+        let identity_seed = SymmetricKey::from_bytes(self.secret.to_bytes());
+        x25519_dalek::StaticSecret::from(*identity_seed.derive(SEAL_ENC_LABEL).as_bytes())
     }
 
     /// The X25519 public key peers seal to us with — published in our card.
@@ -287,6 +287,22 @@ mod tests {
         assert_eq!(
             encode_hex(dedup_key16(None, &id).as_bytes()),
             "7c3ccd10bb7ec37b46d37926ae627426"
+        );
+    }
+
+    /// The seal key is the same key as before the secret went through a wiped key: the
+    /// derivation of the plain bytes under the same label.
+    #[test]
+    fn the_seal_secret_is_the_derivation_of_the_identity_seed() {
+        let identity = Identity::generate();
+        let by_hand = x25519_dalek::StaticSecret::from(crate::crypto::derive_secret(
+            &identity.secret.to_bytes(),
+            super::SEAL_ENC_LABEL,
+        ));
+        assert_eq!(identity.seal_secret().to_bytes(), by_hand.to_bytes());
+        assert_eq!(
+            identity.seal_public(),
+            x25519_dalek::PublicKey::from(&by_hand)
         );
     }
 
