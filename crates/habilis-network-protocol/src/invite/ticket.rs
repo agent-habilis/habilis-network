@@ -12,7 +12,7 @@
 use std::fmt;
 
 use anyhow::{Context, Result, bail};
-use iroh_base::{PublicKey, SecretKey, Signature};
+use iroh_base::{PublicKey, Signature};
 
 use crate::base58check::{self, take_array};
 use crate::crypto::{self, Password, SymmetricKey};
@@ -93,8 +93,7 @@ pub fn mint(mesh: &Mesh, ttl_secs: Option<u64>, password: Option<&Password>) -> 
         None | Some(0) => 0,
         Some(ttl) => clock::unix_secs().saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)),
     };
-    let signature =
-        SecretKey::from_bytes(issuer_secret).sign(&signing_bytes(&mesh_hash, root, expiry));
+    let signature = issuer_secret.sign(&signing_bytes(&mesh_hash, root, expiry));
     let root_field = match password {
         Some(password) => {
             let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
@@ -430,7 +429,7 @@ mod tests {
         let hash = mesh.to_string();
         let root = mesh.invite_key().unwrap().clone();
         let past = habilis_network_util::clock::unix_secs() - 100;
-        let issuer = SecretKey::from_bytes(mesh.issuer_secret().unwrap());
+        let issuer = mesh.issuer_secret().unwrap().clone();
         let expired = InviteTicket {
             mesh_hash: hash.clone(),
             expiry: past,
