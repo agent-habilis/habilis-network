@@ -18,6 +18,7 @@ use habilis_network::net::{endpoint_addr_from_json, endpoint_addr_to_json};
 use habilis_network::protocol::base58check::{self, take_array};
 use habilis_network::protocol::identity::write_hex;
 use habilis_network::protocol::{LookupOpts, TransportPolicy, ct_eq};
+use zeroize::Zeroizing;
 
 /// Framing version. An unknown version is rejected on decode.
 const VERSION: u8 = 1;
@@ -192,8 +193,8 @@ impl StreamHash {
     /// The bytes a consumer sends first on the stream it opens: `id ‖ secret`.
     /// The producer reads them back in the same order.
     #[must_use]
-    pub(crate) fn header_bytes(&self) -> [u8; ID_LEN + SECRET_LEN] {
-        let mut header = [0; ID_LEN + SECRET_LEN];
+    pub(crate) fn header_bytes(&self) -> Zeroizing<[u8; ID_LEN + SECRET_LEN]> {
+        let mut header = Zeroizing::new([0; ID_LEN + SECRET_LEN]);
         header[..ID_LEN].copy_from_slice(self.id.as_bytes());
         header[ID_LEN..].copy_from_slice(self.secret.as_bytes());
         header

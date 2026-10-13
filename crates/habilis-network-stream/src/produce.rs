@@ -11,6 +11,7 @@ use habilis_network::iroh::protocol::{AcceptError, ProtocolHandler};
 use habilis_network::net::direct::{PROBE_DEADLINE, refuse_unless_direct};
 use habilis_network::protocol::ct_eq;
 use tokio::sync::oneshot;
+use zeroize::Zeroizing;
 
 use crate::code;
 use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
@@ -161,12 +162,13 @@ impl ProtocolHandler for StreamAcceptor {
 async fn read_header(conn: &Connection) -> Result<(SendStream, (StreamId, StreamSecret))> {
     let (send, mut recv) = conn.accept_bi().await?;
     let mut id = [0; ID_LEN];
-    let mut secret = [0; SECRET_LEN];
+    let mut secret = Zeroizing::new([0; SECRET_LEN]);
     recv.read_exact(&mut id).await?;
-    recv.read_exact(&mut secret).await?;
-    let header = (StreamId::from_bytes(id), StreamSecret::from_bytes(secret));
-    zeroize::Zeroize::zeroize(&mut secret);
-    Ok((send, header))
+    recv.read_exact(&mut *secret).await?;
+    Ok((
+        send,
+        (StreamId::from_bytes(id), StreamSecret::from_bytes(*secret)),
+    ))
 }
 
 /// One stream's writing end. It admits exactly one consumer.
