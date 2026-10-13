@@ -282,10 +282,13 @@ pub struct EventLoopState {
     lane_wanted: HashMap<EndpointId, Instant>,
     /// The proven peers whose gossip link went down, with the time of their quick re-graft.
     regraft_at: HashMap<EndpointId, Instant>,
-    /// When each author's digest was last served. Keyed on the pubkey rather
-    /// than the nickname, which an author picks freely.
+    /// When each author's digest was last served. Keyed on the author key rather
+    /// than the nickname, which an author picks freely. The key is an `Option`
+    /// because a digest built with no signature is a valid input of the tests: `None`
+    /// is its own bucket, as the empty string was.
     digest_serves: Cooldown<Option<AuthorKey>>,
-    /// When we last reported an author whose digest we could not read.
+    /// When we last reported an author whose digest we could not read. An `Option` key
+    /// for the same reason as `digest_serves`.
     digest_unreadable: Cooldown<Option<AuthorKey>>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.

@@ -466,6 +466,8 @@ fn heads_digest(
 /// digest with made-up heads would be new every time.
 #[derive(Debug, Default)]
 pub(crate) struct ServeBudget {
+    /// The asker's key is an `Option` because a digest built with no signature is a valid
+    /// input of the tests: `None` is its own bucket, as the empty string was.
     windows: HashMap<(Option<AuthorKey>, Channel, Plane), Served>,
 }
 
