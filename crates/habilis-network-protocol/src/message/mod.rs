@@ -916,7 +916,10 @@ impl Message {
         field(&self.timestamp.to_le_bytes());
         field(self.body.as_str().as_bytes());
         // The hex text of the key, not its 32 bytes: the text is what every signature covers.
-        field(key.map(AuthorKey::to_string).unwrap_or_default().as_bytes());
+        match key {
+            Some(key) => field(&key.hex()),
+            None => field(&[]),
+        }
         // `seq`/`prev` are signed too. `None` encodes as a zero-length field
         // (distinct from `Some(0)`, which is 8 bytes), so a plumbing message
         // and a `seq 0` message never collide.

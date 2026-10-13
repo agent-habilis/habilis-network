@@ -56,11 +56,22 @@ impl AuthorKey {
         Some(Self(bytes))
     }
 
+    /// The 64 ASCII bytes of the lowercase hex form, on the stack: what the signed bytes carry
+    /// and what the dedup key hashes, written for every inbound message without an allocation.
+    #[must_use]
+    pub fn hex(&self) -> [u8; 64] {
+        let mut text = [0u8; 64];
+        for (pair, byte) in text.chunks_exact_mut(2).zip(self.0) {
+            pair[0] = DIGITS[usize::from(byte >> 4)];
+            pair[1] = DIGITS[usize::from(byte & 0x0f)];
+        }
+        text
+    }
+
     /// Whether `hex` is this key in the form of [`Display`](std::fmt::Display). It does not
     /// allocate, so the per-message self-echo check can use it.
     #[must_use]
     pub fn matches_hex(&self, hex: &str) -> bool {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
         hex.len() == 64
             && self
                 .0
@@ -78,6 +89,8 @@ impl AuthorKey {
         PublicKey::from_bytes(&self.0).ok()
     }
 }
+
+const DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 fn lower_hex_digit(digit: u8) -> Option<u8> {
     match digit {
@@ -126,6 +139,13 @@ mod tests {
         );
         assert!(AuthorKey::from_hex(&"zz".repeat(32)).is_none(), "not hex");
         assert!(AuthorKey::from_hex(&"é".repeat(32)).is_none(), "multibyte");
+    }
+
+    #[test]
+    fn hex_is_the_display_text_as_bytes() {
+        let key = AuthorKey::from_hex(HEX).unwrap();
+        assert_eq!(key.hex().as_slice(), HEX.as_bytes());
+        assert_eq!(key.hex().as_slice(), key.to_string().as_bytes());
     }
 
     #[test]

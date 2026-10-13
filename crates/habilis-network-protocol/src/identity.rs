@@ -108,7 +108,7 @@ pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> De
     let mut hasher = Sha256::new();
     // The hex text of the key, as the signed bytes carry it; nothing for an unsigned message.
     if let Some(author) = author {
-        hasher.update(author.to_string().as_bytes());
+        hasher.update(author.hex());
     }
     hasher.update(id_bytes);
     let digest = hasher.finalize();
