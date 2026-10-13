@@ -10,6 +10,7 @@
 
 mod author_key;
 pub mod base58check;
+mod content_hash;
 pub mod crypto;
 mod dedup_key;
 pub mod directory;
@@ -48,6 +49,7 @@ mod wordlist;
 pub use iroh_base;
 
 pub use author_key::AuthorKey;
+pub use content_hash::ContentHash;
 pub use crypto::{Password, Seed, SymmetricKey, TicketAuth, TicketSecret, ct_eq};
 pub use dedup_key::DedupKey;
 pub use identity::{Identity, encode_pubkey};

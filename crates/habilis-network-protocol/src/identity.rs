@@ -164,6 +164,35 @@ pub fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Resul
     Ok(())
 }
 
+/// The 32 bytes of a 64-character lowercase hex string, the one spelling the wire carries for a
+/// key or a hash. `None` for any other length, an uppercase digit, or a non-hex character.
+pub(crate) fn decode_lower_hex_32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let mut bytes = [0u8; 32];
+    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        *byte = (digit(pair[0])? << 4) | digit(pair[1])?;
+    }
+    Some(bytes)
+}
+
+/// The 64 ASCII bytes of the lowercase hex of `bytes`, on the stack.
+pub(crate) fn encode_lower_hex_32(bytes: &[u8; 32]) -> [u8; 64] {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = [0u8; 64];
+    for (pair, byte) in text.chunks_exact_mut(2).zip(bytes) {
+        pair[0] = DIGITS[usize::from(byte >> 4)];
+        pair[1] = DIGITS[usize::from(byte & 0x0f)];
+    }
+    text
+}
+
 /// The bytes of a hex string, either case; `None` for odd length or a non-hex
 /// digit.
 #[must_use]

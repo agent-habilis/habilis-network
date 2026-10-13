@@ -48,57 +48,27 @@ impl AuthorKey {
     /// other length, for an uppercase digit, and for a non-hex character.
     #[must_use]
     pub fn from_hex(hex: &str) -> Option<Self> {
-        if hex.len() != 64 {
-            return None;
-        }
-        let mut bytes = [0u8; 32];
-        for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
-            *byte = (lower_hex_digit(pair[0])? << 4) | lower_hex_digit(pair[1])?;
-        }
-        Some(Self(bytes))
+        crate::identity::decode_lower_hex_32(hex).map(Self)
     }
 
     /// The 64 ASCII bytes of the lowercase hex form, on the stack: what the signed bytes carry
     /// and what the dedup key hashes, written for every inbound message without an allocation.
     #[must_use]
     pub fn hex(&self) -> [u8; 64] {
-        let mut text = [0u8; 64];
-        for (pair, byte) in text.chunks_exact_mut(2).zip(self.0) {
-            pair[0] = DIGITS[usize::from(byte >> 4)];
-            pair[1] = DIGITS[usize::from(byte & 0x0f)];
-        }
-        text
+        crate::identity::encode_lower_hex_32(&self.0)
     }
 
     /// Whether `hex` is this key in the form of [`Display`](std::fmt::Display). It does not
-    /// allocate, so the per-message self-echo check can use it.
+    /// allocate, so a per-message check can use it.
     #[must_use]
     pub fn matches_hex(&self, hex: &str) -> bool {
-        hex.len() == 64
-            && self
-                .0
-                .iter()
-                .zip(hex.as_bytes().chunks_exact(2))
-                .all(|(byte, pair)| {
-                    pair[0] == DIGITS[usize::from(byte >> 4)]
-                        && pair[1] == DIGITS[usize::from(byte & 0x0f)]
-                })
+        self.hex().as_slice() == hex.as_bytes()
     }
 
     /// The key as a curve point, for signature verification. `None` if the bytes are not one.
     #[must_use]
     pub fn public_key(&self) -> Option<PublicKey> {
         PublicKey::from_bytes(&self.0).ok()
-    }
-}
-
-const DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-fn lower_hex_digit(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        _ => None,
     }
 }
 
