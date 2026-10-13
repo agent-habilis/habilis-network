@@ -75,7 +75,8 @@ impl fmt::Debug for StreamId {
 
 /// The bearer secret of a stream. Whoever holds it can take the consumer slot,
 /// so `Debug` prints no byte, and the type has no `PartialEq`: compare two with
-/// [`ct_eq`] on [`Self::as_bytes`].
+/// [`ct_eq`] on [`Self::as_bytes`]. Its bytes are wiped on drop (best-effort: a
+/// copy that a caller made from [`Self::as_bytes`] is not tracked).
 #[derive(Clone)]
 pub struct StreamSecret([u8; SECRET_LEN]);
 
@@ -90,6 +91,16 @@ impl StreamSecret {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; SECRET_LEN] {
         &self.0
+    }
+
+    fn wipe(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
+impl Drop for StreamSecret {
+    fn drop(&mut self) {
+        self.wipe();
     }
 }
 
@@ -316,6 +327,15 @@ mod tests {
             StreamHash::decode(GOLDEN).expect("decodes"),
             sample(policy(true, true, true))
         );
+    }
+
+    // `unsafe_code` is denied, so a test cannot read the freed bytes: it
+    // checks `wipe`, which `drop` calls.
+    #[test]
+    fn wipe_zeroes_the_secret() {
+        let mut secret = StreamSecret::from_bytes([9; SECRET_LEN]);
+        secret.wipe();
+        assert_eq!(secret.as_bytes(), &[0; SECRET_LEN]);
     }
 
     #[test]
