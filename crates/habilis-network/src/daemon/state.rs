@@ -14,7 +14,7 @@ use super::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
-use crate::protocol::{DedupKey, Message, MessageId, Nickname, ShardGroup};
+use crate::protocol::{AuthorKey, DedupKey, Message, MessageId, Nickname, ShardGroup};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
 use crate::util::clock::Instant;
@@ -1498,7 +1498,7 @@ impl EventLoopState {
                 Some(*logical)
             }
             super::reassembly::ShardIngest::Buffered | super::reassembly::ShardIngest::Dropped => {
-                let logical = self.reassemble_from_log(trigger)?;
+                let logical = self.reassemble_from_log(&author, trigger)?;
                 // The store may still hold a partial buffer for this group
                 // (e.g. just the trigger, post-TTL) — release its budget.
                 self.reassembly.forget(&author, &shard.group);
@@ -1511,14 +1511,14 @@ impl EventLoopState {
     /// The log-backed completion path for a **small** (logged) group: scan
     /// the message log for this author's shards and synthesize when every
     /// slot is present. Mirrors the store's synthesis exactly.
-    fn reassemble_from_log(&self, trigger: &Message) -> Option<Message> {
+    fn reassemble_from_log(&self, author: &AuthorKey, trigger: &Message) -> Option<Message> {
         let shard = trigger.shard.as_ref()?;
         if !crate::protocol::message::shard_fits_log(trigger) {
             return None;
         }
         let slots = self
             .message_log
-            .collect_shards(&shard.group, &trigger.pubkey, shard.total);
+            .collect_shards(&shard.group, author, shard.total);
         if slots.iter().any(Option::is_none) {
             return None; // a shard is still missing
         }

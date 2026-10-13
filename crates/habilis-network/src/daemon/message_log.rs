@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::sole_addressee;
-use crate::protocol::{DedupKey, Message, Nickname};
+use crate::protocol::{AuthorKey, DedupKey, Message, Nickname};
 use crate::util::clock;
 
 /// Where a message sits in the log's total order: its timestamp, then its id
@@ -80,8 +80,10 @@ pub struct MessageLog {
     /// [`Self::eviction_index`] needs it on nearly every steady-state message:
     /// at capacity it was hashing a thousand base58 pubkeys to recount what two
     /// counter updates already know. The map is the *only* derived state here,
-    /// and both mutation sites are in [`Self::push`], so it cannot drift.
-    per_author: HashMap<String, usize>,
+    /// and both mutation sites are in [`Self::push`], so it cannot drift. An
+    /// unsigned message (no key) is held under `None`: a test or a fixture can
+    /// push one, and the log must not lose it.
+    per_author: HashMap<Option<AuthorKey>, usize>,
     /// The dedup key of every held message, so a frame that is pushed twice is held once.
     keys: HashSet<DedupKey>,
 }
@@ -112,7 +114,7 @@ impl MessageLog {
         if !self.keys.insert(msg.dedup_key()) {
             return None;
         }
-        *self.per_author.entry(msg.pubkey.clone()).or_default() += 1;
+        *self.per_author.entry(msg.author_key()).or_default() += 1;
         self.messages.push_back(msg);
         if self.messages.len() <= self.capacity {
             return None;
@@ -123,13 +125,13 @@ impl MessageLog {
             self.keys.remove(&gone.dedup_key());
         }
         if let Some(gone) = &evicted
-            && let Some(held) = self.per_author.get_mut(&gone.pubkey)
+            && let Some(held) = self.per_author.get_mut(&gone.author_key())
         {
             *held -= 1;
             // No zero entries: one would win the lowest-pubkey tie-break in
             // `eviction_index` while holding nothing to evict.
             if *held == 0 {
-                self.per_author.remove(&gone.pubkey);
+                self.per_author.remove(&gone.author_key());
             }
         }
         evicted
@@ -164,12 +166,12 @@ impl MessageLog {
             .max_by(|(lhs_key, lhs_count), (rhs_key, rhs_count)| {
                 lhs_count.cmp(rhs_count).then_with(|| rhs_key.cmp(lhs_key))
             })
-            .map(|(pubkey, _)| pubkey.as_str())
+            .map(|(author, _)| *author)
             .expect("over-capacity log is non-empty");
         self.messages
             .iter()
             .enumerate()
-            .filter(|(_, msg)| msg.pubkey.as_str() == fullest)
+            .filter(|(_, msg)| msg.author_key() == fullest)
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
             .expect("the fullest author holds at least one message")
@@ -180,9 +182,9 @@ impl MessageLog {
         self.messages.len()
     }
 
-    /// The retained shards of multipart `group` authored by `pubkey`, slotted by
+    /// The retained shards of multipart `group` authored by `author`, slotted by
     /// `idx` (first-seen wins per idx); `total` slots, each `None` until its shard
-    /// arrives. Keying on `pubkey` as well as `group` is the security boundary: a
+    /// arrives. Keying on the author as well as `group` is the security boundary: a
     /// peer can only sign shards under its own key, so a crafted shard carrying
     /// someone else's `group` forms a separate, never-completing set and can't
     /// inject a slice into the victim's body. Only **small** (logged) groups ever
@@ -191,7 +193,7 @@ impl MessageLog {
     pub(crate) fn collect_shards<'a>(
         &'a self,
         group: &crate::protocol::ShardGroup,
-        pubkey: &str,
+        author: &AuthorKey,
         total: u32,
     ) -> Vec<Option<&'a Message>> {
         let mut slots: Vec<Option<&Message>> = vec![None; total as usize];
@@ -199,7 +201,7 @@ impl MessageLog {
             let Some(shard) = &msg.shard else { continue };
             if shard.group == *group
                 && shard.total == total
-                && msg.pubkey == pubkey
+                && msg.author_key().as_ref() == Some(author)
                 && let Some(slot) = slots.get_mut(shard.idx as usize)
                 && slot.is_none()
             {
@@ -393,15 +395,15 @@ fn resendable_to(msg: &Message, requester: &Nickname) -> bool {
 /// Ranks *within* one author, not across them: because a sender picks these
 /// fields, ordering the whole log by them let one peer stamp its way to
 /// permanent residency. [`MessageLog::eviction_index`] picks the author first.
-fn eviction_key(msg: &Message) -> (i64, &str, Option<u64>, &str) {
-    (msg.timestamp, msg.pubkey.as_str(), msg.seq, msg.id.as_str())
+fn eviction_key(msg: &Message) -> (i64, Option<AuthorKey>, Option<u64>, &str) {
+    (msg.timestamp, msg.author_key(), msg.seq, msg.id.as_str())
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use super::{DedupKey, Message, MessageLog, MissingQuery, Nickname, WindowRange};
+    use super::{AuthorKey, DedupKey, Message, MessageLog, MissingQuery, Nickname, WindowRange};
 
     /// A whole-log gap query for `requester` with nothing already held — the
     /// shape every gate test wants.
@@ -796,16 +798,11 @@ mod tests {
             message.pubkey = author.repeat(32);
             log.push(message);
 
-            let mut recounted: HashMap<&str, usize> = HashMap::new();
+            let mut recounted: HashMap<Option<AuthorKey>, usize> = HashMap::new();
             for held in &log.messages {
-                *recounted.entry(held.pubkey.as_str()).or_default() += 1;
+                *recounted.entry(held.author_key()).or_default() += 1;
             }
-            let maintained: HashMap<&str, usize> = log
-                .per_author
-                .iter()
-                .map(|(key, count)| (key.as_str(), *count))
-                .collect();
-            assert_eq!(maintained, recounted, "counts drifted at step {step}");
+            assert_eq!(log.per_author, recounted, "counts drifted at step {step}");
         }
         // A dropped author leaves no zero entry behind, or it would win the
         // lowest-pubkey tie-break while holding nothing.
