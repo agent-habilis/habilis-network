@@ -14,8 +14,8 @@
 //! ordinary gossip + relay/DHT/mDNS stack. Ads are plain gossip messages
 //! ([`Ad`] in the body) on that mesh's topic — there is no stored list,
 //! so an ad lives only while its publisher keeps re-broadcasting (see
-//! [`habilis_network_util::tuning`]'s `ADVERTISE_INTERVAL_SECS` /
-//! `DIRECTORY_EXPIRY_SECS`).
+//! [`habilis_network_util::tuning`]'s `ADVERTISE_INTERVAL` /
+//! `DIRECTORY_EXPIRY`).
 //!
 //! This module is **pure**: directory derivation, the [`Ad`] codec, and the
 //! [`Listings`] collector. The advertise *task* (a live session on the

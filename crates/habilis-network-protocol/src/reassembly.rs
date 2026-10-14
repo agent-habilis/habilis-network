@@ -8,8 +8,8 @@ use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, Nickname, S
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
     LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
-    REASSEMBLY_MAX_GROUP_LIFETIME_SECS, REASSEMBLY_REPAIR_IDLE_SECS, REASSEMBLY_REPAIR_MAX_IDXS,
-    REASSEMBLY_SLOT_MIN_CHARGE_BYTES, REASSEMBLY_SLOT_OVERHEAD_BYTES, REASSEMBLY_STALE_SECS,
+    REASSEMBLY_MAX_GROUP_LIFETIME, REASSEMBLY_REPAIR_IDLE, REASSEMBLY_REPAIR_MAX_IDXS,
+    REASSEMBLY_SLOT_MIN_CHARGE_BYTES, REASSEMBLY_SLOT_OVERHEAD_BYTES, REASSEMBLY_STALE,
     REASSEMBLY_TOTAL_BUDGET_BYTES, SHARD_CACHE_BUDGET_BYTES,
 };
 
@@ -166,8 +166,8 @@ impl ReassemblyStore {
         }
     }
 
-    /// Reap partial groups that made no progress for [`REASSEMBLY_STALE_SECS`]
-    /// or outlived [`REASSEMBLY_MAX_GROUP_LIFETIME_SECS`] outright (a trickle
+    /// Reap partial groups that made no progress for [`REASSEMBLY_STALE`]
+    /// or outlived [`REASSEMBLY_MAX_GROUP_LIFETIME`] outright (a trickle
     /// of one shard per idle window must not pin its bytes forever); returns
     /// how many were dropped (the prune tick warns when non-zero).
     pub fn sweep_stale(&mut self, now: Instant) -> usize {
@@ -175,9 +175,8 @@ impl ReassemblyStore {
             .groups
             .iter()
             .filter(|(_, group)| {
-                now.duration_since(group.last_seen).as_secs() >= REASSEMBLY_STALE_SECS
-                    || now.duration_since(group.created_at).as_secs()
-                        >= REASSEMBLY_MAX_GROUP_LIFETIME_SECS
+                now.duration_since(group.last_seen) >= REASSEMBLY_STALE
+                    || now.duration_since(group.created_at) >= REASSEMBLY_MAX_GROUP_LIFETIME
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -255,7 +254,7 @@ impl ReassemblyStore {
 
     /// The big (unlogged) groups that stalled long enough to ask their author
     /// for the missing shards, each at most once per
-    /// [`REASSEMBLY_REPAIR_IDLE_SECS`] window. Small groups are excluded —
+    /// [`REASSEMBLY_REPAIR_IDLE`] window. Small groups are excluded —
     /// their shards live in the message log and heal via anti-entropy, which
     /// re-sends a directed shard point-to-point to its addressee.
     #[must_use]
@@ -265,11 +264,11 @@ impl ReassemblyStore {
             if group.total <= LOGGED_SHARD_GROUP_MAX_TOTAL || group.is_complete() {
                 continue;
             }
-            let idle = now.duration_since(group.last_seen).as_secs();
+            let idle = now.duration_since(group.last_seen);
             let asked_recently = group
                 .last_repair
-                .is_some_and(|at| now.duration_since(at).as_secs() < REASSEMBLY_REPAIR_IDLE_SECS);
-            if idle < REASSEMBLY_REPAIR_IDLE_SECS || asked_recently {
+                .is_some_and(|at| now.duration_since(at) < REASSEMBLY_REPAIR_IDLE);
+            if idle < REASSEMBLY_REPAIR_IDLE || asked_recently {
                 continue;
             }
             group.last_repair = Some(now);
@@ -398,7 +397,7 @@ mod tests {
         AppFrameParams, AuthorKey, MeshId, Message, MessageBody, Nickname, Shard, ShardGroup,
     };
     use habilis_network_util::consts::{
-        REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES, REASSEMBLY_STALE_SECS,
+        REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES, REASSEMBLY_STALE,
         REASSEMBLY_TOTAL_BUDGET_BYTES,
     };
 
@@ -873,7 +872,7 @@ mod tests {
             start,
         );
         // Progress (a NEW slot) refreshes the group's clock...
-        let touched = start + Duration::from_secs(REASSEMBLY_STALE_SECS - 1);
+        let touched = start + REASSEMBLY_STALE.saturating_sub(Duration::from_secs(1));
         assert!(matches!(
             ingest(
                 &mut store,
@@ -891,7 +890,7 @@ mod tests {
             ShardIngest::Buffered
         ));
         // ...but a duplicate slot does NOT — no attacker keepalive via resends.
-        let dup_at = touched + Duration::from_secs(REASSEMBLY_STALE_SECS - 1);
+        let dup_at = touched + REASSEMBLY_STALE.saturating_sub(Duration::from_secs(1));
         assert!(matches!(
             ingest(
                 &mut store,
@@ -909,12 +908,12 @@ mod tests {
             ShardIngest::Dropped
         ));
         assert_eq!(
-            store.sweep_stale(touched + Duration::from_secs(REASSEMBLY_STALE_SECS - 1)),
+            store.sweep_stale(touched + REASSEMBLY_STALE.saturating_sub(Duration::from_secs(1))),
             0,
             "a progressing group survives the sweep"
         );
         assert_eq!(
-            store.sweep_stale(touched + Duration::from_secs(REASSEMBLY_STALE_SECS)),
+            store.sweep_stale(touched + REASSEMBLY_STALE),
             1,
             "a group with no new slots is reaped at the idle TTL (the dup did not refresh)"
         );
@@ -924,7 +923,7 @@ mod tests {
 
     #[test]
     fn a_trickling_group_is_reaped_at_the_lifetime_ceiling() {
-        use habilis_network_util::consts::REASSEMBLY_MAX_GROUP_LIFETIME_SECS;
+        use habilis_network_util::consts::REASSEMBLY_MAX_GROUP_LIFETIME;
         let start = Instant::now();
         let mut store = ReassemblyStore::default();
         // One new shard per idle window keeps the group alive under the idle
@@ -932,7 +931,7 @@ mod tests {
         let total = 64u32;
         let mut at = start;
         let mut idx = 0u32;
-        while at.duration_since(start).as_secs() < REASSEMBLY_MAX_GROUP_LIFETIME_SECS {
+        while at.duration_since(start) < REASSEMBLY_MAX_GROUP_LIFETIME {
             ingest(
                 &mut store,
                 &shard_msg(
@@ -947,11 +946,11 @@ mod tests {
                 at,
             );
             idx += 1;
-            at += Duration::from_secs(REASSEMBLY_STALE_SECS - 1);
+            at += REASSEMBLY_STALE.saturating_sub(Duration::from_secs(1));
         }
         assert_eq!(store.groups.len(), 1, "the trickle kept the group alive");
         assert_eq!(
-            store.sweep_stale(start + Duration::from_secs(REASSEMBLY_MAX_GROUP_LIFETIME_SECS)),
+            store.sweep_stale(start + REASSEMBLY_MAX_GROUP_LIFETIME),
             1,
             "the lifetime ceiling reaps it regardless of progress"
         );
@@ -999,9 +998,7 @@ mod tests {
 
     #[test]
     fn repair_tickets_target_stalled_big_groups_once_per_window() {
-        use habilis_network_util::consts::{
-            LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_REPAIR_IDLE_SECS,
-        };
+        use habilis_network_util::consts::{LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_REPAIR_IDLE};
         let start = Instant::now();
         let mut store = ReassemblyStore::default();
         // A small group (logged, heals via anti-entropy) and a big one.
@@ -1051,7 +1048,7 @@ mod tests {
         assert!(store.repair_tickets(start).is_empty());
 
         // Stalled: only the big group is ticketed, with exactly its gaps.
-        let stalled = start + Duration::from_secs(REASSEMBLY_REPAIR_IDLE_SECS);
+        let stalled = start + REASSEMBLY_REPAIR_IDLE;
         let tickets = store.repair_tickets(stalled);
         assert_eq!(tickets.len(), 1, "small groups heal via anti-entropy");
         assert_eq!(tickets[0].group, big);
@@ -1063,7 +1060,7 @@ mod tests {
         // Asked once per window — the immediate re-check yields nothing.
         assert!(store.repair_tickets(stalled).is_empty());
         // The next window asks again.
-        let next = stalled + Duration::from_secs(REASSEMBLY_REPAIR_IDLE_SECS);
+        let next = stalled + REASSEMBLY_REPAIR_IDLE;
         assert_eq!(store.repair_tickets(next).len(), 1);
     }
 
