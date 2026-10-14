@@ -31,8 +31,6 @@ use std::time::Duration;
 /// A finite window by default so a forgotten invite stops admitting; the
 /// creator can override, and `--ttl none`/`0` mints a no-expiry invite.
 pub const INVITE_DEFAULT_TTL: Duration = Duration::from_hours(24);
-/// Use [`INVITE_DEFAULT_TTL`], which holds the same value as a `Duration`.
-pub const INVITE_DEFAULT_TTL_SECS: u64 = INVITE_DEFAULT_TTL.as_secs();
 
 /// Maximum size in bytes of a serialized mesh message. A network-wide
 /// wire contract (must be uniform across members), so it lives here.
@@ -106,8 +104,6 @@ pub const REASSEMBLY_TOTAL_BUDGET_BYTES: usize = 6 * MAX_LOGICAL_BODY_BYTES;
 /// a duplicate slot does not, so an attacker can't keepalive a dead group
 /// with resends — and a slow-but-live transfer is never reaped mid-flight.
 pub const REASSEMBLY_STALE: Duration = Duration::from_mins(5);
-/// Use [`REASSEMBLY_STALE`], which holds the same value as a `Duration`.
-pub const REASSEMBLY_STALE_SECS: u64 = REASSEMBLY_STALE.as_secs();
 
 /// Per-author (pubkey) ceiling on orphan channel changes buffered awaiting
 /// their dependencies. Counted rather than weighed because
@@ -131,8 +127,6 @@ pub const DOC_PENDING_TOTAL_MAX: usize = 512;
 /// hour (generous — a budget-respecting transfer completes in seconds to
 /// minutes).
 pub const REASSEMBLY_MAX_GROUP_LIFETIME: Duration = Duration::from_hours(1);
-/// Use [`REASSEMBLY_MAX_GROUP_LIFETIME`], which holds the same value as a `Duration`.
-pub const REASSEMBLY_MAX_GROUP_LIFETIME_SECS: u64 = REASSEMBLY_MAX_GROUP_LIFETIME.as_secs();
 
 /// Fixed overhead one buffered shard charges on top of its body bytes — the
 /// map nodes, cloned keys, and (for shard 0) the retained envelope clone.
@@ -150,8 +144,6 @@ pub const REASSEMBLY_SLOT_MIN_CHARGE_BYTES: usize = 2048;
 /// over the gossip RPC). Checked on the 1-minute prune tick; with the 300s
 /// idle TTL this yields several repair rounds before the group is reaped.
 pub const REASSEMBLY_REPAIR_IDLE: Duration = Duration::from_mins(1);
-/// Use [`REASSEMBLY_REPAIR_IDLE`], which holds the same value as a `Duration`.
-pub const REASSEMBLY_REPAIR_IDLE_SECS: u64 = REASSEMBLY_REPAIR_IDLE.as_secs();
 
 /// Max missing indexes one repair request names (and the serve side honors) —
 /// bounds both the request body and the resend burst; a wider gap heals over
