@@ -429,8 +429,7 @@ Divergences from upstream, in the order they were made.
     keeps its unit: seconds, or milliseconds for `--ppid-watch-interval-ms`. The CLI
     converts each value to a `Duration` at that one edge, with `Duration::from_secs` or
     `Duration::from_millis`. A port **from** upstream must pass a `Duration` in each
-    `Tuning` field. agent-gossip is carried on its branch `refactor-newtype-pattern` by
-    bone-strand.
+    `Tuning` field. agent-gossip is carried on its branch `refactor-newtype-pattern`.
 
 ## Fork pins — where each one lives, and why
 
