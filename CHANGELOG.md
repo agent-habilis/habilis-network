@@ -10,6 +10,9 @@ published to a registry; pin it with
 
 ### Added
 
+- `habilis_network::x25519_dalek`: the `x25519-dalek` crate, re-exported whole.
+  `Identity::seal_public` returns an `x25519_dalek::PublicKey` and `seal_to_body` takes one, so a
+  consumer takes the type from here and gets no second copy of the crate.
 - `Tuning::rendezvous_periodic_return_secs` (default `RENDEZVOUS_PERIODIC_RETURN_SECS`, 600): how
   long a node that let go of the rendezvous waits before it comes back to it, at the least. The
   node adds up to half of the value from its endpoint id. `NO_RUNG_REPEAT_SECS` (300) is the
