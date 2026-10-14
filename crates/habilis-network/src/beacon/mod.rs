@@ -678,6 +678,15 @@ struct RungReading {
     /// Since when the rung has said nothing, and not answered since. Kept across probes: a rung
     /// that stays silent is bound once it has been silent for the whole reclaim window.
     silent_since: Option<Instant>,
+    /// The ask that this reading answers.
+    generation: u64,
+}
+
+/// A probe task that is out for a rung, and since when.
+#[derive(Clone, Copy, Debug)]
+struct InFlight {
+    generation: u64,
+    since: Instant,
 }
 
 /// What a probe task found out about one rung. The event loop notes it in its [`RungWatch`].
@@ -685,6 +694,9 @@ struct RungReading {
 pub(crate) struct RungReport {
     port: u16,
     answer: ProbeAnswer,
+    /// Which ask of the rung this answers: a task that was given up can still report, and its
+    /// report is not the answer that the loop waits for.
+    generation: u64,
 }
 
 /// How a walk reads a rung that is bound by somebody else.
@@ -716,7 +728,12 @@ pub(crate) struct RungWatch {
     /// The rungs that a probe task is out for, and since when. A task that has not reported for
     /// longer than one heal tick is dead (the loop that would have noted it, or the runtime, is
     /// gone) and the rung is asked again.
-    in_flight: BTreeMap<u16, Instant>,
+    in_flight: BTreeMap<u16, InFlight>,
+    /// The generation of the next ask. A report of an ask that is no longer the one in flight, or
+    /// that is older than the stored reading or than the last clear, is ignored.
+    next_generation: u64,
+    /// The asks below this generation were made before the last clear of the readings.
+    generation_floor: u64,
     /// How many consecutive checks of our own rung did not answer as ours, and the reading that
     /// was counted last, so that one reading is one check however often a tick reads it.
     own_misses: u32,
@@ -729,6 +746,8 @@ impl RungWatch {
         Self {
             readings: BTreeMap::new(),
             in_flight: BTreeMap::new(),
+            next_generation: 1,
+            generation_floor: 0,
             own_misses: 0,
             own_counted: None,
             reports,
@@ -746,7 +765,7 @@ impl RungWatch {
         let now = Instant::now();
         self.in_flight
             .values()
-            .any(|since| Self::alive(*since, now))
+            .any(|probe| Self::alive(probe.since, now))
     }
 
     fn alive(since: Instant, now: Instant) -> bool {
@@ -754,8 +773,26 @@ impl RungWatch {
     }
 
     /// Note what a probe task found.
+    ///
+    /// A probe that was given up can still report. Its report is ignored when the rung was asked
+    /// again since, when a newer ask has been noted, and when the readings were cleared after the
+    /// ask: it would end the wait for the probe in flight and put an old answer in as fresh.
     pub(crate) fn note(&mut self, report: RungReport, now: Instant) {
-        self.in_flight.remove(&report.port);
+        match self.in_flight.get(&report.port) {
+            Some(probe) if probe.generation != report.generation => return,
+            Some(_) => {
+                self.in_flight.remove(&report.port);
+            }
+            None => {}
+        }
+        if report.generation < self.generation_floor
+            || self
+                .readings
+                .get(&report.port)
+                .is_some_and(|stored| report.generation < stored.generation)
+        {
+            return;
+        }
         let gap = Duration::from_secs(heal_interval_secs()).saturating_mul(3);
         let silent_since = match report.answer {
             ProbeAnswer::NoAnswer | ProbeAnswer::Refused => Some(
@@ -773,13 +810,16 @@ impl RungWatch {
                 answer: report.answer,
                 read_at: now,
                 silent_since,
+                generation: report.generation,
             },
         );
     }
 
-    /// Forget every reading: the ladder is ours now.
+    /// Forget every reading: the ladder is ours now. The asks made so far are over, and the late
+    /// report of one of them is ignored.
     fn forget(&mut self) {
         self.readings.clear();
+        self.generation_floor = self.next_generation;
         self.own_misses = 0;
         self.own_counted = None;
     }
@@ -822,6 +862,16 @@ impl RungWatch {
     pub(crate) fn own_check_done(&mut self) {
         self.own_misses = 0;
         self.own_counted = None;
+    }
+
+    /// Tests only: every probe task that is out has been out for longer than a heal tick, as when
+    /// one has passed: the task is given up and the rung is asked again.
+    #[cfg(test)]
+    pub(crate) fn expire_probes_in_flight(&mut self) {
+        let long_ago = Duration::from_secs(heal_interval_secs()).saturating_mul(2);
+        for probe in self.in_flight.values_mut() {
+            probe.since = probe.since.checked_sub(long_ago).unwrap_or(probe.since);
+        }
     }
 
     /// Tests only: every reading is older than a heal tick, as when one has passed.
@@ -869,11 +919,19 @@ impl RungWatch {
         if self
             .in_flight
             .get(&port)
-            .is_some_and(|since| Self::alive(*since, now))
+            .is_some_and(|probe| Self::alive(probe.since, now))
         {
             return;
         }
-        self.in_flight.insert(port, now);
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.in_flight.insert(
+            port,
+            InFlight {
+                generation,
+                since: now,
+            },
+        );
         let reports = self.reports.clone();
         let id = params.id;
         let blind = blindable && rung_probes_are_blind(node);
@@ -901,7 +959,11 @@ impl RungWatch {
             // The report goes before the close: closing an endpoint that dialed a silent rung
             // takes about 3 s, and the silence of a rung is timed from the arrival of the report.
             // A closed channel means the loop is gone: the report is stale.
-            let _ = reports.send(RungReport { port, answer });
+            let _ = reports.send(RungReport {
+                port,
+                answer,
+                generation,
+            });
             if let Some(prober) = prober {
                 prober.close().await;
             }
@@ -1748,6 +1810,7 @@ mod tests {
             RungReport {
                 port: 4242,
                 answer: ProbeAnswer::NoAnswer,
+                generation: 0,
             },
             then,
         );
@@ -1757,6 +1820,123 @@ mod tests {
             rungs.reading(4242, late),
             RungRead::Silent,
             "one report of silence passed the rung after the window: a sample is not a window"
+        );
+    }
+
+    /// A probe task that was given up can still report. Its report answers an ask that is over, and
+    /// it must not end the wait for the probe that replaced it: the loop would walk on an answer
+    /// that is older than the ask it waits for.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_late_report_of_a_probe_that_was_given_up_does_not_stop_its_replacement() {
+        use super::{RungRead, RungWatch};
+
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        crate::beacon::set_blind_rung_probes(node, true);
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let port = 4242;
+
+        rungs.ask(&params, node, port, true);
+        let old = arrivals.recv().await.expect("the first probe reports");
+        rungs.expire_probes_in_flight();
+        rungs.ask(&params, node, port, true);
+        let new = arrivals.recv().await.expect("the second probe reports");
+
+        let now = crate::util::clock::Instant::now();
+        rungs.note(old, now);
+        let waiting = rungs.waiting();
+        let read = rungs.reading(port, now);
+        rungs.note(new, now);
+        let waiting_after = rungs.waiting();
+        let read_after = rungs.reading(port, now);
+        crate::beacon::set_blind_rung_probes(node, false);
+
+        assert!(
+            waiting,
+            "the late report of the first probe ended the wait for the second"
+        );
+        assert_eq!(
+            read,
+            RungRead::Unknown,
+            "an answer older than the ask in flight was stored as fresh"
+        );
+        assert!(
+            !waiting_after,
+            "the report of the second probe ends its wait"
+        );
+        assert_eq!(read_after, RungRead::Silent);
+    }
+
+    /// A report that comes after the report of a newer probe of the same rung says nothing new, and
+    /// it must not make the reading fresh again.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn an_old_report_does_not_make_a_newer_reading_fresh_again() {
+        use super::RungWatch;
+
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        crate::beacon::set_blind_rung_probes(node, true);
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let port = 4242;
+
+        rungs.ask(&params, node, port, true);
+        let old = arrivals.recv().await.expect("the first probe reports");
+        rungs.expire_probes_in_flight();
+        rungs.ask(&params, node, port, true);
+        let new = arrivals.recv().await.expect("the second probe reports");
+
+        let first = crate::util::clock::Instant::now();
+        rungs.note(new, first);
+        rungs.note(old, first + std::time::Duration::from_secs(5));
+        let stored = rungs
+            .readings
+            .get(&port)
+            .expect("the reading of the second probe")
+            .read_at;
+        crate::beacon::set_blind_rung_probes(node, false);
+
+        assert_eq!(
+            stored, first,
+            "the report of the first probe moved the time of a newer reading"
+        );
+    }
+
+    /// A bind clears the readings: the ladder is ours now. The late report of a probe that was
+    /// given up must not bring an answer back from before the bind, after the probe that replaced
+    /// it has reported and the bind has cleared its reading.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_late_report_of_a_probe_that_was_given_up_does_not_come_back_after_a_bind() {
+        use super::{RungRead, RungWatch};
+
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        crate::beacon::set_blind_rung_probes(node, true);
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let port = 4242;
+
+        rungs.ask(&params, node, port, true);
+        let old = arrivals.recv().await.expect("the first probe reports");
+        rungs.expire_probes_in_flight();
+        rungs.ask(&params, node, port, true);
+        let new = arrivals.recv().await.expect("the second probe reports");
+
+        let now = crate::util::clock::Instant::now();
+        rungs.note(new, now);
+        rungs.forget();
+        rungs.note(old, now);
+        let read = rungs.reading(port, now);
+        crate::beacon::set_blind_rung_probes(node, false);
+
+        assert_eq!(
+            read,
+            RungRead::Unknown,
+            "an answer from before the bind was stored after it"
         );
     }
 
@@ -1773,6 +1953,7 @@ mod tests {
         let report = RungReport {
             port: 4242,
             answer: ProbeAnswer::NoAnswer,
+            generation: 0,
         };
         rungs.note(report, then);
 
@@ -1806,6 +1987,7 @@ mod tests {
             RungReport {
                 port: first,
                 answer: ProbeAnswer::Ours,
+                generation: 0,
             },
             now,
         );
@@ -1823,6 +2005,7 @@ mod tests {
             RungReport {
                 port: first,
                 answer: ProbeAnswer::Foreign,
+                generation: 0,
             },
             now,
         );
@@ -1878,6 +2061,7 @@ mod tests {
                 RungReport {
                     port,
                     answer: ProbeAnswer::Foreign,
+                    generation: 0,
                 },
                 now,
             );
