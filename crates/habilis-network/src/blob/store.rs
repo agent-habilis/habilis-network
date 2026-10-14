@@ -5,7 +5,7 @@
 //! producing agent deleting or overwriting the original can't disturb the served
 //! bytes. Spool files are named by hex SHA-256 — traversal-safe and idempotent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,8 +30,11 @@ pub(crate) struct BlobEntry {
     ticket_secret: [u8; SECRET_LEN],
     /// Whether the minted ticket is password-protected.
     password: bool,
-    content_id: ContentId,
-    /// Monotonic insertion order, for oldest-first eviction under disk pressure.
+    /// Every content group that offloaded these bytes. The spool file goes
+    /// only when the last of them is evicted.
+    owners: HashSet<ContentId>,
+    /// Monotonic order of the last registration or claim, for oldest-first
+    /// eviction under disk pressure.
     seq: u64,
 }
 
@@ -52,7 +55,8 @@ pub(crate) struct Registered {
 }
 
 /// The content identity of a file being snapshotted into the store —
-/// [`BlobStore::snapshot`]'s content-addressing key plus its owning task.
+/// [`BlobStore::snapshot`]'s content-addressing key plus the content group it
+/// is offloaded under, which becomes one of the blob's owners.
 pub(crate) struct ContentMeta {
     pub(crate) sha256: [u8; HASH_LEN],
     pub(crate) size: u64,
@@ -90,8 +94,9 @@ impl BlobStore {
     /// is what the fetch handshake is checked against (equal to `ticket_secret`
     /// when not passworded, its Argon2id stretch otherwise). Returns the salt +
     /// password flag to mint the ticket — the existing entry's when this content
-    /// is already spooled (content-addressed dedup — first registration wins),
-    /// so a fresh ticket still matches the stored compare secret.
+    /// is already spooled (content-addressed dedup — first registration wins,
+    /// `content_id` joins its owners), so a fresh ticket still matches the
+    /// stored compare secret.
     ///
     /// # Errors
     /// Snapshotting the file into the spool fails.
@@ -106,11 +111,8 @@ impl BlobStore {
             size,
             content_id,
         } = meta;
-        if let Some(entry) = self.map.get(&sha256) {
-            return Ok(Registered {
-                ticket_secret: entry.ticket_secret,
-                password: entry.password,
-            });
+        if let Some(registered) = self.claim(&sha256, &content_id) {
+            return Ok(registered);
         }
         let dest = self.spool_dir.join(hex_encode(&sha256));
         snapshot_file(src, &dest)?;
@@ -125,7 +127,7 @@ impl BlobStore {
                 secret: secret.compare_secret,
                 ticket_secret: secret.ticket_secret,
                 password: secret.password,
-                content_id,
+                owners: HashSet::from([content_id]),
                 seq,
             },
         );
@@ -141,31 +143,43 @@ impl BlobStore {
         self.map.get(hash)
     }
 
-    /// The ticket fields for an already-spooled blob (a content-addressed dedup
-    /// hit), or `None`. Lets the producer skip the ~100ms password stretch when
-    /// re-offloading content it already holds.
-    pub(crate) fn registered(&self, hash: &[u8; HASH_LEN]) -> Option<Registered> {
-        self.map.get(hash).map(|entry| Registered {
+    /// For an already-spooled blob (a content-addressed dedup hit), add
+    /// `content_id` to its owners, make it the newest blob for disk-pressure
+    /// eviction, and return its ticket fields; `None` when the blob is not
+    /// spooled. Lets the producer skip the ~100ms password stretch
+    /// when re-offloading content it already holds.
+    pub(crate) fn claim(
+        &mut self,
+        hash: &[u8; HASH_LEN],
+        content_id: &ContentId,
+    ) -> Option<Registered> {
+        let entry = self.map.get_mut(hash)?;
+        entry.owners.insert(content_id.clone());
+        entry.seq = self.next_seq;
+        self.next_seq += 1;
+        Some(Registered {
             ticket_secret: entry.ticket_secret,
             password: entry.password,
         })
     }
 
-    /// Drop every blob owned by `content_id` (called from the task idle-timeout
-    /// sweep), unlinking its spool file.
+    /// Release `content_id`'s hold on every blob (called from the task
+    /// idle-timeout sweep), unlinking each spool file no group owns any more.
     pub(crate) fn evict_content(&mut self, content_id: &ContentId) {
         let doomed: Vec<[u8; HASH_LEN]> = self
             .map
-            .iter()
-            .filter(|(_, entry)| &entry.content_id == content_id)
-            .map(|(hash, _)| *hash)
+            .iter_mut()
+            .filter_map(|(hash, entry)| {
+                (entry.owners.remove(content_id) && entry.owners.is_empty()).then_some(*hash)
+            })
             .collect();
         for hash in doomed {
             self.remove(&hash);
         }
     }
 
-    /// Unlink oldest-first until the store is within `MAX_BLOB_STORE_BYTES`.
+    /// Unlink the least recently registered or claimed blob first, until the
+    /// store is within `MAX_BLOB_STORE_BYTES`.
     fn evict_to_budget(&mut self) {
         while self.total_bytes > MAX_BLOB_STORE_BYTES {
             let Some(oldest) = self
@@ -237,7 +251,7 @@ mod tests {
     use crate::blob::{ContentId, HASH_LEN, SECRET_LEN};
     use rand::RngCore;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -337,6 +351,114 @@ mod tests {
         let got = fs::read(&dest).unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(got, b"whole content");
+    }
+
+    fn snapshot_as(store: &mut BlobStore, src: &Path, hash: [u8; HASH_LEN], group: &ContentId) {
+        store
+            .snapshot(
+                src,
+                ContentMeta {
+                    sha256: hash,
+                    size: fs::metadata(src).unwrap().len(),
+                    content_id: group.clone(),
+                },
+                &plain_secret([0u8; SECRET_LEN]),
+            )
+            .unwrap();
+    }
+
+    /// Two offloads of the same bytes that both miss the producer's dedup
+    /// check land in `snapshot` together; the second must still own the blob.
+    #[test]
+    fn a_snapshot_race_adds_the_second_group() {
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"shared").unwrap();
+
+        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let hash = [4u8; HASH_LEN];
+        let group_a = ContentId::new("blob-test-group-a");
+        let group_b = ContentId::new("blob-test-group-b");
+        snapshot_as(&mut store, &src, hash, &group_a);
+        snapshot_as(&mut store, &src, hash, &group_b);
+        let path = store.get(&hash).unwrap().path.clone();
+
+        store.evict_content(&group_a);
+        assert!(store.get(&hash).is_some(), "group B still owns the blob");
+        assert!(path.exists());
+
+        store.evict_content(&group_b);
+        assert!(store.get(&hash).is_none());
+        assert!(
+            !path.exists(),
+            "the last owner's evict unlinks the spool file"
+        );
+
+        fs::remove_dir_all(&src_dir).ok();
+    }
+
+    #[test]
+    fn the_same_group_twice_is_one_owner() {
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"twice").unwrap();
+
+        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let hash = [5u8; HASH_LEN];
+        let group = ContentId::new("blob-test-group");
+        snapshot_as(&mut store, &src, hash, &group);
+        snapshot_as(&mut store, &src, hash, &group);
+        assert!(store.claim(&hash, &group).is_some());
+        assert_eq!(store.total_bytes, 5, "a dedup hit adds no bytes");
+        let path = store.get(&hash).unwrap().path.clone();
+
+        store.evict_content(&group);
+        assert!(store.get(&hash).is_none());
+        assert!(!path.exists());
+
+        fs::remove_dir_all(&src_dir).ok();
+    }
+
+    /// A blob a new group claimed a moment ago is the newest, whatever its
+    /// first registration said: under disk pressure the next-oldest goes.
+    #[test]
+    fn a_claim_makes_the_blob_the_newest_under_disk_pressure() {
+        let src_dir = temp_dir("src");
+        let src = src_dir.join("payload.bin");
+        fs::write(&src, b"x").unwrap();
+
+        let mut store = BlobStore::new(temp_dir("spool")).unwrap();
+        let (oldest, next_oldest, filler) = ([6u8; HASH_LEN], [7u8; HASH_LEN], [8u8; HASH_LEN]);
+        let group_a = ContentId::new("blob-test-group-a");
+        let group_b = ContentId::new("blob-test-group-b");
+        // `size` is the accounted size, so a one-byte file stands in for a
+        // blob of any weight.
+        for (hash, size) in [(oldest, 1), (next_oldest, 1)] {
+            let meta = ContentMeta {
+                sha256: hash,
+                size,
+                content_id: group_a.clone(),
+            };
+            store
+                .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
+                .unwrap();
+        }
+        assert!(store.claim(&oldest, &group_b).is_some());
+
+        // One byte over the budget: exactly one blob has to go.
+        let meta = ContentMeta {
+            sha256: filler,
+            size: super::MAX_BLOB_STORE_BYTES - 1,
+            content_id: group_a.clone(),
+        };
+        store
+            .snapshot(&src, meta, &plain_secret([0u8; SECRET_LEN]))
+            .unwrap();
+
+        assert!(store.get(&oldest).is_some(), "the claimed blob stays");
+        assert!(store.get(&next_oldest).is_none(), "the next oldest goes");
+
+        fs::remove_dir_all(&src_dir).ok();
     }
 
     #[test]

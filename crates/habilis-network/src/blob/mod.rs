@@ -419,6 +419,36 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// The same bytes offloaded under two groups share one spool file, so
+    /// evicting one group must leave the other's ticket redeemable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
+        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
+            .await
+            .unwrap();
+        let src = temp_file(b"shared bytes");
+        let group_a = ContentId::new("blob-test-group-a");
+        let group_b = ContentId::new("blob-test-group-b");
+        server.register(&src, group_a.clone()).await.unwrap();
+        let ticket_b = server.register(&src, group_b.clone()).await.unwrap();
+
+        server.evict_content(&group_a).await;
+        let mut out = Vec::new();
+        fetch(&ticket_b, &mut out, None)
+            .await
+            .expect("group B still holds the blob");
+        assert_eq!(out, b"shared bytes");
+
+        server.evict_content(&group_b).await;
+        out.clear();
+        assert!(
+            fetch(&ticket_b, &mut out, None).await.is_err(),
+            "the blob goes once its last group is evicted"
+        );
+        fs::remove_file(&src).ok();
+        server.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bad_secret_is_refused() {
         let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
