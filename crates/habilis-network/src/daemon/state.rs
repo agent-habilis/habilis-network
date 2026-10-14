@@ -23,7 +23,19 @@ use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{
     KNOWN_ENDPOINTS_CAP, LANE_WANTED_SECS, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
     RECLAIM_WINDOW_SECS, REGRAFT_AFTER_MS, RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
+    rendezvous_periodic_return_secs,
 };
+
+/// How long after it let go of the rendezvous a node wants it again. Every node waits the same
+/// period, plus a share of up to half of it that the id of the node fixes: the pubkey bytes are
+/// uniform, so n members do not come back together.
+fn rendezvous_return_after(local: EndpointId) -> Duration {
+    let period = rendezvous_periodic_return_secs();
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&local.as_bytes()[..8]);
+    let share_ms = u64::from_le_bytes(prefix) % (period * 500).max(1);
+    Duration::from_secs(period) + Duration::from_millis(share_ms)
+}
 
 /// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
 /// re-link throttle (`relink`) and of the `PeerInfo` flood gate.
@@ -382,6 +394,13 @@ pub struct EventLoopState {
     /// is then no loss, so nothing re-grafts it or arms a reclaim for it.
     /// Cleared when the link comes back.
     pub(crate) rendezvous_released: bool,
+    /// When a node that let go of the rendezvous on purpose wants it again, although it holds
+    /// links enough: one period after the release, plus a share from its id. A mesh that split
+    /// into islands, each with links enough, has no other reason to visit the rendezvous, which
+    /// is the one place where the islands meet. The heal tick pays it as an owed return and sets
+    /// the next one a period later ([`Self::pay_periodic_return`]); a link that comes back clears
+    /// it, and the next release sets it again.
+    pub(crate) rendezvous_return_due: Option<Instant>,
     /// A return to the rendezvous is owed, until this instant, although this
     /// node holds enough links to others. Set when a silent roster peer is
     /// swept on a node that is not linked to it (a partition may have split the
@@ -498,6 +517,22 @@ pub struct EventLoopState {
         not(target_arch = "wasm32")
     ))]
     pub(crate) linkstate_held: bool,
+    /// Tests only: this node claims no rendezvous, neither on a heal tick nor in a reclaim window,
+    /// while it is set. A test uses it to force the order "a late joiner claims the free rung
+    /// before any old member does", which a heal tick of a few seconds would otherwise win.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) claims_held: bool,
+    /// What this node knows of the busy rungs of a private ladder, and the probe tasks that find
+    /// out more. The claim walk and the check of the lower rungs read it and never wait.
+    pub(crate) rungs: crate::beacon::RungWatch,
+    /// Tests only: the beacon is shed at the top of the next turn of the loop, as a re-check
+    /// shed does (`Request::ShedBeacon`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) shed_requested: bool,
+    /// Tests only: the beacon stops answering at the top of the next turn of the loop
+    /// (`Request::StallBeacon`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) stall_requested: bool,
     /// What this node already asked of the members it heard on the LAN.
     pub(crate) lan_grafts: crate::gossip::lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
@@ -541,6 +576,11 @@ pub struct EventLoopState {
     /// rival started within seconds of us; later rounds run the steady
     /// jittered cadence.
     pub(crate) rival_recheck_rounds: u32,
+    /// When a sign of a second group last brought the re-check forward
+    /// ([`Self::note_second_group_sign`]).
+    pub(crate) second_group_sign_at: Option<Instant>,
+    /// When the member last said that every rung of its ladder is held by another process.
+    pub(crate) no_rung_noted_at: Option<Instant>,
     /// Consecutive due sheds held back because a data-channel peer depends
     /// on this beacon; see `beacon_arm::defer_shed`. Cleared by a shed and by a
     /// fresh claim (`beacon_arm::schedule_rival_recheck`).
@@ -917,6 +957,7 @@ impl EventLoopState {
             gossip_open: true,
             rendezvous_linked: false,
             rendezvous_released: false,
+            rendezvous_return_due: None,
             rendezvous_comeback_until: None,
             rendezvous_dwell_until: None,
             hosts_rendezvous: false,
@@ -948,6 +989,13 @@ impl EventLoopState {
                 not(target_arch = "wasm32")
             ))]
             linkstate_held: false,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            claims_held: false,
+            rungs: crate::beacon::RungWatch::detached(),
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            shed_requested: false,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            stall_requested: false,
             lan_grafts: crate::gossip::lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,
@@ -956,6 +1004,8 @@ impl EventLoopState {
             reclaim_until: None,
             next_rival_recheck: None,
             rival_recheck_rounds: 0,
+            second_group_sign_at: None,
+            no_rung_noted_at: None,
             rival_recheck_deferrals: 0,
             beacon_closing: None,
             seen: BoundedFifoSet::new(SEEN_IDS_CAP),
@@ -1285,8 +1335,7 @@ impl EventLoopState {
         let addr = self.peer_endpoints.remove(nick)?;
         self.graft_backoff.reset(addr.id);
         self.proven_endpoints.forget_endpoint(addr.id);
-        self.rival_holders
-            .retain(|_, endpoint| *endpoint != addr.id);
+        self.forget_rival_holder(addr.id);
         self.direct.remove(&addr.id);
         self.path_watchers.remove(&addr.id);
         self.path_kinds.remove(&addr.id);
@@ -1353,6 +1402,34 @@ impl EventLoopState {
         }
     }
 
+    /// A sign that another group of this mesh may exist: a member that we do not know linked to
+    /// our beacon, or the LAN named a member that we are not linked to.
+    ///
+    /// A holder that has found no member re-checks its rendezvous only every hour or two, and two
+    /// such holders of one room can stay apart that long. The sign brings the next re-check to
+    /// the fast base and starts the rounds from it again, so a node that nobody approaches keeps
+    /// its long wait. A sign counts once per steady interval: a burst of arrivals must not shed
+    /// the beacon again and again.
+    pub(crate) fn note_second_group_sign(&mut self, own: EndpointId, now: Instant) {
+        let Some(due) = self.next_rival_recheck.filter(|_| self.hosts_rendezvous) else {
+            return;
+        };
+        let spacing = Duration::from_secs(crate::util::tuning::rival_recheck_meshed_secs());
+        if self
+            .second_group_sign_at
+            .is_some_and(|at| now.saturating_duration_since(at) < spacing)
+        {
+            return;
+        }
+        let brisk = now + super::beacon_arm::next_recheck_delay(0, self.peers.len(), own);
+        if due <= brisk {
+            return;
+        }
+        self.second_group_sign_at = Some(now);
+        self.rival_recheck_rounds = 0;
+        self.next_rival_recheck = Some(brisk);
+    }
+
     /// Whether some member is known to hold the rendezvous.
     pub(crate) fn rival_holder_known(&self) -> bool {
         !self.rival_holders.is_empty()
@@ -1363,6 +1440,19 @@ impl EventLoopState {
     pub(crate) fn arm_reclaim(&mut self, now: Instant) {
         self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
         self.probe_backoff.reset();
+    }
+
+    /// Whether a test holds this node's claims back (`Request::HoldClaims`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) fn claims_are_held(&self) -> bool {
+        self.claims_held
+    }
+
+    /// Whether a test holds this node's claims back: never, outside a test build.
+    #[cfg(not(all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+    pub(crate) fn claims_are_held(&self) -> bool {
+        let _ = self;
+        false
     }
 
     /// Whether this node should hold, or come back to, the rendezvous link:
@@ -1377,6 +1467,38 @@ impl EventLoopState {
             || self.linked_endpoints.len() < self.rendezvous_release_links
     }
 
+    /// A live holder of the rendezvous was read, and it is not us: a ladder walk answered "ours",
+    /// or a probe found a beacon. If no member of our mesh is known to host it, the holder is
+    /// outside our mesh, and a node that let go of the rendezvous on purpose would never learn of
+    /// it: it owes a return, which the heal tick pays with a join. Nothing is owed while we host
+    /// it, while we still hold the link, while we want the rendezvous anyway (so a joiner under
+    /// the release count gets no longer visit), or while a holder of our own mesh is known: that
+    /// is the healthy case, and every released member reads it on every heal tick.
+    ///
+    /// Owing makes [`Self::rendezvous_wanted`] true, so the next read owes nothing more: the debt
+    /// is paid by the link, or it runs out after its window and the next read owes it once again.
+    pub(crate) fn note_holder_outside_mesh(&mut self, now: Instant) {
+        if self.rendezvous_linked || self.rendezvous_wanted() || self.rival_holder_known() {
+            return;
+        }
+        tracing::info!(
+            target: "habilis_network::gossip",
+            links = self.linked_endpoints.len(),
+            "a holder of the rendezvous that no member of our mesh hosts: owe a return"
+        );
+        self.owe_rendezvous_return(now);
+        // The graft is the reclaim ticker's: it re-grafts within `RECLAIM_INTERVAL_MS`, where
+        // the heal tick would come round up to a heal interval later.
+        self.arm_reclaim(now);
+    }
+
+    /// The claim of `endpoint` to hold the rendezvous is void: the member is gone, or silent.
+    /// A holder that crashes never sends a `PeerInfo` without the flag, so the flag is dropped
+    /// with the member, whatever else is remembered of it.
+    pub(crate) fn forget_rival_holder(&mut self, endpoint: EndpointId) {
+        self.rival_holders.retain(|_, holder| *holder != endpoint);
+    }
+
     /// A return to the rendezvous is owed from now, for
     /// [`RENDEZVOUS_COMEBACK_SECS`](crate::util::tuning::RENDEZVOUS_COMEBACK_SECS).
     pub(crate) fn owe_rendezvous_return(&mut self, now: Instant) {
@@ -1384,15 +1506,29 @@ impl EventLoopState {
             Some(now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS));
     }
 
+    /// The periodic return, if it fell due, is owed like any other return: for a bounded time,
+    /// and the next one is set one period later. A visit that finds no link is then wanted for
+    /// the comeback window and no longer, and a member does not graft and offer at every tick for
+    /// ever. Called on the heal tick.
+    pub(crate) fn pay_periodic_return(&mut self, now: Instant, local: EndpointId) {
+        if self.rendezvous_return_due.is_some_and(|due| now >= due) {
+            self.owe_rendezvous_return(now);
+            self.rendezvous_return_due = Some(now + rendezvous_return_after(local));
+        }
+    }
+
     /// The rendezvous link came up. If a return was owed, it is paid, and the
     /// visit lasts its dwell time at least.
     pub(crate) fn note_rendezvous_link_up(&mut self, now: Instant) {
         self.rendezvous_linked = true;
         self.rendezvous_released = false;
-        self.rendezvous_dwell_until = self
-            .rendezvous_comeback_until
+        let periodic_visit = self
+            .rendezvous_return_due
             .take()
-            .map(|_| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
+            .is_some_and(|due| now >= due);
+        let owed_visit = self.rendezvous_comeback_until.take().is_some();
+        self.rendezvous_dwell_until = (owed_visit || periodic_visit)
+            .then(|| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
     }
 
     /// Whether this node holds the rendezvous link, has not let go of it yet, is
@@ -1417,6 +1553,7 @@ impl EventLoopState {
     /// read, so that one reads as a choice.
     pub(crate) fn mark_rendezvous_released(&mut self, local: EndpointId) {
         self.rendezvous_released = true;
+        self.rendezvous_return_due = Some(Instant::now() + rendezvous_return_after(local));
         tracing::info!(
             target: "habilis_network::gossip",
             local = %local.fmt_short(),
@@ -2068,6 +2205,97 @@ mod tests {
         assert_eq!(state.rival_recheck_deferrals, 1, "the deferrals stay");
     }
 
+    /// The longest wait that the first round of a re-check can have: its fast base plus the
+    /// offset of the id.
+    fn brisk_wait() -> Duration {
+        Duration::from_secs(
+            crate::util::tuning::rival_recheck_first_secs()
+                + crate::util::tuning::RIVAL_RECHECK_OFFSET_SPAN_SECS,
+        )
+    }
+
+    /// A holder that has found no member has a re-check an hour or two out. A sign that another
+    /// group may exist is all it has to go on: the re-check comes back to the fast base, and the
+    /// rounds start from it again.
+    #[test]
+    fn a_sign_of_a_second_group_brings_the_re_check_to_the_brisk_base() {
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        state.rival_recheck_rounds = 7;
+        let now = Instant::now();
+        state.next_rival_recheck = Some(now + Duration::from_hours(1));
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        let next = state.next_rival_recheck.expect("a re-check is armed");
+        assert!(
+            next <= now + brisk_wait(),
+            "the re-check is due within the fast base"
+        );
+        assert_eq!(state.rival_recheck_rounds, 0, "the rounds start again");
+    }
+
+    /// A burst of members that arrive must not shed the beacon again and again.
+    #[test]
+    fn a_second_sign_inside_one_steady_interval_changes_nothing() {
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        state.next_rival_recheck = Some(far);
+        state.note_second_group_sign(endpoint_id(1), now);
+        assert!(
+            state.next_rival_recheck.is_some_and(|next| next < far),
+            "the first sign counts"
+        );
+
+        state.next_rival_recheck = Some(far);
+        state.rival_recheck_rounds = 3;
+        state.note_second_group_sign(endpoint_id(1), now + Duration::from_secs(10));
+
+        assert_eq!(state.next_rival_recheck, Some(far));
+        assert_eq!(state.rival_recheck_rounds, 3);
+    }
+
+    #[test]
+    fn a_sign_changes_nothing_while_we_do_not_hold_the_beacon() {
+        let mut state = fresh_state();
+        let now = Instant::now();
+        let far = now + Duration::from_hours(1);
+        state.next_rival_recheck = Some(far);
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        assert_eq!(state.next_rival_recheck, Some(far));
+    }
+
+    /// A loopback room has no re-check, and the creator never has one: a sign arms nothing.
+    #[test]
+    fn a_sign_arms_no_re_check_where_none_applies() {
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        state.next_rival_recheck = None;
+
+        state.note_second_group_sign(endpoint_id(1), Instant::now());
+
+        assert_eq!(state.next_rival_recheck, None);
+    }
+
+    #[test]
+    fn a_sign_does_not_push_out_a_re_check_that_is_due_sooner() {
+        let mut state = fresh_state();
+        state.hosts_rendezvous = true;
+        state.rival_recheck_rounds = 4;
+        let now = Instant::now();
+        let soon = now + Duration::from_secs(1);
+        state.next_rival_recheck = Some(soon);
+
+        state.note_second_group_sign(endpoint_id(1), now);
+
+        assert_eq!(state.next_rival_recheck, Some(soon));
+        assert_eq!(state.rival_recheck_rounds, 4);
+    }
+
     /// A flag is remembered only from a proven sender that is not us, and moves our re-check
     /// only while we hold the beacon.
     #[test]
@@ -2107,6 +2335,102 @@ mod tests {
         assert!(state.rival_holder_known());
         assert!(!state.yield_to_lower);
         assert_eq!(state.next_rival_recheck, None);
+    }
+
+    /// A member that let go of the rendezvous and reads a holder that no member of its mesh hosts
+    /// owes a return, and the debt opens the reclaim window that pays it.
+    #[test]
+    fn a_holder_outside_the_mesh_owes_a_return_to_a_released_member() {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        assert!(!state.rendezvous_wanted(), "enough links: it let go");
+
+        state.note_holder_outside_mesh(Instant::now());
+
+        assert!(state.rendezvous_wanted(), "a return is owed");
+        assert!(state.reclaim_until.is_some(), "the reclaim ticker pays it");
+    }
+
+    /// The healthy case, which every released member reads on every heal tick: the holder is a
+    /// member of our own mesh, and its flag is known. Nothing is owed, or the mesh would visit the
+    /// rendezvous for ever.
+    #[test]
+    fn a_holder_of_our_own_mesh_owes_nothing() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, Instant::now());
+        assert!(state.rival_holder_known());
+
+        state.note_holder_outside_mesh(Instant::now());
+
+        assert!(state.rendezvous_comeback_until.is_none());
+        assert!(!state.rendezvous_wanted());
+    }
+
+    /// A member that still holds the link, or hosts the beacon, or wants the rendezvous anyway
+    /// (it has fewer links than the release count) owes nothing: a joiner would otherwise stay
+    /// a dwell longer at every start.
+    #[test]
+    fn a_member_that_has_the_link_or_wants_it_anyway_owes_no_return() {
+        let mut linked = fresh_state();
+        linked.rendezvous_release_links = 1;
+        linked.linked_endpoints.insert(endpoint_id(1));
+        linked.rendezvous_linked = true;
+        linked.note_holder_outside_mesh(Instant::now());
+        assert!(
+            linked.rendezvous_comeback_until.is_none(),
+            "it holds the link"
+        );
+
+        let mut host = fresh_state();
+        host.rendezvous_release_links = 1;
+        host.linked_endpoints.insert(endpoint_id(1));
+        host.hosts_rendezvous = true;
+        host.note_holder_outside_mesh(Instant::now());
+        assert!(host.rendezvous_comeback_until.is_none(), "it hosts it");
+
+        let mut joiner = fresh_state();
+        joiner.note_holder_outside_mesh(Instant::now());
+        assert!(
+            joiner.rendezvous_comeback_until.is_none(),
+            "it wants it anyway"
+        );
+    }
+
+    /// A debt that is owed is not moved by the next read: the window runs out on its own, and a
+    /// read after it owes once again. Without this a node that reads the holder on every heal
+    /// tick would hold the debt open for ever.
+    #[test]
+    fn a_second_read_inside_the_window_does_not_move_it() {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state.linked_endpoints.insert(endpoint_id(1));
+        let first = Instant::now();
+        state.note_holder_outside_mesh(first);
+        let due = state.rendezvous_comeback_until;
+        assert!(due.is_some());
+
+        state.note_holder_outside_mesh(first + Duration::from_secs(5));
+
+        assert_eq!(state.rendezvous_comeback_until, due);
+    }
+
+    /// A holder that crashes never says that it let go. Its flag goes with the member.
+    #[test]
+    fn the_flag_of_a_forgotten_member_is_dropped() {
+        let (low, high) = lower_and_higher();
+        let mut state = fresh_state();
+        state.note_rival_beacon_flag(high, [1u8; 32], low, true, true, Instant::now());
+        state.note_rival_beacon_flag(high, [2u8; 32], endpoint_id(7), true, true, Instant::now());
+
+        state.forget_rival_holder(low);
+
+        assert!(state.rival_holder_known(), "the other holder stays");
+        state.forget_rival_holder(endpoint_id(7));
+        assert!(!state.rival_holder_known());
     }
 
     /// A holder that sends its flag again and again must not keep our re-check away: the push
@@ -2399,6 +2723,146 @@ mod tests {
         state.mark_rendezvous_released(endpoint_id(9));
 
         assert!(!state.should_release_rendezvous(Instant::now()));
+    }
+
+    /// A mesh that split into islands, each with links enough, never visits the rendezvous on its
+    /// own: nothing is owed and no link is below the count. Each node comes back once in a long
+    /// while, and the beacon introduces the islands to each other.
+    #[test]
+    fn a_node_that_let_go_wants_the_rendezvous_again_when_its_return_falls_due() {
+        let mut state = two_link_node();
+        state.rendezvous_linked = true;
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        state.rendezvous_linked = false;
+        assert!(
+            !state.rendezvous_wanted(),
+            "it let go a moment ago: no visit yet"
+        );
+        assert!(
+            state.rendezvous_return_due.is_some(),
+            "a release sets the time of its return"
+        );
+
+        state.rendezvous_return_due = Some(Instant::now());
+        state.pay_periodic_return(Instant::now(), endpoint_id(9));
+
+        assert!(
+            state.rendezvous_wanted(),
+            "a return that fell due is wanted although the links are enough"
+        );
+    }
+
+    /// A return that fell due and found no link is not wanted for ever: the visit is bounded
+    /// like an owed one, or a member whose visit cannot link grafts and offers at every tick.
+    #[test]
+    fn a_return_that_fell_due_and_got_no_link_is_not_wanted_after_the_comeback_window() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let window = Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS);
+        state.rendezvous_return_due = Instant::now().checked_sub(window + Duration::from_secs(1));
+
+        assert!(
+            !state.rendezvous_wanted(),
+            "a return that fell due a window ago and found no link is wanted for ever"
+        );
+    }
+
+    /// The periodic return is paid on the heal tick as an owed one: wanted for the comeback
+    /// window, due again one period later, and not paid twice.
+    #[test]
+    fn a_periodic_return_that_fell_due_is_paid_once_and_set_again_one_period_later() {
+        let local = endpoint_id(9);
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(local);
+        let now = Instant::now();
+        state.rendezvous_return_due = Some(now);
+
+        state.pay_periodic_return(now, local);
+
+        assert!(state.rendezvous_wanted(), "the visit is wanted now");
+        let period = Duration::from_secs(crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN_SECS);
+        let next = state.rendezvous_return_due.expect("it is set again");
+        assert!(next >= now + period, "the next return is a period away");
+        let owed_until = state.rendezvous_comeback_until;
+
+        state.pay_periodic_return(now + Duration::from_secs(1), local);
+
+        assert_eq!(
+            state.rendezvous_comeback_until, owed_until,
+            "a return that is not due is not paid again"
+        );
+        state.rendezvous_comeback_until = now.checked_sub(Duration::from_secs(1));
+        assert!(!state.rendezvous_wanted(), "the visit ends with its window");
+    }
+
+    #[test]
+    fn the_return_of_a_node_that_let_go_falls_due_one_period_later_at_the_earliest() {
+        let period = Duration::from_secs(crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN_SECS);
+        for seed in 1..=8 {
+            let after = super::rendezvous_return_after(endpoint_id(seed));
+            assert!(
+                after >= period,
+                "seed {seed}: {after:?} is before the period"
+            );
+            assert!(
+                after <= period + period / 2,
+                "seed {seed}: {after:?} is later than half a period more"
+            );
+        }
+        assert_ne!(
+            super::rendezvous_return_after(endpoint_id(1)),
+            super::rendezvous_return_after(endpoint_id(2)),
+            "two members do not come back together"
+        );
+    }
+
+    #[test]
+    fn a_visit_that_the_period_asked_for_lasts_its_dwell_time_before_the_node_lets_go() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let now = Instant::now();
+        state.rendezvous_return_due = Some(now);
+
+        state.note_rendezvous_link_up(now);
+
+        assert!(
+            !state.should_release_rendezvous(now),
+            "the visit lasts its dwell time: the beacon needs it to introduce the islands"
+        );
+        let after_dwell = now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS);
+        assert!(state.should_release_rendezvous(after_dwell));
+    }
+
+    #[test]
+    fn a_link_that_comes_up_before_the_return_is_due_asks_for_no_dwell() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let now = Instant::now();
+
+        state.note_rendezvous_link_up(now);
+
+        assert!(state.should_release_rendezvous(now));
+    }
+
+    #[test]
+    fn a_link_that_comes_back_ends_the_wait_for_the_return() {
+        let mut state = two_link_node();
+        state.mark_rendezvous_released(endpoint_id(9));
+        assert!(state.rendezvous_return_due.is_some());
+
+        state.note_rendezvous_link_up(Instant::now());
+
+        assert!(state.rendezvous_return_due.is_none());
     }
 
     #[test]

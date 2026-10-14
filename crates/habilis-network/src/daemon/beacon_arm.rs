@@ -14,6 +14,7 @@ use super::config::CoHostPolicy;
 use super::ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::beacon;
+use crate::gossip::event::NodeEvent;
 use crate::util::clock::Instant;
 
 /// Close the co-hosted rendezvous endpoint before this loop's stack unwinds.
@@ -123,30 +124,92 @@ pub(super) async fn maybe_cohost(
     current: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
 ) {
+    if state.claims_are_held() {
+        return;
+    }
+    // A loopback holder above the first rung yields it when a lower rung answers as our mesh. The
+    // public shed is on a timer that backs off; here the question is positive and cheap, so it
+    // is asked on every heal tick, and nothing is asked of a holder on the first rung. The
+    // answer is a reading in `state.rungs`, which the walk after the shed reads as ours.
+    //
+    // The same tick asks whether the rung that this holder serves still answers: a beacon that
+    // stopped answering keeps its rung, nobody else claims it, and the members that joined
+    // through it hold other links. It sheds at the second check that does not answer, never at
+    // the first, and claims again.
+    if let Some(held) = current.as_ref()
+        && !arm.params.bind_ports.is_empty()
+        && let Some(own) = held.rung_in(&arm.params.bind_ports)
+        && let Some(&own_port) = arm.params.bind_ports.get(own)
+    {
+        let node = ctx.endpoint.id();
+        let stopped = state.rungs.own_rung_failed(arm.params, node, own_port);
+        let yields = own > 0
+            && state
+                .rungs
+                .lower_rung_that_answers(arm.params, node, own)
+                .is_some();
+        if stopped || yields {
+            state.rungs.own_check_done();
+            shed_beacon(state, arm.params, current);
+            return;
+        }
+    }
     if may_cohost(arm.policy, state.meshed, arm.started) {
         // A member that keeps finding the rival probes less often; the reclaim window is not held back.
         let would_probe = arm.params.bind_ports.is_empty() && probes_before_claim(arm.policy);
         if would_probe && probe.is_none() && !state.probe_backoff.due(Instant::now()) {
             return;
         }
-        let claimed = may_probe_to_claim(state)
-            && beacon::ensure(
+        let held = if may_probe_to_claim(state) {
+            beacon::walk_ladder(
                 arm.params,
                 ctx.endpoint,
                 &state.address_book,
                 current,
                 probes_before_claim(arm.policy),
                 probe,
+                &mut state.rungs,
             )
-            .await;
-        if claimed {
-            schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
-            // The new rendezvous never dials us; the reclaim tick re-grafts it.
-            state.arm_reclaim(Instant::now());
-            offer_to_the_new_holder(state, ctx);
+            .await
+        } else {
+            beacon::Held::Idle
+        };
+        match held {
+            beacon::Held::Claimed => {
+                schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
+                // The new rendezvous never dials us; the reclaim tick re-grafts it.
+                state.arm_reclaim(Instant::now());
+                offer_to_the_new_holder(state, ctx);
+            }
+            beacon::Held::Rival => state.note_holder_outside_mesh(Instant::now()),
+            beacon::Held::NoRung => note_no_rung_free(state, ctx, arm.params.bind_ports.len()),
+            beacon::Held::Idle => {}
         }
     }
 }
+/// Every rung of the ladder is held by another process, so no member can serve the rendezvous and
+/// the room cannot be joined through it until one lets go. Said once per repeat interval, however
+/// often the walk runs: to the log, and to the sink so that the app can tell its user.
+fn note_no_rung_free(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, ports: usize) {
+    let now = Instant::now();
+    let repeat = Duration::from_secs(crate::util::tuning::NO_RUNG_REPEAT_SECS);
+    if state
+        .no_rung_noted_at
+        .is_some_and(|at| now.saturating_duration_since(at) < repeat)
+    {
+        return;
+    }
+    state.no_rung_noted_at = Some(now);
+    tracing::warn!(
+        target: "habilis_network::beacon",
+        ports,
+        "no rendezvous port is free: other processes hold every port of this room"
+    );
+    ctx.sink.emit(NodeEvent::Info(format!(
+        "no rendezvous port is free: other processes hold all {ports} ports of this room"
+    )));
+}
+
 /// Offer to our new beacon at once, to the address that the claim just registered. The round of
 /// this member that was started while nobody held the rendezvous was ended by
 /// [`schedule_rival_recheck`].
@@ -157,9 +220,13 @@ pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, ctx: &HandlerC
 /// A probe found a holder of the rendezvous that is not us ("staying peer"): the holder changed for
 /// this member too. The round that it started while nobody held the rendezvous cannot find the
 /// holder, so it is ended and the offer is made anew, as at a claim.
+///
+/// It is also a holder that no member of our mesh may be known to host: the member then owes a
+/// return to it ([`EventLoopState::note_holder_outside_mesh`]).
 pub(super) fn note_rival_holds(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     state.cancel_rendezvous_round();
     offer_to_the_new_holder(state, ctx);
+    state.note_holder_outside_mesh(Instant::now());
 }
 
 /// Fast event-driven failover: while the post-`NeighborDown` reclaim
@@ -187,25 +254,37 @@ pub(super) async fn maybe_reclaim(
     current: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
 ) {
+    if state.claims_are_held() {
+        return;
+    }
     if arm.policy != CoHostPolicy::Never
         && state
             .reclaim_until
             .is_some_and(|deadline| Instant::now() < deadline)
     {
-        let claimed = may_probe_to_claim(state)
-            && beacon::ensure(
+        let held = if may_probe_to_claim(state) {
+            beacon::walk_ladder(
                 arm.params,
                 ctx.endpoint,
                 &state.address_book,
                 current,
                 probes_before_claim(arm.policy),
                 probe,
+                &mut state.rungs,
             )
-            .await;
-        if claimed {
-            schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
-            offer_to_the_new_holder(state, ctx);
-            return;
+            .await
+        } else {
+            beacon::Held::Idle
+        };
+        match held {
+            beacon::Held::Claimed => {
+                schedule_rival_recheck(state, arm.policy, arm.params, ctx.endpoint);
+                offer_to_the_new_holder(state, ctx);
+                return;
+            }
+            beacon::Held::Rival => state.note_holder_outside_mesh(Instant::now()),
+            beacon::Held::NoRung => note_no_rung_free(state, ctx, arm.params.bind_ports.len()),
+            beacon::Held::Idle => {}
         }
         if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
             && crate::transport::webrtc::rendezvous_graftable(state)
@@ -216,6 +295,61 @@ pub(super) async fn maybe_reclaim(
             );
             crate::gossip::heal::tick_heal(arm.params.id, ctx.sender).await;
         }
+    }
+}
+
+/// Let go of the beacon at once and read the ladder again: the endpoint is closed, the address of
+/// the shed beacon leaves the book, and the reclaim window opens, so that the next walk reads
+/// whoever holds a rung (and claims the lowest free one when nobody does).
+fn shed_beacon(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    rendezvous: &mut Option<beacon::Rendezvous>,
+) {
+    let Some(held) = rendezvous.take() else {
+        return;
+    };
+    tracing::info!(
+        target: "habilis_network::gossip",
+        "beacon shed: a lower rung of the ladder answers as our mesh"
+    );
+    state.beacon_closing = Some(held.shed_then());
+    state.next_rival_recheck = None;
+    state.cancel_rendezvous_round();
+    state.address_book.remove_endpoint_info(params.id);
+    super::setup::register_rendezvous(&state.address_book, params);
+    state.rendezvous_linked = false;
+    state.forget_rendezvous_verdict();
+    state.arm_reclaim(Instant::now());
+}
+
+/// Tests only: make the beacon stop answering, if a test asked for it (`Request::StallBeacon`).
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(super) fn stall_on_request(
+    state: &mut EventLoopState,
+    rendezvous: Option<&beacon::Rendezvous>,
+) {
+    if std::mem::take(&mut state.stall_requested)
+        && let Some(held) = rendezvous
+    {
+        tracing::info!(
+            target: "habilis_network::gossip",
+            "beacon stalled at the request of a test"
+        );
+        held.stall();
+    }
+}
+
+/// Tests only: shed the beacon now, if a test asked for it (`Request::ShedBeacon`), as the check
+/// of the lower rungs does after its decision.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(super) fn shed_on_request(
+    state: &mut EventLoopState,
+    params: &beacon::RendezvousParams,
+    rendezvous: &mut Option<beacon::Rendezvous>,
+) {
+    if std::mem::take(&mut state.shed_requested) {
+        shed_beacon(state, params, rendezvous);
     }
 }
 
@@ -252,8 +386,12 @@ fn regrafts_rendezvous(rendezvous_linked: bool, rendezvous_wanted: bool) -> bool
 ///
 /// Still excluded: `Eager` (the mesh origin owns the identity from t=0, and
 /// shedding it would churn the only beacon a cold mesh has), `Never` (claims
-/// nothing), and every loopback mesh — a port ladder arbitrates atomically at
-/// bind time (`AddrInUse` + identity probe), so no split exists to fix there.
+/// nothing), and every loopback mesh. A port ladder arbitrates atomically at
+/// bind time, but the identity probe that follows a failed bind can read a
+/// loaded host wrongly, and two holders then serve one mesh. The loopback
+/// repair is not this timer: a holder above the first rung asks, on every heal
+/// tick, whether a lower rung answers as our mesh, and yields on a positive
+/// answer only (`maybe_cohost`, `beacon::lower_rung_that_answers`).
 pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool {
     matches!(policy, CoHostPolicy::EagerProbed | CoHostPolicy::Deferred) && public
 }
@@ -793,6 +931,603 @@ mod tests {
         );
     }
 
+    /// One heal-tick claim attempt of a meshed `Deferred` member while somebody else holds the only
+    /// rung of the ladder. `configure` sets the member's state before the tick. Returns the state
+    /// after it, and whether the member still holds no beacon.
+    async fn heal_tick_beside_a_foreign_holder(
+        configure: impl FnOnce(&mut crate::daemon::state::EventLoopState),
+    ) -> (crate::daemon::state::EventLoopState, bool) {
+        use iroh_gossip::net::Gossip;
+
+        use super::{CohostArm, maybe_cohost};
+        use crate::daemon::ctx::HandlerCtx;
+        use crate::gossip::event::SilentSink;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::mesh::LookupOpts;
+        use crate::testing::{fresh_state, nick};
+        use crate::transport::MeshSender;
+        use crate::util::clock::Instant;
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let secret = iroh::SecretKey::generate();
+        let params = crate::beacon::RendezvousParams {
+            topic_id: iroh_gossip::proto::TopicId::from_bytes([6u8; 32]),
+            id: secret.public(),
+            secret,
+            bind_ports: vec![port],
+            lookups: LookupOpts::loopback(),
+            relay_transport: false,
+            bootstrap_relay: None,
+            rung_tx: tokio::sync::watch::channel(None).0,
+        };
+
+        // The holder: another member of the same room, on the only rung.
+        let holder_endpoint = loopback_endpoint().await;
+        let holder_book = crate::lookup::address_book(&holder_endpoint);
+        let mut held = None;
+        let mut holder_probe = None;
+        assert!(
+            crate::beacon::ensure(
+                &params,
+                &holder_endpoint,
+                &holder_book,
+                &mut held,
+                false,
+                &mut holder_probe,
+            )
+            .await,
+            "the holder claims the free rung"
+        );
+
+        let endpoint = loopback_endpoint().await;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let (gossip_sender, _receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+        let sender = MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let author = nick("member");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: params.id,
+            external_msg_tx: None,
+            sink: &sink,
+        };
+
+        let mut state = fresh_state();
+        state.meshed = true;
+        configure(&mut state);
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        state.rungs = crate::beacon::RungWatch::new(reports);
+        let mut rendezvous = None;
+        let mut probe = None;
+        let arm = CohostArm {
+            policy: CoHostPolicy::Deferred,
+            params: &params,
+            started: Instant::now(),
+        };
+        // The walk asks the probe tasks and returns; the loop notes their reports and walks
+        // again. This does what the loop does.
+        for _ in 0..4 {
+            maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+            if !state.rungs.waiting() {
+                break;
+            }
+            match tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await {
+                Ok(Some(report)) => state.rungs.note(report, Instant::now()),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        let holds_nothing = rendezvous.is_none();
+
+        if let Some(cohosted) = rendezvous.take() {
+            cohosted.shed_and_wait().await;
+        }
+        if let Some(held) = held.take() {
+            held.shed_and_wait().await;
+        }
+        endpoint.close().await;
+        holder_endpoint.close().await;
+        (state, holds_nothing)
+    }
+
+    /// The one-by-one path: the holder left, a joiner took the free rung, and the old members
+    /// have links enough to have let go of the rendezvous. Their ladder walk reads "ours" and used
+    /// to return nothing, so nothing was owed and nothing was grafted, for ever. Now a member that
+    /// reads a holder that none of its mesh hosts owes a return.
+    #[tokio::test]
+    async fn a_released_member_that_reads_a_holder_outside_its_mesh_owes_a_return() {
+        let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|state| {
+            state.rendezvous_release_links = 1;
+            state
+                .linked_endpoints
+                .insert(crate::testing::endpoint_id(1));
+        }))
+        .await;
+
+        assert!(holds_nothing, "the rung is served: the member stays a peer");
+        assert!(
+            state.rendezvous_wanted(),
+            "the walk read a holder that none of the mesh hosts, and nothing was owed: the member \
+             has links enough, so no graft ever follows"
+        );
+    }
+
+    /// The healthy case, read on every heal tick by every released member: the holder is a member
+    /// of the mesh and its flag is known. Nothing is owed.
+    #[tokio::test]
+    async fn a_released_member_that_knows_the_holder_of_its_mesh_owes_nothing() {
+        let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|state| {
+            state.rendezvous_release_links = 1;
+            state
+                .linked_endpoints
+                .insert(crate::testing::endpoint_id(1));
+            state
+                .rival_holders
+                .insert([9u8; 32], crate::testing::endpoint_id(2));
+        }))
+        .await;
+
+        assert!(holds_nothing);
+        assert!(state.rendezvous_comeback_until.is_none());
+        assert!(!state.rendezvous_wanted());
+    }
+
+    /// A joiner that has fewer links than the release count wants the rendezvous anyway. It owes
+    /// nothing, and so its first visit is not made a dwell longer.
+    #[tokio::test]
+    async fn a_joiner_under_the_release_count_owes_no_return() {
+        let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|_| {})).await;
+
+        assert!(holds_nothing);
+        assert!(state.rendezvous_comeback_until.is_none());
+    }
+
+    /// Every rung of the ladder is held by another process: nobody can serve the rendezvous and
+    /// the room cannot be joined. The member says so once per repeat interval, to its log and to
+    /// its sink, however often the walk runs.
+    #[tokio::test]
+    async fn a_ladder_that_is_taken_whole_is_said_once_per_repeat_interval() {
+        use iroh_gossip::net::Gossip;
+
+        use super::{CohostArm, maybe_cohost};
+        use crate::daemon::ctx::HandlerCtx;
+        use crate::gossip::event::CountingSink;
+        use crate::protocol::MeshId;
+        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::mesh::LookupOpts;
+        use crate::testing::{fresh_state, nick};
+        use crate::transport::MeshSender;
+        use crate::util::clock::Instant;
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let params_of = |seed: u8| {
+            let secret = iroh::SecretKey::generate();
+            crate::beacon::RendezvousParams {
+                topic_id: iroh_gossip::proto::TopicId::from_bytes([seed; 32]),
+                id: secret.public(),
+                secret,
+                bind_ports: vec![port],
+                lookups: LookupOpts::loopback(),
+                relay_transport: false,
+                bootstrap_relay: None,
+                rung_tx: tokio::sync::watch::channel(None).0,
+            }
+        };
+        let params = params_of(6);
+
+        // The beacon of another mesh holds the only rung.
+        let other = params_of(9);
+        let other_endpoint = loopback_endpoint().await;
+        let other_book = crate::lookup::address_book(&other_endpoint);
+        let mut other_held = None;
+        let mut other_probe = None;
+        assert!(
+            crate::beacon::ensure(
+                &other,
+                &other_endpoint,
+                &other_book,
+                &mut other_held,
+                false,
+                &mut other_probe,
+            )
+            .await,
+            "the other mesh claims the free rung"
+        );
+
+        let endpoint = loopback_endpoint().await;
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        let (gossip_sender, _receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+        let sender = MeshSender::new(gossip_sender);
+        let mesh = MeshId::from("test");
+        let author = nick("member");
+        let identity = Identity::generate();
+        let our_pubkey = encode_pubkey(&identity.public());
+        let sink = CountingSink::new();
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &author,
+            identity: &identity,
+            our_pubkey: &our_pubkey,
+            max_peers: 16,
+            rendezvous_id: params.id,
+            external_msg_tx: None,
+            sink: &sink,
+        };
+
+        let mut state = fresh_state();
+        state.meshed = true;
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        state.rungs = crate::beacon::RungWatch::new(reports);
+        let mut rendezvous = None;
+        let mut probe = None;
+        let arm = CohostArm {
+            policy: CoHostPolicy::Deferred,
+            params: &params,
+            started: Instant::now(),
+        };
+        // The walk asks the probe task and returns; the loop notes its report and walks again.
+        for _ in 0..4 {
+            maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+            if !state.rungs.waiting() {
+                break;
+            }
+            match tokio::time::timeout(Duration::from_secs(5), arrivals.recv()).await {
+                Ok(Some(report)) => state.rungs.note(report, Instant::now()),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        let said = sink.count();
+        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        let again = sink.count();
+        let repeat = Duration::from_secs(crate::util::tuning::NO_RUNG_REPEAT_SECS + 1);
+        state.no_rung_noted_at = state.no_rung_noted_at.and_then(|at| at.checked_sub(repeat));
+        maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
+        let later = sink.count();
+
+        if let Some(held) = other_held.take() {
+            held.shed_and_wait().await;
+        }
+        other_endpoint.close().await;
+        endpoint.close().await;
+        assert_eq!(said, 1, "a ladder that is taken whole is said");
+        assert_eq!(
+            again, 1,
+            "a second walk inside the repeat interval says nothing"
+        );
+        assert_eq!(later, 2, "the repeat interval later it is said again");
+    }
+
+    /// The state of one holder on a two-rung ladder, and the means to run a heal tick on it. The
+    /// first rung is taken by a beacon of another mesh while this member walks, so that it binds
+    /// the second; the first rung is then free, or served by another member of this mesh.
+    struct HolderOnTheSecondRung {
+        params: crate::beacon::RendezvousParams,
+        endpoint: iroh::Endpoint,
+        rendezvous: Option<crate::beacon::Rendezvous>,
+        probe: Option<crate::beacon::RivalProbe>,
+        first_port: u16,
+        state: crate::daemon::state::EventLoopState,
+        arrivals: tokio::sync::mpsc::UnboundedReceiver<crate::beacon::RungReport>,
+    }
+
+    impl HolderOnTheSecondRung {
+        async fn new() -> Self {
+            let free_port = || {
+                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .and_then(|socket| socket.local_addr())
+                    .expect("a free loopback port")
+                    .port()
+            };
+            let (first_port, second_port) = (free_port(), free_port());
+            let secret = iroh::SecretKey::generate();
+            let params = crate::beacon::RendezvousParams {
+                topic_id: iroh_gossip::proto::TopicId::from_bytes([8u8; 32]),
+                id: secret.public(),
+                secret,
+                bind_ports: vec![first_port, second_port],
+                lookups: crate::protocol::mesh::LookupOpts::loopback(),
+                relay_transport: false,
+                bootstrap_relay: None,
+                rung_tx: tokio::sync::watch::channel(None).0,
+            };
+            // A beacon of another mesh holds the first rung: this member reads it as foreign and
+            // binds the second.
+            let other_secret = iroh::SecretKey::generate();
+            let other = crate::beacon::RendezvousParams {
+                topic_id: iroh_gossip::proto::TopicId::from_bytes([9u8; 32]),
+                id: other_secret.public(),
+                secret: other_secret,
+                bind_ports: vec![first_port],
+                lookups: crate::protocol::mesh::LookupOpts::loopback(),
+                relay_transport: false,
+                bootstrap_relay: None,
+                rung_tx: tokio::sync::watch::channel(None).0,
+            };
+            let other_endpoint = loopback_endpoint().await;
+            let other_book = crate::lookup::address_book(&other_endpoint);
+            let mut other_beacon = None;
+            let mut other_probe = None;
+            assert!(
+                crate::beacon::ensure(
+                    &other,
+                    &other_endpoint,
+                    &other_book,
+                    &mut other_beacon,
+                    false,
+                    &mut other_probe,
+                )
+                .await,
+                "the other mesh claims the first rung"
+            );
+
+            let endpoint = loopback_endpoint().await;
+            let book = crate::lookup::address_book(&endpoint);
+            let mut rendezvous = None;
+            let mut probe = None;
+            assert!(
+                crate::beacon::ensure(
+                    &params,
+                    &endpoint,
+                    &book,
+                    &mut rendezvous,
+                    false,
+                    &mut probe
+                )
+                .await,
+                "the member walks past the foreign rung and binds the second"
+            );
+            if let Some(held) = other_beacon.take() {
+                held.shed_and_wait().await;
+            }
+            other_endpoint.close().await;
+            let mut state = crate::testing::fresh_state();
+            state.meshed = true;
+            let (reports, arrivals) = tokio::sync::mpsc::unbounded_channel();
+            state.rungs = crate::beacon::RungWatch::new(reports);
+            Self {
+                params,
+                endpoint,
+                rendezvous,
+                probe,
+                first_port,
+                state,
+                arrivals,
+            }
+        }
+
+        /// A member of this mesh takes the first rung, which the foreign beacon left free.
+        async fn another_member_takes_the_first_rung(
+            &self,
+        ) -> (iroh::Endpoint, crate::beacon::Rendezvous) {
+            let member = loopback_endpoint().await;
+            let book = crate::lookup::address_book(&member);
+            let mut beacon = None;
+            let mut probe = None;
+            assert!(
+                crate::beacon::ensure(&self.params, &member, &book, &mut beacon, false, &mut probe)
+                    .await,
+                "a member of the mesh binds the first rung"
+            );
+            (member, beacon.expect("it holds the beacon"))
+        }
+
+        /// One heal tick of this holder.
+        async fn heal_tick(&mut self) {
+            use iroh_gossip::net::Gossip;
+
+            use super::{CohostArm, maybe_cohost};
+            use crate::daemon::ctx::HandlerCtx;
+            use crate::gossip::event::SilentSink;
+            use crate::protocol::MeshId;
+            use crate::protocol::identity::{Identity, encode_pubkey};
+            use crate::testing::nick;
+            use crate::transport::MeshSender;
+            use crate::util::clock::Instant;
+
+            let gossip = Gossip::builder().spawn(self.endpoint.clone());
+            let (gossip_sender, _receiver) = gossip
+                .subscribe(self.params.topic_id, Vec::new())
+                .await
+                .expect("subscribe without a bootstrap")
+                .split();
+            let sender = MeshSender::new(gossip_sender);
+            let mesh = MeshId::from("test");
+            let author = nick("holder");
+            let identity = Identity::generate();
+            let our_pubkey = encode_pubkey(&identity.public());
+            let sink = SilentSink;
+            let ctx = HandlerCtx {
+                sender: &sender,
+                endpoint: &self.endpoint,
+                mesh: &mesh,
+                author: &author,
+                identity: &identity,
+                our_pubkey: &our_pubkey,
+                max_peers: 16,
+                rendezvous_id: self.params.id,
+                external_msg_tx: None,
+                sink: &sink,
+            };
+            let arm = CohostArm {
+                policy: CoHostPolicy::Deferred,
+                params: &self.params,
+                started: Instant::now(),
+            };
+            // The check and the walk ask the probe tasks and return; the loop notes their reports
+            // and walks again. This does what the loop does.
+            for _ in 0..4 {
+                maybe_cohost(
+                    &mut self.state,
+                    &ctx,
+                    &arm,
+                    &mut self.rendezvous,
+                    &mut self.probe,
+                )
+                .await;
+                if !self.state.rungs.waiting() {
+                    break;
+                }
+                match tokio::time::timeout(Duration::from_secs(5), self.arrivals.recv()).await {
+                    Ok(Some(report)) => self.state.rungs.note(report, Instant::now()),
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        }
+
+        async fn close(mut self) {
+            if let Some(held) = self.rendezvous.take() {
+                held.shed_and_wait().await;
+            }
+            self.endpoint.close().await;
+        }
+    }
+
+    /// A holder on a rung above a live one yields it. A split of two beacons on one ladder came
+    /// from a rung probe that timed out, and nothing on a loopback ladder ever repaired it: the
+    /// holder on the higher rung stayed for ever.
+    #[tokio::test]
+    async fn a_holder_on_a_higher_rung_sheds_when_a_lower_rung_answers_as_our_mesh() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+        let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
+
+        holder.heal_tick().await;
+
+        let shed = holder.rendezvous.is_none();
+        holder.close().await;
+        lower_beacon.shed_and_wait().await;
+        lower_endpoint.close().await;
+        assert!(
+            shed,
+            "a member of our mesh serves the first rung, and the holder on the second kept its bind"
+        );
+    }
+
+    /// Silence is not an answer. A lower rung that nobody serves, or whose listener says nothing,
+    /// never makes the holder shed: a wrong reading of a loaded host would otherwise take the
+    /// beacon away from every member that joined through it.
+    #[tokio::test]
+    async fn a_lower_rung_that_does_not_answer_never_makes_the_holder_shed() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+        for _ in 0..2 {
+            holder.heal_tick().await;
+            assert!(holder.rendezvous.is_some(), "the first rung is free");
+        }
+        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, holder.first_port))
+            .expect("the first rung, taken by a socket that says nothing");
+        for _ in 0..2 {
+            holder.heal_tick().await;
+            assert!(
+                holder.rendezvous.is_some(),
+                "the first rung is silent: nothing answers, and silence is no reading"
+            );
+        }
+        drop(silent);
+        holder.close().await;
+    }
+
+    /// A beacon that stopped answering keeps its rung. The holder notices at the second check
+    /// that does not answer, and not at the first: a busy moment must not take a healthy beacon
+    /// from the members that joined through it.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_holder_whose_beacon_stops_answering_sheds_at_the_second_check_and_not_the_first() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+        holder
+            .rendezvous
+            .as_ref()
+            .expect("the holder holds its rung")
+            .stall();
+
+        holder.heal_tick().await;
+        let kept_at_the_first = holder.rendezvous.is_some();
+        holder.state.rungs.expire_readings();
+        holder.heal_tick().await;
+        let shed_at_the_second = holder.rendezvous.is_none();
+
+        holder.close().await;
+        assert!(
+            kept_at_the_first,
+            "one check that does not answer shed the beacon"
+        );
+        assert!(
+            shed_at_the_second,
+            "the beacon stopped answering at two checks and was kept"
+        );
+    }
+
+    /// A beacon that answers is never shed by the check of its own rung, however many ticks
+    /// read it: the count of checks that did not answer starts again at every answer.
+    #[tokio::test]
+    async fn a_holder_whose_beacon_answers_is_kept_by_the_check_of_its_own_rung() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+
+        for _ in 0..3 {
+            holder.heal_tick().await;
+            holder.state.rungs.expire_readings();
+        }
+
+        let kept = holder.rendezvous.is_some();
+        holder.close().await;
+        assert!(kept, "a beacon that answers was shed by its own check");
+    }
+
+    /// A holder that shed because a lower rung answered stays a peer of that rung, even when its
+    /// own probe of the rung then reads silence. A host that stays slow made the probe of the
+    /// walk read "not ours" over and over: the walk bound the rung it had just shed, the check of
+    /// the next tick shed it again, and the member flapped for ever without ever merging.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_holder_that_shed_for_a_live_lower_rung_stays_a_peer_when_its_probe_is_silent() {
+        let mut holder = HolderOnTheSecondRung::new().await;
+        let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
+        crate::beacon::set_blind_rung_probes(holder.endpoint.id(), true);
+
+        holder.heal_tick().await;
+        let shed = holder.rendezvous.is_none();
+        // The close of the shed beacon is done before the walk, or it would find its own rung
+        // still bound and read that as a foreign squat.
+        if let Some(closed) = holder.state.beacon_closing.take() {
+            let _ = closed.await;
+        }
+        holder.heal_tick().await;
+        let peer = holder.rendezvous.is_none();
+
+        crate::beacon::set_blind_rung_probes(holder.endpoint.id(), false);
+        holder.close().await;
+        lower_beacon.shed_and_wait().await;
+        lower_endpoint.close().await;
+        assert!(shed, "the first tick reads the lower rung and sheds");
+        assert!(
+            peer,
+            "the walk that followed read the rung that had just answered as foreign, and bound the rung it shed"
+        );
+    }
+
     /// The book kept the address of every beacon that this process held under the id, so a dial to
     /// the id tried the ports of beacons that were gone (the N=2 round: a claim-time offer that hung
     /// for the whole connect bound while the next offer took 37 ms). A shed takes the entry out.
@@ -1092,8 +1827,9 @@ mod tests {
         // anyone else, and with the shed off there was nothing to re-arbitrate
         // the duplicate beacons that followed. See `rival_recheck_applies`.
         assert!(rival_recheck_applies(CoHostPolicy::Deferred, true));
-        // The loopback port ladder arbitrates atomically at bind time — no
-        // split to fix, shedding would only churn the beacon.
+        // The loopback ladder has no timed re-check: a second beacon on a loopback
+        // mesh is repaired by the lower-rung check and the own-rung check of the
+        // holder (`maybe_cohost`), not by a shed on a timer.
         assert!(!rival_recheck_applies(CoHostPolicy::EagerProbed, false));
         assert!(!rival_recheck_applies(CoHostPolicy::Deferred, false));
         // The origin owns the identity from t=0 and a consumer claims nothing.

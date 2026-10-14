@@ -59,6 +59,8 @@ pub(super) async fn run_heal(
     ctx: &HandlerCtx<'_>,
     params: &beacon::RendezvousParams,
 ) {
+    // A periodic return that fell due is owed from this tick, for a bounded time.
+    state.pay_periodic_return(Instant::now(), ctx.endpoint.id());
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
     crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
@@ -140,6 +142,8 @@ pub(super) async fn run_heal(
     if (hard_edge || state.linked_endpoints.is_empty()) && !state.known_endpoints.is_empty() {
         gossip::heal::rebridge_known(state, ctx).await;
     }
+    // A member of the LAN that was asked to be a neighbor and is still not one is asked again.
+    gossip::lan::ask_unlinked_again(state, ctx).await;
     // Starvation watchdog: links/heal can look busy while no traffic
     // flows (the roster-collapse signature), so the last word every heal
     // tick is a check on verified *inbound* silence.

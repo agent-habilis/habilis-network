@@ -20,34 +20,46 @@
 //!   (`daemon::event_loop::shed_rival_beacon_if_due`) re-arbitrates, so
 //!   the single-co-host invariant holds *eventually*, not at claim time.
 //! - **Private:** a deterministic loopback port *ladder* (no
-//!   pkarr/DNS). Exactly one member per mesh is the beacon: a member
-//!   binds the first free rung; on `AddrInUse` it probes the rung's
-//!   node id — *ours* ⇒ the beacon already exists, stay a peer;
-//!   *foreign* (an unrelated mesh that derived the same port) ⇒ skip
-//!   to the next rung. So independent private meshes on one host never
-//!   hijack each other, and there is no second same-identity co-host
-//!   for a joiner to mis-connect to. On the beacon's death its rung
-//!   frees and the next heal/reclaim tick re-elects.
+//!   pkarr/DNS). One member per mesh is the beacon, the holder of the
+//!   lowest live rung. A member binds the first free rung; on
+//!   `AddrInUse` it reads the rung from the answer of a probe task —
+//!   *ours* ⇒ the beacon already exists, stay a peer; *foreign* (an
+//!   unrelated mesh that derived the same port) ⇒ skip to the next
+//!   rung; *no answer* ⇒ wait, and bind the rung only once it has been
+//!   silent for the whole reclaim window. A listener that refuses,
+//!   closes or fails before a certificate (a busy or starting beacon of
+//!   the same mesh) is read as no answer: only a key that the verifier
+//!   rejects, or an identity that iroh reads as another, is *foreign*.
+//!   So independent private meshes
+//!   on one host never hijack each other. A second same-identity
+//!   co-host can still stand up when a host is too loaded to answer: a
+//!   holder above the first rung yields it on a positive answer of a
+//!   lower rung, at the next heal tick, and a holder whose own rung
+//!   stops answering sheds it. On the beacon's death its rung frees and
+//!   the next heal/reclaim tick re-elects.
 //!
 //! The rendezvous endpoint never authors app messages; its node id is
 //! filtered out of peer-side neighbor handling.
 
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_gossip::proto::TopicId;
 use n0_future::task::JoinHandle;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::Instrument as _;
 
 use crate::lookup::{
-    TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_connect, replace_peer_addr,
+    ProbeAnswer, TransportHandles, add_peer_addr, build_endpoint, build_mesh, probe_answer,
+    probe_connect, replace_peer_addr,
 };
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
+use crate::util::clock::Instant;
 use crate::util::tuning::{
-    HEAL_PROBE_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_ATTEMPTS, RENDEZVOUS_PROBE_RETRY_MS,
-    RENDEZVOUS_PROBE_SECS, heal_interval_secs,
+    HEAL_PROBE_SECS, RECLAIM_WINDOW_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_SECS,
+    heal_interval_secs,
 };
 
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.
@@ -124,6 +136,9 @@ pub(crate) struct Rendezvous {
     /// slot in. The peer endpoint has its own pair, which says nothing about
     /// who depends on the beacon. `None` where the beacon carries no lane.
     lane: RendezvousLane,
+    /// The members that linked to this beacon, as its gossip task saw them come up. The holder
+    /// reads them: a member that it does not know is a sign that another group may exist.
+    arrivals: mpsc::Receiver<EndpointId>,
 }
 
 /// A beacon's `WebRTC` answerer and the table that admits its sessions.
@@ -188,6 +203,44 @@ impl Rendezvous {
             })
     }
 
+    /// The index of the rung in `ladder` that this beacon is bound on: `0` is the first rung that a
+    /// joiner tries. `None` when it is bound on none of them (a public beacon).
+    pub(crate) fn rung_in(&self, ladder: &[u16]) -> Option<usize> {
+        // A browser binds no socket, so it holds no rung of a loopback ladder.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (self, ladder);
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let bound: Vec<u16> = self
+                .endpoint
+                .bound_sockets()
+                .iter()
+                .map(SocketAddr::port)
+                .collect();
+            ladder.iter().position(|port| bound.contains(port))
+        }
+    }
+
+    /// Tests only: make this beacon stop answering and keep its rung. The endpoint stays bound and
+    /// the co-host task stays alive, as a stopped process or a wedged accept loop leaves them;
+    /// no connection of the gossip ALPN is taken any more.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) fn stall(&self) {
+        self.endpoint.set_alpns(Vec::new());
+    }
+
+    /// The members that linked to this beacon since the last call.
+    pub(crate) fn take_arrivals(&mut self) -> Vec<EndpointId> {
+        let mut arrived = Vec::new();
+        while let Ok(id) = self.arrivals.try_recv() {
+            arrived.push(id);
+        }
+        arrived
+    }
+
     /// A beacon holding `endpoint` whose answerer is `lane`, for a test that
     /// needs a held beacon without a claim.
     #[cfg(test)]
@@ -197,6 +250,7 @@ impl Rendezvous {
             monitor: None,
             endpoint,
             lane,
+            arrivals: mpsc::channel(1).1,
         }
     }
 
@@ -214,7 +268,7 @@ impl Rendezvous {
     pub(crate) fn shed_then(self) -> oneshot::Receiver<()> {
         let endpoint = self.endpoint.clone();
         let (done, closed) = oneshot::channel();
-        let shed_at = n0_future::time::Instant::now();
+        let shed_at = Instant::now();
         n0_future::task::spawn(async move {
             endpoint.close().await;
             tracing::debug!(
@@ -561,40 +615,407 @@ fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
 /// it again every time it was re-established. From a throwaway identity
 /// the beacon sees a stranger arrive and leave, which costs it nothing.
 /// [`spawn_rival_probe`] takes the same precaution for the public path.
-async fn rung_serves_our_mesh(prober: &Endpoint, rendezvous_id: EndpointId, port: u16) -> bool {
+///
+/// **One attempt, and four answers.** A rung whose listener failed the identity is foreign for
+/// certain: the verifier rejected its key, or iroh reads the identity as another. A rung that
+/// refused or said nothing is not: a busy or starting beacon of our own mesh refuses, a host too
+/// loaded to answer reads as silence, and a bind cannot be taken back. So the walk binds on
+/// [`ProbeAnswer::Foreign`] at once, and on silence or a refusal only after the rung has stayed
+/// silent for [`RECLAIM_WINDOW_SECS`] across walks (see `build_rendezvous_endpoint`). A walk costs
+/// one attempt on a silent rung, not three.
+async fn rung_answer(prober: &Endpoint, rendezvous_id: EndpointId, port: u16) -> ProbeAnswer {
     let addr = EndpointAddr::new(rendezvous_id)
         .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-    // Retried, and *spaced*: a `false` here is read by the caller as a
-    // positive "foreign" finding and authorizes an irreversible bind, so
-    // it has to be worth believing, and the miss worth covering is a rung
-    // whose owner won the bind race microseconds ago and is not yet
-    // accepting — which refuses instantly, so unspaced attempts would all
-    // land inside that same gap. See `RENDEZVOUS_PROBE_ATTEMPTS` and
-    // `RENDEZVOUS_PROBE_RETRY_MS`. Both common cases still cost one
-    // attempt — a live listener answers, a foreign squat rejects.
-    for attempt in 1..=RENDEZVOUS_PROBE_ATTEMPTS {
-        if attempt > 1 {
-            n0_future::time::sleep(Duration::from_millis(RENDEZVOUS_PROBE_RETRY_MS)).await;
+    let answer = probe_answer(prober, addr, Duration::from_secs(RENDEZVOUS_PROBE_SECS)).await;
+    tracing::trace!(target: "habilis_network::beacon", port, ?answer, "private rung identity-probe");
+    answer
+}
+
+/// Tests only: the members whose rung probe says nothing whatever is there. It stands for a host
+/// too loaded to answer, and it is per member: a process-wide dial would make every in-process
+/// member misread at once, which is not what a loaded host does.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+static BLIND_RUNG_PROBES: std::sync::Mutex<std::collections::BTreeSet<EndpointId>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Make the rung probe of `member` read silence (`blind`), or let it read the truth again.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub(crate) fn set_blind_rung_probes(member: EndpointId, blind: bool) {
+    let mut members = BLIND_RUNG_PROBES.lock().expect("no poison");
+    if blind {
+        members.insert(member);
+    } else {
+        members.remove(&member);
+    }
+}
+
+/// Whether a test made the rung probe of `member` read silence. It is always false outside the
+/// `iroh-test-utils` build.
+fn rung_probes_are_blind(member: EndpointId) -> bool {
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    {
+        BLIND_RUNG_PROBES
+            .lock()
+            .expect("no poison")
+            .contains(&member)
+    }
+    #[cfg(not(all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
+    {
+        let _ = member;
+        false
+    }
+}
+
+/// Whether somebody holds `port`: a socket of ours cannot be bound there. Instant, and no side
+/// effect, so a walk can tell which rungs of a ladder are busy without binding one.
+fn rung_is_busy(port: u16) -> bool {
+    std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).is_err()
+}
+
+/// What a busy rung said when it was last asked.
+#[derive(Clone, Copy, Debug)]
+struct RungReading {
+    answer: ProbeAnswer,
+    read_at: Instant,
+    /// Since when the rung has said nothing, and not answered since. Kept across probes: a rung
+    /// that stays silent is bound once it has been silent for the whole reclaim window.
+    silent_since: Option<Instant>,
+    /// The ask that this reading answers.
+    generation: u64,
+}
+
+/// A probe task that is out for a rung, and since when.
+#[derive(Clone, Copy, Debug)]
+struct InFlight {
+    generation: u64,
+    since: Instant,
+}
+
+/// What a probe task found out about one rung. The event loop notes it in its [`RungWatch`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RungReport {
+    port: u16,
+    answer: ProbeAnswer,
+    /// Which ask of the rung this answers: a task that was given up can still report, and its
+    /// report is not the answer that the loop waits for.
+    generation: u64,
+}
+
+/// How a walk reads a rung that is bound by somebody else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RungRead {
+    /// It answered as the beacon of our own mesh.
+    Ours,
+    /// It answered, and was not ours.
+    Foreign,
+    /// It has said nothing for the whole reclaim window: read as foreign.
+    SilentLongEnough,
+    /// It said nothing, and not for long enough yet: the walk waits.
+    Silent,
+    /// No fresh reading: somebody has to ask.
+    Unknown,
+}
+
+/// What the event loop knows of the busy rungs of a private ladder, and the probe tasks that find
+/// out more.
+///
+/// The ladder walk is instant: it binds a free rung, reads what is here, and asks for what it does
+/// not know by spawning a probe task, as the public path does with `spawn_rival_probe`. It never
+/// waits for a rung. The report of a probe task arrives on the loop, which notes it here and walks
+/// again at once. A reading is fresh for one heal tick; a silent rung keeps the time it was first
+/// read silent until it answers.
+#[derive(Debug)]
+pub(crate) struct RungWatch {
+    readings: BTreeMap<u16, RungReading>,
+    /// The rungs that a probe task is out for, and since when. A task that has not reported for
+    /// longer than one heal tick is dead (the loop that would have noted it, or the runtime, is
+    /// gone) and the rung is asked again.
+    in_flight: BTreeMap<u16, InFlight>,
+    /// The generation of the next ask. A report of an ask that is no longer the one in flight, or
+    /// that is older than the stored reading or than the last clear, is ignored.
+    next_generation: u64,
+    /// The asks below this generation were made before the last clear of the readings.
+    generation_floor: u64,
+    /// How many consecutive checks of our own rung did not answer as ours, and the reading that
+    /// was counted last, so that one reading is one check however often a tick reads it.
+    own_misses: u32,
+    own_counted: Option<Instant>,
+    reports: mpsc::UnboundedSender<RungReport>,
+}
+
+impl RungWatch {
+    pub(crate) fn new(reports: mpsc::UnboundedSender<RungReport>) -> Self {
+        Self {
+            readings: BTreeMap::new(),
+            in_flight: BTreeMap::new(),
+            next_generation: 1,
+            generation_floor: 0,
+            own_misses: 0,
+            own_counted: None,
+            reports,
         }
-        let ours = probe_connect(
-            prober,
-            addr.clone(),
-            Duration::from_secs(RENDEZVOUS_PROBE_SECS),
-        )
-        .await;
-        if ours {
-            tracing::trace!(target: "habilis_network::beacon", port, attempt, "private rung identity-probe: ours");
-            return true;
+    }
+
+    /// A watch whose reports go nowhere: for a state that no loop drives.
+    pub(crate) fn detached() -> Self {
+        Self::new(mpsc::unbounded_channel().0)
+    }
+
+    /// Whether a probe task is out, and not dead.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> bool {
+        let now = Instant::now();
+        self.in_flight
+            .values()
+            .any(|probe| Self::alive(probe.since, now))
+    }
+
+    /// Whether a probe that was asked at `since` is still waited for. After one heal tick it is
+    /// given up: the task, or the loop that would note its report, is gone.
+    fn alive(since: Instant, now: Instant) -> bool {
+        now.saturating_duration_since(since) < Duration::from_secs(heal_interval_secs())
+    }
+
+    /// Note what a probe task found.
+    ///
+    /// A probe that was given up can still report. Its report is ignored when the rung was asked
+    /// again since, when a newer ask has been noted, and when the readings were cleared after the
+    /// ask: it would end the wait for the probe in flight and put an old answer in as fresh.
+    pub(crate) fn note(&mut self, report: RungReport, now: Instant) {
+        match self.in_flight.get(&report.port) {
+            Some(probe) if probe.generation != report.generation => return,
+            Some(_) => {
+                self.in_flight.remove(&report.port);
+            }
+            None => {}
         }
-        tracing::trace!(
-            target: "habilis_network::beacon",
-            port,
-            attempt,
-            attempts = RENDEZVOUS_PROBE_ATTEMPTS,
-            "private rung identity-probe: no answer"
+        if report.generation < self.generation_floor
+            || self
+                .readings
+                .get(&report.port)
+                .is_some_and(|stored| report.generation < stored.generation)
+        {
+            return;
+        }
+        let gap = Duration::from_secs(heal_interval_secs()).saturating_mul(3);
+        let silent_since = match report.answer {
+            ProbeAnswer::NoAnswer | ProbeAnswer::Refused => Some(
+                self.readings
+                    .get(&report.port)
+                    .filter(|before| now.saturating_duration_since(before.read_at) < gap)
+                    .and_then(|before| before.silent_since)
+                    .unwrap_or(now),
+            ),
+            ProbeAnswer::Ours | ProbeAnswer::Foreign => None,
+        };
+        self.readings.insert(
+            report.port,
+            RungReading {
+                answer: report.answer,
+                read_at: now,
+                silent_since,
+                generation: report.generation,
+            },
         );
     }
-    false
+
+    /// Forget every reading: the ladder is ours now. The asks made so far are over, and the late
+    /// report of one of them is ignored.
+    fn forget(&mut self) {
+        self.readings.clear();
+        self.generation_floor = self.next_generation;
+        self.own_misses = 0;
+        self.own_counted = None;
+    }
+
+    /// Whether the holder of the beacon on `own_port` should shed it: its own rung did not answer
+    /// as ours at two consecutive checks, and never at one, so that a busy moment does not take a
+    /// healthy beacon from the members that joined through it. A check is a probe task dialing
+    /// the rung from a throwaway endpoint, one attempt, never blind; a reading that says ours
+    /// resets the count.
+    ///
+    /// What it does not see: a beacon whose endpoint answers while its gossip is wedged.
+    pub(crate) fn own_rung_failed(
+        &mut self,
+        params: &RendezvousParams,
+        node: EndpointId,
+        own_port: u16,
+    ) -> bool {
+        match self.reading(own_port, Instant::now()) {
+            RungRead::Ours => {
+                self.own_misses = 0;
+                self.own_counted = None;
+                false
+            }
+            RungRead::Unknown => {
+                self.ask(params, node, own_port, false);
+                false
+            }
+            RungRead::Foreign | RungRead::SilentLongEnough | RungRead::Silent => {
+                let read_at = self.readings.get(&own_port).map(|reading| reading.read_at);
+                if read_at != self.own_counted {
+                    self.own_misses = self.own_misses.saturating_add(1);
+                    self.own_counted = read_at;
+                }
+                self.own_misses >= 2
+            }
+        }
+    }
+
+    /// The count of the checks of our own rung is over: the beacon was shed.
+    pub(crate) fn own_check_done(&mut self) {
+        self.own_misses = 0;
+        self.own_counted = None;
+    }
+
+    /// Tests only: every probe task that is out has been out for longer than a heal tick, as when
+    /// one has passed: the task is given up and the rung is asked again.
+    #[cfg(all(test, feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub(crate) fn expire_probes_in_flight(&mut self) {
+        let long_ago = Duration::from_secs(heal_interval_secs()).saturating_mul(2);
+        for probe in self.in_flight.values_mut() {
+            probe.since = probe.since.checked_sub(long_ago).unwrap_or(probe.since);
+        }
+    }
+
+    /// Tests only: every reading is older than a heal tick, as when one has passed.
+    #[cfg(test)]
+    pub(crate) fn expire_readings(&mut self) {
+        let long_ago = Duration::from_secs(heal_interval_secs()).saturating_mul(2);
+        for reading in self.readings.values_mut() {
+            reading.read_at = reading
+                .read_at
+                .checked_sub(long_ago)
+                .unwrap_or(reading.read_at);
+        }
+    }
+
+    /// How a walk reads `port` now. A reading older than a heal tick is `Unknown` and asks again.
+    /// `Ours` and `Foreign` act at once. A silent or refusing rung stays `Silent` until two
+    /// reports of silence are a window apart, and then it is `SilentLongEnough`.
+    fn reading(&self, port: u16, now: Instant) -> RungRead {
+        let Some(reading) = self.readings.get(&port) else {
+            return RungRead::Unknown;
+        };
+        if now.saturating_duration_since(reading.read_at)
+            >= Duration::from_secs(heal_interval_secs())
+        {
+            return RungRead::Unknown;
+        }
+        match reading.answer {
+            ProbeAnswer::Ours => RungRead::Ours,
+            ProbeAnswer::Foreign => RungRead::Foreign,
+            // The window is measured between two reports, not up to now: the reading is fresh
+            // for a heal tick, and one report read a window later is still one sample.
+            ProbeAnswer::NoAnswer | ProbeAnswer::Refused => match reading.silent_since {
+                Some(since)
+                    if reading.read_at.saturating_duration_since(since)
+                        >= Duration::from_secs(RECLAIM_WINDOW_SECS) =>
+                {
+                    RungRead::SilentLongEnough
+                }
+                _ => RungRead::Silent,
+            },
+        }
+    }
+
+    /// Spawn one probe of `port`, if none is out. `blindable`: the claim walk's probes are the
+    /// ones that a test makes read silence; the check of the lower rungs is not.
+    fn ask(&mut self, params: &RendezvousParams, node: EndpointId, port: u16, blindable: bool) {
+        let now = Instant::now();
+        if self
+            .in_flight
+            .get(&port)
+            .is_some_and(|probe| Self::alive(probe.since, now))
+        {
+            return;
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.in_flight.insert(
+            port,
+            InFlight {
+                generation,
+                since: now,
+            },
+        );
+        let reports = self.reports.clone();
+        let id = params.id;
+        let blind = blindable && rung_probes_are_blind(node);
+        n0_future::task::spawn(async move {
+            // A throwaway identity, for the reason `rung_answer` gives, and with no address
+            // lookup: the dial carries the one address that it asks about, and a lookup could
+            // hand it another path of the id, which would answer for the id and not the rung.
+            let prober = if blind {
+                None
+            } else {
+                build_endpoint(
+                    &LookupOpts::loopback(),
+                    None,
+                    None,
+                    Vec::new(),
+                    TransportHandles::default(),
+                )
+                .await
+                .ok()
+            };
+            let answer = match &prober {
+                Some(prober) => rung_answer(prober, id, port).await,
+                None => ProbeAnswer::NoAnswer,
+            };
+            // The report goes before the close: closing an endpoint that dialed a silent rung
+            // takes about 3 s, and the silence of a rung is timed from the arrival of the report.
+            // A closed channel means the loop is gone: the report is stale.
+            let _ = reports.send(RungReport {
+                port,
+                answer,
+                generation,
+            });
+            if let Some(prober) = prober {
+                prober.close().await;
+            }
+        });
+    }
+
+    /// The port of a rung below `own` that answered as the beacon of our own mesh, if one did.
+    /// The busy rungs that have no fresh reading are asked, and the answer comes with a later
+    /// call. A rung that said nothing, or refused, or that nobody holds is not an answer: a
+    /// holder never gives up its bind on an unknown. A lower rung is asked only when the std
+    /// socket check (`rung_is_busy`) reads it busy. If iroh binds a family that the check does
+    /// not see, the holder never asks and never sheds. The C, CP and D cases on the fix tree
+    /// are the proof of that assumption.
+    pub(crate) fn lower_rung_that_answers(
+        &mut self,
+        params: &RendezvousParams,
+        node: EndpointId,
+        own: usize,
+    ) -> Option<u16> {
+        let now = Instant::now();
+        let mut answered = None;
+        for &port in params.bind_ports.iter().take(own) {
+            match self.reading(port, now) {
+                RungRead::Ours => {
+                    tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "a lower rung answers as the beacon of our mesh");
+                    answered = Some(port);
+                    break;
+                }
+                RungRead::Unknown if rung_is_busy(port) => self.ask(params, node, port, false),
+                RungRead::Foreign
+                | RungRead::SilentLongEnough
+                | RungRead::Silent
+                | RungRead::Unknown => {}
+            }
+        }
+        answered
+    }
+
+    /// Tests only: say that `port` has been silent for `by` already.
+    #[cfg(test)]
+    pub(crate) fn age_silence(&mut self, port: u16, by: Duration) {
+        if let Some(reading) = self.readings.get_mut(&port) {
+            reading.silent_since = Instant::now().checked_sub(by);
+        }
+    }
 }
 
 /// The beacon mirrors the peer's *address-lookups* (so a joiner
@@ -628,7 +1049,8 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
 async fn build_rendezvous_endpoint(
     params: &RendezvousParams,
     node: EndpointId,
-) -> Option<(Endpoint, RendezvousLane)> {
+    rungs: &mut RungWatch,
+) -> Walk {
     let lookups = beacon_lookups(params);
     if params.answers_jsep() {
         // The public probe-before-claim that used to run here — the analog
@@ -663,17 +1085,18 @@ async fn build_rendezvous_endpoint(
         } else {
             tracing::debug!(target: "habilis_network::beacon", "public beacon endpoint build failed; next tick retries");
         }
-        return endpoint.map(|endpoint| (endpoint, Some((webrtc, admission))));
+        return endpoint.map_or(Walk::Nothing, |endpoint| {
+            Walk::Bound(endpoint, Some((webrtc, admission)))
+        });
     }
-    // Built on the first contended rung and reused for the rest of the
-    // walk, then closed. A throwaway identity, for the reason
-    // `rung_serves_our_mesh` gives at length: probing from `peer` would
-    // make the beacon mistake the probe for this member's own gossip
-    // connection and drop the real one when the probe closes.
-    let mut prober: Option<Endpoint> = None;
-    let mut verdict: Option<(Endpoint, RendezvousLane)> = None;
-    for &port in &params.bind_ports {
-        if let Ok(endpoint) = build_endpoint(
+    // The private ladder. The walk is instant: it binds a free rung when every lower rung is
+    // foreign (by answer, or by silence for the whole window), reads what the probe tasks
+    // reported about the busy ones, and asks for what it does not know.
+    let now = Instant::now();
+    for (index, &port) in params.bind_ports.iter().enumerate() {
+        // The bind is what says that a rung is free, rung by rung: it is instant, and the answer
+        // of a socket check could differ from it. A rung that does not bind is read.
+        match build_endpoint(
             &lookups,
             Some(params.secret.clone()),
             Some(port),
@@ -682,43 +1105,79 @@ async fn build_rendezvous_endpoint(
         )
         .await
         {
-            tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "beacon assumed: bound rendezvous ladder rung");
-            // No `WebRTC` on the ladder: a loopback mesh has no browsers.
-            verdict = Some((endpoint, None));
-            break;
+            Ok(endpoint) => {
+                tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "beacon assumed: bound rendezvous ladder rung");
+                rungs.forget();
+                // No `WebRTC` on the ladder: a loopback mesh has no browsers.
+                return Walk::Bound(endpoint, None);
+            }
+            Err(error) => {
+                tracing::trace!(target: "habilis_network::beacon", node = %node.fmt_short(), port, %error, "rung does not bind: read it");
+            }
         }
-        // build failed (AddrInUse): is it our beacon, or a foreign squat?
-        if prober.is_none() {
-            prober = build_endpoint(
-                &lookups,
-                None,
-                None,
-                Vec::new(),
-                TransportHandles::default(),
-            )
-            .await
-            .ok();
+        match rungs.reading(port, now) {
+            RungRead::Ours => {
+                tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung already serves our beacon; staying peer");
+                return Walk::Rival;
+            }
+            RungRead::Foreign | RungRead::SilentLongEnough => {
+                tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung held by a foreign mesh, or silent for the whole window; trying next rung");
+            }
+            RungRead::Silent => {
+                tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung says nothing; staying peer for now");
+                return Walk::Nothing;
+            }
+            RungRead::Unknown => {
+                // This rung is asked, and so is every later rung that looks busy: eight silent
+                // rungs are resolved in one window, not eight. The socket check only picks the
+                // rungs to ask early; the walk itself binds or reads one rung at a time.
+                rungs.ask(params, node, port, true);
+                for &later_port in params.bind_ports.iter().skip(index + 1) {
+                    if rung_is_busy(later_port)
+                        && rungs.reading(later_port, now) == RungRead::Unknown
+                    {
+                        rungs.ask(params, node, later_port, true);
+                    }
+                }
+                return Walk::Nothing;
+            }
         }
-        let Some(prober) = prober.as_ref() else {
-            tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "rung probe endpoint build failed; staying peer this tick");
-            break;
-        };
-        if rung_serves_our_mesh(prober, params.id, port).await {
-            tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung already serves our beacon; staying peer");
-            break;
-        }
-        tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung squatted by a foreign mesh; trying next rung");
     }
-    if let Some(prober) = prober {
-        // Closed, not dropped: a dropped endpoint reaches `Drop` open and
-        // iroh says so loudly, and the orderly close also retires the
-        // stranger the beacon just saw instead of leaving it to time out.
-        prober.close().await;
+    tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "no rendezvous ladder rung taken; staying peer");
+    if params.bind_ports.is_empty() {
+        Walk::Nothing
+    } else {
+        Walk::NoRung
     }
-    if verdict.is_none() {
-        tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "no rendezvous ladder rung taken; staying peer");
-    }
-    verdict
+}
+
+/// What [`build_rendezvous_endpoint`] ended with.
+enum Walk {
+    /// A rung was free (or, public, the endpoint was built): the beacon can stand up on it.
+    Bound(Endpoint, RendezvousLane),
+    /// A rung was taken and its listener answered as the beacon of our own mesh: a holder exists,
+    /// and it is not this member.
+    Rival,
+    /// No rung was taken, and no holder was read.
+    Nothing,
+    /// Every rung is held by another process, each read as foreign or silent for the whole
+    /// window.
+    NoRung,
+}
+
+/// What a call of [`ensure_holder`] left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Held {
+    /// This call stood up the rendezvous: a `None`/dead to live transition.
+    Claimed,
+    /// The ladder walk read a live holder of our mesh that is not this member. Only a private
+    /// ladder reads one inline; a public member learns it from its probe verdict.
+    Rival,
+    /// Nothing changed: the beacon is held already, or a probe is out.
+    Idle,
+    /// Every rung of the ladder is held by another process: no member can serve the rendezvous
+    /// until one lets go.
+    NoRung,
 }
 
 /// Idempotent: a no-op while we co-host and the task is alive;
@@ -728,31 +1187,26 @@ async fn build_rendezvous_endpoint(
 /// **Nothing slow happens on the caller's task.** A public member that must
 /// probe before claiming starts the probe (`spawn_rival_probe`) and returns
 /// immediately; the verdict lands on the event loop's own arm, which calls
-/// [`claim_after_probe`]. The bind that follows is milliseconds, and
-/// `subscribe_and_join` runs inside the spawned co-host task. The private
-/// ladder walk stays inline: against a live loopback listener a rung
-/// identity-probe answers on its first attempt, in milliseconds. Its
-/// *bound* is not milliseconds though — an unresponsive rung costs
-/// `RENDEZVOUS_PROBE_SECS * RENDEZVOUS_PROBE_ATTEMPTS` before the walk
-/// moves on, on this task. That is deliberate (see
-/// [`RENDEZVOUS_PROBE_ATTEMPTS`] on why the answer has to be worth
-/// believing) but it is the one inline cost here that is not trivially
-/// short.
+/// [`claim_after_probe`]. The private ladder walk is instant too: a rung that
+/// is bound by somebody else is read from `rungs`, and what is not known is
+/// asked by probe tasks whose reports land on the loop's own arm, which walks
+/// again. The bind is milliseconds, and `subscribe_and_join` runs inside the
+/// spawned co-host task.
 ///
-/// Returns whether this call stood up a **new** rendezvous (a
-/// `None`/dead → live transition) — the edge the event loop's rival
-/// re-check scheduling keys on. Starting a probe is not that edge, so a
-/// probing call returns `false`.
-pub(crate) async fn ensure(
+/// Returns what the call left behind: [`Held::Claimed`] is a **new**
+/// rendezvous (a `None`/dead → live transition), the edge the event loop's
+/// rival re-check scheduling keys on. Starting a probe is not that edge.
+pub(crate) async fn walk_ladder(
     params: &RendezvousParams,
     peer: &Endpoint,
     peer_book: &iroh::address_lookup::memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     probe_first: bool,
     probe: &mut Option<RivalProbe>,
-) -> bool {
+    rungs: &mut RungWatch,
+) -> Held {
     if !releasable(current) {
-        return false;
+        return Held::Idle;
     }
     // Public probe-before-claim. Skipped for the eager origin
     // (`probe_first == false`): it has no peers to collide with and must be
@@ -762,9 +1216,61 @@ pub(crate) async fn ensure(
         if probe.is_none() {
             *probe = spawn_rival_probe(params, peer.id()).await;
         }
-        return false;
+        return Held::Idle;
     }
-    claim(params, peer, peer_book, current).await
+    claim_holder(params, peer, peer_book, current, rungs).await
+}
+
+/// [`walk_ladder`] for a test that has no loop: it waits for the probe tasks that the walk
+/// asked for, and walks again, until the walk has nothing left to wait for.
+#[cfg(test)]
+pub(crate) async fn ensure_holder(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    current: &mut Option<Rendezvous>,
+    probe_first: bool,
+    probe: &mut Option<RivalProbe>,
+) -> Held {
+    let (reports, mut arrivals) = mpsc::unbounded_channel();
+    let mut rungs = RungWatch::new(reports);
+    loop {
+        let held = walk_ladder(
+            params,
+            peer,
+            peer_book,
+            current,
+            probe_first,
+            probe,
+            &mut rungs,
+        )
+        .await;
+        if held != Held::Idle || !rungs.waiting() {
+            return held;
+        }
+        match n0_future::time::timeout(
+            Duration::from_secs(RECLAIM_WINDOW_SECS + 4),
+            arrivals.recv(),
+        )
+        .await
+        {
+            Ok(Some(report)) => rungs.note(report, Instant::now()),
+            Ok(None) | Err(_) => return held,
+        }
+    }
+}
+
+/// [`ensure_holder`], as the bool of "did this call stand up a new rendezvous".
+#[cfg(test)]
+pub(crate) async fn ensure(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    current: &mut Option<Rendezvous>,
+    probe_first: bool,
+    probe: &mut Option<RivalProbe>,
+) -> bool {
+    ensure_holder(params, peer, peer_book, current, probe_first, probe).await == Held::Claimed
 }
 
 /// Whether a holder lets go of its beacon for a rival holder it has read: the lower member id
@@ -785,6 +1291,7 @@ pub(crate) async fn claim_after_probe(
     peer_book: &iroh::address_lookup::memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     found_rival: bool,
+    rungs: &mut RungWatch,
 ) -> bool {
     if found_rival {
         tracing::debug!(target: "habilis_network::beacon", node = %peer.id().fmt_short(), "public rendezvous already served by a beacon; staying peer");
@@ -793,7 +1300,7 @@ pub(crate) async fn claim_after_probe(
     if !releasable(current) {
         return false;
     }
-    claim(params, peer, peer_book, current).await
+    claim_holder(params, peer, peer_book, current, rungs).await == Held::Claimed
 }
 
 /// Whether the beacon slot is free to (re)claim: empty, or holding a
@@ -822,18 +1329,34 @@ fn releasable(current: &mut Option<Rendezvous>) -> bool {
 /// question is already settled by the time this runs — either it never
 /// applied (private ladder, eager origin) or [`claim_after_probe`] answered
 /// it.
+#[cfg(test)]
 async fn claim(
     params: &RendezvousParams,
     peer: &Endpoint,
     peer_book: &iroh::address_lookup::memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
 ) -> bool {
-    let Some((endpoint, lane)) = build_rendezvous_endpoint(params, peer.id()).await else {
-        // Public: endpoint build failed. Private: every ladder rung is
-        // occupied — our mesh's beacon(s) already exist on the ladder
-        // (joiners reach them by identity-checked dial). Either way,
-        // nothing to do; the next tick retries.
-        return false;
+    claim_holder(params, peer, peer_book, current, &mut RungWatch::detached()).await
+        == Held::Claimed
+}
+
+/// [`claim`], with what the walk read when it did not bind.
+async fn claim_holder(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    current: &mut Option<Rendezvous>,
+    rungs: &mut RungWatch,
+) -> Held {
+    let (endpoint, lane) = match build_rendezvous_endpoint(params, peer.id(), rungs).await {
+        Walk::Bound(endpoint, lane) => (endpoint, lane),
+        // Private: a rung is taken by the beacon of our own mesh. Joiners reach it by an
+        // identity-checked dial; whether this member must go to it is the caller's to say.
+        Walk::Rival => return Held::Rival,
+        Walk::NoRung => return Held::NoRung,
+        // Public: the endpoint build failed. Private: a rung is read, or waits for its probe.
+        // Nothing to do; the next tick retries.
+        Walk::Nothing => return Held::Idle,
     };
 
     // The rendezvous pseudo-node's active view is overlay plumbing, not the
@@ -883,6 +1406,8 @@ async fn claim(
     let monitor_homed = params.bootstrap_relay.is_some();
     let monitor_rung_tx = params.rung_tx.clone();
     let rendezvous_endpoint = endpoint.clone();
+    // A bounded channel and `try_send`: a sign that is lost to a burst is one of many.
+    let (arrivals_tx, arrivals) = mpsc::channel(32);
 
     let task = n0_future::task::spawn(async move {
         use futures_util::StreamExt as _;
@@ -905,8 +1430,13 @@ async fn claim(
         let _gossip = gossip;
         let (_sender, mut receiver) = topic.split();
         // App payloads are discarded — this node only relays the gossip
-        // overlay. Ends when the topic terminally closes.
-        while receiver.next().await.is_some() {}
+        // overlay. Who links to it is reported to the holder, which reads it as a sign of
+        // another group. Ends when the topic terminally closes.
+        while let Some(event) = receiver.next().await {
+            if let Ok(iroh_gossip::api::Event::NeighborUp(id)) = event {
+                let _ = arrivals_tx.try_send(id);
+            }
+        }
     });
 
     // Relay liveness/discovery, off this gossip task: never stops
@@ -922,8 +1452,9 @@ async fn claim(
         monitor,
         endpoint: rendezvous_endpoint,
         lane,
+        arrivals,
     });
-    true
+    Held::Claimed
 }
 
 #[cfg(test)]
@@ -933,6 +1464,738 @@ mod tests {
         ensure, foreign_sessions, holder_entry, oneshot, probe_verdict, releasable,
         rendezvous_addr, spawn_rival_probe, verdict_of, watch, yields_to,
     };
+
+    /// Two ports of a ladder: the first is taken by `held` (a socket that says nothing, or another
+    /// mesh's beacon), the second is free.
+    fn ladder_of_two() -> (std::net::UdpSocket, Vec<u16>) {
+        let first = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a loopback socket for the first rung");
+        let second = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let ports = vec![first.local_addr().expect("its address").port(), second];
+        (first, ports)
+    }
+
+    /// A rung that says nothing is not a rung that is not ours: a host too loaded to answer reads
+    /// the same, and a bind cannot be taken back. One walk binds nothing on a silence, and costs
+    /// one attempt, not three: the owner of a silent rung held the caller's task for 3.5 s.
+    #[tokio::test]
+    async fn one_walk_that_meets_a_silent_rung_binds_nothing_and_costs_one_attempt() {
+        let (silent, ports) = ladder_of_two();
+        let mut params = public_params();
+        params.bind_ports = ports;
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+
+        let started = std::time::Instant::now();
+        let claimed = ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await;
+        let took = started.elapsed();
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        peer.close().await;
+        drop(silent);
+        assert!(
+            !claimed,
+            "the walk read a rung that said nothing as foreign and bound the next one"
+        );
+        assert!(
+            took < std::time::Duration::from_millis(1500),
+            "the walk of a silent rung took {took:?}: one attempt is 1 s"
+        );
+    }
+
+    /// A rung that answers as another mesh's beacon is foreign for certain, and the walk binds the
+    /// next rung at once: it does not wait to be told twice.
+    #[tokio::test]
+    async fn a_walk_that_meets_another_meshs_beacon_binds_the_next_rung_at_once() {
+        let (squat, ports) = ladder_of_two();
+        let first = ports[0];
+        drop(squat);
+        let other_secret = SecretKey::generate();
+        let mut other = public_params();
+        other.id = other_secret.public();
+        other.secret = other_secret;
+        other.bind_ports = vec![first];
+        let other_peer = loopback_endpoint().await;
+        let other_book = crate::lookup::address_book(&other_peer);
+        let mut other_beacon = None;
+        let mut other_probe = None;
+        assert!(
+            ensure(
+                &other,
+                &other_peer,
+                &other_book,
+                &mut other_beacon,
+                false,
+                &mut other_probe,
+            )
+            .await,
+            "the other mesh claims the first rung"
+        );
+
+        let mut params = public_params();
+        params.bind_ports = ports;
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+        let started = std::time::Instant::now();
+        let claimed = ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await;
+        let took = started.elapsed();
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        if let Some(held) = other_beacon.take() {
+            held.shed_and_wait().await;
+        }
+        peer.close().await;
+        other_peer.close().await;
+        assert!(
+            claimed,
+            "a foreign beacon is read as foreign: the next rung is bound"
+        );
+        assert!(
+            took < std::time::Duration::from_millis(1500),
+            "the walk took {took:?} to bind the rung after a foreign one"
+        );
+    }
+
+    /// Three of the four answers of a probe are told apart by what a listener does: a listener of
+    /// the identity that was asked for opens the connection, a listener of another identity fails
+    /// the handshake, and a port that nobody answers on says nothing. The fourth, a refusal, has
+    /// its own tests in `lookup`. The mapping is read from the error types of iroh, so this test
+    /// is what proves it on a real handshake.
+    #[tokio::test]
+    async fn a_probe_tells_ours_from_foreign_from_no_answer() {
+        use super::{EndpointAddr, EndpointId, Ipv4Addr, SocketAddr};
+        use crate::lookup::{ProbeAnswer, probe_answer};
+
+        // One prober per probe: iroh dials an identity and keeps every path it learned for it, so
+        // a second dial of the same id from one endpoint can complete on the path of the first.
+        async fn asked(addr: EndpointAddr, timeout: std::time::Duration) -> ProbeAnswer {
+            let prober = loopback_endpoint().await;
+            let answer = probe_answer(&prober, addr, timeout).await;
+            prober.close().await;
+            answer
+        }
+
+        let port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let mut params = public_params();
+        params.bind_ports = vec![port];
+        let holder = loopback_endpoint().await;
+        let holder_book = crate::lookup::address_book(&holder);
+        let mut beacon = None;
+        let mut holder_probe = None;
+        assert!(
+            ensure(
+                &params,
+                &holder,
+                &holder_book,
+                &mut beacon,
+                false,
+                &mut holder_probe,
+            )
+            .await,
+            "the beacon claims the rung"
+        );
+        let silent =
+            std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("a silent loopback socket");
+        let at = |id: EndpointId, rung: u16| {
+            EndpointAddr::new(id).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, rung)))
+        };
+        let timeout = std::time::Duration::from_secs(2);
+
+        let ours = asked(at(params.id, port), timeout).await;
+        let foreign = asked(at(SecretKey::generate().public(), port), timeout).await;
+        let none = asked(
+            at(params.id, silent.local_addr().expect("its address").port()),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        holder.close().await;
+        assert_eq!(ours, ProbeAnswer::Ours);
+        assert_eq!(
+            foreign,
+            ProbeAnswer::Foreign,
+            "a handshake that failed is an answer"
+        );
+        assert_eq!(
+            none,
+            ProbeAnswer::NoAnswer,
+            "a socket that says nothing is no answer"
+        );
+    }
+
+    /// A rung that stays silent is bound at the walk after it has been silent for the whole
+    /// reclaim window, and not before: the host that answers late is given the window, a rung
+    /// that nobody serves is not kept for ever.
+    #[tokio::test]
+    async fn a_rung_that_stays_silent_for_the_whole_window_is_bound_at_a_later_walk() {
+        use super::{Held, RungWatch, walk_ladder};
+        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+
+        let (silent, ports) = ladder_of_two();
+        let first = ports[0];
+        let mut params = public_params();
+        params.bind_ports = ports;
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+
+        // The first walk asks, and binds nothing.
+        let asked = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+        let report = tokio::time::timeout(std::time::Duration::from_secs(5), arrivals.recv())
+            .await
+            .expect("a probe task reports")
+            .expect("the channel is open");
+        rungs.note(report, crate::util::clock::Instant::now());
+        // The rung says nothing: still no bind.
+        let waited = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+        let kept_free = beacon.is_none();
+        // The rung has been silent for the window already.
+        rungs.age_silence(
+            first,
+            std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1),
+        );
+        let later = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+
+        let bound = beacon.is_some();
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        peer.close().await;
+        drop(silent);
+        assert_eq!(
+            asked,
+            Held::Idle,
+            "one walk binds nothing on a rung it has not read"
+        );
+        assert_eq!(waited, Held::Idle, "a silence binds nothing at once");
+        assert!(kept_free);
+        assert_eq!(
+            later,
+            Held::Claimed,
+            "a rung silent for the whole window is bound"
+        );
+        assert!(bound);
+    }
+
+    /// Two silent rungs, and a free one after them: both are asked at once, both are passed when
+    /// they have been silent for the window, and the free one is bound. A walk that asked one
+    /// rung at a time would take two windows, and eight silent rungs eight.
+    #[tokio::test]
+    async fn two_silent_rungs_are_asked_at_once_and_passed_and_the_free_one_after_them_is_bound() {
+        use super::{Held, RungWatch, walk_ladder};
+        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+
+        let (first_socket, mut ports) = ladder_of_two();
+        let (second_socket, second_ports) = ladder_of_two();
+        let free = ports.pop().expect("the free port of the first ladder");
+        ports.push(second_ports[0]);
+        ports.push(free);
+        let (first, second) = (ports[0], ports[1]);
+        let mut params = public_params();
+        params.bind_ports = ports;
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+
+        let asked = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+        // Both rungs are out at once: both report inside one second, not two.
+        let started = std::time::Instant::now();
+        for _ in 0..2 {
+            let report = tokio::time::timeout(std::time::Duration::from_secs(5), arrivals.recv())
+                .await
+                .expect("a probe task reports")
+                .expect("the channel is open");
+            rungs.note(report, crate::util::clock::Instant::now());
+        }
+        let both_asked_at_once = started.elapsed() < std::time::Duration::from_millis(1800);
+        let window = std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1);
+        rungs.age_silence(first, window);
+        rungs.age_silence(second, window);
+        let later = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+
+        let bound = beacon.is_some();
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        peer.close().await;
+        drop((first_socket, second_socket));
+        assert_eq!(asked, Held::Idle);
+        assert!(
+            both_asked_at_once,
+            "the two rungs were asked one after the other"
+        );
+        assert_eq!(
+            later,
+            Held::Claimed,
+            "both silent rungs are passed and the free one is bound"
+        );
+        assert!(bound);
+    }
+
+    /// One report of silence is one sample. A rung is passed as silent when two reports a window
+    /// apart said nothing, not when one report is read late: the reading stays fresh for a heal
+    /// tick, and a walk that reads it a window after its only report must still wait for the
+    /// second one.
+    #[test]
+    fn one_silent_report_is_not_a_window_of_silence_however_late_it_is_read() {
+        use super::{RungRead, RungReport, RungWatch};
+        use crate::lookup::ProbeAnswer;
+        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+
+        let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let then = crate::util::clock::Instant::now();
+        rungs.note(
+            RungReport {
+                port: 4242,
+                answer: ProbeAnswer::NoAnswer,
+                generation: 0,
+            },
+            then,
+        );
+
+        let late = then + std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1);
+        assert_eq!(
+            rungs.reading(4242, late),
+            RungRead::Silent,
+            "one report of silence passed the rung after the window: a sample is not a window"
+        );
+    }
+
+    /// A probe task that was given up can still report. Its report answers an ask that is over, and
+    /// it must not end the wait for the probe that replaced it: the loop would walk on an answer
+    /// that is older than the ask it waits for.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn the_late_report_of_a_probe_that_was_given_up_does_not_stop_its_replacement() {
+        use super::{RungRead, RungWatch};
+
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        crate::beacon::set_blind_rung_probes(node, true);
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let port = 4242;
+
+        rungs.ask(&params, node, port, true);
+        let old = arrivals.recv().await.expect("the first probe reports");
+        rungs.expire_probes_in_flight();
+        rungs.ask(&params, node, port, true);
+        let new = arrivals.recv().await.expect("the second probe reports");
+
+        let now = crate::util::clock::Instant::now();
+        rungs.note(old, now);
+        let waiting = rungs.waiting();
+        let read = rungs.reading(port, now);
+        rungs.note(new, now);
+        let waiting_after = rungs.waiting();
+        let read_after = rungs.reading(port, now);
+        crate::beacon::set_blind_rung_probes(node, false);
+
+        assert!(
+            waiting,
+            "the late report of the first probe ended the wait for the second"
+        );
+        assert_eq!(
+            read,
+            RungRead::Unknown,
+            "an answer older than the ask in flight was stored as fresh"
+        );
+        assert!(
+            !waiting_after,
+            "the report of the second probe ends its wait"
+        );
+        assert_eq!(read_after, RungRead::Silent);
+    }
+
+    /// A report that comes after the report of a newer probe of the same rung says nothing new, and
+    /// it must not make the reading fresh again.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn an_old_report_does_not_make_a_newer_reading_fresh_again() {
+        use super::RungWatch;
+
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        crate::beacon::set_blind_rung_probes(node, true);
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let port = 4242;
+
+        rungs.ask(&params, node, port, true);
+        let old = arrivals.recv().await.expect("the first probe reports");
+        rungs.expire_probes_in_flight();
+        rungs.ask(&params, node, port, true);
+        let new = arrivals.recv().await.expect("the second probe reports");
+
+        let first = crate::util::clock::Instant::now();
+        rungs.note(new, first);
+        rungs.note(old, first + std::time::Duration::from_secs(5));
+        let stored = rungs
+            .readings
+            .get(&port)
+            .expect("the reading of the second probe")
+            .read_at;
+        crate::beacon::set_blind_rung_probes(node, false);
+
+        assert_eq!(
+            stored, first,
+            "the report of the first probe moved the time of a newer reading"
+        );
+    }
+
+    /// A bind clears the readings: the ladder is ours now. The late report of a probe that was
+    /// given up must not bring an answer back from before the bind, after the probe that replaced
+    /// it has reported and the bind has cleared its reading.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn a_late_report_of_a_probe_that_was_given_up_does_not_come_back_after_a_bind() {
+        use super::{RungRead, RungWatch};
+
+        let params = public_params();
+        let node = SecretKey::generate().public();
+        crate::beacon::set_blind_rung_probes(node, true);
+        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let port = 4242;
+
+        rungs.ask(&params, node, port, true);
+        let old = arrivals.recv().await.expect("the first probe reports");
+        rungs.expire_probes_in_flight();
+        rungs.ask(&params, node, port, true);
+        let new = arrivals.recv().await.expect("the second probe reports");
+
+        let now = crate::util::clock::Instant::now();
+        rungs.note(new, now);
+        rungs.forget();
+        rungs.note(old, now);
+        let read = rungs.reading(port, now);
+        crate::beacon::set_blind_rung_probes(node, false);
+
+        assert_eq!(
+            read,
+            RungRead::Unknown,
+            "an answer from before the bind was stored after it"
+        );
+    }
+
+    /// Two reports that said nothing, a window apart, pass the rung: the second one is the proof.
+    #[test]
+    fn two_silent_reports_a_window_apart_pass_the_rung() {
+        use super::{RungRead, RungReport, RungWatch};
+        use crate::lookup::ProbeAnswer;
+        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+
+        let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let then = crate::util::clock::Instant::now();
+        let report = RungReport {
+            port: 4242,
+            answer: ProbeAnswer::NoAnswer,
+            generation: 0,
+        };
+        rungs.note(report, then);
+
+        let again = then + std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1);
+        rungs.note(report, again);
+
+        assert_eq!(rungs.reading(4242, again), RungRead::SilentLongEnough);
+    }
+
+    /// A reading in the map is used, not asked for again: a rung that answered as ours is a
+    /// holder, whatever its next probe would say, and a rung that answered as foreign is passed
+    /// at once. This is the fact that the lower-rung check of a holder leaves for the walk after
+    /// its shed.
+    #[tokio::test]
+    async fn a_fresh_reading_in_the_map_is_read_without_asking_again() {
+        use super::{Held, RungReport, RungWatch, walk_ladder};
+        use crate::lookup::ProbeAnswer;
+
+        let (silent, ports) = ladder_of_two();
+        let first = ports[0];
+        let mut params = public_params();
+        params.bind_ports = ports;
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+        let mut rungs = RungWatch::detached();
+        let now = crate::util::clock::Instant::now();
+
+        rungs.note(
+            RungReport {
+                port: first,
+                answer: ProbeAnswer::Ours,
+                generation: 0,
+            },
+            now,
+        );
+        let on_ours = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+        rungs.note(
+            RungReport {
+                port: first,
+                answer: ProbeAnswer::Foreign,
+                generation: 0,
+            },
+            now,
+        );
+        let on_foreign = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        peer.close().await;
+        drop(silent);
+        assert_eq!(
+            on_ours,
+            Held::Rival,
+            "a rung that answered as ours is a holder"
+        );
+        assert_eq!(
+            on_foreign,
+            Held::Claimed,
+            "a foreign rung is passed at once"
+        );
+    }
+
+    /// Every rung of the ladder is held by another process: the walk says so, and does not stay
+    /// "idle" as it does while a probe is out. A member that cannot serve the rendezvous and
+    /// cannot reach one is in a state that the loop must be able to report.
+    #[tokio::test]
+    async fn a_walk_that_reads_every_rung_as_taken_says_so() {
+        use super::{Held, RungReport, RungWatch, walk_ladder};
+        use crate::lookup::ProbeAnswer;
+
+        let (first_socket, first_ports) = ladder_of_two();
+        let (second_socket, second_ports) = ladder_of_two();
+        let (first, second) = (first_ports[0], second_ports[0]);
+        let mut params = public_params();
+        params.bind_ports = vec![first, second];
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+        let mut rungs = RungWatch::detached();
+        let now = crate::util::clock::Instant::now();
+        for port in [first, second] {
+            rungs.note(
+                RungReport {
+                    port,
+                    answer: ProbeAnswer::Foreign,
+                    generation: 0,
+                },
+                now,
+            );
+        }
+
+        let walked = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut rungs,
+        )
+        .await;
+
+        let bound = beacon.is_some();
+        peer.close().await;
+        drop((first_socket, second_socket));
+        assert_eq!(
+            walked,
+            Held::NoRung,
+            "a ladder that is taken whole is not a walk that waits for a probe"
+        );
+        assert!(!bound);
+    }
+
+    /// The walk of a claim tick does not wait for a rung that does not answer. The caller is the
+    /// event loop, and a silent rung held it for a second at every tick (three and a half
+    /// before the walk made one attempt): the members that hold no beacon, all of them, paid it.
+    #[tokio::test]
+    async fn the_walk_of_a_claim_tick_returns_at_once_on_a_rung_that_says_nothing() {
+        use super::{Held, RungWatch, walk_ladder};
+
+        let (silent, ports) = ladder_of_two();
+        let mut params = public_params();
+        params.bind_ports = ports;
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+
+        let started = std::time::Instant::now();
+        let held = walk_ladder(
+            &params,
+            &peer,
+            &book,
+            &mut beacon,
+            false,
+            &mut probe,
+            &mut RungWatch::detached(),
+        )
+        .await;
+        let took = started.elapsed();
+
+        if let Some(bound) = beacon.take() {
+            bound.shed_and_wait().await;
+        }
+        peer.close().await;
+        drop(silent);
+        assert_eq!(held, Held::Idle, "a silent rung binds nothing in one walk");
+        assert!(
+            took < std::time::Duration::from_millis(100),
+            "the walk of a claim tick waited {took:?} for a rung that says nothing"
+        );
+    }
+
+    /// A free rung is claimed, and a taken rung of our own mesh is read as a holder that is not us.
+    /// The second answer used to be `false`, the same as "nothing happened".
+    #[tokio::test]
+    async fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
+        use super::{Held, ensure_holder};
+
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let mut params = public_params();
+        params.bind_ports = vec![port];
+
+        let first = loopback_endpoint().await;
+        let first_book = crate::lookup::address_book(&first);
+        let mut first_beacon = None;
+        let mut first_probe = None;
+        let claimed = ensure_holder(
+            &params,
+            &first,
+            &first_book,
+            &mut first_beacon,
+            false,
+            &mut first_probe,
+        )
+        .await;
+
+        let second = loopback_endpoint().await;
+        let second_book = crate::lookup::address_book(&second);
+        let mut second_beacon = None;
+        let mut second_probe = None;
+        let read = ensure_holder(
+            &params,
+            &second,
+            &second_book,
+            &mut second_beacon,
+            false,
+            &mut second_probe,
+        )
+        .await;
+        let held_again = ensure_holder(
+            &params,
+            &first,
+            &first_book,
+            &mut first_beacon,
+            false,
+            &mut first_probe,
+        )
+        .await;
+
+        if let Some(held) = first_beacon.take() {
+            held.shed_and_wait().await;
+        }
+        first.close().await;
+        second.close().await;
+        assert_eq!(claimed, Held::Claimed, "a free rung is claimed");
+        assert_eq!(read, Held::Rival, "a taken rung of our mesh is a holder");
+        assert!(second_beacon.is_none(), "and it is not claimed");
+        assert_eq!(held_again, Held::Idle, "a held beacon changes nothing");
+    }
 
     #[test]
     fn the_holder_with_the_lower_member_id_keeps_the_beacon() {
@@ -1007,6 +2270,7 @@ mod tests {
             monitor: None,
             endpoint,
             lane: None,
+            arrivals: tokio::sync::mpsc::channel(1).1,
         }
     }
 
@@ -1125,6 +2389,7 @@ mod tests {
                 monitor: Some(monitor),
                 endpoint,
                 lane: None,
+                arrivals: tokio::sync::mpsc::channel(1).1,
             };
 
             rendezvous.shed_and_wait().await;
@@ -1394,6 +2659,7 @@ mod tests {
             monitor: None,
             endpoint: endpoint.clone(),
             lane: None,
+            arrivals: tokio::sync::mpsc::channel(1).1,
         });
 
         assert!(!releasable(&mut slot), "a live beacon is not releasable");
@@ -1522,6 +2788,74 @@ mod tests {
         assert!(
             linked,
             "the holder never reached its own rendezvous: nothing registered its address, and with every lookup off nothing can resolve it"
+        );
+    }
+
+    /// The holder learns who links to its beacon. The re-check of a holder that knows no member
+    /// is an hour or two out, and a member that arrives is the sign that it must look sooner.
+    #[tokio::test]
+    async fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
+        use futures_util::StreamExt as _;
+        use iroh_gossip::api::Event;
+
+        let params = public_params();
+        let peer = loopback_endpoint().await;
+        let (gossip, router, _book) = crate::lookup::build_mesh(
+            peer.clone(),
+            crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            None,
+            None,
+            Vec::new(),
+            false,
+            false,
+        );
+        let (sender, mut receiver) = gossip
+            .subscribe(params.topic_id, Vec::new())
+            .await
+            .expect("subscribe without a bootstrap")
+            .split();
+
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut probe = None;
+        assert!(
+            ensure(&params, &peer, &book, &mut beacon, false, &mut probe).await,
+            "a public rendezvous is claimed when no probe is asked for"
+        );
+        sender
+            .join_peers(vec![params.id])
+            .await
+            .expect("ask the gossip to join the rendezvous");
+        let linked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match receiver.next().await {
+                    Some(Ok(Event::NeighborUp(id))) if id == params.id => return,
+                    Some(_) => {}
+                    None => std::future::pending::<()>().await,
+                }
+            }
+        })
+        .await
+        .is_ok();
+        let mut arrivals = Vec::new();
+        if let Some(held) = beacon.as_mut() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while arrivals.is_empty() {
+                    arrivals.extend(held.take_arrivals());
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+        }
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        let _ = router.shutdown().await;
+        assert!(linked, "the member never linked to the beacon");
+        assert!(
+            arrivals.contains(&peer.id()),
+            "the beacon did not report the member that linked to it"
         );
     }
 
