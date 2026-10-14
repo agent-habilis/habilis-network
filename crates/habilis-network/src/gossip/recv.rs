@@ -2589,9 +2589,7 @@ mod first_contact_tests {
         assert!(!crate::transport::webrtc::rendezvous_graftable(&state));
 
         let silent = crate::util::clock::Instant::now()
-            .checked_sub(Duration::from_secs(
-                crate::util::tuning::alive_timeout_secs() + 10,
-            ))
+            .checked_sub(crate::util::tuning::alive_timeout() + Duration::from_secs(10))
             .expect("a past instant");
         state.last_seen.insert(nick("far-side"), silent);
         state.peers.insert(nick("far-side"));
