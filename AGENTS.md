@@ -108,7 +108,7 @@ State: `surfaced`.
 
 Layer: heartbeat. Keyed by nickname.
 
-A peer that went silent past `ALIVE_TIMEOUT_SECS`. A quiet peer can still return.
+A peer that went silent past `ALIVE_TIMEOUT`. A quiet peer can still return.
 
 State: `quiet`. Code: `lifecycle/heartbeat.rs`.
 
@@ -220,6 +220,14 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 - At a wire edge or an API edge, turn a sentinel into `Option`.
 - Make `Deserialize` and `Serialize` refuse a value that is not a real value of the type. A negative `Frame` is a parse error.
 
+### Time spans
+
+- A time span is a `std::time::Duration`. Never write a `u64` with a unit suffix such as `_secs` or `_ms`.
+- Write a `const` span with `from_secs`, `from_millis`, `from_mins`, or `from_hours`. Use the largest unit that is exact.
+- Do the arithmetic of a `const` span with `saturating_mul` and `saturating_add`.
+- Convert a span to `u64` only at a wire edge, a `UnixSecs` edge, or a log edge.
+- A tracing field keeps its name and its unit. A `*_secs` field gets `as_secs()`. A `*_ms` field gets `clock::millis_saturating()`.
+
 ### Wire format
 
 - Make a newtype serialize as the value it wraps, with `#[serde(transparent)]` or by hand, so the bytes do not change.
@@ -238,7 +246,6 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `unix_nanos` in `habilis-network-util` | It has one caller. |
 | `ContentId::new` | It is a newtype already. A new validation rule can reject ids that exist. |
 | `util::logs::log_file_path(mesh_id: &str, nickname: &str)` | The util crate is below the protocol crate, so it cannot name `MeshId`. |
-| The tuning constants in `habilis-network-util/src/tuning.rs` and `consts.rs`, and the timing constants of `beacon/mod.rs` and `transport/probe.rs` | They stay `u64` seconds and milliseconds. A `Duration` rule for them waits on that part, and that part is on hold. This branch does not do it. |
 
 ### Types that exist
 
