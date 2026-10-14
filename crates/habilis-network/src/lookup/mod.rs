@@ -657,8 +657,8 @@ pub fn multihop_handle_config(
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
     habilis_network_iroh_multihop_transport::HandleConfig {
         relay_payload,
-        vector_max_age: Duration::from_secs(crate::util::tuning::LINKSTATE_MAX_AGE_SECS),
-        relay_stuck_after: Duration::from_secs(crate::util::tuning::MULTIHOP_RELAY_STUCK_SECS),
+        vector_max_age: crate::util::tuning::LINKSTATE_MAX_AGE,
+        relay_stuck_after: crate::util::tuning::MULTIHOP_RELAY_STUCK,
         ..habilis_network_iroh_multihop_transport::HandleConfig::default()
     }
 }
