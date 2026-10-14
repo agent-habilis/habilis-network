@@ -4,7 +4,7 @@
 //! while it holds no rendezvous. In a settled mesh every probe finds the rival, and every
 //! probe costs an endpoint, a relay registration and a connection on the host. Each probe that
 //! finds the rival now doubles the wait before the next one, from one heal interval up to
-//! [`HEAL_PROBE_BACKOFF_MAX_SECS`]. A probe that reads the rendezvous as free holds nothing
+//! [`HEAL_PROBE_BACKOFF_MAX`]. A probe that reads the rendezvous as free holds nothing
 //! back and starts the waits over, so the second free reading that a claim needs comes at the
 //! next heal tick, as before.
 //!
@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use crate::util::clock::Instant;
-use crate::util::tuning::{HEAL_PROBE_BACKOFF_MAX_SECS, heal_interval_secs};
+use crate::util::tuning::{HEAL_PROBE_BACKOFF_MAX, heal_interval};
 
 /// The jitter on a wait, as a fraction either way, so that members that probed together do not
 /// probe together again.
@@ -61,9 +61,8 @@ impl ProbeBackoff {
 
     /// The wait that the next probe finding the rival earns, before the jitter.
     fn wait(&self) -> Duration {
-        let base = Duration::from_secs(heal_interval_secs());
-        let longest =
-            Duration::from_secs(HEAL_PROBE_BACKOFF_MAX_SECS).min(base * 2u32.pow(MAX_STEPS));
+        let base = heal_interval();
+        let longest = HEAL_PROBE_BACKOFF_MAX.min(base * 2u32.pow(MAX_STEPS));
         (base * 2u32.pow(self.rivals_in_a_row.min(MAX_STEPS))).min(longest)
     }
 }

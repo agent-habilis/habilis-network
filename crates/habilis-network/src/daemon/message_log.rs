@@ -215,7 +215,7 @@ impl MessageLog {
     /// window cut from it would cover a different set on each.
     ///
     /// This sorts the whole log, and one digest calls it up to three times. At
-    /// `MESSAGE_LOG_SIZE` entries every `ANTIENTROPY_INTERVAL_SECS` that costs
+    /// `MESSAGE_LOG_SIZE` entries every `ANTIENTROPY_INTERVAL` that costs
     /// nothing that matters. Look at it before a log a hundred times larger.
     fn bounds(&self) -> Vec<Bound> {
         let mut bounds: Vec<Bound> = self

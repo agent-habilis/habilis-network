@@ -27,8 +27,8 @@ use crate::util::clock::{Instant, millis_saturating};
 // `tokio::time::Instant`). Aliased rather than path-qualified, matching
 // `daemon::state` / `daemon::app`.
 use crate::util::tuning::{
-    ALIVE_INTERVAL_SECS, LINKSTATE_INTERVAL_SECS, RECLAIM_INTERVAL_MS, STATE_REFRESH_SECS,
-    antientropy_interval_secs, heal_interval_secs, sweep_interval_secs,
+    ALIVE_INTERVAL, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH, antientropy_interval,
+    heal_interval, sweep_interval,
 };
 use n0_future::StreamExt as _;
 use n0_future::time::Instant as TokioInstant;
@@ -229,7 +229,7 @@ pub async fn run<A: NodeDriver>(
     let mut rendezvous: Option<beacon::Rendezvous> = None;
     // The outstanding probe-before-claim, if any. Owned here beside the
     // beacon it decides, because a probe outlives the tick that started it:
-    // its verdict arrives on the loop's own arm, up to `HEAL_PROBE_SECS`
+    // its verdict arrives on the loop's own arm, up to `HEAL_PROBE`
     // later.
     let mut rival_probe: Option<beacon::RivalProbe> = None;
     if claims_at_startup(cohost) {
@@ -259,7 +259,7 @@ pub async fn run<A: NodeDriver>(
     // link to lose, and so arms nothing. Recovery then waited out the 15s
     // heal cadence — long enough that a two-peer mesh looks simply broken.
     // With the window open, `maybe_reclaim` re-grafts within
-    // `RECLAIM_INTERVAL_MS` instead, and stops as soon as the link is up.
+    // `RECLAIM_INTERVAL` instead, and stops as soon as the link is up.
     state.arm_reclaim(Instant::now());
 
     let (gossip_sender, receiver) = topic.split();
@@ -398,7 +398,7 @@ async fn alive_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, ctx: &
         "alive",
         &mut anchors.alive,
         &mut anchors.alive_wall,
-        Duration::from_secs(ALIVE_INTERVAL_SECS),
+        ALIVE_INTERVAL,
     );
     lifecycle::heartbeat::tick_alive(state, ctx.sender, ctx.mesh, ctx.author).await;
     // A neighbor that came up inside the window of a flood is owed our address.
@@ -419,7 +419,7 @@ async fn antientropy_arm(
         "antientropy",
         &mut anchors.antientropy,
         &mut anchors.antientropy_wall,
-        Duration::from_secs(antientropy_interval_secs()),
+        antientropy_interval(),
     );
     gossip::antientropy::broadcast_digest(state, ctx.sender, ctx.mesh, ctx.author).await;
     gossip::antientropy::broadcast_state_digests(
@@ -554,7 +554,7 @@ fn advertised_changed(last: Option<&[(EndpointId, u32)]>, links: &[(EndpointId, 
 
 /// [`linkstate_arm`] now, for a link that came up: the vector of this node is what lets a
 /// neighbor offer a session on the underlay and route over its edges, and the first tick is
-/// `LINKSTATE_INTERVAL_SECS` away. It sends only when the links are another set than the last
+/// `LINKSTATE_INTERVAL` away. It sends only when the links are another set than the last
 /// vector had: a second link that comes up 100 ms after the first goes out at once, and a link
 /// that flaps back to the set that went out sends nothing.
 #[cfg(feature = "multihop")]
@@ -569,7 +569,7 @@ fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn N
         "sweep",
         &mut anchors.sweep,
         &mut anchors.sweep_wall,
-        Duration::from_secs(sweep_interval_secs()),
+        sweep_interval(),
     );
     lifecycle::heartbeat::tick_sweep(state, sink);
 }
@@ -916,7 +916,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             }
             _ = intervals.heal.tick() => {
                 state.idle.heal += 1;
-                let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, Duration::from_secs(heal_interval_secs()));
+                let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, heal_interval());
                 if state.gossip_open {
                     let ctx = parts.ctx(&sender);
                     run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut state, &ctx, &rendezvous_params).await;
@@ -952,7 +952,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             }
             // The off-loop probe-before-claim answered. Its own arm rather
             // than a poll at the next heal tick: the probe already cost up to
-            // `HEAL_PROBE_SECS`, and making a free rendezvous wait out another
+            // `HEAL_PROBE`, and making a free rendezvous wait out another
             // 15s interval before anyone binds it would hand back the claim
             // latency this change was meant to leave untouched.
             found_rival = beacon::probe_verdict(&mut rival_probe) => {
@@ -1011,7 +1011,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // one holder to catch the other still up (observed lockstep:
                 // both shed within 5ms, both probe into the gap, both re-bind,
                 // forever). At this cadence the offsets survive; the next tick
-                // (~RECLAIM_INTERVAL_MS later, after the dropped endpoint has
+                // (~RECLAIM_INTERVAL later, after the dropped endpoint has
                 // unmapped) runs the re-probe via `maybe_reclaim`.
                 if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous, ctx.endpoint.id()) {
                     maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
@@ -1306,26 +1306,25 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
 
     let mut prune = n0_future::time::interval(Duration::from_mins(1));
     prune.set_missed_tick_behavior(Skip);
-    let mut alive = n0_future::time::interval(Duration::from_secs(ALIVE_INTERVAL_SECS));
+    let mut alive = n0_future::time::interval(ALIVE_INTERVAL);
     alive.set_missed_tick_behavior(Skip);
     alive.tick().await;
-    let mut sweep = n0_future::time::interval(Duration::from_secs(sweep_interval_secs()));
+    let mut sweep = n0_future::time::interval(sweep_interval());
     sweep.set_missed_tick_behavior(Skip);
     sweep.tick().await;
-    let mut heal = n0_future::time::interval(Duration::from_secs(heal_interval_secs()));
+    let mut heal = n0_future::time::interval(heal_interval());
     heal.set_missed_tick_behavior(Skip);
     heal.tick().await;
-    let mut reclaim = n0_future::time::interval(Duration::from_millis(RECLAIM_INTERVAL_MS));
+    let mut reclaim = n0_future::time::interval(RECLAIM_INTERVAL);
     reclaim.set_missed_tick_behavior(Skip);
     reclaim.tick().await;
-    let mut antientropy =
-        n0_future::time::interval(Duration::from_secs(antientropy_interval_secs()));
+    let mut antientropy = n0_future::time::interval(antientropy_interval());
     antientropy.set_missed_tick_behavior(Skip);
     antientropy.tick().await;
-    let mut state_refresh = n0_future::time::interval(Duration::from_secs(STATE_REFRESH_SECS));
+    let mut state_refresh = n0_future::time::interval(STATE_REFRESH);
     state_refresh.set_missed_tick_behavior(Skip);
     state_refresh.tick().await;
-    let mut linkstate = n0_future::time::interval(Duration::from_secs(LINKSTATE_INTERVAL_SECS));
+    let mut linkstate = n0_future::time::interval(LINKSTATE_INTERVAL);
     linkstate.set_missed_tick_behavior(Skip);
     linkstate.tick().await;
     MaintenanceIntervals {

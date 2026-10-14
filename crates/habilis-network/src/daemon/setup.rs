@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Result;
 use iroh::{Endpoint, RelayUrl};
@@ -15,7 +14,7 @@ use crate::lookup::{
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
-use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
+use crate::util::tuning::RELAY_RUNG_PROBE;
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
@@ -113,12 +112,7 @@ fn spawn_startup_rung_confirmation(
         return None;
     }
     Some(StoppableTask::spawn(|stopped| async move {
-        let confirmed = select_bootstrap_rung(
-            &ladder,
-            Duration::from_secs(RELAY_RUNG_PROBE_SECS),
-            Some(&stopped),
-        )
-        .await;
+        let confirmed = select_bootstrap_rung(&ladder, RELAY_RUNG_PROBE, Some(&stopped)).await;
         if stopped.has_changed().is_err() {
             // A departure ended the walk: its `None` is not a verdict.
             return;

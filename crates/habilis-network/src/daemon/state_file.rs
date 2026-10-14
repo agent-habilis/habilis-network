@@ -22,7 +22,7 @@
 //! can gate on it rather than on the file's mere existence.
 //! `peer_count` is the total number of agents in the mesh,
 //! including self. `last_updated` is a unix timestamp the daemon
-//! refreshes on a fixed heartbeat (see `tuning::STATE_REFRESH_SECS`)
+//! refreshes on a fixed heartbeat (see `tuning::STATE_REFRESH`)
 //! even when membership is unchanged, so a reader can treat a fresh
 //! value as a liveness signal. `pid` is the daemon's own process id —
 //! what lets a consumer's `leave`/`session` map a state file back to a
