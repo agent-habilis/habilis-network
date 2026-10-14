@@ -149,6 +149,30 @@ published to a registry; pin it with
 
 ### Changed
 
+- **Breaking:** a time span is a `Duration`, not a `u64` with a unit suffix. The wire does not
+  change: a wire struct converts at its edge, and the bytes are the same.
+  - Every `*_SECS` and `*_MS` constant of `habilis-network-util` (`tuning` and `consts`) is
+    removed. Use the item of the same name without the suffix, which is a `Duration`: for example
+    `tuning::ALIVE_TIMEOUT` in place of `tuning::ALIVE_TIMEOUT_SECS`, and
+    `consts::INVITE_DEFAULT_TTL` in place of `consts::INVITE_DEFAULT_TTL_SECS`.
+  - The `Tuning` fields lose the suffix and are `Duration`: `alive_timeout`, `sweep_interval`,
+    `heal_interval`, `antientropy_interval`, `cohost_grace`, `ping_window`, `ppid_watch_interval`
+    (was `_ms`), `heal_stall_threshold`, `starvation_threshold`, `advertise_interval`,
+    `directory_expiry`, `rival_recheck_first`, `rival_recheck`, `rival_recheck_meshed`,
+    `rival_recheck_alone`, and `rendezvous_periodic_return`. A `Tuning { .. }` literal passes a
+    `Duration`, for example `Duration::from_secs(90)`. `antientropy_max_resend`,
+    `directory_private`, and `topic_mdns_only` do not change.
+  - The accessors of `tuning` lose the suffix and return a `Duration`: for example
+    `tuning::alive_timeout()` in place of `tuning::alive_timeout_secs()`. The same holds for
+    `sweep_interval`, `heal_interval`, `antientropy_interval`, `cohost_grace`, `ping_window`,
+    `ppid_watch_interval`, `heal_stall_threshold`, `starvation_threshold`, `advertise_interval`,
+    `directory_expiry`, the four `rival_recheck` accessors, and `rendezvous_periodic_return`.
+  - `runtime::tuning` re-exports only the `Duration` names. `POLL_LONG_MIN_CYCLE_MS`,
+    `READY_FRESH_SECS`, `READY_MAX_SECS`, `READY_POLL_INTERVAL_MS`, `advertise_interval_secs`,
+    `directory_expiry_secs`, and `ping_window_secs` are gone from it.
+
+  The agent-gossip CLI keeps its hidden `--*-secs` flags in seconds and converts them to a
+  `Duration` where it builds `Tuning`.
 - A member of a loopback room whose ladder of ports is held whole by other processes says so: a
   warning in its log, and one `NodeEvent::Info` that names the number of ports, repeated every 5
   minutes while no port is free. agent-gossip shows one new Info line each 5 minutes in that
