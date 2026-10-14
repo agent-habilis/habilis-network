@@ -420,6 +420,17 @@ Divergences from upstream, in the order they were made.
     - `a2a/node.rs:261`, `a2a/rpc.rs:314`: `Identity::seal_public()` returns an
       `x25519_dalek::PublicKey`. Encode `seal_public().as_bytes()`.
 
+29. **Time spans are `Duration`.** The `*_SECS` and `*_MS` constants of
+    `habilis-network-util`, their accessors, and the `Tuning` fields lose the unit suffix
+    and are `Duration`. `CHANGELOG.md` lists each name, and `AGENTS.md` holds the rule.
+    The wire does not change.
+
+    agent-gossip builds `Tuning` from its hidden `--*-secs` flags (`cli/args/tuning.rs`).
+    The flags stay in seconds. The CLI converts each value to a `Duration` at that one edge,
+    with `Duration::from_secs`. A port **from** upstream must pass a `Duration` in each
+    `Tuning` field. agent-gossip is carried on its branch `refactor-newtype-pattern` by
+    bone-strand.
+
 ## Fork pins — where each one lives, and why
 
 Three forks are in play: `agent-habilis/{iroh, iroh-gossip, net-tools}`. They do
