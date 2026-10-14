@@ -870,7 +870,7 @@ impl RungWatch {
 
     /// Tests only: every probe task that is out has been out for longer than a heal tick, as when
     /// one has passed: the task is given up and the rung is asked again.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) fn expire_probes_in_flight(&mut self) {
         let long_ago = Duration::from_secs(heal_interval_secs()).saturating_mul(2);
         for probe in self.in_flight.values_mut() {
