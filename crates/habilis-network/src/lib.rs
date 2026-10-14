@@ -174,6 +174,14 @@ pub use iroh_mainline_address_lookup;
 #[cfg(feature = "mdns")]
 pub use iroh_mdns_address_lookup;
 
+/// The `x25519-dalek` crate that the seal keys of this engine come from.
+/// `protocol::Identity::seal_public` returns an `x25519_dalek::PublicKey`, and
+/// `protocol::seal_to_body` takes one. A consumer that names its own
+/// `x25519-dalek` can get a second copy of the crate in the graph, and the two
+/// `PublicKey` types then do not match. Take the type from here:
+/// `habilis_network::x25519_dalek::PublicKey`.
+pub use x25519_dalek;
+
 // Shared config for the crate's `proptest!` blocks. Overrides the default
 // failure-persistence path so regression seeds land in
 // `tests/proptest-regressions` rather than a `proptest-regressions` folder
