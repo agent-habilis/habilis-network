@@ -33,7 +33,6 @@
 //! filtered out of peer-side neighbor handling.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Duration;
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_gossip::proto::TopicId;
@@ -46,8 +45,8 @@ use crate::lookup::{
 };
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
 use crate::util::tuning::{
-    HEAL_PROBE_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_ATTEMPTS, RENDEZVOUS_PROBE_RETRY_MS,
-    RENDEZVOUS_PROBE_SECS, heal_interval_secs,
+    HEAL_PROBE, RENDEZVOUS_CLOSE, RENDEZVOUS_PROBE, RENDEZVOUS_PROBE_ATTEMPTS,
+    RENDEZVOUS_PROBE_RETRY, heal_interval,
 };
 
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.
@@ -241,7 +240,7 @@ impl Rendezvous {
     /// co-hosting member, which is all of them.
     ///
     /// Bounded, because winding down must not hang on a relay that stopped
-    /// answering. See `RENDEZVOUS_CLOSE_SECS`. Past the bound we are no worse
+    /// answering. See `RENDEZVOUS_CLOSE`. Past the bound we are no worse
     /// off than before this existed.
     ///
     /// The monitor is stopped and waited for in the same budget, not aborted:
@@ -255,12 +254,9 @@ impl Rendezvous {
         drop(self);
         tokio::join!(
             async {
-                if n0_future::time::timeout(
-                    Duration::from_secs(RENDEZVOUS_CLOSE_SECS),
-                    endpoint.close(),
-                )
-                .await
-                .is_err()
+                if n0_future::time::timeout(RENDEZVOUS_CLOSE, endpoint.close())
+                    .await
+                    .is_err()
                 {
                     tracing::debug!(target: "habilis_network::beacon", "rendezvous endpoint close timed out; abandoning it");
                 }
@@ -336,7 +332,7 @@ fn holder_entry(holder: EndpointAddr, params: &RendezvousParams) -> EndpointAddr
 /// The probe answers one question — does a beacon already serve this
 /// rendezvous? — and it answers it slowly: a free rendezvous is only
 /// provably free once the dial has exhausted its budget, so the common
-/// "nobody is home, claim it" case costs the full [`HEAL_PROBE_SECS`].
+/// "nobody is home, claim it" case costs the full [`HEAL_PROBE`].
 /// Paid inline that was ~5s per heal tick during which the sole event loop
 /// polled nothing at all: no gossip, no IPC, and — the reason this exists —
 /// no quit. A departure landing in that window missed `Node::leave`'s
@@ -383,7 +379,7 @@ impl RivalProbe {
         if let Some(cancel) = self.cancel.take() {
             let _ = cancel.send(());
         }
-        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), &mut self.task)
+        if n0_future::time::timeout(RENDEZVOUS_CLOSE, &mut self.task)
             .await
             .is_err()
         {
@@ -497,7 +493,7 @@ async fn spawn_rival_probe(params: &RendezvousParams, node: EndpointId) -> Optio
     tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "rival probe endpoint built");
     // Clamped so at most one probe is outstanding per heal tick even when
     // tests shorten the cadence below the probe cap.
-    let budget = Duration::from_secs(HEAL_PROBE_SECS.min(heal_interval_secs()));
+    let budget = HEAL_PROBE.min(heal_interval());
     let (tx, rx) = oneshot::channel();
     let endpoint = prober.clone();
     let (cancel, cancelled) = oneshot::channel();
@@ -570,18 +566,13 @@ async fn rung_serves_our_mesh(prober: &Endpoint, rendezvous_id: EndpointId, port
     // whose owner won the bind race microseconds ago and is not yet
     // accepting — which refuses instantly, so unspaced attempts would all
     // land inside that same gap. See `RENDEZVOUS_PROBE_ATTEMPTS` and
-    // `RENDEZVOUS_PROBE_RETRY_MS`. Both common cases still cost one
+    // `RENDEZVOUS_PROBE_RETRY`. Both common cases still cost one
     // attempt — a live listener answers, a foreign squat rejects.
     for attempt in 1..=RENDEZVOUS_PROBE_ATTEMPTS {
         if attempt > 1 {
-            n0_future::time::sleep(Duration::from_millis(RENDEZVOUS_PROBE_RETRY_MS)).await;
+            n0_future::time::sleep(RENDEZVOUS_PROBE_RETRY).await;
         }
-        let ours = probe_connect(
-            prober,
-            addr.clone(),
-            Duration::from_secs(RENDEZVOUS_PROBE_SECS),
-        )
-        .await;
+        let ours = probe_connect(prober, addr.clone(), RENDEZVOUS_PROBE).await;
         if ours {
             tracing::trace!(target: "habilis_network::beacon", port, attempt, "private rung identity-probe: ours");
             return true;
@@ -733,7 +724,7 @@ async fn build_rendezvous_endpoint(
 /// ladder walk stays inline: against a live loopback listener a rung
 /// identity-probe answers on its first attempt, in milliseconds. Its
 /// *bound* is not milliseconds though — an unresponsive rung costs
-/// `RENDEZVOUS_PROBE_SECS * RENDEZVOUS_PROBE_ATTEMPTS` before the walk
+/// `RENDEZVOUS_PROBE * RENDEZVOUS_PROBE_ATTEMPTS` before the walk
 /// moves on, on this task. That is deliberate (see
 /// [`RENDEZVOUS_PROBE_ATTEMPTS`] on why the answer has to be worth
 /// believing) but it is the one inline cost here that is not trivially
@@ -785,7 +776,7 @@ impl Contest {
 
 /// Apply an off-loop probe's verdict: claim the rendezvous if it is free.
 ///
-/// Re-checks the beacon slot first, because up to [`HEAL_PROBE_SECS`] passed
+/// Re-checks the beacon slot first, because up to [`HEAL_PROBE`] passed
 /// while the probe ran and the loop kept moving — a reclaim tick or a
 /// re-stand-up may have taken the role in the meantime, and claiming twice
 /// binds the duplicate same-id copy the probe exists to prevent.
@@ -1540,7 +1531,7 @@ mod tests {
     async fn ensure_starts_the_probe_instead_of_waiting_for_it() {
         // The invariant the departure bug came down to: `ensure` runs on the
         // sole event loop, so it must not block on the probe. It used to,
-        // for the full `HEAL_PROBE_SECS` — long enough that `Node::leave`'s
+        // for the full `HEAL_PROBE` — long enough that `Node::leave`'s
         // 3s budget expired and the graceful `Left` was never sent.
         let params = public_params();
         let peer = loopback_endpoint().await;
