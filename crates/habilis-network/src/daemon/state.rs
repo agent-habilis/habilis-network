@@ -24,13 +24,9 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, LANE_WANTED_SECS, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
-    RECLAIM_WINDOW_SECS, REGRAFT_AFTER_MS, RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
+    KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
+    RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED,
 };
-
-/// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
-/// re-link throttle (`relink`) and of the `PeerInfo` flood gate.
-const RELINK_COOLDOWN: Duration = Duration::from_secs(RELINK_COOLDOWN_SECS);
 
 /// How long an author whose digest we could not read stays unreported. A build
 /// that does not know the window format sends one every round, and one line per
@@ -116,7 +112,7 @@ impl Default for ParkedLinkStates {
 
 /// One peer in a [`RosterSnapshot`]. `last_seen_secs_ago` is
 /// `None` until the peer's first heartbeat is timed; `quiet` marks a
-/// peer heartbeat-evicted past `ALIVE_TIMEOUT_SECS` (still returnable);
+/// peer heartbeat-evicted past `ALIVE_TIMEOUT` (still returnable);
 /// `reach` is `direct` only while we hold a live link to it; `transport`
 /// is the lane a directed frame to this peer would take right now (the
 /// live [`crate::transport`] send decision — distinct from `reach`, which
@@ -257,7 +253,7 @@ pub struct EventLoopState {
     /// Per-endpoint re-link throttle: caps re-dialing + re-flooding a peer
     /// learned via `PeerInfo` to once per window. Tracked *across*
     /// `NeighborDown` (unlike `linked_endpoints`), so a flapping/unstable peer
-    /// is re-linked at most once per `RELINK_COOLDOWN_SECS` — the choke that
+    /// is re-linked at most once per `RELINK_COOLDOWN` — the choke that
     /// stops one bad node's flap from amplifying into a mesh-wide connection
     /// storm. Bounded by construction (see [`Cooldown`]).
     pub(crate) relink: Cooldown<EndpointId>,
@@ -319,7 +315,7 @@ pub struct EventLoopState {
     /// via gossip; `NeighborUp`/`PeerInfo` are asymmetric for
     /// bootstrap links), by implicit heartbeats from any received
     /// message (self-heal for a missed Joined), and by the sweeper's
-    /// eviction of peers gone silent past `ALIVE_TIMEOUT_SECS`.
+    /// eviction of peers gone silent past `ALIVE_TIMEOUT`.
     pub(crate) peers: HashSet<Nickname>,
     /// Implicit-heartbeat tracker: nickname -> last time we heard
     /// anything from that peer. Drives sweep-based eviction.
@@ -341,7 +337,7 @@ pub struct EventLoopState {
     /// `linked_endpoints` by design). `None` until the loop learns it.
     pub(crate) rendezvous_id: Option<EndpointId>,
     /// Heartbeat layer: peers we've evicted as quiet (silent
-    /// past `ALIVE_TIMEOUT_SECS`) but who may still reappear. Any
+    /// past `ALIVE_TIMEOUT`) but who may still reappear. Any
     /// message from a nickname in this set triggers a symmetric
     /// `peer_return` event and re-inclusion in `peers`. Bounded FIFO
     /// (cap `QUIET_CAP`): drained on return, so without the cap a churn /
@@ -893,9 +889,7 @@ impl EventLoopState {
             graft_backoff: crate::transport::graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
-            digest_serves: Cooldown::new(Duration::from_secs(
-                habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
-            )),
+            digest_serves: Cooldown::new(habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN),
             digest_unreadable: Cooldown::new(UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -1064,7 +1058,7 @@ impl EventLoopState {
     }
 
     /// `true` if we re-dialed + re-flooded `peer` within the last
-    /// `RELINK_COOLDOWN_SECS` of `now`, so the caller should skip re-linking
+    /// `RELINK_COOLDOWN` of `now`, so the caller should skip re-linking
     /// it again. Breaks the flap → re-dial → re-flood loop that otherwise
     /// turns one unstable peer into a mesh-wide CPU storm.
     pub(crate) fn relink_on_cooldown(&self, peer: EndpointId, now: Instant) -> bool {
@@ -1096,17 +1090,17 @@ impl EventLoopState {
 
     /// A frame is held for the lane peer `peer` at `now`: its session is wanted.
     pub(crate) fn want_lane_session(&mut self, peer: EndpointId, now: Instant) {
-        let window = Duration::from_secs(LANE_WANTED_SECS);
+        let window = LANE_WANTED;
         self.lane_wanted
             .retain(|_, since| now.saturating_duration_since(*since) < window);
         self.lane_wanted.insert(peer, now);
     }
 
-    /// Whether a frame was held for `peer` within the last `LANE_WANTED_SECS`.
+    /// Whether a frame was held for `peer` within the last `LANE_WANTED`.
     pub(crate) fn lane_session_wanted(&self, peer: EndpointId, now: Instant) -> bool {
-        self.lane_wanted.get(&peer).is_some_and(|since| {
-            now.saturating_duration_since(*since) < Duration::from_secs(LANE_WANTED_SECS)
-        })
+        self.lane_wanted
+            .get(&peer)
+            .is_some_and(|since| now.saturating_duration_since(*since) < LANE_WANTED)
     }
 
     /// A proven pair lost its gossip link while its path reads as the relay. Returns the
@@ -1135,7 +1129,7 @@ impl EventLoopState {
     }
 
     /// The gossip link of a proven peer went down: plan its re-graft at
-    /// `now` plus [`REGRAFT_AFTER_MS`] with a jitter of 30 % either way (`spread` in
+    /// `now` plus [`REGRAFT_AFTER`] with a jitter of 30 % either way (`spread` in
     /// `-1.0..=1.0`). A peer on its relink cooldown is left to the heal tick, so a flapping
     /// pair does not dial every second. A pair that reads as the relay is left to
     /// [`Self::relay_race_on_link_loss`]: its graft follows the attach, and a dial over the relay
@@ -1156,7 +1150,7 @@ impl EventLoopState {
             return false;
         }
         let jitter = 1.0 + 0.3 * spread.clamp(-1.0, 1.0);
-        let after = Duration::from_millis(REGRAFT_AFTER_MS).mul_f64(jitter);
+        let after = REGRAFT_AFTER.mul_f64(jitter);
         self.regraft_at.insert(peer, now + after);
         true
     }
@@ -1192,8 +1186,8 @@ impl EventLoopState {
     }
 
     /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held
-    /// two or more links fewer than G for `STARVED_SECS`, and the last fallback is
-    /// `STARVED_SECS` old. A `true` stamps the fallback.
+    /// two or more links fewer than G for `STARVED`, and the last fallback is
+    /// `STARVED` old. A `true` stamps the fallback.
     pub(crate) fn starved_join_due(&mut self, now: Instant) -> bool {
         let due = self.starved_join_ready(now);
         if due {
@@ -1204,7 +1198,7 @@ impl EventLoopState {
 
     /// [`Self::starved_join_due`] without the stamp: whether a fallback would be due at `now`.
     pub(crate) fn starved_join_ready(&self, now: Instant) -> bool {
-        let window = Duration::from_secs(STARVED_SECS);
+        let window = STARVED;
         let starved = self
             .below_target_since
             .is_some_and(|since| now.duration_since(since) >= window);
@@ -1216,7 +1210,7 @@ impl EventLoopState {
 
     /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
     /// wait runs. A starved node whose fallback is due asks every peer, because a `Join` is not
-    /// refused: those dials, one per peer once per `STARVED_SECS`, are expected.
+    /// refused: those dials, one per peer once per `STARVED`, are expected.
     pub(crate) fn graft_blocked(&self, peer: EndpointId, now: Instant) -> bool {
         self.graft_backoff.is_blocked(&peer, now) && !self.starved_join_ready(now)
     }
@@ -1361,7 +1355,7 @@ impl EventLoopState {
     /// Open the fast `beacon::ensure` burst; the only writer of
     /// [`Self::reclaim_until`].
     pub(crate) fn arm_reclaim(&mut self, now: Instant) {
-        self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
+        self.reclaim_until = Some(now + RECLAIM_WINDOW);
         self.probe_backoff.reset();
     }
 
@@ -1378,10 +1372,9 @@ impl EventLoopState {
     }
 
     /// A return to the rendezvous is owed from now, for
-    /// [`RENDEZVOUS_COMEBACK_SECS`](crate::util::tuning::RENDEZVOUS_COMEBACK_SECS).
+    /// [`RENDEZVOUS_COMEBACK`](crate::util::tuning::RENDEZVOUS_COMEBACK).
     pub(crate) fn owe_rendezvous_return(&mut self, now: Instant) {
-        self.rendezvous_comeback_until =
-            Some(now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS));
+        self.rendezvous_comeback_until = Some(now + crate::util::tuning::RENDEZVOUS_COMEBACK);
     }
 
     /// The rendezvous link came up. If a return was owed, it is paid, and the
@@ -1392,7 +1385,7 @@ impl EventLoopState {
         self.rendezvous_dwell_until = self
             .rendezvous_comeback_until
             .take()
-            .map(|_| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
+            .map(|_| now + crate::util::tuning::RENDEZVOUS_DWELL);
     }
 
     /// Whether this node holds the rendezvous link, has not let go of it yet, is
@@ -2016,8 +2009,7 @@ const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport:
 mod tests {
     use super::{
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
-        KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
-        TokioInstant,
+        KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN, Reach, TokioInstant,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::protocol::{AuthorKey, ContentHash, UnixSecs};
@@ -2461,9 +2453,7 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         let long_ago = Instant::now()
-            .checked_sub(Duration::from_secs(
-                crate::util::tuning::RENDEZVOUS_COMEBACK_SECS + 1,
-            ))
+            .checked_sub(crate::util::tuning::RENDEZVOUS_COMEBACK + Duration::from_secs(1))
             .expect("a past instant");
         state.owe_rendezvous_return(long_ago);
 
@@ -2487,7 +2477,7 @@ mod tests {
             "the visit has just begun"
         );
 
-        let later = now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS + 1);
+        let later = now + crate::util::tuning::RENDEZVOUS_DWELL + Duration::from_secs(1);
 
         assert!(
             state.should_release_rendezvous(later),
@@ -2913,8 +2903,7 @@ mod tests {
     fn a_peer_is_served_one_digest_per_window() {
         let mut state = fresh_state();
         let now = Instant::now();
-        let window =
-            Duration::from_secs(habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS);
+        let window = habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN;
 
         assert!(
             state.admit_digest(Some(author_of("aa")), now),
@@ -2993,7 +2982,7 @@ mod tests {
         assert_eq!(relinks, 1, "the cooldown caps re-links to once per window");
 
         // Past the window a genuine re-link is allowed again (no permanent lockout).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(!cooled.relink_on_cooldown(peer, later));
     }
 
@@ -3102,7 +3091,7 @@ mod tests {
         assert_eq!(refloods, 1, "five neighbors flood once per window");
 
         // Past the window a neighbor up floods once more (no permanent silence).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(state.neighbor_up_refloods_peerinfo(later));
     }
 
@@ -3119,7 +3108,7 @@ mod tests {
         state.defer_peerinfo();
 
         assert!(!state.take_deferred_peerinfo(start + Duration::from_secs(1)));
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(
             state.take_deferred_peerinfo(later),
             "due once the window ends"
@@ -3132,9 +3121,7 @@ mod tests {
         let start = Instant::now();
         let mut state = fresh_state();
         state.peerinfo_flooded_at = Some(start);
-        assert!(
-            !state.take_deferred_peerinfo(start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1))
-        );
+        assert!(!state.take_deferred_peerinfo(start + RELINK_COOLDOWN + Duration::from_secs(1)));
     }
 
     #[test]
@@ -3157,7 +3144,7 @@ mod tests {
         assert!(state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)));
 
         // Past the window a re-announce floods once more (no permanent silence).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(state.joined_refloods_peerinfo(false, later));
     }
 
@@ -3391,7 +3378,7 @@ mod tests {
             state.note_relink(endpoint_id(seed), when);
         }
         assert!(
-            state.relink.len() <= usize::try_from(RELINK_COOLDOWN_SECS).unwrap() + 1,
+            state.relink.len() <= usize::try_from(RELINK_COOLDOWN.as_secs()).unwrap() + 1,
             "expired cooldown entries are pruned (map stays bounded)"
         );
     }
