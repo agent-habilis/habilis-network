@@ -52,9 +52,7 @@ pub mod ipc {
 /// every knob is a `const` default a consumer may override through this.
 pub mod tuning {
     pub use crate::util::tuning::{
-        NODE_INBOUND_CAP, POLL_LONG_MIN_CYCLE, POLL_LONG_MIN_CYCLE_MS, READY_FRESH,
-        READY_FRESH_SECS, READY_MAX, READY_MAX_SECS, READY_POLL_INTERVAL, READY_POLL_INTERVAL_MS,
-        Tuning, advertise_interval, advertise_interval_secs, directory_expiry,
-        directory_expiry_secs, directory_private_for_test, init, ping_window, ping_window_secs,
+        NODE_INBOUND_CAP, POLL_LONG_MIN_CYCLE, READY_FRESH, READY_MAX, READY_POLL_INTERVAL, Tuning,
+        advertise_interval, directory_expiry, directory_private_for_test, init, ping_window,
     };
 }
