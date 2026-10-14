@@ -246,6 +246,9 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `unix_nanos` in `habilis-network-util` | It has one caller. |
 | `ContentId::new` | It is a newtype already. A new validation rule can reject ids that exist. |
 | `util::logs::log_file_path(mesh_id: &str, nickname: &str)` | The util crate is below the protocol crate, so it cannot name `MeshId`. |
+| The browser milliseconds in `habilis-network-iroh-webrtc-transport`: `DISCONNECT_GRACE_MS` in `liveness.rs`, and `CHANNEL_OPEN_DEADLINE_MS`, `ICE_GATHERING_DEADLINE_MS`, `ICE_QUIET_MS`, and `POLL_MS` in `web/jsep.rs` | The browser clock gives `f64` milliseconds, and the browser `sleep_ms` takes an `i32`. |
+| `timeout_ms: c_int` in `habilis-network-ffi/src/ffi.rs` | It is a C edge. The code converts it into a `Duration` at entry. |
+| The hidden `--*-secs` and `--*-ms` flags of agent-gossip (`cli/args/tuning.rs`) | They hold CLI input as `u64`. The CLI converts each value into a `Duration` where it builds `Tuning`. |
 
 ### Types that exist
 
