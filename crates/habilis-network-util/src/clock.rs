@@ -143,8 +143,11 @@ pub fn unix_nanos() -> i64 {
 /// `u64` past ~584 million years — but a silent wrap in a log field is worse
 /// than a clamp.
 #[must_use]
-pub fn millis_saturating(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+pub const fn millis_saturating(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_mul(1000)
+        .saturating_add(duration.subsec_millis() as u64)
 }
 
 #[cfg(test)]
