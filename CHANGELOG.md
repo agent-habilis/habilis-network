@@ -10,6 +10,19 @@ published to a registry; pin it with
 
 ### Added
 
+- `Tuning::rendezvous_periodic_return_secs` (default `RENDEZVOUS_PERIODIC_RETURN_SECS`, 600): how
+  long a node that let go of the rendezvous waits before it comes back to it, at the least. The
+  node adds up to half of the value from its endpoint id. `NO_RUNG_REPEAT_SECS` (300) is the
+  interval of the "no port is free" message. `probe_connect` keeps its signature.
+  **Breaking:** `Tuning` has a new field. A `Tuning { .. }` literal without
+  `..Tuning::DEFAULTS` must name it; agent-gossip builds one in its CLI (`cli/args/tuning.rs`) and
+  gains the field at its next pin move.
+- `tuning::rendezvous_periodic_return_secs()` returns the live value of that field, at least 1 s,
+  and `tuning::RENDEZVOUS_PERIODIC_RETURN_SECS` (600) and `tuning::NO_RUNG_REPEAT_SECS` (300) are
+  new constants (#10, #11). With the `iroh-test-utils` feature, `membership::blind_new_members`
+  and the request `Request::StallBeacon` are test hooks (#12, #15).
+  **Breaking, with `iroh-test-utils`:** `Request` has a new variant, so an exhaustive `match` on
+  it must name `StallBeacon`.
 - Members of one mesh on the same LAN link before any beacon is claimed. A member puts a tag
   of its mesh in its mDNS record, and a member that sees that tag asks the other member to be a
   neighbor, at most 8 times per minute. The tag hashes the topic, so two meshes on one LAN do not
@@ -135,6 +148,18 @@ published to a registry; pin it with
   most 32 MiB in the worst case.
 
 ### Changed
+
+- A member of a loopback room whose ladder of ports is held whole by other processes says so: a
+  warning in its log, and one `NodeEvent::Info` that names the number of ports, repeated every 5
+  minutes while no port is free. agent-gossip shows one new Info line each 5 minutes in that
+  state. No new `NodeEvent` variant (#11).
+- The rung probe of a loopback member runs in a task and makes one attempt of 1 s. Three attempts
+  of 1 s, 250 ms apart, ran on the event loop and read a silence as a foreign rung.
+  **Breaking:** `tuning::RENDEZVOUS_PROBE_ATTEMPTS` and `tuning::RENDEZVOUS_PROBE_RETRY_MS` are
+  removed (#4, #12, #15).
+- A loopback holder above the first rung yields it on a positive answer of a lower rung, and a
+  holder checks that its own rung answers. A rung that says nothing never makes a member bind or
+  shed on the first reading (#4, #12, #15).
 
 - **Breaking:** `ops::deliver` returns at once, and no longer waits for a dial. A broadcast, a
   frame held for a direct path, a refused frame and a send to a warm connection give their verdict
@@ -378,6 +403,31 @@ published to a registry; pin it with
   and `session_id_for` do not change.
 
 ### Fixed
+
+- A loopback room no longer stays split into separate meshes when a joiner took the rung of a
+  holder that left: a member that let go of the rendezvous owes a return when its walk reads a
+  holder that no member of its mesh hosts (#4).
+- A loopback holder above the first rung yields it to a lower holder of its mesh, at the next heal
+  tick, on a positive answer only. Two holders that stood up because a probe read a loaded host
+  wrongly become one (#4).
+- A loopback holder whose beacon stopped answering sheds it at the second check that fails, and a
+  member no longer waits 3.5 s of its event loop at each heal tick on a rung that says nothing
+  (#12).
+- A member that let go of the rendezvous comes back to it once per
+  `rendezvous_periodic_return_secs`, so two groups that hold links enough meet again without an
+  event. A visit that finds no link is wanted for the comeback window (2 minutes) and no longer,
+  and the next one is due a period later (#10).
+- A public holder that knows no member re-checks sooner when a member that it does not know links
+  to its beacon, or the LAN names a member that it is not linked to (#13).
+- A member of the LAN that was asked to be a neighbor and is still not one is asked again, after
+  60 s and then every 5 minutes (#14).
+- A loopback member that is too loaded to answer a probe reads the silence of a rung as silence,
+  and passes it only after two reports of silence that are at least 6 s apart. A rung that nobody
+  serves is bound about one heal tick after the first report, not 6 s after it. A listener that
+  closes,
+  refuses, resets or fails before a certificate (a busy or starting beacon of the same mesh, or a
+  holder whose router has not set its ALPN yet) is read as silence too. Only a key that the
+  verifier rejects, or an identity that iroh reads as another, is foreign (#15).
 
 - The `iroh` fork moves to `c2e81ee` (agent-habilis/iroh PR #1). iroh opens a
   custom-transport path that it learns while another custom path is already

@@ -19,4 +19,6 @@ pub use app::{
     msg_fits, parse_to,
 };
 pub use event::{MembershipEvent, json_sink};
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use join::blind_new_members;
 pub use join::{Membership, Opts, depart, join, resolve_kind};

@@ -292,6 +292,7 @@ pub struct Tuning {
     pub rival_recheck: Duration,
     pub rival_recheck_meshed: Duration,
     pub rival_recheck_alone: Duration,
+    pub rendezvous_periodic_return: Duration,
     pub topic_mdns_only: bool,
 }
 
@@ -315,6 +316,7 @@ impl Tuning {
         rival_recheck: RIVAL_RECHECK,
         rival_recheck_meshed: RIVAL_RECHECK_MESHED,
         rival_recheck_alone: RIVAL_RECHECK_ALONE,
+        rendezvous_periodic_return: RENDEZVOUS_PERIODIC_RETURN,
         topic_mdns_only: false,
     };
 }
@@ -531,6 +533,17 @@ pub const RECLAIM_WINDOW_SECS: u64 = RECLAIM_WINDOW.as_secs();
 pub const RECLAIM_INTERVAL: Duration = Duration::from_millis(400);
 /// Use [`RECLAIM_INTERVAL`], which holds the same value as a `Duration`.
 pub const RECLAIM_INTERVAL_MS: u64 = millis(RECLAIM_INTERVAL);
+
+/// How often a member repeats that every port of its room's ladder is held by other processes
+/// (`daemon::beacon_arm`: the warning and the event of the app).
+///
+/// The walk runs at every heal tick and at every tick of the reclaim burst, and the state does
+/// not change in between. A line every heal tick is 240 lines an hour in the log and in the
+/// terminal of the user, who can do nothing about it but free a port. Five minutes says it again
+/// often enough for a session that was started later or a scrolled screen.
+pub const NO_RUNG_REPEAT: Duration = Duration::from_mins(5);
+/// Use [`NO_RUNG_REPEAT`], which holds the same value as a `Duration`.
+pub const NO_RUNG_REPEAT_SECS: u64 = NO_RUNG_REPEAT.as_secs();
 
 /// Max remembered `quiet` (silence-evicted but maybe-returning) peers.
 /// `quiet` is drained only when a peer returns, so without a cap a churn / sybil
@@ -786,54 +799,24 @@ pub const RELAY_REPROBE_BACKOFF_MAX_SECS: u64 = RELAY_REPROBE_BACKOFF_MAX.as_sec
 /// Timeout for *one attempt* of the private-mode rendezvous identity
 /// probe. When a ladder rung is `AddrInUse`, a member probes it to tell
 /// *our* mesh's beacon (→ stay a peer) from an unrelated mesh squatting
-/// the rung (→ try the next rung). The probe is a loopback connect to a
-/// live listener, so it resolves in milliseconds; this is only a guard
-/// against a pathological non-responding socket, kept tight so a
-/// contended-rung walk can't stall the event loop.
+/// the rung (→ try the next rung), or a rung that says nothing (→ stay a
+/// peer, and bind it only once it has said nothing for
+/// [`RECLAIM_WINDOW`] across walks).
 ///
-/// See [`RENDEZVOUS_PROBE_ATTEMPTS`] for why a miss is retried rather
-/// than given a longer single window.
+/// The probe is a loopback connect to a live listener, so it resolves in
+/// milliseconds; this is the cost of a walk that meets a silent rung, and
+/// the walk stops at the first one. Kept tight so a contended-rung walk
+/// cannot stall the event loop for long.
+///
+/// One attempt is enough because a silence no longer binds: the answer that
+/// authorizes an irreversible bind is a failed identity check
+/// (`ProbeAnswer::Foreign`: a key that the verifier rejected, or an identity
+/// that iroh reads as another), or a rung that has stayed silent for the whole
+/// window. A refusal (`ProbeAnswer::Refused`) reads as silence, and so does a
+/// host that is too loaded to answer: for a few walks, and it binds nothing.
 pub const RENDEZVOUS_PROBE: Duration = Duration::from_secs(1);
 /// Use [`RENDEZVOUS_PROBE`], which holds the same value as a `Duration`.
 pub const RENDEZVOUS_PROBE_SECS: u64 = RENDEZVOUS_PROBE.as_secs();
-
-/// How many times the private rung identity-probe is attempted before its
-/// answer is believed.
-///
-/// One shot is not enough, and the reason is asymmetric: a false
-/// *negative* here is not a slow retry, it is a **permanent** split.
-/// `probe_connect` reports a rejected dial and a timed-out dial as the
-/// same `false`, and `beacon::build_rendezvous_endpoint` reads that
-/// `false` as a positive finding of "foreign" — which authorizes it to
-/// bind a rung of its own. Two beacons then serve one mesh forever,
-/// because the loopback path deliberately has no rival-recheck repair
-/// (`daemon::beacon_arm::rival_recheck_applies` is `false` whenever
-/// `bind_ports` is non-empty, on the premise that bind-time arbitration
-/// is atomic — true of the bind, not of the bind *plus a network probe
-/// with a timeout*).
-///
-/// Retrying rather than lengthening the single window is the cheaper
-/// half of the fix: same worst case, but it also covers a transient
-/// rejection, which no timeout value can. The common cases are both
-/// unchanged — a live listener answers on the first attempt in
-/// milliseconds, and a genuine foreign squat rejects just as fast — so
-/// the extra attempts are only ever spent right before an irreversible
-/// decision.
-pub const RENDEZVOUS_PROBE_ATTEMPTS: u32 = 3;
-
-/// How long to wait between two rung identity-probe attempts.
-///
-/// Without this the retry only covers the *timeout* failure, which is the
-/// rarer one. The failure that actually splits a loopback mesh is a rung
-/// that is bound but not yet serving: the owner won the bind race
-/// microseconds ago and its accept loop is not up, so the dial is refused
-/// **immediately**. Back-to-back attempts against that all fail inside a
-/// single millisecond and the retry buys nothing. Spacing them is what
-/// turns [`RENDEZVOUS_PROBE_ATTEMPTS`] into a window the owner can finish
-/// starting up inside.
-pub const RENDEZVOUS_PROBE_RETRY: Duration = Duration::from_millis(250);
-/// Use [`RENDEZVOUS_PROBE_RETRY`], which holds the same value as a `Duration`.
-pub const RENDEZVOUS_PROBE_RETRY_MS: u64 = millis(RENDEZVOUS_PROBE_RETRY);
 
 /// How long a departing member waits for its co-hosted rendezvous endpoint,
 /// and for an outstanding rival probe's endpoint, to close
@@ -1006,6 +989,29 @@ pub const CAP_REFUSAL_COOLDOWN_MAX_SECS: u64 = CAP_REFUSAL_COOLDOWN_MAX.as_secs(
 pub const RENDEZVOUS_DWELL: Duration = Duration::from_secs(30);
 /// Use [`RENDEZVOUS_DWELL`], which holds the same value as a `Duration`.
 pub const RENDEZVOUS_DWELL_SECS: u64 = RENDEZVOUS_DWELL.as_secs();
+
+/// How long a node that let go of the rendezvous on purpose waits before it wants it again, at
+/// the least. Islands of a split mesh that each hold links enough have no other reason to visit the
+/// rendezvous, where they meet. A node adds up to half of this from its id, so that n members cost
+/// about n / period visits a minute, and not n at once. A wider spread for very large rooms is a
+/// tuning choice: raise this value.
+pub const RENDEZVOUS_PERIODIC_RETURN: Duration = Duration::from_mins(10);
+/// Use [`RENDEZVOUS_PERIODIC_RETURN`], which holds the same value as a `Duration`.
+pub const RENDEZVOUS_PERIODIC_RETURN_SECS: u64 = RENDEZVOUS_PERIODIC_RETURN.as_secs();
+
+/// The live value, after any override of [`RENDEZVOUS_PERIODIC_RETURN`]. Clamped to `>= 1`.
+#[must_use]
+pub fn rendezvous_periodic_return() -> Duration {
+    current()
+        .rendezvous_periodic_return
+        .max(Duration::from_secs(1))
+}
+
+/// Use [`rendezvous_periodic_return`], which returns the live value as a `Duration`.
+#[must_use]
+pub fn rendezvous_periodic_return_secs() -> u64 {
+    rendezvous_periodic_return().as_secs()
+}
 
 /// How long an owed return to the rendezvous lasts. A node that is refused at
 /// the rendezvous, or finds it gone, offers again for this long and then stops:

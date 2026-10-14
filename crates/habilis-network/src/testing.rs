@@ -147,6 +147,7 @@ pub(crate) struct LaneNode {
     pub(crate) endpoint: iroh::Endpoint,
     pub(crate) handle: habilis_network_iroh_webrtc_transport::WebRtcHandle,
     pub(crate) bob: EndpointId,
+    gossip: iroh_gossip::net::Gossip,
     sender: crate::transport::MeshSender,
     mesh: crate::protocol::MeshId,
     identity: Identity,
@@ -182,6 +183,7 @@ impl LaneNode {
             endpoint,
             handle,
             bob: endpoint_id(77),
+            gossip,
             sender: crate::transport::MeshSender::new(gossip_sender),
             mesh: crate::protocol::MeshId::from("test"),
             our_pubkey: identity.author_key(),
@@ -189,6 +191,11 @@ impl LaneNode {
             author: nick("alice"),
             sink: crate::gossip::event::SilentSink,
         }
+    }
+
+    /// Stops the gossip actor: a request to the sender returns an error from here on.
+    pub(crate) async fn stop_gossip(&self) {
+        let _ = self.gossip.shutdown().await;
     }
 
     pub(crate) fn ctx(&self) -> crate::daemon::ctx::HandlerCtx<'_> {

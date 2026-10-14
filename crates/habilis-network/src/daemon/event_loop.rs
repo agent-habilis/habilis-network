@@ -227,21 +227,26 @@ pub async fn run<A: NodeDriver>(
     // advertisers sharing one directory `rendezvous_id` don't bind
     // duplicate copies. Why: `EventLoopConfig::cohost`.
     let mut rendezvous: Option<beacon::Rendezvous> = None;
+    // The probe tasks of the private ladder report here; the loop notes the reading and walks.
+    let (rung_report_tx, rung_reports) = mpsc::unbounded_channel();
+    state.rungs = beacon::RungWatch::new(rung_report_tx);
     // The outstanding probe-before-claim, if any. Owned here beside the
     // beacon it decides, because a probe outlives the tick that started it:
     // its verdict arrives on the loop's own arm, up to `HEAL_PROBE`
     // later.
     let mut rival_probe: Option<beacon::RivalProbe> = None;
     if claims_at_startup(cohost) {
-        let claimed = beacon::ensure(
+        let claimed = beacon::walk_ladder(
             &rendezvous_params,
             &endpoint,
             &state.address_book,
             &mut rendezvous,
             probes_before_claim(cohost),
             &mut rival_probe,
+            &mut state.rungs,
         )
-        .await;
+        .await
+            == beacon::Held::Claimed;
         if claimed {
             schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
         }
@@ -375,6 +380,7 @@ pub async fn run<A: NodeDriver>(
         rendezvous_params,
         rung_rx,
         rung_probe,
+        rung_reports,
         cohost,
         started,
         external_quit_rx,
@@ -614,6 +620,8 @@ struct EventLoop<A: NodeDriver> {
     rung_rx: watch::Receiver<Option<RelayUrl>>,
     /// The startup probe behind `rung_rx`, released with the rendezvous.
     rung_probe: Option<crate::lookup::StoppableTask>,
+    /// What the probe tasks of the private ladder found, and the walk that asked for it.
+    rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
     /// When this member may serve the rendezvous (see [`CoHostPolicy`]).
     cohost: CoHostPolicy,
     /// Event-loop start, for the unmeshed-joiner co-host grace.
@@ -684,6 +692,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut rendezvous_params,
         mut rung_rx,
         mut rung_probe,
+        mut rung_reports,
         cohost,
         started,
         mut external_quit_rx,
@@ -751,10 +760,22 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     let mut address_changes = endpoint.watch_addr().stream_updates_only();
 
     loop {
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        super::beacon_arm::shed_on_request(&mut state, &rendezvous_params, &mut rendezvous);
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        super::beacon_arm::stall_on_request(&mut state, rendezvous.as_ref());
         // Whether this process hosts the beacon is read here, once per turn,
         // from the one place that owns it, so that no path that claims or sheds
         // the beacon has to remember to say so.
         state.hosts_rendezvous = rendezvous.is_some();
+        // A member that links to our beacon and that we do not know is a sign of another group.
+        if let Some(held) = rendezvous.as_mut() {
+            for arrived in held.take_arrivals() {
+                if arrived != endpoint.id() && !state.known_endpoints.contains(&arrived) {
+                    state.note_second_group_sign(endpoint.id(), Instant::now());
+                }
+            }
+        }
         // Said in our `PeerInfo` from here, for the same reason: no claim or shed path has to
         // remember to send it again.
         if state.hosts_rendezvous != state.beacon_flag_flooded {
@@ -972,7 +993,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     state.rendezvous_probe_read_free = true;
                 } else {
                     state.rendezvous_probe_read_free = false;
-                    let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &state.address_book, &mut rendezvous, found_rival).await;
+                    let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &state.address_book, &mut rendezvous, found_rival, &mut state.rungs).await;
                     if claimed {
                         // Still from the brisk base: two joiners that start
                         // together both read free twice and claim in the same
@@ -990,6 +1011,16 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         note_rival_holds(&mut state, &parts.ctx(&sender));
                     }
                 }
+            }
+            // A probe task of the private ladder answered. Its own arm, so that the walk that
+            // asked for it walks again at once and no tick has to wait.
+            Some(report) = rung_reports.recv() => {
+                state.idle.external += 1;
+                state.rungs.note(report, Instant::now());
+                let ctx = parts.ctx(&sender);
+                let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
+                maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
+                maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
             }
             () = closed_opt(&mut state.beacon_closing) => {
                 // The beacon that the re-check shed is closed: the id is free of our own corpse, so
