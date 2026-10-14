@@ -1354,9 +1354,9 @@ mod tests {
             "handed to the pool as a point-to-point batch"
         );
 
-        tokio::time::sleep(std::time::Duration::from_millis(
-            crate::util::tuning::FAST_ROUND_MIN_INTERVAL_MS + 50,
-        ))
+        tokio::time::sleep(
+            crate::util::tuning::FAST_ROUND_MIN_INTERVAL + std::time::Duration::from_millis(50),
+        )
         .await;
         let again = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(

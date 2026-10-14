@@ -1632,7 +1632,7 @@ fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) 
 }
 
 /// Detach the sessions that nothing has held for
-/// [`DIRECT_IDLE_BACKSTOP_SECS`](crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS)
+/// [`DIRECT_IDLE_BACKSTOP`](crate::util::tuning::DIRECT_IDLE_BACKSTOP)
 /// (decision D11: the ceiling frees a place for a newcomer, this frees what nobody uses).
 /// A detached pair holds no pooled connection, so [`held_back`] leaves it alone until a send dials the
 /// peer.
@@ -1648,7 +1648,7 @@ fn detach_idle_sessions_at(
     let Some(handle) = state.webrtc.clone() else {
         return Vec::new();
     };
-    let window = std::time::Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS);
+    let window = crate::util::tuning::DIRECT_IDLE_BACKSTOP;
     let mut detached = Vec::new();
     for peer in state.webrtc_admission.idle_sessions(now, window) {
         let kept = state.linked_endpoints.contains(&peer)
@@ -3148,7 +3148,7 @@ mod tests {
         state
             .peer_endpoints
             .insert(crate::testing::nick("bob"), bob_addr(server.id()));
-        let window = Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let window = crate::util::tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
         assert!(detach_idle_sessions_at(&mut state, start).is_empty());
