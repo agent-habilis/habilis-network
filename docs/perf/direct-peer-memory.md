@@ -216,7 +216,7 @@ This section turns the measurements above into a rule for two caps. Phase 2 of t
 
 - **G** is the size of the gossip active view (`max_peers`). The planned default is 32. Today it is 64 (`GOSSIP_ACTIVE_VIEW_CAPACITY` in `crates/habilis-network-util/src/tuning.rs`).
 - **D** was the cap on WebRTC sessions. Decision D11 replaced it with **C**, the ceiling of direct connections, which counts WebRTC sessions and unicast connections together. The default is 64 (`MAX_DIRECT_PEERS`) and the setting is `max_direct`. See the section "The ceiling C of direct connections (decision D11)" at the end of this document. The text and the measurements below were made with D, before D11.
-- D counted WebRTC sessions only. Plain QUIC connections were not counted, and no count cap limited them. The idle closes limited them in time: 120 s on the dial side and 240 s on the accept side. Today one backstop of 900 s (`DIRECT_IDLE_BACKSTOP_SECS`) replaces both.
+- D counted WebRTC sessions only. Plain QUIC connections were not counted, and no count cap limited them. The idle closes limited them in time: 120 s on the dial side and 240 s on the accept side. Today one backstop of 900 s (`DIRECT_IDLE_BACKSTOP`) replaces both.
 
 G bounds a count. It does not refuse a member. The iroh-gossip fork (`src/proto/hyparview.rs`, `on_join` and `add_active`) always accepts a high-priority `Join` or `Neighbor` request. If the active view is full, it first drops a random active member, and that member gets a disconnect. It refuses only a low-priority `Neighbor` request at a full view. A burst of joins can therefore replace the neighbors of a node that is at G. The number of links stays at G or less, but the churn is not bounded.
 
