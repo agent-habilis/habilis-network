@@ -13,15 +13,15 @@ published to a registry; pin it with
 - `habilis_network::x25519_dalek`: the `x25519-dalek` crate, re-exported whole.
   `Identity::seal_public` returns an `x25519_dalek::PublicKey` and `seal_to_body` takes one, so a
   consumer takes the type from here and gets no second copy of the crate.
-- `Tuning::rendezvous_periodic_return_secs` (default `RENDEZVOUS_PERIODIC_RETURN_SECS`, 600): how
+- `Tuning::rendezvous_periodic_return` (default `RENDEZVOUS_PERIODIC_RETURN`, 600 s): how
   long a node that let go of the rendezvous waits before it comes back to it, at the least. The
-  node adds up to half of the value from its endpoint id. `NO_RUNG_REPEAT_SECS` (300) is the
+  node adds up to half of the value from its endpoint id. `NO_RUNG_REPEAT` (300 s) is the
   interval of the "no port is free" message. `probe_connect` keeps its signature.
   **Breaking:** `Tuning` has a new field. A `Tuning { .. }` literal without
   `..Tuning::DEFAULTS` must name it; agent-gossip builds one in its CLI (`cli/args/tuning.rs`) and
   gains the field at its next pin move.
-- `tuning::rendezvous_periodic_return_secs()` returns the live value of that field, at least 1 s,
-  and `tuning::RENDEZVOUS_PERIODIC_RETURN_SECS` (600) and `tuning::NO_RUNG_REPEAT_SECS` (300) are
+- `tuning::rendezvous_periodic_return()` returns the live value of that field, at least 1 s,
+  and `tuning::RENDEZVOUS_PERIODIC_RETURN` (600 s) and `tuning::NO_RUNG_REPEAT` (300 s) are
   new constants (#10, #11). With the `iroh-test-utils` feature, `membership::blind_new_members`
   and the request `Request::StallBeacon` are test hooks (#12, #15).
   **Breaking, with `iroh-test-utils`:** `Request` has a new variant, so an exhaustive `match` on
@@ -173,6 +173,11 @@ published to a registry; pin it with
   - `runtime::tuning` re-exports only the `Duration` names. `POLL_LONG_MIN_CYCLE_MS`,
     `READY_FRESH_SECS`, `READY_MAX_SECS`, `READY_POLL_INTERVAL_MS`, `advertise_interval_secs`,
     `directory_expiry_secs`, and `ping_window_secs` are gone from it.
+
+  A fractional `Tuning` value (`cohost_grace`, `heal_interval`, the `rival_recheck*` fields, and
+  the others) is no longer truncated to whole seconds. The defaults are whole seconds, and so are
+  the values of the agent-gossip `--*-secs` flags, so nothing changes for them. The value of
+  `--ppid-watch-interval-ms` was in milliseconds before, so it does not change either.
 
   Each hidden flag of the agent-gossip CLI keeps its unit: seconds, or milliseconds for
   `--ppid-watch-interval-ms`. The CLI converts each value to a `Duration` where it builds
@@ -442,7 +447,7 @@ published to a registry; pin it with
   member no longer waits 3.5 s of its event loop at each heal tick on a rung that says nothing
   (#12).
 - A member that let go of the rendezvous comes back to it once per
-  `rendezvous_periodic_return_secs`, so two groups that hold links enough meet again without an
+  `rendezvous_periodic_return`, so two groups that hold links enough meet again without an
   event. A visit that finds no link is wanted for the comeback window (2 minutes) and no longer,
   and the next one is due a period later (#10).
 - A public holder that knows no member re-checks sooner when a member that it does not know links
