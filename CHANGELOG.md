@@ -171,8 +171,9 @@ published to a registry; pin it with
     `READY_FRESH_SECS`, `READY_MAX_SECS`, `READY_POLL_INTERVAL_MS`, `advertise_interval_secs`,
     `directory_expiry_secs`, and `ping_window_secs` are gone from it.
 
-  The agent-gossip CLI keeps its hidden `--*-secs` flags in seconds and converts them to a
-  `Duration` where it builds `Tuning`.
+  Each hidden flag of the agent-gossip CLI keeps its unit: seconds, or milliseconds for
+  `--ppid-watch-interval-ms`. The CLI converts each value to a `Duration` where it builds
+  `Tuning`.
 - A member of a loopback room whose ladder of ports is held whole by other processes says so: a
   warning in its log, and one `NodeEvent::Info` that names the number of ports, repeated every 5
   minutes while no port is free. agent-gossip shows one new Info line each 5 minutes in that

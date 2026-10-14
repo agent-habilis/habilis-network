@@ -425,9 +425,10 @@ Divergences from upstream, in the order they were made.
     and are `Duration`. `CHANGELOG.md` lists each name, and `AGENTS.md` holds the rule.
     The wire does not change.
 
-    agent-gossip builds `Tuning` from its hidden `--*-secs` flags (`cli/args/tuning.rs`).
-    The flags stay in seconds. The CLI converts each value to a `Duration` at that one edge,
-    with `Duration::from_secs`. A port **from** upstream must pass a `Duration` in each
+    agent-gossip builds `Tuning` from its hidden flags (`cli/args/tuning.rs`). Each flag
+    keeps its unit: seconds, or milliseconds for `--ppid-watch-interval-ms`. The CLI
+    converts each value to a `Duration` at that one edge, with `Duration::from_secs` or
+    `Duration::from_millis`. A port **from** upstream must pass a `Duration` in each
     `Tuning` field. agent-gossip is carried on its branch `refactor-newtype-pattern` by
     bone-strand.
 
