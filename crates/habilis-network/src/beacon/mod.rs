@@ -837,9 +837,11 @@ impl RungWatch {
         match reading.answer {
             ProbeAnswer::Ours => RungRead::Ours,
             ProbeAnswer::Foreign => RungRead::Foreign,
+            // The window is measured between two reports, not up to now: the reading is fresh
+            // for a heal tick, and one report read a window later is still one sample.
             ProbeAnswer::NoAnswer | ProbeAnswer::Refused => match reading.silent_since {
                 Some(since)
-                    if now.saturating_duration_since(since)
+                    if reading.read_at.saturating_duration_since(since)
                         >= Duration::from_secs(RECLAIM_WINDOW_SECS) =>
                 {
                     RungRead::SilentLongEnough
@@ -1715,6 +1717,57 @@ mod tests {
             "both silent rungs are passed and the free one is bound"
         );
         assert!(bound);
+    }
+
+    /// One report of silence is one sample. A rung is passed as silent when two reports a window
+    /// apart said nothing, not when one report is read late: the reading stays fresh for a heal
+    /// tick, and a walk that reads it a window after its only report must still wait for the
+    /// second one.
+    #[test]
+    fn one_silent_report_is_not_a_window_of_silence_however_late_it_is_read() {
+        use super::{RungRead, RungReport, RungWatch};
+        use crate::lookup::ProbeAnswer;
+        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+
+        let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let then = crate::util::clock::Instant::now();
+        rungs.note(
+            RungReport {
+                port: 4242,
+                answer: ProbeAnswer::NoAnswer,
+            },
+            then,
+        );
+
+        let late = then + std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1);
+        assert_eq!(
+            rungs.reading(4242, late),
+            RungRead::Silent,
+            "one report of silence passed the rung after the window: a sample is not a window"
+        );
+    }
+
+    /// Two reports that said nothing, a window apart, pass the rung: the second one is the proof.
+    #[test]
+    fn two_silent_reports_a_window_apart_pass_the_rung() {
+        use super::{RungRead, RungReport, RungWatch};
+        use crate::lookup::ProbeAnswer;
+        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+
+        let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let then = crate::util::clock::Instant::now();
+        let report = RungReport {
+            port: 4242,
+            answer: ProbeAnswer::NoAnswer,
+        };
+        rungs.note(report, then);
+
+        let again = then + std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1);
+        rungs.note(report, again);
+
+        assert_eq!(rungs.reading(4242, again), RungRead::SilentLongEnough);
     }
 
     /// A reading in the map is used, not asked for again: a rung that answered as ours is a
