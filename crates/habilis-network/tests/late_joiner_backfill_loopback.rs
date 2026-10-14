@@ -143,7 +143,7 @@ impl Joined {
 /// here wants the same value.
 fn pin_antientropy_tick() {
     habilis_network::runtime::tuning::init(habilis_network::runtime::tuning::Tuning {
-        antientropy_interval_secs: 3600,
+        antientropy_interval: Duration::from_hours(1),
         ..habilis_network::runtime::tuning::Tuning::DEFAULTS
     });
 }

@@ -263,9 +263,9 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // As in the mesh suite: the beacon re-check is parked beyond the cell, which measures the mesh's
     // steady state.
     habilis_network::util::tuning::init(habilis_network::util::tuning::Tuning {
-        rival_recheck_first_secs: 3600,
-        rival_recheck_secs: 3600,
-        rival_recheck_meshed_secs: 3600,
+        rival_recheck_first: Duration::from_hours(1),
+        rival_recheck: Duration::from_hours(1),
+        rival_recheck_meshed: Duration::from_hours(1),
         ..habilis_network::util::tuning::Tuning::DEFAULTS
     });
     let runtime = tokio::runtime::Builder::new_multi_thread()

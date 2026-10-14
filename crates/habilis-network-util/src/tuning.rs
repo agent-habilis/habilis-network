@@ -7,6 +7,13 @@
 //! and so honours a CLI override. `crate::consts` keeps only what every member
 //! of a mesh must agree on bit-for-bit — the wire contracts.
 
+use std::time::Duration;
+
+/// A `Duration` in whole milliseconds, for the `*_MS` items that `Duration` replaces.
+const fn millis(duration: Duration) -> u64 {
+    duration.as_secs() * 1000 + duration.subsec_millis() as u64
+}
+
 /// In-memory message-log capacity: how many recent messages each member
 /// retains as the anti-entropy recovery source and poll/fetch history. A
 /// bigger log lets a reconnecting peer recover a longer gap. It also anchors
@@ -52,19 +59,29 @@ pub const KNOWN_ENDPOINTS_CAP: usize = 64;
 /// cost is one tiny message per interval. Hidden flag
 /// `--antientropy-interval-secs` so the backfill tests reconcile in
 /// seconds. Clamped to `>= 1`.
-pub const ANTIENTROPY_INTERVAL_SECS: u64 = 10;
+pub const ANTIENTROPY_INTERVAL: Duration = Duration::from_secs(10);
+/// Use [`ANTIENTROPY_INTERVAL`], which holds the same value as a `Duration`.
+pub const ANTIENTROPY_INTERVAL_SECS: u64 = ANTIENTROPY_INTERVAL.as_secs();
 
-/// The live value, after any CLI override of [`ANTIENTROPY_INTERVAL_SECS`].
+/// The live value, after any CLI override of [`ANTIENTROPY_INTERVAL`].
+#[must_use]
+pub fn antientropy_interval() -> Duration {
+    current().antientropy_interval.max(Duration::from_secs(1))
+}
+
+/// Use [`antientropy_interval`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn antientropy_interval_secs() -> u64 {
-    current().antientropy_interval_secs.max(1)
+    antientropy_interval().as_secs()
 }
 
 /// How often a node re-broadcasts its relay **link-state** vector (its own
 /// measured links) so every peer keeps a fresh routing graph. Steady-state cost
 /// is one small message per interval; churn triggers a fresh vector out-of-band
 /// is not yet wired, so this cadence bounds convergence time.
-pub const LINKSTATE_INTERVAL_SECS: u64 = 15;
+pub const LINKSTATE_INTERVAL: Duration = Duration::from_secs(15);
+/// Use [`LINKSTATE_INTERVAL`], which holds the same value as a `Duration`.
+pub const LINKSTATE_INTERVAL_SECS: u64 = LINKSTATE_INTERVAL.as_secs();
 
 /// How long a peer's link-vector stays in the routing graph without a newer one,
 /// and how old a vector may be when it arrives. Three missed advertisements: a
@@ -76,13 +93,17 @@ pub const LINKSTATE_INTERVAL_SECS: u64 = 15;
 /// age keeps a crashed peer's routes longer instead. A peer's clock more than
 /// this behind ours has its vectors refused, because a vector's `seq` is the
 /// sender's wall-clock time in milliseconds.
-pub const LINKSTATE_MAX_AGE_SECS: u64 = LINKSTATE_INTERVAL_SECS * 3;
+pub const LINKSTATE_MAX_AGE: Duration = LINKSTATE_INTERVAL.saturating_mul(3);
+/// Use [`LINKSTATE_MAX_AGE`], which holds the same value as a `Duration`.
+pub const LINKSTATE_MAX_AGE_SECS: u64 = LINKSTATE_MAX_AGE.as_secs();
 
 /// How long a next hop's underlay may stay on the relay, refused by the relay
 /// gate, before the hop stops being advertised as a link. A connection starts on
 /// the relay until a direct path opens, so the deadline must outlast a normal
 /// hole punch.
-pub const MULTIHOP_RELAY_STUCK_SECS: u64 = 20;
+pub const MULTIHOP_RELAY_STUCK: Duration = Duration::from_secs(20);
+/// Use [`MULTIHOP_RELAY_STUCK`], which holds the same value as a `Duration`.
+pub const MULTIHOP_RELAY_STUCK_SECS: u64 = MULTIHOP_RELAY_STUCK.as_secs();
 
 /// Max ids advertised per digest **window**. A digest carries up to two
 /// windows: an **open-ended newest** one (`[lo, i64::MAX]`, which drives
@@ -100,7 +121,7 @@ pub const ANTIENTROPY_DIGEST_WINDOW_IDS: usize = 70;
 /// Max messages re-broadcast in response to one received digest, so a
 /// far-behind peer can't trigger an unbounded burst. This throttles
 /// deep-backfill throughput (~`this × peers` messages per
-/// `ANTIENTROPY_INTERVAL_SECS`). Hidden flag `--antientropy-max-resend` (tests raise it for deep backfill).
+/// `ANTIENTROPY_INTERVAL`). Hidden flag `--antientropy-max-resend` (tests raise it for deep backfill).
 pub const ANTIENTROPY_MAX_RESEND: usize = 64;
 
 /// The live value, after any CLI override of [`ANTIENTROPY_MAX_RESEND`].
@@ -131,33 +152,51 @@ pub const RESIDENT_MEMORY_WARN_MB: u64 = 1024;
 /// How often an idle daemon broadcasts a `Presence::Alive` keepalive.
 /// Active talkers never emit one — any sent gossip message resets the
 /// timer, so chatty meshes pay zero heartbeat cost.
-pub const ALIVE_INTERVAL_SECS: u64 = 30;
+pub const ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// Use [`ALIVE_INTERVAL`], which holds the same value as a `Duration`.
+pub const ALIVE_INTERVAL_SECS: u64 = ALIVE_INTERVAL.as_secs();
 
 /// How long a peer can go unheard before the sweeper evicts it.
-/// Must exceed `ALIVE_INTERVAL_SECS` comfortably — 3x absorbs one or
+/// Must exceed `ALIVE_INTERVAL` comfortably — 3x absorbs one or
 /// two lost gossip rounds. Worst-case ghost window is
 /// `alive_timeout + sweep_interval`.
 ///
 /// Hidden flag
 /// `--alive-timeout-secs` so integration tests exercise eviction in
 /// seconds instead of minutes.
-pub const ALIVE_TIMEOUT_SECS: u64 = 90;
+pub const ALIVE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Use [`ALIVE_TIMEOUT`], which holds the same value as a `Duration`.
+pub const ALIVE_TIMEOUT_SECS: u64 = ALIVE_TIMEOUT.as_secs();
 
-/// The live value, after any CLI override of [`ALIVE_TIMEOUT_SECS`].
+/// The live value, after any CLI override of [`ALIVE_TIMEOUT`].
+#[must_use]
+pub fn alive_timeout() -> Duration {
+    current().alive_timeout
+}
+
+/// Use [`alive_timeout`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn alive_timeout_secs() -> u64 {
-    current().alive_timeout_secs
+    alive_timeout().as_secs()
 }
 
 /// How often the sweeper walks `last_seen` looking for expired peers.
 /// Bounds the maximum statusline staleness from a peer's true
 /// disappearance to its eviction. Hidden flag `--sweep-interval-secs`.
-pub const SWEEP_INTERVAL_SECS: u64 = 10;
+pub const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// Use [`SWEEP_INTERVAL`], which holds the same value as a `Duration`.
+pub const SWEEP_INTERVAL_SECS: u64 = SWEEP_INTERVAL.as_secs();
 
-/// The live value, after any CLI override of [`SWEEP_INTERVAL_SECS`].
+/// The live value, after any CLI override of [`SWEEP_INTERVAL`].
+#[must_use]
+pub fn sweep_interval() -> Duration {
+    current().sweep_interval
+}
+
+/// Use [`sweep_interval`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn sweep_interval_secs() -> u64 {
-    current().sweep_interval_secs
+    sweep_interval().as_secs()
 }
 
 /// Grace before an **unmeshed joiner** co-hosts the rendezvous anyway
@@ -166,24 +205,40 @@ pub fn sweep_interval_secs() -> u64 {
 /// on heal ticks, never delays `ready`; a joiner that meshes co-hosts
 /// the moment it has a neighbor, well before this. Hidden flag
 /// `--beacon-cohost-grace-secs`.
-pub const BEACON_COHOST_GRACE_SECS: u64 = 10;
+pub const BEACON_COHOST_GRACE: Duration = Duration::from_secs(10);
+/// Use [`BEACON_COHOST_GRACE`], which holds the same value as a `Duration`.
+pub const BEACON_COHOST_GRACE_SECS: u64 = BEACON_COHOST_GRACE.as_secs();
 
-/// The live value, after any CLI override of [`BEACON_COHOST_GRACE_SECS`].
+/// The live value, after any CLI override of [`BEACON_COHOST_GRACE`].
+#[must_use]
+pub fn cohost_grace() -> Duration {
+    current().cohost_grace
+}
+
+/// Use [`cohost_grace`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn cohost_grace_secs() -> u64 {
-    current().cohost_grace_secs
+    cohost_grace().as_secs()
 }
 
 /// How long a ping round collects pongs before the daemon
 /// emits its `ping_report`. Long enough for a relayed round-trip
 /// across the mesh; hidden flag `--ping-window-secs` so tests don't
 /// wait the full window.
-pub const PING_WINDOW_SECS: u64 = 10;
+pub const PING_WINDOW: Duration = Duration::from_secs(10);
+/// Use [`PING_WINDOW`], which holds the same value as a `Duration`.
+pub const PING_WINDOW_SECS: u64 = PING_WINDOW.as_secs();
 
-/// The live value, after any CLI override of [`PING_WINDOW_SECS`].
+/// The live value, after any CLI override of [`PING_WINDOW`].
+#[must_use]
+pub fn ping_window() -> Duration {
+    current().ping_window
+}
+
+/// Use [`ping_window`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn ping_window_secs() -> u64 {
-    current().ping_window_secs
+    ping_window().as_secs()
 }
 
 /// How often the CLI daemon re-reads its parent pid to detect orphaning.
@@ -192,16 +247,25 @@ pub fn ping_window_secs() -> u64 {
 ///
 /// Ungated, unlike its accessor: [`Tuning::DEFAULTS`] is one `const` for every
 /// target and cannot name a field that disappears off a host.
-pub const PPID_WATCH_INTERVAL_MS: u64 = 1500;
+pub const PPID_WATCH_INTERVAL: Duration = Duration::from_millis(1500);
+/// Use [`PPID_WATCH_INTERVAL`], which holds the same value as a `Duration`.
+pub const PPID_WATCH_INTERVAL_MS: u64 = millis(PPID_WATCH_INTERVAL);
 
-/// The live value, after any CLI override of [`PPID_WATCH_INTERVAL_MS`].
+/// The live value, after any CLI override of [`PPID_WATCH_INTERVAL`].
 ///
 /// Gated with its only caller (`daemon::event_loop::spawn_orphan_watch`): the
 /// orphan watch is `libc::getppid`, which arrives with `host`.
 #[cfg(all(unix, feature = "host"))]
 #[must_use]
+pub fn ppid_watch_interval() -> Duration {
+    current().ppid_watch_interval.max(Duration::from_millis(1))
+}
+
+/// Use [`ppid_watch_interval`], which returns the live value as a `Duration`.
+#[cfg(all(unix, feature = "host"))]
+#[must_use]
 pub fn ppid_watch_interval_ms() -> u64 {
-    current().ppid_watch_interval_ms.max(1)
+    millis(ppid_watch_interval())
 }
 
 /// Process tuning sourced **once** at daemon startup from the hidden CLI
@@ -211,46 +275,46 @@ pub fn ppid_watch_interval_ms() -> u64 {
 /// values) when [`init`] is never called (the in-process path).
 #[derive(Clone, Copy, Debug)]
 pub struct Tuning {
-    pub alive_timeout_secs: u64,
-    pub sweep_interval_secs: u64,
-    pub heal_interval_secs: u64,
-    pub antientropy_interval_secs: u64,
-    pub cohost_grace_secs: u64,
-    pub ping_window_secs: u64,
-    pub ppid_watch_interval_ms: u64,
-    pub heal_stall_threshold_secs: u64,
-    pub starvation_threshold_secs: u64,
-    pub advertise_interval_secs: u64,
-    pub directory_expiry_secs: u64,
+    pub alive_timeout: Duration,
+    pub sweep_interval: Duration,
+    pub heal_interval: Duration,
+    pub antientropy_interval: Duration,
+    pub cohost_grace: Duration,
+    pub ping_window: Duration,
+    pub ppid_watch_interval: Duration,
+    pub heal_stall_threshold: Duration,
+    pub starvation_threshold: Duration,
+    pub advertise_interval: Duration,
+    pub directory_expiry: Duration,
     pub antientropy_max_resend: usize,
     pub directory_private: bool,
-    pub rival_recheck_first_secs: u64,
-    pub rival_recheck_secs: u64,
-    pub rival_recheck_meshed_secs: u64,
-    pub rival_recheck_alone_secs: u64,
+    pub rival_recheck_first: Duration,
+    pub rival_recheck: Duration,
+    pub rival_recheck_meshed: Duration,
+    pub rival_recheck_alone: Duration,
     pub topic_mdns_only: bool,
 }
 
 impl Tuning {
     /// The production defaults, all from `crate::consts`.
     pub const DEFAULTS: Self = Self {
-        alive_timeout_secs: ALIVE_TIMEOUT_SECS,
-        sweep_interval_secs: SWEEP_INTERVAL_SECS,
-        heal_interval_secs: HEAL_INTERVAL_SECS,
-        antientropy_interval_secs: ANTIENTROPY_INTERVAL_SECS,
-        cohost_grace_secs: BEACON_COHOST_GRACE_SECS,
-        ping_window_secs: PING_WINDOW_SECS,
-        ppid_watch_interval_ms: PPID_WATCH_INTERVAL_MS,
-        heal_stall_threshold_secs: HEAL_STALL_THRESHOLD_SECS,
-        starvation_threshold_secs: STARVATION_THRESHOLD_SECS,
-        advertise_interval_secs: ADVERTISE_INTERVAL_SECS,
-        directory_expiry_secs: DIRECTORY_EXPIRY_SECS,
+        alive_timeout: ALIVE_TIMEOUT,
+        sweep_interval: SWEEP_INTERVAL,
+        heal_interval: HEAL_INTERVAL,
+        antientropy_interval: ANTIENTROPY_INTERVAL,
+        cohost_grace: BEACON_COHOST_GRACE,
+        ping_window: PING_WINDOW,
+        ppid_watch_interval: PPID_WATCH_INTERVAL,
+        heal_stall_threshold: HEAL_STALL_THRESHOLD,
+        starvation_threshold: STARVATION_THRESHOLD,
+        advertise_interval: ADVERTISE_INTERVAL,
+        directory_expiry: DIRECTORY_EXPIRY,
         antientropy_max_resend: ANTIENTROPY_MAX_RESEND,
         directory_private: false,
-        rival_recheck_first_secs: RIVAL_RECHECK_FIRST_SECS,
-        rival_recheck_secs: RIVAL_RECHECK_SECS,
-        rival_recheck_meshed_secs: RIVAL_RECHECK_MESHED_SECS,
-        rival_recheck_alone_secs: RIVAL_RECHECK_ALONE_SECS,
+        rival_recheck_first: RIVAL_RECHECK_FIRST,
+        rival_recheck: RIVAL_RECHECK,
+        rival_recheck_meshed: RIVAL_RECHECK_MESHED,
+        rival_recheck_alone: RIVAL_RECHECK_ALONE,
         topic_mdns_only: false,
     };
 }
@@ -281,7 +345,9 @@ fn current() -> Tuning {
 /// show a false pill after a hard crash. Coupled to the statusline's
 /// staleness window, which must stay >= ~3x this value (currently 30s
 /// for a 10s cadence); change both together.
-pub const STATE_REFRESH_SECS: u64 = 10;
+pub const STATE_REFRESH: Duration = Duration::from_secs(10);
+/// Use [`STATE_REFRESH`], which holds the same value as a `Duration`.
+pub const STATE_REFRESH_SECS: u64 = STATE_REFRESH.as_secs();
 
 /// Cadence of the unconditional gossip healer (`gossip::heal::tick_heal`).
 /// The default balances fast re-mesh after a partition against
@@ -289,12 +355,20 @@ pub const STATE_REFRESH_SECS: u64 = 10;
 /// `HyParView` control message per tick when already healthy. Hidden flag
 /// `--heal-interval-secs` so the subprocess reliability tests collapse the
 /// multi-cycle rendezvous-handoff floor to seconds. Clamped to `>= 1`.
-pub const HEAL_INTERVAL_SECS: u64 = 15;
+pub const HEAL_INTERVAL: Duration = Duration::from_secs(15);
+/// Use [`HEAL_INTERVAL`], which holds the same value as a `Duration`.
+pub const HEAL_INTERVAL_SECS: u64 = HEAL_INTERVAL.as_secs();
 
-/// The live value, after any CLI override of [`HEAL_INTERVAL_SECS`].
+/// The live value, after any CLI override of [`HEAL_INTERVAL`].
+#[must_use]
+pub fn heal_interval() -> Duration {
+    current().heal_interval.max(Duration::from_secs(1))
+}
+
+/// Use [`heal_interval`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn heal_interval_secs() -> u64 {
-    current().heal_interval_secs.max(1)
+    heal_interval().as_secs()
 }
 
 /// Consecutive failed gossip-topic resubscribe attempts (one per heal
@@ -313,9 +387,15 @@ pub const RESUBSCRIBE_MAX_ATTEMPTS: u32 = 8;
 ///
 /// `host`-only with the listener itself — a browser binds no socket.
 #[cfg(feature = "host")]
-pub const IPC_ACCEPT_BACKOFF_MIN_MS: u64 = 100;
+pub const IPC_ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(100);
+/// Use [`IPC_ACCEPT_BACKOFF_MIN`], which holds the same value as a `Duration`.
 #[cfg(feature = "host")]
-pub const IPC_ACCEPT_BACKOFF_MAX_SECS: u64 = 5;
+pub const IPC_ACCEPT_BACKOFF_MIN_MS: u64 = millis(IPC_ACCEPT_BACKOFF_MIN);
+#[cfg(feature = "host")]
+pub const IPC_ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// Use [`IPC_ACCEPT_BACKOFF_MAX`], which holds the same value as a `Duration`.
+#[cfg(feature = "host")]
+pub const IPC_ACCEPT_BACKOFF_MAX_SECS: u64 = IPC_ACCEPT_BACKOFF_MAX.as_secs();
 
 /// Per-connection IPC I/O deadline: how long the daemon waits for a
 /// connected client to send its command line, and for the response
@@ -323,44 +403,59 @@ pub const IPC_ACCEPT_BACKOFF_MAX_SECS: u64 = 5;
 /// otherwise pin a task + fd for the daemon's lifetime; well above any
 /// real `msg`/`poll` round-trip, so only a hung client ever hits it.
 #[cfg(feature = "host")]
-pub const IPC_IO_TIMEOUT_SECS: u64 = 10;
+pub const IPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Use [`IPC_IO_TIMEOUT`], which holds the same value as a `Duration`.
+#[cfg(feature = "host")]
+pub const IPC_IO_TIMEOUT_SECS: u64 = IPC_IO_TIMEOUT.as_secs();
 
 /// Readiness gate: how long to wait for the daemon's `--state-file` to
 /// report `ready: true` before giving up (the `--timeout-secs` default),
 /// and the fixed interval between file reads while waiting. 30s covers a
 /// cold daemon start (the file appears sub-second once the process is up).
 /// Client-side, so these are not part of the daemon `Tuning` struct.
-pub const READY_MAX_SECS: u64 = 30;
-pub const READY_POLL_INTERVAL_MS: u64 = 100;
+pub const READY_MAX: Duration = Duration::from_secs(30);
+/// Use [`READY_MAX`], which holds the same value as a `Duration`.
+pub const READY_MAX_SECS: u64 = READY_MAX.as_secs();
+pub const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Use [`READY_POLL_INTERVAL`], which holds the same value as a `Duration`.
+pub const READY_POLL_INTERVAL_MS: u64 = millis(READY_POLL_INTERVAL);
 
 /// How fresh a `ready: true` state-file write must be for the gate to trust
-/// it. A live daemon rewrites the file every `STATE_REFRESH_SECS` (10s), so
+/// it. A live daemon rewrites the file every `STATE_REFRESH` (10s), so
 /// a `last_updated` older than this window means the writer is gone — e.g. a
 /// `ready: true` file left behind by a prior daemon killed with SIGKILL (which
 /// skips the file-removing shutdown path). Two heartbeats of slack absorbs a
 /// missed refresh without trusting a truly stale file.
-pub const READY_FRESH_SECS: u64 = 2 * STATE_REFRESH_SECS;
+pub const READY_FRESH: Duration = STATE_REFRESH.saturating_mul(2);
+/// Use [`READY_FRESH`], which holds the same value as a `Duration`.
+pub const READY_FRESH_SECS: u64 = READY_FRESH.as_secs();
 
 /// Floor on one long-poll re-issue cycle. Normally dormant — a parked
 /// read returns at the ~60s cap, far above it — it only engages when the
 /// daemon degrades a long read to an immediate empty (waiter registry at
 /// `POLL_WAITERS_CAP`), keeping the CLI's re-poll loop from spinning hot.
 /// Client-side, so not part of the daemon `Tuning` struct.
-pub const POLL_LONG_MIN_CYCLE_MS: u64 = 1_000;
+pub const POLL_LONG_MIN_CYCLE: Duration = Duration::from_secs(1);
+/// Use [`POLL_LONG_MIN_CYCLE`], which holds the same value as a `Duration`.
+pub const POLL_LONG_MIN_CYCLE_MS: u64 = millis(POLL_LONG_MIN_CYCLE);
 
 /// Upper bound on the healer's detached rendezvous connect-probe.
 /// Generous enough to absorb a public relay/lookup warmup after a
 /// real network change, capped well under the default heal interval so
 /// at most one probe task is ever outstanding (probe sites clamp to
-/// `heal_interval_secs()` to preserve that when tests shorten the
+/// `heal_interval()` to preserve that when tests shorten the
 /// cadence).
-pub const HEAL_PROBE_SECS: u64 = 5;
+pub const HEAL_PROBE: Duration = Duration::from_secs(5);
+/// Use [`HEAL_PROBE`], which holds the same value as a `Duration`.
+pub const HEAL_PROBE_SECS: u64 = HEAL_PROBE.as_secs();
 
 /// Probe budget for the resume-edge hard heal. Longer than
-/// `HEAL_PROBE_SECS` because a cold relay re-home after a freeze
+/// `HEAL_PROBE` because a cold relay re-home after a freeze
 /// routinely exceeds the steady-state 5s; the path is rare so a probe
 /// that briefly outlives one heal interval (still detached) is fine.
-pub const HEAL_HARD_PROBE_SECS: u64 = 20;
+pub const HEAL_HARD_PROBE: Duration = Duration::from_secs(20);
+/// Use [`HEAL_HARD_PROBE`], which holds the same value as a `Duration`.
+pub const HEAL_HARD_PROBE_SECS: u64 = HEAL_HARD_PROBE.as_secs();
 
 /// The longest wait between two rival probes of a member that keeps finding the rival.
 /// A probe is a throwaway endpoint and a relay registration, and without a back-off every
@@ -375,7 +470,9 @@ pub const HEAL_HARD_PROBE_SECS: u64 = 20;
 /// comes after about 120 / N s on average: 40 s at N = 4, 5 s at N = 24. The worst case, with
 /// all phases aligned, is the full 120 s; a new joiner then waits that long, plus the two
 /// free readings and the claim, as it does today. The jitter on the wait keeps the phases apart.
-pub const HEAL_PROBE_BACKOFF_MAX_SECS: u64 = 120;
+pub const HEAL_PROBE_BACKOFF_MAX: Duration = Duration::from_mins(2);
+/// Use [`HEAL_PROBE_BACKOFF_MAX`], which holds the same value as a `Duration`.
+pub const HEAL_PROBE_BACKOFF_MAX_SECS: u64 = HEAL_PROBE_BACKOFF_MAX.as_secs();
 
 /// A heal inter-tick gap above this many seconds means the process was
 /// frozen between ticks (App Nap / coalescing / sleep) and must hard
@@ -383,12 +480,20 @@ pub const HEAL_PROBE_BACKOFF_MAX_SECS: u64 = 120;
 /// slack never trips it. Hidden flag `--heal-stall-threshold-secs` so subprocess
 /// tests drive it in seconds; a test shortening `--heal-interval-secs`
 /// must keep this comfortably above the cadence it injects.
-pub const HEAL_STALL_THRESHOLD_SECS: u64 = 60;
+pub const HEAL_STALL_THRESHOLD: Duration = Duration::from_mins(1);
+/// Use [`HEAL_STALL_THRESHOLD`], which holds the same value as a `Duration`.
+pub const HEAL_STALL_THRESHOLD_SECS: u64 = HEAL_STALL_THRESHOLD.as_secs();
 
-/// The live value, after any CLI override of [`HEAL_STALL_THRESHOLD_SECS`].
+/// The live value, after any CLI override of [`HEAL_STALL_THRESHOLD`].
+#[must_use]
+pub fn heal_stall_threshold() -> Duration {
+    current().heal_stall_threshold
+}
+
+/// Use [`heal_stall_threshold`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn heal_stall_threshold_secs() -> u64 {
-    current().heal_stall_threshold_secs
+    heal_stall_threshold().as_secs()
 }
 
 /// No verified inbound gossip for this long, while real peers are known,
@@ -397,12 +502,20 @@ pub fn heal_stall_threshold_secs() -> u64 {
 /// view — links can look alive while nothing flows (the roster-collapse
 /// signature). Hidden flag `--starvation-threshold-secs`, its own knob so
 /// the tests' short-evict profile doesn't arm it everywhere.
-pub const STARVATION_THRESHOLD_SECS: u64 = 2 * ALIVE_TIMEOUT_SECS;
+pub const STARVATION_THRESHOLD: Duration = ALIVE_TIMEOUT.saturating_mul(2);
+/// Use [`STARVATION_THRESHOLD`], which holds the same value as a `Duration`.
+pub const STARVATION_THRESHOLD_SECS: u64 = STARVATION_THRESHOLD.as_secs();
 
-/// The live value, after any CLI override of [`STARVATION_THRESHOLD_SECS`].
+/// The live value, after any CLI override of [`STARVATION_THRESHOLD`].
+#[must_use]
+pub fn starvation_threshold() -> Duration {
+    current().starvation_threshold
+}
+
+/// Use [`starvation_threshold`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn starvation_threshold_secs() -> u64 {
-    current().starvation_threshold_secs
+    starvation_threshold().as_secs()
 }
 
 /// How long the event-driven failover burst keeps retrying
@@ -410,10 +523,14 @@ pub fn starvation_threshold_secs() -> u64 {
 /// comfortably exceed the departing beacon's graceful-shutdown grace
 /// (it broadcasts `Left`, sleeps, then exits and releases the UDP
 /// socket) so the survivor is still retrying when the port frees.
-pub const RECLAIM_WINDOW_SECS: u64 = 6;
+pub const RECLAIM_WINDOW: Duration = Duration::from_secs(6);
+/// Use [`RECLAIM_WINDOW`], which holds the same value as a `Duration`.
+pub const RECLAIM_WINDOW_SECS: u64 = RECLAIM_WINDOW.as_secs();
 
 /// Cadence of the fast reclaim burst while the window (above) is open.
-pub const RECLAIM_INTERVAL_MS: u64 = 400;
+pub const RECLAIM_INTERVAL: Duration = Duration::from_millis(400);
+/// Use [`RECLAIM_INTERVAL`], which holds the same value as a `Duration`.
+pub const RECLAIM_INTERVAL_MS: u64 = millis(RECLAIM_INTERVAL);
 
 /// Max remembered `quiet` (silence-evicted but maybe-returning) peers.
 /// `quiet` is drained only when a peer returns, so without a cap a churn / sybil
@@ -431,13 +548,17 @@ pub const QUIET_CAP: usize = 1024;
 /// aggressively re-dialed) and is ≤ the default heal interval (15s), so the
 /// healer stays the backstop for legitimate re-bridge. iroh-gossip's own membership
 /// still maintains links independently — this only throttles *our* piling-on.
-pub const RELINK_COOLDOWN_SECS: u64 = 10;
+pub const RELINK_COOLDOWN: Duration = Duration::from_secs(10);
+/// Use [`RELINK_COOLDOWN`], which holds the same value as a `Duration`.
+pub const RELINK_COOLDOWN_SECS: u64 = RELINK_COOLDOWN.as_secs();
 
 /// How long after a proven pair loses its gossip link it is grafted again, before the
 /// jitter of 30 %. The heal tick would take 10 to 15 s. The relink cooldown above paces a pair
 /// that flaps. Both ends of a pair plan it, so the two grafts can cross: the tie-break of the
 /// fork keeps one of the two links.
-pub const REGRAFT_AFTER_MS: u64 = 1000;
+pub const REGRAFT_AFTER: Duration = Duration::from_secs(1);
+/// Use [`REGRAFT_AFTER`], which holds the same value as a `Duration`.
+pub const REGRAFT_AFTER_MS: u64 = millis(REGRAFT_AFTER);
 
 /// How many session rounds a node holds in flight when it offers a lane session. The rounds that
 /// it answers count too: the budget is the rounds of the admission table. A browser pays an ICE
@@ -463,7 +584,9 @@ pub const MESH_TOPIC_EVENTS_CAP: usize = 2048;
 /// neighbor of the peer, and that peer lands at G - 1, so one fallback per 300 s per
 /// member bounds the churn to 0.2 link-ups per member per minute, and a fallback
 /// starts no chain.
-pub const STARVED_SECS: u64 = 300;
+pub const STARVED: Duration = Duration::from_mins(5);
+/// Use [`STARVED`], which holds the same value as a `Duration`.
+pub const STARVED_SECS: u64 = STARVED.as_secs();
 
 /// How often an advertising `create` re-broadcasts its mesh id into
 /// the directory. Short enough that a fresh discoverer sees every live
@@ -472,66 +595,106 @@ pub const STARVED_SECS: u64 = 300;
 /// quiet — directory traffic is one tiny message per advertiser per
 /// interval. Hidden flag `--advertise-interval-secs` so the subprocess directory test re-ads
 /// quickly.
-pub const ADVERTISE_INTERVAL_SECS: u64 = 20;
+pub const ADVERTISE_INTERVAL: Duration = Duration::from_secs(20);
+/// Use [`ADVERTISE_INTERVAL`], which holds the same value as a `Duration`.
+pub const ADVERTISE_INTERVAL_SECS: u64 = ADVERTISE_INTERVAL.as_secs();
 
-/// The live value, after any CLI override of [`ADVERTISE_INTERVAL_SECS`].
+/// The live value, after any CLI override of [`ADVERTISE_INTERVAL`].
+#[must_use]
+pub fn advertise_interval() -> Duration {
+    current().advertise_interval
+}
+
+/// Use [`advertise_interval`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn advertise_interval_secs() -> u64 {
-    current().advertise_interval_secs
+    advertise_interval().as_secs()
 }
 
 /// How long a discoverer keeps showing a mesh after its last ad. A
 /// publisher that exits stops re-broadcasting, so its listing ages out
-/// within this window. ~3× `ADVERTISE_INTERVAL_SECS` so one or two lost
+/// within this window. ~3× `ADVERTISE_INTERVAL` so one or two lost
 /// gossip rounds don't flicker a live mesh out of the list. Hidden flag
 /// `--directory-expiry-secs` so the subprocess directory test can shorten the
 /// `mesh_lost` window.
-pub const DIRECTORY_EXPIRY_SECS: u64 = 60;
+pub const DIRECTORY_EXPIRY: Duration = Duration::from_mins(1);
+/// Use [`DIRECTORY_EXPIRY`], which holds the same value as a `Duration`.
+pub const DIRECTORY_EXPIRY_SECS: u64 = DIRECTORY_EXPIRY.as_secs();
 
-/// The live value, after any CLI override of [`DIRECTORY_EXPIRY_SECS`].
+/// The live value, after any CLI override of [`DIRECTORY_EXPIRY`].
+#[must_use]
+pub fn directory_expiry() -> Duration {
+    current().directory_expiry
+}
+
+/// Use [`directory_expiry`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn directory_expiry_secs() -> u64 {
-    current().directory_expiry_secs
+    directory_expiry().as_secs()
 }
 
 /// First shed of an `EagerProbed` public beacon after a probed claim — see
-/// [`RIVAL_RECHECK_FIRST_SECS`] for the rationale.
+/// [`RIVAL_RECHECK_FIRST`] for the rationale.
 /// Hidden flag `--rival-recheck-first-secs` (tests converge in seconds).
 /// Clamped to `>= 1`.
-pub const RIVAL_RECHECK_FIRST_SECS: u64 = 12;
+pub const RIVAL_RECHECK_FIRST: Duration = Duration::from_secs(12);
+/// Use [`RIVAL_RECHECK_FIRST`], which holds the same value as a `Duration`.
+pub const RIVAL_RECHECK_FIRST_SECS: u64 = RIVAL_RECHECK_FIRST.as_secs();
 
-/// The live value, after any CLI override of [`RIVAL_RECHECK_FIRST_SECS`].
+/// The live value, after any CLI override of [`RIVAL_RECHECK_FIRST`].
+#[must_use]
+pub fn rival_recheck_first() -> Duration {
+    current().rival_recheck_first.max(Duration::from_secs(1))
+}
+
+/// Use [`rival_recheck_first`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn rival_recheck_first_secs() -> u64 {
-    current().rival_recheck_first_secs.max(1)
+    rival_recheck_first().as_secs()
 }
 
 /// Steady shed cadence for a lone `EagerProbed` public beacon holder —
-/// see [`RIVAL_RECHECK_SECS`]. Hidden flag
+/// see [`RIVAL_RECHECK`]. Hidden flag
 /// `--rival-recheck-secs`. Clamped to `>= 1`.
-pub const RIVAL_RECHECK_SECS: u64 = 30;
+pub const RIVAL_RECHECK: Duration = Duration::from_secs(30);
+/// Use [`RIVAL_RECHECK`], which holds the same value as a `Duration`.
+pub const RIVAL_RECHECK_SECS: u64 = RIVAL_RECHECK.as_secs();
 
-/// The live value, after any CLI override of [`RIVAL_RECHECK_SECS`].
+/// The live value, after any CLI override of [`RIVAL_RECHECK`].
+#[must_use]
+pub fn rival_recheck() -> Duration {
+    current().rival_recheck.max(Duration::from_secs(1))
+}
+
+/// Use [`rival_recheck`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn rival_recheck_secs() -> u64 {
-    current().rival_recheck_secs.max(1)
+    rival_recheck().as_secs()
 }
 
 /// Steady shed cadence while meshed (island-vs-island backstop) — see
-/// [`RIVAL_RECHECK_MESHED_SECS`]. Hidden flag
+/// [`RIVAL_RECHECK_MESHED`]. Hidden flag
 /// `--rival-recheck-meshed-secs`. Clamped to `>= 1`.
-pub const RIVAL_RECHECK_MESHED_SECS: u64 = 300;
+pub const RIVAL_RECHECK_MESHED: Duration = Duration::from_mins(5);
+/// Use [`RIVAL_RECHECK_MESHED`], which holds the same value as a `Duration`.
+pub const RIVAL_RECHECK_MESHED_SECS: u64 = RIVAL_RECHECK_MESHED.as_secs();
 
-/// The live value, after any CLI override of [`RIVAL_RECHECK_MESHED_SECS`].
+/// The live value, after any CLI override of [`RIVAL_RECHECK_MESHED`].
+#[must_use]
+pub fn rival_recheck_meshed() -> Duration {
+    current().rival_recheck_meshed.max(Duration::from_secs(1))
+}
+
+/// Use [`rival_recheck_meshed`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn rival_recheck_meshed_secs() -> u64 {
-    current().rival_recheck_meshed_secs.max(1)
+    rival_recheck_meshed().as_secs()
 }
 
 /// Shed cadence ceiling for a holder with an **empty roster** — the tier
 /// `daemon::beacon_arm::next_recheck_delay` picks when `roster == 0`.
 ///
-/// [`RIVAL_RECHECK_MESHED_SECS`] is priced for two multi-member islands, and
+/// [`RIVAL_RECHECK_MESHED`] is priced for two multi-member islands, and
 /// the geometric ramp caps there for every small roster. A node that knows no
 /// peer at all has nothing to reconcile: the brisk early rounds still run,
 /// and they are what repairs a double-claim, but once a run of probes has
@@ -542,12 +705,20 @@ pub fn rival_recheck_meshed_secs() -> u64 {
 /// converges to a ~1.5h mean interval.
 ///
 /// Hidden flag `--rival-recheck-alone-secs`. Clamped to `>= 1`.
-pub const RIVAL_RECHECK_ALONE_SECS: u64 = 3600;
+pub const RIVAL_RECHECK_ALONE: Duration = Duration::from_hours(1);
+/// Use [`RIVAL_RECHECK_ALONE`], which holds the same value as a `Duration`.
+pub const RIVAL_RECHECK_ALONE_SECS: u64 = RIVAL_RECHECK_ALONE.as_secs();
 
-/// The live value, after any CLI override of [`RIVAL_RECHECK_ALONE_SECS`].
+/// The live value, after any CLI override of [`RIVAL_RECHECK_ALONE`].
+#[must_use]
+pub fn rival_recheck_alone() -> Duration {
+    current().rival_recheck_alone.max(Duration::from_secs(1))
+}
+
+/// Use [`rival_recheck_alone`], which returns the live value as a `Duration`.
 #[must_use]
 pub fn rival_recheck_alone_secs() -> u64 {
-    current().rival_recheck_alone_secs.max(1)
+    rival_recheck_alone().as_secs()
 }
 
 /// Topic meshes are the public preset; the `--topic-mdns-only` flag narrows
@@ -580,12 +751,16 @@ pub fn directory_private_for_test() -> bool {
 /// to use a timeout close to it so at least one net-report has been
 /// attempted — a shorter budget can misjudge a healthy-but-slow relay
 /// as down and trigger a spurious fall-through.
-pub const RELAY_RUNG_PROBE_SECS: u64 = 10;
+pub const RELAY_RUNG_PROBE: Duration = Duration::from_secs(10);
+/// Use [`RELAY_RUNG_PROBE`], which holds the same value as a `Duration`.
+pub const RELAY_RUNG_PROBE_SECS: u64 = RELAY_RUNG_PROBE.as_secs();
 
 /// How often the beacon polls whether its current relay rung is still
-/// connected (`timeout(RELAY_RUNG_PROBE_SECS, online())` on its own
+/// connected (`timeout(RELAY_RUNG_PROBE, online())` on its own
 /// endpoint). Off the event loop, inside the beacon co-host task.
-pub const RELAY_LIVENESS_INTERVAL_SECS: u64 = 10;
+pub const RELAY_LIVENESS_INTERVAL: Duration = Duration::from_secs(10);
+/// Use [`RELAY_LIVENESS_INTERVAL`], which holds the same value as a `Duration`.
+pub const RELAY_LIVENESS_INTERVAL_SECS: u64 = RELAY_LIVENESS_INTERVAL.as_secs();
 
 /// Debounce: consecutive failed liveness polls before the beacon
 /// concludes its rung is gone and re-walks the ladder. >1 so a single
@@ -599,10 +774,14 @@ pub const RELAY_LIVENESS_FAILS_TO_EVICT: u32 = 2;
 /// rounds (`crate::lookup::next_relay_backoff`, doubling from MIN to
 /// MAX) so an all-down ladder isn't hammered. The MIN is the first
 /// inter-round wait; MAX caps it (still re-walking forever, just
-/// sparsely). Distinct from `RELAY_LIVENESS_INTERVAL_SECS`, which is the
+/// sparsely). Distinct from `RELAY_LIVENESS_INTERVAL`, which is the
 /// *homed* poll cadence (cheap, no backoff).
-pub const RELAY_REPROBE_BACKOFF_MIN_SECS: u64 = 30;
-pub const RELAY_REPROBE_BACKOFF_MAX_SECS: u64 = 300;
+pub const RELAY_REPROBE_BACKOFF_MIN: Duration = Duration::from_secs(30);
+/// Use [`RELAY_REPROBE_BACKOFF_MIN`], which holds the same value as a `Duration`.
+pub const RELAY_REPROBE_BACKOFF_MIN_SECS: u64 = RELAY_REPROBE_BACKOFF_MIN.as_secs();
+pub const RELAY_REPROBE_BACKOFF_MAX: Duration = Duration::from_mins(5);
+/// Use [`RELAY_REPROBE_BACKOFF_MAX`], which holds the same value as a `Duration`.
+pub const RELAY_REPROBE_BACKOFF_MAX_SECS: u64 = RELAY_REPROBE_BACKOFF_MAX.as_secs();
 
 /// Timeout for *one attempt* of the private-mode rendezvous identity
 /// probe. When a ladder rung is `AddrInUse`, a member probes it to tell
@@ -614,7 +793,9 @@ pub const RELAY_REPROBE_BACKOFF_MAX_SECS: u64 = 300;
 ///
 /// See [`RENDEZVOUS_PROBE_ATTEMPTS`] for why a miss is retried rather
 /// than given a longer single window.
-pub const RENDEZVOUS_PROBE_SECS: u64 = 1;
+pub const RENDEZVOUS_PROBE: Duration = Duration::from_secs(1);
+/// Use [`RENDEZVOUS_PROBE`], which holds the same value as a `Duration`.
+pub const RENDEZVOUS_PROBE_SECS: u64 = RENDEZVOUS_PROBE.as_secs();
 
 /// How many times the private rung identity-probe is attempted before its
 /// answer is believed.
@@ -650,7 +831,9 @@ pub const RENDEZVOUS_PROBE_ATTEMPTS: u32 = 3;
 /// single millisecond and the retry buys nothing. Spacing them is what
 /// turns [`RENDEZVOUS_PROBE_ATTEMPTS`] into a window the owner can finish
 /// starting up inside.
-pub const RENDEZVOUS_PROBE_RETRY_MS: u64 = 250;
+pub const RENDEZVOUS_PROBE_RETRY: Duration = Duration::from_millis(250);
+/// Use [`RENDEZVOUS_PROBE_RETRY`], which holds the same value as a `Duration`.
+pub const RENDEZVOUS_PROBE_RETRY_MS: u64 = millis(RENDEZVOUS_PROBE_RETRY);
 
 /// How long a departing member waits for its co-hosted rendezvous endpoint,
 /// and for an outstanding rival probe's endpoint, to close
@@ -659,7 +842,7 @@ pub const RENDEZVOUS_PROBE_RETRY_MS: u64 = 250;
 /// Bounded because shutdown must not hang on a relay that stopped answering.
 /// Exceeding the bound abandons the endpoint exactly as it was abandoned
 /// before this wait existed — a fallback to the old behaviour, never worse
-/// than it. [`NODE_LEAVE_SECS`] is derived from this, so the two cannot drift.
+/// than it. [`NODE_LEAVE`] is derived from this, so the two cannot drift.
 ///
 /// **Not a round number picked for looks.** At 1s it timed out on a live
 /// three-peer share: an endpoint homed on two relay rungs spends most of a
@@ -668,18 +851,22 @@ pub const RENDEZVOUS_PROBE_RETRY_MS: u64 = 250;
 /// rival probe was still in its handshake: the probe's close frame is never
 /// acknowledged, so iroh's close waits out the QUIC drain, which it documents
 /// as "usually 3 seconds". 4s clears that with headroom.
-pub const RENDEZVOUS_CLOSE_SECS: u64 = 4;
+pub const RENDEZVOUS_CLOSE: Duration = Duration::from_secs(4);
+/// Use [`RENDEZVOUS_CLOSE`], which holds the same value as a `Duration`.
+pub const RENDEZVOUS_CLOSE_SECS: u64 = RENDEZVOUS_CLOSE.as_secs();
 
 /// How long `Node::leave` waits for the event loop to wind down before it
 /// detaches it: the 500ms `Left` propagation sleep, then the endpoint closes,
-/// which run concurrently and so cost one [`RENDEZVOUS_CLOSE_SECS`], plus
+/// which run concurrently and so cost one [`RENDEZVOUS_CLOSE`], plus
 /// headroom. A shorter budget let `serve` return and drop the runtime while a
 /// close was still in flight, which aborts that close.
-pub const NODE_LEAVE_SECS: u64 = RENDEZVOUS_CLOSE_SECS + 2;
+pub const NODE_LEAVE: Duration = RENDEZVOUS_CLOSE.saturating_add(Duration::from_secs(2));
+/// Use [`NODE_LEAVE`], which holds the same value as a `Duration`.
+pub const NODE_LEAVE_SECS: u64 = NODE_LEAVE.as_secs();
 
 /// Roster size (known live members) at or below which a *meshed* holder uses
-/// the brisk lone cadence ([`RIVAL_RECHECK_SECS`]) instead of the slow
-/// [`RIVAL_RECHECK_MESHED_SECS`] backstop.
+/// the brisk lone cadence ([`RIVAL_RECHECK`]) instead of the slow
+/// [`RIVAL_RECHECK_MESHED`] backstop.
 ///
 /// The slow cadence is priced for the case it was written for: two
 /// **multi-member** islands, where a shed's beacon blip costs a healthy gossip
@@ -688,7 +875,7 @@ pub const NODE_LEAVE_SECS: u64 = RENDEZVOUS_CLOSE_SECS + 2;
 /// a shed there disturbs almost nobody. So the tier is chosen by how much a
 /// shed actually costs, which is roster size, not by the meshed flag alone.
 ///
-/// A pure const with no flag, like [`RIVAL_RECHECK_OFFSET_SPAN_SECS`]: it
+/// A pure const with no flag, like [`RIVAL_RECHECK_OFFSET_SPAN`]: it
 /// picks between two cadences that already have their own knobs.
 pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
 
@@ -696,15 +883,19 @@ pub const RIVAL_RECHECK_SMALL_ROSTER: usize = 4;
 /// derived from the peer endpoint id. Orders simultaneous claimants so
 /// the earlier-offset node sheds first, finds the other's still-held beacon,
 /// and yields — a tie-break, not a delay knob, so no flag.
-pub const RIVAL_RECHECK_OFFSET_SPAN_SECS: u64 = 8;
+pub const RIVAL_RECHECK_OFFSET_SPAN: Duration = Duration::from_secs(8);
+/// Use [`RIVAL_RECHECK_OFFSET_SPAN`], which holds the same value as a `Duration`.
+pub const RIVAL_RECHECK_OFFSET_SPAN_SECS: u64 = RIVAL_RECHECK_OFFSET_SPAN.as_secs();
 
 /// How often one peer's digest may be *served*.
 ///
 /// Answering a digest costs up to [`ANTIENTROPY_MAX_RESEND`] mesh-wide
 /// broadcasts, and the budget was per digest with nothing per peer, so one
 /// small crafted frame bought that from every member at once. Comfortably under
-/// [`ANTIENTROPY_INTERVAL_SECS`], so the honest cadence is never refused.
-pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = 5;
+/// [`ANTIENTROPY_INTERVAL`], so the honest cadence is never refused.
+pub const ANTIENTROPY_SERVE_COOLDOWN: Duration = Duration::from_secs(5);
+/// Use [`ANTIENTROPY_SERVE_COOLDOWN`], which holds the same value as a `Duration`.
+pub const ANTIENTROPY_SERVE_COOLDOWN_SECS: u64 = ANTIENTROPY_SERVE_COOLDOWN.as_secs();
 
 /// How many members answer one chat digest.
 ///
@@ -723,8 +914,8 @@ pub const ANTIENTROPY_ANSWERERS: usize = 3;
 pub const RESEND_OUTBOX_CAP: usize = 256;
 
 /// How many state digest answers one asker may get per channel on the unicast
-/// plane in one [`ANTIENTROPY_SERVE_COOLDOWN_SECS`] window; the same heads get
-/// an answer again only after [`FAST_ROUND_MIN_INTERVAL_MS`]. A backfilling
+/// plane in one [`ANTIENTROPY_SERVE_COOLDOWN`] window; the same heads get
+/// an answer again only after [`FAST_ROUND_MIN_INTERVAL`]. A backfilling
 /// node asks again as long as a peer's heads show it is behind (a fast round),
 /// so it needs several per window; eight answers of
 /// [`ANTIENTROPY_MAX_RESEND`] frames cover 512 changes, and still bound a node
@@ -734,23 +925,31 @@ pub const ANTIENTROPY_SERVES_PER_WINDOW: usize = 8;
 /// The shortest time between two direct fast-round digests to one peer, for
 /// one channel. A peer that advertises heads nobody can hold then costs one
 /// small frame per interval.
-pub const FAST_ROUND_MIN_INTERVAL_MS: u64 = 200;
+pub const FAST_ROUND_MIN_INTERVAL: Duration = Duration::from_millis(200);
+/// Use [`FAST_ROUND_MIN_INTERVAL`], which holds the same value as a `Duration`.
+pub const FAST_ROUND_MIN_INTERVAL_MS: u64 = millis(FAST_ROUND_MIN_INTERVAL);
 
 /// How long after a direct fast-round digest a node holds back its own
 /// broadcast digests for that channel.
-pub const FAST_ROUND_ACTIVE_MS: u64 = 1000;
+pub const FAST_ROUND_ACTIVE: Duration = Duration::from_secs(1);
+/// Use [`FAST_ROUND_ACTIVE`], which holds the same value as a `Duration`.
+pub const FAST_ROUND_ACTIVE_MS: u64 = millis(FAST_ROUND_ACTIVE);
 
 /// How long a stalled fast round waits before it asks a peer that is still
 /// ahead again: a lost request, a lost answer, or a refusal costs this, not an
 /// anti-entropy tick. The reclaim timer drives the check, so this matches it.
-pub const FAST_ROUND_RETRY_MS: u64 = 400;
+pub const FAST_ROUND_RETRY: Duration = Duration::from_millis(400);
+/// Use [`FAST_ROUND_RETRY`], which holds the same value as a `Duration`.
+pub const FAST_ROUND_RETRY_MS: u64 = millis(FAST_ROUND_RETRY);
 
 /// How many peers a node remembers as ahead of it, per channel.
 pub const FAST_ROUND_AHEAD_MAX: usize = 16;
 
 /// How long a peer stays remembered as ahead after its heads last showed it:
 /// a peer whose heads we can never hold must not hold a place for ever.
-pub const FAST_ROUND_AHEAD_TTL_SECS: u64 = 60;
+pub const FAST_ROUND_AHEAD_TTL: Duration = Duration::from_mins(1);
+/// Use [`FAST_ROUND_AHEAD_TTL`], which holds the same value as a `Duration`.
+pub const FAST_ROUND_AHEAD_TTL_SECS: u64 = FAST_ROUND_AHEAD_TTL.as_secs();
 
 /// `HyParView` **active view** capacity (G): the number of direct gossip
 /// neighbors (open QUIC links) each member keeps per topic. A mesh of G + 1
@@ -772,7 +971,9 @@ pub const GOSSIP_ACTIVE_VIEW_CAPACITY: usize = 32;
 /// How often the direct-peer slot table drops the connections that are gone and
 /// the peers that nothing holds. One timer per admission table, not one task
 /// per connection.
-pub const SLOT_SWEEP_SECS: u64 = 5;
+pub const SLOT_SWEEP: Duration = Duration::from_secs(5);
+/// Use [`SLOT_SWEEP`], which holds the same value as a `Duration`.
+pub const SLOT_SWEEP_SECS: u64 = SLOT_SWEEP.as_secs();
 
 /// How many gossip links to other members make a node let go of the
 /// rendezvous. The rendezvous is where a node enters the mesh and where split
@@ -784,32 +985,42 @@ pub const RENDEZVOUS_RELEASE_LINKS: usize = 3;
 
 /// How long a node that a peer refused at its cap leaves that peer alone, the
 /// first time. Each further refusal in a row doubles it, up to
-/// [`CAP_REFUSAL_COOLDOWN_MAX_SECS`]; a success resets it. A refusal at the
+/// [`CAP_REFUSAL_COOLDOWN_MAX`]; a success resets it. A refusal at the
 /// rendezvous frees up fast, so the first wait is short. A refusal at a member
 /// does not: its sessions are gossip links and stay busy, so the wait grows to
 /// the size that keeps the cost of a refused round (a full candidate gathering
 /// on our side) low.
-pub const CAP_REFUSAL_COOLDOWN_SECS: u64 = 30;
+pub const CAP_REFUSAL_COOLDOWN: Duration = Duration::from_secs(30);
+/// Use [`CAP_REFUSAL_COOLDOWN`], which holds the same value as a `Duration`.
+pub const CAP_REFUSAL_COOLDOWN_SECS: u64 = CAP_REFUSAL_COOLDOWN.as_secs();
 
 /// The longest a node leaves a peer alone after repeated refusals at its cap.
-pub const CAP_REFUSAL_COOLDOWN_MAX_SECS: u64 = 300;
+pub const CAP_REFUSAL_COOLDOWN_MAX: Duration = Duration::from_mins(5);
+/// Use [`CAP_REFUSAL_COOLDOWN_MAX`], which holds the same value as a `Duration`.
+pub const CAP_REFUSAL_COOLDOWN_MAX_SECS: u64 = CAP_REFUSAL_COOLDOWN_MAX.as_secs();
 
 /// How long a node that comes back to the rendezvous stays, at least, before
 /// it may let go again. The beacon introduces a visitor to the members in its
 /// gossip view, and the introduction takes a few round trips; a visit shorter
 /// than that would find no one.
-pub const RENDEZVOUS_DWELL_SECS: u64 = 30;
+pub const RENDEZVOUS_DWELL: Duration = Duration::from_secs(30);
+/// Use [`RENDEZVOUS_DWELL`], which holds the same value as a `Duration`.
+pub const RENDEZVOUS_DWELL_SECS: u64 = RENDEZVOUS_DWELL.as_secs();
 
 /// How long an owed return to the rendezvous lasts. A node that is refused at
 /// the rendezvous, or finds it gone, offers again for this long and then stops:
 /// the owed return is a debt with an end, not a state.
-pub const RENDEZVOUS_COMEBACK_SECS: u64 = 120;
+pub const RENDEZVOUS_COMEBACK: Duration = Duration::from_mins(2);
+/// Use [`RENDEZVOUS_COMEBACK`], which holds the same value as a `Duration`.
+pub const RENDEZVOUS_COMEBACK_SECS: u64 = RENDEZVOUS_COMEBACK.as_secs();
 
 /// How long the session of a lane peer stays wanted after a frame was held for it. The offer
 /// that the held frame asks for must start within this time, or the want lapses. A frame that stays
 /// parked after the want lapsed does not mark the peer again by itself: the next send to the peer
 /// does.
-pub const LANE_WANTED_SECS: u64 = 60;
+pub const LANE_WANTED: Duration = Duration::from_mins(1);
+/// Use [`LANE_WANTED`], which holds the same value as a `Duration`.
+pub const LANE_WANTED_SECS: u64 = LANE_WANTED.as_secs();
 
 /// How many bytes of one QUIC stream a node buffers for a peer that sends faster than the node
 /// reads (decision D11): 16 `MiB`, the same as the window of the connection, so that one blob
@@ -827,21 +1038,29 @@ pub const QUIC_SEND_WINDOW: u64 = 16 * 1024 * 1024;
 /// How long after a `Neighbor` request a node reads "no link came up" as a refusal: the longer of
 /// the relink cooldown (10 s) and the probe deadline (15 s), plus 5 s. A link that comes up later
 /// than this is not a reply to the request.
-pub const GRAFT_REFUSED_AFTER_SECS: u64 = 20;
+pub const GRAFT_REFUSED_AFTER: Duration = Duration::from_secs(20);
+/// Use [`GRAFT_REFUSED_AFTER`], which holds the same value as a `Duration`.
+pub const GRAFT_REFUSED_AFTER_SECS: u64 = GRAFT_REFUSED_AFTER.as_secs();
 
 /// The first wait before a peer that refused a `Neighbor` request is asked again. Each refusal in
-/// a row doubles it, up to [`GRAFT_BACKOFF_MAX_SECS`]. A `NeighborUp` or a new address of the peer
+/// a row doubles it, up to [`GRAFT_BACKOFF_MAX`]. A `NeighborUp` or a new address of the peer
 /// starts it over.
-pub const GRAFT_BACKOFF_FIRST_SECS: u64 = 60;
+pub const GRAFT_BACKOFF_FIRST: Duration = Duration::from_mins(1);
+/// Use [`GRAFT_BACKOFF_FIRST`], which holds the same value as a `Duration`.
+pub const GRAFT_BACKOFF_FIRST_SECS: u64 = GRAFT_BACKOFF_FIRST.as_secs();
 
 /// The longest wait before a peer that keeps refusing is asked again, 15 minutes.
-pub const GRAFT_BACKOFF_MAX_SECS: u64 = 900;
+pub const GRAFT_BACKOFF_MAX: Duration = Duration::from_mins(15);
+/// Use [`GRAFT_BACKOFF_MAX`], which holds the same value as a `Duration`.
+pub const GRAFT_BACKOFF_MAX_SECS: u64 = GRAFT_BACKOFF_MAX.as_secs();
 
 /// The one idle backstop of the direct connections (decision D11). The ceiling frees a place
 /// when a newcomer needs it; this only closes what nobody used for a quarter of an hour, so
 /// that a quiet node holds nothing for ever. It is the idle close of a pooled connection and of
 /// an accepted one, and the wait before an unheld session is detached.
-pub const DIRECT_IDLE_BACKSTOP_SECS: u64 = 900;
+pub const DIRECT_IDLE_BACKSTOP: Duration = Duration::from_mins(15);
+/// Use [`DIRECT_IDLE_BACKSTOP`], which holds the same value as a `Duration`.
+pub const DIRECT_IDLE_BACKSTOP_SECS: u64 = DIRECT_IDLE_BACKSTOP.as_secs();
 
 /// How long the pooled connection of a direct-path probe stays after the probe
 /// ends, when no send takes it (decision D4: direct connections are on demand).
@@ -849,7 +1068,9 @@ pub const DIRECT_IDLE_BACKSTOP_SECS: u64 = 900;
 /// window, and iroh keeps the proven path for the peer while any connection to
 /// it is open. Longer than that, the probe connection would be a pre-warmed
 /// unicast connection for a pair that never sent.
-pub const PROBE_HOLD_SECS: u64 = 15;
+pub const PROBE_HOLD: Duration = Duration::from_secs(15);
+/// Use [`PROBE_HOLD`], which holds the same value as a `Duration`.
+pub const PROBE_HOLD_SECS: u64 = PROBE_HOLD.as_secs();
 
 /// Max bytes a per-member log file grows before rotating to `<file>.1`
 /// (active + one backup ⇒ bounded at `2 ×` this). The `--log-max-bytes` flag
