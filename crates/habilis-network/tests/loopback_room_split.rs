@@ -32,6 +32,10 @@
 //!   instant, as one agent spawns them. G1 keeps the creator, G2 lets it leave first. No hook:
 //!   G shows what the engine does by itself.
 //!
+//! - **H**: issue #11. Other processes hold every port of the ladder (eight plain sockets that
+//!   answer nothing), so no member can serve the rendezvous. A member that starts then must say so
+//!   to its app, once: an `Info` event and a `warn` line, and no beacon.
+//!
 //! The probe is blind for a member, not for the process: a process-wide dial would make
 //! every in-process member misread at once, which is not what a loaded host does.
 //!
@@ -42,11 +46,13 @@
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
 use std::collections::BTreeSet;
+use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use habilis_network::membership::{self, Membership, Request};
+use habilis_network::protocol::Mesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -55,6 +61,14 @@ const SPACING: Duration = Duration::from_secs(2);
 
 /// How long the creator may take to bind the first rung.
 const BEACON_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long a member may take to say that the ladder is taken. A silent rung is passed after two
+/// reports a window apart (6 s), and the walk runs at every heal tick (3 s).
+const NO_RUNG_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long the member is watched after it said so, to see that it says it once. The repeat
+/// interval is 300 s, so this is far inside it.
+const NO_RUNG_QUIET: Duration = Duration::from_secs(12);
 
 /// How long the members may take to see each other, from the last start. A mesh that
 /// heals needs a few heal ticks and one round of anti-entropy, so the bound is generous.
@@ -682,6 +696,125 @@ async fn holder_whose_beacon_stops_answering(
     become_one_mesh(&all, MERGE_DEADLINE).await
 }
 
+/// A joiner by id whose sink is read by the caller. The one case that reads what the app is told.
+async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<String>) {
+    let (sink, events) = membership::json_sink();
+    let membership = membership::join(
+        &membership::Opts {
+            nick: Some(nick.to_owned()),
+            mesh: Some(mesh.to_owned()),
+            ..membership::Opts::default()
+        },
+        sink,
+    )
+    .await
+    .expect("open a member");
+    let (_sender, unread) = tokio::sync::mpsc::unbounded_channel();
+    (
+        Member {
+            membership,
+            _events: unread,
+        },
+        events,
+    )
+}
+
+/// Eight plain sockets on the ports of a ladder, as the processes of someone else would hold
+/// them. The creator that made the room has just left, so a port can need a moment to be free.
+async fn hold_every_rung(ports: &[u16]) -> Result<Vec<UdpSocket>, String> {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let sockets: Result<Vec<UdpSocket>, std::io::Error> = ports
+            .iter()
+            .map(|port| UdpSocket::bind((Ipv4Addr::LOCALHOST, *port)))
+            .collect();
+        match sockets {
+            Ok(sockets) => return Ok(sockets),
+            Err(error) if Instant::now() >= until => {
+                return Err(format!("could not hold the ports {ports:?}: {error}"));
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    }
+}
+
+/// Whether a line of the sink is the `Info` about a ladder that is taken.
+fn is_taken_ladder_info(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line).is_ok_and(|event| {
+        event["kind"] == "info"
+            && event["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("no rendezvous port is free"))
+    })
+}
+
+/// A room whose eight ports are held by other processes. Nobody can serve its rendezvous, so
+/// nobody can join through it, and the only trace used to be a line at debug level (issue #11). The
+/// member must tell its app (an `Info` event) and the log (a `warn` line), once and not at every
+/// heal tick, and it must bind nothing.
+async fn ladder_held_by_other_processes(
+    round: &Round,
+    members: &mut Vec<Member>,
+) -> Result<Duration, String> {
+    let creator = Member::open("creator", None).await;
+    wait_for_beacons(round, 1).await?;
+    let mesh_id = creator.mesh_id();
+    creator.leave().await;
+    let mesh: Mesh = mesh_id
+        .parse()
+        .map_err(|error| format!("the id of the room does not parse: {error}"))?;
+    let _held = hold_every_rung(&mesh.rendezvous_ports()).await?;
+    let bound_before = round.beacons().len();
+
+    let (member, mut events) = open_watched("taken", &mesh_id).await;
+    members.push(member);
+    let started = Instant::now();
+    let mut seen = Vec::new();
+    let first = loop {
+        match tokio::time::timeout(
+            NO_RUNG_DEADLINE.saturating_sub(started.elapsed()),
+            events.recv(),
+        )
+        .await
+        {
+            Ok(Some(line)) if is_taken_ladder_info(&line) => break line,
+            Ok(Some(line)) => seen.push(line),
+            Ok(None) => return Err("the sink of the member closed".to_owned()),
+            Err(_) => {
+                return Err(format!(
+                    "the member told its app nothing about the taken ladder inside {NO_RUNG_DEADLINE:?}; the sink gave {seen:?}"
+                ));
+            }
+        }
+    };
+    let told_after = started.elapsed();
+    if !first.contains("all 8 ports") {
+        return Err(format!(
+            "the Info does not name the 8 ports of the room: {first}"
+        ));
+    }
+
+    tokio::time::sleep(NO_RUNG_QUIET).await;
+    let mut again = 0;
+    while let Ok(line) = events.try_recv() {
+        if is_taken_ladder_info(&line) {
+            again += 1;
+        }
+    }
+    let warns = round
+        .log()
+        .lines()
+        .filter(|line| line.contains("WARN") && line.contains("no rendezvous port is free"))
+        .count();
+    let bound = round.beacons().len() - bound_before;
+    if again != 0 || warns != 1 || bound != 0 {
+        return Err(format!(
+            "after the first Info at {told_after:?}, {NO_RUNG_QUIET:?} later: {again} more Info (want 0), {warns} warn lines (want 1), {bound} beacons bound (want 0)"
+        ));
+    }
+    Ok(told_after)
+}
+
 async fn finish(round: Round, members: Vec<Member>, verdict: Result<Duration, String>) {
     for member in members {
         member.leave().await;
@@ -809,5 +942,15 @@ async fn a_holder_whose_beacon_stops_answering_serves_again_and_a_joiner_finds_i
     let round = Round::begin("holder-stalled");
     let mut members = Vec::new();
     let verdict = holder_whose_beacon_stops_answering(&round, &mut members).await;
+    finish(round, members, verdict).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by cargo task matrix"]
+async fn a_member_says_so_when_other_processes_hold_every_port_of_its_room() {
+    let _serial = SERIAL.lock().await;
+    let round = Round::begin("ladder-taken");
+    let mut members = Vec::new();
+    let verdict = ladder_held_by_other_processes(&round, &mut members).await;
     finish(round, members, verdict).await;
 }
