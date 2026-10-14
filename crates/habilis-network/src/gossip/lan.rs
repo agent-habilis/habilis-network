@@ -31,6 +31,8 @@ struct Asked {
 }
 
 impl Asked {
+    /// How long to wait after the last request before the next one: `RETRY_FIRST` after the first
+    /// request, `RETRY_STEADY` after each later one.
     fn wait(&self) -> Duration {
         if self.again == 0 {
             RETRY_FIRST
@@ -138,6 +140,8 @@ pub(crate) async fn ask_unlinked_again(state: &mut EventLoopState, ctx: &Handler
     }
 }
 
+/// Ask one member of the LAN to be a neighbor. An error only logs: the record stays, and the
+/// member is asked again when its wait is over.
 async fn ask(addr: EndpointAddr, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let peer = addr.id;
     crate::lookup::add_peer_addr(&state.address_book, addr);

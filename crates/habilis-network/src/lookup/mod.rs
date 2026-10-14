@@ -1251,6 +1251,10 @@ fn answer_of_connect_error(error: &iroh::endpoint::ConnectError) -> ProbeAnswer 
     }
 }
 
+/// A connection error, during the handshake or after it. Only a certificate alert that our own
+/// verifier raises about the key is [`ProbeAnswer::Foreign`]. A close, a reset, a refusal and
+/// any other alert are [`ProbeAnswer::Refused`]. A timeout, a close of ours and exhausted
+/// connection ids say nothing.
 fn answer_of_connection_error(error: &iroh::endpoint::ConnectionError) -> ProbeAnswer {
     use iroh::endpoint::{ConnectionError, TransportErrorCode};
 

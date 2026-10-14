@@ -649,6 +649,8 @@ pub(crate) fn set_blind_rung_probes(member: EndpointId, blind: bool) {
     }
 }
 
+/// Whether a test made the rung probe of `member` read silence. It is always false outside the
+/// `iroh-test-utils` build.
 fn rung_probes_are_blind(member: EndpointId) -> bool {
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     {
@@ -768,6 +770,8 @@ impl RungWatch {
             .any(|probe| Self::alive(probe.since, now))
     }
 
+    /// Whether a probe that was asked at `since` is still waited for. After one heal tick it is
+    /// given up: the task, or the loop that would note its report, is gone.
     fn alive(since: Instant, now: Instant) -> bool {
         now.saturating_duration_since(since) < Duration::from_secs(heal_interval_secs())
     }
@@ -886,6 +890,9 @@ impl RungWatch {
         }
     }
 
+    /// How a walk reads `port` now. A reading older than a heal tick is `Unknown` and asks again.
+    /// `Ours` and `Foreign` act at once. A silent or refusing rung stays `Silent` until two
+    /// reports of silence are a window apart, and then it is `SilentLongEnough`.
     fn reading(&self, port: u16, now: Instant) -> RungRead {
         let Some(reading) = self.readings.get(&port) else {
             return RungRead::Unknown;
