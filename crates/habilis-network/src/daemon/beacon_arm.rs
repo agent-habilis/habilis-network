@@ -1827,8 +1827,9 @@ mod tests {
         // anyone else, and with the shed off there was nothing to re-arbitrate
         // the duplicate beacons that followed. See `rival_recheck_applies`.
         assert!(rival_recheck_applies(CoHostPolicy::Deferred, true));
-        // The loopback port ladder arbitrates atomically at bind time — no
-        // split to fix, shedding would only churn the beacon.
+        // The loopback ladder has no timed re-check: a second beacon on a loopback
+        // mesh is repaired by the lower-rung check and the own-rung check of the
+        // holder (`maybe_cohost`), not by a shed on a timer.
         assert!(!rival_recheck_applies(CoHostPolicy::EagerProbed, false));
         assert!(!rival_recheck_applies(CoHostPolicy::Deferred, false));
         // The origin owns the identity from t=0 and a consumer claims nothing.

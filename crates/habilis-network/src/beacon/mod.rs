@@ -20,14 +20,23 @@
 //!   (`daemon::event_loop::shed_rival_beacon_if_due`) re-arbitrates, so
 //!   the single-co-host invariant holds *eventually*, not at claim time.
 //! - **Private:** a deterministic loopback port *ladder* (no
-//!   pkarr/DNS). Exactly one member per mesh is the beacon: a member
-//!   binds the first free rung; on `AddrInUse` it probes the rung's
-//!   node id — *ours* ⇒ the beacon already exists, stay a peer;
-//!   *foreign* (an unrelated mesh that derived the same port) ⇒ skip
-//!   to the next rung. So independent private meshes on one host never
-//!   hijack each other, and there is no second same-identity co-host
-//!   for a joiner to mis-connect to. On the beacon's death its rung
-//!   frees and the next heal/reclaim tick re-elects.
+//!   pkarr/DNS). One member per mesh is the beacon, the holder of the
+//!   lowest live rung. A member binds the first free rung; on
+//!   `AddrInUse` it reads the rung from the answer of a probe task —
+//!   *ours* ⇒ the beacon already exists, stay a peer; *foreign* (an
+//!   unrelated mesh that derived the same port) ⇒ skip to the next
+//!   rung; *no answer* ⇒ wait, and bind the rung only once it has been
+//!   silent for the whole reclaim window. A listener that refuses,
+//!   closes or fails before a certificate (a busy or starting beacon of
+//!   the same mesh) is read as no answer: only a key that the verifier
+//!   rejects, or an identity that iroh reads as another, is *foreign*.
+//!   So independent private meshes
+//!   on one host never hijack each other. A second same-identity
+//!   co-host can still stand up when a host is too loaded to answer: a
+//!   holder above the first rung yields it on a positive answer of a
+//!   lower rung, at the next heal tick, and a holder whose own rung
+//!   stops answering sheds it. On the beacon's death its rung frees and
+//!   the next heal/reclaim tick re-elects.
 //!
 //! The rendezvous endpoint never authors app messages; its node id is
 //! filtered out of peer-side neighbor handling.
@@ -607,11 +616,13 @@ fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
 /// the beacon sees a stranger arrive and leave, which costs it nothing.
 /// [`spawn_rival_probe`] takes the same precaution for the public path.
 ///
-/// **One attempt, and three answers.** A rung that answered and refused is foreign for certain.
-/// A rung that said nothing is not: a host too loaded to answer reads the same, and a bind cannot
-/// be taken back. So the walk binds on [`ProbeAnswer::Foreign`] at once, and on silence only after
-/// the rung has stayed silent for [`RECLAIM_WINDOW_SECS`] across walks (see
-/// `build_rendezvous_endpoint`). A walk costs one attempt on a silent rung, not three.
+/// **One attempt, and four answers.** A rung whose listener failed the identity is foreign for
+/// certain: the verifier rejected its key, or iroh reads the identity as another. A rung that
+/// refused or said nothing is not: a busy or starting beacon of our own mesh refuses, a host too
+/// loaded to answer reads as silence, and a bind cannot be taken back. So the walk binds on
+/// [`ProbeAnswer::Foreign`] at once, and on silence or a refusal only after the rung has stayed
+/// silent for [`RECLAIM_WINDOW_SECS`] across walks (see `build_rendezvous_endpoint`). A walk costs
+/// one attempt on a silent rung, not three.
 async fn rung_answer(prober: &Endpoint, rendezvous_id: EndpointId, port: u16) -> ProbeAnswer {
     let addr = EndpointAddr::new(rendezvous_id)
         .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
@@ -1487,10 +1498,11 @@ mod tests {
         );
     }
 
-    /// The three answers of a probe are told apart by what a listener does: a listener of the
-    /// identity that was asked for opens the connection, a listener of another identity fails the
-    /// handshake, and a port that nobody answers on says nothing. The mapping is read from the
-    /// error types of iroh, so this test is what proves it on a real handshake.
+    /// Three of the four answers of a probe are told apart by what a listener does: a listener of
+    /// the identity that was asked for opens the connection, a listener of another identity fails
+    /// the handshake, and a port that nobody answers on says nothing. The fourth, a refusal, has
+    /// its own tests in `lookup`. The mapping is read from the error types of iroh, so this test
+    /// is what proves it on a real handshake.
     #[tokio::test]
     async fn a_probe_tells_ours_from_foreign_from_no_answer() {
         use super::{EndpointAddr, EndpointId, Ipv4Addr, SocketAddr};

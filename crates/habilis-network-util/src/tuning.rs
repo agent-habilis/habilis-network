@@ -628,9 +628,11 @@ pub const RELAY_REPROBE_BACKOFF_MAX_SECS: u64 = 300;
 /// cannot stall the event loop for long.
 ///
 /// One attempt is enough because a silence no longer binds: the answer that
-/// authorizes an irreversible bind is a refusal (`ProbeAnswer::Foreign`), or
-/// a rung that has stayed silent for the whole window. A host that is too
-/// loaded to answer reads as silence, for a few walks, and binds nothing.
+/// authorizes an irreversible bind is a failed identity check
+/// (`ProbeAnswer::Foreign`: a key that the verifier rejected, or an identity
+/// that iroh reads as another), or a rung that has stayed silent for the whole
+/// window. A refusal (`ProbeAnswer::Refused`) reads as silence, and so does a
+/// host that is too loaded to answer: for a few walks, and it binds nothing.
 pub const RENDEZVOUS_PROBE_SECS: u64 = 1;
 
 /// How long a departing member waits for its co-hosted rendezvous endpoint,
