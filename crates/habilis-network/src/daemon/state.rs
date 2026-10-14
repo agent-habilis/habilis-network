@@ -397,7 +397,9 @@ pub struct EventLoopState {
     /// When a node that let go of the rendezvous on purpose wants it again, although it holds
     /// links enough: one period after the release, plus a share from its id. A mesh that split
     /// into islands, each with links enough, has no other reason to visit the rendezvous, which
-    /// is the one place where the islands meet. Cleared when the link comes back.
+    /// is the one place where the islands meet. The heal tick pays it as an owed return and sets
+    /// the next one a period later ([`Self::pay_periodic_return`]); a link that comes back clears
+    /// it, and the next release sets it again.
     pub(crate) rendezvous_return_due: Option<Instant>,
     /// A return to the rendezvous is owed, until this instant, although this
     /// node holds enough links to others. Set when a silent roster peer is
@@ -1455,17 +1457,13 @@ impl EventLoopState {
 
     /// Whether this node should hold, or come back to, the rendezvous link:
     /// while it has fewer than [`Self::rendezvous_release_links`] links to
-    /// others, while a return is owed or the periodic return fell due, and always on the node
-    /// that hosts it.
+    /// others, while a return is owed, and always on the node that hosts it.
     /// Every graft and offer to the rendezvous is gated on this one answer.
     pub(crate) fn rendezvous_wanted(&self) -> bool {
         self.hosts_rendezvous
             || self
                 .rendezvous_comeback_until
                 .is_some_and(|until| Instant::now() < until)
-            || self
-                .rendezvous_return_due
-                .is_some_and(|due| Instant::now() >= due)
             || self.linked_endpoints.len() < self.rendezvous_release_links
     }
 
@@ -1506,6 +1504,17 @@ impl EventLoopState {
     pub(crate) fn owe_rendezvous_return(&mut self, now: Instant) {
         self.rendezvous_comeback_until =
             Some(now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS));
+    }
+
+    /// The periodic return, if it fell due, is owed like any other return: for a bounded time,
+    /// and the next one is set one period later. A visit that finds no link is then wanted for
+    /// the comeback window and no longer, and a member does not graft and offer at every tick for
+    /// ever. Called on the heal tick.
+    pub(crate) fn pay_periodic_return(&mut self, now: Instant, local: EndpointId) {
+        if self.rendezvous_return_due.is_some_and(|due| now >= due) {
+            self.owe_rendezvous_return(now);
+            self.rendezvous_return_due = Some(now + rendezvous_return_after(local));
+        }
     }
 
     /// The rendezvous link came up. If a return was owed, it is paid, and the
@@ -2737,11 +2746,59 @@ mod tests {
         );
 
         state.rendezvous_return_due = Some(Instant::now());
+        state.pay_periodic_return(Instant::now(), endpoint_id(9));
 
         assert!(
             state.rendezvous_wanted(),
             "a return that fell due is wanted although the links are enough"
         );
+    }
+
+    /// A return that fell due and found no link is not wanted for ever: the visit is bounded
+    /// like an owed one, or a member whose visit cannot link grafts and offers at every tick.
+    #[test]
+    fn a_return_that_fell_due_and_got_no_link_is_not_wanted_after_the_comeback_window() {
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(endpoint_id(9));
+        let window = Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS);
+        state.rendezvous_return_due = Instant::now().checked_sub(window + Duration::from_secs(1));
+
+        assert!(
+            !state.rendezvous_wanted(),
+            "a return that fell due a window ago and found no link is wanted for ever"
+        );
+    }
+
+    /// The periodic return is paid on the heal tick as an owed one: wanted for the comeback
+    /// window, due again one period later, and not paid twice.
+    #[test]
+    fn a_periodic_return_that_fell_due_is_paid_once_and_set_again_one_period_later() {
+        let local = endpoint_id(9);
+        let mut state = two_link_node();
+        state.linked_endpoints.insert(endpoint_id(1));
+        state.linked_endpoints.insert(endpoint_id(2));
+        state.mark_rendezvous_released(local);
+        let now = Instant::now();
+        state.rendezvous_return_due = Some(now);
+
+        state.pay_periodic_return(now, local);
+
+        assert!(state.rendezvous_wanted(), "the visit is wanted now");
+        let period = Duration::from_secs(crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN_SECS);
+        let next = state.rendezvous_return_due.expect("it is set again");
+        assert!(next >= now + period, "the next return is a period away");
+        let owed_until = state.rendezvous_comeback_until;
+
+        state.pay_periodic_return(now + Duration::from_secs(1), local);
+
+        assert_eq!(
+            state.rendezvous_comeback_until, owed_until,
+            "a return that is not due is not paid again"
+        );
+        state.rendezvous_comeback_until = now.checked_sub(Duration::from_secs(1));
+        assert!(!state.rendezvous_wanted(), "the visit ends with its window");
     }
 
     #[test]

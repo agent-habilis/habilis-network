@@ -59,6 +59,8 @@ pub(super) async fn run_heal(
     ctx: &HandlerCtx<'_>,
     params: &beacon::RendezvousParams,
 ) {
+    // A periodic return that fell due is owed from this tick, for a bounded time.
+    state.pay_periodic_return(Instant::now(), ctx.endpoint.id());
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
     crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
