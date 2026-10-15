@@ -258,7 +258,8 @@ mod tests {
             MeshConfig::loopback(),
         );
         creator.set_invite();
-        let invite = crate::invite::mint(&creator, Some(3600), None).expect("mint");
+        let invite = crate::invite::mint(&creator, Some(std::time::Duration::from_hours(1)), None)
+            .expect("mint");
         let blob = sample(false).encode();
 
         assert!(crate::protocol::InviteTicket::decode(&blob).is_err());

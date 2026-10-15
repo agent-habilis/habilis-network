@@ -175,7 +175,12 @@ mod tests {
 
     #[test]
     fn a_minted_invite_classifies_as_invite() {
-        let token = crate::invite::mint(&invite_only_mesh(), Some(3600), None).unwrap();
+        let token = crate::invite::mint(
+            &invite_only_mesh(),
+            Some(std::time::Duration::from_hours(1)),
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             token.parse::<JoinTarget>(),
             Ok(JoinTarget::Invite(_))

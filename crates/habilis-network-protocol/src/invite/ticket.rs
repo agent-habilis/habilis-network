@@ -77,22 +77,30 @@ fn signing_bytes(mesh_hash: &str, root: &SymmetricKey, expiry: UnixSecs) -> Vec<
     bytes
 }
 
-/// Mint an invite for `mesh`. `ttl_secs` `None`/`Some(0)` ⇒ no expiry,
-/// else the invite expires `ttl_secs` from now. `password` (the mesh's, if it
+/// Mint an invite for `mesh`. `ttl` `None`/`Some(Duration::ZERO)` ⇒ no expiry,
+/// else the invite expires `ttl` from now. The expiry is a whole second, so a ttl that
+/// has a part of a second rounds up: the invite never lives shorter than asked, and a
+/// ttl of one millisecond is not already spent. `password` (the mesh's, if it
 /// has one) wraps the root so a scraped invite still needs it.
 ///
 /// # Errors
 /// This session is not the creator (holds no issuer key), or `mesh` is not
 /// invite-only.
-pub fn mint(mesh: &Mesh, ttl_secs: Option<u64>, password: Option<&Password>) -> Result<String> {
+pub fn mint(mesh: &Mesh, ttl: Option<Duration>, password: Option<&Password>) -> Result<String> {
     let issuer_secret = mesh
         .issuer_secret()
         .context("only the creator can mint invites (this session holds no issuer key)")?;
     let root = mesh.invite_key().context("not an invite-only mesh")?;
     let mesh_hash = mesh.to_string();
-    let expiry = match ttl_secs {
-        None | Some(0) => UnixSecs::ZERO,
-        Some(ttl) => UnixSecs::now() + Duration::from_secs(ttl),
+    let expiry = match ttl {
+        None => UnixSecs::ZERO,
+        Some(ttl) if ttl.is_zero() => UnixSecs::ZERO,
+        Some(ttl) => {
+            let whole_seconds = ttl
+                .as_secs()
+                .saturating_add(u64::from(ttl.subsec_nanos() > 0));
+            UnixSecs::now() + Duration::from_secs(whole_seconds)
+        }
     };
     let signature = issuer_secret.sign(&signing_bytes(&mesh_hash, root, expiry));
     let root_field = match password {
@@ -281,7 +289,7 @@ mod tests {
         mesh
     }
 
-    fn minted(mesh: &Mesh, ttl: Option<u64>, password: Option<&Password>) -> InviteTicket {
+    fn minted(mesh: &Mesh, ttl: Option<Duration>, password: Option<&Password>) -> InviteTicket {
         InviteTicket::decode(&mint(mesh, ttl, password).unwrap()).expect("decode")
     }
 
@@ -297,8 +305,8 @@ mod tests {
         }
     }
 
-    /// The bytes of a ticket minted by the code at the base commit. A change
-    /// here is a wire change: tokens of this shape exist outside the code.
+    /// The encoding of `fixed_ticket()`, a ticket built by hand from fixed fields, not minted.
+    /// A change here is a wire change: tokens of this shape exist outside the code.
     const GOLDEN: &str = "CwX3aUAD9kjLm3ckGQZRSWa7jgHDTkggEgknyFUdHA9jDSm9M2YETdX3eachwWSHUkki6oZu2rStxtuJy3ZQM51fCh8Le1a7Suh3cuhtAYt67jN72d11tJPQ72hSp1mvLAwaSUkKQpL8eYxewU9y6ANjDBqTn6gHv7XwMWcJSSgM6s";
 
     #[test]
@@ -318,7 +326,7 @@ mod tests {
 
     #[test]
     fn minted_invite_is_bare_base58() {
-        let token = mint(&creator(), Some(3600), None).unwrap();
+        let token = mint(&creator(), Some(Duration::from_hours(1)), None).unwrap();
         assert!(token.is_ascii());
         assert!(!token.contains("://"));
     }
@@ -326,7 +334,9 @@ mod tests {
     #[test]
     fn redeemed_invite_derives_the_creators_topic() {
         let mesh = creator();
-        let redeemed = minted(&mesh, Some(3600), None).redeem(None).unwrap();
+        let redeemed = minted(&mesh, Some(Duration::from_hours(1)), None)
+            .redeem(None)
+            .unwrap();
         assert!(redeemed.requires_invite());
         // The gate works: same root ⇒ same topic ⇒ they actually meet.
         assert_eq!(redeemed.topic_id(), mesh.topic_id());
@@ -335,7 +345,7 @@ mod tests {
     #[test]
     fn no_expiry_invite_round_trips() {
         let mesh = creator();
-        for ttl in [None, Some(0)] {
+        for ttl in [None, Some(Duration::ZERO)] {
             let ticket = minted(&mesh, ttl, None);
             assert!(ticket.redeem(None).is_ok(), "0/none ttl never expires");
         }
@@ -346,9 +356,37 @@ mod tests {
     #[test]
     fn a_ttl_past_the_range_saturates_the_expiry() {
         let mesh = creator();
-        let ticket = minted(&mesh, Some(u64::MAX), None);
+        let ticket = minted(&mesh, Some(Duration::from_secs(u64::MAX)), None);
         assert_eq!(ticket.expiry, UnixSecs::MAX);
         assert!(ticket.redeem(None).is_ok());
+    }
+
+    /// The expiry is a whole second. A ttl with a part of a second rounds up, so that a ttl
+    /// of one millisecond is no invite that is spent at once (`redeem` refuses `now >= expiry`).
+    #[test]
+    fn a_sub_second_ttl_rounds_up_to_a_whole_second() {
+        let mesh = creator();
+        for (ttl, secs) in [
+            (Duration::from_millis(1), 1),
+            (Duration::from_millis(999), 1),
+            (Duration::from_secs(1), 1),
+            (Duration::from_millis(1_500), 2),
+            (Duration::from_secs(60) + Duration::from_nanos(1), 61),
+        ] {
+            let before = UnixSecs::now();
+            let ticket = minted(&mesh, Some(ttl), None);
+            let after = UnixSecs::now();
+            assert!(
+                before + Duration::from_secs(secs) <= ticket.expiry
+                    && ticket.expiry <= after + Duration::from_secs(secs),
+                "ttl {ttl:?} must expire {secs} s from now, got {} (now {before}..{after})",
+                ticket.expiry
+            );
+            assert!(
+                ticket.redeem(None).is_ok(),
+                "ttl {ttl:?} is not spent at once"
+            );
+        }
     }
 
     // ── "only the creator can mint" ───────────────────────────────────────
@@ -356,12 +394,14 @@ mod tests {
     #[test]
     fn a_redeemer_holds_the_root_but_cannot_mint() {
         let mesh = creator();
-        let redeemed = minted(&mesh, Some(3600), None).redeem(None).unwrap();
+        let redeemed = minted(&mesh, Some(Duration::from_hours(1)), None)
+            .redeem(None)
+            .unwrap();
         // The redeemer has the join root (it derived the topic) but no issuer
         // key, so it can neither mint nor sign a forgery.
         assert!(redeemed.issuer_secret().is_none());
         assert!(
-            mint(&redeemed, Some(3600), None).is_err(),
+            mint(&redeemed, Some(Duration::from_hours(1)), None).is_err(),
             "a non-creator must not be able to mint a valid invite"
         );
     }
@@ -373,7 +413,7 @@ mod tests {
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
         );
-        assert!(mint(&plain, Some(3600), None).is_err());
+        assert!(mint(&plain, Some(Duration::from_hours(1)), None).is_err());
     }
 
     // ── adversarial: forged / tampered signatures ─────────────────────────
@@ -381,7 +421,7 @@ mod tests {
     #[test]
     fn rejects_a_zeroed_or_garbage_signature() {
         let mesh = creator();
-        let mut ticket = minted(&mesh, Some(3600), None);
+        let mut ticket = minted(&mesh, Some(Duration::from_hours(1)), None);
         ticket.sig = [0u8; 64];
         assert!(ticket.redeem(None).is_err(), "a blank sig must be refused");
     }
@@ -417,7 +457,7 @@ mod tests {
         // Extending the window by editing `expiry` invalidates the signature,
         // which covers it — so a bearer can't lengthen their own invite.
         let mesh = creator();
-        let mut ticket = minted(&mesh, Some(3600), None);
+        let mut ticket = minted(&mesh, Some(Duration::from_hours(1)), None);
         ticket.expiry = UnixSecs::MAX;
         assert!(ticket.redeem(None).is_err());
     }
@@ -425,7 +465,7 @@ mod tests {
     #[test]
     fn rejects_a_tampered_root() {
         let mesh = creator();
-        let mut ticket = minted(&mesh, Some(3600), None);
+        let mut ticket = minted(&mesh, Some(Duration::from_hours(1)), None);
         ticket.root_field[0] ^= 0xff;
         assert!(
             ticket.redeem(None).is_err(),
@@ -460,7 +500,7 @@ mod tests {
     #[test]
     fn a_password_wrapped_invite_needs_the_right_password() {
         let mesh = creator();
-        let ticket = minted(&mesh, Some(3600), Some(&pw("hunter2")));
+        let ticket = minted(&mesh, Some(Duration::from_hours(1)), Some(&pw("hunter2")));
         assert!(ticket.requires_password());
         assert!(ticket.redeem(None).is_err(), "missing password");
         assert!(
@@ -475,7 +515,7 @@ mod tests {
     fn a_plain_invite_rejects_a_stray_password() {
         let mesh = creator();
         assert!(
-            minted(&mesh, Some(3600), None)
+            minted(&mesh, Some(Duration::from_hours(1)), None)
                 .redeem(Some(&pw("x")))
                 .is_err()
         );
@@ -496,7 +536,7 @@ mod tests {
 
     #[test]
     fn rejects_a_bad_checksum() {
-        let mut token = mint(&creator(), Some(3600), None).unwrap();
+        let mut token = mint(&creator(), Some(Duration::from_hours(1)), None).unwrap();
         let last = token.pop().unwrap();
         token.push(if last == '1' { '2' } else { '1' });
         assert!(InviteTicket::decode(&token).is_err());
@@ -506,7 +546,7 @@ mod tests {
     fn mints_bare_ascii_base58() {
         // No glyph, no variation selector, no `://`: an invite pastes into a
         // URL or a shell word untouched.
-        let token = mint(&creator(), Some(3600), None).unwrap();
+        let token = mint(&creator(), Some(Duration::from_hours(1)), None).unwrap();
         assert!(
             token.bytes().all(|byte| byte.is_ascii_alphanumeric()),
             "invite must be ASCII Base58: {token}"
