@@ -139,12 +139,12 @@ impl SymmetricKey {
         Self(Zeroizing::new(bytes))
     }
 
-    /// Take a buffer that is already wiped on drop, so that no plain copy of
-    /// the secret exists on the way in. Every internal path that holds a secret
-    /// in a [`Zeroizing`] (a derivation, a stretch) comes here, not through
-    /// [`Self::from_bytes`].
+    /// Take a buffer that is already wiped on drop, whole, so that no plain
+    /// copy of the secret exists on the way in. This is the constructor for a
+    /// secret that is already in a [`Zeroizing`] (a derivation, a stretch, bytes
+    /// read off a stream). [`Self::from_bytes`] stays for raw input at an edge.
     #[must_use]
-    pub(crate) fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+    pub fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
         Self(bytes)
     }
 
@@ -383,10 +383,12 @@ impl TicketSecret {
         Self(Zeroizing::new(bytes))
     }
 
-    /// Take a buffer that is already wiped on drop, so that no plain copy of
-    /// the secret exists on the way in (see [`SymmetricKey::from_zeroizing`]).
+    /// Take a buffer that is already wiped on drop, whole, so that no plain
+    /// copy of the secret exists on the way in. This is the constructor for a
+    /// secret that is already in a [`Zeroizing`] (a stretch, a salt or a token
+    /// read off a stream). [`Self::from_bytes`] stays for raw input at an edge.
     #[must_use]
-    pub(crate) fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+    pub fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
         Self(bytes)
     }
 
