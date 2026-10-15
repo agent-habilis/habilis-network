@@ -442,7 +442,9 @@ published to a registry; pin it with
   use `UnixSecs::now()`, and `.as_secs()` for the number. A wire struct converts with
   `UnixSecs::from_secs` and `as_secs`, so no byte of a message, a signature or a ticket moves.
   Adding a `Duration` to a `UnixSecs`, or subtracting one, computes the exact result and clamps
-  it at the ends of the range (`i64::MIN` and `UnixSecs::MAX`).
+  it at the ends of the range (`i64::MIN` and `UnixSecs::MAX`). `UnixSecs::since` is the exact
+  span, also past `i64::MAX` seconds, and a span that is not positive is `Duration::ZERO`. Neither
+  change touches a wire byte or a signature.
   `EventLoopState::note_dag` takes the timestamp as a `UnixSecs` as its third argument.
 - **Breaking:** the two endpoints of a multihop node have a type each. `MultihopHandle::app_id()`
   is an `AppId` and `underlay_id()` is an `UnderlayId`. `route_addr`, `refuse_hop_for_test`,
