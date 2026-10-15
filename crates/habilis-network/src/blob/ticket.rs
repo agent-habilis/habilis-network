@@ -268,12 +268,20 @@ mod tests {
 
     #[test]
     fn debug_never_prints_the_secret() {
-        // The derive prints a byte array in decimal, so the check is against
-        // the decimal text of the secret, not against its hex.
+        // A byte array prints in decimal and a hex dump prints in hex, so the
+        // check covers both forms, and it asks for the redaction itself.
         let shown = format!("{:?}", sample(false));
         assert!(
             !shown.contains(&format!("{:?}", [9u8; SECRET_LEN])),
-            "the bearer secret leaked through Debug: {shown}"
+            "the bearer secret leaked through Debug in decimal: {shown}"
+        );
+        assert!(
+            !shown.contains(&"09".repeat(SECRET_LEN)),
+            "the bearer secret leaked through Debug in hex: {shown}"
+        );
+        assert!(
+            shown.contains("TicketSecret(***)"),
+            "the secret is not redacted: {shown}"
         );
     }
 
