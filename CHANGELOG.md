@@ -10,6 +10,10 @@ published to a registry; pin it with
 
 ### Added
 
+- `SymmetricKey::from_zeroizing` and `TicketSecret::from_zeroizing` take a `Zeroizing<[u8; 32]>`
+  whole, so a consumer that holds a secret in a wiped buffer (a salt, a token read off a stream)
+  moves it into its type with no plain copy. `from_bytes` stays for raw input at an edge.
+  `SymmetricKey` and `TicketSecret` now implement `ZeroizeOnDrop`.
 - `habilis_network::x25519_dalek`: the `x25519-dalek` crate, re-exported whole.
   `Identity::seal_public` returns an `x25519_dalek::PublicKey` and `seal_to_body` takes one, so a
   consumer takes the type from here and gets no second copy of the crate.
@@ -152,6 +156,15 @@ published to a registry; pin it with
 
 ### Changed
 
+- A secret key no longer passes through a plain array that nobody wipes. The stretched password
+  key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the root of an invite, and
+  the salt and the token of a blob ticket now move from their wiped buffer into `SymmetricKey` or
+  `TicketSecret` whole. The one copy that is left is the bare array that `iroh`'s
+  `SecretKey::to_bytes()` returns: the engine does not control it, and the bytes go into a wiped
+  buffer at once. No wire change: the golden tests are unchanged.
+  **Breaking:** `TicketSecret::from_bytes` and `TicketSecret::as_bytes` are no longer `const fn`,
+  because `TicketSecret` holds a `Zeroizing` field. A caller in a `const` context must change.
+  No caller in the workspace is const.
 - **Breaking:** a time span is a `Duration`, not a `u64` with a unit suffix. The wire does not
   change: a wire struct converts at its edge, and the bytes are the same.
   - Every `*_SECS` and `*_MS` constant of `habilis-network-util` (`tuning` and `consts`) is
