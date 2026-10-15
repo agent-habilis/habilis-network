@@ -765,14 +765,16 @@ mod password_tests {
     }
 
     // `unsafe_code` is denied, so a test cannot read the freed bytes: the types
-    // carry the test. A secret type holds its bytes in a `Zeroizing`, which wipes
-    // them on drop, and says so with the `ZeroizeOnDrop` marker. This does not
-    // compile if a field stops wiping.
+    // carry the test. The `ZeroizeOnDrop` marker on a secret type is a promise
+    // and proves nothing by itself, so the test pins the field: it holds its
+    // bytes in a `Zeroizing`, which wipes them on drop. This does not compile if
+    // a field becomes a bare array.
     #[test]
-    fn the_secret_types_wipe_on_drop() {
-        fn wipes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-        wipes_on_drop::<super::TicketSecret>();
-        wipes_on_drop::<super::SymmetricKey>();
+    fn the_secret_types_hold_their_bytes_in_a_zeroizing_buffer() {
+        use zeroize::Zeroizing;
+
+        let _: &Zeroizing<[u8; 32]> = &super::TicketSecret::from_bytes([0; 32]).0;
+        let _: &Zeroizing<[u8; 32]> = &super::SymmetricKey::from_bytes([0; 32]).0;
     }
 
     #[test]
