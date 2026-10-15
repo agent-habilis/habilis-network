@@ -108,6 +108,17 @@ pub enum Request {
         body: MessageBody,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Tests only: send one directed `msg` the way [`Request::Send`] does, but never take the
+    /// warm fast path. A pooled connection that a direct-path probe opened between a
+    /// [`Request::ForgetUnicast`] and the send would answer at once, `Sent` or `Refused`, and a
+    /// test that needs the send to wait on a dial would not see the wait. This one dials, or
+    /// waits for a direct path on the pooled connection, as the cold path does.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    SendCold {
+        to: Option<Nickname>,
+        body: MessageBody,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     StateMerge {
         merge: serde_json::Value,
         reply: oneshot::Sender<Result<(), String>>,
@@ -527,6 +538,42 @@ impl NodeDriver for MembershipApp {
                     }
                     Err(error) => {
                         let _ = reply.send(Err(error.to_string()));
+                    }
+                }
+                true
+            }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::SendCold { to, body, reply } => {
+                let frame = app_frame(
+                    ctx,
+                    AppFrameParams {
+                        tag: AppTag::from(MSG_TAG),
+                        to,
+                        corr: None,
+                        body,
+                    },
+                );
+                let routed = frame
+                    .serialize()
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| {
+                        crate::transport::resolve(&frame, bytes::Bytes::from(bytes), state)
+                            .map_err(|error| error.to_string())
+                    });
+                match routed {
+                    Ok(crate::transport::Resend::Unicast(eid, bytes)) => {
+                        let pool = state.unicast_pool.clone();
+                        let registration = pool.register_dial(eid);
+                        n0_future::task::spawn(async move {
+                            let sent = pool.send_registered(registration, eid, bytes).await;
+                            let _ = reply.send(sent.map_err(|error| error.to_string()));
+                        });
+                    }
+                    Ok(crate::transport::Resend::Broadcast(_)) => {
+                        let _ = reply.send(Err("a cold send needs a directed message".to_owned()));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
                     }
                 }
                 true

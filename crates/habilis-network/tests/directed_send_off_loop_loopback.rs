@@ -27,6 +27,9 @@ const PREMISE: Duration = Duration::from_secs(1);
 /// How many times alice is asked to forget the connection of bob before the send. A probe of the
 /// direct path can pool one again, so one forget is not enough; the answer `false` says there is none.
 const FORGET_TRIES: usize = 20;
+/// How long iroh may take to re-run path selection after the block. It reads the path list on its
+/// path-stat updates, which come within a few seconds.
+const BLOCK_TAKES_EFFECT: Duration = Duration::from_secs(30);
 
 struct Member {
     membership: Membership,
@@ -82,11 +85,24 @@ impl Member {
             .expect("the loop answers");
     }
 
-    async fn send(&self, to: &str, text: &str) -> Result<(), String> {
+    /// A directed send that never takes the warm fast path: see [`Request::SendCold`].
+    async fn send_cold(&self, to: &str, text: &str) -> Result<(), String> {
         let to = membership::parse_to(Some(to)).expect("a nickname");
         let body = membership::msg_body(text).expect("fits one frame");
         self.membership
-            .request(|reply| Request::Send { to, body, reply })
+            .request(|reply| Request::SendCold { to, body, reply })
+            .await
+            .expect("the loop answers")
+    }
+
+    /// The rung of the selected path on the connection of alice to `peer`: `ip`, `relay`, and so
+    /// on. `None` while no path is selected.
+    async fn selected_rung(&self, peer: &str) -> Option<&'static str> {
+        self.membership
+            .request(|reply| Request::SelectedRung {
+                peer: peer.to_owned(),
+                reply,
+            })
             .await
             .expect("the loop answers")
     }
@@ -130,9 +146,21 @@ async fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
     alice
         .block_ip_to(bob.membership.node.bound_ports().to_vec())
         .await;
+    // `BlockIpTo` returns before iroh has re-run path selection, and a connection that is opened
+    // before it does rides the IP path that iroh still holds. Wait until the path to bob has left
+    // UDP, so that a new connection to bob finds no direct path.
+    let block_ends = Instant::now() + BLOCK_TAKES_EFFECT;
+    while alice.selected_rung("bob").await != Some("relay") {
+        assert!(
+            Instant::now() < block_ends,
+            "the path of alice to bob did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
-    // A probe of the direct path can pool a connection to bob, and then the send is warm and fast.
-    // Forget it until none is pooled, right before the send, so that the send is cold.
+    // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
+    // path can still pool one again before the send, so the send is `SendCold`: it never takes the
+    // warm fast path, and its wait does not depend on this race.
     for _ in 0..FORGET_TRIES {
         if !alice.forget_unicast("bob").await {
             break;
@@ -141,7 +169,7 @@ async fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
 
     let started = Instant::now();
     let send = async {
-        let verdict = alice.send("bob", "hello").await;
+        let verdict = alice.send_cold("bob", "hello").await;
         (verdict, started.elapsed())
     };
     let local = async {
