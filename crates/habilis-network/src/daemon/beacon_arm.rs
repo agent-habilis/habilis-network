@@ -38,12 +38,14 @@ use crate::util::clock::Instant;
 /// An outstanding probe-before-claim goes the same way, and for the same
 /// reason: its throwaway endpoint is just as capable of reaching `Drop` open.
 /// So does the startup rung probe, which walks the relay ladder on endpoints
-/// of its own. All three close concurrently, so the whole release costs one
-/// close budget, which is what `NODE_LEAVE_SECS` is sized for.
+/// of its own. The endpoints of the node close with them. All of these close
+/// concurrently, so the whole release costs one close budget, which is what
+/// `NODE_LEAVE_SECS` is sized for.
 pub(super) async fn release_rendezvous(
     rendezvous: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
     rung_probe: &mut Option<crate::lookup::StoppableTask>,
+    owned: super::shutdown::OwnedEndpoints,
 ) {
     let (rendezvous, probe, rung_probe) = (rendezvous.take(), probe.take(), rung_probe.take());
     tokio::join!(
@@ -62,6 +64,7 @@ pub(super) async fn release_rendezvous(
                 probe.abort_and_close().await;
             }
         },
+        owned.close(),
     );
 }
 /// Whether a co-hosting member probes the rendezvous before claiming it —

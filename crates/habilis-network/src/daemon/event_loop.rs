@@ -41,12 +41,12 @@ use super::beacon_arm::{
     offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
     shed_rival_beacon_if_due, verdict_after_known_holders,
 };
-use super::config::{CoHostPolicy, DriverMode, EndpointOwner, EventLoopConfig};
+use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
 use super::ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 #[cfg(feature = "host")]
 use super::shutdown::spawn_quit_signal_tasks;
-use super::shutdown::{QuitParams, announce_and_maybe_exit, never_quit};
+use super::shutdown::{OwnedEndpoints, QuitParams, announce_and_maybe_exit, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
 use super::timers;
 
@@ -182,11 +182,13 @@ pub async fn run<A: NodeDriver>(
         started,
     );
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
-    // The loop closes the underlay only when it built it; an injected handle is the caller's.
-    #[cfg(feature = "multihop")]
-    let owned_multihop = multihop
-        .clone()
-        .filter(|_| endpoint_owner == EndpointOwner::Engine);
+    let owned = OwnedEndpoints {
+        router,
+        owner: endpoint_owner,
+        // A handle that the caller injected is the caller's; `close` skips it with the endpoint.
+        #[cfg(feature = "multihop")]
+        multihop: multihop.clone(),
+    };
     #[cfg(feature = "multihop")]
     {
         state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
@@ -366,7 +368,7 @@ pub async fn run<A: NodeDriver>(
     // size is target-dependent (it crosses the limit on x86_64-linux but
     // not aarch64-macOS), so boxing the single await is more robust than
     // shaving struct fields.
-    let result = Box::pin(event_loop(EventLoop {
+    Box::pin(event_loop(EventLoop {
         sender,
         receiver,
         gossip,
@@ -400,22 +402,9 @@ pub async fn run<A: NodeDriver>(
         direct_rx,
         path_rx,
         flush_failed_rx,
+        owned,
     }))
-    .await;
-    // Dropping an endpoint that was never closed makes iroh log an ERROR and abort
-    // its connections. `Router::shutdown` closes the router and its endpoint.
-    if endpoint_owner == EndpointOwner::Engine {
-        // It fails only when a protocol handler panicked, which the task has
-        // already reported; the loop is ending either way.
-        if let Err(error) = router.shutdown().await {
-            tracing::debug!(%error, "the router failed while it shut down");
-        }
-        #[cfg(feature = "multihop")]
-        if let Some(handle) = owned_multihop {
-            handle.close().await;
-        }
-    }
-    result
+    .await
 }
 
 /// The alive tick: note the gap, broadcast the keepalive presence, then pay a held-back `PeerInfo` flood.
@@ -659,6 +648,8 @@ struct EventLoop<A: NodeDriver> {
     path_rx: mpsc::UnboundedReceiver<crate::transport::probe::PathChange>,
     /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
     flush_failed_rx: mpsc::UnboundedReceiver<(Message, bytes::Bytes)>,
+    /// Closed with the rendezvous as the loop ends.
+    owned: OwnedEndpoints,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI
@@ -716,6 +707,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut direct_rx,
         mut path_rx,
         mut flush_failed_rx,
+        owned,
     } = loop_state;
 
     log_daemon_start(&author);
@@ -964,7 +956,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
                     ).await {
-                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe).await;
+                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe, owned).await;
                         return Err(error);
                     }
                     let ctx = parts.ctx(&sender);
@@ -1103,7 +1095,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         app.drain_surfaced();
     }
 
-    release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe).await;
+    release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe, owned).await;
     Ok(())
 }
 
