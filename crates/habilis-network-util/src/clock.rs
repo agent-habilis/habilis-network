@@ -72,10 +72,12 @@ impl UnixSecs {
     }
 
     /// The time from `earlier` to this point. Zero when `earlier` is not earlier, so a clock that
-    /// was set back is no negative span and no panic.
+    /// was set back is no negative span and no panic. The span is exact: an `i128` holds the
+    /// difference of two counts, and a `u64` of seconds holds every span that is not negative.
     #[must_use]
     pub fn since(self, earlier: Self) -> Duration {
-        u64::try_from(self.0.saturating_sub(earlier.0)).map_or(Duration::ZERO, Duration::from_secs)
+        u64::try_from(i128::from(self.0) - i128::from(earlier.0))
+            .map_or(Duration::ZERO, Duration::from_secs)
     }
 
     /// The point at the exact count `secs`, or the nearest end of the range. An `i128` holds the
@@ -201,7 +203,25 @@ mod unix_secs_tests {
         assert_eq!(earlier.since(later), Duration::ZERO);
         assert_eq!(
             UnixSecs::MAX.since(UnixSecs::from_secs(-1)).as_secs(),
-            i64::MAX as u64
+            i64::MAX as u64 + 1
+        );
+    }
+
+    /// The span between two points is exact: it can be wider than `i64::MAX` seconds, and a
+    /// `u64` holds it.
+    #[test]
+    fn a_span_wider_than_i64_max_is_exact() {
+        assert_eq!(
+            UnixSecs::MAX.since(UnixSecs::from_secs(i64::MIN)),
+            Duration::from_secs(u64::MAX)
+        );
+        assert_eq!(
+            UnixSecs::MAX.since(UnixSecs::from_secs(-1)),
+            Duration::from_secs(i64::MAX as u64 + 1)
+        );
+        assert_eq!(
+            UnixSecs::from_secs(i64::MIN).since(UnixSecs::MAX),
+            Duration::ZERO
         );
     }
 
