@@ -724,7 +724,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
 
     // Owned Arc clone so the per-arm ctx can borrow it without colliding with `&mut state`.
     let identity = state.identity.clone();
-    // Our own pubkey hex, computed once for the per-message self-echo compare.
+    // Our own author key, computed once for the per-message self-echo compare.
     let our_pubkey = identity.author_key();
     // Everything a HandlerCtx needs *except* the sender. The ctx itself
     // is built per-arm (`parts.ctx(&sender)`) rather than once out here:

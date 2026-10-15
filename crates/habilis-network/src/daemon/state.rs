@@ -178,6 +178,16 @@ impl DirectState {
     }
 }
 
+/// What a member's `PeerInfo` says about the rendezvous, and whether we believe the sender. One
+/// struct for the pair, because both are a `bool` and a swap compiles and flips the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RivalFlag {
+    /// The signer proved the endpoint it sent from.
+    pub(crate) proven: bool,
+    /// The `PeerInfo` carries the beacon flag: the member holds the rendezvous.
+    pub(crate) held: bool,
+}
+
 /// Link counts by [`DirectState`], for the census line.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectCounts {
@@ -661,9 +671,9 @@ pub struct EventLoopState {
     /// our `Msg` stream is a `seq`+`prev` hash chain.
     pub(crate) self_seq: u64,
     pub(crate) self_prev: Option<ContentHash>,
-    /// Phase 2 fork detection: per author pubkey (hex), the content hash
+    /// Phase 2 fork detection: per author key, the content hash
     /// seen at each `Msg` `seq`. A *different* hash at an already-seen
-    /// `(pubkey, seq)` is cryptographic proof of equivocation → a `fork`
+    /// `(author, seq)` is cryptographic proof of equivocation → a `fork`
     /// event. Order-independent (gossip delivers out of order).
     pub(crate) author_seqs: HashMap<AuthorKey, HashMap<u64, ContentHash>>,
     /// Author pubkeys already flagged as forked, so one `fork` event fires
@@ -1353,23 +1363,22 @@ impl EventLoopState {
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
     }
 
-    /// A member's `PeerInfo` read: `flag` says it holds the rendezvous. A flag from a proven
-    /// sender is remembered whether we hold the rendezvous or not; it moves our re-check only
-    /// while we hold it too.
+    /// A member's `PeerInfo` read: `flag.held` says it holds the rendezvous. A flag from a
+    /// proven sender is remembered whether we hold the rendezvous or not; it moves our re-check
+    /// only while we hold it too.
     pub(crate) fn note_rival_beacon_flag(
         &mut self,
         own: EndpointId,
         signer: AuthorKey,
         sender: EndpointId,
-        proven: bool,
-        flag: bool,
+        flag: RivalFlag,
         now: Instant,
     ) {
-        if !flag {
+        if !flag.held {
             self.rival_holders.remove(&signer);
             return;
         }
-        if !proven || sender == own {
+        if !flag.proven || sender == own {
             return;
         }
         let newly = self.rival_holders.insert(signer, sender) != Some(sender);
@@ -2146,7 +2155,8 @@ const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport:
 mod tests {
     use super::{
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
-        KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN, Reach, TokioInstant,
+        KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN, Reach, RivalFlag,
+        TokioInstant,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::protocol::{AuthorKey, ContentHash, UnixSecs};
@@ -2171,7 +2181,16 @@ mod tests {
         state.hosts_rendezvous = true;
         let now = Instant::now();
 
-        state.note_rival_beacon_flag(high, AuthorKey::from_bytes([9u8; 32]), low, true, true, now);
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from_bytes([9u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
 
         assert!(state.yield_to_lower);
         assert_eq!(state.next_rival_recheck, Some(now));
@@ -2188,7 +2207,16 @@ mod tests {
         state.rival_recheck_deferrals = 1;
         let now = Instant::now();
 
-        state.note_rival_beacon_flag(low, AuthorKey::from_bytes([9u8; 32]), high, true, true, now);
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from_bytes([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
 
         assert!(!state.yield_to_lower);
         let next = state
@@ -2297,15 +2325,42 @@ mod tests {
 
         let mut no_flag = fresh_state();
         no_flag.hosts_rendezvous = true;
-        no_flag.note_rival_beacon_flag(high, signer, low, true, false, now);
+        no_flag.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
+            now,
+        );
 
         let mut unproven = fresh_state();
         unproven.hosts_rendezvous = true;
-        unproven.note_rival_beacon_flag(high, signer, low, false, true, now);
+        unproven.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: false,
+                held: true,
+            },
+            now,
+        );
 
         let mut ourselves = fresh_state();
         ourselves.hosts_rendezvous = true;
-        ourselves.note_rival_beacon_flag(high, signer, high, true, true, now);
+        ourselves.note_rival_beacon_flag(
+            high,
+            signer,
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
 
         for state in [no_flag, unproven, ourselves] {
             assert!(!state.yield_to_lower);
@@ -2325,8 +2380,10 @@ mod tests {
             high,
             AuthorKey::from_bytes([9u8; 32]),
             low,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             Instant::now(),
         );
 
@@ -2363,8 +2420,10 @@ mod tests {
             high,
             AuthorKey::from_bytes([9u8; 32]),
             low,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             Instant::now(),
         );
         assert!(state.rival_holder_known());
@@ -2432,16 +2491,20 @@ mod tests {
             high,
             AuthorKey::from_bytes([1u8; 32]),
             low,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             Instant::now(),
         );
         state.note_rival_beacon_flag(
             high,
             AuthorKey::from_bytes([2u8; 32]),
             endpoint_id(7),
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             Instant::now(),
         );
 
@@ -2465,8 +2528,10 @@ mod tests {
             low,
             AuthorKey::from_bytes([9u8; 32]),
             high,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             first,
         );
         let pushed = state.next_rival_recheck;
@@ -2476,8 +2541,10 @@ mod tests {
             low,
             AuthorKey::from_bytes([9u8; 32]),
             high,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             first + Duration::from_secs(5),
         );
 
@@ -2497,7 +2564,16 @@ mod tests {
         let far = now + Duration::from_secs(100_000);
         state.next_rival_recheck = Some(far);
 
-        state.note_rival_beacon_flag(low, AuthorKey::from_bytes([9u8; 32]), high, true, true, now);
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from_bytes([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
 
         assert_eq!(state.next_rival_recheck, Some(far));
     }
@@ -2509,13 +2585,40 @@ mod tests {
         let (low, high) = lower_and_higher();
         let signer = AuthorKey::from_bytes([9u8; 32]);
         let mut state = fresh_state();
-        state.note_rival_beacon_flag(high, signer, low, true, true, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
         assert!(state.rival_holder_known());
 
-        state.note_rival_beacon_flag(high, signer, low, true, false, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
+            Instant::now(),
+        );
         assert!(!state.rival_holder_known(), "no flag takes it out");
 
-        state.note_rival_beacon_flag(high, signer, low, true, true, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
         state
             .peer_endpoints
             .insert(nick("bob"), iroh::EndpointAddr::new(low));

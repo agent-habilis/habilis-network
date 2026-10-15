@@ -12,7 +12,7 @@ use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::state::{DirectState, EventLoopState};
+use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
@@ -1525,8 +1525,10 @@ async fn handle_peer_info(
             ctx.endpoint.id(),
             signer,
             peer_id,
-            proven,
-            parsed["beacon"].as_bool() == Some(true),
+            RivalFlag {
+                proven,
+                held: parsed["beacon"].as_bool() == Some(true),
+            },
             Instant::now(),
         );
     }

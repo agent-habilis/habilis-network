@@ -601,6 +601,7 @@ pub(super) fn shed_rival_beacon_if_due(
 #[cfg(test)]
 mod tests {
     use super::super::config::CoHostPolicy;
+    use super::super::state::RivalFlag;
     use super::{
         MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
         regrafts_rendezvous, rival_recheck_applies,
@@ -700,8 +701,10 @@ mod tests {
             own,
             crate::protocol::AuthorKey::from_bytes([9u8; 32]),
             holder,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             now,
         );
         assert!(!super::may_probe_to_claim(&state), "a holder is known");
@@ -710,8 +713,10 @@ mod tests {
             own,
             crate::protocol::AuthorKey::from_bytes([9u8; 32]),
             holder,
-            true,
-            false,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
             now,
         );
         assert!(super::may_probe_to_claim(&state), "it let go: probe again");
@@ -730,8 +735,10 @@ mod tests {
             own,
             crate::protocol::AuthorKey::from_bytes([9u8; 32]),
             holder,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             crate::util::clock::Instant::now(),
         );
 
