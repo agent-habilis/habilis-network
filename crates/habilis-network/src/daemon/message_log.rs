@@ -77,7 +77,7 @@ pub struct MessageLog {
     ///
     /// Maintained on every push and eviction rather than rebuilt, because
     /// [`Self::eviction_index`] needs it on nearly every steady-state message:
-    /// at capacity it was hashing a thousand base58 pubkeys to recount what two
+    /// at capacity it was hashing a thousand base58 author keys to recount what two
     /// counter updates already know. The map is the *only* derived state here,
     /// and both mutation sites are in [`Self::push`], so it cannot drift. An
     /// unsigned message (no key) is held under `None`: a test or a fixture can
@@ -127,7 +127,7 @@ impl MessageLog {
             && let Some(held) = self.per_author.get_mut(&gone.author_key())
         {
             *held -= 1;
-            // No zero entries: one would win the lowest-pubkey tie-break in
+            // No zero entries: one would win the lowest-author-key tie-break in
             // `eviction_index` while holding nothing to evict.
             if *held == 0 {
                 self.per_author.remove(&gone.author_key());
@@ -149,15 +149,15 @@ impl MessageLog {
     /// else's alone. Bounding the timestamp would not do: any future a sender
     /// is allowed still sorts above every honest message.
     ///
-    /// Still a pure function of the message set — the counts, the pubkey
+    /// Still a pure function of the message set — the counts, the author-key
     /// tie-break and the key comparison all read wire fields, never arrival
     /// order — so peers agree on the retained set, which is what lets
     /// anti-entropy converge on one set rather than a union of windows.
     ///
-    /// Not a Sybil defence: pubkeys are free, so N identities hold N shares.
+    /// Not a Sybil defence: author keys are free, so N identities hold N shares.
     /// It removes the case where one identity costs everyone their history.
     fn eviction_index(&self) -> usize {
-        // Ties go to the lowest pubkey, so the choice is total and identical
+        // Ties go to the lowest author key, so the choice is total and identical
         // on every node.
         let fullest = self
             .per_author
@@ -810,7 +810,7 @@ mod tests {
             assert_eq!(log.per_author, recounted, "counts drifted at step {step}");
         }
         // A dropped author leaves no zero entry behind, or it would win the
-        // lowest-pubkey tie-break while holding nothing.
+        // lowest-author-key tie-break while holding nothing.
         assert!(log.per_author.values().all(|count| *count > 0));
     }
 

@@ -989,7 +989,7 @@ fn retain_and_index(
     }
     if class.is_some_and(|cls| cls.chained) {
         let hash = ContentHash::of(canonical);
-        // A second, *different* content hash at an already-seen `(pubkey, seq)`
+        // A second, *different* content hash at an already-seen `(author, seq)`
         // is cryptographic proof of equivocation — surface a `fork` once per
         // offending key (order-independent; we keep both).
         if let Some(seq) = message.seq
