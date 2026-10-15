@@ -1,6 +1,6 @@
 //! The `Message` envelope + its value types.
 //!
-//! - [`MessageBody`] ([`body`]) and [`MessageId`] ([`id`]) — the
+//! - [`MessageBody`] (`body`) and [`MessageId`] (`id`) — the
 //!   validated newtypes the envelope carries.
 //! - [`Message`] (this file) — the JSON wire envelope, its
 //!   [`MessageKind`] / [`PresenceSubtype`] tags, the constructors, and
@@ -960,7 +960,7 @@ impl Message {
     /// The 16-byte dedup / anti-entropy key (`SHA-256(pubkey ‖ id)[..16]`).
     /// Dedup, the message/state logs, and the digest all key on this rather
     /// than the sender-chosen id, so a forged message reusing a victim's id
-    /// cannot suppress the genuine one. See [`identity::dedup_key16`].
+    /// cannot suppress the genuine one. See `identity::dedup_key16`.
     #[must_use]
     pub fn dedup_key(&self) -> DedupKey {
         identity::dedup_key16(self.author_key().as_ref(), &self.id.as_uuid_bytes())

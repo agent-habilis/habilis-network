@@ -1,7 +1,7 @@
 //! The mesh identifier, at two levels:
 //!
 //! - [`MeshId`] — the validated bare `Base58Check` string. Possession proves
-//!   the checksum, version, and full payload structure. Code: [`id`].
+//!   the checksum, version, and full payload structure. Code: `id`.
 //! - [`Mesh`] — the *decoded* structure (32-byte seed + name +
 //!   [`MeshConfig`]), with the `Base58Check` codec (this file). `MeshId`
 //!   is what flows through the wire/CLI; `Mesh` is what `setup_mesh`
@@ -9,7 +9,7 @@
 //!
 //! See `docs/mesh-hash.md` for the full byte layout and rationale.
 //!
-//! Also home to [`MeshName`] ([`name`]), the lookup allowlist ([`lookup`])
+//! Also home to [`MeshName`] (`name`), the lookup allowlist (`lookup`)
 //! carried in the id, and the relay-ladder parsing.
 
 use std::fmt;
@@ -182,9 +182,9 @@ impl Mesh {
     }
 
     /// Build a mesh deterministically from an arbitrary string (the `topic`
-    /// command). The seed is [`crypto::topic_seed`] of the string; the name is
+    /// command). The seed is `crypto::topic_seed` of the string; the name is
     /// the string itself sanitized into a [`MeshName`]
-    /// ([`MeshName::from_topic_string`]). Both are deterministic functions of
+    /// (`MeshName::from_topic_string`). Both are deterministic functions of
     /// the string, so callers passing the same string + config converge on the
     /// same id with zero coordination.
     #[must_use]

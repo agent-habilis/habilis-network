@@ -5,7 +5,7 @@
 //!
 //! Construction: a fresh **ephemeral** X25519 keypair per frame → ECDH with the
 //! recipient's static X25519 public key → the shared secret is run through the
-//! in-tree [`derive_secret`] KDF (SHA-256, domain-separated) into a 32-byte AEAD
+//! in-tree `derive_secret` KDF (SHA-256, domain-separated) into a 32-byte AEAD
 //! key → ChaCha20-Poly1305. The ephemeral public key travels in the envelope, so
 //! the recipient (holding the static secret) can re-derive the shared secret;
 //! nobody else can. The ephemeral key gives forward secrecy; **sender

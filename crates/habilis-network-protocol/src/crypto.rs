@@ -10,9 +10,9 @@
 //! [`crate::mesh`]). Every value the mesh needs is derived
 //! from it in memory — no stored address, no file:
 //!
-//! - the gossip topic ([`derive_topic_id`]),
+//! - the gossip topic (`derive_topic_id`),
 //! - a well-known **rendezvous endpoint** keypair: every joiner can
-//!   compute [`rendezvous_id`] locally and bootstrap from it without
+//!   compute `rendezvous_id` locally and bootstrap from it without
 //!   ever contacting the creator,
 //! - (private meshes only) a deterministic loopback port ladder, since
 //!   `presets::Minimal` has no pkarr/DNS lookup to resolve
