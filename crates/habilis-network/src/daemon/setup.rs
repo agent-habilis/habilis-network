@@ -20,6 +20,7 @@ use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
 
+use super::config::EndpointOwner;
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
 /// What kind of mesh we're setting up — either minting a new one
@@ -662,6 +663,11 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         transports,
         per_peer_gate,
     } = params;
+    let endpoint_owner = if injected.is_none() {
+        EndpointOwner::Engine
+    } else {
+        EndpointOwner::Caller
+    };
     let (max_peers, max_direct) = resolve_caps(max_peers, max_direct);
     // The localhost binding is owned + bound by the caller; the engine only needs
     // the resolved port for the `ready` event. `Some(0)` (ephemeral) is resolved
@@ -780,6 +786,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         sink,
         mint_mesh,
         endpoint,
+        endpoint_owner,
         router,
         max_peers,
         rendezvous_params: rdv,

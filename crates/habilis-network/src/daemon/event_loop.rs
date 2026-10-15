@@ -41,7 +41,7 @@ use super::beacon_arm::{
     offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
     shed_rival_beacon_if_due, verdict_after_known_holders,
 };
-use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
+use super::config::{CoHostPolicy, DriverMode, EndpointOwner, EventLoopConfig};
 use super::ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 #[cfg(feature = "host")]
@@ -83,7 +83,8 @@ pub async fn run<A: NodeDriver>(
         sink,
         mint_mesh,
         endpoint,
-        router: _router,
+        endpoint_owner,
+        router,
         max_peers,
         rendezvous_params,
         rung_rx,
@@ -350,7 +351,7 @@ pub async fn run<A: NodeDriver>(
         });
     }
 
-    // `_router` stays owned in this scope so its accept loop outlives
+    // `router` stays owned in this scope so its accept loop outlives
     // the event loop below (dropping it makes the daemon unreachable
     // to new peers).
     //
@@ -360,7 +361,7 @@ pub async fn run<A: NodeDriver>(
     // size is target-dependent (it crosses the limit on x86_64-linux but
     // not aarch64-macOS), so boxing the single await is more robust than
     // shaving struct fields.
-    Box::pin(event_loop(EventLoop {
+    let result = Box::pin(event_loop(EventLoop {
         sender,
         receiver,
         gossip,
@@ -395,7 +396,13 @@ pub async fn run<A: NodeDriver>(
         path_rx,
         flush_failed_rx,
     }))
-    .await
+    .await;
+    // Dropping an endpoint that was never closed makes iroh log an ERROR and abort
+    // its connections. `Router::shutdown` closes the router and its endpoint.
+    if endpoint_owner == EndpointOwner::Engine {
+        let _ = router.shutdown().await;
+    }
+    result
 }
 
 /// The alive tick: note the gap, broadcast the keepalive presence, then pay a held-back `PeerInfo` flood.

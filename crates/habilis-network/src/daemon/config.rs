@@ -80,6 +80,15 @@ pub enum CoHostPolicy {
 /// the directory in public mode — only one mesh was discoverable).
 pub const DIRECTORY_ADVERTISER_COHOST: CoHostPolicy = CoHostPolicy::EagerProbed;
 
+/// Who bound the endpoint of an [`EventLoopConfig`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EndpointOwner {
+    /// Setup bound it for this node.
+    Engine,
+    /// The caller built it and injected it.
+    Caller,
+}
+
 /// Configuration for the event loop, shared by `create` and `join`.
 /// The driver-specific channels live in [`DriverMode`].
 /// Opaque to consumers: built whole by
@@ -132,6 +141,9 @@ pub struct EventLoopConfig {
     /// joiner holds no issuer key, so it could never mint).
     pub(crate) mint_mesh: Option<Mesh>,
     pub(crate) endpoint: Endpoint,
+    /// Who bound `endpoint`. The loop closes only an endpoint it owns: a shared
+    /// one carries the caller's protocols too.
+    pub(crate) endpoint_owner: EndpointOwner,
     /// iroh router whose accept loop routes inbound gossip
     /// connections. Must be held alive for the whole event loop —
     /// dropping it kills the accept task and makes the daemon
