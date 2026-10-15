@@ -164,11 +164,18 @@ published to a registry; pin it with
   (`StreamSecret`) now move from their wiped buffer into their type whole. Two copies stay, and
   the engine does not control them: the bare array that `iroh`'s `SecretKey::to_bytes()` returns
   (its bytes go into a wiped buffer at once), and the array that `x25519_dalek::StaticSecret::from`
-  takes by value when `Identity::seal_secret` builds its key. No wire change: the golden tests are
-  unchanged.
+  takes by value when `Identity::seal_secret` builds its key. No wire change: the golden tests that
+  existed before did not change, and this change adds new ones (the ticket, the blob ticket, the
+  digest body, and the derivations).
   **Breaking:** `TicketSecret::from_bytes`, `TicketSecret::as_bytes`, `StreamSecret::from_bytes`,
   and `StreamSecret::as_bytes` are no longer `const fn`, because each type holds a `Zeroizing`
   field. A caller in a `const` context must change. No caller in the workspace is const.
+- **Breaking:** `crypto::rendezvous_secret` is no longer public. It was `pub` and took
+  `&[u8; 32]`. It is `pub(crate)` and takes `Keying`, so a consumer that called it must derive the
+  key through the mesh, with `Mesh::rendezvous_secret`.
+- **Behavior:** `ReassemblyStore::ingest` drops a shard that has no author key. Before, an
+  unsigned shard could reassemble. A production node is not affected: the signature gate drops an
+  unsigned message before it reaches the store.
 - **Breaking:** a time span is a `Duration`, not a `u64` with a unit suffix. The wire does not
   change: a wire struct converts at its edge, and the bytes are the same.
   - Every `*_SECS` and `*_MS` constant of `habilis-network-util` (`tuning` and `consts`) is
@@ -190,6 +197,12 @@ published to a registry; pin it with
   - `runtime::tuning` re-exports only the `Duration` names. `POLL_LONG_MIN_CYCLE_MS`,
     `READY_FRESH_SECS`, `READY_MAX_SECS`, `READY_POLL_INTERVAL_MS`, `advertise_interval_secs`,
     `directory_expiry_secs`, and `ping_window_secs` are gone from it.
+  - **Breaking:** `invite::mint` takes `ttl: Option<Duration>` in place of
+    `ttl_secs: Option<u64>`. The path is `habilis_network_protocol::invite::mint`, and
+    `habilis_network::ops` re-exports it as `invite::mint`. `None` and `Some(Duration::ZERO)` mean
+    no expiry. A `ttl` with a part of a second rounds up to the next whole second, because redeem
+    refuses an invite when `now >= expiry`. A `ttl` past the range saturates at `UnixSecs::MAX`.
+    The ticket goldens do not change.
 
   A fractional `Tuning` value (`cohost_grace`, `heal_interval`, the `rival_recheck*` fields, and
   the others) is no longer truncated to whole seconds. The defaults are whole seconds, and so are
@@ -428,6 +441,8 @@ published to a registry; pin it with
   ticket is one, and the wire of the ticket does not change. `clock::unix_secs()` is removed:
   use `UnixSecs::now()`, and `.as_secs()` for the number. A wire struct converts with
   `UnixSecs::from_secs` and `as_secs`, so no byte of a message, a signature or a ticket moves.
+  Adding a `Duration` to a `UnixSecs`, or subtracting one, computes the exact result and clamps
+  it at the ends of the range (`i64::MIN` and `UnixSecs::MAX`).
   `EventLoopState::note_dag` takes the timestamp as a `UnixSecs` as its third argument.
 - **Breaking:** the two endpoints of a multihop node have a type each. `MultihopHandle::app_id()`
   is an `AppId` and `underlay_id()` is an `UnderlayId`. `route_addr`, `refuse_hop_for_test`,
