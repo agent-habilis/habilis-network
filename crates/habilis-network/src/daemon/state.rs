@@ -676,7 +676,7 @@ pub struct EventLoopState {
     /// `(author, seq)` is cryptographic proof of equivocation → a `fork`
     /// event. Order-independent (gossip delivers out of order).
     pub(crate) author_seqs: HashMap<AuthorKey, HashMap<u64, ContentHash>>,
-    /// Author pubkeys already flagged as forked, so one `fork` event fires
+    /// Author keys already flagged as forked, so one `fork` event fires
     /// per offending key rather than per message.
     pub(crate) forked: HashSet<AuthorKey>,
     /// Cross-author DAG (Phase 3): `by_hash` maps each known `Msg`'s content
@@ -1777,9 +1777,9 @@ impl EventLoopState {
         self.last_recovery_at = Some(now);
     }
 
-    /// Record a `Msg`'s `(pubkey, seq, content-hash)` for fork detection.
+    /// Record a `Msg`'s `(author, seq, content-hash)` for fork detection.
     /// Returns `true` **exactly once** per offending key — when a *different*
-    /// content hash is first seen at an already-recorded `(pubkey, seq)`,
+    /// content hash is first seen at an already-recorded `(author, seq)`,
     /// which is cryptographic proof the author equivocated (signed two
     /// conflicting messages at one seq). Order-independent. The caller emits
     /// a `fork` event on `true`; the message itself is still processed.
@@ -1836,13 +1836,13 @@ impl EventLoopState {
         self.dag_heads.remove(hash);
     }
 
-    /// Prune an evicted `Msg`'s `(pubkey, seq)` from the fork-detection
+    /// Prune an evicted `Msg`'s `(author, seq)` from the fork-detection
     /// index, bounding `author_seqs`/`forked` to the message-log window: an
     /// identity whose messages have all aged out drops off both maps (so a
     /// sybil that fires once and vanishes is forgotten).
     ///
     /// Only drops the slot when `hash` is the one we recorded for that
-    /// `(pubkey, seq)`. A fork retains *two* messages at one `(pubkey, seq)`;
+    /// `(author, seq)`. A fork retains *two* messages at one `(author, seq)`;
     /// evicting the twin we did **not** record must not clear the recorded
     /// evidence, or a later anti-entropy resend of the still-retained twin
     /// would re-detect the equivocation as a fresh first sighting.
@@ -3157,7 +3157,7 @@ mod tests {
 
     #[test]
     fn forget_msg_seq_keeps_evidence_when_other_twin_evicted() {
-        // A fork keeps two twins at one (pubkey, seq). Evicting the twin we did
+        // A fork keeps two twins at one (author, seq). Evicting the twin we did
         // NOT record must not clear the recorded slot / fork flag — otherwise a
         // later resend of the still-retained twin re-detects the fork as new.
         let mut state = fresh_state();

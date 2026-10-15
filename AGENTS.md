@@ -212,7 +212,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 
 - Give each role of an id its own type when one node holds two ids of one primitive type. In the multihop transport, `AppId` is the endpoint that the topology and the routes name, and `UnderlayId` is the endpoint that carries the cells and that a forwarder dials. A swap of the two is a compile error.
 - Keep the raw `EndpointId` where it is the id of the iroh layer: `linked_endpoints`, `peer_endpoints`, `path_kinds`, and `route_dialed`. Wrap it with `AppId::new` or `UnderlayId::new` at the call into the multihop transport.
-- Do not write two arguments of one type in a row when a swap changes the result. Name them with a small struct: `Leg { src, dst }`, `Contest { own, rival }`, `GraftTarget { peer, rendezvous }`, and `Frame { dst, src, datagram }`.
+- Do not write two arguments of one type in a row when a swap changes the result. Name them with a small struct: `Leg { src, dst }`, `Contest { own, rival }`, `GraftTarget { peer, rendezvous }`, `RivalFlag { proven, held }`, and `Frame { dst, src, datagram }`.
 
 ### Options and sentinels
 
@@ -276,3 +276,4 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `Leg` | `habilis-network-iroh-multihop-transport/src/graph.rs` | The two ends of a route, `src` and `dst`, both `AppId`. |
 | `Contest` | `habilis-network/src/beacon/mod.rs` | The two holders of one beacon, `own` and `rival`. |
 | `GraftTarget` | `habilis-network/src/transport/probe.rs` | The peer of a graft and the rendezvous it is told apart from. |
+| `RivalFlag` | `habilis-network/src/daemon/state.rs` | What a `PeerInfo` says about the rendezvous: `proven` says that the sender proved its endpoint, and `held` says that it carries the beacon flag. |
