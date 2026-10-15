@@ -114,7 +114,7 @@ impl Seed {
     /// If `label` exceeds 255 bytes; labels are short internal constants.
     #[must_use]
     pub fn derive(&self, label: &[u8]) -> SymmetricKey {
-        SymmetricKey::from_bytes(*derive_secret(&self.0, label))
+        SymmetricKey::from_zeroizing(derive_secret(&self.0, label))
     }
 }
 
@@ -139,6 +139,15 @@ impl SymmetricKey {
         Self(Zeroizing::new(bytes))
     }
 
+    /// Take a buffer that is already wiped on drop, so that no plain copy of
+    /// the secret exists on the way in. Every internal path that holds a secret
+    /// in a [`Zeroizing`] (a derivation, a stretch) comes here, not through
+    /// [`Self::from_bytes`].
+    #[must_use]
+    pub(crate) fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
+        Self(bytes)
+    }
+
     /// The raw bytes, borrowed.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -152,9 +161,12 @@ impl SymmetricKey {
     /// If `label` exceeds 255 bytes; labels are short internal constants.
     #[must_use]
     pub fn derive(&self, label: &[u8]) -> Self {
-        Self::from_bytes(*derive_secret(&self.0, label))
+        Self::from_zeroizing(derive_secret(&self.0, label))
     }
 }
+
+// The only field is a `Zeroizing`.
+impl zeroize::ZeroizeOnDrop for SymmetricKey {}
 
 impl std::fmt::Debug for SymmetricKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -282,7 +294,11 @@ impl std::fmt::Display for Password {
 /// `derive_secret` use and no rainbow table carries over. Cost params are a
 /// wire contract (`util::consts`); ~50-100ms by design, paid once at
 /// create/join.
-fn stretch_password(password: &Password, salt_seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
+fn stretch_password(
+    password: &Password,
+    salt_seed: &[u8; 32],
+    label: &[u8],
+) -> Zeroizing<[u8; 32]> {
     let params = argon2::Params::new(
         PASSWORD_KDF_M_COST_KIB,
         PASSWORD_KDF_T_COST,
@@ -296,7 +312,7 @@ fn stretch_password(password: &Password, salt_seed: &[u8; 32], label: &[u8]) -> 
     argon
         .hash_password_into(password.as_str().as_bytes(), &*salt, &mut *out)
         .expect("32-byte salt and output are valid argon2 lengths");
-    *out
+    out
 }
 
 /// The stretched key for a passworded mesh: every derivation (topic,
@@ -304,7 +320,7 @@ fn stretch_password(password: &Password, salt_seed: &[u8; 32], label: &[u8]) -> 
 /// holding the mesh id without the password computes nothing reachable.
 #[must_use]
 pub(crate) fn stretch_mesh_password(password: &Password, seed: &Seed) -> SymmetricKey {
-    SymmetricKey::from_bytes(stretch_password(password, seed.as_bytes(), b"password"))
+    SymmetricKey::from_zeroizing(stretch_password(password, seed.as_bytes(), b"password"))
 }
 
 /// The 32-byte key that wraps an invite ticket's root secret when the mesh's
@@ -317,7 +333,7 @@ pub(crate) fn stretch_mesh_password(password: &Password, seed: &Seed) -> Symmetr
 /// recover it — bullet: a leaked invite still needs the password.
 #[must_use]
 pub(crate) fn invite_wrap_key(password: &Password, salt: &Seed) -> SymmetricKey {
-    SymmetricKey::from_bytes(stretch_password(
+    SymmetricKey::from_zeroizing(stretch_password(
         password,
         salt.as_bytes(),
         b"invite-ticket",
@@ -357,31 +373,32 @@ pub(crate) fn password_verifier(key: &SymmetricKey) -> [u8; PASSWORD_VERIFIER_LE
 /// let _ = TicketAuth::blob(&raw, None);
 /// ```
 #[derive(Clone)]
-pub struct TicketSecret([u8; 32]);
+pub struct TicketSecret(Zeroizing<[u8; 32]>);
 
 impl TicketSecret {
-    /// Wrap 32 raw bytes.
+    /// Wrap 32 raw bytes. The array passed in is a copy that the caller still
+    /// holds: keep it in a [`Zeroizing`] when it is a secret.
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Take a buffer that is already wiped on drop, so that no plain copy of
+    /// the secret exists on the way in (see [`SymmetricKey::from_zeroizing`]).
+    #[must_use]
+    pub(crate) fn from_zeroizing(bytes: Zeroizing<[u8; 32]>) -> Self {
         Self(bytes)
     }
 
     /// The raw bytes, borrowed.
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
-
-    fn wipe(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.0);
-    }
 }
 
-impl Drop for TicketSecret {
-    fn drop(&mut self) {
-        self.wipe();
-    }
-}
+// The only field is a `Zeroizing`.
+impl zeroize::ZeroizeOnDrop for TicketSecret {}
 
 impl std::fmt::Debug for TicketSecret {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -420,7 +437,7 @@ impl TicketAuth {
     pub fn derive(secret: &TicketSecret, password: Option<&Password>, label: &[u8]) -> Self {
         match password {
             Some(password) => Self {
-                token: TicketSecret::from_bytes(stretch_password(
+                token: TicketSecret::from_zeroizing(stretch_password(
                     password,
                     secret.as_bytes(),
                     label,
@@ -710,6 +727,25 @@ mod password_tests {
         );
     }
 
+    /// The stretched password key is secret material, so the stretch hands it on in
+    /// a wiped buffer and each secret type takes that buffer whole: no plain
+    /// `[u8; 32]` copy of it exists on the way. A wipe cannot be observed at run
+    /// time (`unsafe_code` is denied), so the types carry the test: it does not
+    /// compile if `stretch_password` returns a bare array, or if a secret type has
+    /// no constructor for a wiped buffer.
+    #[test]
+    fn the_stretched_key_moves_from_its_wiped_buffer_into_a_secret_type() {
+        use super::{SymmetricKey, TicketSecret, stretch_password};
+        use zeroize::Zeroizing;
+
+        let stretched: Zeroizing<[u8; 32]> = stretch_password(&pw("hunter2"), &SEED_A, b"password");
+        assert_ne!(*stretched, [0u8; 32], "the stretch fills the buffer");
+        let key = SymmetricKey::from_zeroizing(stretched.clone());
+        let secret = TicketSecret::from_zeroizing(stretched.clone());
+        assert_eq!(key.as_bytes(), &*stretched);
+        assert_eq!(secret.as_bytes(), &*stretched);
+    }
+
     fn hex(bytes: &[u8]) -> String {
         use std::fmt::Write as _;
         bytes.iter().fold(String::new(), |mut out, byte| {
@@ -726,13 +762,15 @@ mod password_tests {
         assert_eq!(secret.as_bytes(), &[9u8; 32]);
     }
 
-    // `unsafe_code` is denied, so a test cannot read the freed bytes: it
-    // checks `wipe`, which `drop` calls.
+    // `unsafe_code` is denied, so a test cannot read the freed bytes: the types
+    // carry the test. A secret type holds its bytes in a `Zeroizing`, which wipes
+    // them on drop, and says so with the `ZeroizeOnDrop` marker. This does not
+    // compile if a field stops wiping.
     #[test]
-    fn wipe_zeroes_the_secret() {
-        let mut secret = super::TicketSecret::from_bytes([9u8; 32]);
-        secret.wipe();
-        assert_eq!(secret.as_bytes(), &[0u8; 32]);
+    fn the_secret_types_wipe_on_drop() {
+        fn wipes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        wipes_on_drop::<super::TicketSecret>();
+        wipes_on_drop::<super::SymmetricKey>();
     }
 
     #[test]
