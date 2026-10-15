@@ -232,7 +232,7 @@ impl InviteTicket {
             bail!("invite root is not 32 bytes");
         }
         bytes.copy_from_slice(&raw);
-        Ok(SymmetricKey::from_bytes(*bytes))
+        Ok(SymmetricKey::from_zeroizing(bytes))
     }
 }
 
