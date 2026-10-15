@@ -79,31 +79,34 @@ impl fmt::Debug for StreamId {
 /// [`ct_eq`] on [`Self::as_bytes`]. Its bytes are wiped on drop (best-effort: a
 /// copy that a caller made from [`Self::as_bytes`] is not tracked).
 #[derive(Clone)]
-pub struct StreamSecret([u8; SECRET_LEN]);
+pub struct StreamSecret(Zeroizing<[u8; SECRET_LEN]>);
 
 impl StreamSecret {
-    /// Wrap the 32 bytes of a secret.
+    /// Wrap the 32 bytes of a secret. The array passed in is a copy that the
+    /// caller still holds: keep it in a [`Zeroizing`] when it is a secret.
     #[must_use]
-    pub const fn from_bytes(bytes: [u8; SECRET_LEN]) -> Self {
+    pub fn from_bytes(bytes: [u8; SECRET_LEN]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Take a buffer that is already wiped on drop, whole, so that the code
+    /// makes no plain copy of the secret on the way in. This is the constructor
+    /// for a secret that is already in a [`Zeroizing`] (bytes read off a stream,
+    /// a random draw). [`Self::from_bytes`] stays for raw input at an edge.
+    #[must_use]
+    pub fn from_zeroizing(bytes: Zeroizing<[u8; SECRET_LEN]>) -> Self {
         Self(bytes)
     }
 
     /// The raw bytes, borrowed.
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; SECRET_LEN] {
+    pub fn as_bytes(&self) -> &[u8; SECRET_LEN] {
         &self.0
     }
-
-    fn wipe(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.0);
-    }
 }
 
-impl Drop for StreamSecret {
-    fn drop(&mut self) {
-        self.wipe();
-    }
-}
+// The only field is a `Zeroizing`.
+impl zeroize::ZeroizeOnDrop for StreamSecret {}
 
 impl fmt::Debug for StreamSecret {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -330,13 +333,18 @@ mod tests {
         );
     }
 
-    // `unsafe_code` is denied, so a test cannot read the freed bytes: it
-    // checks `wipe`, which `drop` calls.
+    // `unsafe_code` is denied, so a test cannot read the freed bytes: it pins the
+    // type of the field instead. A `Zeroizing` buffer wipes on drop.
     #[test]
-    fn wipe_zeroes_the_secret() {
-        let mut secret = StreamSecret::from_bytes([9; SECRET_LEN]);
-        secret.wipe();
-        assert_eq!(secret.as_bytes(), &[0; SECRET_LEN]);
+    fn the_secret_is_held_in_a_wiped_buffer() {
+        let secret = StreamSecret::from_bytes([9; SECRET_LEN]);
+        let _: &Zeroizing<[u8; SECRET_LEN]> = &secret.0;
+    }
+
+    #[test]
+    fn from_zeroizing_keeps_the_bytes() {
+        let secret = StreamSecret::from_zeroizing(Zeroizing::new([4; SECRET_LEN]));
+        assert_eq!(secret.as_bytes(), &[4; SECRET_LEN]);
     }
 
     #[test]

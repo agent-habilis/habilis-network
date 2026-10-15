@@ -167,7 +167,10 @@ async fn read_header(conn: &Connection) -> Result<(SendStream, (StreamId, Stream
     recv.read_exact(&mut *secret).await?;
     Ok((
         send,
-        (StreamId::from_bytes(id), StreamSecret::from_bytes(*secret)),
+        (
+            StreamId::from_bytes(id),
+            StreamSecret::from_zeroizing(secret),
+        ),
     ))
 }
 
