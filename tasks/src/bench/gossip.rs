@@ -158,6 +158,8 @@ async fn start_flood() -> Result<Flood, String> {
             .relay_mode(RelayMode::Disabled)
             .clear_ip_transports()
             .add_custom_transport(handles[index].custom_transport())
+            // The endpoint carries the cells and no multihop node sits above it, so
+            // its key is the underlay id, not an application id.
             .path_selector(underlay_path_selector(UnderlayId::new(key.public())))
             .address_lookup(lookups[index].clone());
         for bind in binds {
@@ -315,6 +317,8 @@ async fn endpoint(key: &SecretKey, handle: &GossipHandle) -> Result<Endpoint, St
         .bind_addr(loopback)
         .map_err(|error| format!("bind address refused: {error:#}"))?
         .add_custom_transport(handle.custom_transport())
+        // Same as the pair above: the endpoint carries the cells, so its key is the
+        // underlay id.
         .path_selector(underlay_path_selector(UnderlayId::new(key.public())))
         .bind()
         .await
