@@ -200,7 +200,7 @@ impl BlobServer {
         }
         let mut salt_bytes = Zeroizing::new([0u8; SECRET_LEN]);
         rand::rng().fill_bytes(&mut *salt_bytes);
-        let salt = TicketSecret::from_bytes(*salt_bytes);
+        let salt = TicketSecret::from_zeroizing(salt_bytes);
         let compare = match self.password.clone() {
             Some(password) => {
                 // ~100ms of Argon2id off the async worker (mirrors mesh join).
@@ -344,7 +344,7 @@ async fn serve_stream(
     let hash = BlobDigest::from_bytes(hash_bytes);
     let mut token_bytes = Zeroizing::new([0u8; SECRET_LEN]);
     token_bytes.copy_from_slice(&request[HASH_LEN..]);
-    let token = TicketSecret::from_bytes(*token_bytes);
+    let token = TicketSecret::from_zeroizing(token_bytes);
 
     // Resolve under the lock, then release it before streaming from disk.
     let served = {

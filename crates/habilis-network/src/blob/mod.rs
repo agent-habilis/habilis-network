@@ -183,6 +183,21 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    /// A secret that is already in a wiped buffer (the blob salt, the token read off
+    /// the wire) moves into its type whole, through the constructor that takes the
+    /// buffer, with no plain `[u8; 32]` copy on the way. This does not compile
+    /// outside the protocol crate unless that constructor is public.
+    #[test]
+    fn a_secret_in_a_wiped_buffer_moves_into_its_type_whole() {
+        use crate::protocol::crypto::{SymmetricKey, TicketSecret};
+        use zeroize::Zeroizing;
+
+        let secret = TicketSecret::from_zeroizing(Zeroizing::new([5u8; super::SECRET_LEN]));
+        assert_eq!(secret.as_bytes(), &[5u8; super::SECRET_LEN]);
+        let key = SymmetricKey::from_zeroizing(Zeroizing::new([6u8; 32]));
+        assert_eq!(key.as_bytes(), &[6u8; 32]);
+    }
+
     /// A throwaway file under the OS temp dir holding `bytes`; the caller drops it.
     fn temp_file(bytes: &[u8]) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
