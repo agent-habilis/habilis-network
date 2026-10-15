@@ -277,6 +277,38 @@ mod tests {
             .expect("directory mesh id is valid")
     }
 
+    // The golden id, topic and rendezvous of the `global` directory. They equal what the code
+    // before the newtype refactor (795c4f88) gives. The rendezvous holds for both lookups, and the
+    // topic differs, because only the topic mixes in the config.
+    #[test]
+    fn golden_global_directory_is_pinned() {
+        let name = directory("global");
+        let public = directory_mesh(&name, LookupOpts::public_preset());
+        let loopback = directory_mesh(&name, LookupOpts::loopback());
+        assert_eq!(
+            public.to_string(),
+            "6V2BWDBYyzZ2JSgSeNnSuaDLLyeWXYsCMx51Rrx6uAahPifGmAhw4oGrZ7X4fAAoK"
+        );
+        assert_eq!(
+            format!("{:?}", public.topic_id()),
+            "TopicId(0ac3690b9968f8fd7f2183337984af2629df292a94165f0405135ed001db0dc7)"
+        );
+        assert_eq!(
+            loopback.to_string(),
+            "6V2BWDBYyzZ2JSgSeNnSuaDLLyeWXYsCMx51Rrx6uAahPifGmAhw4oGrZ42xQmkfY"
+        );
+        assert_eq!(
+            format!("{:?}", loopback.topic_id()),
+            "TopicId(14a8001b57bb1cbcc7b94f936c71cb94c2ab39a8c9b0423dbad0da809f93db8f)"
+        );
+        for mesh in [&public, &loopback] {
+            assert_eq!(
+                mesh.rendezvous_id().to_string(),
+                "947e089a2d95674c53b0c9fd4b3a4abd2d58480bda7fd18e268438d4c56d7cbc"
+            );
+        }
+    }
+
     #[test]
     fn directory_is_deterministic_per_name() {
         let one = directory_mesh(&directory("global"), LookupOpts::public_preset());

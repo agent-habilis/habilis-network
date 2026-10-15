@@ -1,5 +1,5 @@
 use super::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy};
-use crate::crypto::Seed;
+use crate::crypto::{Password, Seed};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
 
 fn dummy_seed() -> Seed {
@@ -243,6 +243,31 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     assert_eq!(
         format!("{topic:?}"),
         "TopicId(1898d0078596295e6f69e42e9284e139d69921f2db46026b16611a924e65bd1d)"
+    );
+}
+
+// The golden derivations of a passworded mesh, for a fixed seed and password. They equal what the
+// code before the newtype refactor (795c4f88) gives: the password key replaces the seed in every
+// derivation, and none of the outputs moved.
+#[test]
+fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
+    let mut mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset());
+    mesh.set_password(&Password::new("hunter2".to_owned()));
+    assert_eq!(
+        mesh.to_string(),
+        "Xts3MujFJ6LPpDwNyubQmyofWgxZkrhDTx3ohPc8iYvUxpTMyBg1yWJBJ39x2RSLzPzUV1nGDdx7YL5nX41SP"
+    );
+    assert_eq!(
+        format!("{:?}", mesh.topic_id()),
+        "TopicId(47afc8fd71963d7bcbc78dac9588dbb142b4ae79013489ff3d0f09361479a322)"
+    );
+    assert_eq!(
+        mesh.rendezvous_id().to_string(),
+        "0114a2e8ae14744cb2573befc064f196108e6a403eadc32a51b752e22be3517a"
+    );
+    assert_eq!(
+        mesh.rendezvous_ports(),
+        [9654, 21191, 64941, 55185, 63449, 5703, 10814, 29199]
     );
 }
 
