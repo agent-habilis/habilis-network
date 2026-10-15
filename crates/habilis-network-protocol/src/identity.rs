@@ -72,9 +72,10 @@ impl Identity {
     /// so the signing key and the encryption key never coincide (no key reuse).
     #[must_use]
     pub fn seal_secret(&self) -> x25519_dalek::StaticSecret {
-        // The Ed25519 secret goes through a key that wipes itself on drop, not a plain array
-        // left on the stack by every seal and unseal.
-        let identity_seed = SymmetricKey::from_bytes(self.secret.to_bytes());
+        // iroh's `to_bytes()` returns a bare array: that one stack copy is not wiped and we do
+        // not control it. From there the bytes sit in a buffer that wipes itself on drop.
+        let identity_seed =
+            SymmetricKey::from_zeroizing(zeroize::Zeroizing::new(self.secret.to_bytes()));
         x25519_dalek::StaticSecret::from(*identity_seed.derive(SEAL_ENC_LABEL).as_bytes())
     }
 
