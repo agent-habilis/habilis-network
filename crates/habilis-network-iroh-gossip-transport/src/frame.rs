@@ -29,7 +29,8 @@ pub const MAX_FRAME_LEN: usize = 3840;
 /// The largest datagram that fits a frame.
 pub const MAX_DATAGRAM_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 
-/// A frame that was read: the two ends and the datagram, borrowed from the input.
+/// A frame: the two ends and the datagram. A decode borrows the datagram from the
+/// input, and an encode writes this value out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame<'a> {
     pub dst: EndpointId,
