@@ -195,7 +195,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 
 - Write the type by hand in the shape of `TopicId`. Do not use a macro, except the existing `string_newtype!` for validated strings.
 - Make the field private.
-- Give the type a `const fn from_bytes` or a `const fn new`, where the field allows it. A `SymmetricKey` and a `TicketSecret` cannot be const, because each holds a `Zeroizing` value. Their `from_bytes` and `as_bytes` are not `const fn`.
+- Give the type a `const fn from_bytes` or a `const fn new`, where the field allows it. A `SymmetricKey`, a `TicketSecret`, and a `StreamSecret` cannot be const, because each holds a `Zeroizing` value. Their `from_bytes` and `as_bytes` are not `const fn`.
 - Mark each getter `#[must_use]`.
 - Add no dependency for a newtype.
 
@@ -206,7 +206,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 - Compare two secrets with `ct_eq` on `as_bytes`.
 - Make a secret type wipe its bytes on drop.
 - Hold a raw secret buffer in `Zeroizing` from its creation. A buffer that is wiped by hand leaks on an early return.
-- Move a secret that is already in `Zeroizing` into its type with `from_zeroizing`. Never copy it through a plain array. Use `from_bytes` only for raw input at an edge.
+- Move a secret that is already in `Zeroizing` into its type with `from_zeroizing`. Never copy it through a plain array. Use `from_bytes` only for raw input at an edge. The wipe is best-effort: `from_zeroizing` removes the copies that we write, and a move can still leave bytes on the stack.
 
 ### Roles and argument pairs
 
