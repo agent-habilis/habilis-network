@@ -371,7 +371,7 @@ mod tests {
             (Duration::from_millis(999), 1),
             (Duration::from_secs(1), 1),
             (Duration::from_millis(1_500), 2),
-            (Duration::from_secs(60) + Duration::from_nanos(1), 61),
+            (Duration::from_mins(1) + Duration::from_nanos(1), 61),
         ] {
             let before = UnixSecs::now();
             let ticket = minted(&mesh, Some(ttl), None);
