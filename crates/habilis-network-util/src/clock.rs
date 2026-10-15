@@ -78,6 +78,12 @@ impl UnixSecs {
         u64::try_from(self.0.saturating_sub(earlier.0)).map_or(Duration::ZERO, Duration::from_secs)
     }
 
+    /// The point at the exact count `secs`, or the nearest end of the range. An `i128` holds the
+    /// sum of an `i64` count and a `u64` span, so the clamp is the only place that loses range.
+    fn clamped(secs: i128) -> Self {
+        Self(i64::try_from(secs).unwrap_or(if secs < 0 { i64::MIN } else { i64::MAX }))
+    }
+
     /// The 8 little-endian bytes of the count: what a signature and an invite carry.
     #[must_use]
     pub const fn to_le_bytes(self) -> [u8; 8] {
@@ -96,10 +102,7 @@ impl std::ops::Add<Duration> for UnixSecs {
     type Output = Self;
 
     fn add(self, rhs: Duration) -> Self {
-        Self(
-            self.0
-                .saturating_add(i64::try_from(rhs.as_secs()).unwrap_or(i64::MAX)),
-        )
+        Self::clamped(i128::from(self.0) + i128::from(rhs.as_secs()))
     }
 }
 
@@ -108,10 +111,7 @@ impl std::ops::Sub<Duration> for UnixSecs {
     type Output = Self;
 
     fn sub(self, rhs: Duration) -> Self {
-        Self(
-            self.0
-                .saturating_sub(i64::try_from(rhs.as_secs()).unwrap_or(i64::MAX)),
-        )
+        Self::clamped(i128::from(self.0) - i128::from(rhs.as_secs()))
     }
 }
 
@@ -174,6 +174,20 @@ mod unix_secs_tests {
         );
         assert_eq!(
             UnixSecs::from_secs(i64::MIN + 1) - Duration::from_secs(u64::MAX),
+            UnixSecs::from_secs(i64::MIN)
+        );
+    }
+
+    /// The sum and the difference are exact, then clamped: a span of any `u64` seconds moves a
+    /// point of any count to the end of the range, never to a point short of it.
+    #[test]
+    fn a_span_past_the_range_saturates_at_the_end_of_the_range() {
+        let span = Duration::from_secs(u64::MAX);
+        assert_eq!(UnixSecs::ZERO - span, UnixSecs::from_secs(i64::MIN));
+        assert_eq!(UnixSecs::from_secs(i64::MIN) + span, UnixSecs::MAX);
+        assert_eq!(UnixSecs::MAX - span, UnixSecs::from_secs(i64::MIN));
+        assert_eq!(
+            UnixSecs::from_secs(i64::MIN) - span,
             UnixSecs::from_secs(i64::MIN)
         );
     }
