@@ -233,6 +233,11 @@ impl<A: NodeDriver + 'static> Node<A> {
     /// [`NODE_LEAVE_SECS`]. On
     /// timeout returns `Ok(())` and the task detaches.
     ///
+    /// The loop closes the endpoint that setup bound for this node, with its
+    /// router and multi-hop underlay. It does not close an endpoint that the
+    /// caller injected (`SetupParams::endpoint`); that one stays open for the
+    /// caller's own protocols, and the caller closes it.
+    ///
     /// # Errors
     /// Returns an error if the event-loop task panicked or returned an error.
     pub async fn leave(mut self) -> anyhow::Result<()> {

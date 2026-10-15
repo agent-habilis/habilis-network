@@ -182,6 +182,11 @@ pub async fn run<A: NodeDriver>(
         started,
     );
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
+    // The loop closes the underlay only when it built it; an injected handle is the caller's.
+    #[cfg(feature = "multihop")]
+    let owned_multihop = multihop
+        .clone()
+        .filter(|_| endpoint_owner == EndpointOwner::Engine);
     #[cfg(feature = "multihop")]
     {
         state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
@@ -400,7 +405,15 @@ pub async fn run<A: NodeDriver>(
     // Dropping an endpoint that was never closed makes iroh log an ERROR and abort
     // its connections. `Router::shutdown` closes the router and its endpoint.
     if endpoint_owner == EndpointOwner::Engine {
-        let _ = router.shutdown().await;
+        // It fails only when a protocol handler panicked, which the task has
+        // already reported; the loop is ending either way.
+        if let Err(error) = router.shutdown().await {
+            tracing::debug!(%error, "the router failed while it shut down");
+        }
+        #[cfg(feature = "multihop")]
+        if let Some(handle) = owned_multihop {
+            handle.close().await;
+        }
     }
     result
 }

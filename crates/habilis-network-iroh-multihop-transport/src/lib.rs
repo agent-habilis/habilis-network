@@ -193,8 +193,9 @@ struct HandleInner {
     self_id: EndpointId,
     underlay: Endpoint,
     transport: Arc<MultihopTransport>,
-    // Kept alive so the underlay's `FORWARD_ALPN` accept loop keeps running.
-    _router: iroh::protocol::Router,
+    // Kept alive so the underlay's `FORWARD_ALPN` accept loop keeps running;
+    // `close` shuts it down.
+    router: iroh::protocol::Router,
 }
 
 impl MultihopHandle {
@@ -288,7 +289,7 @@ impl MultihopHandle {
                 self_id: app_id,
                 underlay,
                 transport,
-                _router: router,
+                router,
             }),
         })
     }
@@ -409,6 +410,22 @@ impl MultihopHandle {
     #[must_use]
     pub fn stuck_hops(&self) -> Vec<EndpointId> {
         self.inner.forwarder.stuck_hops()
+    }
+
+    /// Close the underlay: stop its accept loop and close its endpoint, so iroh
+    /// does not log an ERROR for an endpoint dropped without a close. Safe to call
+    /// again and from any clone of the handle: a second call returns at once.
+    /// Close only a handle that the caller owns; every clone shares this underlay.
+    pub async fn close(&self) {
+        if let Err(error) = self.inner.router.shutdown().await {
+            tracing::debug!(%error, "the underlay router failed while it shut down");
+        }
+    }
+
+    /// Whether [`close`](Self::close) has closed the underlay endpoint.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.underlay.is_closed()
     }
 
     /// The id of this node's underlay endpoint: the key derived by

@@ -1512,6 +1512,74 @@ mod tests {
             "the startup rung probe's endpoint reached its drop open:\n{errors}"
         );
     }
+
+    /// Spawn a node on `config`, give back the endpoint and the underlay handle it was
+    /// set up with, and leave. The clones keep the answer readable after the node is gone.
+    async fn leave_and_keep_handles(
+        config: super::EventLoopConfig,
+    ) -> (
+        iroh::Endpoint,
+        Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
+    ) {
+        let endpoint = config.endpoint.clone();
+        let underlay = config.multihop.clone();
+        let (inbound_tx, _inbound_rx) = tokio::sync::mpsc::channel(1);
+        let node = crate::daemon::node::Node::spawn(
+            config,
+            crate::membership::MembershipApp::new(inbound_tx),
+            None,
+            false,
+        );
+        node.leave().await.expect("the node leaves");
+        (endpoint, underlay)
+    }
+
+    // The node closes what its setup bound, so iroh has nothing to log as dropped.
+    #[tokio::test]
+    async fn leave_closes_the_endpoint_and_the_underlay_that_setup_bound() {
+        let opts = crate::membership::Opts::default();
+        let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
+        let config = super::setup_mesh(
+            kind,
+            super::SetupParams {
+                author,
+                max_peers: 8,
+                max_direct: 0,
+                runtime_base: None,
+                state_file: None,
+                sink: std::sync::Arc::new(crate::embed::SilentSink),
+                endpoint: None,
+                protocols: Vec::new(),
+                transports: crate::lookup::TransportOpts::default(),
+                per_peer_gate: None,
+                cohost: None,
+                live_count: None,
+            },
+        )
+        .await
+        .expect("a loopback mesh sets up");
+        let (endpoint, underlay) = leave_and_keep_handles(config).await;
+        assert!(endpoint.is_closed(), "the endpoint is closed after leave");
+        assert!(
+            underlay.expect("the default list has multihop").is_closed(),
+            "the underlay is closed after leave"
+        );
+    }
+
+    // An injected endpoint is the caller's, and it may carry protocols of the caller.
+    #[tokio::test]
+    async fn leave_keeps_an_injected_endpoint_and_its_underlay_open() {
+        let injected = injected(false).await;
+        let config = setup_with(Vec::new(), injected)
+            .await
+            .expect("a loopback mesh sets up");
+        let (endpoint, underlay) = leave_and_keep_handles(config).await;
+        assert!(!endpoint.is_closed(), "the caller's endpoint stays open");
+        let underlay = underlay.expect("the injected handle is used");
+        assert!(!underlay.is_closed(), "the caller's underlay stays open");
+        underlay.close().await;
+        endpoint.close().await;
+    }
 }
 
 // The browser build of `build_member_endpoint` is the one that runs without `host`. A native test
