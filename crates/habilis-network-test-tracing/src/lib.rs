@@ -22,9 +22,16 @@ use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{Layer, fmt as tracing_fmt};
 
-static INSTALLED: OnceLock<bool> = OnceLock::new();
+static INSTALLED: OnceLock<Mode> = OnceLock::new();
 static LIVE: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
 static CAPTURED: Mutex<String> = Mutex::new(String::new());
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Stderr,
+    Capture,
+    Writer,
+}
 
 /// Installs the subscriber on the first call and returns the guard of the
 /// calling test.
@@ -37,10 +44,10 @@ static CAPTURED: Mutex<String> = Mutex::new(String::new());
 ///
 /// Panics if another global subscriber is already installed, because the
 /// guard would never see an event. Panics if an earlier call in this binary
-/// was [`init_capturing`].
+/// was [`init_capturing`] or [`init_with_writer`].
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init() -> Guard {
-    install(false, "");
+    install(Mode::Stderr, "", io::stderr);
     new_guard()
 }
 
@@ -51,47 +58,57 @@ pub fn init() -> Guard {
 ///
 /// # Panics
 ///
-/// Panics under the same conditions as [`init`], and if an earlier call in
-/// this binary was [`init`].
+/// Panics under the same conditions as [`init`].
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init_capturing(default_directives: &str) -> Guard {
-    install(true, default_directives);
+    install(Mode::Capture, default_directives, Capture);
+    new_guard()
+}
+
+/// Like [`init_capturing`], but the events go to `writer`, for a test that
+/// keeps its log in a place of its own. Only the first call of the binary
+/// installs `writer`.
+///
+/// # Panics
+///
+/// Panics under the same conditions as [`init`].
+#[must_use = "the guard fails the test when it drops; bind it to a local"]
+pub fn init_with_writer<W>(default_directives: &str, writer: W) -> Guard
+where
+    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+{
+    install(Mode::Writer, default_directives, writer);
     new_guard()
 }
 
 /// The log text that [`init_capturing`] collected, for the whole binary. Empty
-/// after [`init`].
+/// after the other entry points.
 #[must_use]
 pub fn captured_logs() -> String {
     lock(&CAPTURED).clone()
 }
 
-fn install(capturing: bool, default_directives: &str) {
+fn install<W>(mode: Mode, default_directives: &str, writer: W)
+where
+    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+{
     let installed = *INSTALLED.get_or_init(|| {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(default_directives));
-        let result = if capturing {
-            let print = tracing_fmt::layer()
-                .with_ansi(false)
-                .with_writer(Capture)
-                .with_filter(filter);
-            tracing_subscriber::registry()
-                .with(print)
-                .with(Catch.with_filter(LevelFilter::WARN))
-                .try_init()
-        } else {
-            let print = tracing_fmt::layer().with_filter(filter);
-            tracing_subscriber::registry()
-                .with(print)
-                .with(Catch.with_filter(LevelFilter::WARN))
-                .try_init()
-        };
-        result.expect("another global tracing subscriber is installed");
-        capturing
+        let print = tracing_fmt::layer()
+            .with_ansi(mode == Mode::Stderr)
+            .with_writer(writer)
+            .with_filter(filter);
+        tracing_subscriber::registry()
+            .with(print)
+            .with(Catch.with_filter(LevelFilter::WARN))
+            .try_init()
+            .expect("another global tracing subscriber is installed");
+        mode
     });
     assert_eq!(
-        installed, capturing,
-        "init and init_capturing in the same test binary"
+        installed, mode,
+        "two of init, init_capturing and init_with_writer in the same test binary"
     );
 }
 
