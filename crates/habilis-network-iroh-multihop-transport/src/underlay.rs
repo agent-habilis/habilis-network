@@ -51,7 +51,7 @@ const MAX_WRITERS: usize = 64;
 /// the only bound, and it multiplies by the writer count instead of capping it.
 const FORWARD_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 
-/// Hops without a vector that get a warning of their own. The ids come off the wire, so the set
+/// Hops without a vector that get a log line of their own. The ids come off the wire, so the set
 /// that remembers them has a ceiling.
 const UNRESOLVED_SEEN_CAP: usize = 128;
 
@@ -442,6 +442,9 @@ impl Forwarder {
     /// vector names the same underlay endpoint as the hop. A hop without a vector is dialed
     /// by its id alone, never at an address that a cell carries, and counted: it may still be reachable by what iroh
     /// knows of the id, and if it is not, the cells are lost like any other.
+    ///
+    /// The case is normal, so it is logged at debug: a reply goes back along the reversed route
+    /// of a cell, and the sender's first link-vector arrives some 15 s after it starts.
     fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
         let known = self
             .topology
@@ -452,7 +455,7 @@ impl Forwarder {
         known.unwrap_or_else(|| {
             let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
             if self.first_without_vector(hop.underlay_id, total) {
-                tracing::warn!(
+                tracing::debug!(
                     total,
                     hop = %hop.underlay_id.fmt_short(),
                     app_id = %hop.app_id.fmt_short(),
@@ -463,9 +466,9 @@ impl Forwarder {
         })
     }
 
-    /// Whether a warning is due for the hop `underlay_id`, found without a vector for the
+    /// Whether a log line is due for the hop `underlay_id`, found without a vector for the
     /// `total`-th time: one per distinct hop. The ids come off the wire, so the set that
-    /// remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`] hops the rule is one warning in 256.
+    /// remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`] hops the rule is one line in 256.
     fn first_without_vector(&self, underlay_id: EndpointId, total: u64) -> bool {
         let mut seen = self
             .unresolved_seen
@@ -874,8 +877,8 @@ impl ProtocolHandler for ForwardAcceptor {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, RwLock, TransportAddr,
-        UNRESOLVED_SEEN_CAP,
+        Arc, AtomicUsize, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, RwLock,
+        TransportAddr, UNRESOLVED_SEEN_CAP,
     };
     use crate::addr::{Route, RouteHop};
     use crate::test_support::relay_server;
@@ -1271,8 +1274,43 @@ mod tests {
         assert_eq!(forwarder.unresolved_hops(), 1);
     }
 
+    /// Counts the WARN and ERROR events of the thread that installs it. The tests of this module
+    /// run in parallel, and many of them drop an endpoint without a close, so a subscriber that
+    /// is global to the binary would see the events of the other tests.
+    struct CountsWarnings(Arc<AtomicUsize>);
+
+    impl tracing::Subscriber for CountsWarnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() <= tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
     #[tokio::test]
-    async fn a_hop_without_a_vector_is_warned_about_once_each() {
+    async fn a_hop_without_a_vector_is_not_a_warning() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&stranger(140));
+        });
+        assert_eq!(warnings.load(Ordering::Relaxed), 0);
+        assert_eq!(forwarder.unresolved_hops(), 1, "the hop was counted");
+        forwarder.underlay.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_hop_without_a_vector_is_logged_once_each() {
         let (forwarder, _app, _received) = forwarder().await;
         let (one, other) = (stranger(130).underlay_id, stranger(131).underlay_id);
         assert!(forwarder.first_without_vector(one, 1), "the first hop");
@@ -1281,7 +1319,7 @@ mod tests {
             "the same hop again"
         );
         assert!(forwarder.first_without_vector(other, 3), "another hop");
-        // Past the ceiling the rule is one warning in 256.
+        // Past the ceiling the rule is one line in 256.
         for seed in 0..u8::try_from(UNRESOLVED_SEEN_CAP).expect("fits") {
             let id = SecretKey::from_bytes(&[seed.wrapping_add(1); 32]).public();
             forwarder.first_without_vector(id, 4);
