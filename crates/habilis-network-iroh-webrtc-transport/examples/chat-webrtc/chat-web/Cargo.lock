@@ -994,6 +994,7 @@ dependencies = [
  "iroh",
  "iroh-base",
  "js-sys",
+ "n0-future",
  "n0-watcher",
  "noq-udp",
  "serde",
