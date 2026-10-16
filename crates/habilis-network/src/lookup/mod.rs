@@ -1329,19 +1329,21 @@ pub(crate) fn build_mesh(
         .as_ref()
         .filter(|_| needs_session)
         .map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
-    let mut builder = Router::builder(endpoint).accept(
-        GOSSIP_ALPN,
-        crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport, session_gate),
-    );
+    // Every router serves the nudge, the beacon's too: a session that attaches to the rendezvous
+    // is followed by a nudge, and it does its work only when the connect completes.
+    let mut builder = Router::builder(endpoint)
+        .accept(
+            GOSSIP_ALPN,
+            crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport, session_gate),
+        )
+        .accept(
+            crate::transport::webrtc::NUDGE_ALPN,
+            crate::transport::webrtc::NudgeAcceptor,
+        );
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {
-        builder = builder
-            .accept(crate::transport::UNICAST_ALPN, acceptor)
-            .accept(
-                crate::transport::webrtc::NUDGE_ALPN,
-                crate::transport::webrtc::NudgeAcceptor,
-            );
+        builder = builder.accept(crate::transport::UNICAST_ALPN, acceptor);
     }
     // …and answers JSEP offers, so a peer that cannot reach us over IP can
     // still open a direct data channel. Answering is unconditional: the role
@@ -2293,6 +2295,63 @@ mod tests {
             "a listener that refused is not another mesh: it proved no identity"
         );
         assert_ne!(answer, ProbeAnswer::Ours, "a refused dial did not open");
+    }
+
+    /// A session that attaches to the rendezvous is followed by a nudge: a dial on the nudge ALPN
+    /// that does its work only when it completes. The router of the beacon is built with no
+    /// unicast acceptor, so it has to serve the nudge ALPN all the same, or the handshake fails
+    /// with `no_application_protocol` and the nudge does nothing.
+    #[tokio::test]
+    async fn a_router_that_carries_no_unicast_completes_a_nudge() {
+        use std::net::SocketAddr;
+
+        use iroh::EndpointAddr;
+        use iroh::SecretKey;
+        use iroh_gossip::net::GOSSIP_ALPN;
+
+        use super::{TransportHandles, build_endpoint, build_mesh};
+
+        let secret = SecretKey::generate();
+        let id = secret.public();
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let beacon = build_endpoint(
+            &LookupOpts::loopback(),
+            Some(secret),
+            Some(port),
+            vec![GOSSIP_ALPN.to_vec()],
+            TransportHandles::default(),
+        )
+        .await
+        .expect("a beacon endpoint");
+        let (_gossip, router, _book) = build_mesh(beacon, 5, None, None, Vec::new(), true, false);
+        let dialer = build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            TransportHandles::default(),
+        )
+        .await
+        .expect("a dialer");
+        let addr = EndpointAddr::new(id)
+            .with_ip_addr(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)));
+
+        let nudge = n0_future::time::timeout(
+            std::time::Duration::from_secs(5),
+            dialer.connect(addr, crate::transport::webrtc::NUDGE_ALPN),
+        )
+        .await
+        .map(|dialed| dialed.map(|_| ()));
+
+        dialer.close().await;
+        let _ = router.shutdown().await;
+        assert!(
+            matches!(nudge, Ok(Ok(()))),
+            "the nudge did not complete: {nudge:?}"
+        );
     }
 
     /// What each way a dial can end proves: only the verdict of our verifier on the key is another
