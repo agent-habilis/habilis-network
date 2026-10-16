@@ -50,7 +50,7 @@ impl<T: Config> RollbackDriver<T> {
     /// Build a driver and the transport that talks to it.
     ///
     /// Hand the driver to `Node::spawn`, then pass the node's
-    /// `sender()` to [`PendingTransport::connect`] to finish wiring:
+    /// `sender()` to `PendingTransport::connect` to finish wiring:
     ///
     /// ```ignore
     /// let (driver, pending) = RollbackDriver::<MyGame>::new();

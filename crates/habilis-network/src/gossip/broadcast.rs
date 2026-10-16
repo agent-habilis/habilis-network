@@ -131,7 +131,7 @@ pub async fn broadcast_msg(sender: &MeshSender, msg: &Message) {
 }
 
 /// Start an RTT round: arm it and broadcast the first probe. The event loop sends the second probe
-/// at the middle of the window ([`send_second_probe`]); the round ends at its deadline and reports
+/// at the middle of the window (`send_second_probe`); the round ends at its deadline and reports
 /// the first pong of each peer. This is the one place that starts a round.
 pub async fn start_ping_round(
     state: &mut EventLoopState,

@@ -6,7 +6,7 @@
 //! automerge merges them conflict-free — so we no longer own an ordered-log
 //! fold. Convergence is automerge's job; ours is authenticity.
 //!
-//! Every change is carried inside a signed [`Message`](habilis_network_protocol::Message),
+//! Every change is carried inside a signed [`Message`],
 //! and every change is authorized before it touches the live doc. A channel
 //! configured with a [`SelfWriteGate`] holds a per-peer map keyed by nickname in
 //! which one field belongs to the peer it names: [`MeshDoc::ingest`] applies the
@@ -368,7 +368,7 @@ impl MeshDoc {
     /// so an oversize change never lands in the doc it could not be gossiped for.
     ///
     /// `actor_seed` must be unique per session — the daemon passes its signing
-    /// public key (see [`actor_for`]).
+    /// public key (see `actor_for`).
     ///
     /// # Errors
     /// Unrepresentable merge (a non-object at the document root).

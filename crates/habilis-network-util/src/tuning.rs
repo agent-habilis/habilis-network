@@ -268,7 +268,7 @@ impl Default for Tuning {
 static TUNING: std::sync::OnceLock<Tuning> = std::sync::OnceLock::new();
 
 /// Install the process tuning, once, at daemon startup (from the parsed CLI
-/// flags). A second call is ignored; if never called (in-process: library API or MCP), [`current`]
+/// flags). A second call is ignored; if never called (in-process: library API or MCP), `current`
 /// returns [`Tuning::DEFAULTS`].
 pub fn init(tuning: Tuning) {
     let _ = TUNING.set(tuning);

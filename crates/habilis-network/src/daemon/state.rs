@@ -127,7 +127,7 @@ impl Default for ParkedLinkStates {
 /// peer heartbeat-evicted past `ALIVE_TIMEOUT` (still returnable);
 /// `reach` is `direct` only while we hold a live link to it; `transport`
 /// is the lane a directed frame to this peer would take right now (the
-/// live [`crate::transport`] send decision — distinct from `reach`, which
+/// live `crate::transport` send decision — distinct from `reach`, which
 /// is a gossip-overlay link fact). Serialized directly into the
 /// consumer's roster surfaces.
 #[derive(Debug, Clone, Serialize)]
@@ -1803,7 +1803,7 @@ impl EventLoopState {
     }
 
     /// The `parents` to stamp on the next `Msg` we author: the current DAG
-    /// tips, sorted (deterministic) and capped to [`MAX_DAG_PARENTS`] to
+    /// tips, sorted (deterministic) and capped to `MAX_DAG_PARENTS` to
     /// bound message size. Usually a single head on a quiet mesh.
     #[must_use]
     pub fn dag_parents(&self) -> Vec<ContentHash> {

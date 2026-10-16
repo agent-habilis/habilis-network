@@ -1,5 +1,5 @@
 //! Developer-log plumbing: the tracing directive filter ([`log_filter`]),
-//! the deferred per-member file sink ([`sink`]), and the per-message
+//! the deferred per-member file sink (`sink`), and the per-message
 //! [`messages`] logger on the `habilis_network::messages` target.
 //! `--output json` (stdout) is a separate path and is unaffected by
 //! anything here.

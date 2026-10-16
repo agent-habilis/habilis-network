@@ -492,7 +492,7 @@ fn reaches_relay(lookups: &LookupOpts, transports: crate::lookup::TransportOpts)
 /// (already narrowed to `policy`).
 ///
 /// # Errors
-/// A browser that cannot [reach the relay](reaches_relay). Or a list that
+/// A browser that cannot reach the relay (`reaches_relay`). Or a list that
 /// leaves both the data channel and relay payload out: nothing could carry
 /// its payload.
 pub fn refuse_in_browser(

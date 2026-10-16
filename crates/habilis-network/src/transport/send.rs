@@ -225,9 +225,9 @@ fn held(eid: EndpointId, state: &EventLoopState) -> bool {
         && state.direct.get(&eid) != Some(&crate::daemon::state::DirectState::Direct)
 }
 
-/// The lane a directed frame to `nick` would take right now — [`Route`]
+/// The lane a directed frame to `nick` would take right now — `Route`
 /// stripped of its endpoint payload so the roster can serialize it. Sharing
-/// [`directed_endpoint`] keeps the surfaced column from ever drifting from the
+/// `directed_endpoint` keeps the surfaced column from ever drifting from the
 /// real send decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]

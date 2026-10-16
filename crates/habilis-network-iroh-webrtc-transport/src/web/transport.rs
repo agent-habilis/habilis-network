@@ -62,7 +62,7 @@ pub struct SessionCounters {
     /// pump had not been scheduled since the queue drained. QUIC is told the
     /// send succeeded, so these are invisible above.
     pub dropped_queue_full: AtomicU64,
-    /// Dropped by the pump: `bufferedAmount` was at or over [`BUFFER_CAP`].
+    /// Dropped by the pump: `bufferedAmount` was at or over `BUFFER_CAP`.
     pub dropped_congested: AtomicU64,
     /// Dropped by the pump: `send` threw. A non-zero count here means the
     /// channel is refusing traffic, not merely slow.

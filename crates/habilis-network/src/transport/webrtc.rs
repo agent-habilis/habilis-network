@@ -37,7 +37,7 @@ use super::LOG_TARGET;
 use super::admission::{Refusal, SignalAdmission};
 
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
-/// [`super::UNICAST_ALPN`] is: both ends must agree, so it moves only with a
+/// `super::UNICAST_ALPN` is: both ends must agree, so it moves only with a
 /// deliberate protocol break.
 pub const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1";
 
@@ -669,7 +669,7 @@ async fn dial_signal_round(
 /// sizes the gossip overlay and is fixed when the mesh is built. Each direct connection costs
 /// memory and, in a browser, up to a full ICE gathering budget — so the ceiling is real, not
 /// notional. A newcomer past C evicts the least valuable peer, see
-/// [`super::ceiling`]; no offer is refused for it.
+/// `super::ceiling`; no offer is refused for it.
 ///
 /// Public so the CLI and the browser can render a denominator. A node with its
 /// own ceiling reports it with [`super::admission::SignalAdmission::cap`], because

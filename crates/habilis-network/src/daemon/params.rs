@@ -116,7 +116,7 @@ impl JoinParams {
     ///
     /// # Errors
     /// The id cannot be decoded into a [`Mesh`]; the id requires a password
-    /// and none was given ([`PasswordRequired`], typed for the frontends);
+    /// and none was given (`PasswordRequired`, typed for the frontends);
     /// the password is wrong; or a password was given for a passwordless id.
     ///
     /// [`Mesh`]: crate::protocol::mesh::Mesh

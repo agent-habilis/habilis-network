@@ -31,7 +31,7 @@ use crate::util::tuning::{
 
 /// The default relay **ladder** — n0's prod relay set, in fixed
 /// preference order. The beacon homes on the first reachable rung
-/// ([`select_bootstrap_rung`]) and the joiner pre-registers
+/// (`select_bootstrap_rung`) and the joiner pre-registers
 /// `rendezvous_id` at that same rung — `EndpointAddr::new(rendezvous_id)
 /// .with_relay_url(rung)` — for a **zero-address-lookup** relay-direct
 /// dial: a creator-independent bootstrap that needs no address lookup to
@@ -82,8 +82,8 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 /// `Disabled` ⇒ empty (no relay), `Pinned` ⇒ the default n0 prod
 /// ladder, `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
 /// preserved). The beacon homes on, and the joiner pre-registers at, the
-/// first reachable rung ([`select_bootstrap_rung`]) — the beacon leg of
-/// [`relay_mode`] and `daemon::setup::register_rendezvous` must agree or
+/// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
+/// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
 /// the relay-direct bootstrap dial finds nothing.
 pub fn relay_ladder(choice: &RelayChoice) -> Vec<RelayUrl> {
     match choice {
@@ -186,7 +186,7 @@ where
 }
 
 /// Probe every rung of `ladder` for reachability, in order, returning each
-/// rung's online status. Unlike [`select_bootstrap_rung`] this does **not**
+/// rung's online status. Unlike `select_bootstrap_rung` this does **not**
 /// short-circuit at the first reachable rung — `doctor --mesh` shows the full
 /// ladder's health, not just the bootstrap pick.
 pub async fn probe_ladder(ladder: &[RelayUrl], per_rung: Duration) -> Vec<(RelayUrl, bool)> {

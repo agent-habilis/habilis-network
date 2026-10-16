@@ -76,7 +76,7 @@ pub(crate) use relay::{
 /// - `lookups`: which address-lookups (mDNS / DHT) and relay to wire.
 ///   When any lookup is on, the builder is composed from
 ///   `presets::Minimal` plus the selected lookups; the relay maps via
-///   [`relay::relay_mode`]. An all-off (loopback-only) set wires none of
+///   `relay::relay_mode`. An all-off (loopback-only) set wires none of
 ///   them.
 /// - `secret_key`: `Some` pins a deterministic identity (used for the
 ///   shared rendezvous endpoint); `None` lets iroh generate a fresh
@@ -945,7 +945,7 @@ pub(crate) async fn build_peer_multihop(
 #[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
 static UNDERLAY_LEG_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Tests only: see [`UNDERLAY_LEG_OFF`].
+/// Tests only: see `UNDERLAY_LEG_OFF`.
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
 pub fn set_underlay_leg_off(off: bool) {
     UNDERLAY_LEG_OFF.store(off, std::sync::atomic::Ordering::SeqCst);

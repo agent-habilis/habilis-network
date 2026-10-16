@@ -150,7 +150,7 @@ impl StreamNode {
     /// Open a new stream and return its writing end. Hand its
     /// [`hash`](Producer::hash) to the one consumer.
     ///
-    /// With a relay lookup, it first waits (at most [`ONLINE_WAIT`], once) for
+    /// With a relay lookup, it first waits (at most `ONLINE_WAIT`, once) for
     /// the endpoint to reach its home relay, so the hash carries it. Here and
     /// not in `bind`: a node that only reads never pays for it.
     pub async fn create(&self) -> Producer {
