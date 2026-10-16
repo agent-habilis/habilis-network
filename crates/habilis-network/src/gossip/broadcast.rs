@@ -139,7 +139,7 @@ pub async fn start_ping_round(
     resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
 ) {
     let now = n0_future::time::Instant::now();
-    let window = std::time::Duration::from_secs(crate::util::tuning::ping_window_secs());
+    let window = crate::util::tuning::ping_window();
     let probe = Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity);
     state.arm_ping_round(PingRound::new(&probe, now, now + window, resp));
     broadcast_msg(ctx.sender, &probe).await;
@@ -355,7 +355,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
             crate::transport::endpoint_proof::sign(
                 ctx.endpoint.secret_key(),
                 ctx.mesh,
-                state.identity.public().as_bytes(),
+                &state.identity.author_key(),
             )
         })
         .clone();

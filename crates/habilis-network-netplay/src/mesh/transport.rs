@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use habilis_network::protocol::{AuthorKey, Nickname};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
@@ -106,7 +107,7 @@ impl<T: Config> MeshTransport<T> {
     /// Take every lobby packet received since the last call, as
     /// `(sender public key, raw JSON)`.
     #[must_use]
-    pub fn drain_lobby(&self) -> Vec<(String, String)> {
+    pub fn drain_lobby(&self) -> Vec<(AuthorKey, String)> {
         self.mailboxes
             .lobby
             .lock()
@@ -120,18 +121,18 @@ impl<T: Config> MeshTransport<T> {
     /// not exist before `Node::spawn`. Poll it before building a
     /// [`super::Lobby`].
     #[must_use]
-    pub fn local_pubkey(&self) -> Option<String> {
+    pub fn local_pubkey(&self) -> Option<AuthorKey> {
         self.mailboxes
             .local_pubkey
             .lock()
             .ok()
-            .and_then(|slot| slot.clone())
+            .and_then(|slot| *slot)
     }
 
     /// Whether a peer's public key can be addressed yet — true once we have
     /// received any frame from them.
     #[must_use]
-    pub fn knows(&self, pubkey: &str) -> bool {
+    pub fn knows(&self, pubkey: &AuthorKey) -> bool {
         self.mailboxes
             .directory
             .lock()
@@ -140,25 +141,25 @@ impl<T: Config> MeshTransport<T> {
 
     /// Every peer we can address, as `(public key, nickname)`.
     #[must_use]
-    pub fn known_peers(&self) -> Vec<(String, String)> {
+    pub fn known_peers(&self) -> Vec<(AuthorKey, Nickname)> {
         self.mailboxes
             .directory
             .lock()
             .map(|directory| {
                 directory
                     .iter()
-                    .map(|(pubkey, nickname)| (pubkey.clone(), nickname.to_string()))
+                    .map(|(pubkey, nickname)| (*pubkey, nickname.clone()))
                     .collect()
             })
             .unwrap_or_default()
     }
 }
 
-/// Bound to `Address = String` deliberately: over a mesh a peer *is* its
-/// public-key hex, and pretending the address type is open would mean
-/// inventing a conversion that only ever has one sensible implementation.
-impl<T: Config<Address = String>> Transport<T> for MeshTransport<T> {
-    fn send_to(&mut self, message: &Message<T::Input>, addr: &String) {
+/// Bound to `Address = AuthorKey` deliberately: over a mesh a peer *is* the
+/// key that signs its frames, and pretending the address type is open would
+/// mean inventing a conversion that only ever has one sensible implementation.
+impl<T: Config<Address = AuthorKey>> Transport<T> for MeshTransport<T> {
+    fn send_to(&mut self, message: &Message<T::Input>, addr: &AuthorKey) {
         let Some(payload) = encode(message) else {
             return;
         };
@@ -166,13 +167,12 @@ impl<T: Config<Address = String>> Transport<T> for MeshTransport<T> {
         // loop, which must not block on the event loop draining. A full
         // queue means the loop is badly backed up, and dropping is the right
         // answer anyway — the protocol resends unacked inputs.
-        let _ = self.outbox.try_send(Outbound::Rollback {
-            to: addr.clone(),
-            payload,
-        });
+        let _ = self
+            .outbox
+            .try_send(Outbound::Rollback { to: *addr, payload });
     }
 
-    fn receive_all(&mut self) -> Vec<(String, Message<T::Input>)> {
+    fn receive_all(&mut self) -> Vec<(AuthorKey, Message<T::Input>)> {
         let Ok(mut inbound) = self.mailboxes.inbound.lock() else {
             return Vec::new();
         };

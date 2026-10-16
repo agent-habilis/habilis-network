@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use habilis_network_netplay::{
-    Config, Event, Message, P2PSession, Request, RollbackError, SessionState, Transport,
+    Config, Event, Message, P2PSession, PlayerHandle, Request, RollbackError, SessionState,
+    Transport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -179,7 +180,7 @@ fn build(count: usize, impairment: Impairment) -> (Rc<std::cell::RefCell<Network
             Peer {
                 session: P2PSession::new(
                     addrs.clone(),
-                    handle,
+                    PlayerHandle::new(handle),
                     wire,
                     8,
                     0,

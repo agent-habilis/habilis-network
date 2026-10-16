@@ -4,19 +4,19 @@
 //! nothing. The engine sees no refusal, only that no `NeighborUp` came. A node that arrives late
 //! then asks the same full peers every alive tick, and each ask costs a connection. This type
 //! reads the silence as the answer: a request that brought no link in
-//! [`GRAFT_REFUSED_AFTER_SECS`] was refused, and the peer is left alone for a wait that doubles
+//! [`GRAFT_REFUSED_AFTER`] was refused, and the peer is left alone for a wait that doubles
 //! with each refusal in a row.
 //!
 //! Every graft is held by it, the `PeerInfo` graft too: a request that goes out during the wait
 //! would otherwise end in silence again and double the step by itself. A starved node still asks
-//! every peer when its fallback is due, once per `STARVED_SECS`: those asks are expected.
+//! every peer when its fallback is due, once per `STARVED`: those asks are expected.
 //!
 //! The backoff is one-sided on purpose. A peer that frees a slot asks us itself, so a wait of
 //! 15 minutes is not a risk to liveness. It is kept apart from the refusals of session offers
 //! (`RefusalBackoff` in `admission.rs`) and from the eviction backoff (`EvictionBackoff` in
 //! `ceiling.rs`): those are other protocols with other causes.
 //!
-//! The starved fallback, a `Join` once per `STARVED_SECS`, ignores this backoff. A `Join` is
+//! The starved fallback, a `Join` once per `STARVED`, ignores this backoff. A `Join` is
 //! never refused. It is also the only way out when a peer holds a tombstone for this node (it saw a
 //! `Disconnect` with `left = true`): such a peer refuses every `Neighbor` request for ever, so the
 //! backoff alone would leave the node without that peer for good.
@@ -27,9 +27,7 @@ use std::time::Duration;
 use iroh::EndpointId;
 
 use crate::util::clock::Instant;
-use crate::util::tuning::{
-    GRAFT_BACKOFF_FIRST_SECS, GRAFT_BACKOFF_MAX_SECS, GRAFT_REFUSED_AFTER_SECS,
-};
+use crate::util::tuning::{GRAFT_BACKOFF_FIRST, GRAFT_BACKOFF_MAX, GRAFT_REFUSED_AFTER};
 
 /// The jitter on a wait, as a fraction either way, so that the nodes that were refused together
 /// do not ask again together.
@@ -57,8 +55,8 @@ impl GraftBackoff {
     /// double the step. A peer that was quiet for longer than the longest wait starts again at the
     /// first wait.
     pub(crate) fn asked(&mut self, peer: EndpointId, now: Instant) {
-        let first = Duration::from_secs(GRAFT_BACKOFF_FIRST_SECS);
-        let longest = Duration::from_secs(GRAFT_BACKOFF_MAX_SECS);
+        let first = GRAFT_BACKOFF_FIRST;
+        let longest = GRAFT_BACKOFF_MAX;
         let entry = self.by_peer.entry(peer).or_insert(Entry {
             asked_at: None,
             until: None,
@@ -77,7 +75,7 @@ impl GraftBackoff {
         entry.asked_at = Some(now);
     }
 
-    /// Read the answers: every peer that was asked at least [`GRAFT_REFUSED_AFTER_SECS`] ago and
+    /// Read the answers: every peer that was asked at least [`GRAFT_REFUSED_AFTER`] ago and
     /// is not linked refused. `spread` is in `-1.0..=1.0` and scales the jitter of the wait.
     /// Returns the peers that were read as refusing now, with their wait.
     pub(crate) fn settle(
@@ -87,8 +85,8 @@ impl GraftBackoff {
         spread: f64,
     ) -> Vec<(EndpointId, Duration)> {
         let mut refused = Vec::new();
-        let refused_after = Duration::from_secs(GRAFT_REFUSED_AFTER_SECS);
-        let longest = Duration::from_secs(GRAFT_BACKOFF_MAX_SECS);
+        let refused_after = GRAFT_REFUSED_AFTER;
+        let longest = GRAFT_BACKOFF_MAX;
         for (peer, entry) in &mut self.by_peer {
             let Some(asked_at) = entry.asked_at else {
                 continue;
@@ -280,7 +278,7 @@ mod tests {
             now = at(now, 500);
         }
         // The wait of 480 s ended long ago.
-        now = at(now, GRAFT_BACKOFF_MAX_SECS + 1);
+        now += GRAFT_BACKOFF_MAX + Duration::from_secs(1);
         backoff.asked(peer, now);
         backoff.settle(at(now, 21), unlinked, 0.0);
         assert!(backoff.is_blocked(&peer, at(now, 21 + 59)));

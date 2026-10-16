@@ -6,7 +6,7 @@
 //!
 //! **Body redaction.** By default the `Msg` body is replaced with
 //! `<redacted NB hashprefix>` — byte length plus the first 8 hex chars of
-//! [`Message::content_hash_hex`] (stable across nodes for the same
+//! [`Message::content_hash`] (stable across nodes for the same
 //! message, so a dev can still correlate one message across several
 //! members' log files). The `--log-raw` flag opts a local debugging run
 //! back into raw bodies; default `false` so any log a user collects is
@@ -28,14 +28,14 @@ fn log_raw() -> bool {
 
 /// Redacted stand-in for a message body: byte length + the first 8 hex
 /// chars of the message's content hash. The hash is identical on every
-/// node for the same message (`content_hash_hex` covers the full
+/// node for the same message (`content_hash` covers the full
 /// canonical/stamped form), so the prefix is a stable correlation token
 /// across multiple members' log files without revealing the raw body. 8
 /// hex chars = 32 bits — wide enough that a per-session collision is
 /// unlikely while staying compact.
 fn redacted_body(msg: &Message) -> String {
     let len = msg.body.as_str().len();
-    let hash = msg.content_hash_hex();
+    let hash = msg.content_hash().to_string();
     format!("<redacted {len}B {}>", &hash[..8])
 }
 
@@ -91,7 +91,7 @@ fn log(direction: &'static str, msg: &Message) {
                 target: "habilis_network::messages",
                 dir = direction,
                 author = %msg.author,
-                ts = msg.timestamp,
+                ts = msg.timestamp.as_secs(),
                 body = %logged_body(msg),
                 "msg"
             ),
@@ -104,7 +104,7 @@ fn log(direction: &'static str, msg: &Message) {
                     target: "habilis_network::messages",
                     dir = direction,
                     author = %msg.author,
-                    ts = msg.timestamp,
+                    ts = msg.timestamp.as_secs(),
                     to = ?to,
                     kind = %msg.kind,
                     body = %logged_body(msg),
@@ -121,7 +121,7 @@ fn log(direction: &'static str, msg: &Message) {
             target: "habilis_network::messages",
             dir = direction,
             author = %msg.author,
-            ts = msg.timestamp,
+            ts = msg.timestamp.as_secs(),
             presence = %subtype,
             "presence"
         ),
@@ -131,7 +131,7 @@ fn log(direction: &'static str, msg: &Message) {
             target: "habilis_network::messages",
             dir = direction,
             author = %msg.author,
-            ts = msg.timestamp,
+            ts = msg.timestamp.as_secs(),
             channel = %msg.kind,
             body = %logged_body(msg),
             "state"

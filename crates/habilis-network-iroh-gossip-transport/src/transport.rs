@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 
 use crate::budget::Budget;
 use crate::counters::{Counters, Stats};
-use crate::frame::{self, EncodeError};
+use crate::frame::{self, EncodeError, Frame};
 use crate::{gossip_addr, parse_gossip_addr};
 
 /// The guard of `mutex`. A poisoned lock holds data with no invariant to break
@@ -101,7 +101,13 @@ impl Shared {
         if locked(&self.blocked).contains(&dst) {
             return self.counters.dropped_not_allowed();
         }
-        let frame = match frame::encode(dst, self.app_id, datagram) {
+        let frame = match (Frame {
+            dst,
+            src: self.app_id,
+            datagram,
+        })
+        .encode()
+        {
             Ok(frame) => frame,
             Err(EncodeError::Empty) => return self.counters.dropped_empty(),
             Err(EncodeError::TooLarge { .. }) => return self.counters.dropped_too_large(),
@@ -597,7 +603,13 @@ mod tests {
             "woken with nothing queued"
         );
 
-        let from_bob = frame::encode(me, secret(2).public(), &[5u8; 100]).expect("a frame");
+        let from_bob = (Frame {
+            dst: me,
+            src: secret(2).public(),
+            datagram: &[5u8; 100],
+        })
+        .encode()
+        .expect("a frame");
         assert_eq!(handle.deliver(&from_bob), Delivery::Queued);
         assert_eq!(waker.0.load(Ordering::SeqCst), 1, "one wake per delivery");
 
@@ -609,7 +621,13 @@ mod tests {
     #[test]
     fn a_frame_for_another_member_or_a_bad_frame_is_not_queued() {
         let handle = GossipHandle::new(secret(1).public());
-        let for_carol = frame::encode(secret(3).public(), secret(2).public(), &[1]).expect("frame");
+        let for_carol = (Frame {
+            dst: secret(3).public(),
+            src: secret(2).public(),
+            datagram: &[1],
+        })
+        .encode()
+        .expect("frame");
 
         assert_eq!(handle.deliver(&for_carol), Delivery::NotForUs);
         assert_eq!(handle.deliver(b"{\"kind\":\"chat\"}"), Delivery::Malformed);
@@ -629,8 +647,13 @@ mod tests {
 
         let real = hub.sent().into_iter().next().expect("a frame was sent");
         let real = frame::decode(&real).expect("a frame");
-        let forged = frame::encode(alice_handle.app_id(), secret(9).public(), real.datagram)
-            .expect("a frame");
+        let forged = (Frame {
+            dst: alice_handle.app_id(),
+            src: secret(9).public(),
+            datagram: real.datagram,
+        })
+        .encode()
+        .expect("a frame");
         for _ in 0..5 {
             let _ = alice_handle.deliver(&forged);
         }
@@ -716,8 +739,20 @@ mod tests {
     fn a_frame_that_arrives_is_counted_by_what_became_of_it() {
         let me = secret(1).public();
         let handle = GossipHandle::new(me);
-        let for_me = frame::encode(me, secret(2).public(), &[1u8; 50]).expect("frame");
-        let for_carol = frame::encode(secret(3).public(), secret(2).public(), &[1]).expect("frame");
+        let for_me = (Frame {
+            dst: me,
+            src: secret(2).public(),
+            datagram: &[1u8; 50],
+        })
+        .encode()
+        .expect("frame");
+        let for_carol = (Frame {
+            dst: secret(3).public(),
+            src: secret(2).public(),
+            datagram: &[1],
+        })
+        .encode()
+        .expect("frame");
 
         let _ = handle.deliver(&for_me);
         let _ = handle.deliver(&for_carol);
@@ -877,8 +912,20 @@ mod tests {
         let mut bufs = [io::IoSliceMut::new(&mut storage)];
         let mut metas = [noq_udp::RecvMeta::default()];
         let mut infos = [RecvInfo::new(gossip_addr(me), None)];
-        let big = frame::encode(me, secret(2).public(), &[5u8; 100]).expect("a frame");
-        let small = frame::encode(me, secret(2).public(), &[5u8; 40]).expect("a frame");
+        let big = (Frame {
+            dst: me,
+            src: secret(2).public(),
+            datagram: &[5u8; 100],
+        })
+        .encode()
+        .expect("a frame");
+        let small = (Frame {
+            dst: me,
+            src: secret(2).public(),
+            datagram: &[5u8; 40],
+        })
+        .encode()
+        .expect("a frame");
 
         assert_eq!(handle.deliver(&big), Delivery::Queued);
         let first = endpoint.poll_recv(&mut cx, &mut bufs, &mut metas, &mut infos);

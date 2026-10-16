@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Result;
 use iroh::{Endpoint, RelayUrl};
@@ -15,7 +14,7 @@ use crate::lookup::{
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
-use crate::util::tuning::RELAY_RUNG_PROBE_SECS;
+use crate::util::tuning::RELAY_RUNG_PROBE;
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
@@ -113,12 +112,7 @@ fn spawn_startup_rung_confirmation(
         return None;
     }
     Some(StoppableTask::spawn(|stopped| async move {
-        let confirmed = select_bootstrap_rung(
-            &ladder,
-            Duration::from_secs(RELAY_RUNG_PROBE_SECS),
-            Some(&stopped),
-        )
-        .await;
+        let confirmed = select_bootstrap_rung(&ladder, RELAY_RUNG_PROBE, Some(&stopped)).await;
         if stopped.has_changed().is_err() {
             // A departure ended the walk: its `None` is not a verdict.
             return;
@@ -582,7 +576,7 @@ struct Assembled {
     mesh_password: Option<Password>,
     /// The Argon2id-stretched mesh key — retained to derive the state/meta/
     /// broadcast content-encryption keys. `None` when passwordless. Wiped on drop.
-    mesh_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    mesh_key: Option<crate::protocol::SymmetricKey>,
     /// The invite-only creator's mesh (with its in-memory issuer key + root),
     /// retained so `invite` can mint. `Some` only on an invite-only creator.
     mint_mesh: Option<Mesh>,
@@ -896,7 +890,11 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     let (endpoint, multihop, webrtc, admission, underlay_webrtc, mdns) =
         build_member_endpoint(build).await?;
 
-    let mut mesh = Mesh::new(seed, name.clone(), config);
+    let mut mesh = Mesh::new(
+        crate::protocol::Seed::from_bytes(seed),
+        name.clone(),
+        config,
+    );
     // Invite-only: mint the invite root + issuer keypair and bake the issuer
     // pubkey into the id BEFORE it is rendered. Cheap (random keys, no Argon2).
     if invite_only {
@@ -929,7 +927,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         }
         (password, _) => (mesh, password),
     };
-    let mesh_key = mesh.stretched_key().map(zeroize::Zeroizing::new);
+    let mesh_key = mesh.mesh_key();
     // The creator alone retains its full mesh (issuer key + root) to mint from.
     let mint_mesh = mesh.requires_invite().then(|| mesh.clone());
     let id_str = mesh.to_string();
@@ -1017,7 +1015,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
         }
         SetupKind::Create { .. } => unreachable!("outer arm excludes Create"),
     };
-    let mesh_key = mesh.stretched_key().map(zeroize::Zeroizing::new);
+    let mesh_key = mesh.mesh_key();
     let id_str = mesh.to_string();
     let mesh_id =
         MeshId::new(id_str.clone()).expect("Mesh::to_string always produces a valid MeshId");

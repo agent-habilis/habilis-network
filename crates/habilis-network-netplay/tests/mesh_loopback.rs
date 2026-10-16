@@ -15,13 +15,13 @@ use std::time::Duration;
 
 use habilis_network::embed::SilentSink;
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::{LookupOpts, Nickname};
+use habilis_network::protocol::{AuthorKey, LookupOpts, Nickname};
 use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
 use serde::{Deserialize, Serialize};
 
 use habilis_network_netplay::{
     Config, Event, Lobby, MeshTransport, P2PSession, Request, RollbackDriver, RollbackError,
-    SessionState,
+    SessionState, Tick,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -41,7 +41,7 @@ impl Config for Game {
     type State = State;
     // The peer's signed public key. Never the nickname — the protocol
     // treats those as cosmetic and non-unique.
-    type Address = String;
+    type Address = AuthorKey;
 }
 
 /// One player: a node, its transport, and the state its requests drive.
@@ -51,7 +51,7 @@ struct Player {
     lobby: Option<Lobby>,
     session: Option<P2PSession<Game, MeshTransport<Game>>>,
     state: State,
-    nick: String,
+    nick: Nickname,
     desynced: bool,
 }
 
@@ -66,7 +66,7 @@ async fn spawn(topic: &str, nick: &str) -> Player {
     let config = setup_mesh(
         kind,
         SetupParams {
-            author,
+            author: author.clone(),
             max_peers: 16,
             max_direct: 0,
             endpoint: None,
@@ -93,7 +93,7 @@ async fn spawn(topic: &str, nick: &str) -> Player {
         lobby: None,
         session: None,
         state: State::default(),
-        nick: nick.to_owned(),
+        nick: author,
         desynced: false,
     }
 }
@@ -143,7 +143,7 @@ impl Player {
         }
         let lobby = self.lobby.as_mut().expect("just ensured");
         for (pubkey, raw) in transport.drain_lobby() {
-            lobby.on_message(&pubkey, &raw, tick as u64);
+            lobby.on_message(&pubkey, &raw, Tick::new(tick as u64));
         }
         if tick.is_multiple_of(10) {
             transport.broadcast_lobby(&lobby.presence());
@@ -174,7 +174,7 @@ impl Player {
                 2,
                 // Scoped to this match, so a straggler from a previous one
                 // cannot be mistaken for live input.
-                u32::try_from(session_id & 0xFFFF_FFFF).unwrap_or(1),
+                u32::try_from(session_id.get() & 0xFFFF_FFFF).unwrap_or(1),
             )
             .expect("the handle came from our own player list"),
         );

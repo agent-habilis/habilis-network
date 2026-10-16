@@ -107,8 +107,8 @@ fn init_process() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         init(Tuning {
-            heal_interval_secs: 3,
-            cohost_grace_secs: 2,
+            heal_interval: Duration::from_secs(3),
+            cohost_grace: Duration::from_secs(2),
             ..Tuning::DEFAULTS
         });
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()

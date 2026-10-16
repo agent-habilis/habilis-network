@@ -13,7 +13,9 @@ use anyhow::{Context, Result};
 
 use crate::util::consts::MAX_BLOB_STORE_BYTES;
 
-use super::{ContentId, HASH_LEN, SECRET_LEN};
+use crate::protocol::crypto::TicketSecret;
+
+use super::{BlobDigest, ContentId};
 
 /// One spooled blob: the metadata the fetch path needs, plus the spool path to
 /// stream from. No bytes are held.
@@ -23,11 +25,11 @@ pub(crate) struct BlobEntry {
     /// The value the producer compares a presented token against
     /// (constant-time): the raw bearer secret, or — when the blob is
     /// password-protected — the Argon2id stretch of the ticket's public salt.
-    pub secret: [u8; SECRET_LEN],
+    pub secret: TicketSecret,
     /// The public salt the ticket carries (equal to `secret` when not
     /// passworded). Retained so a deduped re-registration mints a ticket that
     /// still matches this entry's compare `secret`.
-    ticket_secret: [u8; SECRET_LEN],
+    ticket_secret: TicketSecret,
     /// Whether the minted ticket is password-protected.
     password: bool,
     /// Every content group that offloaded these bytes. The spool file goes
@@ -42,15 +44,15 @@ pub(crate) struct BlobEntry {
 /// carries, the value the fetch handshake is compared against (equal to the salt
 /// when not passworded, its Argon2id stretch otherwise), and the password flag.
 pub(crate) struct NewSecret {
-    pub ticket_secret: [u8; SECRET_LEN],
-    pub compare_secret: [u8; SECRET_LEN],
+    pub ticket_secret: TicketSecret,
+    pub compare_secret: TicketSecret,
     pub password: bool,
 }
 
 /// What a registration hands back for building the ticket: the public salt the
 /// ticket carries and whether it is password-protected.
 pub(crate) struct Registered {
-    pub ticket_secret: [u8; SECRET_LEN],
+    pub ticket_secret: TicketSecret,
     pub password: bool,
 }
 
@@ -58,7 +60,7 @@ pub(crate) struct Registered {
 /// [`BlobStore::snapshot`]'s content-addressing key plus the content group it
 /// is offloaded under, which becomes one of the blob's owners.
 pub(crate) struct ContentMeta {
-    pub(crate) sha256: [u8; HASH_LEN],
+    pub(crate) sha256: BlobDigest,
     pub(crate) size: u64,
     pub(crate) content_id: ContentId,
 }
@@ -67,7 +69,7 @@ pub(crate) struct ContentMeta {
 /// outbound inputs and produced outputs — content-addressed, never replicated.
 pub(crate) struct BlobStore {
     spool_dir: PathBuf,
-    map: HashMap<[u8; HASH_LEN], BlobEntry>,
+    map: HashMap<BlobDigest, BlobEntry>,
     total_bytes: u64,
     next_seq: u64,
 }
@@ -114,7 +116,7 @@ impl BlobStore {
         if let Some(registered) = self.claim(&sha256, &content_id) {
             return Ok(registered);
         }
-        let dest = self.spool_dir.join(hex_encode(&sha256));
+        let dest = self.spool_dir.join(sha256.to_string());
         snapshot_file(src, &dest)?;
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -124,8 +126,8 @@ impl BlobStore {
             BlobEntry {
                 path: dest,
                 size,
-                secret: secret.compare_secret,
-                ticket_secret: secret.ticket_secret,
+                secret: secret.compare_secret.clone(),
+                ticket_secret: secret.ticket_secret.clone(),
                 password: secret.password,
                 owners: HashSet::from([content_id]),
                 seq,
@@ -133,13 +135,13 @@ impl BlobStore {
         );
         self.evict_to_budget();
         Ok(Registered {
-            ticket_secret: secret.ticket_secret,
+            ticket_secret: secret.ticket_secret.clone(),
             password: secret.password,
         })
     }
 
     /// The entry for `hash`, if spooled.
-    pub(crate) fn get(&self, hash: &[u8; HASH_LEN]) -> Option<&BlobEntry> {
+    pub(crate) fn get(&self, hash: &BlobDigest) -> Option<&BlobEntry> {
         self.map.get(hash)
     }
 
@@ -150,7 +152,7 @@ impl BlobStore {
     /// when re-offloading content it already holds.
     pub(crate) fn claim(
         &mut self,
-        hash: &[u8; HASH_LEN],
+        hash: &BlobDigest,
         content_id: &ContentId,
     ) -> Option<Registered> {
         let entry = self.map.get_mut(hash)?;
@@ -158,7 +160,7 @@ impl BlobStore {
         entry.seq = self.next_seq;
         self.next_seq += 1;
         Some(Registered {
-            ticket_secret: entry.ticket_secret,
+            ticket_secret: entry.ticket_secret.clone(),
             password: entry.password,
         })
     }
@@ -166,7 +168,7 @@ impl BlobStore {
     /// Release `content_id`'s hold on every blob (called from the task
     /// idle-timeout sweep), unlinking each spool file no group owns any more.
     pub(crate) fn evict_content(&mut self, content_id: &ContentId) {
-        let doomed: Vec<[u8; HASH_LEN]> = self
+        let doomed: Vec<BlobDigest> = self
             .map
             .iter_mut()
             .filter_map(|(hash, entry)| {
@@ -194,7 +196,7 @@ impl BlobStore {
         }
     }
 
-    fn remove(&mut self, hash: &[u8; HASH_LEN]) {
+    fn remove(&mut self, hash: &BlobDigest) {
         if let Some(entry) = self.map.remove(hash) {
             self.total_bytes = self.total_bytes.saturating_sub(entry.size);
             let _ = fs::remove_file(&entry.path);
@@ -235,20 +237,11 @@ fn snapshot_file(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Lowercase hex of `bytes` — the spool filename for a content hash.
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::{BlobStore, ContentMeta};
-    use crate::blob::{ContentId, HASH_LEN, SECRET_LEN};
+    use crate::blob::{BlobDigest, ContentId, HASH_LEN, SECRET_LEN};
+    use crate::protocol::crypto::TicketSecret;
     use rand::RngCore;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -265,8 +258,8 @@ mod tests {
     /// A passwordless capability: the ticket secret is also the compare secret.
     fn plain_secret(secret: [u8; SECRET_LEN]) -> super::NewSecret {
         super::NewSecret {
-            ticket_secret: secret,
-            compare_secret: secret,
+            ticket_secret: TicketSecret::from_bytes(secret),
+            compare_secret: TicketSecret::from_bytes(secret),
             password: false,
         }
     }
@@ -278,7 +271,7 @@ mod tests {
         fs::write(&src, vec![7u8; 4096]).unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = [1u8; HASH_LEN];
+        let hash = BlobDigest::from_bytes([1u8; HASH_LEN]);
         let registered = store
             .snapshot(
                 &src,
@@ -290,7 +283,7 @@ mod tests {
                 &plain_secret([9u8; SECRET_LEN]),
             )
             .unwrap();
-        assert_eq!(registered.ticket_secret, [9u8; SECRET_LEN]);
+        assert_eq!(registered.ticket_secret.as_bytes(), &[9u8; SECRET_LEN]);
         assert!(!registered.password);
 
         let entry = store.get(&hash).expect("entry present");
@@ -307,7 +300,7 @@ mod tests {
         fs::write(&src, b"same content").unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = [2u8; HASH_LEN];
+        let hash = BlobDigest::from_bytes([2u8; HASH_LEN]);
         let first = store
             .snapshot(
                 &src,
@@ -330,9 +323,10 @@ mod tests {
                 &plain_secret([2u8; SECRET_LEN]),
             )
             .unwrap();
-        assert_eq!(first.ticket_secret, [1u8; SECRET_LEN]);
+        assert_eq!(first.ticket_secret.as_bytes(), &[1u8; SECRET_LEN]);
         assert_eq!(
-            second.ticket_secret, first.ticket_secret,
+            second.ticket_secret.as_bytes(),
+            first.ticket_secret.as_bytes(),
             "dedup must return the first registration's secret"
         );
 
@@ -353,7 +347,7 @@ mod tests {
         assert_eq!(got, b"whole content");
     }
 
-    fn snapshot_as(store: &mut BlobStore, src: &Path, hash: [u8; HASH_LEN], group: &ContentId) {
+    fn snapshot_as(store: &mut BlobStore, src: &Path, hash: BlobDigest, group: &ContentId) {
         store
             .snapshot(
                 src,
@@ -376,7 +370,7 @@ mod tests {
         fs::write(&src, b"shared").unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = [4u8; HASH_LEN];
+        let hash = BlobDigest::from_bytes([4u8; HASH_LEN]);
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
         snapshot_as(&mut store, &src, hash, &group_a);
@@ -404,7 +398,7 @@ mod tests {
         fs::write(&src, b"twice").unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = [5u8; HASH_LEN];
+        let hash = BlobDigest::from_bytes([5u8; HASH_LEN]);
         let group = ContentId::new("blob-test-group");
         snapshot_as(&mut store, &src, hash, &group);
         snapshot_as(&mut store, &src, hash, &group);
@@ -428,7 +422,11 @@ mod tests {
         fs::write(&src, b"x").unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let (oldest, next_oldest, filler) = ([6u8; HASH_LEN], [7u8; HASH_LEN], [8u8; HASH_LEN]);
+        let (oldest, next_oldest, filler) = (
+            BlobDigest::from_bytes([6u8; HASH_LEN]),
+            BlobDigest::from_bytes([7u8; HASH_LEN]),
+            BlobDigest::from_bytes([8u8; HASH_LEN]),
+        );
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
         // `size` is the accounted size, so a one-byte file stands in for a
@@ -468,7 +466,7 @@ mod tests {
         fs::write(&src, b"bye").unwrap();
 
         let mut store = BlobStore::new(temp_dir("spool")).unwrap();
-        let hash = [3u8; HASH_LEN];
+        let hash = BlobDigest::from_bytes([3u8; HASH_LEN]);
         let task = ContentId::new("blob-test-content");
         store
             .snapshot(

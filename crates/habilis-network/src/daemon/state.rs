@@ -14,32 +14,31 @@ use super::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
-use crate::protocol::{Message, MessageId, Nickname, ShardGroup};
+use crate::protocol::{
+    AuthorKey, ContentHash, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
+    UnixSecs,
+};
 use crate::util::bounded_fifo_set::BoundedFifoSet;
 use crate::util::bounded_queue::BoundedQueue;
-use crate::util::clock::Instant;
+use crate::util::clock::{Instant, millis_saturating};
 use crate::util::cooldown::Cooldown;
 
 use crate::util::tuning::{
-    KNOWN_ENDPOINTS_CAP, LANE_WANTED_SECS, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
-    RECLAIM_WINDOW_SECS, REGRAFT_AFTER_MS, RELINK_COOLDOWN_SECS, SEEN_IDS_CAP, STARVED_SECS,
-    rendezvous_periodic_return_secs,
+    KNOWN_ENDPOINTS_CAP, LANE_WANTED, MESSAGE_LOG_SIZE, PENDING_OUTBOUND_CAP, QUIET_CAP,
+    RECLAIM_WINDOW, REGRAFT_AFTER, RELINK_COOLDOWN, SEEN_IDS_CAP, STARVED,
+    rendezvous_periodic_return,
 };
 
 /// How long after it let go of the rendezvous a node wants it again. Every node waits the same
 /// period, plus a share of up to half of it that the id of the node fixes: the pubkey bytes are
 /// uniform, so n members do not come back together.
 fn rendezvous_return_after(local: EndpointId) -> Duration {
-    let period = rendezvous_periodic_return_secs();
+    let period = rendezvous_periodic_return();
     let mut prefix = [0u8; 8];
     prefix.copy_from_slice(&local.as_bytes()[..8]);
-    let share_ms = u64::from_le_bytes(prefix) % (period * 500).max(1);
-    Duration::from_secs(period) + Duration::from_millis(share_ms)
+    let share_ms = u64::from_le_bytes(prefix) % (millis_saturating(period) / 2).max(1);
+    period + Duration::from_millis(share_ms)
 }
-
-/// `RELINK_COOLDOWN_SECS` as a `Duration` — the window of the per-endpoint
-/// re-link throttle (`relink`) and of the `PeerInfo` flood gate.
-const RELINK_COOLDOWN: Duration = Duration::from_secs(RELINK_COOLDOWN_SECS);
 
 /// How long an author whose digest we could not read stays unreported. A build
 /// that does not know the window format sends one every round, and one line per
@@ -125,7 +124,7 @@ impl Default for ParkedLinkStates {
 
 /// One peer in a [`RosterSnapshot`]. `last_seen_secs_ago` is
 /// `None` until the peer's first heartbeat is timed; `quiet` marks a
-/// peer heartbeat-evicted past `ALIVE_TIMEOUT_SECS` (still returnable);
+/// peer heartbeat-evicted past `ALIVE_TIMEOUT` (still returnable);
 /// `reach` is `direct` only while we hold a live link to it; `transport`
 /// is the lane a directed frame to this peer would take right now (the
 /// live [`crate::transport`] send decision — distinct from `reach`, which
@@ -177,6 +176,16 @@ impl DirectState {
             PathSummary::Mixed | PathSummary::Unknown => None,
         }
     }
+}
+
+/// What a member's `PeerInfo` says about the rendezvous, and whether we believe the sender. One
+/// struct for the pair, because both are a `bool` and a swap compiles and flips the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RivalFlag {
+    /// The signer proved the endpoint it sent from.
+    pub(crate) proven: bool,
+    /// The `PeerInfo` carries the beacon flag: the member holds the rendezvous.
+    pub(crate) held: bool,
 }
 
 /// Link counts by [`DirectState`], for the census line.
@@ -266,7 +275,7 @@ pub struct EventLoopState {
     /// Per-endpoint re-link throttle: caps re-dialing + re-flooding a peer
     /// learned via `PeerInfo` to once per window. Tracked *across*
     /// `NeighborDown` (unlike `linked_endpoints`), so a flapping/unstable peer
-    /// is re-linked at most once per `RELINK_COOLDOWN_SECS` — the choke that
+    /// is re-linked at most once per `RELINK_COOLDOWN` — the choke that
     /// stops one bad node's flap from amplifying into a mesh-wide connection
     /// storm. Bounded by construction (see [`Cooldown`]).
     pub(crate) relink: Cooldown<EndpointId>,
@@ -294,11 +303,14 @@ pub struct EventLoopState {
     lane_wanted: HashMap<EndpointId, Instant>,
     /// The proven peers whose gossip link went down, with the time of their quick re-graft.
     regraft_at: HashMap<EndpointId, Instant>,
-    /// When each author's digest was last served. Keyed on the pubkey rather
-    /// than the nickname, which an author picks freely.
-    digest_serves: Cooldown<String>,
-    /// When we last reported an author whose digest we could not read.
-    digest_unreadable: Cooldown<String>,
+    /// When each author's digest was last served. Keyed on the author key rather
+    /// than the nickname, which an author picks freely. The key is an `Option`
+    /// because a digest built with no signature is a valid input of the tests: `None`
+    /// is its own bucket, as the empty string was.
+    digest_serves: Cooldown<Option<AuthorKey>>,
+    /// When we last reported an author whose digest we could not read. An `Option` key
+    /// for the same reason as `digest_serves`.
+    digest_unreadable: Cooldown<Option<AuthorKey>>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
     pub(crate) resend_outbox: crate::transport::ResendOutbox,
@@ -325,7 +337,7 @@ pub struct EventLoopState {
     /// via gossip; `NeighborUp`/`PeerInfo` are asymmetric for
     /// bootstrap links), by implicit heartbeats from any received
     /// message (self-heal for a missed Joined), and by the sweeper's
-    /// eviction of peers gone silent past `ALIVE_TIMEOUT_SECS`.
+    /// eviction of peers gone silent past `ALIVE_TIMEOUT`.
     pub(crate) peers: HashSet<Nickname>,
     /// Implicit-heartbeat tracker: nickname -> last time we heard
     /// anything from that peer. Drives sweep-based eviction.
@@ -347,7 +359,7 @@ pub struct EventLoopState {
     /// `linked_endpoints` by design). `None` until the loop learns it.
     pub(crate) rendezvous_id: Option<EndpointId>,
     /// Heartbeat layer: peers we've evicted as quiet (silent
-    /// past `ALIVE_TIMEOUT_SECS`) but who may still reappear. Any
+    /// past `ALIVE_TIMEOUT`) but who may still reappear. Any
     /// message from a nickname in this set triggers a symmetric
     /// `peer_return` event and re-inclusion in `peers`. Bounded FIFO
     /// (cap `QUIET_CAP`): drained on return, so without the cap a churn /
@@ -377,7 +389,7 @@ pub struct EventLoopState {
     /// (anti-entropy keeps the mesh's set uniform), but messages
     /// stamped before this are never *surfaced* (printed / `poll` /
     /// `fetch` / library API): the operator/agent view starts at join.
-    pub(crate) joined_at: i64,
+    pub(crate) joined_at: UnixSecs,
     /// Goes false when the receiver stream terminally ends; IPC
     /// keeps working for `msg` / `poll` after that.
     pub(crate) gossip_open: bool,
@@ -429,7 +441,7 @@ pub struct EventLoopState {
     /// key and the endpoint that key proved. A `PeerInfo` of the same signer without the flag,
     /// or the roster removal of the member, takes it out again. While it is not empty and we do
     /// not hold the rendezvous, we do not probe to claim it.
-    pub(crate) rival_holders: HashMap<[u8; 32], EndpointId>,
+    pub(crate) rival_holders: HashMap<AuthorKey, EndpointId>,
     /// How many links to other members make this node release the rendezvous.
     /// A field, not a constant, so a test can set it.
     pub(crate) rendezvous_release_links: usize,
@@ -594,7 +606,7 @@ pub struct EventLoopState {
     /// twice; `mark_seen` drops the repeat before it reaches the log /
     /// inbound push channel / agent. Bounded (`SEEN_IDS_CAP`, 2× the message log)
     /// so it always covers the retention window.
-    pub(crate) seen: BoundedFifoSet<[u8; 16]>,
+    pub(crate) seen: BoundedFifoSet<DedupKey>,
     /// User messages sent before we had a real-peer link (no gossip
     /// path yet — a bare `broadcast` would be a lost one-shot). Drained in
     /// FIFO order once `meshed` flips, each routed through the send decision;
@@ -658,22 +670,22 @@ pub struct EventLoopState {
     /// last sent `Msg` (`None` until the first). Advanced on every send so
     /// our `Msg` stream is a `seq`+`prev` hash chain.
     pub(crate) self_seq: u64,
-    pub(crate) self_prev: Option<String>,
-    /// Phase 2 fork detection: per author pubkey (hex), the content hash
+    pub(crate) self_prev: Option<ContentHash>,
+    /// Phase 2 fork detection: per author key, the content hash
     /// seen at each `Msg` `seq`. A *different* hash at an already-seen
-    /// `(pubkey, seq)` is cryptographic proof of equivocation → a `fork`
+    /// `(author, seq)` is cryptographic proof of equivocation → a `fork`
     /// event. Order-independent (gossip delivers out of order).
-    pub(crate) author_seqs: HashMap<String, HashMap<u64, String>>,
-    /// Author pubkeys already flagged as forked, so one `fork` event fires
+    pub(crate) author_seqs: HashMap<AuthorKey, HashMap<u64, ContentHash>>,
+    /// Author keys already flagged as forked, so one `fork` event fires
     /// per offending key rather than per message.
-    pub(crate) forked: HashSet<String>,
+    pub(crate) forked: HashSet<AuthorKey>,
     /// Cross-author DAG (Phase 3): `by_hash` maps each known `Msg`'s content
     /// hash to its timestamp (for the `ts ≥ max(parents.ts)` backdating
     /// rule); `dag_heads` is the current tip set (hashes with no observed
     /// child) — the `parents` stamped on the next `Msg` we author. Both are
     /// pruned alongside the message-log eviction.
-    pub(crate) by_hash: HashMap<String, i64>,
-    pub(crate) dag_heads: HashSet<String>,
+    pub(crate) by_hash: HashMap<ContentHash, UnixSecs>,
+    pub(crate) dag_heads: HashSet<ContentHash>,
     /// When the last *verified* inbound gossip message arrived — the
     /// starvation watchdog's signal. Keyed on messages, not neighbor
     /// events: the roster-collapse showed links can look alive (or flap)
@@ -718,7 +730,7 @@ pub struct EventLoopState {
     /// Symmetric key for broadcast-chat app bodies on a passworded
     /// mesh, `derive_secret(mesh_key, "broadcast")` — domain-separated from
     /// the state/meta doc keys. `None` ⇒ chat stays plaintext. Wiped on drop.
-    pub(crate) broadcast_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    pub(crate) broadcast_key: Option<SymmetricKey>,
     /// Where the event loop's wakeups went since the last census.
     pub(crate) idle: IdleCounters,
 }
@@ -840,7 +852,7 @@ impl PingRound {
 #[derive(Default)]
 pub(crate) struct MeshSecrets {
     pub password: Option<crate::protocol::crypto::Password>,
-    pub key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    pub key: Option<SymmetricKey>,
 }
 
 /// Everything [`EventLoopState::new`] needs beyond the clock, grouped for the
@@ -897,15 +909,9 @@ impl EventLoopState {
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
-        let state_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"state-doc"))
-        });
-        let meta_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"meta-doc"))
-        });
-        let broadcast_key = mesh_key.as_deref().map(|key| {
-            zeroize::Zeroizing::new(crate::protocol::crypto::derive_secret(key, b"broadcast"))
-        });
+        let state_key = mesh_key.as_ref().map(|key| key.derive(b"state-doc"));
+        let meta_key = mesh_key.as_ref().map(|key| key.derive(b"meta-doc"));
+        let broadcast_key = mesh_key.as_ref().map(|key| key.derive(b"broadcast"));
         Self {
             linked_endpoints: HashSet::new(),
             direct: HashMap::new(),
@@ -933,9 +939,7 @@ impl EventLoopState {
             graft_backoff: crate::transport::graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
-            digest_serves: Cooldown::new(Duration::from_secs(
-                habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS,
-            )),
+            digest_serves: Cooldown::new(habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN),
             digest_unreadable: Cooldown::new(UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -953,7 +957,7 @@ impl EventLoopState {
             quiet_since: HashMap::new(),
             surfaced: HashSet::new(),
             last_sent_at: now,
-            joined_at: crate::util::clock::unix_secs(),
+            joined_at: UnixSecs::now(),
             gossip_open: true,
             rendezvous_linked: false,
             rendezvous_released: false,
@@ -1114,7 +1118,7 @@ impl EventLoopState {
     }
 
     /// `true` if we re-dialed + re-flooded `peer` within the last
-    /// `RELINK_COOLDOWN_SECS` of `now`, so the caller should skip re-linking
+    /// `RELINK_COOLDOWN` of `now`, so the caller should skip re-linking
     /// it again. Breaks the flap → re-dial → re-flood loop that otherwise
     /// turns one unstable peer into a mesh-wide CPU storm.
     pub(crate) fn relink_on_cooldown(&self, peer: EndpointId, now: Instant) -> bool {
@@ -1146,17 +1150,17 @@ impl EventLoopState {
 
     /// A frame is held for the lane peer `peer` at `now`: its session is wanted.
     pub(crate) fn want_lane_session(&mut self, peer: EndpointId, now: Instant) {
-        let window = Duration::from_secs(LANE_WANTED_SECS);
+        let window = LANE_WANTED;
         self.lane_wanted
             .retain(|_, since| now.saturating_duration_since(*since) < window);
         self.lane_wanted.insert(peer, now);
     }
 
-    /// Whether a frame was held for `peer` within the last `LANE_WANTED_SECS`.
+    /// Whether a frame was held for `peer` within the last `LANE_WANTED`.
     pub(crate) fn lane_session_wanted(&self, peer: EndpointId, now: Instant) -> bool {
-        self.lane_wanted.get(&peer).is_some_and(|since| {
-            now.saturating_duration_since(*since) < Duration::from_secs(LANE_WANTED_SECS)
-        })
+        self.lane_wanted
+            .get(&peer)
+            .is_some_and(|since| now.saturating_duration_since(*since) < LANE_WANTED)
     }
 
     /// A proven pair lost its gossip link while its path reads as the relay. Returns the
@@ -1185,7 +1189,7 @@ impl EventLoopState {
     }
 
     /// The gossip link of a proven peer went down: plan its re-graft at
-    /// `now` plus [`REGRAFT_AFTER_MS`] with a jitter of 30 % either way (`spread` in
+    /// `now` plus [`REGRAFT_AFTER`] with a jitter of 30 % either way (`spread` in
     /// `-1.0..=1.0`). A peer on its relink cooldown is left to the heal tick, so a flapping
     /// pair does not dial every second. A pair that reads as the relay is left to
     /// [`Self::relay_race_on_link_loss`]: its graft follows the attach, and a dial over the relay
@@ -1206,7 +1210,7 @@ impl EventLoopState {
             return false;
         }
         let jitter = 1.0 + 0.3 * spread.clamp(-1.0, 1.0);
-        let after = Duration::from_millis(REGRAFT_AFTER_MS).mul_f64(jitter);
+        let after = REGRAFT_AFTER.mul_f64(jitter);
         self.regraft_at.insert(peer, now + after);
         true
     }
@@ -1242,8 +1246,8 @@ impl EventLoopState {
     }
 
     /// Whether a graft at `now` falls back to a `Join` for a starved node: it has held
-    /// two or more links fewer than G for `STARVED_SECS`, and the last fallback is
-    /// `STARVED_SECS` old. A `true` stamps the fallback.
+    /// two or more links fewer than G for `STARVED`, and the last fallback is
+    /// `STARVED` old. A `true` stamps the fallback.
     pub(crate) fn starved_join_due(&mut self, now: Instant) -> bool {
         let due = self.starved_join_ready(now);
         if due {
@@ -1254,7 +1258,7 @@ impl EventLoopState {
 
     /// [`Self::starved_join_due`] without the stamp: whether a fallback would be due at `now`.
     pub(crate) fn starved_join_ready(&self, now: Instant) -> bool {
-        let window = Duration::from_secs(STARVED_SECS);
+        let window = STARVED;
         let starved = self
             .below_target_since
             .is_some_and(|since| now.duration_since(since) >= window);
@@ -1266,7 +1270,7 @@ impl EventLoopState {
 
     /// Whether a graft leaves `peer` alone at `now`: it refused a `Neighbor` request and its
     /// wait runs. A starved node whose fallback is due asks every peer, because a `Join` is not
-    /// refused: those dials, one per peer once per `STARVED_SECS`, are expected.
+    /// refused: those dials, one per peer once per `STARVED`, are expected.
     pub(crate) fn graft_blocked(&self, peer: EndpointId, now: Instant) -> bool {
         self.graft_backoff.is_blocked(&peer, now) && !self.starved_join_ready(now)
     }
@@ -1359,30 +1363,29 @@ impl EventLoopState {
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
     }
 
-    /// A member's `PeerInfo` read: `flag` says it holds the rendezvous. A flag from a proven
-    /// sender is remembered whether we hold the rendezvous or not; it moves our re-check only
-    /// while we hold it too.
+    /// A member's `PeerInfo` read: `flag.held` says it holds the rendezvous. A flag from a
+    /// proven sender is remembered whether we hold the rendezvous or not; it moves our re-check
+    /// only while we hold it too.
     pub(crate) fn note_rival_beacon_flag(
         &mut self,
         own: EndpointId,
-        signer: [u8; 32],
+        signer: AuthorKey,
         sender: EndpointId,
-        proven: bool,
-        flag: bool,
+        flag: RivalFlag,
         now: Instant,
     ) {
-        if !flag {
+        if !flag.held {
             self.rival_holders.remove(&signer);
             return;
         }
-        if !proven || sender == own {
+        if !flag.proven || sender == own {
             return;
         }
         let newly = self.rival_holders.insert(signer, sender) != Some(sender);
         if !self.hosts_rendezvous {
             return;
         }
-        if crate::beacon::yields_to(own, sender) {
+        if (crate::beacon::Contest { own, rival: sender }).own_yields() {
             self.yield_to_lower = true;
             self.next_rival_recheck = Some(now);
         } else if newly {
@@ -1414,7 +1417,7 @@ impl EventLoopState {
         let Some(due) = self.next_rival_recheck.filter(|_| self.hosts_rendezvous) else {
             return;
         };
-        let spacing = Duration::from_secs(crate::util::tuning::rival_recheck_meshed_secs());
+        let spacing = crate::util::tuning::rival_recheck_meshed();
         if self
             .second_group_sign_at
             .is_some_and(|at| now.saturating_duration_since(at) < spacing)
@@ -1438,7 +1441,7 @@ impl EventLoopState {
     /// Open the fast `beacon::ensure` burst; the only writer of
     /// [`Self::reclaim_until`].
     pub(crate) fn arm_reclaim(&mut self, now: Instant) {
-        self.reclaim_until = Some(now + Duration::from_secs(RECLAIM_WINDOW_SECS));
+        self.reclaim_until = Some(now + RECLAIM_WINDOW);
         self.probe_backoff.reset();
     }
 
@@ -1487,7 +1490,7 @@ impl EventLoopState {
             "a holder of the rendezvous that no member of our mesh hosts: owe a return"
         );
         self.owe_rendezvous_return(now);
-        // The graft is the reclaim ticker's: it re-grafts within `RECLAIM_INTERVAL_MS`, where
+        // The graft is the reclaim ticker's: it re-grafts within `RECLAIM_INTERVAL`, where
         // the heal tick would come round up to a heal interval later.
         self.arm_reclaim(now);
     }
@@ -1500,10 +1503,9 @@ impl EventLoopState {
     }
 
     /// A return to the rendezvous is owed from now, for
-    /// [`RENDEZVOUS_COMEBACK_SECS`](crate::util::tuning::RENDEZVOUS_COMEBACK_SECS).
+    /// [`RENDEZVOUS_COMEBACK`](crate::util::tuning::RENDEZVOUS_COMEBACK).
     pub(crate) fn owe_rendezvous_return(&mut self, now: Instant) {
-        self.rendezvous_comeback_until =
-            Some(now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS));
+        self.rendezvous_comeback_until = Some(now + crate::util::tuning::RENDEZVOUS_COMEBACK);
     }
 
     /// The periodic return, if it fell due, is owed like any other return: for a bounded time,
@@ -1527,8 +1529,8 @@ impl EventLoopState {
             .take()
             .is_some_and(|due| now >= due);
         let owed_visit = self.rendezvous_comeback_until.take().is_some();
-        self.rendezvous_dwell_until = (owed_visit || periodic_visit)
-            .then(|| now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS));
+        self.rendezvous_dwell_until =
+            (owed_visit || periodic_visit).then(|| now + crate::util::tuning::RENDEZVOUS_DWELL);
     }
 
     /// Whether this node holds the rendezvous link, has not let go of it yet, is
@@ -1636,7 +1638,7 @@ impl EventLoopState {
                 let logical = self.reassemble_from_log(trigger)?;
                 // The store may still hold a partial buffer for this group
                 // (e.g. just the trigger, post-TTL) — release its budget.
-                self.reassembly.forget(&trigger.pubkey, &shard.group);
+                self.reassembly.forget(trigger);
                 self.reassembled_groups.insert(shard.group.clone());
                 Some(logical)
             }
@@ -1648,12 +1650,14 @@ impl EventLoopState {
     /// slot is present. Mirrors the store's synthesis exactly.
     fn reassemble_from_log(&self, trigger: &Message) -> Option<Message> {
         let shard = trigger.shard.as_ref()?;
+        // A message that reaches reassembly passed the signature gate, so it has a key.
+        let author = trigger.author_key()?;
         if !crate::protocol::message::shard_fits_log(trigger) {
             return None;
         }
         let slots = self
             .message_log
-            .collect_shards(&shard.group, &trigger.pubkey, shard.total);
+            .collect_shards(&shard.group, &author, shard.total);
         if slots.iter().any(Option::is_none) {
             return None; // a shard is still missing
         }
@@ -1773,14 +1777,14 @@ impl EventLoopState {
         self.last_recovery_at = Some(now);
     }
 
-    /// Record a `Msg`'s `(pubkey, seq, content-hash)` for fork detection.
+    /// Record a `Msg`'s `(author, seq, content-hash)` for fork detection.
     /// Returns `true` **exactly once** per offending key — when a *different*
-    /// content hash is first seen at an already-recorded `(pubkey, seq)`,
+    /// content hash is first seen at an already-recorded `(author, seq)`,
     /// which is cryptographic proof the author equivocated (signed two
     /// conflicting messages at one seq). Order-independent. The caller emits
     /// a `fork` event on `true`; the message itself is still processed.
-    pub(crate) fn note_msg_seq(&mut self, pubkey: &str, seq: u64, hash: String) -> bool {
-        let seen = self.author_seqs.entry(pubkey.to_owned()).or_default();
+    pub(crate) fn note_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: ContentHash) -> bool {
+        let seen = self.author_seqs.entry(*author).or_default();
         match seen.get(&seq) {
             Some(existing) if *existing != hash => {} // conflict → fall through
             Some(_) => return false,                  // same message, already recorded
@@ -1790,15 +1794,15 @@ impl EventLoopState {
             }
         }
         // Equivocation: flag the key, returning true only on first detection.
-        self.forked.insert(pubkey.to_owned())
+        self.forked.insert(*author)
     }
 
     /// The `parents` to stamp on the next `Msg` we author: the current DAG
     /// tips, sorted (deterministic) and capped to [`MAX_DAG_PARENTS`] to
     /// bound message size. Usually a single head on a quiet mesh.
     #[must_use]
-    pub fn dag_parents(&self) -> Vec<String> {
-        let mut heads: Vec<String> = self.dag_heads.iter().cloned().collect();
+    pub fn dag_parents(&self) -> Vec<ContentHash> {
+        let mut heads: Vec<ContentHash> = self.dag_heads.iter().copied().collect();
         heads.sort_unstable();
         heads.truncate(MAX_DAG_PARENTS);
         heads
@@ -1810,7 +1814,7 @@ impl EventLoopState {
     /// to flag). Updates `by_hash` and moves the tip set: the named parents
     /// are no longer tips, and `hash` becomes one. Unknown parents are left
     /// alone (the set converges via anti-entropy).
-    pub fn note_dag(&mut self, hash: String, parents: &[String], ts: i64) -> bool {
+    pub fn note_dag(&mut self, hash: ContentHash, parents: &[ContentHash], ts: UnixSecs) -> bool {
         let mut backdated = false;
         for parent in parents {
             if let Some(&parent_ts) = self.by_hash.get(parent)
@@ -1820,36 +1824,36 @@ impl EventLoopState {
             }
             self.dag_heads.remove(parent);
         }
-        self.by_hash.insert(hash.clone(), ts);
+        self.by_hash.insert(hash, ts);
         self.dag_heads.insert(hash);
         backdated
     }
 
     /// Prune an evicted message's content hash from the DAG indexes, keeping
     /// `by_hash`/`dag_heads` bounded alongside the message-log `VecDeque`.
-    pub fn forget_hash(&mut self, hash: &str) {
+    pub fn forget_hash(&mut self, hash: &ContentHash) {
         self.by_hash.remove(hash);
         self.dag_heads.remove(hash);
     }
 
-    /// Prune an evicted `Msg`'s `(pubkey, seq)` from the fork-detection
+    /// Prune an evicted `Msg`'s `(author, seq)` from the fork-detection
     /// index, bounding `author_seqs`/`forked` to the message-log window: an
     /// identity whose messages have all aged out drops off both maps (so a
     /// sybil that fires once and vanishes is forgotten).
     ///
     /// Only drops the slot when `hash` is the one we recorded for that
-    /// `(pubkey, seq)`. A fork retains *two* messages at one `(pubkey, seq)`;
+    /// `(author, seq)`. A fork retains *two* messages at one `(author, seq)`;
     /// evicting the twin we did **not** record must not clear the recorded
     /// evidence, or a later anti-entropy resend of the still-retained twin
     /// would re-detect the equivocation as a fresh first sighting.
-    pub fn forget_msg_seq(&mut self, pubkey: &str, seq: u64, hash: &str) {
-        if let Some(seqs) = self.author_seqs.get_mut(pubkey)
+    pub fn forget_msg_seq(&mut self, author: &AuthorKey, seq: u64, hash: &ContentHash) {
+        if let Some(seqs) = self.author_seqs.get_mut(author)
             && seqs.get(&seq).is_some_and(|recorded| recorded == hash)
         {
             seqs.remove(&seq);
             if seqs.is_empty() {
-                self.author_seqs.remove(pubkey);
-                self.forked.remove(pubkey);
+                self.author_seqs.remove(author);
+                self.forked.remove(author);
             }
         }
     }
@@ -1937,8 +1941,8 @@ impl EventLoopState {
 
     /// The Argon2id-derived broadcast key, for a password-protected mesh.
     #[must_use]
-    pub fn broadcast_key(&self) -> Option<&[u8; 32]> {
-        self.broadcast_key.as_deref()
+    pub fn broadcast_key(&self) -> Option<&SymmetricKey> {
+        self.broadcast_key.as_ref()
     }
 
     /// The raw mesh password, retained for blob-ticket keying.
@@ -1956,7 +1960,7 @@ impl EventLoopState {
 
     /// Stamp the next position on this author's hash chain, advancing it.
     /// `prev` is the content hash of the message just authored.
-    pub fn advance_chain(&mut self, prev: String) {
+    pub fn advance_chain(&mut self, prev: ContentHash) {
         self.self_seq += 1;
         self.self_prev = Some(prev);
     }
@@ -1964,8 +1968,8 @@ impl EventLoopState {
     /// This author's current chain position — the `seq` the next message takes
     /// and the hash it points back to.
     #[must_use]
-    pub fn chain_head(&self) -> (u64, Option<&str>) {
-        (self.self_seq, self.self_prev.as_deref())
+    pub fn chain_head(&self) -> (u64, Option<ContentHash>) {
+        (self.self_seq, self.self_prev)
     }
 
     /// Arm a ping round, replacing any already in flight.
@@ -2003,11 +2007,11 @@ impl EventLoopState {
     /// so without a per-peer gate a single crafted digest buys that from every
     /// member — an amplifier that grows with the mesh. Serving at most one per
     /// window per author bounds it to the honest cadence.
-    pub fn admit_digest(&mut self, pubkey: &str, now: Instant) -> bool {
-        if self.digest_serves.on_cooldown(&pubkey.to_owned(), now) {
+    pub fn admit_digest(&mut self, author: Option<AuthorKey>, now: Instant) -> bool {
+        if self.digest_serves.on_cooldown(&author, now) {
             return false;
         }
-        self.digest_serves.note(pubkey.to_owned(), now);
+        self.digest_serves.note(author, now);
         true
     }
 
@@ -2033,8 +2037,7 @@ impl EventLoopState {
     /// Whether to report that this author's digest could not be read: once per
     /// author per window. The author runs a build with another digest format, or
     /// sends garbage; either way the two never repair each other's gaps.
-    pub fn report_unreadable_digest(&mut self, pubkey: &str, now: Instant) -> bool {
-        let author = pubkey.to_owned();
+    pub fn report_unreadable_digest(&mut self, author: Option<AuthorKey>, now: Instant) -> bool {
         if self.digest_unreadable.on_cooldown(&author, now) {
             return false;
         }
@@ -2085,7 +2088,7 @@ impl EventLoopState {
         vector: habilis_network_iroh_multihop_transport::LinkVector,
         bound: EndpointId,
     ) {
-        if vector.origin() != bound {
+        if vector.origin().get() != bound {
             tracing::debug!(target: "habilis_network::gossip",
                 "dropping parked multihop link-state: its origin is not the endpoint bound to its author"
             );
@@ -2152,11 +2155,12 @@ const _: fn(&EventLoopState) -> Option<&habilis_network_iroh_multihop_transport:
 mod tests {
     use super::{
         DirectCounts, DirectState, Duration, EndpointId, EventLoopState, Instant,
-        KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN_SECS, Reach,
+        KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN, Reach, RivalFlag,
         TokioInstant,
     };
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-    use crate::testing::{endpoint_id, fresh_state, fresh_state_with_book, nick};
+    use crate::protocol::{AuthorKey, ContentHash, UnixSecs};
+    use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
 
     fn lower_and_higher() -> (EndpointId, EndpointId) {
         let first = endpoint_id(1);
@@ -2177,7 +2181,16 @@ mod tests {
         state.hosts_rendezvous = true;
         let now = Instant::now();
 
-        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, now);
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from_bytes([9u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
 
         assert!(state.yield_to_lower);
         assert_eq!(state.next_rival_recheck, Some(now));
@@ -2194,7 +2207,16 @@ mod tests {
         state.rival_recheck_deferrals = 1;
         let now = Instant::now();
 
-        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, now);
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from_bytes([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
 
         assert!(!state.yield_to_lower);
         let next = state
@@ -2208,10 +2230,7 @@ mod tests {
     /// The longest wait that the first round of a re-check can have: its fast base plus the
     /// offset of the id.
     fn brisk_wait() -> Duration {
-        Duration::from_secs(
-            crate::util::tuning::rival_recheck_first_secs()
-                + crate::util::tuning::RIVAL_RECHECK_OFFSET_SPAN_SECS,
-        )
+        crate::util::tuning::rival_recheck_first() + crate::util::tuning::RIVAL_RECHECK_OFFSET_SPAN
     }
 
     /// A holder that has found no member has a re-check an hour or two out. A sign that another
@@ -2301,20 +2320,47 @@ mod tests {
     #[test]
     fn a_flag_that_does_not_count_changes_nothing() {
         let (low, high) = lower_and_higher();
-        let signer = [9u8; 32];
+        let signer = AuthorKey::from_bytes([9u8; 32]);
         let now = Instant::now();
 
         let mut no_flag = fresh_state();
         no_flag.hosts_rendezvous = true;
-        no_flag.note_rival_beacon_flag(high, signer, low, true, false, now);
+        no_flag.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
+            now,
+        );
 
         let mut unproven = fresh_state();
         unproven.hosts_rendezvous = true;
-        unproven.note_rival_beacon_flag(high, signer, low, false, true, now);
+        unproven.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: false,
+                held: true,
+            },
+            now,
+        );
 
         let mut ourselves = fresh_state();
         ourselves.hosts_rendezvous = true;
-        ourselves.note_rival_beacon_flag(high, signer, high, true, true, now);
+        ourselves.note_rival_beacon_flag(
+            high,
+            signer,
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
 
         for state in [no_flag, unproven, ourselves] {
             assert!(!state.yield_to_lower);
@@ -2330,7 +2376,16 @@ mod tests {
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
 
-        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from_bytes([9u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
 
         assert!(state.rival_holder_known());
         assert!(!state.yield_to_lower);
@@ -2361,7 +2416,16 @@ mod tests {
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state.linked_endpoints.insert(endpoint_id(1));
-        state.note_rival_beacon_flag(high, [9u8; 32], low, true, true, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from_bytes([9u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
         assert!(state.rival_holder_known());
 
         state.note_holder_outside_mesh(Instant::now());
@@ -2423,8 +2487,26 @@ mod tests {
     fn the_flag_of_a_forgotten_member_is_dropped() {
         let (low, high) = lower_and_higher();
         let mut state = fresh_state();
-        state.note_rival_beacon_flag(high, [1u8; 32], low, true, true, Instant::now());
-        state.note_rival_beacon_flag(high, [2u8; 32], endpoint_id(7), true, true, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from_bytes([1u8; 32]),
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
+        state.note_rival_beacon_flag(
+            high,
+            AuthorKey::from_bytes([2u8; 32]),
+            endpoint_id(7),
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
 
         state.forget_rival_holder(low);
 
@@ -2442,16 +2524,27 @@ mod tests {
         state.hosts_rendezvous = true;
         let first = Instant::now();
 
-        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, first);
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from_bytes([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            first,
+        );
         let pushed = state.next_rival_recheck;
         assert!(pushed.is_some_and(|due| due > first), "pushed out once");
 
         state.note_rival_beacon_flag(
             low,
-            [9u8; 32],
+            AuthorKey::from_bytes([9u8; 32]),
             high,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             first + Duration::from_secs(5),
         );
 
@@ -2471,7 +2564,16 @@ mod tests {
         let far = now + Duration::from_secs(100_000);
         state.next_rival_recheck = Some(far);
 
-        state.note_rival_beacon_flag(low, [9u8; 32], high, true, true, now);
+        state.note_rival_beacon_flag(
+            low,
+            AuthorKey::from_bytes([9u8; 32]),
+            high,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
 
         assert_eq!(state.next_rival_recheck, Some(far));
     }
@@ -2481,15 +2583,42 @@ mod tests {
     #[test]
     fn a_holder_stops_counting_when_it_drops_the_flag_or_leaves() {
         let (low, high) = lower_and_higher();
-        let signer = [9u8; 32];
+        let signer = AuthorKey::from_bytes([9u8; 32]);
         let mut state = fresh_state();
-        state.note_rival_beacon_flag(high, signer, low, true, true, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
         assert!(state.rival_holder_known());
 
-        state.note_rival_beacon_flag(high, signer, low, true, false, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
+            Instant::now(),
+        );
         assert!(!state.rival_holder_known(), "no flag takes it out");
 
-        state.note_rival_beacon_flag(high, signer, low, true, true, Instant::now());
+        state.note_rival_beacon_flag(
+            high,
+            signer,
+            low,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            Instant::now(),
+        );
         state
             .peer_endpoints
             .insert(nick("bob"), iroh::EndpointAddr::new(low));
@@ -2762,7 +2891,7 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         state.mark_rendezvous_released(endpoint_id(9));
-        let window = Duration::from_secs(crate::util::tuning::RENDEZVOUS_COMEBACK_SECS);
+        let window = crate::util::tuning::RENDEZVOUS_COMEBACK;
         state.rendezvous_return_due = Instant::now().checked_sub(window + Duration::from_secs(1));
 
         assert!(
@@ -2786,7 +2915,7 @@ mod tests {
         state.pay_periodic_return(now, local);
 
         assert!(state.rendezvous_wanted(), "the visit is wanted now");
-        let period = Duration::from_secs(crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN_SECS);
+        let period = crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN;
         let next = state.rendezvous_return_due.expect("it is set again");
         assert!(next >= now + period, "the next return is a period away");
         let owed_until = state.rendezvous_comeback_until;
@@ -2803,7 +2932,7 @@ mod tests {
 
     #[test]
     fn the_return_of_a_node_that_let_go_falls_due_one_period_later_at_the_earliest() {
-        let period = Duration::from_secs(crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN_SECS);
+        let period = crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN;
         for seed in 1..=8 {
             let after = super::rendezvous_return_after(endpoint_id(seed));
             assert!(
@@ -2837,7 +2966,7 @@ mod tests {
             !state.should_release_rendezvous(now),
             "the visit lasts its dwell time: the beacon needs it to introduce the islands"
         );
-        let after_dwell = now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS);
+        let after_dwell = now + crate::util::tuning::RENDEZVOUS_DWELL;
         assert!(state.should_release_rendezvous(after_dwell));
     }
 
@@ -2909,9 +3038,7 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         let long_ago = Instant::now()
-            .checked_sub(Duration::from_secs(
-                crate::util::tuning::RENDEZVOUS_COMEBACK_SECS + 1,
-            ))
+            .checked_sub(crate::util::tuning::RENDEZVOUS_COMEBACK + Duration::from_secs(1))
             .expect("a past instant");
         state.owe_rendezvous_return(long_ago);
 
@@ -2935,7 +3062,7 @@ mod tests {
             "the visit has just begun"
         );
 
-        let later = now + Duration::from_secs(crate::util::tuning::RENDEZVOUS_DWELL_SECS + 1);
+        let later = now + crate::util::tuning::RENDEZVOUS_DWELL + Duration::from_secs(1);
 
         assert!(
             state.should_release_rendezvous(later),
@@ -2974,21 +3101,26 @@ mod tests {
         message
     }
 
+    /// A content hash for a test: the hash of the name.
+    fn hash_of(name: &str) -> ContentHash {
+        ContentHash::of(name.as_bytes())
+    }
+
     #[test]
     fn note_msg_seq_detects_equivocation_once() {
         let mut state = fresh_state();
-        let key = "alice-key";
+        let key = author_of("alice-key");
         // First sighting at a seq → recorded, no fork.
-        assert!(!state.note_msg_seq(key, 0, "hashA".into()));
+        assert!(!state.note_msg_seq(&key, 0, hash_of("hashA")));
         // Same message again (same hash) → no fork.
-        assert!(!state.note_msg_seq(key, 0, "hashA".into()));
+        assert!(!state.note_msg_seq(&key, 0, hash_of("hashA")));
         // Different hash at the SAME seq → fork, reported exactly once.
         assert!(
-            state.note_msg_seq(key, 0, "hashB".into()),
+            state.note_msg_seq(&key, 0, hash_of("hashB")),
             "conflict is a fork"
         );
         assert!(
-            !state.note_msg_seq(key, 0, "hashC".into()),
+            !state.note_msg_seq(&key, 0, hash_of("hashC")),
             "already flagged: one event per key"
         );
     }
@@ -2996,85 +3128,104 @@ mod tests {
     #[test]
     fn note_msg_seq_is_per_key_and_per_seq() {
         let mut state = fresh_state();
-        assert!(!state.note_msg_seq("alice", 0, "h0".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 0, hash_of("h0")));
         // A new seq for the same author is just the next entry, not a fork.
-        assert!(!state.note_msg_seq("alice", 1, "h1".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 1, hash_of("h1")));
         // A different key reusing seq 0 with its own hash is independent.
-        assert!(!state.note_msg_seq("bob", 0, "other".into()));
+        assert!(!state.note_msg_seq(&author_of("bob"), 0, hash_of("other")));
         // But a conflict on alice's seq 0 still fires.
-        assert!(state.note_msg_seq("alice", 0, "h0-prime".into()));
+        assert!(state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")));
     }
 
     #[test]
     fn forget_msg_seq_prunes_author_and_fork_flag() {
         let mut state = fresh_state();
-        state.note_msg_seq("alice", 0, "h0".into());
-        assert!(state.note_msg_seq("alice", 0, "h0-prime".into()), "fork");
-        assert!(state.forked.contains("alice"));
-        // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
-        state.forget_msg_seq("alice", 0, "h0");
-        assert!(!state.author_seqs.contains_key("alice"));
+        state.note_msg_seq(&author_of("alice"), 0, hash_of("h0"));
         assert!(
-            !state.forked.contains("alice"),
+            state.note_msg_seq(&author_of("alice"), 0, hash_of("h0-prime")),
+            "fork"
+        );
+        assert!(state.forked.contains(&author_of("alice")));
+        // Evicting the *recorded* twin (hash "h0") drops alice from both maps.
+        state.forget_msg_seq(&author_of("alice"), 0, &hash_of("h0"));
+        assert!(!state.author_seqs.contains_key(&author_of("alice")));
+        assert!(
+            !state.forked.contains(&author_of("alice")),
             "fork flag pruned with author"
         );
     }
 
     #[test]
     fn forget_msg_seq_keeps_evidence_when_other_twin_evicted() {
-        // A fork keeps two twins at one (pubkey, seq). Evicting the twin we did
+        // A fork keeps two twins at one (author, seq). Evicting the twin we did
         // NOT record must not clear the recorded slot / fork flag — otherwise a
         // later resend of the still-retained twin re-detects the fork as new.
         let mut state = fresh_state();
-        state.note_msg_seq("alice", 0, "recorded".into());
-        assert!(state.note_msg_seq("alice", 0, "twin".into()), "fork fires");
-        assert!(state.forked.contains("alice"));
-        // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
-        state.forget_msg_seq("alice", 0, "twin");
+        state.note_msg_seq(&author_of("alice"), 0, hash_of("recorded"));
         assert!(
-            state.author_seqs.contains_key("alice"),
+            state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")),
+            "fork fires"
+        );
+        assert!(state.forked.contains(&author_of("alice")));
+        // Evict the non-recorded twin ("twin"): the slot for "recorded" stays.
+        state.forget_msg_seq(&author_of("alice"), 0, &hash_of("twin"));
+        assert!(
+            state.author_seqs.contains_key(&author_of("alice")),
             "recorded slot retained"
         );
-        assert!(state.forked.contains("alice"), "fork flag retained");
+        assert!(
+            state.forked.contains(&author_of("alice")),
+            "fork flag retained"
+        );
         // A resend of the recorded twin does not re-fire the fork (already
         // flagged), proving the evidence survived the eviction.
-        assert!(!state.note_msg_seq("alice", 0, "twin".into()));
+        assert!(!state.note_msg_seq(&author_of("alice"), 0, hash_of("twin")));
     }
 
     #[test]
     fn note_dag_moves_tip_set() {
         let mut state = fresh_state();
         // First message (no parents) becomes the sole tip.
-        assert!(!state.note_dag("h1".into(), &[], 100));
-        assert_eq!(state.dag_parents(), vec!["h1".to_string()]);
+        assert!(!state.note_dag(hash_of("h1"), &[], UnixSecs::from_secs(100)));
+        assert_eq!(state.dag_parents(), vec![hash_of("h1")]);
         // A child referencing h1 makes h1 no longer a tip; h2 is the new one.
-        assert!(!state.note_dag("h2".into(), &["h1".to_string()], 101));
-        assert_eq!(state.dag_parents(), vec!["h2".to_string()]);
+        assert!(!state.note_dag(hash_of("h2"), &[hash_of("h1")], UnixSecs::from_secs(101)));
+        assert_eq!(state.dag_parents(), vec![hash_of("h2")]);
     }
 
     #[test]
     fn note_dag_keeps_concurrent_tips() {
         let mut state = fresh_state();
-        state.note_dag("a".into(), &[], 1);
-        state.note_dag("b".into(), &[], 1); // concurrent: no shared parent
-        assert_eq!(state.dag_parents(), vec!["a".to_string(), "b".to_string()]);
+        state.note_dag(hash_of("a"), &[], UnixSecs::from_secs(1));
+        state.note_dag(hash_of("b"), &[], UnixSecs::from_secs(1)); // concurrent: no shared parent
+        let mut both = vec![hash_of("a"), hash_of("b")];
+        both.sort();
+        assert_eq!(state.dag_parents(), both, "both tips, in hash order");
     }
 
     #[test]
     fn note_dag_flags_backdating() {
         let mut state = fresh_state();
-        state.note_dag("parent".into(), &[], 200);
+        state.note_dag(hash_of("parent"), &[], UnixSecs::from_secs(200));
         // Child claims an earlier timestamp than a parent it references.
-        assert!(state.note_dag("child".into(), &["parent".to_string()], 100));
+        assert!(state.note_dag(
+            hash_of("child"),
+            &[hash_of("parent")],
+            UnixSecs::from_secs(100)
+        ));
         // A forward timestamp is fine.
-        assert!(!state.note_dag("ok".into(), &["parent".to_string()], 300));
+        assert!(!state.note_dag(
+            hash_of("ok"),
+            &[hash_of("parent")],
+            UnixSecs::from_secs(300)
+        ));
     }
 
     #[test]
     fn forget_hash_prunes_dag() {
         let mut state = fresh_state();
-        state.note_dag("h".into(), &[], 1);
-        state.forget_hash("h");
+        state.note_dag(hash_of("h"), &[], UnixSecs::from_secs(1));
+        state.forget_hash(&hash_of("h"));
         assert!(state.dag_parents().is_empty());
     }
 
@@ -3313,20 +3464,20 @@ mod tests {
         let mut state = fresh_state();
         let now = Instant::now();
         assert!(
-            state.report_unreadable_digest("aa", now),
+            state.report_unreadable_digest(Some(author_of("aa")), now),
             "the first is reported"
         );
         assert!(
-            !state.report_unreadable_digest("aa", now + Duration::from_secs(10)),
+            !state.report_unreadable_digest(Some(author_of("aa")), now + Duration::from_secs(10)),
             "the same author every round is one line, not one line per round"
         );
         assert!(
-            state.report_unreadable_digest("bb", now),
+            state.report_unreadable_digest(Some(author_of("bb")), now),
             "another author is reported on its own"
         );
         assert!(
             state.report_unreadable_digest(
-                "aa",
+                Some(author_of("aa")),
                 now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
             ),
             "the author is reported again after the window"
@@ -3337,20 +3488,25 @@ mod tests {
     fn a_peer_is_served_one_digest_per_window() {
         let mut state = fresh_state();
         let now = Instant::now();
-        let window =
-            Duration::from_secs(habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN_SECS);
+        let window = habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN;
 
-        assert!(state.admit_digest("aa", now), "the first is served");
         assert!(
-            !state.admit_digest("aa", now),
+            state.admit_digest(Some(author_of("aa")), now),
+            "the first is served"
+        );
+        assert!(
+            !state.admit_digest(Some(author_of("aa")), now),
             "a second digest inside the window must not buy another round of resends"
         );
         assert!(
-            state.admit_digest("bb", now),
+            state.admit_digest(Some(author_of("bb")), now),
             "one peer's flood must not deny another peer service"
         );
         assert!(
-            state.admit_digest("aa", now + window + Duration::from_millis(1)),
+            state.admit_digest(
+                Some(author_of("aa")),
+                now + window + Duration::from_millis(1)
+            ),
             "the honest cadence resumes after the window"
         );
     }
@@ -3362,10 +3518,8 @@ mod tests {
         // attack. Distinct pubkeys ⇒ distinct `dedup_key`s.
         let mut state = fresh_state();
         let id = MessageId::random();
-        let mut victim = msg_with_id(&id);
-        victim.pubkey = "aa".repeat(32);
-        let mut attacker = msg_with_id(&id);
-        attacker.pubkey = "bb".repeat(32);
+        let victim = msg_with_id(&id).with_unverified_key(AuthorKey::from_bytes([0xaa; 32]));
+        let attacker = msg_with_id(&id).with_unverified_key(AuthorKey::from_bytes([0xbb; 32]));
         assert!(!state.mark_seen(&victim), "victim's message is fresh");
         assert!(
             !state.mark_seen(&attacker),
@@ -3413,7 +3567,7 @@ mod tests {
         assert_eq!(relinks, 1, "the cooldown caps re-links to once per window");
 
         // Past the window a genuine re-link is allowed again (no permanent lockout).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(!cooled.relink_on_cooldown(peer, later));
     }
 
@@ -3522,7 +3676,7 @@ mod tests {
         assert_eq!(refloods, 1, "five neighbors flood once per window");
 
         // Past the window a neighbor up floods once more (no permanent silence).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(state.neighbor_up_refloods_peerinfo(later));
     }
 
@@ -3539,7 +3693,7 @@ mod tests {
         state.defer_peerinfo();
 
         assert!(!state.take_deferred_peerinfo(start + Duration::from_secs(1)));
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(
             state.take_deferred_peerinfo(later),
             "due once the window ends"
@@ -3552,9 +3706,7 @@ mod tests {
         let start = Instant::now();
         let mut state = fresh_state();
         state.peerinfo_flooded_at = Some(start);
-        assert!(
-            !state.take_deferred_peerinfo(start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1))
-        );
+        assert!(!state.take_deferred_peerinfo(start + RELINK_COOLDOWN + Duration::from_secs(1)));
     }
 
     #[test]
@@ -3577,7 +3729,7 @@ mod tests {
         assert!(state.joined_refloods_peerinfo(true, start + Duration::from_secs(1)));
 
         // Past the window a re-announce floods once more (no permanent silence).
-        let later = start + Duration::from_secs(RELINK_COOLDOWN_SECS + 1);
+        let later = start + RELINK_COOLDOWN + Duration::from_secs(1);
         assert!(state.joined_refloods_peerinfo(false, later));
     }
 
@@ -3811,7 +3963,7 @@ mod tests {
             state.note_relink(endpoint_id(seed), when);
         }
         assert!(
-            state.relink.len() <= usize::try_from(RELINK_COOLDOWN_SECS).unwrap() + 1,
+            state.relink.len() <= usize::try_from(RELINK_COOLDOWN.as_secs()).unwrap() + 1,
             "expired cooldown entries are pruned (map stays bounded)"
         );
     }

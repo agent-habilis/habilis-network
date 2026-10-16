@@ -18,9 +18,10 @@ use habilis_network::protocol::{
 };
 use rand::RngCore as _;
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use crate::code;
-use crate::hash::{ID_LEN, SECRET_LEN, StreamHash};
+use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
 
@@ -159,19 +160,17 @@ impl StreamNode {
             let _ = n0_future::time::timeout(ONLINE_WAIT, self.endpoint.online()).await;
         }
         let mut id = [0; ID_LEN];
-        let mut secret = [0; SECRET_LEN];
+        let mut secret = Zeroizing::new([0; SECRET_LEN]);
         rand::rng().fill_bytes(&mut id);
-        rand::rng().fill_bytes(&mut secret);
-        Producer::new(
-            StreamHash {
-                addr: self.endpoint.addr(),
-                lookups: self.lookups.clone(),
-                transport: self.transport,
-                id,
-                secret,
-            },
-            Arc::clone(&self.registry),
-        )
+        rand::rng().fill_bytes(&mut *secret);
+        let hash = StreamHash {
+            addr: self.endpoint.addr(),
+            lookups: self.lookups.clone(),
+            transport: self.transport,
+            id: StreamId::from_bytes(id),
+            secret: StreamSecret::from_zeroizing(secret),
+        };
+        Producer::new(hash, Arc::clone(&self.registry))
     }
 
     /// Take the consumer slot of the stream behind `hash`.
@@ -225,8 +224,7 @@ impl StreamNode {
             bail!(Refused::RelayRefused);
         }
         let (mut send, recv) = conn.open_bi().await.context("opening the stream")?;
-        send.write_all(&hash.id).await?;
-        send.write_all(&hash.secret).await?;
+        send.write_all(hash.header_bytes().as_slice()).await?;
         send.finish()?;
         Ok(Reader::new(conn, recv))
     }

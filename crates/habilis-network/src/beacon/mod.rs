@@ -43,7 +43,6 @@
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Duration;
 
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey};
 use iroh_gossip::proto::TopicId;
@@ -58,8 +57,7 @@ use crate::lookup::{
 use crate::protocol::mesh::{LookupOpts, RelayChoice};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
-    HEAL_PROBE_SECS, RECLAIM_WINDOW_SECS, RENDEZVOUS_CLOSE_SECS, RENDEZVOUS_PROBE_SECS,
-    heal_interval_secs,
+    HEAL_PROBE, RECLAIM_WINDOW, RENDEZVOUS_CLOSE, RENDEZVOUS_PROBE, heal_interval,
 };
 
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.
@@ -295,7 +293,7 @@ impl Rendezvous {
     /// co-hosting member, which is all of them.
     ///
     /// Bounded, because winding down must not hang on a relay that stopped
-    /// answering. See `RENDEZVOUS_CLOSE_SECS`. Past the bound we are no worse
+    /// answering. See `RENDEZVOUS_CLOSE`. Past the bound we are no worse
     /// off than before this existed.
     ///
     /// The monitor is stopped and waited for in the same budget, not aborted:
@@ -309,12 +307,9 @@ impl Rendezvous {
         drop(self);
         tokio::join!(
             async {
-                if n0_future::time::timeout(
-                    Duration::from_secs(RENDEZVOUS_CLOSE_SECS),
-                    endpoint.close(),
-                )
-                .await
-                .is_err()
+                if n0_future::time::timeout(RENDEZVOUS_CLOSE, endpoint.close())
+                    .await
+                    .is_err()
                 {
                     tracing::debug!(target: "habilis_network::beacon", "rendezvous endpoint close timed out; abandoning it");
                 }
@@ -390,7 +385,7 @@ fn holder_entry(holder: EndpointAddr, params: &RendezvousParams) -> EndpointAddr
 /// The probe answers one question — does a beacon already serve this
 /// rendezvous? — and it answers it slowly: a free rendezvous is only
 /// provably free once the dial has exhausted its budget, so the common
-/// "nobody is home, claim it" case costs the full [`HEAL_PROBE_SECS`].
+/// "nobody is home, claim it" case costs the full [`HEAL_PROBE`].
 /// Paid inline that was ~5s per heal tick during which the sole event loop
 /// polled nothing at all: no gossip, no IPC, and — the reason this exists —
 /// no quit. A departure landing in that window missed `Node::leave`'s
@@ -437,7 +432,7 @@ impl RivalProbe {
         if let Some(cancel) = self.cancel.take() {
             let _ = cancel.send(());
         }
-        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), &mut self.task)
+        if n0_future::time::timeout(RENDEZVOUS_CLOSE, &mut self.task)
             .await
             .is_err()
         {
@@ -551,7 +546,7 @@ async fn spawn_rival_probe(params: &RendezvousParams, node: EndpointId) -> Optio
     tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), "rival probe endpoint built");
     // Clamped so at most one probe is outstanding per heal tick even when
     // tests shorten the cadence below the probe cap.
-    let budget = Duration::from_secs(HEAL_PROBE_SECS.min(heal_interval_secs()));
+    let budget = HEAL_PROBE.min(heal_interval());
     let (tx, rx) = oneshot::channel();
     let endpoint = prober.clone();
     let (cancel, cancelled) = oneshot::channel();
@@ -621,12 +616,12 @@ fn bare_id_resolvable(lookups: &LookupOpts) -> bool {
 /// refused or said nothing is not: a busy or starting beacon of our own mesh refuses, a host too
 /// loaded to answer reads as silence, and a bind cannot be taken back. So the walk binds on
 /// [`ProbeAnswer::Foreign`] at once, and on silence or a refusal only after the rung has stayed
-/// silent for [`RECLAIM_WINDOW_SECS`] across walks (see `build_rendezvous_endpoint`). A walk costs
+/// silent for [`RECLAIM_WINDOW`] across walks (see `build_rendezvous_endpoint`). A walk costs
 /// one attempt on a silent rung, not three.
 async fn rung_answer(prober: &Endpoint, rendezvous_id: EndpointId, port: u16) -> ProbeAnswer {
     let addr = EndpointAddr::new(rendezvous_id)
         .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-    let answer = probe_answer(prober, addr, Duration::from_secs(RENDEZVOUS_PROBE_SECS)).await;
+    let answer = probe_answer(prober, addr, RENDEZVOUS_PROBE).await;
     tracing::trace!(target: "habilis_network::beacon", port, ?answer, "private rung identity-probe");
     answer
 }
@@ -773,7 +768,7 @@ impl RungWatch {
     /// Whether a probe that was asked at `since` is still waited for. After one heal tick it is
     /// given up: the task, or the loop that would note its report, is gone.
     fn alive(since: Instant, now: Instant) -> bool {
-        now.saturating_duration_since(since) < Duration::from_secs(heal_interval_secs())
+        now.saturating_duration_since(since) < heal_interval()
     }
 
     /// Note what a probe task found.
@@ -797,7 +792,7 @@ impl RungWatch {
         {
             return;
         }
-        let gap = Duration::from_secs(heal_interval_secs()).saturating_mul(3);
+        let gap = heal_interval().saturating_mul(3);
         let silent_since = match report.answer {
             ProbeAnswer::NoAnswer | ProbeAnswer::Refused => Some(
                 self.readings
@@ -872,7 +867,7 @@ impl RungWatch {
     /// one has passed: the task is given up and the rung is asked again.
     #[cfg(all(test, feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) fn expire_probes_in_flight(&mut self) {
-        let long_ago = Duration::from_secs(heal_interval_secs()).saturating_mul(2);
+        let long_ago = heal_interval().saturating_mul(2);
         for probe in self.in_flight.values_mut() {
             probe.since = probe.since.checked_sub(long_ago).unwrap_or(probe.since);
         }
@@ -881,7 +876,7 @@ impl RungWatch {
     /// Tests only: every reading is older than a heal tick, as when one has passed.
     #[cfg(test)]
     pub(crate) fn expire_readings(&mut self) {
-        let long_ago = Duration::from_secs(heal_interval_secs()).saturating_mul(2);
+        let long_ago = heal_interval().saturating_mul(2);
         for reading in self.readings.values_mut() {
             reading.read_at = reading
                 .read_at
@@ -897,9 +892,7 @@ impl RungWatch {
         let Some(reading) = self.readings.get(&port) else {
             return RungRead::Unknown;
         };
-        if now.saturating_duration_since(reading.read_at)
-            >= Duration::from_secs(heal_interval_secs())
-        {
+        if now.saturating_duration_since(reading.read_at) >= heal_interval() {
             return RungRead::Unknown;
         }
         match reading.answer {
@@ -909,8 +902,7 @@ impl RungWatch {
             // for a heal tick, and one report read a window later is still one sample.
             ProbeAnswer::NoAnswer | ProbeAnswer::Refused => match reading.silent_since {
                 Some(since)
-                    if reading.read_at.saturating_duration_since(since)
-                        >= Duration::from_secs(RECLAIM_WINDOW_SECS) =>
+                    if reading.read_at.saturating_duration_since(since) >= RECLAIM_WINDOW =>
                 {
                     RungRead::SilentLongEnough
                 }
@@ -1011,7 +1003,7 @@ impl RungWatch {
 
     /// Tests only: say that `port` has been silent for `by` already.
     #[cfg(test)]
-    pub(crate) fn age_silence(&mut self, port: u16, by: Duration) {
+    pub(crate) fn age_silence(&mut self, port: u16, by: std::time::Duration) {
         if let Some(reading) = self.readings.get_mut(&port) {
             reading.silent_since = Instant::now().checked_sub(by);
         }
@@ -1249,7 +1241,7 @@ pub(crate) async fn ensure_holder(
             return held;
         }
         match n0_future::time::timeout(
-            Duration::from_secs(RECLAIM_WINDOW_SECS + 4),
+            RECLAIM_WINDOW + std::time::Duration::from_secs(4),
             arrivals.recv(),
         )
         .await
@@ -1273,15 +1265,25 @@ pub(crate) async fn ensure(
     ensure_holder(params, peer, peer_book, current, probe_first, probe).await == Held::Claimed
 }
 
-/// Whether a holder lets go of its beacon for a rival holder it has read: the lower member id
-/// keeps the rendezvous. Both holders compute it from the same two ids, so exactly one yields.
-pub(crate) fn yields_to(own: EndpointId, other: EndpointId) -> bool {
-    other < own
+/// Two holders of one beacon: this node and a rival that it has read. One struct for the pair,
+/// because both are an `EndpointId` and a swap compiles and flips the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Contest {
+    pub(crate) own: EndpointId,
+    pub(crate) rival: EndpointId,
+}
+
+impl Contest {
+    /// Whether this holder lets go of its beacon for the rival: the lower member id keeps the
+    /// rendezvous. Both holders compute it from the same two ids, so exactly one yields.
+    pub(crate) fn own_yields(self) -> bool {
+        self.rival < self.own
+    }
 }
 
 /// Apply an off-loop probe's verdict: claim the rendezvous if it is free.
 ///
-/// Re-checks the beacon slot first, because up to [`HEAL_PROBE_SECS`] passed
+/// Re-checks the beacon slot first, because up to [`HEAL_PROBE`] passed
 /// while the probe ran and the loop kept moving — a reclaim tick or a
 /// re-stand-up may have taken the role in the meantime, and claiming twice
 /// binds the duplicate same-id copy the probe exists to prevent.
@@ -1460,9 +1462,9 @@ async fn claim_holder(
 #[cfg(test)]
 mod tests {
     use super::{
-        Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey, TopicId, claim,
-        ensure, foreign_sessions, holder_entry, oneshot, probe_verdict, releasable,
-        rendezvous_addr, spawn_rival_probe, verdict_of, watch, yields_to,
+        Contest, Endpoint, LookupOpts, Rendezvous, RendezvousParams, RivalProbe, SecretKey,
+        TopicId, claim, ensure, foreign_sessions, holder_entry, oneshot, probe_verdict, releasable,
+        rendezvous_addr, spawn_rival_probe, verdict_of, watch,
     };
 
     /// Two ports of a ladder: the first is taken by `held` (a socket that says nothing, or another
@@ -1646,7 +1648,7 @@ mod tests {
     #[tokio::test]
     async fn a_rung_that_stays_silent_for_the_whole_window_is_bound_at_a_later_walk() {
         use super::{Held, RungWatch, walk_ladder};
-        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+        use crate::util::tuning::RECLAIM_WINDOW;
 
         let (silent, ports) = ladder_of_two();
         let first = ports[0];
@@ -1688,10 +1690,7 @@ mod tests {
         .await;
         let kept_free = beacon.is_none();
         // The rung has been silent for the window already.
-        rungs.age_silence(
-            first,
-            std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1),
-        );
+        rungs.age_silence(first, RECLAIM_WINDOW + std::time::Duration::from_secs(1));
         let later = walk_ladder(
             &params,
             &peer,
@@ -1730,7 +1729,7 @@ mod tests {
     #[tokio::test]
     async fn two_silent_rungs_are_asked_at_once_and_passed_and_the_free_one_after_them_is_bound() {
         use super::{Held, RungWatch, walk_ladder};
-        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+        use crate::util::tuning::RECLAIM_WINDOW;
 
         let (first_socket, mut ports) = ladder_of_two();
         let (second_socket, second_ports) = ladder_of_two();
@@ -1767,7 +1766,7 @@ mod tests {
             rungs.note(report, crate::util::clock::Instant::now());
         }
         let both_asked_at_once = started.elapsed() < std::time::Duration::from_millis(1800);
-        let window = std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1);
+        let window = RECLAIM_WINDOW + std::time::Duration::from_secs(1);
         rungs.age_silence(first, window);
         rungs.age_silence(second, window);
         let later = walk_ladder(
@@ -1808,7 +1807,7 @@ mod tests {
     fn one_silent_report_is_not_a_window_of_silence_however_late_it_is_read() {
         use super::{RungRead, RungReport, RungWatch};
         use crate::lookup::ProbeAnswer;
-        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+        use crate::util::tuning::RECLAIM_WINDOW;
 
         let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
@@ -1822,7 +1821,7 @@ mod tests {
             then,
         );
 
-        let late = then + std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1);
+        let late = then + RECLAIM_WINDOW + std::time::Duration::from_secs(1);
         assert_eq!(
             rungs.reading(4242, late),
             RungRead::Silent,
@@ -1952,7 +1951,7 @@ mod tests {
     fn two_silent_reports_a_window_apart_pass_the_rung() {
         use super::{RungRead, RungReport, RungWatch};
         use crate::lookup::ProbeAnswer;
-        use crate::util::tuning::RECLAIM_WINDOW_SECS;
+        use crate::util::tuning::RECLAIM_WINDOW;
 
         let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
@@ -1964,7 +1963,7 @@ mod tests {
         };
         rungs.note(report, then);
 
-        let again = then + std::time::Duration::from_secs(RECLAIM_WINDOW_SECS + 1);
+        let again = then + RECLAIM_WINDOW + std::time::Duration::from_secs(1);
         rungs.note(report, again);
 
         assert_eq!(rungs.reading(4242, again), RungRead::SilentLongEnough);
@@ -2207,9 +2206,10 @@ mod tests {
             (second, first)
         };
 
-        assert!(yields_to(high, low), "the higher id yields to the lower");
-        assert!(!yields_to(low, high), "the lower id keeps the beacon");
-        assert!(!yields_to(low, low), "an id never yields to itself");
+        let contest = |own, rival| Contest { own, rival }.own_yields();
+        assert!(contest(high, low), "the higher id yields to the lower");
+        assert!(!contest(low, high), "the lower id keeps the beacon");
+        assert!(!contest(low, low), "an id never yields to itself");
     }
 
     /// Observed on both holders of a split topic: the one session counted as a
@@ -2863,7 +2863,7 @@ mod tests {
     async fn ensure_starts_the_probe_instead_of_waiting_for_it() {
         // The invariant the departure bug came down to: `ensure` runs on the
         // sole event loop, so it must not block on the probe. It used to,
-        // for the full `HEAL_PROBE_SECS` — long enough that `Node::leave`'s
+        // for the full `HEAL_PROBE` — long enough that `Node::leave`'s
         // 3s budget expired and the graceful `Left` was never sent.
         let params = public_params();
         let peer = loopback_endpoint().await;

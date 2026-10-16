@@ -39,7 +39,7 @@ use crate::util::clock::Instant;
 /// reason: its throwaway endpoint is just as capable of reaching `Drop` open.
 /// So does the startup rung probe, which walks the relay ladder on endpoints
 /// of its own. All three close concurrently, so the whole release costs one
-/// close budget, which is what `NODE_LEAVE_SECS` is sized for.
+/// close budget, which is what `NODE_LEAVE` is sized for.
 pub(super) async fn release_rendezvous(
     rendezvous: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
@@ -93,14 +93,14 @@ pub(super) fn claims_at_startup(cohost: CoHostPolicy) -> bool {
 /// May this member co-host the rendezvous yet? See [`CoHostPolicy`].
 /// `Never` never co-hosts (a pure consumer); `Eager`/`EagerProbed` always
 /// may; a `Deferred` member only once `meshed`, or after
-/// `cohost_grace_secs` for an empty mesh (then probe-gated in
+/// `cohost_grace` for an empty mesh (then probe-gated in
 /// `beacon::ensure`). Pure + cheap; never blocks `ready`.
 pub(super) fn may_cohost(cohost: CoHostPolicy, meshed: bool, started: Instant) -> bool {
     match cohost {
         CoHostPolicy::Never => false,
         CoHostPolicy::Eager | CoHostPolicy::EagerProbed => true,
         CoHostPolicy::Deferred => {
-            meshed || started.elapsed().as_secs() >= crate::util::tuning::cohost_grace_secs()
+            meshed || started.elapsed() >= crate::util::tuning::cohost_grace()
         }
     }
 }
@@ -192,7 +192,7 @@ pub(super) async fn maybe_cohost(
 /// often the walk runs: to the log, and to the sink so that the app can tell its user.
 fn note_no_rung_free(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, ports: usize) {
     let now = Instant::now();
-    let repeat = Duration::from_secs(crate::util::tuning::NO_RUNG_REPEAT_SECS);
+    let repeat = crate::util::tuning::NO_RUNG_REPEAT;
     if state
         .no_rung_noted_at
         .is_some_and(|at| now.saturating_duration_since(at) < repeat)
@@ -419,7 +419,7 @@ pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool 
 /// rival wins an arbitration, so a fresh claim epoch starts brisk again.
 ///
 /// An **empty** roster ramps past the island backstop to
-/// [`RIVAL_RECHECK_ALONE_SECS`](crate::util::tuning::RIVAL_RECHECK_ALONE_SECS).
+/// [`RIVAL_RECHECK_ALONE`](crate::util::tuning::RIVAL_RECHECK_ALONE).
 /// The brisk rounds are the same — a double-claim inside a probe window is
 /// repaired by the first few sheds, and those are untouched — but a node that
 /// has found no rival and knows no peer has nothing left to arbitrate, and the
@@ -427,40 +427,39 @@ pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool 
 /// tier is `roster == 0`, not "small": two survivors of a departed origin each
 /// count the other, and that split is the one the brisk cap exists for.
 pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: EndpointId) -> Duration {
-    use crate::util::tuning::{RIVAL_RECHECK_OFFSET_SPAN_SECS, RIVAL_RECHECK_SMALL_ROSTER};
+    use crate::util::clock::millis_saturating;
+    use crate::util::tuning::{RIVAL_RECHECK_OFFSET_SPAN, RIVAL_RECHECK_SMALL_ROSTER};
     use crate::util::tuning::{
-        rival_recheck_alone_secs, rival_recheck_first_secs, rival_recheck_meshed_secs,
-        rival_recheck_secs,
+        rival_recheck, rival_recheck_alone, rival_recheck_first, rival_recheck_meshed,
     };
 
     if round == 0 {
         let mut prefix = [0u8; 8];
         prefix.copy_from_slice(&endpoint_id.as_bytes()[..8]);
         // Pubkey bytes are already uniform — no hashing needed.
-        let offset_ms = u64::from_le_bytes(prefix) % (RIVAL_RECHECK_OFFSET_SPAN_SECS * 1000);
-        return Duration::from_secs(rival_recheck_first_secs()) + Duration::from_millis(offset_ms);
+        let offset_ms = u64::from_le_bytes(prefix) % millis_saturating(RIVAL_RECHECK_OFFSET_SPAN);
+        return rival_recheck_first() + Duration::from_millis(offset_ms);
     }
-    let base_secs = if roster > RIVAL_RECHECK_SMALL_ROSTER {
-        rival_recheck_meshed_secs()
+    let base = if roster > RIVAL_RECHECK_SMALL_ROSTER {
+        rival_recheck_meshed()
     } else {
-        let backstop_secs = if roster == 0 {
-            rival_recheck_alone_secs()
+        let backstop = if roster == 0 {
+            rival_recheck_alone()
         } else {
-            rival_recheck_meshed_secs()
+            rival_recheck_meshed()
         };
         // Seven doublings reach the alone ceiling from the brisk base
         // (30s << 7 = 3840s); capped well before the shift could overflow, and
         // the base is capped at the backstop regardless.
         let doublings = round.saturating_sub(1).min(7);
-        rival_recheck_secs()
-            .saturating_mul(1u64 << doublings)
-            .min(backstop_secs)
+        rival_recheck()
+            .saturating_mul(1u32 << doublings)
+            .min(backstop)
     };
     // Jitter spans the full base: two split holders re-jitter from
     // near-aligned schedules every round, and the wider the span the more
     // likely one's probe window lands while the other still holds.
-    let jitter_ms = rand::Rng::random_range(&mut rand::rng(), 0..=base_secs.saturating_mul(1000));
-    Duration::from_secs(base_secs) + Duration::from_millis(jitter_ms)
+    base + rand::Rng::random_range(&mut rand::rng(), Duration::ZERO..=base)
 }
 /// How many steady intervals a shed may be held back while a data-channel
 /// peer depends on this beacon.
@@ -547,8 +546,7 @@ pub(super) fn shed_rival_beacon_if_due(
         .map_or_else(beacon::Dependents::default, |held| held.dependents(peer));
     if !state.yield_to_lower && defer_shed(dependents.count(), state.rival_recheck_deferrals) {
         state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
-        state.next_rival_recheck =
-            Some(Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()));
+        state.next_rival_recheck = Some(Instant::now() + crate::util::tuning::rival_recheck());
         tracing::info!(
             target: "habilis_network::gossip",
             node = %peer.fmt_short(),
@@ -595,7 +593,7 @@ pub(super) fn shed_rival_beacon_if_due(
     state.forget_rendezvous_verdict();
     // Arm the fast burst explicitly rather than waiting for our own
     // beacon's `NeighborDown` to do it — the re-probe (and the re-claim
-    // when no rival exists) then runs within ~RECLAIM_INTERVAL_MS.
+    // when no rival exists) then runs within ~RECLAIM_INTERVAL.
     state.arm_reclaim(Instant::now());
     true
 }
@@ -603,6 +601,7 @@ pub(super) fn shed_rival_beacon_if_due(
 #[cfg(test)]
 mod tests {
     use super::super::config::CoHostPolicy;
+    use super::super::state::RivalFlag;
     use super::{
         MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
         regrafts_rendezvous, rival_recheck_applies,
@@ -698,10 +697,28 @@ mod tests {
         let now = crate::util::clock::Instant::now();
         assert!(super::may_probe_to_claim(&state), "no holder known: probe");
 
-        state.note_rival_beacon_flag(own, [9u8; 32], holder, true, true, now);
+        state.note_rival_beacon_flag(
+            own,
+            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+            holder,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
+            now,
+        );
         assert!(!super::may_probe_to_claim(&state), "a holder is known");
 
-        state.note_rival_beacon_flag(own, [9u8; 32], holder, true, false, now);
+        state.note_rival_beacon_flag(
+            own,
+            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+            holder,
+            RivalFlag {
+                proven: true,
+                held: false,
+            },
+            now,
+        );
         assert!(super::may_probe_to_claim(&state), "it let go: probe again");
     }
 
@@ -716,10 +733,12 @@ mod tests {
 
         state.note_rival_beacon_flag(
             own,
-            [9u8; 32],
+            crate::protocol::AuthorKey::from_bytes([9u8; 32]),
             holder,
-            true,
-            true,
+            RivalFlag {
+                proven: true,
+                held: true,
+            },
             crate::util::clock::Instant::now(),
         );
 
@@ -836,7 +855,7 @@ mod tests {
     }
 
     /// Our rendezvous never dials us, so a fresh claim is linked only by our
-    /// own re-graft. The reclaim tick does that within `RECLAIM_INTERVAL_MS`,
+    /// own re-graft. The reclaim tick does that within `RECLAIM_INTERVAL`,
     /// but only while its window is open, and a heal-tick claim happens with
     /// no window open: without one, the link waits for the next heal tick.
     #[tokio::test]
@@ -847,7 +866,7 @@ mod tests {
         use crate::daemon::ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::protocol::mesh::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
@@ -888,7 +907,7 @@ mod tests {
         let mesh = MeshId::from("test");
         let author = nick("holder");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let sink = SilentSink;
         let ctx = HandlerCtx {
             sender: &sender,
@@ -896,7 +915,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,
@@ -943,7 +962,7 @@ mod tests {
         use crate::daemon::ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::protocol::mesh::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
@@ -994,7 +1013,7 @@ mod tests {
         let mesh = MeshId::from("test");
         let author = nick("member");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let sink = SilentSink;
         let ctx = HandlerCtx {
             sender: &sender,
@@ -1002,7 +1021,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,
@@ -1077,9 +1096,10 @@ mod tests {
             state
                 .linked_endpoints
                 .insert(crate::testing::endpoint_id(1));
-            state
-                .rival_holders
-                .insert([9u8; 32], crate::testing::endpoint_id(2));
+            state.rival_holders.insert(
+                crate::protocol::AuthorKey::from_bytes([9u8; 32]),
+                crate::testing::endpoint_id(2),
+            );
         }))
         .await;
 
@@ -1109,7 +1129,7 @@ mod tests {
         use crate::daemon::ctx::HandlerCtx;
         use crate::gossip::event::CountingSink;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::protocol::mesh::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
@@ -1164,7 +1184,7 @@ mod tests {
         let mesh = MeshId::from("test");
         let author = nick("member");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let sink = CountingSink::new();
         let ctx = HandlerCtx {
             sender: &sender,
@@ -1172,7 +1192,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,
@@ -1204,7 +1224,7 @@ mod tests {
         let said = sink.count();
         maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
         let again = sink.count();
-        let repeat = Duration::from_secs(crate::util::tuning::NO_RUNG_REPEAT_SECS + 1);
+        let repeat = crate::util::tuning::NO_RUNG_REPEAT + Duration::from_secs(1);
         state.no_rung_noted_at = state.no_rung_noted_at.and_then(|at| at.checked_sub(repeat));
         maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
         let later = sink.count();
@@ -1344,7 +1364,7 @@ mod tests {
             use crate::daemon::ctx::HandlerCtx;
             use crate::gossip::event::SilentSink;
             use crate::protocol::MeshId;
-            use crate::protocol::identity::{Identity, encode_pubkey};
+            use crate::protocol::identity::Identity;
             use crate::testing::nick;
             use crate::transport::MeshSender;
             use crate::util::clock::Instant;
@@ -1359,7 +1379,7 @@ mod tests {
             let mesh = MeshId::from("test");
             let author = nick("holder");
             let identity = Identity::generate();
-            let our_pubkey = encode_pubkey(&identity.public());
+            let our_pubkey = identity.author_key();
             let sink = SilentSink;
             let ctx = HandlerCtx {
                 sender: &sender,
@@ -1367,7 +1387,7 @@ mod tests {
                 mesh: &mesh,
                 author: &author,
                 identity: &identity,
-                our_pubkey: &our_pubkey,
+                our_pubkey,
                 max_peers: 16,
                 rendezvous_id: self.params.id,
                 external_msg_tx: None,
@@ -1606,7 +1626,7 @@ mod tests {
         use crate::daemon::ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::protocol::mesh::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
@@ -1647,7 +1667,7 @@ mod tests {
         let mesh = MeshId::from("test");
         let author = nick("holder");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let sink = SilentSink;
         let ctx = HandlerCtx {
             sender: &sender,
@@ -1655,7 +1675,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,
@@ -1711,7 +1731,7 @@ mod tests {
         use crate::daemon::ctx::HandlerCtx;
         use crate::gossip::event::SilentSink;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::protocol::mesh::LookupOpts;
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
@@ -1751,7 +1771,7 @@ mod tests {
         let mesh = MeshId::from("test");
         let author = nick("holder");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let sink = SilentSink;
         let ctx = HandlerCtx {
             sender: &sender,
@@ -1759,7 +1779,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: params.id,
             external_msg_tx: None,
@@ -1839,7 +1859,7 @@ mod tests {
 
     #[test]
     fn first_recheck_delay_is_deterministic_and_bounded() {
-        use crate::util::tuning::{RIVAL_RECHECK_FIRST_SECS, RIVAL_RECHECK_OFFSET_SPAN_SECS};
+        use crate::util::tuning::{RIVAL_RECHECK_FIRST, RIVAL_RECHECK_OFFSET_SPAN};
 
         let id = |byte: u8| iroh::SecretKey::from_bytes(&[byte; 32]).public();
 
@@ -1852,8 +1872,8 @@ mod tests {
         );
 
         // Base + phase offset, offset strictly inside the span.
-        let base = Duration::from_secs(RIVAL_RECHECK_FIRST_SECS);
-        let span = Duration::from_secs(RIVAL_RECHECK_OFFSET_SPAN_SECS);
+        let base = RIVAL_RECHECK_FIRST;
+        let span = RIVAL_RECHECK_OFFSET_SPAN;
         for byte in 0..8u8 {
             let delay = next_recheck_delay(0, 0, id(byte));
             assert!(
@@ -1872,14 +1892,14 @@ mod tests {
     #[test]
     fn steady_recheck_delay_is_jittered_within_bounds() {
         use crate::util::tuning::{
-            RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS, RIVAL_RECHECK_SMALL_ROSTER,
+            RIVAL_RECHECK, RIVAL_RECHECK_MESHED, RIVAL_RECHECK_SMALL_ROSTER,
         };
 
         let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
 
         // Steady rounds: base by tier plus jitter in [0, base].
-        let lone_base = Duration::from_secs(RIVAL_RECHECK_SECS);
-        let meshed_base = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS);
+        let lone_base = RIVAL_RECHECK;
+        let meshed_base = RIVAL_RECHECK_MESHED;
         for _ in 0..8 {
             let lone = next_recheck_delay(1, 0, id);
             assert!(lone >= lone_base && lone <= lone_base * 2);
@@ -1890,10 +1910,10 @@ mod tests {
 
     #[test]
     fn a_small_roster_rechecks_at_the_brisk_cadence() {
-        use crate::util::tuning::{RIVAL_RECHECK_SECS, RIVAL_RECHECK_SMALL_ROSTER};
+        use crate::util::tuning::{RIVAL_RECHECK, RIVAL_RECHECK_SMALL_ROSTER};
 
         let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
-        let lone_base = Duration::from_secs(RIVAL_RECHECK_SECS);
+        let lone_base = RIVAL_RECHECK;
 
         // The workload this exists for: an origin dies and two survivors are
         // left holding same-id beacons. Waiting out a cadence priced for two
@@ -1910,7 +1930,7 @@ mod tests {
     #[test]
     fn rival_free_rounds_back_off_geometrically_to_the_backstop() {
         use crate::util::tuning::{
-            RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS, RIVAL_RECHECK_SMALL_ROSTER,
+            RIVAL_RECHECK, RIVAL_RECHECK_MESHED, RIVAL_RECHECK_SMALL_ROSTER,
         };
 
         let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
@@ -1922,21 +1942,21 @@ mod tests {
         // and their same-id split is what the cap is priced for.
         for roster in 1..=RIVAL_RECHECK_SMALL_ROSTER {
             for round in 1..=10u32 {
-                let expected = (RIVAL_RECHECK_SECS << round.saturating_sub(1).min(7))
-                    .min(RIVAL_RECHECK_MESHED_SECS);
-                let base = Duration::from_secs(expected);
+                let base = RIVAL_RECHECK
+                    .saturating_mul(1u32 << round.saturating_sub(1).min(7))
+                    .min(RIVAL_RECHECK_MESHED);
                 for _ in 0..4 {
                     let delay = next_recheck_delay(round, roster, id);
                     assert!(
                         delay >= base && delay <= base * 2,
-                        "roster {roster}, round {round}: expected base {expected}s, got {delay:?}"
+                        "roster {roster}, round {round}: expected base {base:?}, got {delay:?}"
                     );
                 }
             }
         }
 
         // A large roster pays the backstop from round one, backoff or not.
-        let backstop = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS);
+        let backstop = RIVAL_RECHECK_MESHED;
         let delay = next_recheck_delay(1, 20, id);
         assert!(delay >= backstop && delay <= backstop * 2);
     }
@@ -1947,21 +1967,19 @@ mod tests {
     /// past the island backstop to the alone ceiling.
     #[test]
     fn an_empty_roster_ramps_past_the_island_backstop_to_the_alone_ceiling() {
-        use crate::util::tuning::{
-            RIVAL_RECHECK_ALONE_SECS, RIVAL_RECHECK_MESHED_SECS, RIVAL_RECHECK_SECS,
-        };
+        use crate::util::tuning::{RIVAL_RECHECK, RIVAL_RECHECK_ALONE, RIVAL_RECHECK_MESHED};
 
         let id = iroh::SecretKey::from_bytes(&[9; 32]).public();
 
         for round in 1..=12u32 {
-            let expected = (RIVAL_RECHECK_SECS << round.saturating_sub(1).min(7))
-                .min(RIVAL_RECHECK_ALONE_SECS);
-            let base = Duration::from_secs(expected);
+            let base = RIVAL_RECHECK
+                .saturating_mul(1u32 << round.saturating_sub(1).min(7))
+                .min(RIVAL_RECHECK_ALONE);
             for _ in 0..4 {
                 let delay = next_recheck_delay(round, 0, id);
                 assert!(
                     delay >= base && delay <= base * 2,
-                    "round {round}: expected base {expected}s, got {delay:?}"
+                    "round {round}: expected base {base:?}, got {delay:?}"
                 );
             }
         }
@@ -1971,7 +1989,7 @@ mod tests {
         for round in 1..=4u32 {
             let alone = next_recheck_delay(round, 0, id);
             let pair = next_recheck_delay(round, 1, id);
-            let base = Duration::from_secs(RIVAL_RECHECK_SECS << round.saturating_sub(1));
+            let base = RIVAL_RECHECK.saturating_mul(1u32 << round.saturating_sub(1));
             assert!(
                 alone >= base && alone <= base * 2,
                 "round {round}: {alone:?}"
@@ -1981,12 +1999,12 @@ mod tests {
 
         // The settled cadence is well past the island backstop.
         let settled = next_recheck_delay(12, 0, id);
-        let island_cap = Duration::from_secs(RIVAL_RECHECK_MESHED_SECS) * 2;
+        let island_cap = RIVAL_RECHECK_MESHED * 2;
         assert!(
             settled > island_cap,
             "a settled lone holder must idle past the island cap: {settled:?}"
         );
-        assert!(settled >= Duration::from_secs(RIVAL_RECHECK_ALONE_SECS));
+        assert!(settled >= RIVAL_RECHECK_ALONE);
     }
 
     /// A rehome is a fresh arbitration epoch, so the backoff restarts with it.

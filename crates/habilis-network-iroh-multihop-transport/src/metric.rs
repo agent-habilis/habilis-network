@@ -12,9 +12,21 @@
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
-pub struct LinkMetric(pub u32);
+pub struct LinkMetric(u32);
 
 impl LinkMetric {
+    /// A link cost of `cost`.
+    #[must_use]
+    pub const fn new(cost: u32) -> Self {
+        Self(cost)
+    }
+
+    /// The cost as a number.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
     /// A zero-cost link — the identity for path accumulation (cost of staying
     /// put at the source).
     pub(crate) const ZERO: Self = Self(0);

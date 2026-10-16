@@ -17,7 +17,7 @@ string_newtype!(
 /// of value. Deserialization is **validating** (not the derived
 /// transparent one): an inbound id off the wire is run through `new`, so a
 /// non-UUID `id` is rejected at `Message::parse` rather than panicking later
-/// in `as_uuid_bytes` (the anti-entropy digest path).
+/// in `as_uuid_bytes` (the dedup key path).
     MessageId,
     error = IdError,
     deserialize,
@@ -52,9 +52,9 @@ impl MessageId {
         Self(Uuid::new_v4().to_string())
     }
 
-    /// The id's 16 raw UUID bytes — the compact form packed into an
-    /// anti-entropy digest (vs the 36-char string), so far more ids fit
-    /// one gossip message. Infallible: a `MessageId` is always a valid
+    /// The id's 16 raw UUID bytes. They are the id half of the input of
+    /// [`Message::dedup_key`](crate::Message::dedup_key), which hashes them
+    /// with the author's key. Infallible: a `MessageId` is always a valid
     /// UUID (enforced by `new`).
     pub(crate) fn as_uuid_bytes(&self) -> [u8; 16] {
         Uuid::parse_str(&self.0)

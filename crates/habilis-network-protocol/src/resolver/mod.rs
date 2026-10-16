@@ -122,7 +122,7 @@ mod tests {
     fn known_mesh_id() -> String {
         use crate::mesh::{Mesh, MeshConfig, MeshName};
         Mesh::new(
-            [1u8; 32],
+            crate::crypto::Seed::from_bytes([1u8; 32]),
             MeshName::new("test").unwrap(),
             MeshConfig::loopback(),
         )
@@ -155,7 +155,7 @@ mod tests {
     fn invite_only_mesh() -> crate::mesh::Mesh {
         use crate::mesh::{Mesh, MeshConfig, MeshName};
         let mut mesh = Mesh::new(
-            [5u8; 32],
+            crate::crypto::Seed::from_bytes([5u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
         );
@@ -175,7 +175,12 @@ mod tests {
 
     #[test]
     fn a_minted_invite_classifies_as_invite() {
-        let token = crate::invite::mint(&invite_only_mesh(), Some(3600), None).unwrap();
+        let token = crate::invite::mint(
+            &invite_only_mesh(),
+            Some(std::time::Duration::from_hours(1)),
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             token.parse::<JoinTarget>(),
             Ok(JoinTarget::Invite(_))

@@ -12,13 +12,12 @@ use bytes::Bytes;
 use iroh_gossip::api::{ApiError, Event};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::state::{DirectState, EventLoopState};
+use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
-use crate::protocol::identity;
 use crate::protocol::message::MessageBody;
-use crate::protocol::{Channel, Message, MessageKind, Nickname, PresenceSubtype};
+use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
 // `clock::Instant` off wasm32. See `daemon::state`.
@@ -499,10 +498,10 @@ pub(crate) async fn ingest(
     };
     // Self-echo drop: keyed on our **public key**, not the nickname. With
     // non-unique display names a peer may legitimately share our nickname —
-    // only our own signing key identifies our own echoed broadcasts. The hex
-    // pubkey is computed once at loop setup (`ctx.our_pubkey`), so this is a
-    // string compare, not a key-derivation + allocation per message.
-    if message.pubkey == ctx.our_pubkey {
+    // only our own signing key identifies our own echoed broadcasts. The
+    // key is taken once at loop setup (`ctx.our_pubkey`), so this is a 32-byte
+    // compare, not a key derivation per message.
+    if message.author_key() == Some(ctx.our_pubkey) {
         return;
     }
     if dropped_by_test_hook(state, &message) {
@@ -814,7 +813,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
                     );
                     return false;
                 }
-                if bound != Some(vector.origin()) {
+                if bound != Some(vector.origin().get()) {
                     tracing::debug!(target: "habilis_network::gossip",
                         author = %message.author,
                         "dropping multihop link-state: its origin is not the endpoint bound to its author"
@@ -989,16 +988,17 @@ fn retain_and_index(
         return;
     }
     if class.is_some_and(|cls| cls.chained) {
-        let hash = identity::content_hash_hex(canonical);
-        // A second, *different* content hash at an already-seen `(pubkey, seq)`
+        let hash = ContentHash::of(canonical);
+        // A second, *different* content hash at an already-seen `(author, seq)`
         // is cryptographic proof of equivocation — surface a `fork` once per
         // offending key (order-independent; we keep both).
         if let Some(seq) = message.seq
-            && state.note_msg_seq(&message.pubkey, seq, hash.clone())
+            && let Some(author) = message.author_key()
+            && state.note_msg_seq(&author, seq, hash)
         {
             ctx.sink.emit(NodeEvent::Fork {
                 nickname: message.author.clone(),
-                pubkey: message.pubkey.clone(),
+                pubkey: author.to_string(),
                 seq,
             });
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
@@ -1015,10 +1015,12 @@ fn retain_and_index(
 /// indexes bounded with the log window as the push evicts.
 pub(super) fn push_to_log(state: &mut EventLoopState, message: Message) {
     if let Some(evicted) = state.message_log.push(message) {
-        let evicted_hash = evicted.content_hash_hex();
+        let evicted_hash = evicted.content_hash();
         state.forget_hash(&evicted_hash);
-        if let Some(seq) = evicted.seq {
-            state.forget_msg_seq(&evicted.pubkey, seq, &evicted_hash);
+        if let Some(seq) = evicted.seq
+            && let Some(author) = evicted.author_key()
+        {
+            state.forget_msg_seq(&author, seq, &evicted_hash);
         }
     }
 }
@@ -1322,7 +1324,7 @@ fn gate_directed_to_us(
 /// when there is no key or the body is not a decryptable `enc` envelope (on a
 /// passworded mesh that means an unsealed/tampered body — the caller drops it).
 fn decrypt_broadcast(message: &mut Message, state: &EventLoopState) -> Option<MessageBody> {
-    let key = state.broadcast_key.as_deref()?;
+    let key = state.broadcast_key.as_ref()?;
     // A key exists (passworded mesh), so a body that will not open is either
     // cleartext or tampered — drop it, but say so (mirroring the directed-drop
     // warn) rather than vanishing silently. A generic `send_app` broadcast that
@@ -1507,10 +1509,8 @@ async fn handle_peer_info(
     // The only binding a digest's answer may follow: this signer proved it
     // owns `peer_id`. A `PeerInfo` arrives many times, so a known pair is not
     // checked again.
-    if let (Some(signer), Some(proof)) = (
-        crate::transport::endpoint_proof::signer_bytes(&message.pubkey),
-        parsed["proof"].as_str(),
-    ) && state.proven_endpoints.get(&signer) != Some(peer_id)
+    if let (Some(signer), Some(proof)) = (message.author_key(), parsed["proof"].as_str())
+        && state.proven_endpoints.get(&signer) != Some(peer_id)
         && crate::transport::endpoint_proof::verifies(peer_id, ctx.mesh, &signer, proof)
     {
         state
@@ -1519,14 +1519,16 @@ async fn handle_peer_info(
     }
     // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
     // endpoint is believed.
-    if let Some(signer) = crate::transport::endpoint_proof::signer_bytes(&message.pubkey) {
+    if let Some(signer) = message.author_key() {
         let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
         state.note_rival_beacon_flag(
             ctx.endpoint.id(),
             signer,
             peer_id,
-            proven,
-            parsed["beacon"].as_bool() == Some(true),
+            RivalFlag {
+                proven,
+                held: parsed["beacon"].as_bool() == Some(true),
+            },
             Instant::now(),
         );
     }
@@ -1786,7 +1788,7 @@ mod retain_own_broadcast_tests {
     use super::retain_own_broadcast;
     use crate::daemon::message_log::{MissingQuery, WindowRange};
     use crate::daemon::state::EventLoopState;
-    use crate::protocol::{MeshId, Message, Nickname};
+    use crate::protocol::{DedupKey, MeshId, Message, Nickname};
 
     fn joined(state: &EventLoopState, author: &str) -> Message {
         Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author))
@@ -1891,7 +1893,7 @@ mod retain_own_broadcast_tests {
 
         // We advertise what we hold; they compute what we are missing.
         let window = us.message_log.recent_window(64).expect("non-empty log");
-        let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
+        let have: HashSet<DedupKey> = window.ids.into_iter().collect();
         let offered = them.message_log.missing_in_window(MissingQuery {
             range: WindowRange {
                 lo: window.lo,
@@ -1928,7 +1930,7 @@ mod evicted_orphan_tests {
     use crate::doc::Ingested;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
-    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::identity::Identity;
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -2020,7 +2022,7 @@ mod evicted_orphan_tests {
         let (gossip_sender, _receiver) = topic.split();
         let sender = MeshSender::new(gossip_sender);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let reader_nick = nick("reader");
         let sink = SilentSink;
         let ctx = HandlerCtx {
@@ -2029,7 +2031,7 @@ mod evicted_orphan_tests {
             mesh: &mesh,
             author: &reader_nick,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: endpoint_id(9),
             external_msg_tx: None,
@@ -2098,7 +2100,7 @@ mod first_contact_tests {
     use crate::daemon::state::EventLoopState;
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
-    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::identity::Identity;
     use crate::protocol::message::MessageBody;
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -2135,7 +2137,7 @@ mod first_contact_tests {
         sender: MeshSender,
         mesh: MeshId,
         identity: Identity,
-        our_pubkey: String,
+        our_pubkey: crate::protocol::AuthorKey,
         author: Nickname,
         sink: SilentSink,
     }
@@ -2153,7 +2155,7 @@ mod first_contact_tests {
                 .expect("subscribe to a peerless topic");
             let (gossip_sender, _receiver) = topic.split();
             let identity = Identity::generate();
-            let our_pubkey = encode_pubkey(&identity.public());
+            let our_pubkey = identity.author_key();
             Self {
                 endpoint,
                 _gossip: gossip,
@@ -2173,7 +2175,7 @@ mod first_contact_tests {
                 mesh: &self.mesh,
                 author: &self.author,
                 identity: &self.identity,
-                our_pubkey: &self.our_pubkey,
+                our_pubkey: self.our_pubkey,
                 max_peers: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
@@ -2589,9 +2591,7 @@ mod first_contact_tests {
         assert!(!crate::transport::webrtc::rendezvous_graftable(&state));
 
         let silent = crate::util::clock::Instant::now()
-            .checked_sub(Duration::from_secs(
-                crate::util::tuning::alive_timeout_secs() + 10,
-            ))
+            .checked_sub(crate::util::tuning::alive_timeout() + Duration::from_secs(10))
             .expect("a past instant");
         state.last_seen.insert(nick("far-side"), silent);
         state.peers.insert(nick("far-side"));
@@ -2611,10 +2611,11 @@ mod first_contact_tests {
     /// carries it but is signed by another key must bind nothing.
     #[tokio::test]
     async fn a_peer_info_binds_its_signer_only_with_the_endpoints_proof() {
+        use crate::protocol::AuthorKey;
         use crate::protocol::identity::encode_pubkey;
         use crate::protocol::message::MessageBody;
         use crate::protocol::peer_addr::endpoint_addr_to_json;
-        use crate::transport::endpoint_proof::{sign, signer_bytes};
+        use crate::transport::endpoint_proof::sign;
 
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2622,7 +2623,7 @@ mod first_contact_tests {
         let bob_endpoint = bob_endpoint_key.public();
         let bob = Identity::generate();
         let stranger = Identity::generate();
-        let bob_signer = signer_bytes(&encode_pubkey(&bob.public())).expect("a 32-byte key");
+        let bob_signer = AuthorKey::from_hex(&encode_pubkey(&bob.public())).expect("a 32-byte key");
         let peer_info = |proof: Option<&str>, signed_by: &Identity| {
             let mut json = endpoint_addr_to_json(&iroh::EndpointAddr::new(bob_endpoint));
             if let Some(proof) = proof {
@@ -2642,7 +2643,7 @@ mod first_contact_tests {
         )
         .await;
         let stranger_signer =
-            signer_bytes(&encode_pubkey(&stranger.public())).expect("a 32-byte key");
+            AuthorKey::from_hex(&encode_pubkey(&stranger.public())).expect("a 32-byte key");
         assert_eq!(
             state.proven_endpoints.get(&stranger_signer),
             None,
@@ -2702,9 +2703,11 @@ mod first_contact_tests {
         let mut state = fresh_state();
         state.multihop = Some(ours.clone());
 
-        let vector_body =
-            crate::gossip::json_body(&theirs.link_vector(vec![(other_key.public(), 10)]))
-                .expect("a vector serializes");
+        let vector_body = crate::gossip::json_body(&theirs.link_vector(vec![(
+            habilis_network_iroh_multihop_transport::AppId::new(other_key.public()),
+            10,
+        )]))
+        .expect("a vector serializes");
         let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body);
         assert!(
             !super::handle_link_state(&vector, &mut state),
@@ -3113,8 +3116,11 @@ mod link_state_tests {
         let mut state = fresh_state();
         state.multihop = Some(ours.clone());
 
-        let body = crate::gossip::json_body(&theirs.link_vector(vec![(bob.public(), 10)]))
-            .expect("a vector serializes");
+        let body = crate::gossip::json_body(&theirs.link_vector(vec![(
+            habilis_network_iroh_multihop_transport::AppId::new(bob.public()),
+            10,
+        )]))
+        .expect("a vector serializes");
         let message_from = |author: &str| {
             Message::new_link_state(&MeshId::from("test"), &nick(author), body.clone())
         };
@@ -3160,7 +3166,7 @@ mod left_tests {
     use crate::lifecycle::membership::MembershipUpdate;
     use crate::lifecycle::{PresenceEvent, handle_presence};
     use crate::lookup::{TransportOpts, build_peer_multihop};
-    use crate::protocol::identity::{Identity, encode_pubkey};
+    use crate::protocol::identity::Identity;
     use crate::protocol::mesh::LookupOpts;
     use crate::protocol::{MeshId, Message, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -3218,7 +3224,10 @@ mod left_tests {
         let mut state = fresh_state();
         state.multihop = Some(handle.clone());
         let leaver = nick("leaver");
-        state.note_peer_endpoint(leaver.clone(), EndpointAddr::new(leaver_handle.app_id()));
+        state.note_peer_endpoint(
+            leaver.clone(),
+            EndpointAddr::new(leaver_handle.app_id().get()),
+        );
 
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let topic = gossip
@@ -3228,7 +3237,7 @@ mod left_tests {
         let (gossip_sender, _receiver) = topic.split();
         let sender = MeshSender::new(gossip_sender);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let mesh = MeshId::from("test");
         let us = nick("us");
         let sink = SilentSink;
@@ -3238,7 +3247,7 @@ mod left_tests {
             mesh: &mesh,
             author: &us,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: endpoint_id(9),
             external_msg_tx: None,
@@ -3329,7 +3338,7 @@ mod left_tests {
         let (gossip_sender, _receiver) = topic.split();
         let sender = MeshSender::new(gossip_sender);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let mesh = MeshId::from("test");
         let us = nick("us");
         let sink = SilentSink;
@@ -3339,7 +3348,7 @@ mod left_tests {
             mesh: &mesh,
             author: &us,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: endpoint_id(9),
             external_msg_tx: None,
@@ -3437,6 +3446,15 @@ mod parked_link_state_tests {
         handle: &MultihopHandle,
         links: Vec<(iroh::EndpointId, u32)>,
     ) -> Message {
+        let links = links
+            .into_iter()
+            .map(|(id, cost)| {
+                (
+                    habilis_network_iroh_multihop_transport::AppId::new(id),
+                    cost,
+                )
+            })
+            .collect();
         let body =
             crate::gossip::json_body(&handle.link_vector(links)).expect("a vector serializes");
         Message::new_link_state(&MeshId::from("test"), &nick(author), body)

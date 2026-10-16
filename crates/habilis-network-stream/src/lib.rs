@@ -15,7 +15,7 @@ mod node;
 mod produce;
 mod read;
 
-pub use hash::{ID_LEN, SECRET_LEN, StreamHash};
+pub use hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 pub use node::{StreamNode, StreamOpts};
 pub use produce::Producer;
 pub use read::{Reader, Refused};

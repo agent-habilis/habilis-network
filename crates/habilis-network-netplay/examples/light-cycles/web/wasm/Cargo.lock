@@ -1437,7 +1437,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "zeroize",
 ]
 
 [[package]]
@@ -1475,6 +1474,7 @@ dependencies = [
  "iroh",
  "iroh-base",
  "js-sys",
+ "n0-future",
  "n0-watcher",
  "noq-udp",
  "rand 0.9.5",

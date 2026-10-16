@@ -2,7 +2,7 @@
 //! sessions together, and the rule that keeps it.
 //!
 //! A direct connection is a cache. Below the ceiling `C` nothing closes for idleness (the one
-//! backstop of `DIRECT_IDLE_BACKSTOP_SECS` apart). At `C` the node always accepts a new peer and
+//! backstop of `DIRECT_IDLE_BACKSTOP` apart). At `C` the node always accepts a new peer and
 //! evicts the least recently used one.
 //!
 //! The count is per peer: a peer that holds a session and a QUIC connection over it is one unit.

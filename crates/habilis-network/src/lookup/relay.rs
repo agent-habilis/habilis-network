@@ -25,8 +25,8 @@ use tokio::sync::watch;
 
 use crate::protocol::mesh::RelayChoice;
 use crate::util::tuning::{
-    RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL_SECS, RELAY_REPROBE_BACKOFF_MAX_SECS,
-    RELAY_REPROBE_BACKOFF_MIN_SECS, RELAY_RUNG_PROBE_SECS, RENDEZVOUS_CLOSE_SECS,
+    RELAY_LIVENESS_FAILS_TO_EVICT, RELAY_LIVENESS_INTERVAL, RELAY_REPROBE_BACKOFF_MAX,
+    RELAY_REPROBE_BACKOFF_MIN, RELAY_RUNG_PROBE, RENDEZVOUS_CLOSE,
 };
 
 /// The default relay **ladder** — n0's prod relay set, in fixed
@@ -262,12 +262,12 @@ impl StoppableTask {
         }
     }
 
-    /// Stop the task and wait for it, bounded by `RENDEZVOUS_CLOSE_SECS` like
+    /// Stop the task and wait for it, bounded by `RENDEZVOUS_CLOSE` like
     /// the other closes on the way out.
     pub(crate) async fn stop_and_wait(self) {
         let Self { task, stop } = self;
         drop(stop);
-        if n0_future::time::timeout(Duration::from_secs(RENDEZVOUS_CLOSE_SECS), task)
+        if n0_future::time::timeout(RENDEZVOUS_CLOSE, task)
             .await
             .is_err()
         {
@@ -318,13 +318,13 @@ fn should_evict_rung(consecutive_fails: u32) -> bool {
 }
 
 /// The next inter-round backoff for the relay-less rediscovery loop:
-/// double `current`, saturating at [`RELAY_REPROBE_BACKOFF_MAX_SECS`].
-/// The first wait is [`RELAY_REPROBE_BACKOFF_MIN_SECS`] (the caller
+/// double `current`, saturating at [`RELAY_REPROBE_BACKOFF_MAX`].
+/// The first wait is [`RELAY_REPROBE_BACKOFF_MIN`] (the caller
 /// seeds `current` with it); thereafter the beacon keeps re-walking the
 /// ladder forever, just ever more sparsely while every rung stays down.
 /// Pure, so the progression is unit-tested.
 fn next_relay_backoff(current: Duration) -> Duration {
-    let max = Duration::from_secs(RELAY_REPROBE_BACKOFF_MAX_SECS);
+    let max = RELAY_REPROBE_BACKOFF_MAX;
     current.saturating_mul(2).min(max)
 }
 
@@ -333,7 +333,7 @@ fn next_relay_backoff(current: Duration) -> Duration {
 /// gossip co-host or the event loop. It **never stops probing**:
 ///
 /// - **Homed** (`homed`, built with a rung): poll our own
-///   `endpoint.online()` every [`RELAY_LIVENESS_INTERVAL_SECS`] — cheap,
+///   `endpoint.online()` every [`RELAY_LIVENESS_INTERVAL`] — cheap,
 ///   reuses the live relay connection. `online()` resolves only when a
 ///   relay handshake is connected, so a `timeout` failure means the rung
 ///   is unreachable; [`should_evict_rung`] debounces transient blips
@@ -356,7 +356,7 @@ pub(crate) fn spawn_relay_monitor(
     rung_tx: watch::Sender<Option<RelayUrl>>,
     homed: bool,
 ) -> StoppableTask {
-    let probe = Duration::from_secs(RELAY_RUNG_PROBE_SECS);
+    let probe = RELAY_RUNG_PROBE;
     StoppableTask::spawn(|stop| async move {
         if homed {
             monitor_homed_rung(&endpoint, &ladder, &rung_tx, probe, &stop).await;
@@ -379,7 +379,7 @@ async fn monitor_homed_rung(
     let mut fails: u32 = 0;
     loop {
         let poll = async {
-            n0_future::time::sleep(Duration::from_secs(RELAY_LIVENESS_INTERVAL_SECS)).await;
+            n0_future::time::sleep(RELAY_LIVENESS_INTERVAL).await;
             n0_future::time::timeout(probe, endpoint.online())
                 .await
                 .is_ok()
@@ -419,7 +419,7 @@ async fn monitor_relay_less(
     probe: Duration,
     stop: &watch::Receiver<()>,
 ) {
-    let mut backoff = Duration::from_secs(RELAY_REPROBE_BACKOFF_MIN_SECS);
+    let mut backoff = RELAY_REPROBE_BACKOFF_MIN;
     loop {
         let selected = select_bootstrap_rung(ladder, probe, Some(stop)).await;
         if is_stopped(stop) {
@@ -564,9 +564,8 @@ mod tests {
 
     #[test]
     fn backoff_doubles_then_saturates_at_max() {
-        use std::time::Duration;
-        let max = Duration::from_secs(super::RELAY_REPROBE_BACKOFF_MAX_SECS);
-        let min = Duration::from_secs(crate::util::tuning::RELAY_REPROBE_BACKOFF_MIN_SECS);
+        let max = super::RELAY_REPROBE_BACKOFF_MAX;
+        let min = crate::util::tuning::RELAY_REPROBE_BACKOFF_MIN;
         // Doubles each round...
         let mut backoff = min;
         let next = next_relay_backoff(backoff);

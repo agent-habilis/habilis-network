@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use habilis_network_protocol::SymmetricKey;
 use habilis_network_protocol::message::MessageBody;
 
 /// The tagged `State`/`Meta` message body.
@@ -85,7 +86,7 @@ pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
 ///
 /// # Errors
 /// Serialization or `MessageBody` validation of the envelope fails.
-pub fn encrypt_body(plain: &MessageBody, key: &[u8; 32]) -> anyhow::Result<MessageBody> {
+pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> anyhow::Result<MessageBody> {
     let blob = habilis_network_protocol::seal::seal_symmetric(key, plain.as_str().as_bytes());
     let json = serde_json::to_string(&StateOp::Enc {
         data: bs58::encode(blob).into_string(),
@@ -100,7 +101,7 @@ pub fn encrypt_body(plain: &MessageBody, key: &[u8; 32]) -> anyhow::Result<Messa
 /// an `enc` body can't be opened (wrong key / malformed) — the caller treats a
 /// `None` as an opaque no-op (state/meta) or a drop (chat).
 #[must_use]
-pub fn decrypt_body(body: &str, key: Option<&[u8; 32]>) -> Option<String> {
+pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
     match serde_json::from_str::<StateOp>(body) {
         Ok(StateOp::Enc { data }) => {
             let key = key?;
@@ -120,10 +121,15 @@ pub fn decrypt_body(body: &str, key: Option<&[u8; 32]>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{change_body, decrypt_body, encrypt_body, merge_body, parse_change_body};
+    use habilis_network_protocol::SymmetricKey;
+
+    fn key(byte: u8) -> SymmetricKey {
+        SymmetricKey::from_bytes([byte; 32])
+    }
 
     #[test]
     fn enc_body_round_trips_and_hides_the_delta() {
-        let key = [3u8; 32];
+        let key = key(3);
         let plain =
             change_body(&[1, 2, 3, 4], Some(&serde_json::json!({"board": "x"}))).expect("compose");
         let enc = encrypt_body(&plain, &key).expect("encrypt");
@@ -144,9 +150,9 @@ mod tests {
 
     #[test]
     fn enc_body_needs_the_right_key() {
-        let enc = encrypt_body(&change_body(&[9, 9], None).unwrap(), &[1u8; 32]).unwrap();
+        let enc = encrypt_body(&change_body(&[9, 9], None).unwrap(), &key(1)).unwrap();
         assert!(
-            decrypt_body(enc.as_str(), Some(&[2u8; 32])).is_none(),
+            decrypt_body(enc.as_str(), Some(&key(2))).is_none(),
             "wrong key"
         );
         assert!(decrypt_body(enc.as_str(), None).is_none(), "no key");
@@ -164,7 +170,7 @@ mod tests {
         );
         // Passworded (key set): a non-`enc` body is rejected — cleartext can't
         // slip past the encryption guarantee.
-        assert!(decrypt_body(plain.as_str(), Some(&[7u8; 32])).is_none());
+        assert!(decrypt_body(plain.as_str(), Some(&key(7))).is_none());
     }
 
     #[test]

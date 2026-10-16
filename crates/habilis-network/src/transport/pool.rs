@@ -22,7 +22,7 @@ use super::{LOG_TARGET, RELAY_REFUSED, UNICAST_ALPN, payload_allowed_on};
 
 use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
-use crate::util::tuning::{DIRECT_IDLE_BACKSTOP_SECS, PROBE_HOLD_SECS};
+use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
@@ -143,24 +143,14 @@ pub(crate) enum WarmSend {
 impl UnicastPool {
     /// A pool wired to `endpoint`, able to dial and carry unicast traffic.
     pub(crate) fn new(endpoint: Endpoint, relay_transport: bool) -> Self {
-        Self::with_timeouts(
-            endpoint,
-            relay_transport,
-            Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS),
-            Duration::from_secs(PROBE_HOLD_SECS),
-        )
+        Self::with_timeouts(endpoint, relay_transport, DIRECT_IDLE_BACKSTOP, PROBE_HOLD)
     }
 
     /// [`Self::new`] with the idle timeout spelled out, for tests that must not
     /// wait the real one.
     #[cfg(test)]
     pub(crate) fn with_idle(endpoint: Endpoint, relay_transport: bool, idle: Duration) -> Self {
-        Self::with_timeouts(
-            endpoint,
-            relay_transport,
-            idle,
-            Duration::from_secs(PROBE_HOLD_SECS),
-        )
+        Self::with_timeouts(endpoint, relay_transport, idle, PROBE_HOLD)
     }
 
     /// [`Self::new`] with the idle timeout and the probe hold spelled out.
@@ -208,8 +198,8 @@ impl UnicastPool {
             inner: Arc::new(PoolInner {
                 endpoint: None,
                 conns: Mutex::new(HashMap::new()),
-                idle: Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS),
-                probe_hold: Duration::from_secs(PROBE_HOLD_SECS),
+                idle: DIRECT_IDLE_BACKSTOP,
+                probe_hold: PROBE_HOLD,
                 sweeping: AtomicBool::new(false),
                 dial_failures: Mutex::new(Cooldown::new(DIAL_FAILURE_COOLDOWN)),
                 dial_attempts: AtomicU64::new(0),
@@ -1490,7 +1480,7 @@ mod tests {
     fn a_pool_closes_an_idle_connection_after_the_one_backstop() {
         assert_eq!(
             super::UnicastPool::disconnected().inner.idle,
-            Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS)
+            crate::util::tuning::DIRECT_IDLE_BACKSTOP
         );
     }
 

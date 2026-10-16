@@ -11,6 +11,8 @@
 //! a hidden CLI flag, and its doc was restated on the accessor in `tuning` that
 //! read it. The two copies had already drifted.
 
+use std::time::Duration;
+
 // The runtime base for per-mesh files is per-user and computed at runtime —
 // see [`crate::runtime_base`] / [`crate::ensure_runtime_base`].
 // It used to be a hardcoded shared product-named const; that let other
@@ -28,7 +30,7 @@
 /// Default lifetime of a minted invite ticket when `--ttl` is omitted (24h).
 /// A finite window by default so a forgotten invite stops admitting; the
 /// creator can override, and `--ttl none`/`0` mints a no-expiry invite.
-pub const INVITE_DEFAULT_TTL_SECS: u64 = 24 * 60 * 60;
+pub const INVITE_DEFAULT_TTL: Duration = Duration::from_hours(24);
 
 /// Maximum size in bytes of a serialized mesh message. A network-wide
 /// wire contract (must be uniform across members), so it lives here.
@@ -101,7 +103,7 @@ pub const REASSEMBLY_TOTAL_BUDGET_BYTES: usize = 6 * MAX_LOGICAL_BODY_BYTES;
 /// (swept on the 1-minute prune tick). Only progress refreshes the clock —
 /// a duplicate slot does not, so an attacker can't keepalive a dead group
 /// with resends — and a slow-but-live transfer is never reaped mid-flight.
-pub const REASSEMBLY_STALE_SECS: u64 = 300;
+pub const REASSEMBLY_STALE: Duration = Duration::from_mins(5);
 
 /// Per-author (pubkey) ceiling on orphan channel changes buffered awaiting
 /// their dependencies. Counted rather than weighed because
@@ -124,7 +126,7 @@ pub const DOC_PENDING_TOTAL_MAX: usize = 512;
 /// trickling one shard per window; this bounds any single group's pin to an
 /// hour (generous — a budget-respecting transfer completes in seconds to
 /// minutes).
-pub const REASSEMBLY_MAX_GROUP_LIFETIME_SECS: u64 = 3600;
+pub const REASSEMBLY_MAX_GROUP_LIFETIME: Duration = Duration::from_hours(1);
 
 /// Fixed overhead one buffered shard charges on top of its body bytes — the
 /// map nodes, cloned keys, and (for shard 0) the retained envelope clone.
@@ -141,7 +143,7 @@ pub const REASSEMBLY_SLOT_MIN_CHARGE_BYTES: usize = 2048;
 /// the receiver asks the author to re-send its missing shards (`shard/repair`
 /// over the gossip RPC). Checked on the 1-minute prune tick; with the 300s
 /// idle TTL this yields several repair rounds before the group is reaped.
-pub const REASSEMBLY_REPAIR_IDLE_SECS: u64 = 60;
+pub const REASSEMBLY_REPAIR_IDLE: Duration = Duration::from_mins(1);
 
 /// Max missing indexes one repair request names (and the serve side honors) —
 /// bounds both the request body and the resend burst; a wider gap heals over

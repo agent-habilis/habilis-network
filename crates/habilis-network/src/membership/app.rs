@@ -108,6 +108,17 @@ pub enum Request {
         body: MessageBody,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Tests only: send one directed `msg` the way [`Request::Send`] does, but never take the
+    /// warm fast path. A pooled connection that a direct-path probe opened between a
+    /// [`Request::ForgetUnicast`] and the send would answer at once, `Sent` or `Refused`, and a
+    /// test that needs the send to wait on a dial would not see the wait. This one dials, or
+    /// waits for a direct path on the pooled connection, as the cold path does.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    SendCold {
+        to: Option<Nickname>,
+        body: MessageBody,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     StateMerge {
         merge: serde_json::Value,
         reply: oneshot::Sender<Result<(), String>>,
@@ -531,6 +542,42 @@ impl NodeDriver for MembershipApp {
                 }
                 true
             }
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            Request::SendCold { to, body, reply } => {
+                let frame = app_frame(
+                    ctx,
+                    AppFrameParams {
+                        tag: AppTag::from(MSG_TAG),
+                        to,
+                        corr: None,
+                        body,
+                    },
+                );
+                let routed = frame
+                    .serialize()
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| {
+                        crate::transport::resolve(&frame, bytes::Bytes::from(bytes), state)
+                            .map_err(|error| error.to_string())
+                    });
+                match routed {
+                    Ok(crate::transport::Resend::Unicast(eid, bytes)) => {
+                        let pool = state.unicast_pool.clone();
+                        let registration = pool.register_dial(eid);
+                        n0_future::task::spawn(async move {
+                            let sent = pool.send_registered(registration, eid, bytes).await;
+                            let _ = reply.send(sent.map_err(|error| error.to_string()));
+                        });
+                    }
+                    Ok(crate::transport::Resend::Broadcast(_)) => {
+                        let _ = reply.send(Err("a cold send needs a directed message".to_owned()));
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+                true
+            }
             Request::StateMerge { merge, reply } => {
                 let merged = broadcast_state_merge(
                     state,
@@ -774,9 +821,13 @@ impl NodeDriver for MembershipApp {
             ))]
             Request::HasRoute { peer, reply } => {
                 let has_route = known_peer(state, &peer).is_ok_and(|addr| {
-                    state
-                        .multihop()
-                        .is_some_and(|handle| handle.route_addr(addr.id).is_some())
+                    state.multihop().is_some_and(|handle| {
+                        handle
+                            .route_addr(habilis_network_iroh_multihop_transport::AppId::new(
+                                addr.id,
+                            ))
+                            .is_some()
+                    })
                 });
                 let _ = reply.send(has_route);
                 false
@@ -1005,20 +1056,25 @@ fn route_diag(state: &EventLoopState) -> String {
         .peer_endpoints
         .iter()
         .filter_map(|(nickname, addr)| {
-            let underlay = handle.underlay_addr_of(addr.id)?;
+            let underlay = handle
+                .underlay_addr_of(habilis_network_iroh_multihop_transport::AppId::new(addr.id))?;
             let text: &str = nickname.borrow();
-            let open = handle.underlay_paths_for_test(underlay.id).map_or_else(
-                || "none".to_owned(),
-                |paths| {
-                    let shown: Vec<String> = paths
-                        .into_iter()
-                        .map(|(path, selected)| {
-                            format!("{path:?}{}", if selected { "*" } else { "" })
-                        })
-                        .collect();
-                    shown.join(",")
-                },
-            );
+            let open = handle
+                .underlay_paths_for_test(habilis_network_iroh_multihop_transport::UnderlayId::new(
+                    underlay.id,
+                ))
+                .map_or_else(
+                    || "none".to_owned(),
+                    |paths| {
+                        let shown: Vec<String> = paths
+                            .into_iter()
+                            .map(|(path, selected)| {
+                                format!("{path:?}{}", if selected { "*" } else { "" })
+                            })
+                            .collect();
+                        shown.join(",")
+                    },
+                );
             Some(format!("{text}:{open}"))
         })
         .collect();

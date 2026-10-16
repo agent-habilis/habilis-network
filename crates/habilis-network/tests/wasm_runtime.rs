@@ -11,7 +11,7 @@
 //!
 //! - `std::time::Instant::now()` and `SystemTime::now()` do not fail to
 //!   compile on `wasm32-unknown-unknown`. They compile, and then `panic!`
-//!   ("time not implemented on this platform") — and `unix_secs` stamps every
+//!   ("time not implemented on this platform") — and `UnixSecs::now` stamps every
 //!   `Message`, so a browser peer could not author a single frame.
 //! - `tokio::time` compiles and panics the same way: there is no timer driver.
 //! - `tokio::spawn` compiles and panics with "there is no reactor running".
@@ -56,7 +56,7 @@ fn monotonic_clock_runs() {
 /// `SystemTime::now()`, through the wire-path helper that stamps every frame.
 #[wasm_bindgen_test]
 fn wall_clock_stamps_a_plausible_time() {
-    let secs = clock::unix_secs();
+    let secs = clock::UnixSecs::now().as_secs();
     // 2020-01-01. Guards against the "returns 0 on failure" path silently
     // becoming the normal case, which would put epoch timestamps on the wire.
     assert!(secs > 1_577_836_800, "implausible unix time: {secs}");
@@ -105,7 +105,7 @@ fn a_message_can_be_authored() {
     let nick = Nickname::new("wasm-guard").expect("a well-formed nickname");
     let message = Message::new_joined(&mesh, &nick);
     assert!(
-        message.timestamp > 1_577_836_800,
+        message.timestamp.as_secs() > 1_577_836_800,
         "frame carries no real time"
     );
     assert!(!message.id.to_string().is_empty(), "frame carries no id");

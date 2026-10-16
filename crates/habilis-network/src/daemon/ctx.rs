@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::identity::Identity;
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::{AuthorKey, MeshId, Message, Nickname};
 use crate::transport::MeshSender;
 
 /// Immutable loop-level context threaded through every handler.
@@ -18,10 +18,10 @@ pub struct HandlerCtx<'a> {
     /// This member's signing identity (Ed25519). Messages we author are
     /// signed with it before broadcast; see [`Identity`].
     pub identity: &'a Identity,
-    /// Our own public key as lowercase hex — computed once at loop setup so
-    /// the per-message self-echo check is a string compare, not a fresh
-    /// key-derivation + allocation on every inbound message.
-    pub our_pubkey: &'a str,
+    /// Our own author key — taken once at loop setup so the per-message
+    /// self-echo check is a 32-byte compare, not a fresh key derivation on
+    /// every inbound message.
+    pub our_pubkey: AuthorKey,
     pub(crate) max_peers: usize,
     /// Well-known rendezvous endpoint id. Its co-hosted pseudo-node
     /// shows up as a gossip neighbor on peer endpoints; it is

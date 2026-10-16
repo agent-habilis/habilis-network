@@ -29,7 +29,8 @@ pub const MAX_FRAME_LEN: usize = 3840;
 /// The largest datagram that fits a frame.
 pub const MAX_DATAGRAM_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 
-/// A frame that was read: the two ends and the datagram, borrowed from the input.
+/// A frame: the two ends and the datagram. A decode borrows the datagram from the
+/// input, and an encode writes this value out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame<'a> {
     pub dst: EndpointId,
@@ -61,29 +62,33 @@ pub enum DecodeError {
     BadId,
 }
 
-/// Write `datagram` as a frame from `src` to `dst`.
-///
-/// # Errors
-/// The datagram is empty or longer than [`MAX_DATAGRAM_LEN`].
-pub fn encode(dst: EndpointId, src: EndpointId, datagram: &[u8]) -> Result<Bytes, EncodeError> {
-    if datagram.is_empty() {
-        return Err(EncodeError::Empty);
+impl Frame<'_> {
+    /// Write the frame to bytes: kind, version, destination, source, datagram.
+    ///
+    /// # Errors
+    /// The datagram is empty or longer than [`MAX_DATAGRAM_LEN`].
+    pub fn encode(&self) -> Result<Bytes, EncodeError> {
+        let Self { dst, src, datagram } = *self;
+        if datagram.is_empty() {
+            return Err(EncodeError::Empty);
+        }
+        if datagram.len() > MAX_DATAGRAM_LEN {
+            return Err(EncodeError::TooLarge {
+                len: datagram.len(),
+            });
+        }
+        let mut bytes = Vec::with_capacity(HEADER_LEN + datagram.len());
+        bytes.push(FRAME_KIND);
+        bytes.push(FRAME_VERSION);
+        bytes.extend_from_slice(dst.as_bytes());
+        bytes.extend_from_slice(src.as_bytes());
+        bytes.extend_from_slice(datagram);
+        Ok(Bytes::from(bytes))
     }
-    if datagram.len() > MAX_DATAGRAM_LEN {
-        return Err(EncodeError::TooLarge {
-            len: datagram.len(),
-        });
-    }
-    let mut bytes = Vec::with_capacity(HEADER_LEN + datagram.len());
-    bytes.push(FRAME_KIND);
-    bytes.push(FRAME_VERSION);
-    bytes.extend_from_slice(dst.as_bytes());
-    bytes.extend_from_slice(src.as_bytes());
-    bytes.extend_from_slice(datagram);
-    Ok(Bytes::from(bytes))
 }
 
-/// Read a frame.
+/// Read a frame. A free function and not a method, because it is the constructor of a
+/// [`Frame`] that borrows `bytes`: there is no frame yet to call a method on.
 ///
 /// # Errors
 /// The bytes are not a frame of this build: see [`DecodeError`].
@@ -127,7 +132,13 @@ mod tests {
     fn a_frame_round_trips() {
         let datagram = [7u8; 1200];
 
-        let bytes = encode(id(1), id(2), &datagram).expect("a datagram that fits");
+        let bytes = Frame {
+            dst: id(1),
+            src: id(2),
+            datagram: &datagram,
+        }
+        .encode()
+        .expect("a datagram that fits");
         let frame = decode(&bytes).expect("a frame");
 
         assert_eq!(frame.dst, id(1));
@@ -138,7 +149,13 @@ mod tests {
     /// The layout is a wire contract: a second build must read what this one writes.
     #[test]
     fn the_header_is_kind_version_destination_source() {
-        let bytes = encode(id(1), id(2), &[9, 9, 9]).expect("a frame");
+        let bytes = Frame {
+            dst: id(1),
+            src: id(2),
+            datagram: &[9, 9, 9],
+        }
+        .encode()
+        .expect("a frame");
 
         assert_eq!(bytes[0], FRAME_KIND);
         assert_eq!(bytes[1], FRAME_VERSION);
@@ -155,18 +172,38 @@ mod tests {
 
         assert_eq!(MAX_DATAGRAM_LEN, 3774);
         assert_eq!(
-            encode(id(1), id(2), &fits).expect("fits").len(),
+            Frame {
+                dst: id(1),
+                src: id(2),
+                datagram: &fits
+            }
+            .encode()
+            .expect("fits")
+            .len(),
             MAX_FRAME_LEN
         );
         assert_eq!(
-            encode(id(1), id(2), &over),
+            Frame {
+                dst: id(1),
+                src: id(2),
+                datagram: &over
+            }
+            .encode(),
             Err(EncodeError::TooLarge { len: over.len() })
         );
     }
 
     #[test]
     fn an_empty_datagram_is_not_framed() {
-        assert_eq!(encode(id(1), id(2), &[]), Err(EncodeError::Empty));
+        assert_eq!(
+            Frame {
+                dst: id(1),
+                src: id(2),
+                datagram: &[]
+            }
+            .encode(),
+            Err(EncodeError::Empty)
+        );
     }
 
     #[test]
@@ -176,7 +213,14 @@ mod tests {
 
     #[test]
     fn an_unknown_version_is_refused() {
-        let mut bytes = encode(id(1), id(2), &[1]).expect("a frame").to_vec();
+        let mut bytes = Frame {
+            dst: id(1),
+            src: id(2),
+            datagram: &[1],
+        }
+        .encode()
+        .expect("a frame")
+        .to_vec();
         bytes[1] = 2;
 
         assert_eq!(decode(&bytes), Err(DecodeError::UnknownVersion(2)));
@@ -184,7 +228,13 @@ mod tests {
 
     #[test]
     fn a_frame_with_no_datagram_is_truncated() {
-        let bytes = encode(id(1), id(2), &[1]).expect("a frame");
+        let bytes = Frame {
+            dst: id(1),
+            src: id(2),
+            datagram: &[1],
+        }
+        .encode()
+        .expect("a frame");
 
         assert_eq!(decode(&bytes[..HEADER_LEN]), Err(DecodeError::Truncated));
         assert_eq!(decode(&bytes[..10]), Err(DecodeError::Truncated));

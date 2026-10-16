@@ -1632,7 +1632,7 @@ fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) 
 }
 
 /// Detach the sessions that nothing has held for
-/// [`DIRECT_IDLE_BACKSTOP_SECS`](crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS)
+/// [`DIRECT_IDLE_BACKSTOP`](crate::util::tuning::DIRECT_IDLE_BACKSTOP)
 /// (decision D11: the ceiling frees a place for a newcomer, this frees what nobody uses).
 /// A detached pair holds no pooled connection, so [`held_back`] leaves it alone until a send dials the
 /// peer.
@@ -1648,7 +1648,7 @@ fn detach_idle_sessions_at(
     let Some(handle) = state.webrtc.clone() else {
         return Vec::new();
     };
-    let window = std::time::Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS);
+    let window = crate::util::tuning::DIRECT_IDLE_BACKSTOP;
     let mut detached = Vec::new();
     for peer in state.webrtc_admission.idle_sessions(now, window) {
         let kept = state.linked_endpoints.contains(&peer)
@@ -3148,7 +3148,7 @@ mod tests {
         state
             .peer_endpoints
             .insert(crate::testing::nick("bob"), bob_addr(server.id()));
-        let window = Duration::from_secs(crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let window = crate::util::tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
         assert!(detach_idle_sessions_at(&mut state, start).is_empty());
@@ -3182,7 +3182,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_retry_pass_offers_a_session_only_to_a_pair_that_sent() {
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use iroh::endpoint::Connection;
         use iroh::protocol::{AcceptError, ProtocolHandler};
 
@@ -3227,7 +3227,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3236,7 +3236,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(9),
             external_msg_tx: None,
@@ -3289,7 +3289,7 @@ mod tests {
     async fn the_higher_id_offers_and_demotes_a_proven_pair_that_reads_as_relay() {
         use crate::daemon::state::DirectState;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::transport::probe::PathKind;
         use iroh::endpoint::Connection;
         use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -3334,7 +3334,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3343,7 +3343,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(9),
             external_msg_tx: None,
@@ -3401,7 +3401,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_retry_pass_offers_a_session_to_an_idle_lane_peer_only_for_a_held_frame() {
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use iroh::endpoint::Connection;
         use iroh::protocol::{AcceptError, ProtocolHandler};
 
@@ -3446,7 +3446,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3455,7 +3455,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(9),
             external_msg_tx: None,
@@ -3503,7 +3503,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_graft_of_a_cold_lane_peer_opens_its_session() {
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
 
         let (endpoint, handle) = endpoint().await;
         // Only the lower id offers, so the peer's key must be above ours.
@@ -3527,7 +3527,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3536,7 +3536,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(9),
             external_msg_tx: None,
@@ -3579,7 +3579,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_frame_held_on_the_higher_id_node_opens_the_session() {
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
 
         let (endpoint, handle) = endpoint().await;
         // Only the lower id offers unless a frame is held, and here the peer is the lower id.
@@ -3605,7 +3605,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3614,7 +3614,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(9),
             external_msg_tx: None,
@@ -3655,7 +3655,7 @@ mod tests {
     async fn a_pair_with_a_session_keeps_its_proof_when_a_connection_reads_as_relay() {
         use crate::daemon::state::DirectState;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::transport::probe::PathKind;
 
         let (endpoint, handle) = endpoint().await;
@@ -3682,7 +3682,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3691,7 +3691,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(9),
             external_msg_tx: None,
@@ -3741,7 +3741,7 @@ mod tests {
     async fn a_session_is_detached_once_udp_is_selected_again() {
         use crate::daemon::state::DirectState;
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::transport::probe::PathKind;
 
         let (endpoint, handle) = endpoint().await;
@@ -3766,7 +3766,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3775,7 +3775,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(9),
             external_msg_tx: None,
@@ -3827,7 +3827,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_retry_pass_offers_to_the_budget_of_lane_members_and_leaves_the_others_alone() {
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
 
         let (endpoint, handle) = endpoint().await;
@@ -3840,7 +3840,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3849,7 +3849,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(99),
             external_msg_tx: None,
@@ -3895,7 +3895,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_top_up_fills_the_slot_that_a_round_freed() {
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use crate::util::tuning::LANE_OFFERS_IN_FLIGHT;
 
         let (endpoint, handle) = endpoint().await;
@@ -3908,7 +3908,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = crate::testing::nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let ctx = crate::daemon::ctx::HandlerCtx {
@@ -3917,7 +3917,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 16,
             rendezvous_id: crate::testing::endpoint_id(99),
             external_msg_tx: None,

@@ -5,7 +5,7 @@
 //! never fails is worse than no checker, because a green run reads as
 //! evidence of correctness.
 
-use habilis_network_netplay::{Config, Request, RollbackError, SyncTestSession};
+use habilis_network_netplay::{Config, PlayerHandle, Request, RollbackError, SyncTestSession};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -81,8 +81,8 @@ impl Runner {
 fn run(runner: &mut Runner, frames: i32) -> Result<(), RollbackError> {
     let mut session = SyncTestSession::<Game>::new(2, 4);
     for frame in 0..frames {
-        session.add_input(0, Input(frame % 3))?;
-        session.add_input(1, Input(frame % 5))?;
+        session.add_input(PlayerHandle::new(0), Input(frame % 3))?;
+        session.add_input(PlayerHandle::new(1), Input(frame % 5))?;
         for request in session.advance_frame()? {
             runner.handle(request);
         }
@@ -118,11 +118,13 @@ fn a_nondeterministic_simulation_is_caught() {
 #[test]
 fn a_missing_input_is_reported_rather_than_silently_defaulted() {
     let mut session = SyncTestSession::<Game>::new(2, 4);
-    session.add_input(0, Input(1)).expect("valid handle");
+    session
+        .add_input(PlayerHandle::new(0), Input(1))
+        .expect("valid handle");
     // Player 1's input was never supplied.
     assert!(matches!(
         session.advance_frame(),
-        Err(RollbackError::InvalidPlayer(1))
+        Err(RollbackError::InvalidPlayer(missing)) if missing == PlayerHandle::new(1)
     ));
 }
 
@@ -130,7 +132,7 @@ fn a_missing_input_is_reported_rather_than_silently_defaulted() {
 fn an_out_of_range_handle_is_rejected() {
     let mut session = SyncTestSession::<Game>::new(2, 4);
     assert!(matches!(
-        session.add_input(7, Input(1)),
-        Err(RollbackError::InvalidPlayer(7))
+        session.add_input(PlayerHandle::new(7), Input(1)),
+        Err(RollbackError::InvalidPlayer(unknown)) if unknown == PlayerHandle::new(7)
     ));
 }

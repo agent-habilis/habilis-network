@@ -533,8 +533,11 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // otherwise run iroh's default selector: it gets `MultihopLadder`.
     #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
     if let Some(id) = underlay_id.filter(|_| underlay && transports.webrtc.is_none()) {
-        builder = builder
-            .path_selector(habilis_network_iroh_multihop_transport::underlay_path_selector(id));
+        builder = builder.path_selector(
+            habilis_network_iroh_multihop_transport::underlay_path_selector(
+                habilis_network_iroh_multihop_transport::UnderlayId::new(id),
+            ),
+        );
     }
     // Data-plane exclusivity: with IP cleared, a WebRTC-only peer cannot
     // silently fall back onto a hole-punched path, so a run that *claims* to be
@@ -638,7 +641,7 @@ pub struct InjectedMultihop {
 impl From<&habilis_network_iroh_multihop_transport::MultihopHandle> for InjectedMultihop {
     fn from(handle: &habilis_network_iroh_multihop_transport::MultihopHandle) -> Self {
         Self {
-            hop_identity: handle.app_id(),
+            hop_identity: handle.app_id().get(),
             relay_payload: handle.relay_payload(),
         }
     }
@@ -654,8 +657,8 @@ pub fn multihop_handle_config(
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
     habilis_network_iroh_multihop_transport::HandleConfig {
         relay_payload,
-        vector_max_age: Duration::from_secs(crate::util::tuning::LINKSTATE_MAX_AGE_SECS),
-        relay_stuck_after: Duration::from_secs(crate::util::tuning::MULTIHOP_RELAY_STUCK_SECS),
+        vector_max_age: crate::util::tuning::LINKSTATE_MAX_AGE,
+        relay_stuck_after: crate::util::tuning::MULTIHOP_RELAY_STUCK,
         ..habilis_network_iroh_multihop_transport::HandleConfig::default()
     }
 }
@@ -2053,7 +2056,7 @@ mod tests {
         assert_eq!(leg.admission.cap(), 5, "the table has the cap of G");
         assert_eq!(
             leg.endpoint.id(),
-            handle.underlay_id(),
+            handle.underlay_id().get(),
             "the leg is on the underlay"
         );
         assert_eq!(leg.handle.session_count(), 0);
@@ -2094,7 +2097,7 @@ mod tests {
         )
         .await
         .expect("a multihop peer binds");
-        assert_eq!(handle.app_id(), endpoint.id(), "hop identity");
+        assert_eq!(handle.app_id().get(), endpoint.id(), "hop identity");
         assert_eq!(
             webrtc.transport().local_id(),
             endpoint.id(),

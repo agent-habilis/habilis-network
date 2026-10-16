@@ -14,7 +14,7 @@
 //! immediately. The roster is now fixed by the lobby before a match
 //! starts.
 
-use habilis_network_netplay::{Request, RollbackError, SyncTestSession};
+use habilis_network_netplay::{PlayerHandle, Request, RollbackError, SyncTestSession};
 
 use light_cycles_native::app::LightCycles;
 use light_cycles_native::grid::{Dir, Input};
@@ -73,7 +73,7 @@ fn the_simulation_survives_a_rollback_on_every_frame() {
     for frame in 0..400 {
         for player in 0..PLAYERS {
             session
-                .add_input(player, steer(player, frame))
+                .add_input(PlayerHandle::new(player), steer(player, frame))
                 .expect("a fresh input for every player, every frame");
         }
         match session.advance_frame() {

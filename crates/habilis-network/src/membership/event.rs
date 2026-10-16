@@ -30,7 +30,7 @@ pub enum MembershipEvent {
     Left {
         nick: String,
     },
-    /// Heartbeat-evicted past `ALIVE_TIMEOUT_SECS`. Deliberately **not** `left`:
+    /// Heartbeat-evicted past `ALIVE_TIMEOUT`. Deliberately **not** `left`:
     /// the peer is still in the roster with `quiet: true`, and folding the two
     /// together would desync a consumer's mirror from the roster it can read
     /// back.

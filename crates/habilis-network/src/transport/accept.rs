@@ -12,7 +12,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use tokio::sync::mpsc;
 
 use crate::util::consts::MAX_MESSAGE_SIZE;
-use crate::util::tuning::DIRECT_IDLE_BACKSTOP_SECS;
+use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
 use super::LOG_TARGET;
 use super::path::{PROBE_DEADLINE, refuse_unless_direct};
@@ -44,11 +44,7 @@ impl UnicastAcceptor {
     }
 
     pub(crate) fn new(tx: mpsc::Sender<Bytes>, relay_transport: bool) -> Self {
-        Self::with_idle(
-            tx,
-            relay_transport,
-            Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS),
-        )
+        Self::with_idle(tx, relay_transport, DIRECT_IDLE_BACKSTOP)
     }
 
     /// [`Self::new`] with the idle timeout spelled out, for tests that must not
@@ -243,9 +239,6 @@ mod tests {
     #[test]
     fn an_acceptor_closes_an_idle_connection_after_the_one_backstop() {
         let (tx, _frames) = mpsc::channel(1);
-        assert_eq!(
-            UnicastAcceptor::new(tx, true).idle,
-            Duration::from_secs(DIRECT_IDLE_BACKSTOP_SECS)
-        );
+        assert_eq!(UnicastAcceptor::new(tx, true).idle, DIRECT_IDLE_BACKSTOP);
     }
 }

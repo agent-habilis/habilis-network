@@ -1,6 +1,7 @@
 //! What can go wrong.
 
 use crate::frame::Frame;
+use crate::handle::PlayerHandle;
 
 /// Errors a rollback session can return.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,7 +16,7 @@ pub enum RollbackError {
     PredictionLimit,
 
     /// A player handle that does not exist in this session.
-    InvalidPlayer(usize),
+    InvalidPlayer(PlayerHandle),
 
     /// `advance_frame` was called without a local input for this frame.
     /// Supply one with `add_local_input` first.

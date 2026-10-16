@@ -1,14 +1,12 @@
 //! Gossip healer — the sole reconnect primitive for the gossip mesh.
 
-use std::time::Duration;
-
 use crate::transport::MeshSender;
 use iroh::{Endpoint, EndpointId};
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::util::clock::Instant;
-use crate::util::tuning::HEAL_HARD_PROBE_SECS;
+use crate::util::tuning::HEAL_HARD_PROBE;
 
 /// Let go of the rendezvous if this node is due to
 /// ([`EventLoopState::should_release_rendezvous`]).
@@ -80,7 +78,7 @@ pub(crate) async fn tick_heal(rendezvous_id: EndpointId, sender: &MeshSender) {
 }
 
 /// Resume-edge re-bootstrap: [`tick_heal`] with a longer probe budget
-/// ([`HEAL_HARD_PROBE_SECS`]) so a cold relay re-home after a freeze
+/// ([`HEAL_HARD_PROBE`]) so a cold relay re-home after a freeze
 /// completes (the steady-state 5s cap routinely aborts it). The caller
 /// (`run_heal`) logs the edge and pairs this with clearing
 /// `state.meshed` and re-asserting the rendezvous hint.
@@ -94,12 +92,7 @@ pub(crate) async fn tick_heal_hard(
     // take seconds and this must never run on the sole event loop.
     let endpoint = endpoint.clone();
     n0_future::task::spawn(async move {
-        let _ = crate::lookup::probe_connect(
-            &endpoint,
-            rendezvous_id,
-            Duration::from_secs(HEAL_HARD_PROBE_SECS),
-        )
-        .await;
+        let _ = crate::lookup::probe_connect(&endpoint, rendezvous_id, HEAL_HARD_PROBE).await;
     });
     regraft(rendezvous_id, sender).await;
 }

@@ -102,7 +102,7 @@ mod mesh_id_tests {
     fn valid_id() -> String {
         use super::super::{MeshConfig, MeshName};
         Mesh::new(
-            [1u8; 32],
+            crate::crypto::Seed::from_bytes([1u8; 32]),
             MeshName::new("test").unwrap(),
             MeshConfig::loopback(),
         )

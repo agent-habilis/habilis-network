@@ -638,9 +638,9 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // has the engine's own tests. In-process only — the browser side never
     // claims under the stagger, so its defaults stay untouched.
     habilis_network::util::tuning::init(habilis_network::util::tuning::Tuning {
-        rival_recheck_first_secs: 3600,
-        rival_recheck_secs: 3600,
-        rival_recheck_meshed_secs: 3600,
+        rival_recheck_first: Duration::from_hours(1),
+        rival_recheck: Duration::from_hours(1),
+        rival_recheck_meshed: Duration::from_hours(1),
         ..habilis_network::util::tuning::Tuning::DEFAULTS
     });
     let runtime = tokio::runtime::Builder::new_multi_thread()

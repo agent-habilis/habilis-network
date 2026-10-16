@@ -1807,7 +1807,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "zeroize",
 ]
 
 [[package]]
@@ -1967,6 +1966,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
