@@ -5,10 +5,17 @@
 //! The guard must be the first local of the test, so that it drops last and
 //! sees the events of every value that the test drops before it.
 //!
+//! The guards of one binary do not overlap: a guard waits until the thread of
+//! the test that held the lock before it has ended, so every event belongs to
+//! exactly one test. An event that arrives between the drop of a guard and the
+//! end of its thread, for example when a runtime drops its endpoints after the
+//! test body, fails the next test with the name of the test that ended.
+//!
 //! A panic inside the subscriber does not fail a test when a spawned task logs
 //! the event, so the subscriber records the event and [`Guard`] panics on the
 //! test thread when it drops.
 
+use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -24,7 +31,16 @@ use tracing_subscriber::{Layer, fmt as tracing_fmt};
 
 static INSTALLED: OnceLock<Mode> = OnceLock::new();
 static LIVE: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
+static SERIAL: Mutex<()> = Mutex::new(());
+static LATE: Mutex<Late> = Mutex::new(Late {
+    ended: None,
+    events: Vec::new(),
+});
 static CAPTURED: Mutex<String> = Mutex::new(String::new());
+
+thread_local! {
+    static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -119,13 +135,23 @@ where
 }
 
 fn new_guard() -> Guard {
+    let serial = HELD
+        .try_with(|held| held.borrow_mut().take())
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| lock(&SERIAL));
     let slot = Arc::new(Slot {
         thread: thread::current().name().unwrap_or_default().to_owned(),
         events: Mutex::new(Vec::new()),
         expected: Mutex::new(Vec::new()),
     });
-    lock(&LIVE).push(Arc::clone(&slot));
-    Guard { slot }
+    let mut live = lock(&LIVE);
+    lock(&slot.events).append(&mut lock(&LATE).events);
+    live.push(Arc::clone(&slot));
+    Guard {
+        slot,
+        serial: Some(serial),
+    }
 }
 
 struct Capture;
@@ -156,6 +182,7 @@ impl io::Write for CaptureWriter {
 #[derive(Debug)]
 pub struct Guard {
     slot: Arc<Slot>,
+    serial: Option<MutexGuard<'static, ()>>,
 }
 
 impl Guard {
@@ -173,7 +200,16 @@ impl Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        lock(&LIVE).retain(|slot| !Arc::ptr_eq(slot, &self.slot));
+        {
+            let mut live = lock(&LIVE);
+            live.retain(|slot| !Arc::ptr_eq(slot, &self.slot));
+            lock(&LATE).ended = Some(self.slot.thread.clone());
+        }
+        if let Some(serial) = self.serial.take() {
+            // The lock stays until the thread of the test ends, so the
+            // runtime that the test drops after its body still logs to this test.
+            let _ = HELD.try_with(|held| *held.borrow_mut() = Some(serial));
+        }
         if thread::panicking() {
             return;
         }
@@ -202,7 +238,16 @@ impl Slot {
                 .iter_mut()
                 .find(|want| logged.level == Level::WARN && want.matches(logged));
             match hit {
-                Some(want) => want.seen = true,
+                Some(want) if logged.after.is_none() => want.seen = true,
+                _ if logged.after.is_some() => problems.push(format!(
+                    "  logged after test {} ended: {} {}: {} (thread {})",
+                    logged.after.as_deref().unwrap_or_default(),
+                    logged.level,
+                    logged.target,
+                    logged.text,
+                    logged.thread
+                )),
+                Some(_) => {}
                 None => problems.push(format!(
                     "  unexpected {} {}: {} (thread {}{})",
                     logged.level,
@@ -247,6 +292,13 @@ struct Logged {
     text: String,
     thread: String,
     shared: bool,
+    after: Option<String>,
+}
+
+#[derive(Debug)]
+struct Late {
+    ended: Option<String>,
+    events: Vec<Logged>,
 }
 
 /// A thread that is the thread of a live test files the event under that test.
@@ -269,7 +321,18 @@ impl<S: Subscriber> Layer<S> for Catch {
             text: fields.text.clone(),
             thread: thread.to_owned(),
             shared,
+            after: None,
         };
+        if live.is_empty() {
+            let mut late = lock(&LATE);
+            if let Some(ended) = late.ended.clone() {
+                late.events.push(Logged {
+                    after: Some(ended),
+                    ..logged()
+                });
+            }
+            return;
+        }
         let owners = if shared { live.iter().collect() } else { own };
         for slot in owners {
             lock(&slot.events).push(logged());
