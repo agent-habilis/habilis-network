@@ -1987,6 +1987,7 @@ dependencies = [
 name = "habilis-network-test-tracing"
 version = "0.6.0"
 dependencies = [
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",

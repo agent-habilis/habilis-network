@@ -13,7 +13,8 @@
 //!
 //! A test that runs on a runtime uses [`run`] or [`run_multi_thread`] instead of
 //! `#[tokio::test]`. They drop the runtime before the guard, so the events of
-//! the endpoints that the runtime drops belong to the test.
+//! the endpoints that the runtime drops belong to the test. A binary that logs
+//! an event after its last guard has nobody to fail, so it exits with 101.
 //!
 //! A panic inside the subscriber does not fail a test when a spawned task logs
 //! the event, so the subscriber records the event and [`Guard`] panics on the
@@ -151,10 +152,35 @@ pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: 
     output
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[expect(unsafe_code, reason = "libc::atexit and libc::_exit are FFI calls")]
+fn fail_the_binary_on_a_late_event_at_exit() {
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    extern "C" fn at_exit() {
+        let Ok(late) = LATE.try_lock() else { return };
+        if late.events.is_empty() {
+            return;
+        }
+        for logged in &late.events {
+            eprintln!("{}", late_line(logged));
+        }
+        // SAFETY: `_exit` ends the process at once and runs no Rust code.
+        unsafe { libc::_exit(101) }
+    }
+    REGISTERED.call_once(|| {
+        // SAFETY: `at_exit` is an `extern "C" fn` that takes no argument.
+        unsafe {
+            libc::atexit(at_exit);
+        }
+    });
+}
+
 fn install<W>(mode: Mode, default_directives: &str, writer: W)
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
+    #[cfg(not(target_arch = "wasm32"))]
+    fail_the_binary_on_a_late_event_at_exit();
     let installed = *INSTALLED.get_or_init(|| {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(default_directives));
