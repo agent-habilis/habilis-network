@@ -44,7 +44,7 @@ pub fn init() -> Guard {
     new_guard()
 }
 
-/// Like [`init`], but the events go to a buffer that [`Guard::logs`] returns,
+/// Like [`init`], but the events go to a buffer that [`captured_logs`] returns,
 /// for a test that asserts on a log line. `RUST_LOG` wins; without it the
 /// filter is `default_directives`. The buffer is shared by the tests of the
 /// binary.
@@ -57,6 +57,13 @@ pub fn init() -> Guard {
 pub fn init_capturing(default_directives: &str) -> Guard {
     install(true, default_directives);
     new_guard()
+}
+
+/// The log text that [`init_capturing`] collected, for the whole binary. Empty
+/// after [`init`].
+#[must_use]
+pub fn captured_logs() -> String {
+    lock(&CAPTURED).clone()
 }
 
 fn install(capturing: bool, default_directives: &str) {
@@ -129,13 +136,6 @@ pub struct Guard {
 }
 
 impl Guard {
-    /// The log text that [`init_capturing`] collected, for the whole binary.
-    /// Empty after [`init`].
-    #[must_use]
-    pub fn logs(&self) -> String {
-        lock(&CAPTURED).clone()
-    }
-
     /// Asserts that the test logs a WARN event from `target` (a module path
     /// prefix) whose message contains `text`. Use it only where the warning
     /// is the subject of the test; fix the code for every other warning.
