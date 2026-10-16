@@ -135,13 +135,18 @@ where
 }
 
 fn new_guard() -> Guard {
+    let thread = thread::current().name().unwrap_or_default().to_owned();
+    assert!(
+        thread.is_empty() || !lock(&LIVE).iter().any(|slot| slot.thread == thread),
+        "init() twice in one test (thread {thread}): the second guard would wait for the first for ever"
+    );
     let serial = HELD
         .try_with(|held| held.borrow_mut().take())
         .ok()
         .flatten()
         .unwrap_or_else(|| lock(&SERIAL));
     let slot = Arc::new(Slot {
-        thread: thread::current().name().unwrap_or_default().to_owned(),
+        thread,
         events: Mutex::new(Vec::new()),
         expected: Mutex::new(Vec::new()),
     });
