@@ -1388,7 +1388,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
+source = "git+https://github.com/agent-habilis/iroh?rev=2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc#2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc"
 dependencies = [
  "backon",
  "blake3",
@@ -1437,7 +1437,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
+source = "git+https://github.com/agent-habilis/iroh?rev=2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc#2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1455,7 +1455,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
+source = "git+https://github.com/agent-habilis/iroh?rev=2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc#2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -1505,7 +1505,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
+source = "git+https://github.com/agent-habilis/iroh?rev=2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc#2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc"
 dependencies = [
  "blake3",
  "bytes",
@@ -1921,8 +1921,7 @@ dependencies = [
 [[package]]
 name = "noq"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11803df44ac03a30988d61585ea50885d5428e42da944fe1e498799da7886a2"
+source = "git+https://github.com/agent-habilis/noq?rev=5f96cc2603c1414364c9eca07aa6d1ae8498374e#5f96cc2603c1414364c9eca07aa6d1ae8498374e"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1942,9 +1941,8 @@ dependencies = [
 
 [[package]]
 name = "noq-proto"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
+version = "1.1.0"
+source = "git+https://github.com/agent-habilis/noq?rev=5f96cc2603c1414364c9eca07aa6d1ae8498374e#5f96cc2603c1414364c9eca07aa6d1ae8498374e"
 dependencies = [
  "aes-gcm",
  "bytes",

@@ -1082,7 +1082,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1982,7 +1982,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
+source = "git+https://github.com/agent-habilis/iroh?rev=2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc#2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc"
 dependencies = [
  "backon",
  "blake3",
@@ -2032,7 +2032,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
+source = "git+https://github.com/agent-habilis/iroh?rev=2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc#2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "data-encoding",
@@ -2050,7 +2050,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
+source = "git+https://github.com/agent-habilis/iroh?rev=2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc#2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2073,7 +2073,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=98da17629788d35b26e9e7d792e62f36bb9df8e7#98da17629788d35b26e9e7d792e62f36bb9df8e7"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=8a3c1bbc40580d6940b9d60f5a08a5a72b4ea9c2#8a3c1bbc40580d6940b9d60f5a08a5a72b4ea9c2"
 dependencies = [
  "blake3",
  "bytes",
@@ -2126,7 +2126,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
+source = "git+https://github.com/agent-habilis/iroh?rev=2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc#2908b47d771c7275ebe92f9b6dc0a96aa4fbe6fc"
 dependencies = [
  "blake3",
  "bytes",
@@ -2667,8 +2667,7 @@ dependencies = [
 [[package]]
 name = "noq"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11803df44ac03a30988d61585ea50885d5428e42da944fe1e498799da7886a2"
+source = "git+https://github.com/agent-habilis/noq?rev=5f96cc2603c1414364c9eca07aa6d1ae8498374e#5f96cc2603c1414364c9eca07aa6d1ae8498374e"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -2688,9 +2687,8 @@ dependencies = [
 
 [[package]]
 name = "noq-proto"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
+version = "1.1.0"
+source = "git+https://github.com/agent-habilis/noq?rev=5f96cc2603c1414364c9eca07aa6d1ae8498374e#5f96cc2603c1414364c9eca07aa6d1ae8498374e"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -2732,7 +2730,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3471,7 +3469,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3529,7 +3527,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3660,7 +3658,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4077,7 +4075,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4736,7 +4734,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
