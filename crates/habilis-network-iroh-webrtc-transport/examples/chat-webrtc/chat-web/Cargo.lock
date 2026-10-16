@@ -1388,7 +1388,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=8ecc86536b033602949ff80ead76732a473f434d#8ecc86536b033602949ff80ead76732a473f434d"
+source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
 dependencies = [
  "backon",
  "blake3",
@@ -1437,7 +1437,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=8ecc86536b033602949ff80ead76732a473f434d#8ecc86536b033602949ff80ead76732a473f434d"
+source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1455,7 +1455,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=8ecc86536b033602949ff80ead76732a473f434d#8ecc86536b033602949ff80ead76732a473f434d"
+source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -1505,7 +1505,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=8ecc86536b033602949ff80ead76732a473f434d#8ecc86536b033602949ff80ead76732a473f434d"
+source = "git+https://github.com/agent-habilis/iroh?rev=3452fc6824b9158c5b7a87d82533989132e26706#3452fc6824b9158c5b7a87d82533989132e26706"
 dependencies = [
  "blake3",
  "bytes",
@@ -2502,9 +2502,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -2566,9 +2566,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
