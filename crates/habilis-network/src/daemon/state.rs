@@ -223,6 +223,10 @@ pub struct EventLoopState {
     /// Distinct from `peers` — links are asymmetric and node-id
     /// keyed; the roster is symmetric and nickname keyed.
     pub(crate) linked_endpoints: HashSet<EndpointId>,
+    /// When `linked_endpoints` last became empty, `None` while it holds a link. The census warns
+    /// of a silent partition only when this gap outlasts a heal: see
+    /// [`Self::silent_partition_due`].
+    zero_links_since: Option<Instant>,
     /// Whether each known peer's data path is direct or relay-only: the
     /// `conn_path` snapshot `NeighborUp` logs, or a probe verdict. Keyed like
     /// `peer_endpoints` and pruned with it (`forget_peer_endpoint`), not on
@@ -914,6 +918,7 @@ impl EventLoopState {
         let broadcast_key = mesh_key.as_ref().map(|key| key.derive(b"broadcast"));
         Self {
             linked_endpoints: HashSet::new(),
+            zero_links_since: None,
             direct: HashMap::new(),
             relay_transport: false,
             direct_proven: tokio::sync::mpsc::unbounded_channel().0,
@@ -1357,12 +1362,30 @@ impl EventLoopState {
     /// alive tick re-probed (about 40 s with the relink cooldown).
     pub(crate) fn unlink(&mut self, peer: EndpointId) {
         self.linked_endpoints.remove(&peer);
+        if self.linked_endpoints.is_empty() {
+            self.zero_links_since.get_or_insert_with(Instant::now);
+        }
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+    }
+
+    /// Whether the census calls the state a silent partition: a meshed member that knows
+    /// `roster_len` peers has held no link for longer than
+    /// [`silent_partition_after`](crate::util::tuning::silent_partition_after). A shorter gap is
+    /// a heal on its way, or a link closed on purpose.
+    pub(crate) fn silent_partition_due(&self, roster_len: usize, now: Instant) -> bool {
+        self.meshed
+            && roster_len > 0
+            && self.linked_endpoints.is_empty()
+            && self.zero_links_since.is_some_and(|since| {
+                now.saturating_duration_since(since)
+                    >= crate::util::tuning::silent_partition_after()
+            })
     }
 
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);
+        self.zero_links_since = None;
         self.regraft_at.remove(&peer);
         self.graft_backoff.reset(peer);
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
@@ -3783,6 +3806,52 @@ mod tests {
 
         state.unlink(bob);
         assert_eq!(state.webrtc_admission.direct_units(), 1, "no longer one");
+    }
+
+    /// A meshed member that lost every link is a silent partition once the gap outlasts a heal,
+    /// not before: a link closed on purpose, or a heal on its way, shows the same zero.
+    #[test]
+    fn a_meshed_member_without_links_is_a_silent_partition_only_after_a_heal() {
+        let (bob, roster) = (endpoint_id(1), 3);
+        let after = crate::util::tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.meshed = true;
+
+        state.link(bob);
+        let far = Instant::now() + after + Duration::from_secs(1);
+        assert!(!state.silent_partition_due(roster, far), "a link is up");
+
+        state.unlink(bob);
+        assert!(
+            !state.silent_partition_due(roster, Instant::now()),
+            "the gap is young"
+        );
+        assert!(
+            state.silent_partition_due(roster, far),
+            "the gap outlasted a heal"
+        );
+        assert!(
+            !state.silent_partition_due(0, far),
+            "there is nobody to be apart from"
+        );
+        state.meshed = false;
+        assert!(!state.silent_partition_due(roster, far), "never meshed");
+        state.meshed = true;
+
+        // An unlink of a peer that was not linked leaves the clock where it was.
+        state.unlink(endpoint_id(2));
+        assert!(
+            state.silent_partition_due(roster, far),
+            "the clock did not restart"
+        );
+
+        // A link clears the gap, and the next loss starts a new one.
+        state.link(bob);
+        state.unlink(bob);
+        assert!(
+            !state.silent_partition_due(roster, Instant::now()),
+            "a new gap is young"
+        );
     }
 
     #[test]

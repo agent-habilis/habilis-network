@@ -301,6 +301,15 @@ pub fn heal_interval() -> Duration {
     current().heal_interval.max(Duration::from_secs(1))
 }
 
+/// How long a meshed member may hold no gossip link before the census calls it a silent
+/// partition: one heal and one census tick. The heal arm re-bridges a member that lost its
+/// links, so a shorter gap is a heal that is on its way, or a link that was closed on purpose;
+/// a longer one is a heal that did not work.
+#[must_use]
+pub fn silent_partition_after() -> Duration {
+    heal_interval().saturating_add(STATE_REFRESH)
+}
+
 /// Consecutive failed gossip-topic resubscribe attempts (one per heal
 /// tick after the stream terminally ends) before the daemon gives up
 /// and shuts down. A subscribe error means the gossip actor itself is
