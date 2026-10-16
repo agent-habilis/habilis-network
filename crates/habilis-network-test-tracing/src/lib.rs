@@ -115,6 +115,25 @@ pub fn clear_captured_logs() {
     lock(&CAPTURED).clear();
 }
 
+/// Whether the test of the calling thread has logged a WARN from `target` (a
+/// module path prefix) whose message contains `text`. A test that expects the
+/// WARN with [`Guard::expect_warn`] polls it to wait until the WARN came.
+#[must_use]
+pub fn saw_warn(target: &str, text: &str) -> bool {
+    let current = thread::current();
+    let name = current.name().unwrap_or_default();
+    lock(&LIVE)
+        .iter()
+        .filter(|slot| slot.thread == name)
+        .any(|slot| {
+            lock(&slot.events).iter().any(|logged| {
+                logged.level == Level::WARN
+                    && logged.target.starts_with(target)
+                    && logged.text.contains(text)
+            })
+        })
+}
+
 /// Runs `future` to its end on a current-thread runtime, drops the runtime,
 /// then drops `guard`. Use it in place of `#[tokio::test]`.
 ///
