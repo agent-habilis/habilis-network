@@ -66,13 +66,13 @@ fn an_expected_warn_that_occurs_twice_passes() {
 }
 
 #[test]
-fn an_event_from_the_test_thread_is_not_marked_shared() {
+fn an_event_from_the_test_thread_is_not_marked_as_from_a_worker() {
     let text = panic_text(|| {
         let _log = init();
         tracing::warn!("link lost");
     });
     let text = text.expect("the guard must panic");
-    assert!(!text.contains("shared by all running tests"), "{text}");
+    assert!(!text.contains("from a worker thread"), "{text}");
 }
 
 #[test]

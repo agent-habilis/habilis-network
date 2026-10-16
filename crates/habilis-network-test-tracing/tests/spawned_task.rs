@@ -25,5 +25,5 @@ fn a_warn_from_a_spawned_task_fails() {
     assert!(text.contains("unexpected WARN"), "{text}");
     assert!(text.contains("relay actor errored"), "{text}");
     assert!(text.contains("tokio-rt-worker"), "{text}");
-    assert!(text.contains("shared by all running tests"), "{text}");
+    assert!(text.contains("from a worker thread"), "{text}");
 }

@@ -255,7 +255,7 @@ impl Slot {
                     logged.text,
                     logged.thread,
                     if logged.shared {
-                        ", shared by all running tests"
+                        ", from a worker thread"
                     } else {
                         ""
                     }
