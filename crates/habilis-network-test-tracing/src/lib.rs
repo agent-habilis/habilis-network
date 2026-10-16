@@ -11,6 +11,10 @@
 //! end of its thread, for example when a runtime drops its endpoints after the
 //! test body, fails the next test with the name of the test that ended.
 //!
+//! A test that runs on a runtime uses [`run`] or [`run_multi_thread`] instead of
+//! `#[tokio::test]`. They drop the runtime before the guard, so the events of
+//! the endpoints that the runtime drops belong to the test.
+//!
 //! A panic inside the subscriber does not fail a test when a spawned task logs
 //! the event, so the subscriber records the event and [`Guard`] panics on the
 //! test thread when it drops.
@@ -108,6 +112,43 @@ pub fn captured_logs() -> String {
 /// log of its own run when the tests of the binary run one after the other.
 pub fn clear_captured_logs() {
     lock(&CAPTURED).clear();
+}
+
+/// Runs `future` to its end on a current-thread runtime, drops the runtime,
+/// then drops `guard`. Use it in place of `#[tokio::test]`.
+///
+/// # Panics
+///
+/// Panics if the runtime cannot be built.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let output = runtime.block_on(future);
+    drop(runtime);
+    drop(guard);
+    output
+}
+
+/// Like [`run`], on a multi-thread runtime with `worker_threads` workers. Use it
+/// in place of `#[tokio::test(flavor = "multi_thread", worker_threads = N)]`.
+///
+/// # Panics
+///
+/// Panics if the runtime cannot be built.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: F) -> F::Output {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let output = runtime.block_on(future);
+    drop(runtime);
+    drop(guard);
+    output
 }
 
 fn install<W>(mode: Mode, default_directives: &str, writer: W)
@@ -244,14 +285,7 @@ impl Slot {
                 .find(|want| logged.level == Level::WARN && want.matches(logged));
             match hit {
                 Some(want) if logged.after.is_none() => want.seen = true,
-                _ if logged.after.is_some() => problems.push(format!(
-                    "  logged after test {} ended: {} {}: {} (thread {})",
-                    logged.after.as_deref().unwrap_or_default(),
-                    logged.level,
-                    logged.target,
-                    logged.text,
-                    logged.thread
-                )),
+                _ if logged.after.is_some() => problems.push(late_line(logged)),
                 Some(_) => {}
                 None => problems.push(format!(
                     "  unexpected {} {}: {} (thread {}{})",
@@ -298,6 +332,17 @@ struct Logged {
     thread: String,
     shared: bool,
     after: Option<String>,
+}
+
+fn late_line(logged: &Logged) -> String {
+    format!(
+        "  logged after test {} ended: {} {}: {} (thread {})",
+        logged.after.as_deref().unwrap_or_default(),
+        logged.level,
+        logged.target,
+        logged.text,
+        logged.thread
+    )
 }
 
 #[derive(Debug)]
