@@ -88,6 +88,12 @@ pub fn captured_logs() -> String {
     lock(&CAPTURED).clone()
 }
 
+/// Empties the text that [`captured_logs`] returns, for a test that reads the
+/// log of its own run when the tests of the binary run one after the other.
+pub fn clear_captured_logs() {
+    lock(&CAPTURED).clear();
+}
+
 fn install<W>(mode: Mode, default_directives: &str, writer: W)
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
