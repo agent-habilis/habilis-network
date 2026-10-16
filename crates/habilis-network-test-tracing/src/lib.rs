@@ -204,8 +204,16 @@ impl Slot {
             match hit {
                 Some(want) => want.seen = true,
                 None => problems.push(format!(
-                    "  unexpected {} {}: {} (thread {})",
-                    logged.level, logged.target, logged.text, logged.thread
+                    "  unexpected {} {}: {} (thread {}{})",
+                    logged.level,
+                    logged.target,
+                    logged.text,
+                    logged.thread,
+                    if logged.shared {
+                        ", shared by all running tests"
+                    } else {
+                        ""
+                    }
                 )),
             }
         }
@@ -238,6 +246,7 @@ struct Logged {
     target: String,
     text: String,
     thread: String,
+    shared: bool,
 }
 
 /// A thread that is the thread of a live test files the event under that test.
@@ -251,19 +260,17 @@ impl<S: Subscriber> Layer<S> for Catch {
         event.record(&mut fields);
         let current = thread::current();
         let thread = current.name().unwrap_or("unnamed");
+        let live = lock(&LIVE);
+        let own: Vec<_> = live.iter().filter(|slot| slot.thread == thread).collect();
+        let shared = own.is_empty();
         let logged = || Logged {
             level: *event.metadata().level(),
             target: event.metadata().target().to_owned(),
             text: fields.text.clone(),
             thread: thread.to_owned(),
+            shared,
         };
-        let live = lock(&LIVE);
-        let own: Vec<_> = live.iter().filter(|slot| slot.thread == thread).collect();
-        let owners = if own.is_empty() {
-            live.iter().collect()
-        } else {
-            own
-        };
+        let owners = if shared { live.iter().collect() } else { own };
         for slot in owners {
             lock(&slot.events).push(logged());
         }

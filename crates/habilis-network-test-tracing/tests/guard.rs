@@ -58,6 +58,24 @@ fn an_expected_warn_that_does_not_occur_fails() {
 }
 
 #[test]
+fn an_expected_warn_that_occurs_twice_passes() {
+    let log = init();
+    log.expect_warn(module_path!(), "link lost");
+    tracing::warn!("link lost for peer 7");
+    tracing::warn!("link lost for peer 7");
+}
+
+#[test]
+fn an_event_from_the_test_thread_is_not_marked_shared() {
+    let text = panic_text(|| {
+        let _log = init();
+        tracing::warn!("link lost");
+    });
+    let text = text.expect("the guard must panic");
+    assert!(!text.contains("shared by all running tests"), "{text}");
+}
+
+#[test]
 fn an_unexpected_warn_beside_an_expected_one_fails() {
     let text = panic_text(|| {
         let log = init();
