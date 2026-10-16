@@ -197,6 +197,8 @@ divan = "0.1"
 # unused_extern_crates, ellipsis_inclusive_range_patterns).
 # `rust_2021_compatibility` is a migration-only group, not used here.
 [workspace.lints.rust]
+# A warning is a test failure: the output of a build and of a test stays clean.
+warnings = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
 # `deny` not `forbid`: the engine carries a few documented libc FFI blocks,
 # each with an `#[expect(unsafe_code, reason = ...)]`.
