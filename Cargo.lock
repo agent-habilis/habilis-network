@@ -1984,6 +1984,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "habilis-network-test-tracing"
+version = "0.6.0"
+dependencies = [
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "habilis-network-util"
 version = "0.6.0"
 dependencies = [

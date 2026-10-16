@@ -1,0 +1,19 @@
+[package]
+name = "habilis-network-test-tracing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors = ["Caio Gondim <me@caiogondim.com>"]
+description = "test subscriber that fails a test on a WARN or ERROR event"
+license = "MIT"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
