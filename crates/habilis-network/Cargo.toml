@@ -201,7 +201,7 @@ iroh = { workspace = true, features = [
 iroh-gossip.workspace = true
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "853831dc39515b5eace665a3cc4d54c2254ad919", default-features = false, optional = true }
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "8ecc86536b033602949ff80ead76732a473f434d", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:
 # iroh's defaults (portmapper, fast-apple-datapath, metrics) are host-only and
