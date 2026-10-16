@@ -10,39 +10,85 @@
 //! test thread when it drops.
 
 use std::fmt::{self, Write as _};
-use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
+use std::io;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{Layer, fmt as tracing_fmt};
 
-static INSTALL: Once = Once::new();
+static INSTALLED: OnceLock<bool> = OnceLock::new();
 static LIVE: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
+static CAPTURED: Mutex<String> = Mutex::new(String::new());
 
 /// Installs the subscriber on the first call and returns the guard of the
 /// calling test.
 ///
-/// The events print as they do with `tracing_subscriber::fmt()`, filtered by
-/// `RUST_LOG`. The guard sees every WARN and ERROR event, whatever `RUST_LOG`
-/// says.
+/// The events print to stderr as they do with `tracing_subscriber::fmt()`,
+/// filtered by `RUST_LOG`. The guard sees every WARN and ERROR event, whatever
+/// `RUST_LOG` says.
 ///
 /// # Panics
 ///
 /// Panics if another global subscriber is already installed, because the
-/// guard would never see an event.
+/// guard would never see an event. Panics if an earlier call in this binary
+/// was [`init_capturing`].
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init() -> Guard {
-    INSTALL.call_once(|| {
-        tracing_subscriber::registry()
-            .with(tracing_fmt::layer().with_filter(EnvFilter::from_default_env()))
-            .with(Catch.with_filter(LevelFilter::WARN))
-            .try_init()
-            .expect("another global tracing subscriber is installed");
+    install(false, "");
+    new_guard()
+}
+
+/// Like [`init`], but the events go to a buffer that [`Guard::logs`] returns,
+/// for a test that asserts on a log line. `RUST_LOG` wins; without it the
+/// filter is `default_directives`. The buffer is shared by the tests of the
+/// binary.
+///
+/// # Panics
+///
+/// Panics under the same conditions as [`init`], and if an earlier call in
+/// this binary was [`init`].
+#[must_use = "the guard fails the test when it drops; bind it to a local"]
+pub fn init_capturing(default_directives: &str) -> Guard {
+    install(true, default_directives);
+    new_guard()
+}
+
+fn install(capturing: bool, default_directives: &str) {
+    let installed = *INSTALLED.get_or_init(|| {
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(default_directives));
+        let result = if capturing {
+            let print = tracing_fmt::layer()
+                .with_ansi(false)
+                .with_writer(Capture)
+                .with_filter(filter);
+            tracing_subscriber::registry()
+                .with(print)
+                .with(Catch.with_filter(LevelFilter::WARN))
+                .try_init()
+        } else {
+            let print = tracing_fmt::layer().with_filter(filter);
+            tracing_subscriber::registry()
+                .with(print)
+                .with(Catch.with_filter(LevelFilter::WARN))
+                .try_init()
+        };
+        result.expect("another global tracing subscriber is installed");
+        capturing
     });
+    assert_eq!(
+        installed, capturing,
+        "init and init_capturing in the same test binary"
+    );
+}
+
+fn new_guard() -> Guard {
     let slot = Arc::new(Slot {
         thread: thread::current().name().unwrap_or_default().to_owned(),
         events: Mutex::new(Vec::new()),
@@ -50,6 +96,29 @@ pub fn init() -> Guard {
     });
     lock(&LIVE).push(Arc::clone(&slot));
     Guard { slot }
+}
+
+struct Capture;
+
+impl<'writer> MakeWriter<'writer> for Capture {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'writer self) -> CaptureWriter {
+        CaptureWriter
+    }
+}
+
+struct CaptureWriter;
+
+impl io::Write for CaptureWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        lock(&CAPTURED).push_str(&String::from_utf8_lossy(bytes));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Fails the test, when it drops, if the test logged a WARN or ERROR event
@@ -60,6 +129,13 @@ pub struct Guard {
 }
 
 impl Guard {
+    /// The log text that [`init_capturing`] collected, for the whole binary.
+    /// Empty after [`init`].
+    #[must_use]
+    pub fn logs(&self) -> String {
+        lock(&CAPTURED).clone()
+    }
+
     /// Asserts that the test logs a WARN event from `target` (a module path
     /// prefix) whose message contains `text`. Use it only where the warning
     /// is the subject of the test; fix the code for every other warning.
