@@ -453,9 +453,11 @@ impl Forwarder {
     /// by its id alone, never at an address that a cell carries, and counted: it may still be reachable by what iroh
     /// knows of the id, and if it is not, the cells are lost like any other.
     ///
-    /// Logged at debug when a cell that this node delivered named the hop: a reply goes back
-    /// along the reversed route of a cell, and the sender's first link-vector arrives some 15 s
-    /// after it starts. Any other hop without a vector is a warning.
+    /// Logged at debug when the hop is explained. A cell that this node delivered named it: a
+    /// reply goes back along the reversed route of a cell, and the sender's first link-vector
+    /// arrives some 15 s after it starts. Or it is a link of this node: the origin of a route
+    /// saw the vector of a new neighbor before this node did, and the link reaches it. Any other
+    /// hop without a vector is a warning.
     fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
         let known = self
             .topology
@@ -466,7 +468,7 @@ impl Forwarder {
         known.unwrap_or_else(|| {
             let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
             if self.first_without_vector(hop.underlay_id, total) {
-                if self.heard_hop(hop.underlay_id) {
+                if self.heard_hop(hop.underlay_id) || self.is_link_of_ours(hop.app_id) {
                     tracing::debug!(
                         total,
                         hop = %hop.underlay_id.fmt_short(),
@@ -484,6 +486,15 @@ impl Forwarder {
             }
             EndpointAddr::new(hop.underlay_id.get())
         })
+    }
+
+    /// Whether `app_id` is a link in the vector that this node published of itself.
+    fn is_link_of_ours(&self, app_id: AppId) -> bool {
+        self.topology
+            .read()
+            .expect("topology lock poisoned")
+            .links_of(self.self_app_id)
+            .is_some_and(|links| links.contains(&app_id))
     }
 
     /// Whether a cell that this node delivered named the hop `underlay_id`.
@@ -1355,6 +1366,40 @@ mod tests {
         });
         assert_eq!(warnings.load(Ordering::Relaxed), 0);
         assert_eq!(forwarder.unresolved_hops(), 1, "the hop was counted");
+        forwarder.underlay.close().await;
+    }
+
+    /// A neighbor that this node links to is a hop whose own vector has not arrived yet: the
+    /// origin of a route saw it first. This node reaches the neighbor by the link it holds.
+    #[tokio::test]
+    async fn a_hop_without_a_vector_that_is_a_link_of_ours_is_not_a_warning() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let neighbor = stranger(142);
+        let own_key = SecretKey::from_bytes(&[99; 32]);
+        let own_vector = LinkVector::signed(
+            &own_key,
+            crate::topology::wall_clock_ms(),
+            EndpointAddr::new(forwarder.underlay.id()),
+            vec![(neighbor.app_id, 1)],
+        );
+        assert!(
+            forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .ingest(own_vector),
+            "the vector of this node is accepted"
+        );
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&neighbor);
+            forwarder.dial_addr(&stranger(143));
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "the hop that is no link of ours is the only warning"
+        );
         forwarder.underlay.close().await;
     }
 

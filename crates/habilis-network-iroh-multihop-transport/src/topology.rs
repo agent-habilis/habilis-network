@@ -270,6 +270,13 @@ impl Topology {
         expired.len()
     }
 
+    /// The application ids that `origin` linked to in the vector that we hold of it.
+    pub(crate) fn links_of(&self, origin: AppId) -> Option<Vec<AppId>> {
+        self.vectors
+            .get(&origin)
+            .map(|held| held.vector.links.iter().map(|(id, _)| *id).collect())
+    }
+
     /// The underlay address an origin advertised, for dialing a hop through it.
     pub(crate) fn underlay_of(&self, origin: AppId) -> Option<EndpointAddr> {
         self.vectors
