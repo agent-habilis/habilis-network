@@ -263,6 +263,11 @@ impl Victims {
     }
 }
 
+/// How long a pair keeps reading as the gossip rung after the recursion rule closed its gossip
+/// connection and no other connection is left to read. The loss of the link, the race for a
+/// session and its attach all fit in it.
+const RUNG_CLOSE_MEMORY: Duration = Duration::from_secs(15);
+
 struct Inner {
     slots: HashMap<EndpointId, Slot>,
     /// Peers that refused us at their cap, each with its wait.
@@ -291,6 +296,10 @@ struct Inner {
     /// The peers that a test denied (see [`SignalAdmission::deny`]). Empty in a product build:
     /// only `deny` fills it.
     denied: HashSet<EndpointId>,
+    /// When the recursion rule last closed a gossip connection of a peer. The closed connection
+    /// leaves the table at once, so this is what keeps the pair reading as the gossip rung while
+    /// the event loop handles the loss of the link (see [`SignalAdmission::selected_kind`]).
+    closed_on_rung: HashMap<EndpointId, Instant>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -403,6 +412,7 @@ impl Inner {
             return;
         };
         for (peer, slot) in &self.slots {
+            let carried = self.hub.as_ref().is_some_and(|hub| hub.has_session(peer));
             let kinds: Vec<super::probe::PathKind> = slot
                 .conns
                 .iter()
@@ -412,7 +422,10 @@ impl Inner {
                 .collect();
             let (established, allowed) = gossip_view(&kinds);
             gossip.set_established(*peer, established);
-            gossip.allow(*peer, allowed);
+            // A session carries the pair though no connection is left to read: a gossip
+            // connection dialed now would be born on the gossip rung and closed by the
+            // recursion rule before iroh moves it onto the session.
+            gossip.allow(*peer, allowed && !carried);
         }
     }
 
@@ -426,6 +439,9 @@ impl Inner {
             });
         }
         self.sync_gossip();
+        let now = Instant::now();
+        self.closed_on_rung
+            .retain(|_, at| now.saturating_duration_since(*at) < RUNG_CLOSE_MEMORY);
         for peer in self.ceiling.quic_peers() {
             self.drop_quic_without_connection(peer);
         }
@@ -498,6 +514,7 @@ impl SignalAdmission {
                 proven_sink: None,
                 path_sink: None,
                 gossip: None,
+                closed_on_rung: HashMap::new(),
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
@@ -545,7 +562,12 @@ impl SignalAdmission {
     /// session now reads as the session (`[Relay, WebRtc]` reads `WebRtc`), where the first
     /// connection used to decide.
     pub(crate) fn selected_kind(&self, peer: EndpointId) -> Option<super::probe::PathKind> {
-        let handles: Vec<WeakConnectionHandle> = self.lock().slots.get(&peer)?.conns.clone();
+        let handles: Vec<WeakConnectionHandle> = self
+            .lock()
+            .slots
+            .get(&peer)
+            .map(|slot| slot.conns.clone())
+            .unwrap_or_default();
         super::probe::best_kind(
             handles
                 .iter()
@@ -553,6 +575,21 @@ impl SignalAdmission {
                 .filter(|conn| conn.close_reason().is_none())
                 .map(|conn| super::probe::selected_kind(&conn)),
         )
+        .or_else(|| self.recently_closed_on_rung(peer))
+    }
+
+    /// The recursion rule closed a gossip connection of `peer`: for a while, the pair reads as
+    /// the gossip rung though no connection is left to read it from.
+    pub(crate) fn note_closed_on_rung(&self, peer: EndpointId) {
+        self.lock().closed_on_rung.insert(peer, Instant::now());
+    }
+
+    /// The gossip rung, if the recursion rule closed a connection of `peer` lately.
+    fn recently_closed_on_rung(&self, peer: EndpointId) -> Option<super::probe::PathKind> {
+        let inner = self.lock();
+        let at = inner.closed_on_rung.get(&peer)?;
+        (Instant::now().saturating_duration_since(*at) < RUNG_CLOSE_MEMORY)
+            .then_some(super::probe::PathKind::Gossip)
     }
 
     /// Whether any live connection of `peer` with a selected path reads below IP: the relay, a
@@ -1116,7 +1153,7 @@ impl EndpointHooks for ConnectionHook {
         // both ends close it, whatever the mesh policy says, and before the relay watch, which is
         // policy-gated.
         if conn.alpn() == iroh_gossip::net::GOSSIP_ALPN {
-            super::path::watch_gossip_recursion(conn);
+            super::path::watch_gossip_recursion(conn, self.admission.clone());
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             super::path::track_gossip_conn(conn);
         }
@@ -2223,7 +2260,8 @@ mod tests {
             };
             builder.bind().await.expect("bind a gossip-only endpoint")
         };
-        let alice = bind(alice_key, alice_handle, Some(SignalAdmission::new(8))).await;
+        let admission = SignalAdmission::new(8);
+        let alice = bind(alice_key, alice_handle, Some(admission.clone())).await;
         let bob = bind(bob_key, bob_handle, None).await;
         let (tx, rx) = tokio::sync::oneshot::channel();
         let _router = Router::builder(bob.clone())
@@ -2261,6 +2299,11 @@ mod tests {
         assert!(
             crate::transport::path::gossip_recursion_closes() > before,
             "the close is counted"
+        );
+        assert_eq!(
+            admission.selected_kind(bob.id()),
+            Some(super::super::probe::PathKind::Gossip),
+            "the pair still reads as the gossip rung once its closed connection left the table"
         );
     }
 
@@ -2421,5 +2464,40 @@ mod tests {
         alice_table.lock().sample();
         assert!(!alice_handle.is_established(bob.id()), "no connection left");
         assert!(alice_handle.is_allowed(bob.id()), "allowed again");
+    }
+
+    /// A pair that a session carries is blocked for gossip though no connection is left to read.
+    /// A gossip connection dialed now would be born on the gossip rung, and the recursion rule
+    /// would close it before iroh moves it onto the session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
+        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use iroh::{EndpointAddr, TransportAddr};
+
+        let hub = MemoryHub::new();
+        let (alice, alice_table, alice_handle) = ip_and_gossip_node(45, &hub, false).await;
+        let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, false).await;
+        let sessions = FakeHub::default();
+        alice_table.lock().hub = Some(Arc::new(sessions.clone()));
+        let _router = iroh::protocol::Router::builder(bob.clone())
+            .accept(GOSSIP_TEST_ALPN, HoldConnections)
+            .spawn();
+        let connection = alice
+            .connect(
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
+                GOSSIP_TEST_ALPN,
+            )
+            .await
+            .expect("connect over gossip");
+        connection.close(0u32.into(), b"done");
+        connection.closed().await;
+
+        sessions.attach(bob.id());
+        alice_table.lock().sample();
+        assert!(
+            !alice_handle.is_allowed(bob.id()),
+            "the session carries the pair: the gossip rung is not allowed"
+        );
+        assert!(!alice_handle.is_established(bob.id()), "no connection left");
     }
 }

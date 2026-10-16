@@ -464,6 +464,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                     admission.note_success(remote);
                     admission.report_answered(remote);
                     register_session_addr(&book, remote);
+                    admission.sync_gossip();
                     conn.close(0u32.into(), b"jsep done");
                     // A connection that we dialed before the attach moves onto the
                     // session only after a path event of our own endpoint, and the
@@ -829,6 +830,17 @@ fn proof_is_stale(kind: Option<super::probe::PathKind>, proven: bool) -> bool {
         )
 }
 
+/// Whether a proven pair reads as a path that a session replaces and that no peer-to-peer
+/// transport carries: the relay, or the gossip rung (the recursion rule closes a gossip link on
+/// it).
+fn reads_below_a_session(kind: Option<super::probe::PathKind>, proven: bool) -> bool {
+    proof_is_stale(kind, proven)
+        && matches!(
+            kind,
+            Some(super::probe::PathKind::Relay | super::probe::PathKind::Gossip)
+        )
+}
+
 /// Whether this node leaves the offer of a session to its peer. The higher id waits to be
 /// dialled, so that one offer crosses per pair, unless a frame is held for the peer or the
 /// proof of a direct path is stale.
@@ -914,8 +926,7 @@ pub(crate) fn negotiate_session(
     // is attached: a session carries the pair whatever one connection reads (a connection opened
     // before the attach reads the relay until a path event moves it), so the connection that reads
     // as relay is nudged onto the session, and the proof stands.
-    let reads_as_relay =
-        proof_is_stale(kind, proven) && kind == Some(super::probe::PathKind::Relay);
+    let reads_as_relay = reads_below_a_session(kind, proven);
     let has_session = handle.has_session(&peer);
     if reads_as_relay && has_session {
         let endpoint = ctx.endpoint.clone();
@@ -1098,6 +1109,7 @@ fn spawn_offer_round(
         tracing::debug!(target: LOG_TARGET, node = %node.fmt_short(), %peer, age_ms = started.elapsed().as_millis(), "offer round ended: signalled");
         // The peer took the round: it is not refusing us, so its wait starts over.
         admission.note_success(peer);
+        admission.sync_gossip();
         // A connection opened before the attach rides the session only after a connect.
         if matches!(
             offer,
@@ -1779,6 +1791,19 @@ mod tests {
             !waits_for_the_offer(false, false, Some(PathKind::Ip), true),
             "the lower id never waits"
         );
+    }
+
+    // The recursion rule closes a gossip link on the gossip rung, so a pair that reads as the
+    // gossip rung is raced as one that reads as the relay: its proof is taken back and the
+    // session round reports at once, not after it judges the connection for UDP.
+    #[test]
+    fn a_proven_pair_on_gossip_is_demoted_as_one_on_the_relay() {
+        assert!(reads_below_a_session(Some(PathKind::Relay), true));
+        assert!(reads_below_a_session(Some(PathKind::Gossip), true));
+        assert!(!reads_below_a_session(Some(PathKind::Gossip), false));
+        for kind in [Some(PathKind::Ip), Some(PathKind::WebRtc), None] {
+            assert!(!reads_below_a_session(kind, true), "{kind:?}");
+        }
     }
 
     // A pair on gossip is below a session as a pair on multihop is: its proof of a direct path is
@@ -3727,6 +3752,14 @@ mod tests {
             state.direct.get(&bob),
             Some(&DirectState::Direct),
             "a session carries the pair: the reading of one connection does not take the proof back"
+        );
+
+        // The same for a connection that reads the gossip rung: the graft is not skipped, as the
+        // gossip link will ride the session and not the rung.
+        state.path_kinds.insert(bob, PathKind::Gossip);
+        assert!(
+            !state.rides_gossip_rung(bob),
+            "a session carries the pair: a connection on the gossip rung does not stop the graft"
         );
 
         router.shutdown().await.expect("shutdown");

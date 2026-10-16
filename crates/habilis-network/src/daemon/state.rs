@@ -1159,8 +1159,9 @@ impl EventLoopState {
         })
     }
 
-    /// A proven pair lost its gossip link while its path reads as the relay. Returns the
-    /// address to offer a session to, now, and marks the session wanted.
+    /// A proven pair lost its gossip link while its path reads as the relay or as the gossip
+    /// rung (the recursion rule closes a link on that rung). Returns the address to offer a
+    /// session to, now, and marks the session wanted.
     ///
     /// The path comes from [`Self::pair_path_kind`]: the watcher's report if there is one, else
     /// the admission table, which is the source for a pair that only gossips. A loss that nobody
@@ -1170,8 +1171,12 @@ impl EventLoopState {
         peer: EndpointId,
         now: Instant,
     ) -> Option<EndpointAddr> {
+        use crate::transport::probe::PathKind;
         if self.direct.get(&peer) != Some(&DirectState::Direct)
-            || self.pair_path_kind(peer) != Some(crate::transport::probe::PathKind::Relay)
+            || !matches!(
+                self.pair_path_kind(peer),
+                Some(PathKind::Relay | PathKind::Gossip)
+            )
         {
             return None;
         }
@@ -2026,8 +2031,14 @@ impl EventLoopState {
 
     /// Whether the selected path of `peer` is the gossip rung. The recursion rule closes a gossip
     /// link on that path, so a graft only makes the gossip layer dial a link that dies at once.
+    /// Not while a session is attached: it carries the pair whatever one connection reads, and the
+    /// link rides it once iroh moves the connection.
     pub(crate) fn rides_gossip_rung(&self, peer: EndpointId) -> bool {
         self.pair_path_kind(peer) == Some(crate::transport::probe::PathKind::Gossip)
+            && !self
+                .webrtc
+                .as_ref()
+                .is_some_and(|handle| handle.has_session(&peer))
     }
 
     /// Whether to report that this author's digest could not be read: once per
@@ -2565,6 +2576,27 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    /// The recursion rule closes a gossip link on the gossip rung, and no re-graft follows (see
+    /// `a_pair_that_rides_the_gossip_rung_is_not_regrafted`). The pair must be raced again then,
+    /// or nothing brings a link back while the IP path is gone.
+    #[test]
+    fn a_proven_pair_on_the_gossip_rung_is_raced_again_when_its_link_goes_down() {
+        use crate::transport::probe::PathKind;
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let addr = iroh::EndpointAddr::new(bob)
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+        let mut node = fresh_state();
+        node.peer_endpoints.insert(nick("bob"), addr.clone());
+        node.direct.insert(bob, DirectState::Direct);
+        node.path_kinds.insert(bob, PathKind::Gossip);
+
+        assert_eq!(node.relay_race_on_link_loss(bob, now), Some(addr));
+        assert!(
+            node.lane_session_wanted(bob, now),
+            "the offer is not held back"
+        );
     }
 
     /// A proven pair that loses its link is re-grafted in about a second, whatever the other links
