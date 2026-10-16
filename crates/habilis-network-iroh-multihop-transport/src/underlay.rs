@@ -52,6 +52,10 @@ const MAX_WRITERS: usize = 64;
 /// the only bound, and it multiplies by the writer count instead of capping it.
 const FORWARD_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 
+/// Hops of delivered cells that the forwarder remembers, so that a reply along a reversed route
+/// can tell its first hop. The ids come off the wire, so the set has a ceiling.
+const HEARD_HOPS_CAP: usize = 1024;
+
 /// Hops without a vector that get a log line of their own. The ids come off the wire, so the set
 /// that remembers them has a ceiling.
 const UNRESOLVED_SEEN_CAP: usize = 128;
@@ -402,6 +406,10 @@ pub(crate) struct Forwarder {
     unresolved_hops: AtomicU64,
     /// The hops that were warned about, one line each: see [`UNRESOLVED_SEEN_CAP`].
     unresolved_seen: Mutex<HashSet<UnderlayId>>,
+    /// The hops that named a cell this node delivered: the sender and the hops of its route. A
+    /// reply goes back along that route reversed, so these are the hops that can lack a vector
+    /// for a normal reason: see [`HEARD_HOPS_CAP`].
+    heard_hops: Mutex<HashSet<UnderlayId>>,
 }
 
 impl Forwarder {
@@ -430,6 +438,7 @@ impl Forwarder {
             topology,
             unresolved_hops: AtomicU64::new(0),
             unresolved_seen: Mutex::new(HashSet::new()),
+            heard_hops: Mutex::new(HashSet::new()),
         }
     }
 
@@ -444,8 +453,9 @@ impl Forwarder {
     /// by its id alone, never at an address that a cell carries, and counted: it may still be reachable by what iroh
     /// knows of the id, and if it is not, the cells are lost like any other.
     ///
-    /// The case is normal, so it is logged at debug: a reply goes back along the reversed route
-    /// of a cell, and the sender's first link-vector arrives some 15 s after it starts.
+    /// Logged at debug when a cell that this node delivered named the hop: a reply goes back
+    /// along the reversed route of a cell, and the sender's first link-vector arrives some 15 s
+    /// after it starts. Any other hop without a vector is a warning.
     fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
         let known = self
             .topology
@@ -456,15 +466,43 @@ impl Forwarder {
         known.unwrap_or_else(|| {
             let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
             if self.first_without_vector(hop.underlay_id, total) {
-                tracing::debug!(
-                    total,
-                    hop = %hop.underlay_id.fmt_short(),
-                    app_id = %hop.app_id.fmt_short(),
-                    "multihop forwarder: hop without a vector, dialing it by id"
-                );
+                if self.heard_hop(hop.underlay_id) {
+                    tracing::debug!(
+                        total,
+                        hop = %hop.underlay_id.fmt_short(),
+                        app_id = %hop.app_id.fmt_short(),
+                        "multihop forwarder: hop without a vector, dialing it by id"
+                    );
+                } else {
+                    tracing::warn!(
+                        total,
+                        hop = %hop.underlay_id.fmt_short(),
+                        app_id = %hop.app_id.fmt_short(),
+                        "multihop forwarder: hop without a vector that no delivered cell named, dialing it by id"
+                    );
+                }
             }
             EndpointAddr::new(hop.underlay_id.get())
         })
+    }
+
+    /// Whether a cell that this node delivered named the hop `underlay_id`.
+    fn heard_hop(&self, underlay_id: UnderlayId) -> bool {
+        self.heard_hops
+            .lock()
+            .expect("heard hops poisoned")
+            .contains(&underlay_id)
+    }
+
+    /// Remember the hops of the reply route of a delivered cell, up to [`HEARD_HOPS_CAP`].
+    fn note_heard(&self, reply_route: &Route) {
+        let mut heard = self.heard_hops.lock().expect("heard hops poisoned");
+        for hop in reply_route.hops() {
+            if heard.len() >= HEARD_HOPS_CAP {
+                return;
+            }
+            heard.insert(hop.underlay_id);
+        }
     }
 
     /// Whether a log line is due for the hop `underlay_id`, found without a vector for the
@@ -613,6 +651,7 @@ impl Forwarder {
             self.note_drop("return route is not a legal route");
             return;
         };
+        self.note_heard(&route);
         let delivered = Delivered {
             remote: route.encode(),
             packet: cell.packet,
@@ -1301,15 +1340,36 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
+    /// A reply goes back along the reversed route of a cell that this node delivered, so its first
+    /// hop is the sender, whose link-vector may not have arrived yet: that case is normal.
     #[tokio::test]
     async fn a_hop_without_a_vector_is_not_a_warning() {
         let (forwarder, _app, _received) = forwarder().await;
+        let sender = stranger(140);
+        let delivered = cell(vec![self_hop(&forwarder)], 0, sender.clone());
+        forwarder.handle_cell(delivered, sender.underlay_id);
+        assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
         let warnings = Arc::new(AtomicUsize::new(0));
         tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
-            forwarder.dial_addr(&stranger(140));
+            forwarder.dial_addr(&sender);
         });
         assert_eq!(warnings.load(Ordering::Relaxed), 0);
         assert_eq!(forwarder.unresolved_hops(), 1, "the hop was counted");
+        forwarder.underlay.close().await;
+    }
+
+    /// A hop that no delivered cell named, and that has no vector, is not explained by a reply on
+    /// a reversed route: it is a warning, once.
+    #[tokio::test]
+    async fn a_hop_without_a_vector_that_no_delivered_cell_named_is_a_warning() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&stranger(141));
+            forwarder.dial_addr(&stranger(141));
+        });
+        assert_eq!(warnings.load(Ordering::Relaxed), 1, "one line per hop");
+        assert_eq!(forwarder.unresolved_hops(), 2, "both lookups were counted");
         forwarder.underlay.close().await;
     }
 
