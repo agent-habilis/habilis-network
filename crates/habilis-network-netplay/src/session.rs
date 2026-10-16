@@ -20,7 +20,8 @@
 
 use crate::config::Config;
 use crate::error::RollbackError;
-use crate::frame::{Frame, NULL_FRAME};
+use crate::frame::Frame;
+use crate::handle::PlayerHandle;
 use crate::protocol::{PeerEvent, PeerProtocol, PeerState};
 use crate::request::Request;
 use crate::sync::Sync;
@@ -70,7 +71,7 @@ pub struct P2PSession<T: Config, X: Transport<T>> {
     sync: Sync<T>,
     peers: Vec<PeerProtocol<T>>,
     transport: X,
-    local_handle: usize,
+    local_handle: PlayerHandle,
     state: SessionState,
     events: Vec<Event<T::Address>>,
     /// Frames to skip so peers can catch up, from [`TimeSync`].
@@ -122,18 +123,18 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
     /// index into `players`.
     pub fn new(
         players: Vec<T::Address>,
-        local_handle: usize,
+        local_handle: PlayerHandle,
         transport: X,
         max_prediction: usize,
         input_delay: usize,
         magic: u32,
     ) -> Result<Self, RollbackError> {
-        if local_handle >= players.len() {
+        if local_handle.index() >= players.len() {
             return Err(RollbackError::InvalidPlayer(local_handle));
         }
         let num_players = players.len();
         tracing::debug!(
-            local_handle,
+            local_handle = local_handle.index(),
             num_players,
             magic,
             input_delay,
@@ -143,6 +144,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
         let peers = players
             .into_iter()
             .enumerate()
+            .map(|(index, addr)| (PlayerHandle::new(index), addr))
             .filter(|(handle, _)| *handle != local_handle)
             .map(|(handle, addr)| PeerProtocol::new(addr, handle, magic))
             .collect();
@@ -154,7 +156,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
             state: SessionState::Synchronizing,
             events: Vec::new(),
             skip_frames: 0,
-            last_checksum_frame: NULL_FRAME,
+            last_checksum_frame: Frame::NULL,
             local_input: None,
             unaddressed_drops: 0,
         })
@@ -300,7 +302,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
             self.sync.confirm_through(self.sync.current_frame());
             return;
         };
-        if confirmed != NULL_FRAME {
+        if confirmed != Frame::NULL {
             self.sync.confirm_through(confirmed);
         }
     }
@@ -344,7 +346,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
         // left in place for the retry.
         let frame = self.sync.add_local_input(self.local_handle, input)?;
         self.local_input = None;
-        if frame != NULL_FRAME {
+        if frame != Frame::NULL {
             for peer in &mut self.peers {
                 peer.send_input(frame, input);
             }
@@ -368,7 +370,7 @@ impl<T: Config, X: Transport<T>> P2PSession<T, X> {
     /// turns a silent divergence into a reported one.
     pub fn publish_checksum(&mut self) {
         let frame = self.sync.last_confirmed_frame();
-        if frame == NULL_FRAME || frame == self.last_checksum_frame {
+        if frame == Frame::NULL || frame == self.last_checksum_frame {
             return;
         }
         let Some(cell) = self.sync.saved_state(frame) else {

@@ -355,7 +355,9 @@ fn route_to(state: &EventLoopState, peer: EndpointId) -> Option<iroh::TransportA
     state
         .multihop
         .as_ref()
-        .and_then(|handle| handle.route_addr(peer))
+        .and_then(|handle| {
+            handle.route_addr(habilis_network_iroh_multihop_transport::AppId::new(peer))
+        })
         .map(iroh::TransportAddr::Custom)
 }
 
@@ -767,6 +769,14 @@ pub(crate) enum GraftRequest {
     Skip,
 }
 
+/// The peer that a graft asks for, and the rendezvous it is told apart from: the rendezvous is
+/// asked with a `Join`, and a swap of the two compiles, since both are an `EndpointId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GraftTarget {
+    pub(crate) peer: EndpointId,
+    pub(crate) rendezvous: EndpointId,
+}
+
 /// The request that grafts `peer`. The rendezvous gets a `Join`, because a low
 /// priority request to a peer that holds a tombstone for us is refused for ever.
 /// Every other graft only fills a view, and must not make a full one drop a neighbor.
@@ -778,15 +788,18 @@ pub(crate) enum GraftRequest {
 /// A low priority request evicts nobody, so a node that arrives when every other node is
 /// full gets no link from it. A `paced` graft (the fill tick, a proven direct path) asks
 /// with a `Join` instead when the node is starved: it held two or more links fewer than G
-/// for `STARVED_SECS`, at most once per `STARVED_SECS`. A `PeerInfo` graft is not paced.
+/// for `STARVED`, at most once per `STARVED`. A `PeerInfo` graft is not paced.
 pub(crate) fn graft_request(
     state: &mut EventLoopState,
-    peer: EndpointId,
-    rendezvous_id: EndpointId,
+    target: GraftTarget,
     max_peers: usize,
     now: Instant,
     paced: bool,
 ) -> GraftRequest {
+    let GraftTarget {
+        peer,
+        rendezvous: rendezvous_id,
+    } = target;
     if peer == rendezvous_id {
         return GraftRequest::Join;
     }
@@ -816,8 +829,10 @@ pub(crate) async fn request_graft(
     }
     match graft_request(
         state,
-        peer,
-        ctx.rendezvous_id,
+        GraftTarget {
+            peer,
+            rendezvous: ctx.rendezvous_id,
+        },
         ctx.max_peers,
         Instant::now(),
         paced,
@@ -1096,7 +1111,7 @@ mod tests {
     use iroh::EndpointAddr;
 
     use super::{
-        GraftRequest, PathKind, StepInput, ensure_watchers, graft_request, may_graft,
+        GraftRequest, GraftTarget, PathKind, StepInput, ensure_watchers, graft_request, may_graft,
         retry_candidates, retry_candidates_at, webrtc_riders,
     };
     use crate::daemon::state::EventLoopState;
@@ -1153,31 +1168,50 @@ mod tests {
         let rendezvous = endpoint_id(3);
         let now = crate::util::clock::Instant::now();
         assert_eq!(
-            graft_request(&mut state, endpoint_id(4), rendezvous, 4, now, true),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: endpoint_id(4),
+                    rendezvous
+                },
+                4,
+                now,
+                true
+            ),
             GraftRequest::Neighbor
         );
         assert_eq!(
-            graft_request(&mut state, rendezvous, rendezvous, 4, now, true),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: rendezvous,
+                    rendezvous
+                },
+                4,
+                now,
+                true
+            ),
             GraftRequest::Join
         );
     }
 
     // With no eviction, a member that arrives when every other member is full gets no link.
-    // After STARVED_SECS below G - 1 links, a paced graft asks with a `Join` once, and then
-    // waits STARVED_SECS again.
+    // After STARVED below G - 1 links, a paced graft asks with a `Join` once, and then
+    // waits STARVED again.
     #[test]
     fn a_starved_node_falls_back_to_a_join_once_per_window() {
         use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
         let start = crate::util::clock::Instant::now();
-        let window = Duration::from_secs(crate::util::tuning::STARVED_SECS);
+        let window = crate::util::tuning::STARVED;
         // G = 4 and two links: G - 2.
         state.linked_endpoints.insert(endpoint_id(10));
         state.linked_endpoints.insert(endpoint_id(11));
 
-        let ask =
-            |node: &mut EventLoopState, at| graft_request(node, peer, rendezvous, 4, at, true);
+        let ask = |node: &mut EventLoopState, at| {
+            graft_request(node, GraftTarget { peer, rendezvous }, 4, at, true)
+        };
         assert_eq!(
             ask(&mut state, start),
             GraftRequest::Neighbor,
@@ -1226,24 +1260,60 @@ mod tests {
 
         // The request is not paced: it goes out and is recorded.
         assert_eq!(
-            graft_request(&mut state, refuser, rendezvous, 8, start, false),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: refuser,
+                    rendezvous
+                },
+                8,
+                start,
+                false
+            ),
             GraftRequest::Neighbor
         );
-        let later = start + Duration::from_secs(crate::util::tuning::GRAFT_REFUSED_AFTER_SECS + 1);
+        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         state.settle_graft_backoff(later);
 
         assert_eq!(
-            graft_request(&mut state, refuser, rendezvous, 8, later, true),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: refuser,
+                    rendezvous
+                },
+                8,
+                later,
+                true
+            ),
             GraftRequest::Skip,
             "a paced graft leaves the peer that refused"
         );
         assert_eq!(
-            graft_request(&mut state, refuser, rendezvous, 8, later, false),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: refuser,
+                    rendezvous
+                },
+                8,
+                later,
+                false
+            ),
             GraftRequest::Neighbor,
             "the PeerInfo graft is not held"
         );
         assert_eq!(
-            graft_request(&mut state, other, rendezvous, 8, later, true),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: other,
+                    rendezvous
+                },
+                8,
+                later,
+                true
+            ),
             GraftRequest::Neighbor,
             "another peer is asked"
         );
@@ -1276,19 +1346,36 @@ mod tests {
             EndpointAddr::new(tombstone).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
         let start = crate::util::clock::Instant::now();
-        let window = Duration::from_secs(crate::util::tuning::STARVED_SECS);
+        let window = crate::util::tuning::STARVED;
         // G = 4 and two links: starved once the window has passed.
         state.linked_endpoints.insert(endpoint_id(10));
         state.linked_endpoints.insert(endpoint_id(11));
         assert_eq!(
-            graft_request(&mut state, tombstone, rendezvous, 4, start, false),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: tombstone,
+                    rendezvous
+                },
+                4,
+                start,
+                false
+            ),
             GraftRequest::Neighbor
         );
-        let refused =
-            start + Duration::from_secs(crate::util::tuning::GRAFT_REFUSED_AFTER_SECS + 1);
+        let refused = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         state.settle_graft_backoff(refused);
         assert_eq!(
-            graft_request(&mut state, tombstone, rendezvous, 4, refused, true),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: tombstone,
+                    rendezvous
+                },
+                4,
+                refused,
+                true
+            ),
             GraftRequest::Skip,
             "before the window: the backoff holds"
         );
@@ -1302,7 +1389,16 @@ mod tests {
             "a starved node asks every peer"
         );
         assert_eq!(
-            graft_request(&mut state, tombstone, rendezvous, 4, starved, true),
+            graft_request(
+                &mut state,
+                GraftTarget {
+                    peer: tombstone,
+                    rendezvous
+                },
+                4,
+                starved,
+                true
+            ),
             GraftRequest::Join,
             "the fallback is a Join, whatever the backoff says"
         );
@@ -1318,10 +1414,10 @@ mod tests {
             EndpointAddr::new(peer).with_ip_addr(format!("127.0.0.1:{port}").parse().expect("addr"))
         };
         let start = crate::util::clock::Instant::now();
-        let later = start + Duration::from_secs(crate::util::tuning::GRAFT_REFUSED_AFTER_SECS + 1);
+        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         let refuse = |node: &mut EventLoopState| {
             node.graft_backoff = crate::transport::graft_backoff::GraftBackoff::default();
-            let _ = graft_request(node, peer, rendezvous, 8, start, false);
+            let _ = graft_request(node, GraftTarget { peer, rendezvous }, 8, start, false);
             node.settle_graft_backoff(later);
             assert!(node.graft_blocked(peer, later), "refused");
         };
@@ -1354,11 +1450,17 @@ mod tests {
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
         let start = crate::util::clock::Instant::now();
-        let later = start + Duration::from_secs(crate::util::tuning::GRAFT_REFUSED_AFTER_SECS + 1);
-        let _ = graft_request(&mut state, peer, rendezvous, 8, start, false);
+        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let _ = graft_request(
+            &mut state,
+            GraftTarget { peer, rendezvous },
+            8,
+            start,
+            false,
+        );
         state.settle_graft_backoff(later);
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 8, later, true),
+            graft_request(&mut state, GraftTarget { peer, rendezvous }, 8, later, true),
             GraftRequest::Skip,
             "refused: the paced graft is skipped"
         );
@@ -1366,7 +1468,7 @@ mod tests {
         state.note_path_proven(peer);
         state.settle_graft_backoff(later);
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 8, later, true),
+            graft_request(&mut state, GraftTarget { peer, rendezvous }, 8, later, true),
             GraftRequest::Neighbor,
             "the proof ends the wait, and the old ask is not read as a refusal again"
         );
@@ -1490,20 +1592,19 @@ mod tests {
 
     #[test]
     fn a_node_with_g_minus_one_links_is_not_starved() {
-        use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
         let start = crate::util::clock::Instant::now();
         for seed in 10..13 {
             state.linked_endpoints.insert(endpoint_id(seed));
         }
-        let late = start + Duration::from_secs(crate::util::tuning::STARVED_SECS * 2);
+        let late = start + crate::util::tuning::STARVED * 2;
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 4, start, true),
+            graft_request(&mut state, GraftTarget { peer, rendezvous }, 4, start, true),
             GraftRequest::Neighbor
         );
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 4, late, true),
+            graft_request(&mut state, GraftTarget { peer, rendezvous }, 4, late, true),
             GraftRequest::Neighbor
         );
     }
@@ -1514,30 +1615,41 @@ mod tests {
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
         let start = crate::util::clock::Instant::now();
-        let window = Duration::from_secs(crate::util::tuning::STARVED_SECS);
+        let window = crate::util::tuning::STARVED;
         state.linked_endpoints.insert(endpoint_id(10));
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 4, start, true),
+            graft_request(&mut state, GraftTarget { peer, rendezvous }, 4, start, true),
             GraftRequest::Neighbor
         );
         // A link comes in: G - 1 = 3 links. The clock stops.
         state.linked_endpoints.insert(endpoint_id(11));
         state.linked_endpoints.insert(endpoint_id(12));
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 4, start + window / 2, true),
+            graft_request(
+                &mut state,
+                GraftTarget { peer, rendezvous },
+                4,
+                start + window / 2,
+                true
+            ),
             GraftRequest::Neighbor
         );
         // The links go away again: the clock starts at the next look, not in the past.
         state.linked_endpoints.clear();
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 4, start + window, true),
+            graft_request(
+                &mut state,
+                GraftTarget { peer, rendezvous },
+                4,
+                start + window,
+                true
+            ),
             GraftRequest::Neighbor
         );
         assert_eq!(
             graft_request(
                 &mut state,
-                peer,
-                rendezvous,
+                GraftTarget { peer, rendezvous },
                 4,
                 start + (window * 2).saturating_sub(Duration::from_secs(1)),
                 true
@@ -1548,17 +1660,22 @@ mod tests {
 
     #[test]
     fn a_peer_info_graft_never_falls_back_to_a_join() {
-        use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
         let start = crate::util::clock::Instant::now();
-        let late = start + Duration::from_secs(crate::util::tuning::STARVED_SECS * 3);
+        let late = start + crate::util::tuning::STARVED * 3;
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 4, start, false),
+            graft_request(
+                &mut state,
+                GraftTarget { peer, rendezvous },
+                4,
+                start,
+                false
+            ),
             GraftRequest::Neighbor
         );
         assert_eq!(
-            graft_request(&mut state, peer, rendezvous, 4, late, false),
+            graft_request(&mut state, GraftTarget { peer, rendezvous }, 4, late, false),
             GraftRequest::Neighbor
         );
     }
@@ -2416,7 +2533,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_alive_tick_fills_one_member_per_tick_on_a_relay_transport_mesh() {
         use crate::protocol::MeshId;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
         use iroh::{RelayMode, TransportAddr, endpoint::presets};
 
         let endpoint = iroh::Endpoint::builder(presets::Minimal)
@@ -2434,7 +2551,7 @@ mod tests {
         let sender = crate::transport::MeshSender::new(gossip_sender);
         let mesh = MeshId::from("test");
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let author = nick("alice");
         let sink = crate::gossip::event::SilentSink;
         let rendezvous = endpoint_id(1);
@@ -2444,7 +2561,7 @@ mod tests {
             mesh: &mesh,
             author: &author,
             identity: &identity,
-            our_pubkey: &our_pubkey,
+            our_pubkey,
             max_peers: 8,
             rendezvous_id: rendezvous,
             external_msg_tx: None,

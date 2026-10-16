@@ -202,16 +202,15 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
 pub(crate) fn note_tick_gap(
     timer: &'static str,
     last: &mut Instant,
-    last_wall: &mut i64,
+    last_wall: &mut crate::util::clock::UnixSecs,
     expected: Duration,
 ) -> (Duration, Duration) {
     let now = Instant::now();
     let mono_gap = now.duration_since(*last);
     *last = now;
 
-    let now_wall = crate::util::clock::unix_secs();
-    let wall_gap =
-        Duration::from_secs(u64::try_from(now_wall.saturating_sub(*last_wall)).unwrap_or(0));
+    let now_wall = crate::util::clock::UnixSecs::now();
+    let wall_gap = now_wall.since(*last_wall);
     *last_wall = now_wall;
 
     let mono_gap_ms = millis_saturating(mono_gap);

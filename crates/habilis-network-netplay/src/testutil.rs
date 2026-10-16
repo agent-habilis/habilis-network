@@ -54,7 +54,8 @@ impl TestRunner {
     /// so desync detection has something to compare.
     fn checksum(state: &TestState) -> u128 {
         // Any stable hash works; this one is trivially portable.
-        u128::from(state.value.cast_unsigned()) ^ (u128::from(state.frame.cast_unsigned()) << 64)
+        u128::from(state.value.cast_unsigned())
+            ^ (u128::from(state.frame.get().cast_unsigned()) << 64)
     }
 
     pub(crate) fn handle(&mut self, request: Request<TestGame>) {

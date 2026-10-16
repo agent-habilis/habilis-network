@@ -20,8 +20,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// which is the release count.
 const GROUP: usize = 4;
 
-/// The period of a return, in seconds. A node adds up to half of it from its id.
-const PERIOD_SECS: u64 = 20;
+/// The period of a return. A node adds up to half of it from its id.
+const PERIOD: Duration = Duration::from_secs(20);
 
 fn log_buffer() -> &'static Mutex<String> {
     static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
@@ -156,7 +156,7 @@ impl Member {
 #[ignore = "run by cargo task matrix"]
 async fn a_member_that_let_go_of_the_rendezvous_comes_back_and_lets_go_again() {
     init(Tuning {
-        rendezvous_periodic_return_secs: PERIOD_SECS,
+        rendezvous_periodic_return: PERIOD,
         ..Tuning::DEFAULTS
     });
     init_logging();

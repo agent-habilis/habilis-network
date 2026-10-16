@@ -23,7 +23,10 @@ const FORMATION_DEADLINE: Duration = Duration::from_mins(2);
 
 /// The tests share one log buffer, and a test counts lines in it, so a second test that runs at
 /// the same time adds its own lines to the count.
-static ONE_TEST_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+fn serial() -> &'static tokio::sync::Mutex<()> {
+    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 fn log_buffer() -> &'static Mutex<String> {
     static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
@@ -149,7 +152,7 @@ async fn rosters_until(members: &[Membership], peers: usize, deadline: Duration)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
-    let _one_at_a_time = ONE_TEST_AT_A_TIME.lock().await;
+    let _serial = serial().lock().await;
     init_logging();
     let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
         .await
@@ -186,7 +189,7 @@ async fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roste
 /// it, as it was before members let go at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_joiner_after_a_crash_still_gets_the_full_roster() {
-    let _one_at_a_time = ONE_TEST_AT_A_TIME.lock().await;
+    let _serial = serial().lock().await;
     init_logging();
     let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
         .await

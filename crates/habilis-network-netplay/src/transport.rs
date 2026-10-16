@@ -69,8 +69,9 @@ pub enum Body<I> {
     /// Standalone ack, for when there is nothing to send but the peer is
     /// waiting to retire inputs.
     InputAck {
-        /// Highest frame received contiguously.
-        ack_frame: Frame,
+        /// Highest frame received contiguously. Absent until one has arrived.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ack_frame: Option<Frame>,
     },
     /// How far ahead the sender believes it is, so the pair can converge on
     /// a shared pace instead of one racing.
@@ -104,8 +105,9 @@ pub struct InputPacket<I> {
     /// later.
     pub start_frame: Frame,
     /// Highest frame the sender has received from *us*, piggybacked so an
-    /// ack costs no extra packet.
-    pub ack_frame: Frame,
+    /// ack costs no extra packet. Absent until one has arrived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_frame: Option<Frame>,
     /// Consecutive inputs from `start_frame`.
     pub inputs: Vec<I>,
 }

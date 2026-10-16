@@ -125,6 +125,37 @@ pub const SECRET_LEN: usize = 32;
 /// Length of the SHA-256 content hash that addresses a blob.
 pub const HASH_LEN: usize = 32;
 
+/// The SHA-256 of a blob's bytes: the name it is stored, ticketed and fetched
+/// under. Prints as lowercase hex, the same text as its spool file name.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlobDigest([u8; HASH_LEN]);
+
+impl BlobDigest {
+    /// Wrap the 32 bytes of a SHA-256.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes, borrowed.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for BlobDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        crate::protocol::identity::write_hex(formatter, &self.0)
+    }
+}
+
+impl std::fmt::Debug for BlobDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "BlobDigest({self})")
+    }
+}
+
 /// Fetch stream close code: the presented bearer secret matched no blob's secret.
 pub(crate) const BAD_SECRET: u32 = 1;
 
@@ -151,6 +182,21 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    /// A secret that is already in a wiped buffer (the blob salt, the token read off
+    /// the wire) moves into its type whole, through the constructor that takes the
+    /// buffer, with no plain `[u8; 32]` copy on the way. This does not compile
+    /// outside the protocol crate unless that constructor is public.
+    #[test]
+    fn a_secret_in_a_wiped_buffer_moves_into_its_type_whole() {
+        use crate::protocol::crypto::{SymmetricKey, TicketSecret};
+        use zeroize::Zeroizing;
+
+        let secret = TicketSecret::from_zeroizing(Zeroizing::new([5u8; super::SECRET_LEN]));
+        assert_eq!(secret.as_bytes(), &[5u8; super::SECRET_LEN]);
+        let key = SymmetricKey::from_zeroizing(Zeroizing::new([6u8; 32]));
+        assert_eq!(key.as_bytes(), &[6u8; 32]);
+    }
 
     /// A throwaway file under the OS temp dir holding `bytes`; the caller drops it.
     fn temp_file(bytes: &[u8]) -> PathBuf {
@@ -459,7 +505,7 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.secret = [0u8; super::SECRET_LEN]; // forge a wrong bearer secret
+        ticket.secret = crate::protocol::crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),
@@ -479,7 +525,7 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.sha256 = [0xabu8; super::HASH_LEN]; // a hash the store doesn't hold
+        ticket.sha256 = super::BlobDigest::from_bytes([0xabu8; super::HASH_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),

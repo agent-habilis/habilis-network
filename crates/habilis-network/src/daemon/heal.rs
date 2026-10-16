@@ -21,7 +21,7 @@ use crate::gossip::event::NodeEvent;
 use crate::gossip::split::MeshReceiver;
 use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
-use crate::util::tuning::{RESUBSCRIBE_MAX_ATTEMPTS, heal_stall_threshold_secs};
+use crate::util::tuning::{RESUBSCRIBE_MAX_ATTEMPTS, heal_stall_threshold};
 use crate::{beacon, gossip, lookup};
 
 /// Monotonic `gap` past `stall_threshold`: the process was throttled
@@ -67,7 +67,7 @@ pub(super) async fn run_heal(
     // A node that came back to a mesh whose links are all up gets no link
     // event to release on, so the heal tick checks too.
     gossip::heal::release_rendezvous_if_due(state, ctx).await;
-    let threshold = Duration::from_secs(heal_stall_threshold_secs());
+    let threshold = heal_stall_threshold();
     let hard_edge = is_resume(gap.mono, threshold) || is_wall_resume(gap.wall, gap.mono, threshold);
     if hard_edge {
         tracing::warn!(
@@ -91,9 +91,7 @@ pub(super) async fn run_heal(
         // re-forming; push it out a steady interval so the re-bootstrap
         // settles first.
         if state.next_rival_recheck.is_some() {
-            state.next_rival_recheck = Some(
-                Instant::now() + Duration::from_secs(crate::util::tuning::rival_recheck_secs()),
-            );
+            state.next_rival_recheck = Some(Instant::now() + crate::util::tuning::rival_recheck());
         }
         // Re-assert the rendezvous hint (the network changed). The rung
         // is re-validated off-loop by the beacon's liveness self-monitor,
@@ -147,10 +145,7 @@ pub(super) async fn run_heal(
     // Starvation watchdog: links/heal can look busy while no traffic
     // flows (the roster-collapse signature), so the last word every heal
     // tick is a check on verified *inbound* silence.
-    if state.starvation_due(
-        Instant::now(),
-        Duration::from_secs(crate::util::tuning::starvation_threshold_secs()),
-    ) {
+    if state.starvation_due(Instant::now(), crate::util::tuning::starvation_threshold()) {
         gossip::heal::recover_from_starvation(state, ctx).await;
     }
 }

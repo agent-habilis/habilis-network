@@ -10,15 +10,24 @@ published to a registry; pin it with
 
 ### Added
 
-- `Tuning::rendezvous_periodic_return_secs` (default `RENDEZVOUS_PERIODIC_RETURN_SECS`, 600): how
+- `SymmetricKey::from_zeroizing`, `TicketSecret::from_zeroizing`, and
+  `StreamSecret::from_zeroizing` take a `Zeroizing<[u8; 32]>` whole, so a consumer that holds a
+  secret in a wiped buffer (a salt, a token read off a stream) moves it into its type without a
+  copy of its own. The wipe is best-effort: a move of a `Zeroizing` value copies its inline bytes,
+  and a move can leave bytes on the stack. `from_bytes` stays for raw input at an edge. The three
+  types now implement `ZeroizeOnDrop`.
+- `habilis_network::x25519_dalek`: the `x25519-dalek` crate, re-exported whole.
+  `Identity::seal_public` returns an `x25519_dalek::PublicKey` and `seal_to_body` takes one, so a
+  consumer takes the type from here and gets no second copy of the crate.
+- `Tuning::rendezvous_periodic_return` (default `RENDEZVOUS_PERIODIC_RETURN`, 600 s): how
   long a node that let go of the rendezvous waits before it comes back to it, at the least. The
-  node adds up to half of the value from its endpoint id. `NO_RUNG_REPEAT_SECS` (300) is the
+  node adds up to half of the value from its endpoint id. `NO_RUNG_REPEAT` (300 s) is the
   interval of the "no port is free" message. `probe_connect` keeps its signature.
   **Breaking:** `Tuning` has a new field. A `Tuning { .. }` literal without
   `..Tuning::DEFAULTS` must name it; agent-gossip builds one in its CLI (`cli/args/tuning.rs`) and
   gains the field at its next pin move.
-- `tuning::rendezvous_periodic_return_secs()` returns the live value of that field, at least 1 s,
-  and `tuning::RENDEZVOUS_PERIODIC_RETURN_SECS` (600) and `tuning::NO_RUNG_REPEAT_SECS` (300) are
+- `tuning::rendezvous_periodic_return()` returns the live value of that field, at least 1 s,
+  and `tuning::RENDEZVOUS_PERIODIC_RETURN` (600 s) and `tuning::NO_RUNG_REPEAT` (300 s) are
   new constants (#10, #11). With the `iroh-test-utils` feature, `membership::blind_new_members`
   and the request `Request::StallBeacon` are test hooks (#12, #15).
   **Breaking, with `iroh-test-utils`:** `Request` has a new variant, so an exhaustive `match` on
@@ -149,6 +158,60 @@ published to a registry; pin it with
 
 ### Changed
 
+- A secret key no longer passes through a plain array that the engine writes and nobody wipes.
+  The stretched password key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the
+  root of an invite, the salt and the token of a blob ticket, and the secret of a stream
+  (`StreamSecret`) now move from their wiped buffer into their type whole. Two copies stay, and
+  the engine does not control them: the bare array that `iroh`'s `SecretKey::to_bytes()` returns
+  (its bytes go into a wiped buffer at once), and the array that `x25519_dalek::StaticSecret::from`
+  takes by value when `Identity::seal_secret` builds its key. No wire change: the golden tests that
+  existed before did not change, and this change adds new ones (the ticket, the blob ticket, the
+  digest body, and the derivations).
+  **Breaking:** `TicketSecret::from_bytes`, `TicketSecret::as_bytes`, `StreamSecret::from_bytes`,
+  and `StreamSecret::as_bytes` are no longer `const fn`, because each type holds a `Zeroizing`
+  field. A caller in a `const` context must change. No caller in the workspace is const.
+- **Breaking:** `crypto::rendezvous_secret` is no longer public. It was `pub` and took
+  `&[u8; 32]`. It is `pub(crate)` and takes `Keying`, so a consumer that called it must derive the
+  key through the mesh, with `Mesh::rendezvous_secret`.
+- **Behavior:** `ReassemblyStore::ingest` drops a shard that has no author key. Before, an
+  unsigned shard could reassemble. A production node is not affected: the signature gate drops an
+  unsigned message before it reaches the store.
+- **Breaking:** a time span is a `Duration`, not a `u64` with a unit suffix. The wire does not
+  change: a wire struct converts at its edge, and the bytes are the same.
+  - Every `*_SECS` and `*_MS` constant of `habilis-network-util` (`tuning` and `consts`) is
+    removed. Use the item of the same name without the suffix, which is a `Duration`: for example
+    `tuning::ALIVE_TIMEOUT` in place of `tuning::ALIVE_TIMEOUT_SECS`, and
+    `consts::INVITE_DEFAULT_TTL` in place of `consts::INVITE_DEFAULT_TTL_SECS`.
+  - The `Tuning` fields lose the suffix and are `Duration`: `alive_timeout`, `sweep_interval`,
+    `heal_interval`, `antientropy_interval`, `cohost_grace`, `ping_window`, `ppid_watch_interval`
+    (was `_ms`), `heal_stall_threshold`, `starvation_threshold`, `advertise_interval`,
+    `directory_expiry`, `rival_recheck_first`, `rival_recheck`, `rival_recheck_meshed`,
+    `rival_recheck_alone`, and `rendezvous_periodic_return`. A `Tuning { .. }` literal passes a
+    `Duration`, for example `Duration::from_secs(90)`. `antientropy_max_resend`,
+    `directory_private`, and `topic_mdns_only` do not change.
+  - The accessors of `tuning` lose the suffix and return a `Duration`: for example
+    `tuning::alive_timeout()` in place of `tuning::alive_timeout_secs()`. The same holds for
+    `sweep_interval`, `heal_interval`, `antientropy_interval`, `cohost_grace`, `ping_window`,
+    `ppid_watch_interval`, `heal_stall_threshold`, `starvation_threshold`, `advertise_interval`,
+    `directory_expiry`, the four `rival_recheck` accessors, and `rendezvous_periodic_return`.
+  - `runtime::tuning` re-exports only the `Duration` names. `POLL_LONG_MIN_CYCLE_MS`,
+    `READY_FRESH_SECS`, `READY_MAX_SECS`, `READY_POLL_INTERVAL_MS`, `advertise_interval_secs`,
+    `directory_expiry_secs`, and `ping_window_secs` are gone from it.
+  - **Breaking:** `invite::mint` takes `ttl: Option<Duration>` in place of
+    `ttl_secs: Option<u64>`. The path is `habilis_network_protocol::invite::mint`, and
+    `habilis_network::ops` re-exports it as `invite::mint`. `None` and `Some(Duration::ZERO)` mean
+    no expiry. A `ttl` with a part of a second rounds up to the next whole second, because redeem
+    refuses an invite when `now >= expiry`. A `ttl` past the range saturates at `UnixSecs::MAX`.
+    The ticket goldens do not change.
+
+  A fractional `Tuning` value (`cohost_grace`, `heal_interval`, the `rival_recheck*` fields, and
+  the others) is no longer truncated to whole seconds. The defaults are whole seconds, and so are
+  the values of the agent-gossip `--*-secs` flags, so nothing changes for them. The value of
+  `--ppid-watch-interval-ms` was in milliseconds before, so it does not change either.
+
+  Each hidden flag of the agent-gossip CLI keeps its unit: seconds, or milliseconds for
+  `--ppid-watch-interval-ms`. The CLI converts each value to a `Duration` where it builds
+  `Tuning`.
 - A member of a loopback room whose ladder of ports is held whole by other processes says so: a
   warning in its log, and one `NodeEvent::Info` that names the number of ports, repeated every 5
   minutes while no port is free. agent-gossip shows one new Info line each 5 minutes in that
@@ -312,6 +375,100 @@ published to a registry; pin it with
 - The idle closes of the pool (120 s), the acceptor (240 s) and the session
   detach (120 s) are one backstop of 900 s, read from the last use of the peer.
 
+- **Breaking:** `Message::dedup_key` and `identity::dedup_key16` return `DedupKey`, a 16-byte
+  newtype, in place of `[u8; 16]`. The message log bounds, the digest codec, the seen set and the
+  doc sink hold it. `KEY_MIN` and `KEY_MAX` are `DedupKey::MIN` and `DedupKey::MAX`. The digest
+  codec packs the same 16 bytes, so the wire does not change.
+- **Breaking:** `Message.pubkey` and `Message.sig`, two strings with an empty-string sentinel, are
+  one field, `Message::signer: Option<Signed>`. `Signed` pairs an `AuthorKey` with an
+  `iroh_base::Signature`, so a message has both or neither. `Message::author_key()` reads the key.
+  `identity::decode_pubkey` and `identity::encode_sig` are removed, and `AuthorKey::public_key`
+  replaces them. The per-author maps of the engine, the reassembly store and the doc sink are
+  keyed by `AuthorKey`. `ReassemblyStore::ingest` and `forget` read the author key and the shard
+  group from the message. The JSON keeps its field names and order, and the signed bytes still
+  carry the hex text of the key.
+- **Wire decision, parser side only:** `Message::parse` rejects a `pubkey` with no `sig`, and a
+  `sig` with no `pubkey`. Before, the first parsed and kept the key without a signature. No
+  sender emits either. There is no `VERSION` bump, and no byte that a sender emits moves. A
+  `pubkey` of `""` with a `sig` of `""` still parses as unsigned.
+- **Breaking:** the blob secret and the blob hash have types. `BlobTicket.secret` is a
+  `TicketSecret` (it was `[u8; 32]`) and `BlobTicket.sha256` is a `BlobDigest`. `TicketAuth::blob`
+  and `TicketAuth::derive` take `&TicketSecret`, and `TicketAuth.token` is a `TicketSecret`. A
+  `TicketSecret` has a `Debug` that prints no byte, has no `PartialEq` (compare with `ct_eq` on
+  `as_bytes`), and wipes its bytes on drop. `BlobDigest` prints as the lowercase hex of the hash,
+  the same text as the spool file name, and is re-exported through `ops::blob`.
+- **Breaking:** the stream hash has types. `StreamHash.id` is a `StreamId` and `StreamHash.secret`
+  is a `StreamSecret`. `StreamHash` compares the secret in constant time in its own `PartialEq`.
+  A `StreamSecret` prints no byte and wipes its bytes on drop.
+- **Breaking:** the netplay crate has types. `P2PSession::new` and `SyncTestSession::add_input`
+  take a `PlayerHandle` in place of a `usize`; `RollbackError::InvalidPlayer` and
+  `StartedMatch::local_handle` hold one. `Frame` is a struct in place of an alias for `i32`:
+  `NULL_FRAME` is `Frame::NULL`, a frame plus a count is a frame, and a frame minus a frame is a
+  count. `StartedMatch::epoch` is an `Epoch` and `StartedMatch::session_id` is a `SessionId`.
+  `Lobby::on_message` and `Lobby::expire` take a `Tick` and a `TickSpan` in place of `u64`. The
+  JSON of the lobby `Start` message and the ids from `session_id_for` do not change.
+- **Wire decision, netplay:** `ack_frame` is an absent field in place of `-1`. An input packet and
+  a standalone ack that had no frame to acknowledge carried `"ack_frame":-1`. They carry no
+  `ack_frame` now, and `Frame`'s `Deserialize` refuses a negative number, so the `-1` of an older
+  peer is a parse error. A negative `Frame` does not serialize either. Packets carry a `magic`
+  and no version, so an older peer and a newer peer cannot play together. Both light-cycles
+  builds, native and web, move at once.
+- **Breaking:** `LinkMetric` in the multihop transport has a private field. Build one with
+  `LinkMetric::new` and read it with `LinkMetric::get`. The serde form is the same number.
+- **Breaking:** key material has types. `Seed` is the wire seed of a mesh id and the salt of a
+  derivation, and `SymmetricKey` is a key that encrypts, wraps or derives, wiped on drop, with
+  no `PartialEq`. `Mesh::new` takes a `Seed`. `Mesh::stretched_key` is `Mesh::mesh_key`, which
+  returns `Option<SymmetricKey>`. `crypto::derive_secret` is crate-private: derive with
+  `Seed::derive` or `SymmetricKey::derive`. `seal_symmetric` and `open_symmetric` take a
+  `&SymmetricKey`. `seal_to_body` takes the `x25519_dalek::PublicKey` of the recipient, and
+  `Identity::seal_public` returns one. The doc crate's `encrypt_body` and `decrypt_body` take a
+  `&SymmetricKey` in place of a `&[u8; 32]`, and so does `MeshDoc::with_key`. The state, meta and
+  broadcast keys of the daemon are `SymmetricKey`, and `EventLoopState::broadcast_key` returns
+  `Option<&SymmetricKey>`. Every derived byte stays the same.
+- **Breaking:** `Password` has no `PartialEq` and no `Eq`. Nothing compared two passwords, and an
+  equality that stops at the first byte that differs is a timing oracle.
+- **Breaking:** the hash of a message has a type. `Message::prev` is `Option<ContentHash>` and
+  `Message::parents` is `Vec<ContentHash>`, as are `with_chain`, `with_parents`, `ChainCtx::prev`
+  and `ChainCtx::parents`. `Message::content_hash()` replaces `Message::content_hash_hex`, and
+  `identity::content_hash_hex` is removed. `ContentHash` prints as its 64 lowercase hex
+  characters. `EventLoopState::advance_chain`, `chain_head`, `dag_parents`, `note_dag`,
+  `forget_hash`, `note_msg_seq` and `forget_msg_seq` take or return a `ContentHash`. The wire and
+  the signed bytes keep the hex text, and `parse` keeps its errors for a malformed `prev` or
+  parent.
+- **Breaking:** a point in time has a type. `UnixSecs` (in `habilis_network_util::clock`, also
+  re-exported by the protocol crate and the engine) holds whole seconds since the epoch.
+  `Message::timestamp` and `Listing::first_seen_unix` are a `UnixSecs`. The expiry of an invite
+  ticket is one, and the wire of the ticket does not change. `clock::unix_secs()` is removed:
+  use `UnixSecs::now()`, and `.as_secs()` for the number. A wire struct converts with
+  `UnixSecs::from_secs` and `as_secs`, so no byte of a message, a signature or a ticket moves.
+  Adding a `Duration` to a `UnixSecs`, or subtracting one, computes the exact result and clamps
+  it at the ends of the range (`i64::MIN` and `UnixSecs::MAX`). `UnixSecs::since` is the exact
+  span, also past `i64::MAX` seconds, and a span that is not positive is `Duration::ZERO`. Neither
+  change touches a wire byte or a signature.
+  `EventLoopState::note_dag` takes the timestamp as a `UnixSecs` as its third argument.
+- **Breaking:** the two endpoints of a multihop node have a type each. `MultihopHandle::app_id()`
+  is an `AppId` and `underlay_id()` is an `UnderlayId`. `route_addr`, `refuse_hop_for_test`,
+  `remove_origin` and `underlay_addr_of` take an `AppId`. `app_id_of` takes an `UnderlayId` and
+  returns an `AppId`. `underlay_paths_for_test` and `underlay_path_selector` take an
+  `UnderlayId`. `stuck_hops` returns `Vec<AppId>`. `link_vector` and `LinkVector::signed` take
+  `Vec<(AppId, u32)>`, and `LinkVector::origin()` returns an `AppId`. `Topology::remove` and
+  `Topology::view` take an `AppId`. `Topology::route_to` and the graph search take a
+  `Leg { src, dst }` in place of two ids. The route bytes, the vectors and the signatures do not
+  change. A caller wraps an `EndpointId` with `AppId::new` or `UnderlayId::new` and reads one
+  back with `get`.
+- **Breaking:** the free function `frame::encode(dst, src, datagram)` of the gossip transport is
+  removed. Write `Frame { dst, src, datagram }.encode()`.
+- **Breaking:** `HandlerCtx::our_pubkey` is an `AuthorKey` (it was `&str`).
+  `MeshDoc::changes_since_not_by` takes `Option<&AuthorKey>`.
+- **Breaking:** the netplay lobby and mesh transport hold an `AuthorKey` and a `Nickname` in
+  place of strings. `MeshTransport` is bound to `Address = AuthorKey`. `Lobby::new`,
+  `Lobby::on_message` and `Lobby::present`, `LobbyError::DuplicateNickname`, `LobbyMessage` and
+  `StartedMatch::players` take the typed values; `MeshTransport::local_pubkey`, `drain_lobby`,
+  `knows` and `known_peers` too. Two parser effects: a `Start` message whose `players` list holds
+  a text that is not a lowercase 64-character hex key is refused whole, and a `Present` whose
+  `nick` `Nickname::new` refuses is dropped. The bytes of the messages, the order of the roster
+  and `session_id_for` do not change.
+
 ### Fixed
 
 - A loopback room no longer stays split into separate meshes when a joiner took the rung of a
@@ -324,7 +481,7 @@ published to a registry; pin it with
   member no longer waits 3.5 s of its event loop at each heal tick on a rung that says nothing
   (#12).
 - A member that let go of the rendezvous comes back to it once per
-  `rendezvous_periodic_return_secs`, so two groups that hold links enough meet again without an
+  `rendezvous_periodic_return`, so two groups that hold links enough meet again without an
   event. A visit that finds no link is wanted for the comeback window (2 minutes) and no longer,
   and the next one is due a period later (#10).
 - A public holder that knows no member re-checks sooner when a member that it does not know links
@@ -457,6 +614,10 @@ published to a registry; pin it with
   the other way round. `ops::start_ping_round` starts a round; `PingRound` is no longer part of
   `embed` and no driver builds one: a driver that did (`agent-gossip`'s `a2a/send.rs`) calls
   `start_ping_round` instead.
+- `BlobTicket` printed its bearer secret, in decimal, through `Debug`. The secret is a
+  `TicketSecret` now, which prints `TicketSecret(***)`.
+- The buffers that hold a fetch request, a stream header and a fresh salt or secret are wiped on
+  every exit path, early returns included. Before, a short read left the token in the buffer.
 
 ### Removed
 

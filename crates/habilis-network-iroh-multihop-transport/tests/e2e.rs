@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use habilis_network_iroh_multihop_transport::{
-    HandleConfig, MULTIHOP_TRANSPORT_ID, MultihopHandle, underlay_secret,
+    AppId, HandleConfig, MULTIHOP_TRANSPORT_ID, MultihopHandle, underlay_secret,
 };
 use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -144,7 +144,10 @@ async fn make_relay(secret: SecretKey) -> MultihopHandle {
 fn gossip_all(nodes: &[(&MultihopHandle, Vec<(EndpointId, u32)>)]) {
     let vectors: Vec<_> = nodes
         .iter()
-        .map(|(handle, links)| handle.link_vector(links.clone()))
+        .map(|(handle, links)| {
+            let links = links.iter().map(|(id, cost)| (AppId::new(*id), *cost));
+            handle.link_vector(links.collect())
+        })
         .collect();
     for (handle, _) in nodes {
         for vector in &vectors {
@@ -302,7 +305,7 @@ async fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
     let (bob, bob_webrtc) = make_dual_node(secret(23)).await;
 
     assert_eq!(
-        alice.handle.app_id(),
+        alice.handle.app_id().get(),
         alice.app.id(),
         "one key: hop identity is the endpoint id"
     );

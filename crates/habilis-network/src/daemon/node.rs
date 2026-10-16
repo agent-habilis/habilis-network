@@ -1,5 +1,4 @@
 use std::fmt;
-use std::time::Duration;
 
 // `n0_future::task` is `tokio::task` verbatim off wasm32, and a
 // `wasm-bindgen-futures` shim in a browser — where there is no runtime to
@@ -12,7 +11,7 @@ use crate::daemon::app::NodeDriver;
 use crate::daemon::config::{DriverMode, EventLoopConfig};
 use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Message, Nickname};
-use crate::util::tuning::{NODE_LEAVE_SECS, SESSION_REQUEST_CAP};
+use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 
 /// A live in-process membership over a background event loop, generic over the
 /// application driver `A`. Drop it (or call [`Node::leave`]) to wind the loop
@@ -103,7 +102,7 @@ impl<A: NodeDriver + 'static> Node<A> {
         let underlay = cfg
             .multihop
             .as_ref()
-            .map(|handle| (handle.underlay_id(), handle.underlay_ports()));
+            .map(|handle| (handle.underlay_id().get(), handle.underlay_ports()));
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
         let crash_handles = (cfg.webrtc_handle(), cfg.endpoint.clone());
         let task = n0_future::task::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));
@@ -230,7 +229,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     }
 
     /// Ask the loop to broadcast `Left` and wind down, waiting up to
-    /// [`NODE_LEAVE_SECS`]. On
+    /// [`NODE_LEAVE`]. On
     /// timeout returns `Ok(())` and the task detaches.
     ///
     /// The loop closes the endpoint that setup bound for this node, with its
@@ -243,7 +242,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     pub async fn leave(mut self) -> anyhow::Result<()> {
         let _ = self.quit_tx.send(()).await;
         if let Some(task) = self.task.take() {
-            let timeout = n0_future::time::sleep(Duration::from_secs(NODE_LEAVE_SECS));
+            let timeout = n0_future::time::sleep(NODE_LEAVE);
             tokio::select! {
                 joined = task => {
                     joined

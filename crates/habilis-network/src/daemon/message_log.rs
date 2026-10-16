@@ -1,31 +1,24 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::sole_addressee;
-use crate::protocol::{Message, Nickname};
-use crate::util::clock;
+use crate::protocol::{AuthorKey, DedupKey, Message, Nickname, UnixSecs};
 
 /// Where a message sits in the log's total order: its timestamp, then its id
 /// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
 /// second, so the timestamp alone cannot say which side of a window's edge a
 /// message is on; the key breaks every tie.
-pub(crate) type Bound = (i64, [u8; 16]);
-
-/// The lowest id key. With [`KEY_MAX`] it makes a bound that takes in every
-/// message of its second.
-pub(crate) const KEY_MIN: [u8; 16] = [0; 16];
-/// The highest id key.
-pub(crate) const KEY_MAX: [u8; 16] = [u8::MAX; 16];
+pub(crate) type Bound = (UnixSecs, DedupKey);
 
 /// The smallest bound that sorts after `bound`.
 fn bound_after((timestamp, key): Bound) -> Bound {
-    match u128::from_be_bytes(key).checked_add(1) {
-        Some(next) => (timestamp, next.to_be_bytes()),
-        None => (timestamp.saturating_add(1), KEY_MIN),
+    match u128::from_be_bytes(key.to_bytes()).checked_add(1) {
+        Some(next) => (timestamp, DedupKey::from_bytes(next.to_be_bytes())),
+        None => (timestamp + std::time::Duration::from_secs(1), DedupKey::MIN),
     }
 }
 
 /// One anti-entropy digest window: the inclusive `[lo, hi]` range of
-/// [`Bound`]s it covers and the compact (raw 16-byte UUID) ids the sender holds
+/// [`Bound`]s it covers and the compact dedup keys the sender holds
 /// in that range. The window is a contiguous slice of the log in bound order, so
 /// the ids it lists are **every** message the sender holds in the range. A
 /// receiver can then re-send only real gaps, and advertising a sub-window of a
@@ -33,7 +26,7 @@ fn bound_after((timestamp, key): Bound) -> Bound {
 pub(crate) struct DigestWindow {
     pub lo: Bound,
     pub hi: Bound,
-    pub ids: Vec<[u8; 16]>,
+    pub ids: Vec<DedupKey>,
     /// The window holds the first message of the log: nothing sorts before it.
     pub from_start: bool,
 }
@@ -50,10 +43,10 @@ pub(crate) struct WindowRange {
 
 /// A range of whole seconds: every message from second `lo` to second `hi`.
 #[cfg(test)]
-pub(crate) fn seconds(lo: i64, hi: i64) -> WindowRange {
+pub(crate) fn seconds(lo: UnixSecs, hi: UnixSecs) -> WindowRange {
     WindowRange {
-        lo: (lo, KEY_MIN),
-        hi: (hi, KEY_MAX),
+        lo: (lo, DedupKey::MIN),
+        hi: (hi, DedupKey::MAX),
     }
 }
 
@@ -64,7 +57,7 @@ pub(crate) fn seconds(lo: i64, hi: i64) -> WindowRange {
 #[derive(Clone, Copy)]
 pub(crate) struct MissingQuery<'a> {
     pub range: WindowRange,
-    pub have: &'a HashSet<[u8; 16]>,
+    pub have: &'a HashSet<DedupKey>,
     pub max: usize,
     pub requester: &'a Nickname,
 }
@@ -84,12 +77,14 @@ pub struct MessageLog {
     ///
     /// Maintained on every push and eviction rather than rebuilt, because
     /// [`Self::eviction_index`] needs it on nearly every steady-state message:
-    /// at capacity it was hashing a thousand base58 pubkeys to recount what two
+    /// at capacity it was hashing a thousand base58 author keys to recount what two
     /// counter updates already know. The map is the *only* derived state here,
-    /// and both mutation sites are in [`Self::push`], so it cannot drift.
-    per_author: HashMap<String, usize>,
+    /// and both mutation sites are in [`Self::push`], so it cannot drift. An
+    /// unsigned message (no key) is held under `None`: a test or a fixture can
+    /// push one, and the log must not lose it.
+    per_author: HashMap<Option<AuthorKey>, usize>,
     /// The dedup key of every held message, so a frame that is pushed twice is held once.
-    keys: HashSet<[u8; 16]>,
+    keys: HashSet<DedupKey>,
 }
 
 impl MessageLog {
@@ -118,7 +113,7 @@ impl MessageLog {
         if !self.keys.insert(msg.dedup_key()) {
             return None;
         }
-        *self.per_author.entry(msg.pubkey.clone()).or_default() += 1;
+        *self.per_author.entry(msg.author_key()).or_default() += 1;
         self.messages.push_back(msg);
         if self.messages.len() <= self.capacity {
             return None;
@@ -129,13 +124,13 @@ impl MessageLog {
             self.keys.remove(&gone.dedup_key());
         }
         if let Some(gone) = &evicted
-            && let Some(held) = self.per_author.get_mut(&gone.pubkey)
+            && let Some(held) = self.per_author.get_mut(&gone.author_key())
         {
             *held -= 1;
-            // No zero entries: one would win the lowest-pubkey tie-break in
+            // No zero entries: one would win the lowest-author-key tie-break in
             // `eviction_index` while holding nothing to evict.
             if *held == 0 {
-                self.per_author.remove(&gone.pubkey);
+                self.per_author.remove(&gone.author_key());
             }
         }
         evicted
@@ -154,15 +149,15 @@ impl MessageLog {
     /// else's alone. Bounding the timestamp would not do: any future a sender
     /// is allowed still sorts above every honest message.
     ///
-    /// Still a pure function of the message set — the counts, the pubkey
+    /// Still a pure function of the message set — the counts, the author-key
     /// tie-break and the key comparison all read wire fields, never arrival
     /// order — so peers agree on the retained set, which is what lets
     /// anti-entropy converge on one set rather than a union of windows.
     ///
-    /// Not a Sybil defence: pubkeys are free, so N identities hold N shares.
+    /// Not a Sybil defence: author keys are free, so N identities hold N shares.
     /// It removes the case where one identity costs everyone their history.
     fn eviction_index(&self) -> usize {
-        // Ties go to the lowest pubkey, so the choice is total and identical
+        // Ties go to the lowest author key, so the choice is total and identical
         // on every node.
         let fullest = self
             .per_author
@@ -170,12 +165,12 @@ impl MessageLog {
             .max_by(|(lhs_key, lhs_count), (rhs_key, rhs_count)| {
                 lhs_count.cmp(rhs_count).then_with(|| rhs_key.cmp(lhs_key))
             })
-            .map(|(pubkey, _)| pubkey.as_str())
+            .map(|(author, _)| *author)
             .expect("over-capacity log is non-empty");
         self.messages
             .iter()
             .enumerate()
-            .filter(|(_, msg)| msg.pubkey.as_str() == fullest)
+            .filter(|(_, msg)| msg.author_key() == fullest)
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
             .expect("the fullest author holds at least one message")
@@ -186,9 +181,9 @@ impl MessageLog {
         self.messages.len()
     }
 
-    /// The retained shards of multipart `group` authored by `pubkey`, slotted by
+    /// The retained shards of multipart `group` authored by `author`, slotted by
     /// `idx` (first-seen wins per idx); `total` slots, each `None` until its shard
-    /// arrives. Keying on `pubkey` as well as `group` is the security boundary: a
+    /// arrives. Keying on the author as well as `group` is the security boundary: a
     /// peer can only sign shards under its own key, so a crafted shard carrying
     /// someone else's `group` forms a separate, never-completing set and can't
     /// inject a slice into the victim's body. Only **small** (logged) groups ever
@@ -197,7 +192,7 @@ impl MessageLog {
     pub(crate) fn collect_shards<'a>(
         &'a self,
         group: &crate::protocol::ShardGroup,
-        pubkey: &str,
+        author: &AuthorKey,
         total: u32,
     ) -> Vec<Option<&'a Message>> {
         let mut slots: Vec<Option<&Message>> = vec![None; total as usize];
@@ -205,7 +200,7 @@ impl MessageLog {
             let Some(shard) = &msg.shard else { continue };
             if shard.group == *group
                 && shard.total == total
-                && msg.pubkey == pubkey
+                && msg.author_key().as_ref() == Some(author)
                 && let Some(slot) = slots.get_mut(shard.idx as usize)
                 && slot.is_none()
             {
@@ -220,7 +215,7 @@ impl MessageLog {
     /// window cut from it would cover a different set on each.
     ///
     /// This sorts the whole log, and one digest calls it up to three times. At
-    /// `MESSAGE_LOG_SIZE` entries every `ANTIENTROPY_INTERVAL_SECS` that costs
+    /// `MESSAGE_LOG_SIZE` entries every `ANTIENTROPY_INTERVAL` that costs
     /// nothing that matters. Look at it before a log a hundred times larger.
     fn bounds(&self) -> Vec<Bound> {
         let mut bounds: Vec<Bound> = self
@@ -268,7 +263,7 @@ impl MessageLog {
     /// ones. If every message is ahead, it is the local clock that is wrong,
     /// and all of them count.
     fn settled_len(bounds: &[Bound]) -> usize {
-        let now = clock::unix_secs();
+        let now = UnixSecs::now();
         match bounds.partition_point(|(timestamp, _)| *timestamp <= now) {
             0 => bounds.len(),
             settled => settled,
@@ -288,9 +283,9 @@ impl MessageLog {
         let settled = Self::settled_len(&bounds);
         let mut window = Self::cut(&bounds, settled.saturating_sub(recent), recent, true)?;
         window.hi = if settled == bounds.len() {
-            (i64::MAX, KEY_MAX)
+            (UnixSecs::MAX, DedupKey::MAX)
         } else {
-            (clock::unix_secs(), KEY_MAX)
+            (UnixSecs::now(), DedupKey::MAX)
         };
         Some(window)
     }
@@ -332,7 +327,7 @@ impl MessageLog {
             let first = settled + (start - newest_start);
             let mut window = Self::cut(&bounds, first, max, true)?;
             if first + window.ids.len() == bounds.len() {
-                window.hi = (i64::MAX, KEY_MAX);
+                window.hi = (UnixSecs::MAX, DedupKey::MAX);
             }
             Some(window)
         }
@@ -399,25 +394,27 @@ fn resendable_to(msg: &Message, requester: &Nickname) -> bool {
 /// Ranks *within* one author, not across them: because a sender picks these
 /// fields, ordering the whole log by them let one peer stamp its way to
 /// permanent residency. [`MessageLog::eviction_index`] picks the author first.
-fn eviction_key(msg: &Message) -> (i64, &str, Option<u64>, &str) {
-    (msg.timestamp, msg.pubkey.as_str(), msg.seq, msg.id.as_str())
+fn eviction_key(msg: &Message) -> (UnixSecs, Option<AuthorKey>, Option<u64>, &str) {
+    (msg.timestamp, msg.author_key(), msg.seq, msg.id.as_str())
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use super::{Message, MessageLog, MissingQuery, Nickname, WindowRange};
+    use super::{
+        AuthorKey, DedupKey, Message, MessageLog, MissingQuery, Nickname, UnixSecs, WindowRange,
+    };
 
     /// A whole-log gap query for `requester` with nothing already held — the
     /// shape every gate test wants.
     fn all_missing_for<'a>(
-        have: &'a HashSet<[u8; 16]>,
+        have: &'a HashSet<DedupKey>,
         max: usize,
         requester: &'a Nickname,
     ) -> MissingQuery<'a> {
         MissingQuery {
-            range: super::seconds(0, i64::MAX),
+            range: super::seconds(UnixSecs::ZERO, UnixSecs::MAX),
             have,
             max,
             requester,
@@ -468,7 +465,7 @@ mod tests {
     /// of the same log, and is re-sent to a node that already has it.
     fn assert_range_matches_ids(log: &MessageLog) {
         for window in every_window(log) {
-            let listed: HashSet<[u8; 16]> = window.ids.iter().copied().collect();
+            let listed: HashSet<DedupKey> = window.ids.iter().copied().collect();
             for message in &log.messages {
                 if in_range(message, &window) {
                     assert!(
@@ -529,7 +526,7 @@ mod tests {
     /// A message tagged with an explicit timestamp, for window tests.
     fn msg_at(body: &str, ts: i64) -> Message {
         let mut message = msg(body);
-        message.timestamp = ts;
+        message.timestamp = UnixSecs::from_secs(ts);
         message
     }
 
@@ -545,7 +542,7 @@ mod tests {
                 body: crate::protocol::MessageBody::from(body),
             },
         );
-        message.timestamp = ts;
+        message.timestamp = UnixSecs::from_secs(ts);
         message
     }
 
@@ -566,11 +563,11 @@ mod tests {
         }
         // A middle slice of 2, starting at index 1 (ts=20).
         let window = log.window_at(1, 2).expect("non-empty window");
-        assert_eq!((window.lo.0, window.hi.0), (20, 30));
+        assert_eq!((window.lo.0.as_secs(), window.hi.0.as_secs()), (20, 30));
         assert_eq!(window.ids.len(), 2);
         // A max wider than the log starting at 0 covers everything.
         let full = log.window_at(0, 100).expect("non-empty window");
-        assert_eq!((full.lo.0, full.hi.0), (10, 50));
+        assert_eq!((full.lo.0.as_secs(), full.hi.0.as_secs()), (10, 50));
         assert_eq!(full.ids.len(), 5);
         // Past the end ⇒ None.
         assert!(log.window_at(5, 2).is_none());
@@ -599,10 +596,10 @@ mod tests {
             advertiser.push(frames[index].clone());
         }
         let window = advertiser.window_at(0, 10).expect("non-empty window");
-        assert_eq!((window.lo.0, window.hi.0), (10, 50));
+        assert_eq!((window.lo.0.as_secs(), window.hi.0.as_secs()), (10, 50));
 
         // The holder answers that window with the gap.
-        let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
+        let have: HashSet<DedupKey> = window.ids.into_iter().collect();
         let gap = holder.missing_in_window(MissingQuery {
             range: WindowRange {
                 lo: window.lo,
@@ -627,7 +624,7 @@ mod tests {
         }
         let max = 7;
         let len = log.len();
-        let mut advertised: HashSet<[u8; 16]> = HashSet::new();
+        let mut advertised: HashSet<DedupKey> = HashSet::new();
         let mut cursor = 0usize;
         // ceil(50/7) = 8 rounds covers the cycle; loop a little extra.
         for _ in 0..16 {
@@ -646,14 +643,14 @@ mod tests {
             log.push(msg_at(&ts.to_string(), ts));
         }
         // The receiver already has the ts=30 message.
-        let have: HashSet<[u8; 16]> = log
+        let have: HashSet<DedupKey> = log
             .window_at(2, 1)
             .expect("ts=30 window")
             .ids
             .into_iter()
             .collect();
         let gap = log.missing_in_window(MissingQuery {
-            range: super::seconds(20, 40),
+            range: super::seconds(UnixSecs::from_secs(20), UnixSecs::from_secs(40)),
             have: &have,
             max: 10,
             requester: &nick(ANYONE),
@@ -739,8 +736,12 @@ mod tests {
             }
         }
         let window = requester.recent_window(50).expect("non-empty");
-        assert_eq!(window.hi.0, i64::MAX, "newest window must be open-ended");
-        let have: HashSet<[u8; 16]> = window.ids.into_iter().collect();
+        assert_eq!(
+            window.hi.0,
+            UnixSecs::MAX,
+            "newest window must be open-ended"
+        );
+        let have: HashSet<DedupKey> = window.ids.into_iter().collect();
         let offered: HashSet<String> = holder
             .missing_in_window(MissingQuery {
                 range: WindowRange {
@@ -771,12 +772,12 @@ mod tests {
     fn a_far_future_stamp_does_not_make_a_message_unevictable() {
         let mut log = MessageLog::new(4);
         for index in 0..4 {
-            let mut flood = msg_at(&format!("flood{index}"), i64::MAX);
-            flood.pubkey = "ff".repeat(32);
+            let flood = msg_at(&format!("flood{index}"), i64::MAX)
+                .with_unverified_key(AuthorKey::from_bytes([0xff; 32]));
             log.push(flood);
         }
-        let mut honest = msg_at("honest", 1_700_000_000);
-        honest.pubkey = "aa".repeat(32);
+        let honest =
+            msg_at("honest", 1_700_000_000).with_unverified_key(AuthorKey::from_bytes([0xaa; 32]));
         let evicted = log.push(honest);
         assert!(
             evicted.is_some_and(|msg| msg.body.as_str() != "honest"),
@@ -798,23 +799,18 @@ mod tests {
         // fires repeatedly and each author is both added and dropped.
         for step in 0..60i64 {
             let author = ["aa", "bb", "cc"][usize::try_from(step).expect("fits") % 3];
-            let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step);
-            message.pubkey = author.repeat(32);
+            let message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step)
+                .with_unverified_key(AuthorKey::from_hex(&author.repeat(32)).expect("hex"));
             log.push(message);
 
-            let mut recounted: HashMap<&str, usize> = HashMap::new();
+            let mut recounted: HashMap<Option<AuthorKey>, usize> = HashMap::new();
             for held in &log.messages {
-                *recounted.entry(held.pubkey.as_str()).or_default() += 1;
+                *recounted.entry(held.author_key()).or_default() += 1;
             }
-            let maintained: HashMap<&str, usize> = log
-                .per_author
-                .iter()
-                .map(|(key, count)| (key.as_str(), *count))
-                .collect();
-            assert_eq!(maintained, recounted, "counts drifted at step {step}");
+            assert_eq!(log.per_author, recounted, "counts drifted at step {step}");
         }
         // A dropped author leaves no zero entry behind, or it would win the
-        // lowest-pubkey tie-break while holding nothing.
+        // lowest-author-key tie-break while holding nothing.
         assert!(log.per_author.values().all(|count| *count > 0));
     }
 
@@ -831,12 +827,12 @@ mod tests {
             let mut batch = Vec::new();
             for (index, author) in authors.iter().enumerate() {
                 for step in 0..4i64 {
-                    let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step);
-                    message.pubkey = author.repeat(32);
+                    let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step)
+                        .with_unverified_key(AuthorKey::from_hex(&author.repeat(32)).expect("hex"));
                     // One author also stamps far ahead, the shape that used to
                     // buy immunity.
                     if index == 0 {
-                        message.timestamp = i64::MAX - step;
+                        message.timestamp = UnixSecs::from_secs(i64::MAX - step);
                     }
                     batch.push(message);
                 }

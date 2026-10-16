@@ -158,18 +158,20 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
     }
 }
 
-/// Where an answer to the digest signed by `signer` (its hex `pubkey`) can go
+/// Where an answer to the digest signed by `signer` can go
 /// point-to-point: the endpoint that key proved in its `PeerInfo`, when it is
 /// a linked gossip neighbor with a usable path. Proven, because a nickname is
 /// a label any signer can claim, and one answer is up to a whole resend budget
 /// of frames aimed at whoever holds that endpoint. Linked, because every
 /// holder that hears a digest answers it: the asker's link count bounds how
 /// many answers reach its unicast inbox. `None` means answer on gossip.
-pub(crate) fn unicast_answer_target(signer: &str, state: &EventLoopState) -> Option<EndpointId> {
-    let signer = crate::transport::endpoint_proof::signer_bytes(signer)?;
+pub(crate) fn unicast_answer_target(
+    signer: &crate::protocol::AuthorKey,
+    state: &EventLoopState,
+) -> Option<EndpointId> {
     let eid = state
         .proven_endpoints
-        .get(&signer)
+        .get(signer)
         .filter(|eid| state.rendezvous_id != Some(*eid))?;
     (state.linked_endpoints.contains(&eid) && !held(eid, state)).then_some(eid)
 }
@@ -892,6 +894,8 @@ mod tests {
         let bob = endpoint_id(1);
         let bob_key = "bb".repeat(32);
         let carol_key = "cc".repeat(32);
+        let bob_signer = crate::protocol::AuthorKey::from_hex(&bob_key).expect("a key");
+        let carol_signer = crate::protocol::AuthorKey::from_hex(&carol_key).expect("a key");
         let linked = || {
             let mut state = fresh_state();
             prove(&mut state, &bob_key, bob);
@@ -902,30 +906,30 @@ mod tests {
             state
         };
 
-        assert_eq!(unicast_answer_target(&bob_key, &linked()), Some(bob));
+        assert_eq!(unicast_answer_target(&bob_signer, &linked()), Some(bob));
         assert_eq!(
-            unicast_answer_target(&carol_key, &linked()),
+            unicast_answer_target(&carol_signer, &linked()),
             None,
             "no known endpoint"
         );
         let mut rendezvous = linked();
         rendezvous.rendezvous_id = Some(bob);
         assert_eq!(
-            unicast_answer_target(&bob_key, &rendezvous),
+            unicast_answer_target(&bob_signer, &rendezvous),
             None,
             "the rendezvous pseudo-node"
         );
         let mut held = linked();
         held.direct.remove(&bob);
         assert_eq!(
-            unicast_answer_target(&bob_key, &held),
+            unicast_answer_target(&bob_signer, &held),
             None,
             "no proven direct path on a lookup-only relay"
         );
         let mut unlinked = linked();
         unlinked.linked_endpoints.remove(&bob);
         assert_eq!(
-            unicast_answer_target(&bob_key, &unlinked),
+            unicast_answer_target(&bob_signer, &unlinked),
             None,
             "known but not a gossip neighbor"
         );
@@ -934,7 +938,7 @@ mod tests {
     /// Record, as a verified `PeerInfo` proof would, that the signing key
     /// `pubkey` (hex) owns `endpoint`.
     fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
-        let signer = crate::transport::endpoint_proof::signer_bytes(pubkey).expect("a 32-byte key");
+        let signer = crate::protocol::AuthorKey::from_hex(pubkey).expect("a 32-byte key");
         let linked = state.linked_endpoints.clone();
         state.proven_endpoints.insert(signer, endpoint, &linked);
     }
@@ -957,7 +961,7 @@ mod tests {
         sender: crate::transport::MeshSender,
         mesh: MeshId,
         identity: crate::protocol::identity::Identity,
-        our_pubkey: String,
+        our_pubkey: crate::protocol::AuthorKey,
         author: crate::protocol::Nickname,
         sink: crate::gossip::event::SilentSink,
     }
@@ -970,7 +974,7 @@ mod tests {
                 mesh: &self.mesh,
                 author: &self.author,
                 identity: &self.identity,
-                our_pubkey: &self.our_pubkey,
+                our_pubkey: self.our_pubkey,
                 max_peers: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
@@ -987,7 +991,7 @@ mod tests {
         changes: usize,
     ) -> (Net, EventLoopState, Vec<Bytes>) {
         use crate::protocol::Channel;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use crate::protocol::identity::Identity;
 
         let (endpoint, sender) = loopback_node().await;
         let mut state = state_with_pool(&endpoint, bob_addr);
@@ -1015,7 +1019,7 @@ mod tests {
         let frames = write(Channel::State);
         write(Channel::Meta);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let net = Net {
             endpoint,
             sender,
@@ -1350,9 +1354,9 @@ mod tests {
             "handed to the pool as a point-to-point batch"
         );
 
-        tokio::time::sleep(std::time::Duration::from_millis(
-            crate::util::tuning::FAST_ROUND_MIN_INTERVAL_MS + 50,
-        ))
+        tokio::time::sleep(
+            crate::util::tuning::FAST_ROUND_MIN_INTERVAL + std::time::Duration::from_millis(50),
+        )
         .await;
         let again = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(

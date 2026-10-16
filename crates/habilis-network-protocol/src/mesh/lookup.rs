@@ -91,12 +91,12 @@ impl LookupOpts {
     /// The wire ceilings [`encode_into`](Self::encode_into) relies on. A
     /// caller-supplied ladder (`--relay-url`, `relayUrls`, the `relay_urls` C
     /// field) reaches the encoder unbounded otherwise: past
-    /// [`MAX_RELAY_LADDER`] it mints an id [`decode_from`](Self::decode_from)
+    /// `MAX_RELAY_LADDER` it mints an id [`decode_from`](Self::decode_from)
     /// rejects, and past 255 the count no longer fits its `u8`.
     ///
     /// # Errors
-    /// The custom ladder is longer than [`MAX_RELAY_LADDER`], or one of its
-    /// URLs is longer than [`MAX_RELAY_URL_BYTES`].
+    /// The custom ladder is longer than `MAX_RELAY_LADDER`, or one of its
+    /// URLs is longer than `MAX_RELAY_URL_BYTES`.
     pub fn validate(&self) -> Result<()> {
         let RelayChoice::Custom(ladder) = &self.relay_lookup else {
             return Ok(());

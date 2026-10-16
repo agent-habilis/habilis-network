@@ -362,6 +362,75 @@ Divergences from upstream, in the order they were made.
     [standalone repo](https://github.com/agent-habilis/iroh-multihop-transport)
     they point at still is.
 
+28. **Newtypes on the keys, the hashes, and the netplay ids.** A primitive that
+    carries a domain meaning became a type, in the shape of `TopicId`: `DedupKey`,
+    `AuthorKey`, `Signed`, `TicketSecret`, `BlobDigest`, `StreamId`, `StreamSecret`,
+    `Seed`, `SymmetricKey`, `ContentHash`, `UnixSecs`, `PlayerHandle`, `Frame`, `Epoch`,
+    `SessionId`, `Tick`, `TickSpan`, `AppId`, `UnderlayId`, and a private field on
+    `LinkMetric`. `AGENTS.md` holds the rules and the list. `CHANGELOG.md` has one entry
+    per break.
+
+    The wire does not change, with two named exceptions: `Message::parse` rejects a
+    `pubkey` with no `sig` and the reverse, and netplay's `ack_frame` is an absent
+    field in place of `-1`. A port **from** upstream must keep the typed signatures
+    of the files above. A port **to** upstream is a break for each caller below.
+
+    The call sites in agent-gossip (`feat-webmcp`) that stop compiling against this
+    fork, with the new form:
+
+    - `bridge/connect.rs:44`, `bridge/expose.rs:127`, and `bridge/tests.rs:141`, `:163`,
+      `:188`, `:223`, `:284`: `TicketAuth::derive(&secret, ..)` takes a `&TicketSecret`.
+      Wrap the agent's own `[u8; 32]` once, with `TicketSecret::from_bytes`.
+    - `bridge/connect.rs:118` and `bridge/expose.rs:196`: `auth.token` is a
+      `TicketSecret`. Write it with `auth.token.as_bytes()`, and compare it with
+      `ct_eq(&token, auth.token.as_bytes())`.
+    - `a2a/send.rs:795` and `harness/adversarial.rs:283`: `seal_to_body` takes the
+      `x25519_dalek::PublicKey` of the recipient in place of `&[u8; 32]`.
+    - `a2a/send.rs:34`, `output/json.rs:216`, `:511`, `:680`, and `output/tests.rs:73`:
+      `msg.pubkey` is gone. Read the key with `msg.author_key()`.
+    - `bridge/ticket.rs:183`: a `BlobTicket` literal holds a `TicketSecret` and a
+      `BlobDigest`.
+    - `a2a/send.rs:362` and `a2a/card.rs:403,410` (agent-gossip `main`):
+      `ops::doc::encrypt_body` takes a `&SymmetricKey`. Wrap the key once, with
+      `SymmetricKey::from_bytes`.
+    - `a2a/send.rs:31,34,51-53,169-170,370,384,438,506` and `harness/adversarial.rs:410`
+      (agent-gossip `main`): `Message::prev` and `Message::parents` hold `ContentHash`;
+      `content_hash_hex()` is `content_hash()`, and `.to_string()` gives the text. `forget_hash`,
+      `advance_chain`, `note_dag`, `chain_head`, `dag_parents`, `note_msg_seq` and
+      `forget_msg_seq` take or return a `ContentHash`.
+    - `a2a/send.rs:53`, `output/json.rs:217,490,512,681`, `api/directory.rs:56`
+      (`feat-webmcp`) and `a2a/task.rs:220` (`main`): `Message::timestamp` and
+      `Listing::first_seen_unix` are a `UnixSecs`. Read the number with `as_secs()`, and
+      write an age with `UnixSecs::now().since(timestamp)`. `harness/adversarial.rs:354`
+      sets it with `UnixSecs::from_secs(ts)`.
+    - `a2a/task.rs:959` (`beat.timestamp -= 3600`), `mcp/session.rs:528`
+      (`echo.timestamp > 0`) and `tests/adversarial.rs:664` (`main`): `timestamp` is a
+      `UnixSecs`, so write `UnixSecs::from_secs(beat.timestamp.as_secs() - 3600)`, compare
+      `echo.timestamp.as_secs() > 0`, and note that `.timestamp(4_102_444_800)` goes through
+      the harness builder at `harness/adversarial.rs:360`, which takes an `i64`: it converts
+      with `UnixSecs::from_secs`.
+    - `output/json.rs:547`, `cli/mod.rs:967` (`feat-webmcp`) and `a2a/task.rs:220` (`main`):
+      `clock::unix_secs()` is removed. Call `UnixSecs::now().as_secs()`.
+    - agent-gossip does not call the multihop handle. A port that does wraps an `EndpointId`
+      with `AppId::new` or `UnderlayId::new`, as `CHANGELOG.md` lists.
+    - `harness/bench.rs:64`, `benches/hot_paths.rs:30`: `crypto::derive_secret` is crate-private.
+      Derive with `Seed::derive`.
+    - `bridge/ticket.rs:170`, `harness/bench.rs:86`, `cli/doctor.rs:612`: `Mesh::new` takes a
+      `Seed`.
+    - `a2a/node.rs:261`, `a2a/rpc.rs:314`: `Identity::seal_public()` returns an
+      `x25519_dalek::PublicKey`. Encode `seal_public().as_bytes()`.
+
+29. **Time spans are `Duration`.** The `*_SECS` and `*_MS` constants of
+    `habilis-network-util`, their accessors, and the `Tuning` fields lose the unit suffix
+    and are `Duration`. `CHANGELOG.md` lists each name, and `AGENTS.md` holds the rule.
+    The wire does not change.
+
+    agent-gossip builds `Tuning` from its hidden flags (`cli/args/tuning.rs`). Each flag
+    keeps its unit: seconds, or milliseconds for `--ppid-watch-interval-ms`. The CLI
+    converts each value to a `Duration` at that one edge, with `Duration::from_secs` or
+    `Duration::from_millis`. A port **from** upstream must pass a `Duration` in each
+    `Tuning` field. agent-gossip is carried on its branch `refactor-newtype-pattern`.
+
 ## Fork pins — where each one lives, and why
 
 Three forks are in play: `agent-habilis/{iroh, iroh-gossip, net-tools}`. They do

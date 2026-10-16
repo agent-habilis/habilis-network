@@ -27,7 +27,8 @@ pub mod doc {
 #[cfg(feature = "blob")]
 pub mod blob {
     pub use crate::blob::{
-        BlobServer, BlobTicket, ContentId, HASH_LEN, OffloadRequest, SECRET_LEN, fetch, offload,
+        BlobDigest, BlobServer, BlobTicket, ContentId, HASH_LEN, OffloadRequest, SECRET_LEN, fetch,
+        offload,
     };
 }
 

@@ -125,11 +125,11 @@ pub struct EventLoopConfig {
     /// takes the raw password string, which cannot be recovered from
     /// `mesh_key`. `Password`'s `Debug`/`Display` redact to `***`.
     pub(crate) mesh_password: Option<crate::protocol::crypto::Password>,
-    /// The Argon2id-stretched mesh key (`Mesh::stretched_key`), retained to
+    /// The Argon2id-stretched mesh key (`Mesh::mesh_key`), retained to
     /// derive the per-channel keys that encrypt the `state`/`meta` docs and
     /// broadcast chat. `None` for a passwordless mesh — those stay plaintext.
     /// Wiped on drop.
-    pub(crate) mesh_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    pub(crate) mesh_key: Option<crate::protocol::SymmetricKey>,
     /// Per-loop generic event sink (the tapped `Output`, wrapped as a
     /// [`NodeSink`]). The engine emits `NodeEvent`s through it and hands a clone
     /// to every handler, so multiple in-process sessions each have their own and

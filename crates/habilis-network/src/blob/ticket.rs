@@ -14,10 +14,11 @@ use anyhow::{Context, Result, bail};
 use iroh::EndpointAddr;
 
 use crate::protocol::base58check::{self, take_array};
+use crate::protocol::crypto::TicketSecret;
 use crate::protocol::mesh::LookupOpts;
 use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
 
-use super::{HASH_LEN, SECRET_LEN};
+use super::{BlobDigest, HASH_LEN, SECRET_LEN};
 
 /// Framing version. Bumped only on a breaking framing change; an unknown
 /// version is rejected on decode.
@@ -38,8 +39,8 @@ const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 #[derive(Debug)]
 pub struct BlobTicket {
     pub addr: EndpointAddr,
-    pub secret: [u8; SECRET_LEN],
-    pub sha256: [u8; HASH_LEN],
+    pub secret: TicketSecret,
+    pub sha256: BlobDigest,
     pub size: u64,
     pub lookups: LookupOpts,
     /// Password-protected: the consumer must present the Argon2id stretch of the
@@ -59,7 +60,7 @@ impl BlobTicket {
     /// Panics if an internal invariant is violated.
     pub fn encode(&self) -> String {
         let mut payload = Vec::with_capacity(SECRET_LEN + 1 + HASH_LEN + 8 + 64);
-        payload.extend_from_slice(&self.secret);
+        payload.extend_from_slice(self.secret.as_bytes());
         let mut flags = 0u8;
         if self.password {
             flags |= PASSWORD_BIT;
@@ -68,7 +69,7 @@ impl BlobTicket {
             flags |= RELAY_TRANSPORT_BIT;
         }
         payload.push(flags);
-        payload.extend_from_slice(&self.sha256);
+        payload.extend_from_slice(self.sha256.as_bytes());
         payload.extend_from_slice(&self.size.to_le_bytes());
         self.lookups.encode_into(&mut payload);
         let addr_json = serde_json::to_vec(&endpoint_addr_to_json(&self.addr))
@@ -86,12 +87,7 @@ impl BlobTicket {
     /// (`src/blob/store.rs`).
     #[must_use]
     pub fn sha256_hex(&self) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::with_capacity(self.sha256.len() * 2);
-        for byte in &self.sha256 {
-            let _ = write!(out, "{byte:02x}");
-        }
-        out
+        self.sha256.to_string()
     }
 
     /// Decode a bare base58 blob ticket.
@@ -111,13 +107,16 @@ impl BlobTicket {
         }
         let payload = &framed[2..];
         let mut pos = 0;
-        let secret =
-            take_array::<SECRET_LEN>(payload, &mut pos).context("ticket missing secret")?;
+        let secret = TicketSecret::from_bytes(
+            take_array::<SECRET_LEN>(payload, &mut pos).context("ticket missing secret")?,
+        );
         let flags = *payload.get(pos).context("ticket missing flags")?;
         pos += 1;
         let password = flags & PASSWORD_BIT != 0;
         let relay_transport = flags & RELAY_TRANSPORT_BIT != 0;
-        let sha256 = take_array::<HASH_LEN>(payload, &mut pos).context("ticket missing hash")?;
+        let sha256 = BlobDigest::from_bytes(
+            take_array::<HASH_LEN>(payload, &mut pos).context("ticket missing hash")?,
+        );
         let size_bytes = take_array::<8>(payload, &mut pos).context("ticket missing size")?;
         let size = u64::from_le_bytes(size_bytes);
         let lookups = LookupOpts::decode_from(payload, &mut pos)?;
@@ -142,7 +141,8 @@ impl BlobTicket {
 #[cfg(test)]
 mod tests {
     use super::BlobTicket;
-    use crate::blob::{HASH_LEN, SECRET_LEN};
+    use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
+    use crate::protocol::crypto::TicketSecret;
     use crate::protocol::mesh::LookupOpts;
     use iroh::{EndpointAddr, SecretKey};
 
@@ -154,8 +154,8 @@ mod tests {
     fn sample(password: bool) -> BlobTicket {
         BlobTicket {
             addr: sample_addr(3),
-            secret: [9u8; SECRET_LEN],
-            sha256: [7u8; HASH_LEN],
+            secret: TicketSecret::from_bytes([9u8; SECRET_LEN]),
+            sha256: BlobDigest::from_bytes([7u8; HASH_LEN]),
             size: 1_234_567,
             lookups: LookupOpts::public_preset(),
             password,
@@ -171,11 +171,33 @@ mod tests {
         assert!(!encoded.contains("://"));
         let decoded = BlobTicket::decode(&encoded).expect("decode");
         assert_eq!(decoded.addr.id, ticket.addr.id);
-        assert_eq!(decoded.secret, [9u8; SECRET_LEN]);
-        assert_eq!(decoded.sha256, [7u8; HASH_LEN]);
+        assert_eq!(decoded.secret.as_bytes(), &[9u8; SECRET_LEN]);
+        assert_eq!(decoded.sha256, BlobDigest::from_bytes([7u8; HASH_LEN]));
         assert_eq!(decoded.size, 1_234_567);
         assert_eq!(decoded.lookups, LookupOpts::public_preset());
         assert!(!decoded.password);
+    }
+
+    /// The bytes of a ticket minted by the code at the base commit. A change
+    /// here is a wire change: tokens of this shape exist outside the code.
+    const GOLDEN: &str = "7uoCFwgsTez8XFb4njvMAMtE2vJeBnmBrmZUx5yWRCWRQLMdHteB1NQfJibHEK1WioE5QiSF1L29xXB7Jz1Q6z65hGReoUL4qgUyMJ8FijN6j5dJoGV4Z6HZ7iHiabPLdgWqXbLdBMpo7d1DKBM99xrYT79PaLDPMCAtbwHF13yJQ99G9G9LNVeEaaYs9b1Jdex66d8drD2vYGnZvoeJo2dyennE6g8TTVCogg6xvo4ev6RKcaTVLaipT1a6XzUVQg2S";
+
+    #[test]
+    fn encode_matches_the_golden_string() {
+        assert_eq!(sample(false).encode(), GOLDEN);
+    }
+
+    #[test]
+    fn decode_of_the_golden_string_gives_the_same_fields() {
+        let decoded = BlobTicket::decode(GOLDEN).expect("decode");
+        let expected = sample(false);
+        assert_eq!(decoded.addr, expected.addr);
+        assert_eq!(decoded.secret.as_bytes(), expected.secret.as_bytes());
+        assert_eq!(decoded.sha256, expected.sha256);
+        assert_eq!(decoded.size, expected.size);
+        assert_eq!(decoded.lookups, expected.lookups);
+        assert_eq!(decoded.password, expected.password);
+        assert_eq!(decoded.relay_transport, expected.relay_transport);
     }
 
     #[test]
@@ -214,7 +236,7 @@ mod tests {
         // A mesh id shares the bare-base58 shape but has a different payload;
         // blob decode must refuse it (wrong kind / structure).
         let mesh = crate::protocol::mesh::Mesh::new(
-            [1u8; 32],
+            crate::protocol::Seed::from_bytes([1u8; 32]),
             crate::protocol::mesh::MeshName::new("t").unwrap(),
             crate::protocol::mesh::MeshConfig::loopback(),
         )
@@ -231,16 +253,36 @@ mod tests {
         use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
 
         let mut creator = Mesh::new(
-            [1u8; 32],
+            crate::protocol::Seed::from_bytes([1u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
         );
         creator.set_invite();
-        let invite = crate::invite::mint(&creator, Some(3600), None).expect("mint");
+        let invite = crate::invite::mint(&creator, Some(std::time::Duration::from_hours(1)), None)
+            .expect("mint");
         let blob = sample(false).encode();
 
         assert!(crate::protocol::InviteTicket::decode(&blob).is_err());
         assert!(BlobTicket::decode(&invite).is_err());
+    }
+
+    #[test]
+    fn debug_never_prints_the_secret() {
+        // A byte array prints in decimal and a hex dump prints in hex, so the
+        // check covers both forms, and it asks for the redaction itself.
+        let shown = format!("{:?}", sample(false));
+        assert!(
+            !shown.contains(&format!("{:?}", [9u8; SECRET_LEN])),
+            "the bearer secret leaked through Debug in decimal: {shown}"
+        );
+        assert!(
+            !shown.contains(&"09".repeat(SECRET_LEN)),
+            "the bearer secret leaked through Debug in hex: {shown}"
+        );
+        assert!(
+            shown.contains("TicketSecret(***)"),
+            "the secret is not redacted: {shown}"
+        );
     }
 
     #[test]

@@ -2,9 +2,9 @@
 //! messages a node missed while partitioned/asleep/just-joined.
 //!
 //! The digest advertises a **window** of the message log: an inclusive
-//! `[lo, hi]` timestamp range plus the compact ids the sender holds in it
-//! (raw 16-byte UUIDs, Base58-packed, so ~10× more fit one gossip message
-//! than the old 36-char strings). A log larger than one window is swept
+//! `[lo, hi]` timestamp range plus the compact dedup keys the sender holds in
+//! it (`DedupKey`, 16 bytes each, Base58-packed, so ~10× more fit one gossip
+//! message than the old 36-char ids). A log larger than one window is swept
 //! across rounds via a rolling cursor; the `[lo, hi]` bounds let a receiver
 //! re-send only **in-window** gaps, so advertising a sub-window never makes
 //! peers perpetually re-broadcast the out-of-window remainder.
@@ -21,29 +21,27 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
-use std::time::Duration;
 
 use crate::transport::{MeshSender, Resend};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::ctx::HandlerCtx;
-use crate::daemon::message_log::{DigestWindow, KEY_MIN, MissingQuery, WindowRange};
+use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::{Channel, MeshId, Message, Nickname};
+use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
-    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN_SECS,
-    ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE_MS, FAST_ROUND_AHEAD_MAX,
-    FAST_ROUND_AHEAD_TTL_SECS, FAST_ROUND_MIN_INTERVAL_MS, FAST_ROUND_RETRY_MS,
-    antientropy_max_resend,
+    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN,
+    ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_AHEAD_MAX, FAST_ROUND_AHEAD_TTL,
+    FAST_ROUND_MIN_INTERVAL, FAST_ROUND_RETRY, antientropy_max_resend,
 };
 
 use super::broadcast_msg;
 
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
-/// its ids packed as raw 16-byte UUIDs, Base58-encoded. The key is what lets an
+/// its dedup keys packed as 16 bytes each, Base58-encoded. The key is what lets an
 /// edge fall inside a second that holds more messages than a window lists.
 #[derive(Serialize, Deserialize)]
 struct WireWindow {
@@ -54,24 +52,25 @@ struct WireWindow {
     ids: String,
 }
 
-fn encode_key(key: &[u8; 16]) -> String {
-    bs58::encode(key).into_string()
+fn encode_key(key: &DedupKey) -> String {
+    bs58::encode(key.as_bytes()).into_string()
 }
 
-fn decode_key(text: &str) -> Option<[u8; 16]> {
-    bs58::decode(text).into_vec().ok()?.try_into().ok()
+fn decode_key(text: &str) -> Option<DedupKey> {
+    let bytes: [u8; 16] = bs58::decode(text).into_vec().ok()?.try_into().ok()?;
+    Some(DedupKey::from_bytes(bytes))
 }
 
 impl WireWindow {
     fn encode(window: &DigestWindow) -> Self {
         let mut packed = Vec::with_capacity(window.ids.len() * 16);
         for id in &window.ids {
-            packed.extend_from_slice(id);
+            packed.extend_from_slice(id.as_bytes());
         }
         WireWindow {
-            lo: window.lo.0,
+            lo: window.lo.0.as_secs(),
             lo_key: encode_key(&window.lo.1),
-            hi: window.hi.0,
+            hi: window.hi.0.as_secs(),
             hi_key: encode_key(&window.hi.1),
             ids: bs58::encode(packed).into_string(),
         }
@@ -80,14 +79,14 @@ impl WireWindow {
     /// The window's bounds, or `None` if a key is malformed.
     fn range(&self) -> Option<WindowRange> {
         Some(WindowRange {
-            lo: (self.lo, decode_key(&self.lo_key)?),
-            hi: (self.hi, decode_key(&self.hi_key)?),
+            lo: (UnixSecs::from_secs(self.lo), decode_key(&self.lo_key)?),
+            hi: (UnixSecs::from_secs(self.hi), decode_key(&self.hi_key)?),
         })
     }
 
     /// Decode the packed ids into a set, or `None` if the Base58 / length
     /// is malformed.
-    fn decode_ids(&self) -> Option<HashSet<[u8; 16]>> {
+    fn decode_ids(&self) -> Option<HashSet<DedupKey>> {
         let raw = bs58::decode(&self.ids).into_vec().ok()?;
         if raw.len() % 16 != 0 {
             return None;
@@ -97,7 +96,7 @@ impl WireWindow {
                 .map(|chunk| {
                     let mut id = [0u8; 16];
                     id.copy_from_slice(chunk);
-                    id
+                    DedupKey::from_bytes(id)
                 })
                 .collect(),
         )
@@ -173,7 +172,7 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     // earlier of the two: a message of that second with a smaller id key than
     // the first one we hold sorts before it, and is in range.
     let floor = |window: &mut DigestWindow| {
-        window.lo = (state.joined_at.min(window.lo.0), KEY_MIN);
+        window.lo = (state.joined_at.min(window.lo.0), DedupKey::MIN);
     };
     if newest.from_start {
         floor(&mut newest);
@@ -199,7 +198,7 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
 /// window format sends one every round, and the two builds never repair each
 /// other's gaps: without this line nothing tells the user why.
 fn report_unreadable_digest(message: &Message, state: &mut EventLoopState) {
-    if state.report_unreadable_digest(&message.pubkey, Instant::now()) {
+    if state.report_unreadable_digest(message.author_key(), Instant::now()) {
         tracing::warn!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -243,7 +242,7 @@ pub(crate) fn handle_digest(message: &Message, state: &mut EventLoopState, me: &
     // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
     // small frame into that much flooding from every member that hears it —
     // the cost scaling with the mesh rather than with the sender.
-    if !state.admit_digest(&message.pubkey, Instant::now()) {
+    if !state.admit_digest(message.author_key(), Instant::now()) {
         tracing::debug!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -251,7 +250,7 @@ pub(crate) fn handle_digest(message: &Message, state: &mut EventLoopState, me: &
         );
         return;
     }
-    let mut have: HashSet<[u8; 16]> = HashSet::new();
+    let mut have: HashSet<DedupKey> = HashSet::new();
     for window in &body.windows {
         if let Some(ids) = window.decode_ids() {
             have.extend(ids);
@@ -457,7 +456,7 @@ fn heads_digest(
 /// The state digest answers served in the current window, per asker, channel
 /// and plane: at most [`ANTIENTROPY_SERVES_PER_WINDOW`] on the unicast plane,
 /// one on gossip. On unicast the same heads are answered again only after
-/// [`FAST_ROUND_MIN_INTERVAL_MS`], so a burst of one asker's digests draws one
+/// [`FAST_ROUND_MIN_INTERVAL`], so a burst of one asker's digests draws one
 /// answer and a lost answer can still be asked for again. A serve is counted
 /// when the answer is handed to the pool, not when it is delivered, so a batch
 /// that fails costs one serve, and the asker's next ask is answered. The
@@ -465,7 +464,9 @@ fn heads_digest(
 /// digest with made-up heads would be new every time.
 #[derive(Debug, Default)]
 pub(crate) struct ServeBudget {
-    windows: HashMap<(String, Channel, Plane), Served>,
+    /// The asker's key is an `Option` because a digest built with no signature is a valid
+    /// input of the tests: `None` is its own bucket, as the empty string was.
+    windows: HashMap<(Option<AuthorKey>, Channel, Plane), Served>,
 }
 
 #[derive(Debug)]
@@ -477,11 +478,6 @@ struct Served {
 }
 
 impl ServeBudget {
-    const WINDOW: Duration = Duration::from_secs(ANTIENTROPY_SERVE_COOLDOWN_SECS);
-    /// The same heads are answered again after this on the unicast plane: the
-    /// asker repeats them when an answer was lost.
-    const REPEAT: Duration = Duration::from_millis(FAST_ROUND_MIN_INTERVAL_MS);
-
     /// Fast rounds run point-to-point only, so only the unicast plane needs
     /// more than one answer per window.
     fn limit(plane: Plane) -> usize {
@@ -492,11 +488,18 @@ impl ServeBudget {
     }
 
     /// Whether an answer to these heads may go out now.
-    pub(crate) fn admits(&self, key: &(String, Channel, Plane), heads: u64, now: Instant) -> bool {
+    pub(crate) fn admits(
+        &self,
+        key: &(Option<AuthorKey>, Channel, Plane),
+        heads: u64,
+        now: Instant,
+    ) -> bool {
         match self.windows.get(key) {
-            Some(served) if now.duration_since(served.since) < Self::WINDOW => {
+            Some(served) if now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN => {
+                // The same heads are answered again after the fast-round interval on
+                // the unicast plane: the asker repeats them when an answer was lost.
                 let repeat_too_soon = served.heads.get(&heads).is_some_and(|at| {
-                    key.2 == Plane::Gossip || now.duration_since(*at) < Self::REPEAT
+                    key.2 == Plane::Gossip || now.duration_since(*at) < FAST_ROUND_MIN_INTERVAL
                 });
                 !repeat_too_soon && served.answers < Self::limit(key.2)
             }
@@ -505,9 +508,14 @@ impl ServeBudget {
     }
 
     /// Record an answer to these heads, dropping windows that have ended.
-    pub(crate) fn note(&mut self, key: (String, Channel, Plane), heads: u64, now: Instant) {
+    pub(crate) fn note(
+        &mut self,
+        key: (Option<AuthorKey>, Channel, Plane),
+        heads: u64,
+        now: Instant,
+    ) {
         self.windows
-            .retain(|_, served| now.duration_since(served.since) < Self::WINDOW);
+            .retain(|_, served| now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN);
         let served = self.windows.entry(key).or_insert_with(|| Served {
             since: now,
             answers: 0,
@@ -522,7 +530,7 @@ impl ServeBudget {
 /// asked, and our heads and change count at that ask.
 #[derive(Debug)]
 struct Round {
-    peer: String,
+    peer: AuthorKey,
     at: Instant,
     heads: u64,
     changes: usize,
@@ -531,7 +539,7 @@ struct Round {
 /// A peer whose heads showed it is ahead of us.
 #[derive(Debug, Clone)]
 struct Waiting {
-    pubkey: String,
+    key: AuthorKey,
     author: Nickname,
     heads: Vec<String>,
     noted: Instant,
@@ -557,42 +565,39 @@ pub(crate) struct FastRounds {
 }
 
 impl FastRounds {
-    const MIN_INTERVAL: Duration = Duration::from_millis(FAST_ROUND_MIN_INTERVAL_MS);
-    const ACTIVE: Duration = Duration::from_millis(FAST_ROUND_ACTIVE_MS);
-
     /// The peer of the running round may be asked at once once a full answer
     /// landed since the last ask: the heads that close an answer are the cue
     /// to go on. New heads alone are not, because two answers can be in
     /// flight at once and our heads move with every frame of either; asking
     /// on each ran two chains of asks at two serves per round. Otherwise the
-    /// round waits [`FAST_ROUND_MIN_INTERVAL_MS`] or the retry tick, 400 to
+    /// round waits [`FAST_ROUND_MIN_INTERVAL`] or the retry tick, 400 to
     /// 800 ms, so a peer that advertises heads nobody can hold costs one small
     /// frame per interval. A holder with a smaller resend budget never sends a
     /// full answer, so each of its rounds takes that wait. Another peer starts
     /// a round only when the running one went quiet for
-    /// [`FAST_ROUND_ACTIVE_MS`].
+    /// [`FAST_ROUND_ACTIVE`].
     fn may_ask(
         &self,
-        peer: &str,
+        peer: &AuthorKey,
         channel: Channel,
         heads: u64,
         changes: usize,
         now: Instant,
     ) -> bool {
         self.rounds.get(&channel).is_none_or(|round| {
-            if round.peer == peer {
+            if round.peer == *peer {
                 let quiet = now.duration_since(self.quiet_since(channel, round));
                 let answered = changes.saturating_sub(round.changes) >= antientropy_max_resend();
-                (round.heads != heads && answered) || quiet >= Self::MIN_INTERVAL
+                (round.heads != heads && answered) || quiet >= FAST_ROUND_MIN_INTERVAL
             } else {
-                now.duration_since(round.at) >= Self::ACTIVE
+                now.duration_since(round.at) >= FAST_ROUND_ACTIVE
             }
         })
     }
 
     fn note_asked(
         &mut self,
-        peer: String,
+        peer: AuthorKey,
         channel: Channel,
         heads: u64,
         changes: usize,
@@ -614,26 +619,26 @@ impl FastRounds {
         self.last_change.insert(channel, now);
     }
 
-    /// Whether a change landed on `channel` within [`FAST_ROUND_MIN_INTERVAL_MS`]:
+    /// Whether a change landed on `channel` within [`FAST_ROUND_MIN_INTERVAL`]:
     /// a holder is serving us, so a digest an event would send now draws a
     /// second answer that overlaps the one arriving.
     pub(crate) fn changed_recently(&self, channel: Channel, now: Instant) -> bool {
         self.last_change
             .get(&channel)
-            .is_some_and(|&changed| now.duration_since(changed) < Self::MIN_INTERVAL)
+            .is_some_and(|&changed| now.duration_since(changed) < FAST_ROUND_MIN_INTERVAL)
     }
 
     /// Where a round's wait starts: its ask, or the last change that landed
     /// after it, since under load an answer's frames arrive over more than the
     /// wait and an ask sent meanwhile draws an answer that overlaps it. Capped
-    /// at [`FAST_ROUND_ACTIVE_MS`] after the ask, so live writes cannot hold a
+    /// at [`FAST_ROUND_ACTIVE`] after the ask, so live writes cannot hold a
     /// stalled round; an answer slower than that overlaps again.
     fn quiet_since(&self, channel: Channel, round: &Round) -> Instant {
         let latest = self
             .last_change
             .get(&channel)
             .map_or(round.at, |&changed| changed.max(round.at));
-        latest.min(round.at + Self::ACTIVE)
+        latest.min(round.at + FAST_ROUND_ACTIVE)
     }
 
     /// Our heads when we last asked for `channel`, if a round ran.
@@ -645,7 +650,7 @@ impl FastRounds {
     fn note_ahead(
         &mut self,
         channel: Channel,
-        pubkey: String,
+        key: AuthorKey,
         author: Nickname,
         heads: Vec<String>,
         now: Instant,
@@ -653,12 +658,12 @@ impl FastRounds {
         let ahead = self.ahead.entry(channel).or_default();
         ahead.retain(|peer| Self::fresh(peer, now));
         let peer = Waiting {
-            pubkey,
+            key,
             author,
             heads,
             noted: now,
         };
-        if let Some(known) = ahead.iter_mut().find(|known| known.pubkey == peer.pubkey) {
+        if let Some(known) = ahead.iter_mut().find(|known| known.key == peer.key) {
             *known = peer;
         } else if ahead.len() < FAST_ROUND_AHEAD_MAX {
             ahead.push(peer);
@@ -671,12 +676,12 @@ impl FastRounds {
     }
 
     fn fresh(peer: &Waiting, now: Instant) -> bool {
-        now.duration_since(peer.noted) < Duration::from_secs(FAST_ROUND_AHEAD_TTL_SECS)
+        now.duration_since(peer.noted) < FAST_ROUND_AHEAD_TTL
     }
 
     /// The peer to ask again for `channel` once nothing was asked for
-    /// [`FAST_ROUND_RETRY_MS`]. Peers whose heads we now hold (`holds`), or
-    /// whose heads have not shown for [`FAST_ROUND_AHEAD_TTL_SECS`], are
+    /// [`FAST_ROUND_RETRY`]. Peers whose heads we now hold (`holds`), or
+    /// whose heads have not shown for [`FAST_ROUND_AHEAD_TTL`], are
     /// forgotten first. While the round brings progress (`ours`, our heads
     /// now, moved since the last ask) its own peer stays first; when it does
     /// not, the next `reachable` peer after it takes a turn, so one peer that
@@ -687,11 +692,10 @@ impl FastRounds {
         now: Instant,
         ours: u64,
         holds: impl Fn(&[String]) -> bool,
-        reachable: impl Fn(&str) -> bool,
-    ) -> Option<(String, Nickname)> {
+        reachable: impl Fn(&AuthorKey) -> bool,
+    ) -> Option<(AuthorKey, Nickname)> {
         let waiting = self.rounds.get(&channel).is_some_and(|round| {
-            now.duration_since(self.quiet_since(channel, round))
-                < Duration::from_millis(FAST_ROUND_RETRY_MS)
+            now.duration_since(self.quiet_since(channel, round)) < FAST_ROUND_RETRY
         });
         let ahead = self.ahead.get_mut(&channel)?;
         ahead.retain(|peer| !holds(&peer.heads) && Self::fresh(peer, now));
@@ -699,29 +703,26 @@ impl FastRounds {
         if waiting {
             return None;
         }
-        let candidates: Vec<&Waiting> = ahead
-            .iter()
-            .filter(|peer| reachable(&peer.pubkey))
-            .collect();
+        let candidates: Vec<&Waiting> = ahead.iter().filter(|peer| reachable(&peer.key)).collect();
         let round_index =
-            round.and_then(|round| candidates.iter().position(|peer| peer.pubkey == round.peer));
+            round.and_then(|round| candidates.iter().position(|peer| peer.key == round.peer));
         let progress = round.is_none_or(|round| round.heads != ours);
         let pick = match round_index {
             Some(index) if progress => candidates.get(index),
             Some(index) => candidates.get((index + 1) % candidates.len()),
             None => candidates.first(),
         };
-        pick.map(|peer| (peer.pubkey.clone(), peer.author.clone()))
+        pick.map(|peer| (peer.key, peer.author.clone()))
     }
 
     /// Whether a direct round runs for `channel`: we asked a peer within
-    /// [`FAST_ROUND_ACTIVE_MS`]. Our broadcast digests wait meanwhile: during
+    /// [`FAST_ROUND_ACTIVE`]. Our broadcast digests wait meanwhile: during
     /// a backfill each one draws a full answer from every linked holder, and
     /// together they overflow our unicast inbox.
     pub(crate) fn active(&self, channel: Channel, now: Instant) -> bool {
         self.rounds
             .get(&channel)
-            .is_some_and(|round| now.duration_since(round.at) < Self::ACTIVE)
+            .is_some_and(|round| now.duration_since(round.at) < FAST_ROUND_ACTIVE)
     }
 }
 
@@ -740,22 +741,22 @@ async fn ask_back(
     if state.doc(channel).holds_heads(&body.heads) {
         return;
     }
+    // A digest that passed the signature gate has a key. One without it names no peer to ask.
+    let Some(key) = digest.author_key() else {
+        return;
+    };
     let now = Instant::now();
-    state.fast_rounds.note_ahead(
-        channel,
-        digest.pubkey.clone(),
-        digest.author.clone(),
-        body.heads,
-        now,
-    );
+    state
+        .fast_rounds
+        .note_ahead(channel, key, digest.author.clone(), body.heads, now);
     if state.fast_rounds.may_ask(
-        &digest.pubkey,
+        &key,
         channel,
         heads_key_of(state, channel),
         state.doc(channel).change_count(),
         now,
     ) {
-        ask(channel, &digest.pubkey, &digest.author, state, ctx).await;
+        ask(channel, &key, &digest.author, state, ctx).await;
     } else {
         tracing::debug!(me = %ctx.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
     }
@@ -787,10 +788,10 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
             .filter(|peer| state.doc(channel).holds_heads(&peer.heads))
             .map(|peer| peer.heads.as_slice())
             .collect();
-        let reachable: Vec<&str> = ahead
+        let reachable: Vec<AuthorKey> = ahead
             .iter()
-            .filter(|peer| crate::transport::unicast_answer_target(&peer.pubkey, state).is_some())
-            .map(|peer| peer.pubkey.as_str())
+            .filter(|peer| crate::transport::unicast_answer_target(&peer.key, state).is_some())
+            .map(|peer| peer.key)
             .collect();
         let ours = heads_key_of(state, channel);
         let target = state.fast_rounds.retry_target(
@@ -798,12 +799,12 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
             now,
             ours,
             |heads| held.contains(&heads),
-            |pubkey| reachable.contains(&pubkey),
+            |key| reachable.contains(key),
         );
-        let Some((pubkey, author)) = target else {
+        let Some((key, author)) = target else {
             continue;
         };
-        if ask(channel, &pubkey, &author, state, ctx).await {
+        if ask(channel, &key, &author, state, ctx).await {
             tracing::debug!(me = %ctx.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }
     }
@@ -814,12 +815,12 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
 /// it. Returns whether it went out.
 async fn ask(
     channel: Channel,
-    pubkey: &str,
+    key: &AuthorKey,
     author: &Nickname,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> bool {
-    let Some(eid) = crate::transport::unicast_answer_target(pubkey, state) else {
+    let Some(eid) = crate::transport::unicast_answer_target(key, state) else {
         return false;
     };
     let origin = DigestOrigin {
@@ -844,7 +845,7 @@ async fn ask(
     let changes = state.doc(channel).change_count();
     state
         .fast_rounds
-        .note_asked(pubkey.to_owned(), channel, ours_key, changes, now);
+        .note_asked(*key, channel, ours_key, changes, now);
     tracing::debug!(me = %ctx.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
     true
 }
@@ -895,8 +896,10 @@ pub(crate) async fn handle_state_digest(
     }
     let now = Instant::now();
     let heads = heads_key(message);
-    let serve = |plane| (message.pubkey.clone(), channel, plane);
-    let target = crate::transport::unicast_answer_target(&message.pubkey, state);
+    let serve = |plane| (message.author_key(), channel, plane);
+    let target = message
+        .author_key()
+        .and_then(|key| crate::transport::unicast_answer_target(&key, state));
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -984,9 +987,11 @@ fn missing_frames(channel: Channel, digest: &Message, state: &EventLoopState) ->
     let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
         return Vec::new();
     };
-    state
-        .doc(channel)
-        .changes_since_not_by(&body.heads, &digest.pubkey, antientropy_max_resend())
+    state.doc(channel).changes_since_not_by(
+        &body.heads,
+        digest.author_key().as_ref(),
+        antientropy_max_resend(),
+    )
 }
 
 #[cfg(test)]
@@ -994,24 +999,23 @@ mod budget_tests {
     use std::time::Duration;
 
     use super::{FastRounds, Plane, ServeBudget};
-    use crate::protocol::Channel;
-    use crate::testing::nick;
+    use crate::protocol::{AuthorKey, Channel};
+    use crate::testing::{author_of, nick};
     use crate::util::clock::Instant;
     use crate::util::tuning::{
-        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE_MS, FAST_ROUND_RETRY_MS,
-        antientropy_max_resend,
+        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY, antientropy_max_resend,
     };
 
-    fn key() -> (String, Channel, Plane) {
-        ("asker".to_owned(), Channel::State, Plane::Unicast)
+    fn key() -> (Option<AuthorKey>, Channel, Plane) {
+        (Some(author_of("asker")), Channel::State, Plane::Unicast)
     }
 
     #[test]
     fn the_serve_budget_takes_new_heads_up_to_its_count() {
         let now = Instant::now();
         let mut budget = ServeBudget::default();
-        let gossip = ("asker".to_owned(), Channel::State, Plane::Gossip);
-        budget.note(gossip.clone(), 1, now);
+        let gossip = (Some(author_of("asker")), Channel::State, Plane::Gossip);
+        budget.note(gossip, 1, now);
         assert!(
             !budget.admits(&gossip, 2, now),
             "one gossip answer per window"
@@ -1051,25 +1055,25 @@ mod budget_tests {
         let channel = Channel::State;
         let early_heads = vec!["e".to_owned()];
         let alice_heads = vec!["a".to_owned()];
-        rounds.note_ahead(channel, "early".to_owned(), nick("early"), early_heads, now);
+        rounds.note_ahead(channel, author_of("early"), nick("early"), early_heads, now);
         rounds.note_ahead(
             channel,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             alice_heads.clone(),
             now,
         );
-        rounds.note_asked("alice".to_owned(), channel, 1, 0, now);
+        rounds.note_asked(author_of("alice"), channel, 1, 0, now);
         let never_held = |_: &[String]| false;
-        let all_reachable = |_: &str| true;
+        let all_reachable = |_: &AuthorKey| true;
         let moved = 2;
         let pick = |fast: &mut FastRounds,
                     at,
                     ours,
                     holds: &dyn Fn(&[String]) -> bool,
-                    reachable: &dyn Fn(&str) -> bool| {
+                    reachable: &dyn Fn(&AuthorKey) -> bool| {
             fast.retry_target(channel, at, ours, holds, reachable)
-                .map(|(pubkey, _)| pubkey)
+                .map(|(key, _)| key)
         };
 
         let soon = now + Duration::from_millis(100);
@@ -1080,25 +1084,25 @@ mod budget_tests {
         );
         let quiet = now + Duration::from_millis(500);
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &never_held, &all_reachable).as_deref(),
-            Some("alice"),
+            pick(&mut rounds, quiet, moved, &never_held, &all_reachable),
+            Some(author_of("alice")),
             "the round's peer first, while it brings progress"
         );
         assert_eq!(
-            pick(&mut rounds, quiet, 1, &never_held, &all_reachable).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, 1, &never_held, &all_reachable),
+            Some(author_of("early")),
             "no progress since the last ask: the next peer"
         );
-        let alice_away = |pubkey: &str| pubkey != "alice";
+        let alice_away = |key: &AuthorKey| *key != author_of("alice");
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &never_held, &alice_away).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, moved, &never_held, &alice_away),
+            Some(author_of("early")),
             "else one reachable now"
         );
         let alice_held = |heads: &[String]| heads == alice_heads.as_slice();
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &alice_held, &all_reachable).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, moved, &alice_held, &all_reachable),
+            Some(author_of("early")),
             "alice is no longer ahead"
         );
         let stale = now + Duration::from_secs(61);
@@ -1132,7 +1136,7 @@ mod budget_tests {
         state.meshed = true;
         state
             .fast_rounds
-            .note_asked("holder".to_owned(), Channel::State, 1, 0, Instant::now());
+            .note_asked(author_of("holder"), Channel::State, 1, 0, Instant::now());
         let (mesh, author) = (MeshId::from("test"), nick("late"));
 
         let before = state.idle.broadcasts;
@@ -1240,21 +1244,21 @@ mod budget_tests {
         let mut rounds = FastRounds::default();
         rounds.note_ahead(
             state,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             vec!["a".to_owned()],
             t0,
         );
-        rounds.note_asked("alice".to_owned(), state, 1, 0, t0);
+        rounds.note_asked(author_of("alice"), state, 1, 0, t0);
         rounds.note_change(state, t0 + ms(150));
         assert!(
-            !rounds.may_ask("alice", state, 1, 0, t0 + ms(250)),
+            !rounds.may_ask(&author_of("alice"), state, 1, 0, t0 + ms(250)),
             "the same heads 100 ms after a change"
         );
         rounds.note_change(state, t0 + ms(300));
         let retry = |fast: &mut FastRounds, at| {
             fast.retry_target(state, at, 1, |_| false, |_| true)
-                .map(|(pubkey, _)| pubkey)
+                .map(|(key, _)| key)
         };
         assert_eq!(
             retry(&mut rounds, t0 + ms(450)),
@@ -1263,13 +1267,13 @@ mod budget_tests {
         );
         assert_eq!(
             retry(&mut rounds, t0 + ms(750)),
-            Some("alice".to_owned()),
+            Some(author_of("alice")),
             "quiet for 450 ms"
         );
     }
 
     /// A steady stream of changes, such as live writes, must not hold a stalled
-    /// round forever: the wait is capped at `FAST_ROUND_ACTIVE_MS` after the ask.
+    /// round forever: the wait is capped at `FAST_ROUND_ACTIVE` after the ask.
     #[test]
     fn the_wait_after_changes_is_capped() {
         let t0 = Instant::now();
@@ -1278,13 +1282,13 @@ mod budget_tests {
         let mut rounds = FastRounds::default();
         rounds.note_ahead(
             state,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             vec!["a".to_owned()],
             t0,
         );
-        rounds.note_asked("alice".to_owned(), state, 1, 0, t0);
-        let later = t0 + ms(FAST_ROUND_ACTIVE_MS + FAST_ROUND_RETRY_MS);
+        rounds.note_asked(author_of("alice"), state, 1, 0, t0);
+        let later = t0 + FAST_ROUND_ACTIVE + FAST_ROUND_RETRY;
         let mut at = t0;
         while at < later {
             rounds.note_change(state, at);
@@ -1292,8 +1296,8 @@ mod budget_tests {
         }
         let target = rounds
             .retry_target(state, later, 1, |_| false, |_| true)
-            .map(|(pubkey, _)| pubkey);
-        assert_eq!(target, Some("alice".to_owned()));
+            .map(|(key, _)| key);
+        assert_eq!(target, Some(author_of("alice")));
     }
 
     #[test]
@@ -1302,39 +1306,39 @@ mod budget_tests {
         let full = antientropy_max_resend();
         let mut rounds = FastRounds::default();
         let state = Channel::State;
-        assert!(rounds.may_ask("holder", state, 1, 0, now));
-        rounds.note_asked("holder".to_owned(), state, 1, 0, now);
+        assert!(rounds.may_ask(&author_of("holder"), state, 1, 0, now));
+        rounds.note_asked(author_of("holder"), state, 1, 0, now);
         assert!(rounds.active(state, now));
         assert!(!rounds.active(Channel::Meta, now));
         assert!(
-            !rounds.may_ask("holder", state, 1, 0, now),
+            !rounds.may_ask(&author_of("holder"), state, 1, 0, now),
             "the same heads at once"
         );
         assert!(
-            !rounds.may_ask("holder", state, 2, 5, now),
+            !rounds.may_ask(&author_of("holder"), state, 2, 5, now),
             "new heads after a partial answer wait"
         );
         assert!(
-            rounds.may_ask("holder", state, 2, full, now),
+            rounds.may_ask(&author_of("holder"), state, 2, full, now),
             "new heads after a full answer at once"
         );
         assert!(
-            !rounds.may_ask("other", state, 2, full, now),
+            !rounds.may_ask(&author_of("other"), state, 2, full, now),
             "another peer while the round runs"
         );
         assert!(
-            rounds.may_ask("other", Channel::Meta, 2, full, now),
+            rounds.may_ask(&author_of("other"), Channel::Meta, 2, full, now),
             "another channel"
         );
         let later = now + Duration::from_millis(250);
         assert!(
-            rounds.may_ask("holder", state, 1, 0, later),
+            rounds.may_ask(&author_of("holder"), state, 1, 0, later),
             "the same heads after the interval"
         );
         let quiet = now + Duration::from_secs(2);
         assert!(!rounds.active(state, quiet));
         assert!(
-            rounds.may_ask("other", state, 2, full, quiet),
+            rounds.may_ask(&author_of("other"), state, 2, full, quiet),
             "another peer once the round is quiet"
         );
     }
@@ -1351,7 +1355,7 @@ mod tests {
     use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
-    use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
+    use crate::protocol::{Channel, DedupKey, MeshId, Message, MessageBody, Nickname, UnixSecs};
     use crate::testing::{fresh_state, nick};
 
     fn members(count: usize) -> Vec<Nickname> {
@@ -1406,8 +1410,8 @@ mod tests {
     /// ids, so every message of the holder is a gap.
     fn digest_of_an_empty_log(asker: &Nickname) -> Message {
         let window = DigestWindow {
-            lo: (0, crate::daemon::message_log::KEY_MIN),
-            hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
+            lo: (UnixSecs::ZERO, DedupKey::MIN),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: Vec::new(),
             from_start: true,
         };
@@ -1652,7 +1656,7 @@ mod tests {
                     body: MessageBody::from(format!("m{index}").as_str()),
                 },
             );
-            message.timestamp = 1_700_000_000 + i64::try_from(index).unwrap();
+            message.timestamp = UnixSecs::from_secs(1_700_000_000 + i64::try_from(index).unwrap());
             log.push(message);
         }
         let newest = log.recent_window(ANTIENTROPY_DIGEST_WINDOW_IDS).unwrap();
@@ -1687,10 +1691,12 @@ mod tests {
     /// would silently break cross-node reconciliation.
     #[test]
     fn wire_window_round_trips_ids() {
-        let ids: Vec<[u8; 16]> = (0..5u8).map(|seed| [seed; 16]).collect();
+        let ids: Vec<DedupKey> = (0..5u8)
+            .map(|seed| DedupKey::from_bytes([seed; 16]))
+            .collect();
         let window = DigestWindow {
-            lo: (1, crate::daemon::message_log::KEY_MIN),
-            hi: (i64::MAX, crate::daemon::message_log::KEY_MAX),
+            lo: (UnixSecs::from_secs(1), DedupKey::MIN),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: ids.clone(),
             from_start: false,
         };
@@ -1784,7 +1790,7 @@ mod tests {
                 body: MessageBody::from(body),
             },
         );
-        message.timestamp = timestamp;
+        message.timestamp = UnixSecs::from_secs(timestamp);
         message
     }
 
@@ -1792,7 +1798,7 @@ mod tests {
     /// computes it.
     fn answer(node: &mut EventLoopState, holder: &MessageLog) -> HashSet<String> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let have: HashSet<[u8; 16]> = windows
+        let have: HashSet<DedupKey> = windows
             .iter()
             .flat_map(|window| window.decode_ids().expect("our own encoding"))
             .collect();
@@ -1862,7 +1868,7 @@ mod tests {
         mut budget: usize,
     ) -> Vec<Message> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let mut have: HashSet<[u8; 16]> = windows
+        let mut have: HashSet<DedupKey> = windows
             .iter()
             .flat_map(|window| window.decode_ids().expect("our own encoding"))
             .collect();
@@ -1896,7 +1902,7 @@ mod tests {
             let all = scrambled_messages(seconds);
             let mut holder = MessageLog::new(1000);
             let mut node = fresh_state();
-            node.joined_at = 1_699_999_999;
+            node.joined_at = UnixSecs::from_secs(1_699_999_999);
             let mut lost = HashSet::new();
             for (index, message) in all.iter().enumerate() {
                 holder.push(message.clone());
@@ -1937,7 +1943,7 @@ mod tests {
         all.sort_by_key(|message| (message.timestamp, message.dedup_key()));
         let mut holder = MessageLog::new(1000);
         let mut node = fresh_state();
-        node.joined_at = 1_699_999_999;
+        node.joined_at = UnixSecs::from_secs(1_699_999_999);
         for (index, message) in all.iter().enumerate() {
             holder.push(message.clone());
             if index != ANTIENTROPY_DIGEST_WINDOW_IDS {
@@ -1969,7 +1975,7 @@ mod tests {
         holder.push(smaller.clone());
         holder.push(larger.clone());
         let mut node = fresh_state();
-        node.joined_at = second;
+        node.joined_at = UnixSecs::from_secs(second);
         node.message_log.push(larger);
         let budget = crate::util::tuning::antientropy_max_resend();
 
@@ -1996,7 +2002,7 @@ mod tests {
         holder.push(smaller.clone());
         holder.push(larger.clone());
         let mut node = fresh_state();
-        node.joined_at = second;
+        node.joined_at = UnixSecs::from_secs(second);
         node.message_log.push(larger);
         let budget = crate::util::tuning::antientropy_max_resend();
 
@@ -2019,7 +2025,7 @@ mod tests {
     #[test]
     fn an_author_with_a_fast_clock_does_not_slow_the_newest_messages() {
         let budget = crate::util::tuning::antientropy_max_resend();
-        let base = crate::util::clock::unix_secs() - 3600;
+        let base = UnixSecs::now().as_secs() - 3600;
         let ahead = 80;
         let mut all: Vec<Message> = Vec::new();
         let (mut next_honest, mut next_fast) = (0usize, 0usize);
@@ -2040,7 +2046,7 @@ mod tests {
         let rounds_until_back = |lost_index: usize| {
             let mut holder = MessageLog::new(1000);
             let mut node = fresh_state();
-            node.joined_at = base - 1;
+            node.joined_at = UnixSecs::from_secs(base - 1);
             let lost = all[lost_index].dedup_key();
             for (index, message) in all.iter().enumerate() {
                 holder.push(message.clone());
@@ -2095,10 +2101,10 @@ mod tests {
             .map(|index| chat_at(&format!("e{index}"), base + i64::from(index * 2 / 3)))
             .collect();
         let mut older = fresh_state();
-        older.joined_at = base - 1;
+        older.joined_at = UnixSecs::from_secs(base - 1);
         older.message_log = MessageLog::new(100);
         let mut newer = fresh_state();
-        newer.joined_at = base + 1;
+        newer.joined_at = UnixSecs::from_secs(base + 1);
         newer.message_log = MessageLog::new(100);
         for message in earlier.iter().chain(&common) {
             older.message_log.push(message.clone());
@@ -2139,7 +2145,7 @@ mod tests {
         let joined_at = 1_700_000_000;
         let own_joined = chat_at("own joined", joined_at + 5);
         let mut node = fresh_state();
-        node.joined_at = joined_at;
+        node.joined_at = UnixSecs::from_secs(joined_at);
         node.message_log.push(own_joined.clone());
 
         let mut holder = MessageLog::new(10);
@@ -2168,16 +2174,16 @@ mod tests {
             windows: vec![
                 WireWindow {
                     lo: 100,
-                    lo_key: encode_key(&[3; 16]),
+                    lo_key: encode_key(&DedupKey::from_bytes([3; 16])),
                     hi: i64::MAX,
-                    hi_key: encode_key(&[u8::MAX; 16]),
+                    hi_key: encode_key(&DedupKey::MAX),
                     ids: bs58::encode([7u8; 16]).into_string(),
                 },
                 WireWindow {
                     lo: 10,
-                    lo_key: encode_key(&[1; 16]),
+                    lo_key: encode_key(&DedupKey::from_bytes([1; 16])),
                     hi: 50,
-                    hi_key: encode_key(&[2; 16]),
+                    hi_key: encode_key(&DedupKey::from_bytes([2; 16])),
                     // Two *distinct* 16-byte ids (identical halves would
                     // dedup to one in the decoded set).
                     ids: {
@@ -2194,5 +2200,77 @@ mod tests {
         assert_eq!(back.windows[0].hi, i64::MAX, "open-ended bound preserved");
         assert_eq!(back.windows[0].decode_ids().unwrap().len(), 1);
         assert_eq!(back.windows[1].decode_ids().unwrap().len(), 2);
+    }
+
+    /// Golden: the whole digest body for a fixed pair of windows, as the wire carries it. The
+    /// newest window is open-ended (`i64::MAX` and the all-ones key), the older one is closed.
+    /// The literal was captured at the base commit.
+    #[test]
+    fn a_digest_body_keeps_its_wire_form() {
+        let newest = DigestWindow {
+            lo: (
+                UnixSecs::from_secs(1_700_000_100),
+                DedupKey::from_bytes([0x03; 16]),
+            ),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
+            ids: vec![
+                DedupKey::from_bytes([0x11; 16]),
+                DedupKey::from_bytes([0x22; 16]),
+            ],
+            from_start: false,
+        };
+        let older = DigestWindow {
+            lo: (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN),
+            hi: (
+                UnixSecs::from_secs(1_700_000_099),
+                DedupKey::from_bytes([0x04; 16]),
+            ),
+            ids: vec![DedupKey::from_bytes([0x33; 16])],
+            from_start: true,
+        };
+        let body = crate::gossip::json_body(&DigestBody {
+            windows: vec![WireWindow::encode(&newest), WireWindow::encode(&older)],
+        })
+        .expect("a digest serializes");
+        let wire = concat!(
+            r#"{"windows":[{"lo":1700000100,"lo_key":"Na6EczbX5yvuS59hRb3JJ","#,
+            r#""hi":9223372036854775807,"hi_key":"YcVfxkQb6JRzqk5kF2tNLv","#,
+            r#""ids":"29d2S7vB453rNYFdR5YcwtA5PDEwQncRjCnc4eNvMtWM"},"#,
+            r#"{"lo":1700000000,"lo_key":"1111111111111111","#,
+            r#""hi":1700000099,"hi_key":"Vm7ypzTh7eEsaRsGET44j","#,
+            r#""ids":"7KhXzYt7pTgoNMDYrCyg4z"}]}"#,
+        );
+        assert_eq!(body.as_str(), wire);
+
+        let back: DigestBody = serde_json::from_str(wire).expect("the literal parses");
+        let open_end = back.windows[0].range().expect("the keys decode");
+        assert_eq!(
+            open_end.lo,
+            (
+                UnixSecs::from_secs(1_700_000_100),
+                DedupKey::from_bytes([0x03; 16])
+            )
+        );
+        assert_eq!(open_end.hi, (UnixSecs::MAX, DedupKey::MAX));
+        let ids = back.windows[0].decode_ids().expect("the ids decode");
+        assert_eq!(
+            ids,
+            HashSet::from([
+                DedupKey::from_bytes([0x11; 16]),
+                DedupKey::from_bytes([0x22; 16])
+            ])
+        );
+        let closed = back.windows[1].range().expect("the keys decode");
+        assert_eq!(
+            closed.lo,
+            (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN)
+        );
+        assert_eq!(
+            closed.hi,
+            (
+                UnixSecs::from_secs(1_700_000_099),
+                DedupKey::from_bytes([0x04; 16])
+            )
+        );
     }
 }

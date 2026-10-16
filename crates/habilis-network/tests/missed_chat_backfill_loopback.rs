@@ -28,7 +28,7 @@ const BUDGET: Duration = Duration::from_secs(15);
 
 /// A frame stamped this far ahead stays inside a node's window even when the
 /// node joins after it was sent, so the only way to get it is to ask.
-const AHEAD_SECS: i64 = 30;
+const AHEAD: Duration = Duration::from_secs(30);
 
 /// Logs every chat frame and records the surfaceable ones it receives.
 #[derive(Clone, Default)]
@@ -72,7 +72,7 @@ impl NodeDriver for Chat {
     type Http = ();
     type Ipc = serde_json::Value;
 
-    /// Broadcast one chat frame stamped [`AHEAD_SECS`] ahead.
+    /// Broadcast one chat frame stamped [`AHEAD`] ahead.
     async fn handle_session(
         &mut self,
         sent: Self::Session,
@@ -89,7 +89,7 @@ impl NodeDriver for Chat {
                 body: MessageBody::new("\"hello\"").expect("a JSON body"),
             },
         );
-        frame.timestamp += AHEAD_SECS;
+        frame.timestamp = frame.timestamp + AHEAD;
         let frame = frame.signed(ctx.identity);
         let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
         let _ = habilis_network::ops::deliver(&frame, bytes, state, ctx.sender)
@@ -160,7 +160,7 @@ impl Joined {
 
 fn pin_antientropy_tick() {
     habilis_network::runtime::tuning::init(habilis_network::runtime::tuning::Tuning {
-        antientropy_interval_secs: 3600,
+        antientropy_interval: Duration::from_hours(1),
         ..habilis_network::runtime::tuning::Tuning::DEFAULTS
     });
 }

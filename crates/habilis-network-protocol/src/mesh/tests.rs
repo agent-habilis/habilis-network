@@ -1,8 +1,9 @@
 use super::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy};
+use crate::crypto::{Password, Seed};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
 
-fn dummy_seed() -> [u8; SEED_LEN] {
-    [7u8; SEED_LEN]
+fn dummy_seed() -> Seed {
+    Seed::from_bytes([7u8; SEED_LEN])
 }
 
 fn dummy_name() -> MeshName {
@@ -43,12 +44,12 @@ fn round_trip_loopback() {
 #[test]
 fn round_trip_public_preset() {
     let mesh = Mesh::new(
-        [0xABu8; SEED_LEN],
+        Seed::from_bytes([0xABu8; SEED_LEN]),
         dummy_name(),
         MeshConfig::public_preset(),
     );
     let decoded: Mesh = mesh.to_string().parse().unwrap();
-    assert_eq!(decoded.seed(), &[0xABu8; SEED_LEN]);
+    assert_eq!(decoded.seed().as_bytes(), &[0xABu8; SEED_LEN]);
     assert_eq!(decoded.config, mesh.config);
     assert!(!decoded.is_loopback());
     assert_eq!(decoded.network_label(), "public");
@@ -124,8 +125,18 @@ fn seed_drives_rendezvous_identity() {
 
 #[test]
 fn different_seeds_yield_different_ids() {
-    let one = Mesh::new([1u8; SEED_LEN], dummy_name(), MeshConfig::loopback()).to_string();
-    let two = Mesh::new([2u8; SEED_LEN], dummy_name(), MeshConfig::loopback()).to_string();
+    let one = Mesh::new(
+        Seed::from_bytes([1u8; SEED_LEN]),
+        dummy_name(),
+        MeshConfig::loopback(),
+    )
+    .to_string();
+    let two = Mesh::new(
+        Seed::from_bytes([2u8; SEED_LEN]),
+        dummy_name(),
+        MeshConfig::loopback(),
+    )
+    .to_string();
     assert_ne!(one, two);
 }
 
@@ -224,10 +235,39 @@ fn golden_passwordless_id_and_topic_are_pinned() {
         mesh.to_string(),
         "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH"
     );
-    let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
+    let topic = super::crypto::derive_topic_id(
+        super::crypto::Keying::Wire(mesh.seed()),
+        &mesh.name,
+        &mesh.config_bytes(),
+    );
     assert_eq!(
         format!("{topic:?}"),
         "TopicId(1898d0078596295e6f69e42e9284e139d69921f2db46026b16611a924e65bd1d)"
+    );
+}
+
+// The golden derivations of a passworded mesh, for a fixed seed and password. They equal what the
+// code before the newtype refactor (795c4f88) gives: the password key replaces the seed in every
+// derivation, and none of the outputs moved.
+#[test]
+fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
+    let mut mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset());
+    mesh.set_password(&Password::new("hunter2".to_owned()));
+    assert_eq!(
+        mesh.to_string(),
+        "Xts3MujFJ6LPpDwNyubQmyofWgxZkrhDTx3ohPc8iYvUxpTMyBg1yWJBJ39x2RSLzPzUV1nGDdx7YL5nX41SP"
+    );
+    assert_eq!(
+        format!("{:?}", mesh.topic_id()),
+        "TopicId(47afc8fd71963d7bcbc78dac9588dbb142b4ae79013489ff3d0f09361479a322)"
+    );
+    assert_eq!(
+        mesh.rendezvous_id().to_string(),
+        "0114a2e8ae14744cb2573befc064f196108e6a403eadc32a51b752e22be3517a"
+    );
+    assert_eq!(
+        mesh.rendezvous_ports(),
+        [9654, 21191, 64941, 55185, 63449, 5703, 10814, 29199]
     );
 }
 
@@ -240,7 +280,11 @@ fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
     let mesh: Mesh = older.parse().expect("an older id decodes");
     assert!(!mesh.config.transport.gossip, "it has no gossip");
     assert_eq!(mesh.to_string(), older, "and it keeps its id");
-    let topic = super::crypto::derive_topic_id(mesh.seed(), &mesh.name, &mesh.config_bytes());
+    let topic = super::crypto::derive_topic_id(
+        super::crypto::Keying::Wire(mesh.seed()),
+        &mesh.name,
+        &mesh.config_bytes(),
+    );
     assert_eq!(
         format!("{topic:?}"),
         "TopicId(0efae5467ad7c26c9b6a3f0a64a97d1799412ac891282711077401b8ecd8c0e7)"
@@ -398,6 +442,7 @@ mod prop {
     };
 
     use super::{Mesh, MeshConfig, MeshName, SEED_LEN};
+    use crate::crypto::Seed;
 
     fn arb_seed() -> impl Strategy<Value = [u8; SEED_LEN]> {
         uniform32(0u8..)
@@ -429,7 +474,7 @@ mod prop {
             name in arb_name(),
             config in arb_config(),
         ) {
-            let mesh = Mesh::new(seed, name.clone(), config.clone());
+            let mesh = Mesh::new(Seed::from_bytes(seed), name.clone(), config.clone());
             let decoded: Mesh = mesh.to_string().parse().expect("decode failed");
             prop_assert_eq!(decoded.seed(), mesh.seed());
             prop_assert_eq!(decoded.name, mesh.name);
@@ -438,7 +483,7 @@ mod prop {
 
         #[test]
         fn prop_bare_base58(seed in arb_seed(), name in arb_name()) {
-            let id = Mesh::new(seed, name, MeshConfig::loopback()).to_string();
+            let id = Mesh::new(Seed::from_bytes(seed), name, MeshConfig::loopback()).to_string();
             prop_assert!(!id.contains("://"));
             prop_assert!(id.is_ascii());
             prop_assert!(!id.is_empty());
@@ -450,7 +495,7 @@ mod prop {
             name in arb_name(),
             config in arb_config(),
         ) {
-            let mesh = Mesh::new(seed, name, config);
+            let mesh = Mesh::new(Seed::from_bytes(seed), name, config);
             prop_assert_eq!(mesh.to_string(), mesh.to_string());
         }
 
@@ -461,8 +506,8 @@ mod prop {
             name in arb_name(),
         ) {
             prop_assume!(seed_a != seed_b);
-            let one = Mesh::new(seed_a, name.clone(), MeshConfig::loopback()).to_string();
-            let two = Mesh::new(seed_b, name, MeshConfig::loopback()).to_string();
+            let one = Mesh::new(Seed::from_bytes(seed_a), name.clone(), MeshConfig::loopback()).to_string();
+            let two = Mesh::new(Seed::from_bytes(seed_b), name, MeshConfig::loopback()).to_string();
             prop_assert_ne!(one, two);
         }
     }

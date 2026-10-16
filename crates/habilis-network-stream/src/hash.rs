@@ -16,7 +16,9 @@ use anyhow::{Context, Result, bail};
 use habilis_network::iroh::EndpointAddr;
 use habilis_network::net::{endpoint_addr_from_json, endpoint_addr_to_json};
 use habilis_network::protocol::base58check::{self, take_array};
-use habilis_network::protocol::{LookupOpts, TransportPolicy};
+use habilis_network::protocol::identity::write_hex;
+use habilis_network::protocol::{LookupOpts, TransportPolicy, ct_eq};
+use zeroize::Zeroizing;
 
 /// Framing version. An unknown version is rejected on decode.
 const VERSION: u8 = 1;
@@ -41,8 +43,88 @@ pub const ID_LEN: usize = 16;
 /// Length of the bearer secret.
 pub const SECRET_LEN: usize = 32;
 
+/// The public id a producer files a stream under. It names the stream and
+/// opens nothing: [`StreamSecret`] does that.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamId([u8; ID_LEN]);
+
+impl StreamId {
+    /// Wrap the 16 bytes of an id.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; ID_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes, borrowed.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; ID_LEN] {
+        &self.0
+    }
+}
+
+impl fmt::Display for StreamId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_hex(formatter, &self.0)
+    }
+}
+
+impl fmt::Debug for StreamId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "StreamId({self})")
+    }
+}
+
+/// The bearer secret of a stream. Whoever holds it can take the consumer slot,
+/// so `Debug` prints no byte, and the type has no `PartialEq`: compare two with
+/// [`ct_eq`] on [`Self::as_bytes`]. Its bytes are wiped on drop (best-effort: a
+/// copy that a caller made from [`Self::as_bytes`] is not tracked).
+#[derive(Clone)]
+pub struct StreamSecret(Zeroizing<[u8; SECRET_LEN]>);
+
+impl StreamSecret {
+    /// Wrap the 32 bytes of a secret. The array passed in is a copy that the
+    /// caller still holds: keep it in a [`Zeroizing`] when it is a secret.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; SECRET_LEN]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    /// Take a buffer that is already wiped on drop, whole, so that the code
+    /// makes no plain copy of the secret on the way in. This is the constructor
+    /// for a secret that is already in a [`Zeroizing`] (bytes read off a stream,
+    /// a random draw). [`Self::from_bytes`] stays for raw input at an edge.
+    #[must_use]
+    pub fn from_zeroizing(bytes: Zeroizing<[u8; SECRET_LEN]>) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes, borrowed.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; SECRET_LEN] {
+        &self.0
+    }
+}
+
+// The only field is a `Zeroizing`.
+impl zeroize::ZeroizeOnDrop for StreamSecret {}
+
+impl fmt::Debug for StreamSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StreamSecret(***)")
+    }
+}
+
 /// A decoded stream hash.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// The id and the secret have the same kind of bytes and different types, so a
+/// swap does not compile:
+///
+/// ```compile_fail,E0308
+/// fn swap(mut hash: habilis_network_stream::StreamHash) {
+///     hash.id = hash.secret;
+/// }
+/// ```
+#[derive(Clone)]
 pub struct StreamHash {
     /// The producer's endpoint: its id, its relay, and its direct addresses.
     pub addr: EndpointAddr,
@@ -52,10 +134,24 @@ pub struct StreamHash {
     /// the relay may carry the bytes.
     pub transport: TransportPolicy,
     /// Public: the key the producer looks the stream up by.
-    pub id: [u8; ID_LEN],
+    pub id: StreamId,
     /// Private: compared in constant time once `id` has found the stream.
-    pub secret: [u8; SECRET_LEN],
+    pub secret: StreamSecret,
 }
+
+// Hand-written because the secret has no `PartialEq`: it is compared in
+// constant time, so two hashes never answer faster for a closer secret.
+impl PartialEq for StreamHash {
+    fn eq(&self, other: &Self) -> bool {
+        self.addr == other.addr
+            && self.lookups == other.lookups
+            && self.transport == other.transport
+            && self.id == other.id
+            && ct_eq(self.secret.as_bytes(), other.secret.as_bytes())
+    }
+}
+
+impl Eq for StreamHash {}
 
 impl fmt::Debug for StreamHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -88,13 +184,23 @@ impl StreamHash {
             flags |= NO_WEBRTC_BIT;
         }
         framed.push(flags);
-        framed.extend_from_slice(&self.id);
-        framed.extend_from_slice(&self.secret);
+        framed.extend_from_slice(self.id.as_bytes());
+        framed.extend_from_slice(self.secret.as_bytes());
         self.lookups.encode_into(&mut framed);
         let addr = serde_json::to_vec(&endpoint_addr_to_json(&self.addr))
             .expect("an EndpointAddr always serializes");
         framed.extend_from_slice(&addr);
         base58check::encode(&framed)
+    }
+
+    /// The bytes a consumer sends first on the stream it opens: `id ‖ secret`.
+    /// The producer reads them back in the same order.
+    #[must_use]
+    pub(crate) fn header_bytes(&self) -> Zeroizing<[u8; ID_LEN + SECRET_LEN]> {
+        let mut header = Zeroizing::new([0; ID_LEN + SECRET_LEN]);
+        header[..ID_LEN].copy_from_slice(self.id.as_bytes());
+        header[ID_LEN..].copy_from_slice(self.secret.as_bytes());
+        header
     }
 
     /// Decode a bare Base58Check token.
@@ -118,9 +224,12 @@ impl StreamHash {
             bail!("unsupported stream hash flags {flags:#04x}: upgrade to a newer build");
         }
         let mut pos = 1;
-        let id = take_array::<ID_LEN>(payload, &mut pos).context("stream hash missing id")?;
-        let secret =
-            take_array::<SECRET_LEN>(payload, &mut pos).context("stream hash missing secret")?;
+        let id = StreamId::from_bytes(
+            take_array::<ID_LEN>(payload, &mut pos).context("stream hash missing id")?,
+        );
+        let secret = StreamSecret::from_bytes(
+            take_array::<SECRET_LEN>(payload, &mut pos).context("stream hash missing secret")?,
+        );
         let lookups = LookupOpts::decode_from(payload, &mut pos)?;
         let addr_json = payload.get(pos..).context("stream hash missing address")?;
         let value: serde_json::Value =
@@ -174,8 +283,8 @@ mod tests {
             ),
             lookups: LookupOpts::loopback(),
             transport,
-            id: [1; ID_LEN],
-            secret: [2; SECRET_LEN],
+            id: StreamId::from_bytes([1; ID_LEN]),
+            secret: StreamSecret::from_bytes([2; SECRET_LEN]),
         }
     }
 
@@ -205,6 +314,47 @@ mod tests {
                 hash
             );
         }
+    }
+
+    /// The bytes of a hash minted by the code at the base commit. A change
+    /// here is a wire change: tokens of this shape exist outside the code.
+    const GOLDEN: &str = "JNa7ZgZwvMzW441NiDGTgK654QRhVajAbdBBcye6WJ3gqu3uyqWdEZZAUNs5cyu9H6FsPMQhkgfib2UHxLsS7a3Xq8jURe1VErA8rdM3UdgvXdmQH74aYiQHPj6hFUCK8dkMb5eFCLZy8D3f3cYXiScH5c7Uk23z4gfeoEbH3ZPX2DSk8niKsyZG1C2mtWdpeMuYQc5f4ytXUKRb5vPHyKrKT4BKPSjA3rK";
+
+    #[test]
+    fn encode_matches_the_golden_string() {
+        assert_eq!(sample(policy(true, true, true)).encode(), GOLDEN);
+    }
+
+    #[test]
+    fn decode_of_the_golden_string_gives_the_same_fields() {
+        assert_eq!(
+            StreamHash::decode(GOLDEN).expect("decodes"),
+            sample(policy(true, true, true))
+        );
+    }
+
+    // `unsafe_code` is denied, so a test cannot read the freed bytes: it pins the
+    // type of the field instead. A `Zeroizing` buffer wipes on drop.
+    #[test]
+    fn the_secret_is_held_in_a_wiped_buffer() {
+        let secret = StreamSecret::from_bytes([9; SECRET_LEN]);
+        let _: &Zeroizing<[u8; SECRET_LEN]> = &secret.0;
+    }
+
+    #[test]
+    fn from_zeroizing_keeps_the_bytes() {
+        let secret = StreamSecret::from_zeroizing(Zeroizing::new([4; SECRET_LEN]));
+        assert_eq!(secret.as_bytes(), &[4; SECRET_LEN]);
+    }
+
+    #[test]
+    fn header_bytes_are_the_id_then_the_secret() {
+        let mut expected = vec![1; ID_LEN];
+        expected.extend_from_slice(&[2; SECRET_LEN]);
+        assert_eq!(
+            sample(TransportPolicy::default()).header_bytes().as_slice(),
+            expected.as_slice()
+        );
     }
 
     #[test]
@@ -250,6 +400,18 @@ mod tests {
             habilis_network::runtime::derive_topic_mesh_with("standup", LookupOpts::loopback())
                 .expect("mesh");
         assert!(StreamHash::decode(&mesh.to_string()).is_err());
+    }
+
+    #[test]
+    fn a_secret_prints_no_byte_and_one_byte_makes_two_hashes_differ() {
+        let hash = sample(TransportPolicy::default());
+        assert_eq!(format!("{:?}", hash.secret), "StreamSecret(***)");
+        let mut other = hash.clone();
+        assert_eq!(hash, other);
+        let mut bytes = *other.secret.as_bytes();
+        bytes[SECRET_LEN - 1] ^= 1;
+        other.secret = StreamSecret::from_bytes(bytes);
+        assert_ne!(hash, other);
     }
 
     #[test]

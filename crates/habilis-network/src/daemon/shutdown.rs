@@ -16,7 +16,7 @@ use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::{MeshName, Message};
 #[cfg(all(unix, feature = "host"))]
-use crate::util::tuning::ppid_watch_interval_ms;
+use crate::util::tuning::ppid_watch_interval;
 
 /// Graceful shutdown: remove the statusline state file first, then
 /// announce `Left` and give the broadcast a moment to reach peers.
@@ -212,7 +212,7 @@ impl Owner {
     reason = "libc::getppid FFI; no safe wrapper, always succeeds"
 )]
 fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
-    let interval = Duration::from_millis(ppid_watch_interval_ms());
+    let interval = ppid_watch_interval();
     if let Some(owner) = owner {
         tokio::spawn(watch_owner(owner, interval, quit_tx));
         return;

@@ -16,6 +16,8 @@ use iroh::endpoint_info::{EndpointData, EndpointInfo};
 use n0_future::{boxed::BoxStream, stream};
 
 use crate::addr::Route;
+use crate::graph::Leg;
+use crate::role::AppId;
 use crate::topology::Topology;
 use crate::underlay::Forwarder;
 
@@ -59,14 +61,14 @@ pub(crate) struct Chosen {
 /// the stuck deadline; our own choice of a first hop reads the live gate.
 #[derive(Debug, Clone)]
 pub(crate) struct RouteChooser {
-    self_id: EndpointId,
+    self_id: AppId,
     topology: Arc<RwLock<Topology>>,
     forwarder: Arc<Forwarder>,
 }
 
 impl RouteChooser {
     pub(crate) fn new(
-        self_id: EndpointId,
+        self_id: AppId,
         topology: Arc<RwLock<Topology>>,
         forwarder: Arc<Forwarder>,
     ) -> Self {
@@ -77,16 +79,20 @@ impl RouteChooser {
         }
     }
 
-    pub(crate) fn choose(&self, dst: EndpointId) -> Option<Chosen> {
-        let refused: HashSet<EndpointId> = self.forwarder.refusing_hops().into_iter().collect();
+    pub(crate) fn choose(&self, dst: AppId) -> Option<Chosen> {
+        let refused: HashSet<AppId> = self.forwarder.refusing_hops().into_iter().collect();
         let topology = self.topology.read().expect("topology lock poisoned");
-        let shortest = topology.route_to(self.self_id, dst, 1).into_iter().next();
+        let leg = Leg {
+            src: self.self_id,
+            dst,
+        };
+        let shortest = topology.route_to(leg, 1).into_iter().next();
         let first_is_refused = shortest
             .as_ref()
             .and_then(|route| route.hops().first())
             .is_some_and(|hop| refused.contains(&hop.app_id));
         if first_is_refused
-            && let Some(route) = topology.route_to_avoiding_first_hops(self.self_id, dst, &refused)
+            && let Some(route) = topology.route_to_avoiding_first_hops(leg, &refused)
         {
             return Some(Chosen {
                 route,
@@ -106,7 +112,7 @@ impl AddressLookup for MultihopLookup {
     fn resolve(&self, endpoint_id: EndpointId) -> Option<BoxStream<Result<Item, Error>>> {
         // One route, chosen as `route_addr` chooses it: the shortest, unless the gate
         // refuses its first hop.
-        let chosen = self.chooser.choose(endpoint_id);
+        let chosen = self.chooser.choose(AppId::new(endpoint_id));
         tracing::debug!(target: "habilis_lookup", me = %self.chooser.self_id.fmt_short(), remote = %endpoint_id.fmt_short(), found = chosen.is_some(), first_hop_skipped = chosen.as_ref().is_some_and(|chosen| chosen.skipped), hops = %chosen.as_ref().map_or_else(String::new, |chosen| chosen.route.describe()), "multihop lookup");
         let route = chosen?.route;
         let info = EndpointInfo::from_parts(

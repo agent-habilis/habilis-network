@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
-use habilis_network::util::tuning::STARVED_SECS;
+use habilis_network::util::tuning::STARVED;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// Long enough for a mesh of ten to form and for the alive ticks to fill what the
@@ -199,7 +199,7 @@ async fn a_mesh_of_ten_links_every_member_to_every_other() {
 /// A frozen overlay has no churn either, so the views must also stay filled: the mean
 /// number of links per member is at least 90 percent of G, and every member holds at
 /// least G - 1 links in at least half of the samples. A member that every other member
-/// refuses gets a link only from the fallback of a starved node (`STARVED_SECS`), so the
+/// refuses gets a link only from the fallback of a starved node (`STARVED`), so the
 /// window starts after two of them.
 /// Takes eighteen minutes, so it only runs when asked for: `-- --ignored`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -209,7 +209,7 @@ async fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
     let (members, keep) = mesh(12, VIEW_CAP).await;
 
     let started = Instant::now();
-    let settle = FILL_DEADLINE + Duration::from_secs(2 * STARVED_SECS);
+    let settle = FILL_DEADLINE + STARVED.saturating_mul(2);
     let mut link_ups = 0_u32;
     let mut link_total = 0_u32;
     let mut link_samples = 0_u32;

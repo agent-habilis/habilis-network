@@ -31,6 +31,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
 use crate::addr::{Route, RouteHop};
+use crate::role::{AppId, UnderlayId};
 use crate::topology::Topology;
 use crate::wire::{Cell, read_cell, write_cell};
 
@@ -237,7 +238,7 @@ impl RelayGate {
 #[derive(Debug)]
 struct HopHealth {
     /// The hop's application id: what a link-vector names.
-    app_id: EndpointId,
+    app_id: AppId,
     /// Since when the gate has refused this hop without a break.
     refused_since: Option<Instant>,
     /// Refused for longer than the deadline: not advertised as a link.
@@ -252,26 +253,26 @@ struct HopHealth {
 #[derive(Debug, Default)]
 struct WriterPool {
     /// One outbound writer channel per next-hop underlay endpoint id.
-    writers: Mutex<HashMap<EndpointId, mpsc::Sender<Cell>>>,
+    writers: Mutex<HashMap<UnderlayId, mpsc::Sender<Cell>>>,
     /// Bytes queued across every writer.
     queued_bytes: AtomicUsize,
     /// Cells a writer dropped because its connection was not on a direct path.
     refused_on_relay: AtomicU64,
     /// The relay rule's verdict per next hop, keyed like `writers`.
-    health: Mutex<HashMap<EndpointId, HopHealth>>,
+    health: Mutex<HashMap<UnderlayId, HopHealth>>,
     /// Woken when the gate starts to refuse a hop, and when it admits one that it
     /// refused: the moments at which the best first hop to a peer can change.
     route_wake: Arc<tokio::sync::Notify>,
     /// The connection of each live writer, keyed like `writers`, for a test that reads its paths.
     #[cfg(feature = "test-hooks")]
-    connections: Mutex<HashMap<EndpointId, Connection>>,
+    connections: Mutex<HashMap<UnderlayId, Connection>>,
 }
 
 impl WriterPool {
     /// Drop `key`'s entry, but only if it is still `sender`'s. A writer that has
     /// already been replaced must not delete its successor's channel — that race
     /// is how a sibling transport grew a permanent phantom session.
-    fn retire(&self, key: EndpointId, sender: &mpsc::Sender<Cell>) {
+    fn retire(&self, key: UnderlayId, sender: &mpsc::Sender<Cell>) {
         let mut writers = self.writers.lock().expect("writers mutex poisoned");
         if writers
             .get(&key)
@@ -285,7 +286,7 @@ impl WriterPool {
         self.queued_bytes.fetch_sub(cost, Ordering::Relaxed);
     }
 
-    fn track(&self, underlay: EndpointId, app_id: EndpointId) {
+    fn track(&self, underlay: UnderlayId, app_id: AppId) {
         self.health.lock().expect("health mutex poisoned").insert(
             underlay,
             HopHealth {
@@ -296,7 +297,7 @@ impl WriterPool {
         );
     }
 
-    fn forget(&self, underlay: EndpointId) {
+    fn forget(&self, underlay: UnderlayId) {
         self.health
             .lock()
             .expect("health mutex poisoned")
@@ -310,7 +311,7 @@ impl WriterPool {
 
     /// The gate refused this hop just now. Past the deadline the hop is stuck,
     /// said once in the log.
-    fn note_refused(&self, underlay: EndpointId, stuck_after: Duration) {
+    fn note_refused(&self, underlay: UnderlayId, stuck_after: Duration) {
         let mut health = self.health.lock().expect("health mutex poisoned");
         let Some(hop) = health.get_mut(&underlay) else {
             return;
@@ -330,7 +331,7 @@ impl WriterPool {
     }
 
     /// The gate admitted this hop: it is a link again.
-    fn note_admitted(&self, underlay: EndpointId) {
+    fn note_admitted(&self, underlay: UnderlayId) {
         let mut health = self.health.lock().expect("health mutex poisoned");
         let Some(hop) = health.get_mut(&underlay) else {
             return;
@@ -348,7 +349,7 @@ impl WriterPool {
     }
 
     /// The hops that the gate refuses now, stuck or not.
-    fn refusing_app_ids(&self) -> Vec<EndpointId> {
+    fn refusing_app_ids(&self) -> Vec<AppId> {
         self.health
             .lock()
             .expect("health mutex poisoned")
@@ -358,7 +359,7 @@ impl WriterPool {
             .collect()
     }
 
-    fn stuck_app_ids(&self) -> Vec<EndpointId> {
+    fn stuck_app_ids(&self) -> Vec<AppId> {
         self.health
             .lock()
             .expect("health mutex poisoned")
@@ -375,7 +376,7 @@ pub(crate) struct Forwarder {
     underlay: Endpoint,
     /// This node's application-layer id, the other half of the identity a cell's
     /// current hop must name.
-    self_app_id: EndpointId,
+    self_app_id: AppId,
     /// The runtime that spawns the writers. `enqueue` runs inside `poll_send`, which
     /// iroh calls from the socket's send path (`Transports::poll_send` in iroh's
     /// `socket/transports.rs`). It is kept so that a native spawn never depends on
@@ -400,13 +401,13 @@ pub(crate) struct Forwarder {
     /// Hops that a writer was spawned for with no vector in the topology: a hop without a vector.
     unresolved_hops: AtomicU64,
     /// The hops that were warned about, one line each: see [`UNRESOLVED_SEEN_CAP`].
-    unresolved_seen: Mutex<HashSet<EndpointId>>,
+    unresolved_seen: Mutex<HashSet<UnderlayId>>,
 }
 
 impl Forwarder {
     pub(crate) fn new(
         underlay: Endpoint,
-        self_app_id: EndpointId,
+        self_app_id: AppId,
         inbound: mpsc::Sender<Delivered>,
         allow_relay: bool,
         stuck_after: Duration,
@@ -451,7 +452,7 @@ impl Forwarder {
             .read()
             .expect("topology lock poisoned")
             .underlay_of(hop.app_id)
-            .filter(|addr| addr.id == hop.underlay_id);
+            .filter(|addr| UnderlayId::new(addr.id) == hop.underlay_id);
         known.unwrap_or_else(|| {
             let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
             if self.first_without_vector(hop.underlay_id, total) {
@@ -462,14 +463,14 @@ impl Forwarder {
                     "multihop forwarder: hop without a vector, dialing it by id"
                 );
             }
-            EndpointAddr::new(hop.underlay_id)
+            EndpointAddr::new(hop.underlay_id.get())
         })
     }
 
     /// Whether a log line is due for the hop `underlay_id`, found without a vector for the
     /// `total`-th time: one per distinct hop. The ids come off the wire, so the set that
     /// remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`] hops the rule is one line in 256.
-    fn first_without_vector(&self, underlay_id: EndpointId, total: u64) -> bool {
+    fn first_without_vector(&self, underlay_id: UnderlayId, total: u64) -> bool {
         let mut seen = self
             .unresolved_seen
             .lock()
@@ -513,7 +514,7 @@ impl Forwarder {
     }
 
     /// The application ids of the hops stuck on the relay past the deadline.
-    pub(crate) fn stuck_hops(&self) -> Vec<EndpointId> {
+    pub(crate) fn stuck_hops(&self) -> Vec<AppId> {
         self.pool.stuck_app_ids()
     }
 
@@ -524,14 +525,14 @@ impl Forwarder {
     }
 
     /// The application ids of the hops that the gate refuses now, stuck or not.
-    pub(crate) fn refusing_hops(&self) -> Vec<EndpointId> {
+    pub(crate) fn refusing_hops(&self) -> Vec<AppId> {
         self.pool.refusing_app_ids()
     }
 
     /// Mark a hop as refused now, without the deadline having passed, as a test of
     /// the choice of a route needs it.
     #[cfg(any(test, feature = "test-hooks"))]
-    pub(crate) fn refuse_hop_for_test(&self, underlay: EndpointId, app_id: EndpointId) {
+    pub(crate) fn refuse_hop_for_test(&self, underlay: UnderlayId, app_id: AppId) {
         self.pool.track(underlay, app_id);
         self.pool.note_refused(underlay, Duration::from_mins(1));
     }
@@ -539,7 +540,7 @@ impl Forwarder {
     /// The open paths of the connection that our writer holds toward the underlay `hop`, now,
     /// each with whether it is the selected one: the reading that the gate takes.
     #[cfg(feature = "test-hooks")]
-    pub(crate) fn writer_paths(&self, hop: EndpointId) -> Option<Vec<(TransportAddr, bool)>> {
+    pub(crate) fn writer_paths(&self, hop: UnderlayId) -> Option<Vec<(TransportAddr, bool)>> {
         let connection = self
             .pool
             .connections
@@ -560,7 +561,7 @@ impl Forwarder {
 
     /// The refusal of a cell that came in over `connection` from `hop`, with what
     /// the log needs to tell whose path it was: the hop, this node, and the paths.
-    fn note_inbound_refusal(&self, hop: EndpointId, connection: &Connection) {
+    fn note_inbound_refusal(&self, hop: UnderlayId, connection: &Connection) {
         if let Some(total) = self.count_drop() {
             tracing::warn!(
                 total,
@@ -629,7 +630,7 @@ impl Forwarder {
     /// carry different keys and a cell should not be able to pair our underlay
     /// with somebody else's application id.
     fn is_self(&self, hop: &RouteHop) -> bool {
-        hop.underlay_id == self.underlay.id() && hop.app_id == self.self_app_id
+        hop.underlay_id == UnderlayId::new(self.underlay.id()) && hop.app_id == self.self_app_id
     }
 
     /// The hop that should have sent us this cell: our predecessor on the route,
@@ -649,7 +650,7 @@ impl Forwarder {
     /// injecting a cell at a position it does not occupy — the structural
     /// invariants on [`Route`] bound what a route may look like, but only this
     /// binds a cell to the path it claims to be travelling.
-    pub(crate) fn handle_cell(&self, cell: Cell, from: EndpointId) {
+    pub(crate) fn handle_cell(&self, cell: Cell, from: UnderlayId) {
         let Some(here) = cell.current_hop() else {
             self.note_drop("position past the end of the route");
             return;
@@ -674,7 +675,7 @@ impl Forwarder {
         }
     }
 
-    fn writer_for(&self, key: EndpointId) -> Option<mpsc::Sender<Cell>> {
+    fn writer_for(&self, key: UnderlayId) -> Option<mpsc::Sender<Cell>> {
         let writers = self.pool.writers.lock().expect("writers mutex poisoned");
         writers.get(&key).cloned()
     }
@@ -689,18 +690,19 @@ impl Forwarder {
     /// entry on the way out.
     fn spawn_writer(&self, hop: &RouteHop) -> Option<mpsc::Sender<Cell>> {
         let dst = self.dial_addr(hop);
+        let key = UnderlayId::new(dst.id);
         let app_id = hop.app_id;
         let (tx, rx) = mpsc::channel(WRITER_QUEUE);
         {
             let mut writers = self.pool.writers.lock().expect("writers mutex poisoned");
-            if writers.len() >= MAX_WRITERS && !writers.contains_key(&dst.id) {
+            if writers.len() >= MAX_WRITERS && !writers.contains_key(&key) {
                 drop(writers);
                 self.note_drop("next-hop writer ceiling reached");
                 return None;
             }
-            writers.insert(dst.id, tx.clone());
+            writers.insert(key, tx.clone());
         }
-        self.pool.track(dst.id, app_id);
+        self.pool.track(key, app_id);
         let writer = writer_task(
             self.underlay.clone(),
             dst,
@@ -733,8 +735,9 @@ async fn writer_task(
     if let Err(error) = outcome {
         tracing::debug!(hop = %dst.id.fmt_short(), %error, "multihop underlay writer stopping");
     }
-    pool.retire(dst.id, &handle);
-    pool.forget(dst.id);
+    let key = UnderlayId::new(dst.id);
+    pool.retire(key, &handle);
+    pool.forget(key);
     // Whatever never made it onto the wire is still charged to the budget.
     rx.close();
     while let Ok(cell) = rx.try_recv() {
@@ -756,7 +759,7 @@ async fn drain_to_hop(
     pool.connections
         .lock()
         .expect("connections mutex poisoned")
-        .insert(dst.id, conn.clone());
+        .insert(UnderlayId::new(dst.id), conn.clone());
     let mut send = conn.open_uni().await.context("open underlay uni-stream")?;
     let mut gate = RelayGate::new(rule.allow_relay, underlay.id(), GateRole::Writer);
     // Looks at the path once a second even when no cell comes, so a hop that was
@@ -777,13 +780,13 @@ async fn drain_to_hop(
                 let Some(cell) = next else { break };
                 let cost = cell.packet.len();
                 if gate.admits(&conn) {
-                    pool.note_admitted(dst.id);
+                    pool.note_admitted(UnderlayId::new(dst.id));
                 } else {
                     // Dropped like any other loss: QUIC above retransmits, and a
                     // direct path takes over once one opens.
                     pool.release(cost);
                     pool.refused_on_relay.fetch_add(1, Ordering::Relaxed);
-                    pool.note_refused(dst.id, rule.stuck_after);
+                    pool.note_refused(UnderlayId::new(dst.id), rule.stuck_after);
                     continue;
                 }
                 let written = write_cell(&mut send, &cell).await;
@@ -792,9 +795,9 @@ async fn drain_to_hop(
             }
             _ = recheck.tick(), if !rule.allow_relay => {
                 if gate.admits(&conn) {
-                    pool.note_admitted(dst.id);
+                    pool.note_admitted(UnderlayId::new(dst.id));
                 } else {
-                    pool.note_refused(dst.id, rule.stuck_after);
+                    pool.note_refused(UnderlayId::new(dst.id), rule.stuck_after);
                 }
             }
         }
@@ -831,7 +834,7 @@ impl ForwardAcceptor {
 
     async fn read_loop(
         self,
-        upstream: EndpointId,
+        upstream: UnderlayId,
         connection: Connection,
         gate: Arc<Mutex<RelayGate>>,
         mut recv: iroh::endpoint::RecvStream,
@@ -855,7 +858,7 @@ impl ProtocolHandler for ForwardAcceptor {
         // The peer's QUIC-TLS identity: the one thing about a cell's origin its
         // sender cannot choose, and constant across every stream on this
         // connection. Every cell that arrives here is checked against it.
-        let upstream = connection.remote_id();
+        let upstream = UnderlayId::new(connection.remote_id());
         let gate = Arc::new(Mutex::new(RelayGate::new(
             self.forwarder.rule.allow_relay,
             self.forwarder.underlay.id(),
@@ -881,6 +884,7 @@ mod tests {
         TransportAddr, UNRESOLVED_SEEN_CAP,
     };
     use crate::addr::{Route, RouteHop};
+    use crate::role::{AppId, UnderlayId};
     use crate::test_support::relay_server;
     use crate::topology::{LinkVector, Topology};
     use crate::wire::Cell;
@@ -893,15 +897,15 @@ mod tests {
     fn stranger(seed: u8) -> RouteHop {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
         RouteHop {
-            app_id: id,
-            underlay_id: id,
+            app_id: AppId::new(id),
+            underlay_id: UnderlayId::new(id),
         }
     }
 
     /// A forwarder over a real loopback underlay, plus the delivery receiver the
     /// local transport would hold. `app_id` is a distinct key from the underlay's,
     /// as it is in production.
-    async fn forwarder() -> (Forwarder, EndpointId, mpsc::Receiver<Delivered>) {
+    async fn forwarder() -> (Forwarder, AppId, mpsc::Receiver<Delivered>) {
         let loopback: SocketAddr = "127.0.0.1:0".parse().expect("loopback addr");
         let underlay = Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
@@ -910,7 +914,7 @@ mod tests {
             .bind()
             .await
             .expect("bind underlay endpoint");
-        let app_id: EndpointId = SecretKey::from_bytes(&[99; 32]).public();
+        let app_id = AppId::new(SecretKey::from_bytes(&[99; 32]).public());
         let (inbound, received) = mpsc::channel(4);
         (
             Forwarder::new(
@@ -930,7 +934,7 @@ mod tests {
     fn self_hop(forwarder: &Forwarder) -> RouteHop {
         RouteHop {
             app_id: forwarder.self_app_id,
-            underlay_id: forwarder.underlay.id(),
+            underlay_id: UnderlayId::new(forwarder.underlay.id()),
         }
     }
 
@@ -1105,7 +1109,7 @@ mod tests {
             .await
             .expect("the underlay reaches the relay");
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
-        let app_id: EndpointId = app_secret.public();
+        let app_id = AppId::new(app_secret.public());
         let (inbound, received) = mpsc::channel(8);
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
@@ -1123,7 +1127,7 @@ mod tests {
             .spawn();
         let hop = RouteHop {
             app_id,
-            underlay_id: underlay.id(),
+            underlay_id: UnderlayId::new(underlay.id()),
         };
         RelayNode {
             forwarder,
@@ -1246,8 +1250,8 @@ mod tests {
                 Vec::new(),
             ));
         RouteHop {
-            app_id: app.public(),
-            underlay_id: named,
+            app_id: AppId::new(app.public()),
+            underlay_id: UnderlayId::new(named),
         }
     }
 
@@ -1268,7 +1272,7 @@ mod tests {
         let hop = stranger(122);
         assert_eq!(
             forwarder.dial_addr(&hop),
-            EndpointAddr::new(hop.underlay_id),
+            EndpointAddr::new(hop.underlay_id.get()),
             "no address is made up"
         );
         assert_eq!(forwarder.unresolved_hops(), 1);
@@ -1322,7 +1326,7 @@ mod tests {
         // Past the ceiling the rule is one line in 256.
         for seed in 0..u8::try_from(UNRESOLVED_SEEN_CAP).expect("fits") {
             let id = SecretKey::from_bytes(&[seed.wrapping_add(1); 32]).public();
-            forwarder.first_without_vector(id, 4);
+            forwarder.first_without_vector(UnderlayId::new(id), 4);
         }
         let beyond = stranger(200).underlay_id;
         assert!(
@@ -1406,7 +1410,7 @@ mod tests {
         }
         let underlay = builder.bind().await.expect("bind a loopback underlay");
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
-        let app_id: EndpointId = app_secret.public();
+        let app_id = AppId::new(app_secret.public());
         let (inbound, received) = mpsc::channel(8);
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
@@ -1424,7 +1428,7 @@ mod tests {
             .spawn();
         let hop = RouteHop {
             app_id,
-            underlay_id: underlay.id(),
+            underlay_id: UnderlayId::new(underlay.id()),
         };
         RelayNode {
             forwarder,
@@ -1638,7 +1642,7 @@ mod tests {
         let source = stranger(1);
         for seed in 0..u8::try_from(MAX_WRITERS + 8).expect("fits") {
             let next = stranger(seed.wrapping_add(100));
-            if next.underlay_id == forwarder.underlay.id() {
+            if next.underlay_id == UnderlayId::new(forwarder.underlay.id()) {
                 continue;
             }
             forwarder.enqueue(&next, cell(vec![next.clone()], 0, source.clone()));

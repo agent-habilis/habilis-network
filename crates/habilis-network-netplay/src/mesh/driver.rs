@@ -7,7 +7,7 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
 use habilis_network::protocol::{
-    AppFrameParams, AppTag, Message as WireMessage, MessageBody, Nickname,
+    AppFrameParams, AppTag, AuthorKey, Message as WireMessage, MessageBody, Nickname,
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,7 @@ pub enum Outbound {
     /// A rollback packet for one peer, addressed by public key.
     Rollback {
         /// The recipient's public key.
-        to: String,
+        to: AuthorKey,
         /// Pre-serialized packet.
         payload: String,
     },
@@ -46,17 +46,17 @@ pub enum Outbound {
 /// one handle and each transport another.
 pub(crate) struct Mailboxes<T: Config> {
     /// Decoded rollback packets, tagged with the sender's public key.
-    pub(crate) inbound: Mutex<VecDeque<(String, Message<T::Input>)>>,
+    pub(crate) inbound: Mutex<VecDeque<(AuthorKey, Message<T::Input>)>>,
     /// Raw lobby packets, tagged with the sender's public key.
-    pub(crate) lobby: Mutex<Vec<(String, String)>>,
+    pub(crate) lobby: Mutex<Vec<(AuthorKey, String)>>,
     /// This peer's own public key, known only once the event loop starts.
-    pub(crate) local_pubkey: Mutex<Option<String>>,
+    pub(crate) local_pubkey: Mutex<Option<AuthorKey>>,
     /// public key -> nickname, learned from inbound frames.
     ///
     /// Needed because `send_app` addresses by `Nickname` while inputs are
     /// filed by public key — the protocol treats nicknames as cosmetic and
     /// explicitly non-unique, so they cannot be the identity.
-    pub(crate) directory: Mutex<HashMap<String, Nickname>>,
+    pub(crate) directory: Mutex<HashMap<AuthorKey, Nickname>>,
 }
 
 impl<T: Config> std::fmt::Debug for Mailboxes<T> {
@@ -141,13 +141,17 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
         let Some(tag) = frame.message.kind.app_tag().map(AppTag::as_str) else {
             return false;
         };
-        let pubkey = frame.message.pubkey.clone();
+        // A frame that reached the app passed the signature gate, so it has a
+        // key. One without it could be addressed to nobody.
+        let Some(pubkey) = frame.message.author_key() else {
+            return false;
+        };
 
         // Learn the pubkey -> nickname pairing from any frame. The signed
         // pubkey is the identity; the nickname is only how `send_app`
         // addresses it.
         if let Ok(mut directory) = self.mailboxes.directory.lock() {
-            directory.insert(pubkey.clone(), frame.message.author.clone());
+            directory.insert(pubkey, frame.message.author.clone());
         }
 
         match tag {
@@ -181,7 +185,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
     /// it to the frame loop, which needs it to build a [`super::Lobby`].
     async fn on_startup(&mut self, _state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         if let Ok(mut slot) = self.mailboxes.local_pubkey.lock() {
-            *slot = Some(ctx.our_pubkey.to_string());
+            *slot = Some(ctx.our_pubkey);
         }
     }
 

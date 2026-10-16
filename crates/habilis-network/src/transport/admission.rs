@@ -75,8 +75,8 @@ use crate::util::tuning;
 /// Without a wait the retry tick re-offers every 30s and every refused round
 /// still costs *us* a full candidate-gathering budget before the refusal
 /// arrives. The wait is per peer: the first refusal waits
-/// [`tuning::CAP_REFUSAL_COOLDOWN_SECS`], each further one in a row doubles it up
-/// to [`tuning::CAP_REFUSAL_COOLDOWN_MAX_SECS`], and a success resets it. One
+/// [`tuning::CAP_REFUSAL_COOLDOWN`], each further one in a row doubles it up
+/// to [`tuning::CAP_REFUSAL_COOLDOWN_MAX`], and a success resets it. One
 /// rule serves both kinds of peer: the rendezvous frees a slot soon after, so
 /// the first short wait finds it, while a member whose sessions are all busy
 /// gossip links does not, and the wait grows to a size that makes the cost of a
@@ -98,8 +98,8 @@ struct Backoff {
 
 impl RefusalBackoff {
     fn note(&mut self, peer: EndpointId, now: Instant) {
-        let first = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_SECS);
-        let max = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_MAX_SECS);
+        let first = tuning::CAP_REFUSAL_COOLDOWN;
+        let max = tuning::CAP_REFUSAL_COOLDOWN_MAX;
         // Entries whose wait ended more than a longest wait ago are forgotten, so
         // that the map stays bounded by the peers refused lately.
         self.by_peer
@@ -144,7 +144,7 @@ impl RefusalBackoff {
     /// not older than the longest wait) is a refusal like the cap and waits as one.
     #[cfg(any(feature = "multihop", test))]
     fn note_stranger(&mut self, peer: EndpointId, now: Instant) -> bool {
-        let max = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_MAX_SECS);
+        let max = tuning::CAP_REFUSAL_COOLDOWN_MAX;
         self.strangers
             .retain(|_, at| now.saturating_duration_since(*at) < max);
         if self.strangers.insert(peer, now).is_none() {
@@ -926,10 +926,7 @@ impl SignalAdmission {
         let victims = inner.take_victims(&evictions);
         if !inner.sampler_running {
             inner.sampler_running = true;
-            spawn_sampler(
-                Arc::downgrade(&self.inner),
-                Duration::from_secs(tuning::SLOT_SWEEP_SECS),
-            );
+            spawn_sampler(Arc::downgrade(&self.inner), tuning::SLOT_SWEEP);
         }
         drop(inner);
         if conn.alpn() == super::UNICAST_ALPN {
@@ -1649,7 +1646,7 @@ mod tests {
         drop(admission.try_admit(peer(1), &hub).expect("room"));
         hub.attach(peer(1));
         admission.note_success(peer(1));
-        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let window = tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
         let mut inner = admission.lock();
@@ -1680,7 +1677,7 @@ mod tests {
         drop(admission.try_admit(peer(1), &hub).expect("room"));
         hub.attach(peer(1));
         admission.note_success(peer(1));
-        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let window = tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
         let mut inner = admission.lock();
@@ -1704,7 +1701,7 @@ mod tests {
         let _guard = admission.try_admit(peer(1), &hub).expect("room");
         hub.attach(peer(1));
         admission.note_success(peer(1));
-        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let window = tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
         let mut inner = admission.lock();
@@ -1718,7 +1715,7 @@ mod tests {
         let admission = SignalAdmission::new(4);
         let hub = FakeHub::default();
         drop(admission.try_admit(peer(1), &hub).expect("room"));
-        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let window = tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
         let mut inner = admission.lock();
@@ -1733,14 +1730,11 @@ mod tests {
         let mut backoff = RefusalBackoff::default();
         let bob = peer(1);
         let start = Instant::now();
-        let first = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_SECS);
-        let longest = Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_MAX_SECS);
+        let first = tuning::CAP_REFUSAL_COOLDOWN;
+        let longest = tuning::CAP_REFUSAL_COOLDOWN_MAX;
 
         backoff.note(bob, start);
-        assert!(backoff.on_cooldown(
-            &bob,
-            start + Duration::from_secs(tuning::CAP_REFUSAL_COOLDOWN_SECS - 1)
-        ));
+        assert!(backoff.on_cooldown(&bob, start + first.saturating_sub(Duration::from_secs(1))));
         assert!(!backoff.on_cooldown(&bob, start + first));
 
         let mut now = start + first;
@@ -1831,7 +1825,7 @@ mod tests {
             .connect(relayed, iroh_gossip::net::GOSSIP_ALPN)
             .await
             .expect("dial over the relay");
-        let window = Duration::from_secs(tuning::DIRECT_IDLE_BACKSTOP_SECS);
+        let window = tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
         assert!(admission.lock().take_idle(start, window).is_empty());

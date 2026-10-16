@@ -17,11 +17,11 @@
 //! are usable in both directions, which the bidirectional link-state graph
 //! already models.
 
-use iroh::EndpointId;
 use iroh_base::CustomAddr;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::MULTIHOP_TRANSPORT_ID;
+use crate::role::{AppId, UnderlayId};
 
 /// Longest route this transport will build or relay. Routes come from Dijkstra
 /// over the link-state graph and multihop is a last-resort path, so real ones
@@ -29,13 +29,13 @@ use crate::MULTIHOP_TRANSPORT_ID;
 /// the amplification limit: a cell can be forwarded at most this many times.
 pub(crate) const MAX_ROUTE_HOPS: usize = 8;
 
-/// One hop in a source route: which node it is (its app-layer [`EndpointId`])
+/// One hop in a source route: which node it is (its [`AppId`])
 /// and which multihop **underlay** endpoint carries its cells. Two ids, 64 bytes,
 /// and no address: see the module note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteHop {
-    pub(crate) app_id: EndpointId,
-    pub(crate) underlay_id: EndpointId,
+    pub(crate) app_id: AppId,
+    pub(crate) underlay_id: UnderlayId,
 }
 
 /// A source route: the ordered hops **after** the sender, ending at the
@@ -157,13 +157,15 @@ impl<'de> Deserialize<'de> for Route {
 #[cfg(test)]
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
+    use crate::role::{AppId, UnderlayId};
     use iroh::{EndpointId, SecretKey};
+    use std::fmt::Write as _;
 
     fn hop(seed: u8) -> RouteHop {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
         RouteHop {
-            app_id: id,
-            underlay_id: id,
+            app_id: AppId::new(id),
+            underlay_id: UnderlayId::new(id),
         }
     }
 
@@ -172,6 +174,37 @@ mod tests {
         let route = Route::new(vec![hop(1), hop(2), hop(3)]).unwrap();
         let addr = route.encode();
         assert_eq!(Route::decode(&addr).expect("decodes"), route);
+    }
+
+    /// The route is a wire value: iroh dedupes a peer's path on these bytes, and a second
+    /// build must read what this one writes.
+    #[test]
+    fn a_route_encodes_to_fixed_bytes() {
+        let id = |seed: u8| -> EndpointId { SecretKey::from_bytes(&[seed; 32]).public() };
+        let route = Route::new(vec![
+            RouteHop {
+                app_id: AppId::new(id(1)),
+                underlay_id: UnderlayId::new(id(2)),
+            },
+            RouteHop {
+                app_id: AppId::new(id(3)),
+                underlay_id: UnderlayId::new(id(4)),
+            },
+        ])
+        .unwrap();
+        let mut data = String::new();
+        for byte in route.encode().data() {
+            write!(data, "{byte:02x}").unwrap();
+        }
+        assert_eq!(
+            data,
+            concat!(
+                "028a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+                "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ed",
+                "4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ca93",
+                "ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c"
+            )
+        );
     }
 
     #[test]
