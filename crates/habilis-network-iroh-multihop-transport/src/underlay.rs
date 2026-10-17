@@ -938,6 +938,7 @@ mod tests {
     use crate::test_support::relay_server;
     use crate::topology::{LinkVector, Topology};
     use crate::wire::Cell;
+    use habilis_network_test_tracing::{expect_warn, test};
     use iroh::endpoint::presets;
     use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
     use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
@@ -952,6 +953,12 @@ mod tests {
         }
     }
 
+    /// Closes the endpoint at the end of the test, so that it does not drop open.
+    fn close_at_end(endpoint: &Endpoint) {
+        let endpoint = endpoint.clone();
+        habilis_network_test_tracing::at_end(async move { endpoint.close().await });
+    }
+
     /// A forwarder over a real loopback underlay, plus the delivery receiver the
     /// local transport would hold. `app_id` is a distinct key from the underlay's,
     /// as it is in production.
@@ -964,6 +971,7 @@ mod tests {
             .bind()
             .await
             .expect("bind underlay endpoint");
+        close_at_end(&underlay);
         let app_id = AppId::new(SecretKey::from_bytes(&[99; 32]).public());
         let (inbound, received) = mpsc::channel(4);
         (
@@ -1006,7 +1014,7 @@ mod tests {
             .len()
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_that_ends_at_us_is_delivered_locally() {
         // The happy path the refusals below are measured against.
         let (forwarder, _app, mut received) = forwarder().await;
@@ -1021,7 +1029,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_that_ends_at_us_is_counted_as_delivered() {
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
@@ -1034,8 +1042,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_full_inbox_drops_the_cell_and_counts_it() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"inbox of the local transport is full\"",
+        );
         // The inbox of the fixture holds 4 cells and nothing drains it, as on a transport
         // that is never polled: the fifth and sixth cell are lost, and the counters say so.
         let (forwarder, _app, _received) = forwarder().await;
@@ -1048,15 +1060,23 @@ mod tests {
         assert_eq!((counters.delivered, counters.dropped), (4, 2));
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_packet_that_does_not_fit_the_buffer_is_counted_as_dropped() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop transport dropping packets",
+        );
         let (forwarder, _app, _received) = forwarder().await;
         forwarder.note_oversized(2000, 1500);
         assert_eq!(forwarder.counters().dropped, 1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_naming_another_node_is_neither_delivered_nor_forwarded() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"position does not name this node\"",
+        );
         // The reflector proper: we are nowhere on this route, so relaying it
         // would spend our bandwidth on a stranger's behalf.
         let (forwarder, _app, mut received) = forwarder().await;
@@ -1067,8 +1087,12 @@ mod tests {
         assert_eq!(live_writers(&forwarder), 0, "no writer, no dial, no bytes");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_from_the_wrong_upstream_is_refused() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"cell did not arrive from its preceding hop\"",
+        );
         // A hostile downstream hop bouncing a structurally valid cell back at
         // us. Every hop on this route is real and we genuinely occupy `pos`, so
         // only the authenticated sender id catches it.
@@ -1085,8 +1109,12 @@ mod tests {
         assert_eq!(live_writers(&forwarder), 0);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_positioned_past_the_end_is_not_delivered() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"position past the end of the route\"",
+        );
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
         let subject = cell(vec![self_hop(&forwarder)], 7, source.clone());
@@ -1094,8 +1122,12 @@ mod tests {
         assert!(received.try_recv().is_err());
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_passing_through_us_is_queued_for_the_next_hop() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
         let next = stranger(5);
@@ -1106,8 +1138,12 @@ mod tests {
         assert_eq!(forwarder.forwarded_cells(), 1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_refused_cell_is_not_counted_as_forwarded() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"position does not name this node\"",
+        );
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
         let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
@@ -1155,6 +1191,7 @@ mod tests {
             .bind()
             .await
             .expect("bind a relay-only underlay");
+        close_at_end(&underlay);
         tokio::time::timeout(Duration::from_secs(10), underlay.online())
             .await
             .expect("the underlay reaches the relay");
@@ -1212,7 +1249,7 @@ mod tests {
         false
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_relay_carries_cells_when_the_mesh_lets_it() {
         let (url, _server) = relay_server().await;
         let from = relay_node(1, &url, true).await;
@@ -1223,8 +1260,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_is_not_sent_on_a_relay_selected_path() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop underlay stays on the relay: this hop is not advertised as a link",
+        );
         let (url, _server) = relay_server().await;
         let from = relay_node(3, &url, false).await;
         let mut to = relay_node(4, &url, true).await;
@@ -1238,8 +1279,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_that_arrives_on_a_relay_selected_path_is_dropped() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"cell arrived over the relay\"",
+        );
         let (url, _server) = relay_server().await;
         let from = relay_node(5, &url, true).await;
         let mut to = relay_node(6, &url, false).await;
@@ -1250,8 +1295,12 @@ mod tests {
         assert!(to.forwarder.dropped.load(Ordering::Relaxed) > 0);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_hop_that_stays_on_the_relay_becomes_stuck() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop underlay stays on the relay: this hop is not advertised as a link",
+        );
         let (url, _server) = relay_server().await;
         let from = relay_node(7, &url, false).await;
         let mut to = relay_node(8, &url, true).await;
@@ -1305,7 +1354,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_hop_is_dialed_at_the_address_that_its_vector_signed() {
         let (forwarder, _app, _received) = forwarder().await;
         let underlay_id = SecretKey::from_bytes(&[121; 32]).public();
@@ -1316,8 +1365,12 @@ mod tests {
         assert_eq!(forwarder.unresolved_hops(), 0);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_hop_that_the_topology_does_not_know_is_dialed_by_id_and_counted() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
         let (forwarder, _app, _received) = forwarder().await;
         let hop = stranger(122);
         assert_eq!(
@@ -1353,7 +1406,7 @@ mod tests {
 
     /// A reply goes back along the reversed route of a cell that this node delivered, so its first
     /// hop is the sender, whose link-vector may not have arrived yet: that case is normal.
-    #[tokio::test]
+    #[test]
     async fn a_hop_without_a_vector_is_not_a_warning() {
         let (forwarder, _app, _received) = forwarder().await;
         let sender = stranger(140);
@@ -1371,7 +1424,7 @@ mod tests {
 
     /// A neighbor that this node links to is a hop whose own vector has not arrived yet: the
     /// origin of a route saw it first. This node reaches the neighbor by the link it holds.
-    #[tokio::test]
+    #[test]
     async fn a_hop_without_a_vector_that_is_a_link_of_ours_is_not_a_warning() {
         let (forwarder, _app, _received) = forwarder().await;
         let neighbor = stranger(142);
@@ -1405,7 +1458,7 @@ mod tests {
 
     /// A hop that no delivered cell named, and that has no vector, is not explained by a reply on
     /// a reversed route: it is a warning, once.
-    #[tokio::test]
+    #[test]
     async fn a_hop_without_a_vector_that_no_delivered_cell_named_is_a_warning() {
         let (forwarder, _app, _received) = forwarder().await;
         let warnings = Arc::new(AtomicUsize::new(0));
@@ -1418,7 +1471,7 @@ mod tests {
         forwarder.underlay.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_hop_without_a_vector_is_logged_once_each() {
         let (forwarder, _app, _received) = forwarder().await;
         let (one, other) = (stranger(130).underlay_id, stranger(131).underlay_id);
@@ -1441,8 +1494,12 @@ mod tests {
         assert!(forwarder.first_without_vector(beyond, 256), "one in 256");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_vector_that_names_another_underlay_does_not_resolve_the_hop() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
         // The route says the underlay of this node is `named`; the node signed another.
         // The address of the vector is not the address of the hop.
         let (forwarder, _app, _received) = forwarder().await;
@@ -1454,7 +1511,7 @@ mod tests {
         assert_eq!(forwarder.unresolved_hops(), 1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_pool_wakes_at_the_first_refusal_of_a_hop_and_at_its_recovery() {
         let (hop, app) = (stranger(13).underlay_id, stranger(14).app_id);
         let pool = super::WriterPool::default();
@@ -1478,6 +1535,10 @@ mod tests {
 
     #[test]
     fn a_stuck_hop_is_a_link_again_once_it_is_admitted() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop underlay stays on the relay: this hop is not advertised as a link",
+        );
         let (hop, app) = (stranger(11).underlay_id, stranger(12).app_id);
         let pool = super::WriterPool::default();
         pool.track(hop, app);
@@ -1514,6 +1575,7 @@ mod tests {
             builder = builder.path_selector(selector);
         }
         let underlay = builder.bind().await.expect("bind a loopback underlay");
+        close_at_end(&underlay);
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
         let app_id = AppId::new(app_secret.public());
         let (inbound, received) = mpsc::channel(8);
@@ -1664,7 +1726,7 @@ mod tests {
         assert!(!blocked_by_test(local, &webrtc(cut)), "cleared");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_arrives_when_the_accepting_end_selected_no_path() {
         // The dialling end sends on a selected IP path. The accepting end opened no
         // path of its own and selects none, but its connection has the IP path open.
@@ -1683,7 +1745,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_writer_retires_when_its_connection_closes_under_it() {
         // A direct hop, then the far underlay goes away while no cell is in
         // flight. The writer must see the close: a dead connection read as one
@@ -1712,8 +1774,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_writer_retires_itself_and_releases_its_bytes_when_it_gives_up() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
         // The unpruned-map leak: every next-hop id a peer ever names used to
         // leave an entry behind, and its queued bytes charged, for the life of
         // the process. The hop here is unreachable, so the writer gives up after
@@ -1739,8 +1805,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn writer_spawns_stop_at_the_ceiling() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"next-hop writer ceiling reached\"",
+        );
         // Each cell names a fresh next hop, which is how a remote peer turns an
         // unpruned writer map into unbounded tasks and dials.
         let (forwarder, _app, _received) = forwarder().await;

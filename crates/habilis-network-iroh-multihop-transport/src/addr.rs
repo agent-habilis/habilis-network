@@ -158,6 +158,7 @@ impl<'de> Deserialize<'de> for Route {
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
     use crate::role::{AppId, UnderlayId};
+    use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
     use std::fmt::Write as _;
 

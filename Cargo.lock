@@ -1849,6 +1849,7 @@ dependencies = [
  "bytes",
  "habilis-network-iroh-transport-util",
  "habilis-network-iroh-webrtc-transport",
+ "habilis-network-test-tracing",
  "iroh",
  "iroh-base",
  "iroh-relay",

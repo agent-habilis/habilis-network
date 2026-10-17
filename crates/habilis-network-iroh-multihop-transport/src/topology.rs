@@ -398,6 +398,7 @@ pub struct TopologyEdge {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::{expect_warn, test};
     use n0_future::time::{Duration, Instant};
 
     use super::{Leg, LinkVector, Topology};
@@ -575,6 +576,10 @@ mod tests {
 
     #[test]
     fn a_vector_older_than_the_max_age_is_refused() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::topology",
+            "link-state refused: the sender's clock is behind ours",
+        );
         // The replay a member with old vectors can try after a restart, or
         // against a late joiner.
         let (na, nb) = (eid(1), eid(2));

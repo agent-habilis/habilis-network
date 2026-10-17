@@ -256,6 +256,7 @@ impl PartialOrd for HeapEntry {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use iroh::SecretKey;
 
     use crate::role::AppId;
