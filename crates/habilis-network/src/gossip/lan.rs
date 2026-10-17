@@ -332,6 +332,8 @@ mod tests {
             state.next_rival_recheck.is_some_and(|next| next < far),
             "the re-check came back from an hour out"
         );
+        node.stop_gossip().await;
+        node.endpoint.close().await;
     }
 
     #[cfg(feature = "host")]
@@ -352,6 +354,8 @@ mod tests {
         super::on_lan_event(LanEvent::Seen(addr), &mut state, &ctx).await;
 
         assert_eq!(state.next_rival_recheck, Some(far));
+        node.stop_gossip().await;
+        node.endpoint.close().await;
     }
 
     #[test]
