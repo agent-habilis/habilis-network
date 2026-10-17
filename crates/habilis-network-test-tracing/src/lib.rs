@@ -5,22 +5,23 @@
 //! The guard must be the first local of the test, so that it drops last and
 //! sees the events of every value that the test drops before it.
 //!
-//! The guards of one binary do not overlap: a guard waits until the thread of
-//! the test that held the lock before it has ended, so every event belongs to
-//! exactly one test. An event that arrives between the drop of a guard and the
-//! end of its thread, for example when a runtime drops its endpoints after the
-//! test body, fails the next test with the name of the test that ended.
+//! Tests run side by side. An event belongs to the test whose thread logs it,
+//! or whose runtime logs it: the worker threads of a runtime that [`run`] or
+//! [`run_multi_thread`] build carry the name of their test. They replace
+//! `#[tokio::test]`, and they drop the runtime before the guard, so the events
+//! of the endpoints that the runtime drops belong to the test too. An event of
+//! a thread that no test owns is filed under every live test, and the failure
+//! text names them all.
 //!
-//! A test that runs on a runtime uses [`run`] or [`run_multi_thread`] instead of
-//! `#[tokio::test]`. They drop the runtime before the guard, so the events of
-//! the endpoints that the runtime drops belong to the test. A binary that logs
-//! an event after its last guard has nobody to fail, so it exits with 101.
+//! An event of the worker of a test that ended, or an event that comes while no
+//! test is live, is kept and fails the next guard with the name of the test that
+//! ended. A binary that logs such an event after its last guard has nobody to
+//! fail, so it exits with 101.
 //!
 //! A panic inside the subscriber does not fail a test when a spawned task logs
 //! the event, so the subscriber records the event and [`Guard`] panics on the
 //! test thread when it drops.
 
-use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -37,16 +38,14 @@ use tracing_subscriber::{Layer, fmt as tracing_fmt};
 
 static INSTALLED: OnceLock<Mode> = OnceLock::new();
 static LIVE: Mutex<Vec<Arc<Slot>>> = Mutex::new(Vec::new());
-static SERIAL: Mutex<()> = Mutex::new(());
 static LATE: Mutex<Late> = Mutex::new(Late {
     ended: None,
     events: Vec::new(),
 });
 static CAPTURED: Mutex<String> = Mutex::new(String::new());
 
-thread_local! {
-    static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
-}
+/// The end of the name of a thread that a runtime of this crate starts for a test.
+const WORKER: &str = "/worker";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -70,7 +69,7 @@ enum Mode {
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init() -> Guard {
     install(Mode::Stderr, "", io::stderr);
-    new_guard(true)
+    new_guard()
 }
 
 /// Like [`init`], but the events go to a buffer that [`captured_logs`] returns,
@@ -84,7 +83,7 @@ pub fn init() -> Guard {
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init_capturing(default_directives: &str) -> Guard {
     install(Mode::Capture, default_directives, Capture);
-    new_guard(true)
+    new_guard()
 }
 
 /// Like [`init_capturing`], but the events go to `writer`, for a test that
@@ -100,7 +99,7 @@ where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
     install(Mode::Writer, default_directives, writer);
-    new_guard(true)
+    new_guard()
 }
 
 /// The log text that [`init_capturing`] collected, for the whole binary. Empty
@@ -144,6 +143,7 @@ pub fn saw_warn(target: &str, text: &str) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
     let runtime = tokio::runtime::Builder::new_current_thread()
+        .thread_name(worker_name())
         .enable_all()
         .build()
         .expect("runtime");
@@ -163,6 +163,7 @@ pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
 pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: F) -> F::Output {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
+        .thread_name(worker_name())
         .enable_all()
         .build()
         .expect("runtime");
@@ -170,6 +171,12 @@ pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: 
     drop(runtime);
     drop(guard);
     output
+}
+
+/// The name of the threads of a runtime that a test starts: its own name and `WORKER`.
+#[cfg(not(target_arch = "wasm32"))]
+fn worker_name() -> String {
+    format!("{}{WORKER}", thread::current().name().unwrap_or_default())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -221,29 +228,13 @@ where
     );
 }
 
-/// The guard of a sync test, for the `test` attribute: it holds no lock, so the sync tests of a
-/// binary run side by side. Not for direct use.
-#[doc(hidden)]
-#[must_use]
-pub fn __sync_guard() -> Guard {
-    install(Mode::Stderr, "", io::stderr);
-    new_guard(false)
-}
-
-fn new_guard(serial: bool) -> Guard {
+fn new_guard() -> Guard {
     let thread = thread::current().name().unwrap_or_default().to_owned();
     assert!(
         thread.is_empty() || !lock(&LIVE).iter().any(|slot| slot.thread == thread),
-        "init() twice in one test (thread {thread}): the second guard would wait for the first for ever"
+        "init() twice in one test (thread {thread}): a test has one guard"
     );
-    let serial = serial.then(|| {
-        HELD.try_with(|held| held.borrow_mut().take())
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| lock(&SERIAL))
-    });
     let slot = Arc::new(Slot {
-        serial: serial.is_some(),
         thread,
         events: Mutex::new(Vec::new()),
         expected: Mutex::new(Vec::new()),
@@ -251,7 +242,7 @@ fn new_guard(serial: bool) -> Guard {
     let mut live = lock(&LIVE);
     lock(&slot.events).append(&mut lock(&LATE).events);
     live.push(Arc::clone(&slot));
-    Guard { slot, serial }
+    Guard { slot }
 }
 
 struct Capture;
@@ -282,7 +273,6 @@ impl io::Write for CaptureWriter {
 #[derive(Debug)]
 pub struct Guard {
     slot: Arc<Slot>,
-    serial: Option<MutexGuard<'static, ()>>,
 }
 
 impl Guard {
@@ -305,11 +295,6 @@ impl Drop for Guard {
             live.retain(|slot| !Arc::ptr_eq(slot, &self.slot));
             lock(&LATE).ended = Some(self.slot.thread.clone());
         }
-        if let Some(serial) = self.serial.take() {
-            // The lock stays until the thread of the test ends, so the
-            // runtime that the test drops after its body still logs to this test.
-            let _ = HELD.try_with(|held| *held.borrow_mut() = Some(serial));
-        }
         if thread::panicking() {
             return;
         }
@@ -324,8 +309,6 @@ impl Drop for Guard {
 
 #[derive(Debug)]
 struct Slot {
-    /// Whether the guard holds the lock of the binary, which an async test does.
-    serial: bool,
     thread: String,
     events: Mutex<Vec<Logged>>,
     expected: Mutex<Vec<Expectation>>,
@@ -418,10 +401,10 @@ struct Late {
     events: Vec<Logged>,
 }
 
-/// A thread that is the thread of a live test files the event under that test.
-/// Any other thread (a runtime worker, a thread of iroh) files it under the test
-/// that holds the lock of the binary, or, when no test holds it, under every
-/// live sync test, because the layer cannot tell which test the thread works for.
+/// An event of the thread of a live test, or of a worker of its runtime, is filed
+/// under that test. An event of a worker of a test that ended is kept as late.
+/// Any other thread (a thread of iroh) is filed under every live test, because
+/// the layer cannot tell which test the thread works for.
 struct Catch;
 
 impl<S: Subscriber> Layer<S> for Catch {
@@ -430,8 +413,9 @@ impl<S: Subscriber> Layer<S> for Catch {
         event.record(&mut fields);
         let current = thread::current();
         let thread = current.name().unwrap_or("unnamed");
+        let test = thread.strip_suffix(WORKER).unwrap_or(thread);
         let live = lock(&LIVE);
-        let own: Vec<_> = live.iter().filter(|slot| slot.thread == thread).collect();
+        let own: Vec<_> = live.iter().filter(|slot| slot.thread == test).collect();
         let shared = own.is_empty();
         let logged = || Logged {
             level: *event.metadata().level(),
@@ -442,9 +426,15 @@ impl<S: Subscriber> Layer<S> for Catch {
             shared_with: Vec::new(),
             after: None,
         };
-        if live.is_empty() {
+        let ended_worker = shared && test != thread;
+        if live.is_empty() || ended_worker {
             let mut late = lock(&LATE);
-            if let Some(ended) = late.ended.clone() {
+            let ended = if ended_worker {
+                Some(test.to_owned())
+            } else {
+                late.ended.clone()
+            };
+            if let Some(ended) = ended {
                 late.events.push(Logged {
                     after: Some(ended),
                     ..logged()
@@ -458,19 +448,13 @@ impl<S: Subscriber> Layer<S> for Catch {
             }
             return;
         }
-        let holders: Vec<_> = live.iter().filter(|slot| slot.serial).collect();
-        let owners = if holders.is_empty() {
-            live.iter().collect()
-        } else {
-            holders
-        };
-        let mut shared_with = if owners.len() > 1 {
-            owners.iter().map(|slot| slot.thread.clone()).collect()
+        let mut shared_with: Vec<String> = if live.len() > 1 {
+            live.iter().map(|slot| slot.thread.clone()).collect()
         } else {
             Vec::new()
         };
         shared_with.sort();
-        for slot in owners {
+        for slot in live.iter() {
             lock(&slot.events).push(Logged {
                 shared_with: shared_with.clone(),
                 ..logged()

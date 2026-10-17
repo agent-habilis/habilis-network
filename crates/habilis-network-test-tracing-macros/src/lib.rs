@@ -76,7 +76,7 @@ fn expand(
         ));
     } else {
         quote!({
-            let _guard = ::habilis_network_test_tracing::__sync_guard();
+            let _guard = ::habilis_network_test_tracing::init();
             #block
         })
     };

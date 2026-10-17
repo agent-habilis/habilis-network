@@ -1,11 +1,11 @@
-//! An event of a non-test thread goes to every live sync test when no guard holds
-//! the lock, and the failure text names them all.
+//! An event of a thread that no test owns goes to every live test, and the failure
+//! text names them all.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use habilis_network_test_tracing::__sync_guard;
+use habilis_network_test_tracing::init;
 
 fn named<T: Send + 'static>(
     name: &str,
@@ -27,7 +27,7 @@ fn an_event_of_a_worker_thread_names_every_live_sync_test() {
             let (live, emitted) = (Arc::clone(&live), Arc::clone(&emitted));
             named(name, move || {
                 catch_unwind(AssertUnwindSafe(|| {
-                    let _guard = __sync_guard();
+                    let _guard = init();
                     live.wait();
                     emitted.wait();
                 }))

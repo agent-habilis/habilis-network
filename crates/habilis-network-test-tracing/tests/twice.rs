@@ -1,5 +1,5 @@
-//! A second live guard on one thread would wait for the lock of the first for
-//! ever, so it panics and says why.
+//! A second live guard on one thread would count every event twice, so it panics
+//! and says why.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc;
@@ -9,7 +9,7 @@ use std::time::Duration;
 use habilis_network_test_tracing::init;
 
 #[test]
-fn a_second_live_guard_on_one_thread_panics_instead_of_waiting() {
+fn a_second_live_guard_on_one_thread_panics() {
     let (done, wait) = mpsc::channel();
     thread::Builder::new()
         .name("twice_probe".to_owned())
@@ -27,7 +27,7 @@ fn a_second_live_guard_on_one_thread_panics_instead_of_waiting() {
         .expect("spawn");
     let text = wait
         .recv_timeout(Duration::from_secs(5))
-        .expect("the second init waits for ever")
+        .expect("the second init never returns")
         .expect("the second init must panic");
     assert!(text.contains("init() twice in one test"), "{text}");
 }
