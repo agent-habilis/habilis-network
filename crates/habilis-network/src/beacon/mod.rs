@@ -1626,6 +1626,7 @@ mod tests {
         TopicId, claim, ensure, foreign_sessions, holder_entry, oneshot, probe_verdict, releasable,
         rendezvous_addr, spawn_rival_probe, verdict_of, watch,
     };
+    use habilis_network_test_tracing::test;
 
     /// Two ports of a ladder: the first is taken by `held` (a socket that says nothing, or another
     /// mesh's beacon), the second is free.
@@ -1643,7 +1644,7 @@ mod tests {
     /// A rung that says nothing is not a rung that is not ours: a host too loaded to answer reads
     /// the same, and a bind cannot be taken back. One walk binds nothing on a silence, and costs
     /// one attempt, not three: the owner of a silent rung held the caller's task for 3.5 s.
-    #[tokio::test]
+    #[test]
     async fn one_walk_that_meets_a_silent_rung_binds_nothing_and_costs_one_attempt() {
         let (silent, ports) = ladder_of_two();
         let mut params = public_params();
@@ -1674,7 +1675,7 @@ mod tests {
 
     /// A rung that answers as another mesh's beacon is foreign for certain, and the walk binds the
     /// next rung at once: it does not wait to be told twice.
-    #[tokio::test]
+    #[test]
     async fn a_walk_that_meets_another_meshs_beacon_binds_the_next_rung_at_once() {
         let (squat, ports) = ladder_of_two();
         let first = ports[0];
@@ -1734,7 +1735,7 @@ mod tests {
     /// the handshake, and a port that nobody answers on says nothing. The fourth, a refusal, has
     /// its own tests in `lookup`. The mapping is read from the error types of iroh, so this test
     /// is what proves it on a real handshake.
-    #[tokio::test]
+    #[test]
     async fn a_probe_tells_ours_from_foreign_from_no_answer() {
         use super::{EndpointAddr, EndpointId, Ipv4Addr, SocketAddr};
         use crate::lookup::{ProbeAnswer, probe_answer};
@@ -1805,7 +1806,7 @@ mod tests {
     /// A rung that stays silent is bound at the walk after it has been silent for the whole
     /// reclaim window, and not before: the host that answers late is given the window, a rung
     /// that nobody serves is not kept for ever.
-    #[tokio::test]
+    #[test]
     async fn a_rung_that_stays_silent_for_the_whole_window_is_bound_at_a_later_walk() {
         use super::{Held, RungWatch, walk_ladder};
         use crate::util::tuning::RECLAIM_WINDOW;
@@ -1887,7 +1888,7 @@ mod tests {
     /// Two silent rungs, and a free one after them: both are asked at once, both are passed when
     /// they have been silent for the window, and the free one is bound. A walk that asked one
     /// rung at a time would take two windows, and eight silent rungs eight.
-    #[tokio::test]
+    #[test]
     async fn two_silent_rungs_are_asked_at_once_and_passed_and_the_free_one_after_them_is_bound() {
         use super::{Held, RungWatch, walk_ladder};
         use crate::util::tuning::RECLAIM_WINDOW;
@@ -1995,7 +1996,7 @@ mod tests {
     /// it must not end the wait for the probe that replaced it: the loop would walk on an answer
     /// that is older than the ask it waits for.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    #[tokio::test]
+    #[test]
     async fn the_late_report_of_a_probe_that_was_given_up_does_not_stop_its_replacement() {
         use super::{RungRead, RungWatch};
 
@@ -2040,7 +2041,7 @@ mod tests {
     /// A report that comes after the report of a newer probe of the same rung says nothing new, and
     /// it must not make the reading fresh again.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    #[tokio::test]
+    #[test]
     async fn an_old_report_does_not_make_a_newer_reading_fresh_again() {
         use super::RungWatch;
 
@@ -2077,7 +2078,7 @@ mod tests {
     /// given up must not bring an answer back from before the bind, after the probe that replaced
     /// it has reported and the bind has cleared its reading.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    #[tokio::test]
+    #[test]
     async fn a_late_report_of_a_probe_that_was_given_up_does_not_come_back_after_a_bind() {
         use super::{RungRead, RungWatch};
 
@@ -2135,7 +2136,7 @@ mod tests {
     /// holder, whatever its next probe would say, and a rung that answered as foreign is passed
     /// at once. This is the fact that the lower-rung check of a holder leaves for the walk after
     /// its shed.
-    #[tokio::test]
+    #[test]
     async fn a_fresh_reading_in_the_map_is_read_without_asking_again() {
         use super::{Held, RungReport, RungWatch, walk_ladder};
         use crate::lookup::ProbeAnswer;
@@ -2208,7 +2209,7 @@ mod tests {
     /// Every rung of the ladder is held by another process: the walk says so, and does not stay
     /// "idle" as it does while a probe is out. A member that cannot serve the rendezvous and
     /// cannot reach one is in a state that the loop must be able to report.
-    #[tokio::test]
+    #[test]
     async fn a_walk_that_reads_every_rung_as_taken_says_so() {
         use super::{Held, RungReport, RungWatch, walk_ladder};
         use crate::lookup::ProbeAnswer;
@@ -2260,7 +2261,7 @@ mod tests {
     /// The walk of a claim tick does not wait for a rung that does not answer. The caller is the
     /// event loop, and a silent rung held it for a second at every tick (three and a half
     /// before the walk made one attempt): the members that hold no beacon, all of them, paid it.
-    #[tokio::test]
+    #[test]
     async fn the_walk_of_a_claim_tick_returns_at_once_on_a_rung_that_says_nothing() {
         use super::{Held, RungWatch, walk_ladder};
 
@@ -2301,7 +2302,7 @@ mod tests {
 
     /// A free rung is claimed, and a taken rung of our own mesh is read as a holder that is not us.
     /// The second answer used to be `false`, the same as "nothing happened".
-    #[tokio::test]
+    #[test]
     async fn a_walk_that_reads_a_holder_of_our_mesh_says_so() {
         use super::{Held, ensure_holder};
 
@@ -2474,7 +2475,7 @@ mod tests {
     /// sent a close frame nobody will acknowledge, so iroh's close waits out
     /// the QUIC drain (about 3s) before it finishes. A budget shorter than that
     /// abandoned the endpoint half-closed, and its drop logged the error.
-    #[tokio::test]
+    #[test]
     async fn abort_and_close_waits_out_a_probe_mid_handshake() {
         // Bound and never read: the handshake's packets vanish without an
         // answer, as they do into a relay rung nobody serves.
@@ -2501,7 +2502,7 @@ mod tests {
     /// and its task was already closing the endpoint when the departure came.
     /// Aborting the task there cut that close short, and a second `close()`
     /// returns at once while one is in flight, so nothing finished it.
-    #[tokio::test]
+    #[test]
     async fn abort_and_close_lets_a_probe_finish_closing_its_own_endpoint() {
         let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .expect("a silent loopback socket");
@@ -2572,7 +2573,7 @@ mod tests {
     /// rung of the ladder. A member that dials the bare id has only that registered address to use:
     /// on a public mesh it is the relay rung, and a lane peer with its IP transports cleared finds
     /// nothing else.
-    #[tokio::test]
+    #[test]
     async fn a_claim_keeps_the_rungs_the_mesh_registered_for_the_rendezvous() {
         let sockets: Vec<_> = (0..2)
             .map(|_| {
@@ -2616,7 +2617,7 @@ mod tests {
     /// A member that knows a holder does not walk the ladder, and its book names the rung of the
     /// holder that it read last. When the holder moves to another rung, the member reads the
     /// ladder again without claiming, and the book names the new rung.
-    #[tokio::test]
+    #[test]
     async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
         let sockets: Vec<_> = (0..2)
             .map(|_| {
@@ -2798,7 +2799,7 @@ mod tests {
         // covered end-to-end by `a_probe_whose_task_dies_frees_the_slot_too`.
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_verdict_is_delivered_once_and_frees_the_slot() {
         let (tx, rx) = oneshot::channel();
         let (probe, endpoint) = probe_for(rx).await;
@@ -2812,7 +2813,7 @@ mod tests {
         endpoint.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn an_unanswerable_probe_reads_held_not_free() {
         // Relay disabled, no ladder, and no mDNS/DHT on the mesh: the probe
         // has no dialable address (`nothing_to_name_is_none_not_a_bare_id`
@@ -2833,7 +2834,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_probe_whose_task_dies_frees_the_slot_too() {
         let (tx, rx) = oneshot::channel::<bool>();
         let (probe, endpoint) = probe_for(rx).await;
@@ -2848,7 +2849,7 @@ mod tests {
         endpoint.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn no_probe_means_the_arm_never_fires() {
         let mut slot: Option<RivalProbe> = None;
         let pending = tokio::time::timeout(
@@ -2859,7 +2860,7 @@ mod tests {
         assert!(pending.is_err(), "an empty slot pends instead of firing");
     }
 
-    #[tokio::test]
+    #[test]
     async fn shedding_a_beacon_closes_its_endpoint() {
         let endpoint = loopback_endpoint().await;
         let beacon = dead_beacon(endpoint.clone()).await;
@@ -2870,7 +2871,7 @@ mod tests {
         assert!(endpoint.is_closed(), "`shed` must close, not just abort");
     }
 
-    #[tokio::test]
+    #[test]
     async fn shed_then_resolves_when_the_endpoint_is_closed() {
         let endpoint = loopback_endpoint().await;
         let beacon = dead_beacon(endpoint.clone()).await;
@@ -2885,7 +2886,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn shed_and_wait_closes_before_it_returns() {
         let endpoint = loopback_endpoint().await;
         let beacon = dead_beacon(endpoint.clone()).await;
@@ -2900,7 +2901,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn clearing_a_dead_beacon_closes_its_endpoint() {
         // Regression: this slot used to be cleared with `*current = None`.
         // The co-host task ending says nothing about the endpoint, so the
@@ -2920,7 +2921,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_live_beacon_keeps_the_slot_and_its_endpoint() {
         let endpoint = loopback_endpoint().await;
         let mut slot = Some(Rendezvous {
@@ -2944,7 +2945,7 @@ mod tests {
     /// side then lists the other as a neighbor, and the rendezvous forwards
     /// nothing to its own peer. Here the peer never dials, so any link can
     /// only be the rendezvous dialing it.
-    #[tokio::test]
+    #[test]
     async fn a_rendezvous_does_not_dial_its_own_peer() {
         use futures_util::StreamExt as _;
         use iroh_gossip::api::Event;
@@ -3006,7 +3007,7 @@ mod tests {
     /// lookup to find, yet the holder's own peer is the one that must dial it
     /// (the rendezvous never dials its peer). With every lookup off, only the
     /// address the claim hands the peer lets the holder's re-graft reach it.
-    #[tokio::test]
+    #[test]
     async fn a_holder_reaches_its_own_public_rendezvous_without_lookups() {
         use futures_util::StreamExt as _;
         use iroh_gossip::api::Event;
@@ -3063,7 +3064,7 @@ mod tests {
 
     /// The holder learns who links to its beacon. The re-check of a holder that knows no member
     /// is an hour or two out, and a member that arrives is the sign that it must look sooner.
-    #[tokio::test]
+    #[test]
     async fn a_member_that_links_to_the_beacon_is_reported_to_its_holder() {
         use futures_util::StreamExt as _;
         use iroh_gossip::api::Event;
@@ -3129,7 +3130,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn ensure_starts_the_probe_instead_of_waiting_for_it() {
         // The invariant the departure bug came down to: `ensure` runs on the
         // sole event loop, so it must not block on the probe. It used to,

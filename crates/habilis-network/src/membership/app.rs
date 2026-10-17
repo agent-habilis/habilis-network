@@ -1091,6 +1091,7 @@ mod tests {
     use super::*;
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, RelayLadder};
     use crate::runtime::derive_topic_mesh_config;
+    use habilis_network_test_tracing::test;
 
     /// The longest nickname there is: 32 four-byte scalars.
     fn widest_nick(seed: char) -> Nickname {

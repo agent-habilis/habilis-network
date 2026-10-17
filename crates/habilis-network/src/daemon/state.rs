@@ -2205,6 +2205,7 @@ mod tests {
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::protocol::{AuthorKey, ContentHash, UnixSecs};
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
+    use habilis_network_test_tracing::test;
 
     fn lower_and_higher() -> (EndpointId, EndpointId) {
         let first = endpoint_id(1);

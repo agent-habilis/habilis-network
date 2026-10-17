@@ -65,6 +65,7 @@ pub(crate) struct Redials {
 mod tests {
     use super::*;
     use crate::testing::endpoint_id;
+    use habilis_network_test_tracing::test;
 
     fn after(start: Instant, secs: u64) -> Instant {
         start + Duration::from_secs(secs)

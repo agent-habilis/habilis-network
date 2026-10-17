@@ -810,6 +810,7 @@ const BUSY_AFTER_FINISH: Duration = Duration::from_secs(2);
 mod tests {
     use crate::testing::endpoint_id;
     use crate::util::clock::Instant;
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{Cooldown, DIAL_FAILURE_COOLDOWN};
@@ -846,7 +847,7 @@ mod tests {
     /// The offer decision reads the pooled connection synchronously: a UDP
     /// connection reads `true`, while a busy lock or an unknown peer reads
     /// `false`, so the node offers rather than wrongly skipping the race.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pooled_udp_connection_reads_as_udp_selected() {
         use iroh::endpoint::Connection;
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -950,7 +951,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_pooled_connection_nothing_sends_on_is_closed_after_the_idle_timeout() {
         let (pool, server, router, client) = pool_with_idle(Duration::from_secs(8)).await;
         let conn = pool.warm_or_dial(server).await.expect("dial");
@@ -975,7 +976,7 @@ mod tests {
         client.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_send_restarts_the_idle_timeout() {
         let (pool, server, router, client) = pool_with_idle(Duration::from_secs(8)).await;
         let conn = pool.warm_or_dial(server).await.expect("dial");
@@ -1042,7 +1043,7 @@ mod tests {
     /// The connection of a direct-path probe is not a send: it counts as no use,
     /// and is closed a fixed hold after the probe ends, long before the idle
     /// timeout, unless a send takes it first.
-    #[tokio::test]
+    #[test]
     async fn a_probe_connection_is_closed_after_the_hold_unless_a_send_takes_it() {
         let (pool, server, router, client) =
             pool_with_holds(Duration::from_secs(80), Duration::from_secs(8)).await;
@@ -1215,7 +1216,7 @@ mod tests {
     /// Two sends to one cold peer share one dial: the second caller waits for the dial in flight
     /// and writes on the connection it made, as a warm send. Each dial is a handshake and a
     /// connection, and the pool keeps only the last one.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_second_send_during_a_dial_waits_and_writes_warm() {
         let (pool, server, router, client, mut frames) = pool_with_collecting_server().await;
 
@@ -1237,7 +1238,7 @@ mod tests {
 
     /// Two sends to a peer that nobody serves: the waiter gets the error of the one dial there was,
     /// and does not dial again. The peer is on the dial-failure cooldown afterwards.
-    #[tokio::test]
+    #[test]
     async fn a_waiter_gets_the_dial_error_without_a_second_dial() {
         let (pool, bob, endpoint, _silent) = pool_with_silent_peer().await;
 
@@ -1264,7 +1265,7 @@ mod tests {
 
     /// A background send during a dial is not dropped: it waits for the dial and is delivered after
     /// it. It used to return `false` and send nothing.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_background_frame_during_a_dial_is_delivered_after_it() {
         let (pool, server, router, client, mut frames) = pool_with_collecting_server().await;
 
@@ -1291,7 +1292,7 @@ mod tests {
 
     /// A dialer that is aborted mid-dial wakes the callers that wait on it, with an error, long
     /// before the dial would have timed out, and leaves no entry behind.
-    #[tokio::test]
+    #[test]
     async fn a_cancelled_dialer_wakes_its_waiters() {
         let (pool, bob, endpoint, _silent) = pool_with_silent_peer().await;
         let dialer = tokio::spawn({
@@ -1333,7 +1334,7 @@ mod tests {
 
     /// A test that needs a cold send drops the pooled connection of a peer: the cooldown goes with
     /// it, the address stays, and the next send dials again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn dropping_a_pooled_connection_keeps_the_address_and_clears_the_cooldown() {
         let (pool, server, router, client, mut frames) = pool_with_collecting_server().await;
         assert!(!pool.drop_connection(server).await, "nothing is pooled yet");
@@ -1371,7 +1372,7 @@ mod tests {
     /// cleared so a rejoin dials immediately, and forgetting an unknown
     /// endpoint is a no-op. (Closing a warm `Connection` needs a live
     /// endpoint pair; that path is covered by the network suite.)
-    #[tokio::test]
+    #[test]
     async fn forget_clears_the_cooldown_and_tolerates_absence() {
         let pool = super::UnicastPool::disconnected();
         let bob = endpoint_id(1);
@@ -1392,7 +1393,7 @@ mod tests {
     /// A send over a pooled connection is a use of it: the ledger of the ceiling moves its
     /// last use to the end of the send, so the connection of a peer that is being talked to
     /// is not the least recently used.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_send_marks_its_connection_as_used_in_the_ledger() {
         use iroh::protocol::Router;
 
@@ -1440,7 +1441,7 @@ mod tests {
 
     /// A peer that evicted us is left alone by the proactive dial of a probe, and a send to
     /// it dials at once.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_evicting_peer_is_not_probed_but_a_send_dials_it() {
         use iroh::protocol::Router;
 
@@ -1493,7 +1494,7 @@ mod tests {
     /// is still in flight, so a mark that ended there left a connection with a slow reader open to
     /// eviction, with its frame in the air. The mark now ends when the peer has read the stream to the
     /// end, or after 2 s.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_send_keeps_its_connection_busy_until_the_peer_has_read_the_frame() {
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 

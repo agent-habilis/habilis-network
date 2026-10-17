@@ -348,6 +348,7 @@ pub(crate) struct UnderlayWebRtc {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
 
     use iroh::EndpointAddr;
@@ -630,7 +631,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_gate_refuses_a_signal_from_an_endpoint_that_is_not_a_neighbor() {
         let (logs, _log_guard) = crate::testing::LogCapture::start(tracing::Level::DEBUG);
         let server = loopback_endpoint().await;
@@ -683,7 +684,7 @@ mod tests {
 
     /// The offerer must tell a stranger's turn-away from a refusal at the cap: the first is a
     /// race that the next offer wins, the second backs off.
-    #[tokio::test]
+    #[test]
     async fn an_offer_that_the_gate_turns_away_is_told_apart_from_a_cap_refusal() {
         let server = loopback_endpoint().await;
         let allowed = Allowed::default();

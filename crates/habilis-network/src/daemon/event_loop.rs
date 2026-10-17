@@ -1415,6 +1415,7 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use tokio::sync::oneshot;
@@ -1429,12 +1430,12 @@ mod tests {
             .is_ok()
     }
 
-    #[tokio::test]
+    #[test]
     async fn no_shed_does_not_wake_the_loop() {
         assert!(!wakes_within_a_moment(&mut None).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_close_of_the_shed_beacon_wakes_the_loop() {
         let (done, closed) = oneshot::channel();
         let mut closing = Some(closed);
@@ -1448,7 +1449,7 @@ mod tests {
         assert!(wakes_within_a_moment(&mut closing).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_lost_close_task_does_not_hold_the_re_probe_back() {
         let (done, closed) = oneshot::channel::<()>();
         let mut closing = Some(closed);
@@ -1462,6 +1463,7 @@ mod tests {
 #[cfg(all(test, feature = "host"))]
 mod route_wake_tests {
     use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
+    use habilis_network_test_tracing::test;
     use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
 
     use super::{linkstate_arm, route_wake_arm};
@@ -1522,7 +1524,7 @@ mod route_wake_tests {
 
     /// The cost on the links that a node advertises is the one of its handle, so that a browser
     /// (a handle made with `for_browser`) costs more as a hop in the middle of a route.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_link_state_arm_advertises_the_link_cost_of_its_handle() {
         for (config, expected) in [
             (HandleConfig::default(), 10),
@@ -1541,7 +1543,7 @@ mod route_wake_tests {
     /// A vector names the address of the underlay, and a neighbor dials that address. An
     /// underlay with no IP and no relay yet has none: a vector that names it points nowhere, so
     /// the tick says nothing until the underlay has one.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_link_state_arm_says_nothing_while_the_underlay_has_no_address() {
         // A browser underlay: no IP socket, and a relay that it has not reached yet, so it
         // binds and has no address. (An endpoint with neither does not bind at all.) The relay
@@ -1568,7 +1570,7 @@ mod route_wake_tests {
     /// destination as a first hop: the wake makes the pass dial the route through a
     /// third member within the same turn, without waiting for the stuck deadline and a
     /// link-state tick.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third()
     {
         let node = LaneNode::start().await;
@@ -1617,6 +1619,7 @@ mod route_wake_tests {
 
 #[cfg(all(test, feature = "multihop"))]
 mod advertised_changed_tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::{EndpointId, SecretKey};
@@ -1662,6 +1665,7 @@ mod advertised_changed_tests {
 
 #[cfg(all(test, feature = "multihop"))]
 mod advertised_links_tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::{EndpointId, SecretKey};

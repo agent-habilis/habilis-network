@@ -325,6 +325,7 @@ pub fn active_socket_paths(base: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use serde::{Deserialize, Serialize};
 
     use super::{
@@ -404,6 +405,7 @@ mod tests {
 
     mod prop {
         use crate::util::mesh_prefix;
+        use habilis_network_test_tracing::test;
         use proptest::collection::vec as arb_vec;
         use proptest::{prop_assert, prop_assert_eq, proptest, strategy::Strategy};
 
@@ -488,7 +490,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn ipc_listen_and_send_msg() {
         // Base58-encode the pid so the mesh id passes strict charset validation.
         let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
@@ -552,7 +554,7 @@ mod tests {
     // I/O deadline instead of pinning a handler task + fd for the
     // daemon's lifetime, and the listener must keep serving others
     // throughout. Real-time: waits out `IPC_IO_TIMEOUT` (10s).
-    #[tokio::test]
+    #[test]
     async fn idle_connection_is_closed_at_the_read_deadline() {
         use interprocess::local_socket::{
             GenericFilePath, ToFsName, tokio::Stream, tokio::prelude::*,

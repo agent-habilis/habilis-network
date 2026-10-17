@@ -253,6 +253,7 @@ pub(crate) async fn refuse_relayed(
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::{Endpoint, RelayMode, endpoint::presets};
@@ -304,7 +305,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_dialer_that_closes_while_the_wait_runs_is_not_a_timeout() {
         let (client, server, dialed, accepted) = connected().await;
         tokio::spawn(async move {
@@ -319,7 +320,7 @@ mod tests {
         server.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_wait_with_no_path_and_no_close_times_out() {
         let (client, server, _dialed, accepted) = connected().await;
 
@@ -330,7 +331,7 @@ mod tests {
         server.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_selected_path_ends_the_wait_at_once() {
         let (client, server, _dialed, accepted) = connected().await;
 

@@ -182,6 +182,7 @@ fn refuse_before_session(has_session: bool, negotiating: bool, we_offer: bool) -
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod watcher_tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::endpoint::Connection;
@@ -193,7 +194,7 @@ mod watcher_tests {
     /// that starts the watch and returns drops the last strong handle, so the
     /// connection must close, and the dialer sees it close. A watcher that held
     /// the connection, or a path stream that did, would leave it up.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_relay_watcher_does_not_keep_a_connection_alive() {
         const ALPN: &[u8] = b"habilis-mesh/test-watch/0";
 
@@ -234,7 +235,7 @@ mod watcher_tests {
     /// at once, not after the deadline. The link is relay-only: neither end has an
     /// IP transport.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_watch_that_starts_on_a_relay_link_reports_the_relay() {
         use crate::transport::probe::{PathChange, PathKind};
 
@@ -287,6 +288,7 @@ mod watcher_tests {
 #[cfg(test)]
 mod tests {
     use super::refuse_before_session;
+    use habilis_network_test_tracing::test;
 
     // The offerer attaches one DTLS trip before the answerer does, and grafts
     // the moment it attaches, so its dial can reach the answerer mid-round.

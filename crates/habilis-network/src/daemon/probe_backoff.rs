@@ -69,6 +69,7 @@ impl ProbeBackoff {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::ProbeBackoff;

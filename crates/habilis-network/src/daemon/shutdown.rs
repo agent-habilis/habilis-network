@@ -307,6 +307,7 @@ impl OwnedEndpoints {
 #[cfg(all(unix, feature = "host"))]
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::process::{Child, Command};
     use std::time::Duration;
 
@@ -332,7 +333,7 @@ mod tests {
         quit
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_stays_while_the_owner_lives() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -341,7 +342,7 @@ mod tests {
         child.wait().unwrap();
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_owner_exits() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -350,7 +351,7 @@ mod tests {
         assert!(watch_quits(owner, Duration::from_secs(2)).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -361,7 +362,7 @@ mod tests {
 
     /// Simulates reuse with `start + 1`: that a real reissue changes the start
     /// time is a property of the OS, not something this test can show.
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_pid_is_reissued() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");

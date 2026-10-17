@@ -1197,6 +1197,7 @@ impl Drop for AdmissionGuard {
 // runtime for the abort test. The logic under test is target-independent.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
@@ -1281,7 +1282,7 @@ mod tests {
 
     /// The end of a round wakes the waiter of `slot_freed`, however the round ended, and a round
     /// that was given up for the offer of the peer does not: its guard no longer holds the slot.
-    #[tokio::test]
+    #[test]
     async fn the_end_of_a_round_wakes_the_waiter_of_slot_freed() {
         let admission = SignalAdmission::new(4);
         let freed = admission.slot_freed();
@@ -1313,7 +1314,7 @@ mod tests {
     /// A round that was started while the identity had no holder never finds the holder that comes
     /// later, and held the slot for the whole round deadline: every later offer was refused
     /// `InFlight`. Cancelling the round frees the slot, and the refusals of the old holder are forgotten.
-    #[tokio::test]
+    #[test]
     async fn a_cancelled_round_frees_the_slot_and_forgets_the_refusals() {
         let admission = SignalAdmission::new(4);
         let hub = hub();
@@ -1456,7 +1457,7 @@ mod tests {
 
     /// The permanent-pin bug, under test: a task that is aborted rather than
     /// returning must still give its slot back.
-    #[tokio::test]
+    #[test]
     async fn aborting_the_task_releases_the_slot() {
         let admission = SignalAdmission::new(16);
         let hub = hub();
@@ -1782,7 +1783,7 @@ mod tests {
     /// Once the connection is gone, the session is idle a window after its last use, with no second
     /// window added for the connection.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_connection_holds_a_session_until_it_closes() {
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
@@ -1854,7 +1855,7 @@ mod tests {
     /// the same watch, or a link can stay up on the relay for ever while its
     /// other end believes the policy keeps it off.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_connection_this_node_dialed_is_closed_when_it_stays_on_the_relay() {
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
@@ -2006,7 +2007,7 @@ mod tests {
     /// **Two live connections of one peer.** A session may be detached only when no connection
     /// of the pair reads below IP. The table reads every live connection, not the first.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_table_reads_every_live_connection_of_a_peer() {
         let mut fixture = Fixture::new(4).await;
         let (peer, first) = fixture.dial().await;
@@ -2039,7 +2040,7 @@ mod tests {
     /// the unicast protocol. The fifth connection is admitted, and the least recently used
     /// one is closed with the `EVICTED` code, which the peer reads.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used() {
         use super::super::webrtc::close_code::EVICTED;
 
@@ -2076,7 +2077,7 @@ mod tests {
     /// holds its proactive dials to the evictor for a while. The node that evicted does not
     /// back off.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_peer_that_reads_the_evicted_code_backs_off_from_the_evictor() {
         let mut fixture = Fixture::new(1).await;
         let evicted = SignalAdmission::new(8);
@@ -2110,7 +2111,7 @@ mod tests {
     /// evicts nobody. A unit that is a ghost keeps the count at the ceiling for ever, and every newcomer
     /// then evicts a live peer.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connection_that_closes_leaves_the_ledger() {
         let mut fixture = Fixture::new(4).await;
         let mut conns = Vec::new();
@@ -2154,7 +2155,7 @@ mod tests {
     /// A connection with a send in flight is never evicted: the next least recently used
     /// one goes instead.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_busy_connection_is_not_evicted() {
         let mut fixture = Fixture::new(2).await;
         let (first, first_conn) = fixture.dial().await;
@@ -2179,7 +2180,7 @@ mod tests {
     /// ceiling by the busy connections, the gauge says so, and nothing is evicted. When the
     /// sends end, the next admission evicts again.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling() {
         let mut fixture = Fixture::new(1).await;
         let (first, _first_conn) = fixture.dial().await;
@@ -2210,7 +2211,7 @@ mod tests {
     /// with a hook at both ends each end can close before it reads the close of the other, and
     /// then both read `LocallyClosed`. The rule reads no mesh policy: here the dialed gossip watch
     /// is off, which is its default.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
         use habilis_network_iroh_gossip_transport::memory::MemoryHub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
@@ -2384,7 +2385,7 @@ mod tests {
 
     /// A pair that rides IP is blocked for gossip at BOTH ends, the dialer and the acceptor, and
     /// both are established: neither end needs a path watcher, which only the lower id has.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
         use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
         use iroh::{EndpointAddr, TransportAddr};
@@ -2433,7 +2434,7 @@ mod tests {
 
     /// A pair that only gossip carries is not blocked, and a peer whose connection is gone is
     /// established no more, and allowed again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
         use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
         use iroh::{EndpointAddr, TransportAddr};
@@ -2469,7 +2470,7 @@ mod tests {
     /// A pair that a session carries is blocked for gossip though no connection is left to read.
     /// A gossip connection dialed now would be born on the gossip rung, and the recursion rule
     /// would close it before iroh moves it onto the session.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
         use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
         use iroh::{EndpointAddr, TransportAddr};

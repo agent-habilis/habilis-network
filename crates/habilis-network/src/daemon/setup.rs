@@ -1127,6 +1127,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use crate::protocol::mesh::{LookupOpts, RelayChoice, Transport, TransportPolicy};
@@ -1207,7 +1208,7 @@ mod tests {
 
     // The mesh policy decides multi-hop: the default list has it, a list that
     // leaves it out has none, and no flag says otherwise.
-    #[tokio::test]
+    #[test]
     async fn multihop_follows_the_mesh_policy() {
         for (list, expected) in [
             (vec![], true),
@@ -1251,7 +1252,7 @@ mod tests {
     // underlay has no direct path to forward over, and there is no handle. A node may run with
     // fewer transports than the policy names, which is how a list with `webrtc` and `multihop`
     // meets a node that has no `udp`.
-    #[tokio::test]
+    #[test]
     async fn a_member_without_udp_gets_a_multihop_handle_when_it_has_webrtc() {
         for (transports, expected) in [
             (
@@ -1307,7 +1308,7 @@ mod tests {
 
     // A node run without `udp` has no IP on any of its endpoints. Its underlay rides WebRTC and
     // the relay: it has no IP socket, and it has the WebRTC leg that carries its cells.
-    #[tokio::test]
+    #[test]
     async fn the_underlay_of_a_member_without_udp_has_no_ip_socket_and_has_a_webrtc_leg() {
         let opts = crate::membership::Opts {
             transport: vec![Transport::WebRtc, Transport::Multihop],
@@ -1353,7 +1354,7 @@ mod tests {
     // G and C come from the caller, and `0` takes the default. Every option set
     // (`Opts`, the C struct, the browser object) ends in `setup_mesh`, so this is
     // the one place that has to hold.
-    #[tokio::test]
+    #[test]
     async fn the_caps_follow_the_params_and_zero_takes_the_default() {
         use crate::transport::MAX_DIRECT_PEERS;
         use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
@@ -1479,7 +1480,7 @@ mod tests {
     // An injected endpoint obeys the mesh policy too: a handle on a mesh whose
     // list has no `multihop` is dropped, so it advertises no link-state and takes
     // none in.
-    #[tokio::test]
+    #[test]
     async fn an_injected_multihop_handle_is_dropped_when_the_mesh_has_no_multihop() {
         let first = injected(false).await;
         let (first_endpoint, first_handle) = (first.endpoint.clone(), first.multihop.clone());
@@ -1512,7 +1513,7 @@ mod tests {
 
     // Whether the relay may carry cells is a rule of the mesh: a handle that lets
     // it, on a lookup-only mesh, is refused.
-    #[tokio::test]
+    #[test]
     async fn an_injected_multihop_handle_that_lets_the_relay_carry_cells_is_refused() {
         let refused = injected(true).await;
         let (endpoint, handle) = (refused.endpoint.clone(), refused.multihop.clone());
@@ -1571,7 +1572,7 @@ mod tests {
     }
 
     // The node closes what its setup bound, so iroh has nothing to log as dropped.
-    #[tokio::test]
+    #[test]
     async fn leave_closes_the_endpoint_and_the_underlay_that_setup_bound() {
         let opts = crate::membership::Opts::default();
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
@@ -1603,7 +1604,7 @@ mod tests {
     }
 
     // An injected endpoint is the caller's, and it may carry protocols of the caller.
-    #[tokio::test]
+    #[test]
     async fn leave_keeps_an_injected_endpoint_and_its_underlay_open() {
         let injected = injected(false).await;
         let config = setup_with(Vec::new(), injected)
@@ -1623,8 +1624,9 @@ mod tests {
 #[cfg(all(test, feature = "multihop", not(feature = "host")))]
 mod browser_tests {
     use crate::protocol::mesh::{Lookup, Transport};
+    use habilis_network_test_tracing::test;
 
-    #[tokio::test]
+    #[test]
     async fn a_browser_member_has_a_multihop_handle_with_the_link_cost_of_a_browser() {
         let opts = crate::membership::Opts {
             transport: vec![Transport::WebRtc, Transport::Multihop],

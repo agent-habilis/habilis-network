@@ -330,6 +330,7 @@ pub(super) fn apply_rung_change(
 #[cfg(test)]
 mod tests {
     use super::{is_resume, is_wall_resume};
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     #[test]

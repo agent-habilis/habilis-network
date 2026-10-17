@@ -243,6 +243,7 @@ impl LaneNode {
 #[cfg(feature = "multihop")]
 mod log_capture_tests {
     use super::LogCapture;
+    use habilis_network_test_tracing::test;
 
     fn first_event() {
         tracing::debug!(target: "log-capture-test", "first event");

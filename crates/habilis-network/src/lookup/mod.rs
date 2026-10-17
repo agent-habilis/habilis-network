@@ -1384,6 +1384,7 @@ pub(crate) fn build_mesh(
 #[cfg(test)]
 mod tests {
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+    use habilis_network_test_tracing::test;
 
     /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
     /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
@@ -1463,7 +1464,7 @@ mod tests {
     /// multicast; where it cannot, nothing is discovered and the test fails on the deadline, which
     /// the slot reports as VOID for fix C, never as green.
     #[cfg(all(feature = "host", feature = "mdns"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "needs a host that sends mDNS multicast: run with --ignored --nocapture"]
     async fn two_members_on_the_lan_link_with_no_beacon() {
         use std::io::Write as _;
@@ -1664,7 +1665,7 @@ mod tests {
     /// more than that ahead of what the receiver has taken in, so the bytes that its writes
     /// accept, less its own buffer, are what the receiver granted. Nobody reads at the receiver.
     #[cfg(feature = "host")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1742,7 +1743,7 @@ mod tests {
     /// at the sender, as in
     /// `a_receiver_that_never_reads_grants_the_whole_window_to_one_stream`.
     #[cfg(feature = "host")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn streams_that_nobody_reads_fit_in_the_connection_window() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1820,7 +1821,7 @@ mod tests {
     // An address that changes is told again, so addresses are registered again and again for one
     // endpoint. The endpoint has one lookup service for them, made once by `address_book`, not one
     // per registration.
-    #[tokio::test]
+    #[test]
     async fn the_addresses_of_one_endpoint_go_to_one_lookup_service() {
         let peer = iroh::SecretKey::generate().public();
         let at =
@@ -1855,7 +1856,7 @@ mod tests {
         second.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn loopback_all_off_binds() {
         let endpoint = build_peer_endpoint(&LookupOpts::loopback())
             .await
@@ -1904,7 +1905,7 @@ mod tests {
     // underlay's does not. The member of a mesh without gossip has none. A beacon is built from
     // `TransportHandles::default()`, which has no gossip, and from opts that never name it.
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn only_the_member_endpoint_has_the_gossip_handle() {
         let build = |gossip: bool| async move {
             let opts = TransportOpts {
@@ -1947,7 +1948,7 @@ mod tests {
     // member still gets the gossip handle (the admission table keeps it), the gossip address,
     // and the ladder of the gossip handle, which keeps IP above gossip.
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
         use std::time::Duration;
@@ -2042,7 +2043,7 @@ mod tests {
     }
 
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn the_underlay_leg_takes_the_cap_it_is_given_and_needs_webrtc_on() {
         let build = |opts: TransportOpts, cap: Option<usize>| async move {
             super::build_peer_multihop_with(
@@ -2100,7 +2101,7 @@ mod tests {
     // WebRTC address and the multihop hop identity share one key. The underlay
     // has a key of its own (see `build_peer_multihop`).
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn one_key_serves_udp_webrtc_and_multihop() {
         let (endpoint, handle, webrtc) = super::build_peer_multihop(
             &LookupOpts::loopback(),
@@ -2128,7 +2129,7 @@ mod tests {
     // An injected endpoint's handles must all carry the key it binds, the
     // multihop handle must obey the mesh's relay rule, and the admission table
     // must have a hook reporting to it.
-    #[tokio::test]
+    #[test]
     async fn an_injected_endpoint_is_checked_against_every_handle() {
         use crate::transport::SignalAdmission;
 
@@ -2193,7 +2194,7 @@ mod tests {
     /// `Router::spawn`). A dial on `GOSSIP_ALPN` then fails on the ALPN, which a listener sends
     /// before any certificate: it proves nothing about the identity, so the probe must not
     /// answer `Foreign`, which makes a walk bind a second rung.
-    #[tokio::test]
+    #[test]
     async fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
         use std::net::SocketAddr;
 
@@ -2256,7 +2257,7 @@ mod tests {
     /// A listener of the identity that was asked for, which refuses every connection (a beacon that
     /// is saturated or going down does the same), is not another mesh: its refusal proves nothing
     /// about the identity, so the probe must not answer `Foreign`, which makes a walk bind a rung.
-    #[tokio::test]
+    #[test]
     async fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
         use std::net::SocketAddr;
 
@@ -2316,7 +2317,7 @@ mod tests {
     /// that does its work only when it completes. The router of the beacon is built with no
     /// unicast acceptor, so it has to serve the nudge ALPN all the same, or the handshake fails
     /// with `no_application_protocol` and the nudge does nothing.
-    #[tokio::test]
+    #[test]
     async fn a_router_that_carries_no_unicast_completes_a_nudge() {
         use std::net::SocketAddr;
 
@@ -2418,7 +2419,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn public_default_relay_binds() {
         // No lookup wired: exercises the `Minimal` + pinned-ladder
         // composition. `bind()` is non-blocking wrt the relay, so this

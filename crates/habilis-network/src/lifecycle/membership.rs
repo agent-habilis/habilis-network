@@ -89,6 +89,7 @@ pub(crate) fn apply(update: &MembershipUpdate, author: &Nickname, state: &mut Ev
 #[cfg(test)]
 mod tests {
     use crate::testing::{fresh_state, nick};
+    use habilis_network_test_tracing::test;
 
     use super::{MembershipUpdate, MessageKind, PresenceSubtype, apply, compute};
 

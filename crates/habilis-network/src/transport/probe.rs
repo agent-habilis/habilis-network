@@ -1147,6 +1147,7 @@ fn retry_candidates_at(
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use iroh::EndpointAddr;
 
     use super::{
@@ -2138,7 +2139,7 @@ mod tests {
     }
 
     // The real `selected_kind`, on a real connection whose only transport is gossip.
-    #[tokio::test]
+    #[test]
     async fn a_connection_on_the_gossip_path_reads_as_the_gossip_kind() {
         use habilis_network_iroh_gossip_transport::memory::MemoryHub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
@@ -2421,7 +2422,7 @@ mod tests {
     // Direct connections are on demand (decision D4): the watcher follows a
     // pooled connection that a send opened, and dials none of its own. A pair
     // that was never sent to has nothing to watch, and stays where it is.
-    #[tokio::test]
+    #[test]
     async fn a_peer_nothing_was_sent_to_is_not_dialed_to_be_watched() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
         use iroh::TransportAddr;
@@ -2447,7 +2448,7 @@ mod tests {
 
     // The rendezvous serves no unicast: it is never watched, even when a
     // connection to it exists. A peer with a pooled connection is watched.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_rendezvous_is_not_watched() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
         use iroh::endpoint::Connection;
@@ -2639,7 +2640,7 @@ mod tests {
     // On a mesh whose relay may carry payload there is no probe to hold a graft,
     // and a `PeerInfo` is not repeated: the alive tick fills the view, one member
     // per tick, and a member that was just tried waits out its cooldown.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_alive_tick_fills_one_member_per_tick_on_a_relay_transport_mesh() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;

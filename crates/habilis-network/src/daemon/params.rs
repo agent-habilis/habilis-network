@@ -274,6 +274,7 @@ impl TopicParams {
 #[cfg(test)]
 mod topic_derivation_tests {
     use super::*;
+    use habilis_network_test_tracing::test;
 
     /// The no-argument form must stay exactly what it always was, because the
     /// `--topic` id it derives is public API for every frontend that calls it.
