@@ -257,7 +257,7 @@ async fn build_member_endpoint(
             injected.webrtc.clone(),
             injected.admission.clone(),
             None,
-            injected.mdns.clone(),
+            injected.mdns,
         ));
     }
     // Made before the endpoint, because the endpoint reports its connections
