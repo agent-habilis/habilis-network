@@ -1866,6 +1866,7 @@ dependencies = [
 name = "habilis-network-iroh-transport-util"
 version = "0.6.0"
 dependencies = [
+ "habilis-network-test-tracing",
  "iroh",
  "iroh-base",
 ]

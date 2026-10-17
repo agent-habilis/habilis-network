@@ -391,6 +391,7 @@ pub fn split_segments(contents: &[u8], segment_size: Option<usize>) -> impl Iter
 #[cfg(test)]
 mod tests {
     use super::*;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn the_ladder_runs_from_ip_to_the_relay() {
