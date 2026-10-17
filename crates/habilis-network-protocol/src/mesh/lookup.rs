@@ -784,6 +784,7 @@ mod lookup_tests {
         Lookup, LookupOpts, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection,
         Transport, TransportPolicy, resolve_lookups,
     };
+    use habilis_network_test_tracing::test;
 
     fn lookups(mdns: bool, dht: bool, relay_lookup: RelaySelection) -> LookupSet {
         LookupSet {
@@ -1323,6 +1324,7 @@ mod choice_tests {
         Lookup, LookupSet, MeshConfig, RelayChoice, RelayLadder, RelaySelection, Transport,
         TransportPolicy, resolve_lookups,
     };
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_lookup_and_a_transport_parse_from_their_names() {

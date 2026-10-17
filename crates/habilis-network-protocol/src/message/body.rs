@@ -67,6 +67,7 @@ impl AsRef<[u8]> for MessageBody {
 #[cfg(test)]
 mod body_tests {
     use super::MessageBody;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn new_accepts_ascii() {

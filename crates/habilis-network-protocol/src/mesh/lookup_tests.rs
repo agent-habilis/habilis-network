@@ -1,4 +1,5 @@
 use super::{DEFAULT_DIRECTORY, DirectorySelection, LookupOpts, MeshName, validate_advertise};
+use habilis_network_test_tracing::test;
 
 #[test]
 fn unset_is_not_advertising() {

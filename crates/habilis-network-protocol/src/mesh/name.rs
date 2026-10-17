@@ -197,6 +197,7 @@ impl MeshName {
 #[cfg(test)]
 mod tests {
     use super::{MeshName, ident};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn from_topic_string_passthrough_and_case_preserving() {

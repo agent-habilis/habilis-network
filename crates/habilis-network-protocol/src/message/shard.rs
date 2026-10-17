@@ -108,6 +108,7 @@ impl<'de> Deserialize<'de> for Shard {
 #[cfg(test)]
 mod shard_tests {
     use super::{Shard, ShardGroup};
+    use habilis_network_test_tracing::test;
 
     const GROUP: &str = "550e8400-e29b-41d4-a716-446655440000";
 
