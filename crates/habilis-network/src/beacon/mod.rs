@@ -367,12 +367,117 @@ pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr>
     Some(addr.with_relay_url(params.bootstrap_relay.clone()?))
 }
 
+/// [`rendezvous_addr`] without the rungs of `foreign`: the address that a member registers for the
+/// rendezvous id, after the walk read those rungs as held by a foreign listener.
+pub(crate) fn rendezvous_addr_without(
+    params: &RendezvousParams,
+    foreign: &[u16],
+) -> Option<EndpointAddr> {
+    rendezvous_addr(params).map(|addr| keeping_rungs(addr, |port| !foreign.contains(&port)))
+}
+
+/// The rendezvous id at one rung of the loopback ladder.
+fn rendezvous_holder_addr(params: &RendezvousParams, port: u16) -> EndpointAddr {
+    EndpointAddr::new(params.id).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+}
+
+/// `addr` without the IP addresses whose port `keep` refuses. An address of another kind stays.
+fn keeping_rungs(addr: EndpointAddr, keep: impl Fn(u16) -> bool) -> EndpointAddr {
+    EndpointAddr::from_parts(
+        addr.id,
+        addr.addrs.into_iter().filter(|transport| {
+            if let iroh::TransportAddr::Ip(socket) = transport {
+                keep(socket.port())
+            } else {
+                true
+            }
+        }),
+    )
+}
+
+/// Take the rungs that `forget` names out of the addresses of the rendezvous id: out of the book,
+/// and out of what the endpoint knows. A dial of the id tries every address that the endpoint
+/// knows for it, and a listener of another identity on one of them (any process on the host can
+/// hold a rung) answers with its own identity, or with an alert for an ALPN that it does not
+/// serve, and the dial fails as a whole, on every retry.
+async fn forget_rungs(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    forget: impl Fn(u16) -> bool,
+) {
+    let forgotten = params
+        .bind_ports
+        .iter()
+        .copied()
+        .filter(|&port| forget(port))
+        .fold(EndpointAddr::new(params.id), |addr, port| {
+            addr.with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+        });
+    if forgotten.addrs.is_empty() {
+        return;
+    }
+    if let Some(info) = peer_book.get_endpoint_info(params.id) {
+        replace_peer_addr(
+            peer_book,
+            keeping_rungs(info.into_endpoint_addr(), |port| !forget(port)),
+        );
+    }
+    peer.remove_endpoint_addr(forgotten).await;
+}
+
+/// The rung `port` serves our beacon: the endpoint reaches the rendezvous id there and nowhere else
+/// on the ladder, and the book names that rung. The endpoint is told too, because it does not read
+/// the book again for an id that it knows.
+async fn settle_on_rung(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    port: u16,
+) {
+    forget_rungs(params, peer, peer_book, |rung| rung != port).await;
+    let holder = rendezvous_holder_addr(params, port);
+    add_peer_addr(peer_book, holder.clone());
+    if let Err(error) = peer.add_endpoint_addr(holder).await {
+        tracing::debug!(target: "habilis_network::beacon", %error, port, "the endpoint did not take the rung of the holder");
+    }
+}
+
+/// Read the ladder without claiming a rung: a member that knows a holder skips the walk, and the
+/// rung of the holder that it read last may be dead or foreign when the holder moved (it shed or
+/// yielded, and another member claimed a rung). The busy rungs are asked, the reports land on the
+/// loop, which calls this again, and the rung that reads as ours is settled on.
+pub(crate) async fn refresh_holder_rung(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    rungs: &mut RungWatch,
+) {
+    let now = Instant::now();
+    for &port in &params.bind_ports {
+        match rungs.reading(port, now) {
+            RungRead::Ours => {
+                rungs.clear_foreign(port);
+                settle_on_rung(params, peer, peer_book, port).await;
+                return;
+            }
+            RungRead::Unknown if rung_is_busy(port) => {
+                rungs.ask(params, peer.id(), port, false);
+            }
+            RungRead::Unknown
+            | RungRead::Foreign
+            | RungRead::Silent
+            | RungRead::SilentLongEnough => {}
+        }
+    }
+}
+
 /// The entry of the rendezvous id in the book of the member endpoint after a claim: the direct
 /// addresses of the new holder, and what the mesh registered for the id by itself, a relay rung or
 /// the loopback ladder ([`rendezvous_addr`]). The addresses of a former holder are not in it. A
 /// member whose IP transports are cleared dials the bare id and can use only the registered part.
-fn holder_entry(holder: EndpointAddr, params: &RendezvousParams) -> EndpointAddr {
-    match rendezvous_addr(params) {
+fn holder_entry(holder: EndpointAddr, params: &RendezvousParams, foreign: &[u16]) -> EndpointAddr {
+    match rendezvous_addr_without(params, foreign) {
         Some(registered) => {
             EndpointAddr::from_parts(holder.id, holder.addrs.into_iter().chain(registered.addrs))
         }
@@ -735,6 +840,10 @@ pub(crate) struct RungWatch {
     /// was counted last, so that one reading is one check however often a tick reads it.
     own_misses: u32,
     own_counted: Option<Instant>,
+    /// The rungs that the walk read as held by a foreign listener, and has not read as ours since.
+    /// A reading expires after a heal tick, this does not: the book must not take such a rung
+    /// back each time the rendezvous is registered again.
+    foreign: std::collections::BTreeSet<u16>,
     reports: mpsc::UnboundedSender<RungReport>,
 }
 
@@ -747,6 +856,7 @@ impl RungWatch {
             generation_floor: 0,
             own_misses: 0,
             own_counted: None,
+            foreign: std::collections::BTreeSet::new(),
             reports,
         }
     }
@@ -754,6 +864,21 @@ impl RungWatch {
     /// A watch whose reports go nowhere: for a state that no loop drives.
     pub(crate) fn detached() -> Self {
         Self::new(mpsc::unbounded_channel().0)
+    }
+
+    /// The walk read `port` as serving our beacon.
+    fn clear_foreign(&mut self, port: u16) {
+        self.foreign.remove(&port);
+    }
+
+    /// The walk read `port` as held by a foreign listener.
+    fn mark_foreign(&mut self, port: u16) {
+        self.foreign.insert(port);
+    }
+
+    /// The rungs that the walk read as held by a foreign listener.
+    pub(crate) fn foreign_rungs(&self) -> Vec<u16> {
+        self.foreign.iter().copied().collect()
     }
 
     /// Whether a probe task is out, and not dead.
@@ -1040,9 +1165,11 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
 /// every rung foreign-squatted (≈0); the next tick retries.
 async fn build_rendezvous_endpoint(
     params: &RendezvousParams,
-    node: EndpointId,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
     rungs: &mut RungWatch,
 ) -> Walk {
+    let node = peer.id();
     let lookups = beacon_lookups(params);
     if params.answers_jsep() {
         // The public probe-before-claim that used to run here — the analog
@@ -1110,10 +1237,12 @@ async fn build_rendezvous_endpoint(
         match rungs.reading(port, now) {
             RungRead::Ours => {
                 tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung already serves our beacon; staying peer");
-                return Walk::Rival;
+                return Walk::Rival(port);
             }
             RungRead::Foreign | RungRead::SilentLongEnough => {
                 tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung held by a foreign mesh, or silent for the whole window; trying next rung");
+                rungs.mark_foreign(port);
+                forget_rungs(params, peer, peer_book, |rung| rung == port).await;
             }
             RungRead::Silent => {
                 tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung says nothing; staying peer for now");
@@ -1148,8 +1277,8 @@ enum Walk {
     /// A rung was free (or, public, the endpoint was built): the beacon can stand up on it.
     Bound(Endpoint, RendezvousLane),
     /// A rung was taken and its listener answered as the beacon of our own mesh: a holder exists,
-    /// and it is not this member.
-    Rival,
+    /// and it is not this member. The port is the rung of the holder.
+    Rival(u16),
     /// No rung was taken, and no holder was read.
     Nothing,
     /// Every rung is held by another process, each read as foreign or silent for the whole
@@ -1350,11 +1479,15 @@ async fn claim_holder(
     current: &mut Option<Rendezvous>,
     rungs: &mut RungWatch,
 ) -> Held {
-    let (endpoint, lane) = match build_rendezvous_endpoint(params, peer.id(), rungs).await {
+    let (endpoint, lane) = match build_rendezvous_endpoint(params, peer, peer_book, rungs).await {
         Walk::Bound(endpoint, lane) => (endpoint, lane),
         // Private: a rung is taken by the beacon of our own mesh. Joiners reach it by an
         // identity-checked dial; whether this member must go to it is the caller's to say.
-        Walk::Rival => return Held::Rival,
+        Walk::Rival(port) => {
+            rungs.clear_foreign(port);
+            settle_on_rung(params, peer, peer_book, port).await;
+            return Held::Rival;
+        }
         Walk::NoRung => return Held::NoRung,
         // Public: the endpoint build failed. Private: a rung is read, or waits for its probe.
         // Nothing to do; the next tick retries.
@@ -1394,7 +1527,10 @@ async fn claim_holder(
     // And the other way: our peer is the one that dials the rendezvous, and a
     // public mesh without a relay rung gives it no lookup to find the id by. The entry keeps the
     // relay rung or the ladder that the mesh registered, see `holder_entry`.
-    replace_peer_addr(peer_book, holder_entry(endpoint.addr(), params));
+    replace_peer_addr(
+        peer_book,
+        holder_entry(endpoint.addr(), params, &rungs.foreign_rungs()),
+    );
     let topic_id = params.topic_id;
 
     // Relay-monitor inputs. The monitor runs as its **own** task (below),
@@ -2423,7 +2559,7 @@ mod tests {
         params.bind_ports = rungs.clone();
         let peer = loopback_endpoint().await;
         let book = crate::lookup::address_book(&peer);
-        crate::daemon::setup::register_rendezvous(&book, &params);
+        crate::daemon::setup::register_rendezvous(&book, &params, &[]);
         let mut beacon = None;
 
         let claimed = claim(&params, &peer, &book, &mut beacon).await;
@@ -2447,6 +2583,74 @@ mod tests {
         }
     }
 
+    /// A member that knows a holder does not walk the ladder, and its book names the rung of the
+    /// holder that it read last. When the holder moves to another rung, the member reads the
+    /// ladder again without claiming, and the book names the new rung.
+    #[tokio::test]
+    async fn a_member_that_knows_a_holder_finds_the_rung_it_moved_to() {
+        let sockets: Vec<_> = (0..2)
+            .map(|_| {
+                std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                    .expect("a free loopback port")
+            })
+            .collect();
+        let rungs: Vec<u16> = sockets
+            .iter()
+            .map(|socket| socket.local_addr().expect("its address").port())
+            .collect();
+        drop(sockets);
+        let mut params = public_params();
+        params.bind_ports = rungs.clone();
+        let holder_peer = loopback_endpoint().await;
+        let holder_book = crate::lookup::address_book(&holder_peer);
+        let mut beacon = None;
+        assert!(claim(&params, &holder_peer, &holder_book, &mut beacon).await);
+        let on = beacon
+            .as_ref()
+            .and_then(|held| held.rung_in(&rungs))
+            .expect("the beacon is bound on a rung");
+        let stale = rungs[1 - on];
+
+        let member = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&member);
+        crate::lookup::replace_peer_addr(&book, super::rendezvous_holder_addr(&params, stale));
+        let (reports, mut arrivals) = super::mpsc::unbounded_channel();
+        let mut rungs_watch = super::RungWatch::new(reports);
+        for _ in 0..3 {
+            super::refresh_holder_rung(&params, &member, &book, &mut rungs_watch).await;
+            let ours = book
+                .get_endpoint_info(params.id)
+                .is_some_and(|info| info.into_endpoint_addr().ip_addrs().count() == 1)
+                && book.get_endpoint_info(params.id).is_some_and(|info| {
+                    info.into_endpoint_addr()
+                        .ip_addrs()
+                        .all(|socket| socket.port() == rungs[on])
+                });
+            if ours {
+                break;
+            }
+            if let Ok(Some(report)) =
+                n0_future::time::timeout(std::time::Duration::from_secs(5), arrivals.recv()).await
+            {
+                rungs_watch.note(report, super::Instant::now());
+            }
+        }
+
+        let kept: Vec<u16> = book
+            .get_endpoint_info(params.id)
+            .expect("an entry")
+            .into_endpoint_addr()
+            .ip_addrs()
+            .map(std::net::SocketAddr::port)
+            .collect();
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        member.close().await;
+        holder_peer.close().await;
+        assert_eq!(kept, vec![rungs[on]], "the book still names the old rung");
+    }
+
     /// The entry after a claim holds the relay rung of the rendezvous and the direct addresses of
     /// the new holder, and none of a former holder's. A lane peer, whose IP transports are cleared,
     /// dials the bare id and can use only the relay rung.
@@ -2463,7 +2667,7 @@ mod tests {
         let book = iroh::address_lookup::memory::MemoryLookup::new();
         crate::lookup::add_peer_addr(&book, at(4000));
 
-        crate::lookup::replace_peer_addr(&book, holder_entry(at(5000), &params));
+        crate::lookup::replace_peer_addr(&book, holder_entry(at(5000), &params, &[]));
 
         let entry = book
             .get_endpoint_info(params.id)

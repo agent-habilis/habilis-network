@@ -175,6 +175,17 @@ pub(super) async fn maybe_cohost(
             )
             .await
         } else {
+            // A holder is known, so the ladder is not walked. If the link to it is lost, it may
+            // have moved to another rung, and the book names the rung that was read last.
+            if !state.rendezvous_linked {
+                beacon::refresh_holder_rung(
+                    arm.params,
+                    ctx.endpoint,
+                    &state.address_book,
+                    &mut state.rungs,
+                )
+                .await;
+            }
             beacon::Held::Idle
         };
         match held {
@@ -320,7 +331,7 @@ fn shed_beacon(
     state.next_rival_recheck = None;
     state.cancel_rendezvous_round();
     state.address_book.remove_endpoint_info(params.id);
-    super::setup::register_rendezvous(&state.address_book, params);
+    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.foreign_rungs());
     state.rendezvous_linked = false;
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
@@ -586,7 +597,11 @@ pub(super) fn shed_rival_beacon_if_due(
     // The book still names the beacon just shed; the next holder writes its own address. What the
     // mesh registered for the id by itself (a relay rung) is written back.
     state.address_book.remove_endpoint_info(arm.params.id);
-    super::setup::register_rendezvous(&state.address_book, arm.params);
+    super::setup::register_rendezvous(
+        &state.address_book,
+        arm.params,
+        &state.rungs.foreign_rungs(),
+    );
     // Don't wait for that `NeighborDown` either — clear the link flag now
     // (mirroring the hard resume edge), or a yielding node's heal ticks
     // idle on "rendezvous linked" instead of grafting the rival's beacon.

@@ -97,7 +97,7 @@ pub(super) async fn run_heal(
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
-        setup::register_rendezvous(&state.address_book, params);
+        setup::register_rendezvous(&state.address_book, params, &state.rungs.foreign_rungs());
         if crate::transport::webrtc::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
         }
@@ -303,7 +303,7 @@ pub(super) fn apply_rung_change(
             "bootstrap relay rung changed; re-registering rendezvous and re-homing the beacon"
         );
         params.bootstrap_relay = new;
-        setup::register_rendezvous(&state.address_book, params);
+        setup::register_rendezvous(&state.address_book, params, &state.rungs.foreign_rungs());
         // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
         // homed on the new rung at the next heal/reclaim tick — `shed`, not a
         // plain drop. The old endpoint is still open and still homed on the

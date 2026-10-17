@@ -153,11 +153,14 @@ fn spawn_startup_rung_confirmation(
 pub(crate) fn register_rendezvous(
     book: &iroh::address_lookup::memory::MemoryLookup,
     params: &RendezvousParams,
+    foreign: &[u16],
 ) {
     // Relay disabled (not in the allowlist) or private without a port ladder:
     // nothing to pre-register — joiners resolve the rendezvous id via
     // mDNS/DHT only.
-    let Some(addr) = crate::beacon::rendezvous_addr(params) else {
+    // Without the rungs that the walk read as held by a foreign listener (`foreign`): a dial of the
+    // id tries every address that the endpoint knows for it, and such a listener fails the dial.
+    let Some(addr) = crate::beacon::rendezvous_addr_without(params, foreign) else {
         return;
     };
     if params.bind_ports.is_empty() {
@@ -991,7 +994,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
     let topic = crate::gossip::split::subscribe_mesh(&gossip, topic_id, []).await?;
 
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
-    register_rendezvous(&address_book, &rdv);
+    register_rendezvous(&address_book, &rdv, &[]);
 
     Ok(Assembled {
         mesh_id,
@@ -1063,7 +1066,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // Must precede the join (the subscribe below): the peer resolves the rendezvous id via
     // this registered address — the loopback port ladder (loopback-only) or
     // the chosen relay rung (reachable across machines).
-    register_rendezvous(&address_book, &rdv);
+    register_rendezvous(&address_book, &rdv, &[]);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
     // until we are meshed, so we never register a duplicate `rendezvous_id` on
