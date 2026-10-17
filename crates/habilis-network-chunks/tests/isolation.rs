@@ -42,11 +42,28 @@ fn manifest() -> String {
         .expect("this crate has a Cargo.toml")
 }
 
+/// Test-only helpers that a dev-dependency table may name although the name starts with a forbidden
+/// prefix. `habilis-network-test-tracing` fails a unit test on a WARN or ERROR event. It depends on
+/// `tracing` and `tokio` and knows no network type, and a dev-dependency is never linked into the
+/// library, so the seam stays where it is. The same name in `[dependencies]` still fails.
+const DEV_ONLY_HELPERS: &[&str] = &["habilis-network-test-tracing"];
+
 #[test]
 fn the_crate_does_not_know_about_the_network_layer() {
+    let mut dev_only = false;
     for line in manifest().lines() {
         let line = line.trim();
+        if line.starts_with('[') {
+            dev_only = line.ends_with("dev-dependencies]");
+        }
         if is_metadata(line) {
+            continue;
+        }
+        if dev_only
+            && DEV_ONLY_HELPERS
+                .iter()
+                .any(|helper| line.starts_with(helper))
+        {
             continue;
         }
         for forbidden in FORBIDDEN {

@@ -1785,6 +1785,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "habilis-network-test-tracing",
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",
