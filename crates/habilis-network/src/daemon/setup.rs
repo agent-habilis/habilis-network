@@ -1237,6 +1237,9 @@ mod tests {
             .expect("a loopback mesh sets up");
             assert_eq!(config.multihop.is_some(), expected, "{list:?}");
             config.router.shutdown().await.expect("the router stops");
+            if let Some(handle) = config.multihop.as_ref() {
+                handle.close().await;
+            }
         }
     }
 
@@ -1294,7 +1297,8 @@ mod tests {
             if let Some(handle) = config.multihop.as_ref() {
                 assert_eq!(handle.link_cost(), 10, "{transports:?}");
             }
-            config.router.shutdown().await.expect("the router stops");
+            // Leave closes what setup bound, the endpoint, the underlay and the leg.
+            leave_and_keep_handles(config).await;
         }
     }
 
@@ -1339,7 +1343,8 @@ mod tests {
             "the underlay has no IP socket: {:?}",
             leg.endpoint.bound_sockets()
         );
-        config.router.shutdown().await.expect("the router stops");
+        // Leave closes what setup bound, the endpoint, the underlay and the leg.
+        leave_and_keep_handles(config).await;
     }
 
     // G and C come from the caller, and `0` takes the default. Every option set
@@ -1378,6 +1383,9 @@ mod tests {
             assert_eq!(config.max_peers, want_g, "G for {max_peers}");
             assert_eq!(config.webrtc_admission.cap(), want_c, "C for {max_direct}");
             config.router.shutdown().await.expect("the router stops");
+            if let Some(handle) = config.multihop.as_ref() {
+                handle.close().await;
+            }
         }
     }
 
@@ -1470,17 +1478,20 @@ mod tests {
     // none in.
     #[tokio::test]
     async fn an_injected_multihop_handle_is_dropped_when_the_mesh_has_no_multihop() {
-        let config = setup_with(
-            vec![Transport::Udp, Transport::WebRtc],
-            injected(false).await,
-        )
-        .await
-        .expect("a loopback mesh sets up");
+        let first = injected(false).await;
+        let (first_endpoint, first_handle) = (first.endpoint.clone(), first.multihop.clone());
+        let config = setup_with(vec![Transport::Udp, Transport::WebRtc], first)
+            .await
+            .expect("a loopback mesh sets up");
         assert!(
             config.multihop.is_none(),
             "no multihop on a udp,webrtc mesh"
         );
         config.router.shutdown().await.expect("the router stops");
+        if let Some(handle) = first_handle {
+            handle.close().await;
+        }
+        first_endpoint.close().await;
 
         let default_list = setup_with(Vec::new(), injected(false).await)
             .await
@@ -1491,16 +1502,25 @@ mod tests {
             .shutdown()
             .await
             .expect("the router stops");
+        if let Some(handle) = default_list.multihop.as_ref() {
+            handle.close().await;
+        }
     }
 
     // Whether the relay may carry cells is a rule of the mesh: a handle that lets
     // it, on a lookup-only mesh, is refused.
     #[tokio::test]
     async fn an_injected_multihop_handle_that_lets_the_relay_carry_cells_is_refused() {
-        let error = setup_with(Vec::new(), injected(true).await)
+        let refused = injected(true).await;
+        let (endpoint, handle) = (refused.endpoint.clone(), refused.multihop.clone());
+        let error = setup_with(Vec::new(), refused)
             .await
             .expect_err("relay cells on a lookup-only mesh");
         assert!(format!("{error:#}").contains("relay"), "{error:#}");
+        if let Some(handle) = handle {
+            handle.close().await;
+        }
+        endpoint.close().await;
     }
 
     /// Regression for `Endpoint dropped without calling Endpoint::close` on a
