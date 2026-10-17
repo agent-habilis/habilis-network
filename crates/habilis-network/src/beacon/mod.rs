@@ -1246,6 +1246,7 @@ async fn build_rendezvous_endpoint(
             Ok(endpoint) => {
                 tracing::info!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "beacon assumed: bound rendezvous ladder rung");
                 rungs.forget();
+                rungs.clear_foreign(port);
                 // No `WebRTC` on the ladder: a loopback mesh has no browsers.
                 return Walk::Bound(endpoint, None);
             }
@@ -2678,6 +2679,37 @@ mod tests {
         member.close().await;
         holder_peer.close().await;
         assert_eq!(kept, vec![rungs[on]], "the book still names the old rung");
+    }
+
+    /// A rung that a foreign listener held and that this member then binds is its own rung: it
+    /// is not foreign any more, or `register_rendezvous` would leave it out of the book after each
+    /// heal.
+    #[tokio::test]
+    async fn a_rung_that_this_member_binds_is_no_longer_foreign() {
+        let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a free loopback port");
+        let rung = socket.local_addr().expect("its address").port();
+        drop(socket);
+        let mut params = public_params();
+        params.bind_ports = vec![rung];
+        let peer = loopback_endpoint().await;
+        let book = crate::lookup::address_book(&peer);
+        let mut beacon = None;
+        let mut rungs = super::RungWatch::detached();
+        rungs.mark_foreign(rung);
+
+        let outcome = super::claim_holder(&params, &peer, &book, &mut beacon, &mut rungs).await;
+
+        if let Some(held) = beacon.take() {
+            held.shed_and_wait().await;
+        }
+        peer.close().await;
+        assert_eq!(outcome, super::Held::Claimed, "the free rung is claimed");
+        assert_eq!(
+            rungs.foreign_rungs(),
+            Vec::<u16>::new(),
+            "the rung of our own beacon is still read as foreign"
+        );
     }
 
     /// The entry after a claim holds the relay rung of the rendezvous and the direct addresses of
