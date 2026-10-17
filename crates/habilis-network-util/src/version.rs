@@ -58,6 +58,7 @@ pub fn build_version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::VERSION;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn version_carries_crate_version_and_git_stamp() {

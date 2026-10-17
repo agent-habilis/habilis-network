@@ -89,6 +89,7 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
 #[cfg(test)]
 mod tests {
     use super::BoundedFifoSet;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn insert_reports_novelty_and_dedupes() {

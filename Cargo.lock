@@ -2012,6 +2012,7 @@ dependencies = [
 name = "habilis-network-util"
 version = "0.6.0"
 dependencies = [
+ "habilis-network-test-tracing",
  "libc",
  "tokio",
  "tracing",
