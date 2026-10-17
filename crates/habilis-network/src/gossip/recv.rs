@@ -2242,6 +2242,7 @@ mod first_contact_tests {
         let parked = state.pending_outbound.take();
         assert_eq!(parked.len(), 1, "the frame is in the buffer again");
         assert_eq!(parked[0].0.id, frame.id, "and it is the same frame");
+        node.endpoint.close().await;
     }
 
     /// Feed one gossip event to the handler, as the loop does.
@@ -3303,7 +3304,7 @@ mod left_tests {
         use crate::daemon::event_loop::linkstate_arm;
 
         let lookups = LookupOpts::loopback();
-        let (endpoint, _handle, _webrtc) =
+        let (endpoint, peer_handle, _webrtc) =
             build_peer_multihop(&lookups, TransportOpts::default(), None, false)
                 .await
                 .expect("a multihop peer binds");
@@ -3372,6 +3373,9 @@ mod left_tests {
             !advertises(&handle),
             "the stale links are still in the routing table of a node that is not meshed"
         );
+        handle.close().await;
+        peer_handle.close().await;
+        leaver_handle.close().await;
         endpoint.close().await;
         leaver_endpoint.close().await;
     }
