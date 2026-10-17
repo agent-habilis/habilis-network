@@ -1908,6 +1908,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "habilis-network-protocol",
+ "habilis-network-test-tracing",
  "habilis-network-util",
  "insta",
  "proptest",

@@ -154,6 +154,7 @@ fn log(direction: &'static str, msg: &Message) {
 mod tests {
     use super::redacted_body;
     use habilis_network_protocol::{Message, MessageKind};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn redacted_body_omits_raw_text() {
