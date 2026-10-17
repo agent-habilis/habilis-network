@@ -1382,6 +1382,16 @@ impl EventLoopState {
             })
     }
 
+    /// Whether a reclaim tick asks another known peer for a link: the fast reclaim window is
+    /// open and this member held links and lost every one. A low priority request is refused by
+    /// a peer whose view is full, and the peers that were lost are full first; waiting for the
+    /// heal tick would leave the member alone for up to a heal interval.
+    pub(crate) fn isolated_refill_due(&self, now: Instant) -> bool {
+        self.linked_endpoints.is_empty()
+            && self.zero_links_since.is_some()
+            && self.reclaim_until.is_some_and(|until| now < until)
+    }
+
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);

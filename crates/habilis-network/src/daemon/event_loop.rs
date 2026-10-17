@@ -1060,6 +1060,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 }
                 crate::transport::probe::regraft_due(&mut state, &ctx).await;
+                crate::transport::probe::refill_isolated(&mut state, &ctx).await;
                 crate::transport::webrtc::detach_sessions_under_udp(&mut state, &ctx).await;
                 gossip::antientropy::resume_fast_rounds(&mut state, &ctx).await;
             }
