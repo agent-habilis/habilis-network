@@ -367,11 +367,21 @@ pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr>
     Some(addr.with_relay_url(params.bootstrap_relay.clone()?))
 }
 
+/// The rendezvous id at one rung of the loopback ladder.
+fn rendezvous_holder_addr(params: &RendezvousParams, port: u16) -> EndpointAddr {
+    EndpointAddr::new(params.id).with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+}
+
 /// The entry of the rendezvous id in the book of the member endpoint after a claim: the direct
-/// addresses of the new holder, and what the mesh registered for the id by itself, a relay rung or
-/// the loopback ladder ([`rendezvous_addr`]). The addresses of a former holder are not in it. A
-/// member whose IP transports are cleared dials the bare id and can use only the registered part.
+/// addresses of the new holder, and what the mesh registered for the id by itself, a relay rung
+/// ([`rendezvous_addr`]). The addresses of a former holder are not in it. A member whose IP
+/// transports are cleared dials the bare id and can use only the registered part. On a private
+/// ladder nothing was registered, and the entry is the holder alone: the other rungs are no
+/// address of the id (see [`rendezvous_holder_addr`]).
 fn holder_entry(holder: EndpointAddr, params: &RendezvousParams) -> EndpointAddr {
+    if !params.bind_ports.is_empty() {
+        return holder;
+    }
     match rendezvous_addr(params) {
         Some(registered) => {
             EndpointAddr::from_parts(holder.id, holder.addrs.into_iter().chain(registered.addrs))
@@ -1110,7 +1120,7 @@ async fn build_rendezvous_endpoint(
         match rungs.reading(port, now) {
             RungRead::Ours => {
                 tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung already serves our beacon; staying peer");
-                return Walk::Rival;
+                return Walk::Rival(port);
             }
             RungRead::Foreign | RungRead::SilentLongEnough => {
                 tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung held by a foreign mesh, or silent for the whole window; trying next rung");
@@ -1148,8 +1158,8 @@ enum Walk {
     /// A rung was free (or, public, the endpoint was built): the beacon can stand up on it.
     Bound(Endpoint, RendezvousLane),
     /// A rung was taken and its listener answered as the beacon of our own mesh: a holder exists,
-    /// and it is not this member.
-    Rival,
+    /// and it is not this member. The port is the rung of the holder.
+    Rival(u16),
     /// No rung was taken, and no holder was read.
     Nothing,
     /// Every rung is held by another process, each read as foreign or silent for the whole
@@ -1354,7 +1364,19 @@ async fn claim_holder(
         Walk::Bound(endpoint, lane) => (endpoint, lane),
         // Private: a rung is taken by the beacon of our own mesh. Joiners reach it by an
         // identity-checked dial; whether this member must go to it is the caller's to say.
-        Walk::Rival => return Held::Rival,
+        Walk::Rival(port) => {
+            // The one rung that was read as ours. The book holds no other rung of the ladder: a
+            // dial of the id also tries every address that iroh knows for it, and a foreign
+            // listener on another rung answers with its own identity or with an alert, which
+            // fails the whole dial. The endpoint is told too, because it does not ask the book
+            // again for an id that it knows.
+            let holder = rendezvous_holder_addr(params, port);
+            replace_peer_addr(peer_book, holder.clone());
+            if let Err(error) = peer.add_endpoint_addr(holder).await {
+                tracing::debug!(target: "habilis_network::beacon", %error, port, "the endpoint did not take the rung of the holder");
+            }
+            return Held::Rival;
+        }
         Walk::NoRung => return Held::NoRung,
         // Public: the endpoint build failed. Private: a rung is read, or waits for its probe.
         // Nothing to do; the next tick retries.
@@ -2401,13 +2423,11 @@ mod tests {
         );
     }
 
-    /// The claim writes the address of the new beacon into the book of the member endpoint. The
-    /// entry of the rendezvous id must keep what the mesh registered for it by itself, here every
-    /// rung of the ladder. A member that dials the bare id has only that registered address to use:
-    /// on a public mesh it is the relay rung, and a lane peer with its IP transports cleared finds
-    /// nothing else.
+    /// The claim writes the address of the new beacon into the book of the member endpoint, and
+    /// on a private ladder only that: the rung it bound. The other rungs are no address of the
+    /// id, and a dial that tries one of them can reach a foreign listener.
     #[tokio::test]
-    async fn a_claim_keeps_the_rungs_the_mesh_registered_for_the_rendezvous() {
+    async fn a_claim_on_a_ladder_leaves_only_the_bound_rung_in_the_book() {
         let sockets: Vec<_> = (0..2)
             .map(|_| {
                 std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -2424,6 +2444,10 @@ mod tests {
         let peer = loopback_endpoint().await;
         let book = crate::lookup::address_book(&peer);
         crate::daemon::setup::register_rendezvous(&book, &params);
+        assert!(
+            book.get_endpoint_info(params.id).is_none(),
+            "a ladder is not registered up front"
+        );
         let mut beacon = None;
 
         let claimed = claim(&params, &peer, &book, &mut beacon).await;
@@ -2432,19 +2456,18 @@ mod tests {
             .get_endpoint_info(params.id)
             .expect("an entry")
             .into_endpoint_addr();
-        let kept: std::collections::BTreeSet<u16> =
-            entry.ip_addrs().map(std::net::SocketAddr::port).collect();
+        let kept: Vec<u16> = entry.ip_addrs().map(std::net::SocketAddr::port).collect();
+        let bound = beacon.as_ref().and_then(|held| held.rung_in(&rungs));
         if let Some(held) = beacon.take() {
             held.shed_and_wait().await;
         }
         peer.close().await;
         assert!(claimed, "a free rung is claimed");
-        for rung in rungs {
-            assert!(
-                kept.contains(&rung),
-                "the claim wrote over the rung {rung} that the mesh registered for the rendezvous: {kept:?}"
-            );
-        }
+        assert_eq!(
+            kept,
+            vec![rungs[bound.expect("the beacon is bound on a rung")]],
+            "the entry holds more than the rung that the beacon bound"
+        );
     }
 
     /// The entry after a claim holds the relay rung of the rendezvous and the direct addresses of
