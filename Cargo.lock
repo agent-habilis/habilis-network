@@ -1801,6 +1801,7 @@ dependencies = [
  "bs58",
  "chacha20poly1305",
  "habilis-network-protocol",
+ "habilis-network-test-tracing",
  "habilis-network-util",
  "insta",
  "proptest",

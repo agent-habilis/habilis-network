@@ -844,6 +844,7 @@ mod tests {
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
+    use habilis_network_test_tracing::{expect_warn, test};
     use serde_json::{Value, json};
     use std::collections::HashSet;
 
@@ -1044,6 +1045,10 @@ mod tests {
     /// answers `Duplicate`.
     #[test]
     fn a_change_that_fails_to_apply_is_not_recorded_as_applied() {
+        expect_warn(
+            super::LOG_TARGET,
+            "dropping a channel change automerge refused",
+        );
         let alice = nick("alice");
         let seed = b"shared-actor";
 
@@ -1086,6 +1091,10 @@ mod tests {
     /// never satisfied, so nothing drains and nothing expires.
     #[test]
     fn an_orphan_flood_from_one_author_stays_bounded() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         let chain: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 32)
@@ -1117,6 +1126,10 @@ mod tests {
     /// which states the same rule over the other store.
     #[test]
     fn global_budget_refuses_the_newcomer() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full; incoming orphan dropped",
+        );
         let mut sink = MeshDoc::new_ungated();
 
         // One honest orphan parked first, from its own author.
@@ -1173,6 +1186,10 @@ mod tests {
     /// evicted ones or the author's re-send is discarded as a repeat.
     #[test]
     fn an_orphan_refused_at_the_global_cap_is_reported_as_dropped() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full; incoming orphan dropped",
+        );
         let mut sink = MeshDoc::new_ungated();
         let mut refused = None;
         for who in 0..=DOC_PENDING_TOTAL_MAX {
@@ -1198,6 +1215,10 @@ mod tests {
     /// joiner's honest backfill out of the buffer.
     #[test]
     fn a_floods_orphans_do_not_evict_another_authors() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let alice = nick("alice");
         let mallory = nick("mallory");
 
@@ -1262,6 +1283,10 @@ mod tests {
     /// cannot drain until every link below it arrives again.
     #[test]
     fn a_full_orphan_buffer_keeps_the_lowest_seqs_of_an_author() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let sink = deliver(&chain, &tail, 100);
@@ -1272,6 +1297,10 @@ mod tests {
     /// the seq order keep the same links.
     #[test]
     fn a_reversed_tail_keeps_the_lowest_seqs_of_an_author() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; highest-seq orphan evicted",
+        );
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).rev().collect();
         let sink = deliver(&chain, &tail, 100);
@@ -1281,6 +1310,14 @@ mod tests {
     /// The arrival order does not change which links stay.
     #[test]
     fn a_shuffled_tail_keeps_the_lowest_seqs_of_an_author() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; highest-seq orphan evicted",
+        );
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let chain = keyed_chain(300);
         // 7919 shares no factor with 200, so it walks all 200 slots once each.
         let tail: Vec<usize> = (0..200).map(|slot| 100 + slot * 7919 % 200).collect();
@@ -1292,6 +1329,10 @@ mod tests {
     /// only those: the rest drain and must stay seen.
     #[test]
     fn a_full_orphan_buffer_reports_the_links_it_let_go() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let mut sink = deliver(&chain, &tail, 100);
@@ -1307,6 +1348,10 @@ mod tests {
     /// when its content differs: seq is the only order the buffer trusts.
     #[test]
     fn a_full_orphan_buffer_refuses_a_second_change_at_its_highest_seq() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let chain = keyed_chain(DOC_PENDING_AUTHOR_MAX + 1);
         let alice = nick("alice");
         let mut fork = MeshDoc::new_ungated();
@@ -1328,6 +1373,10 @@ mod tests {
     /// author's real change would then be refused on every replica.
     #[test]
     fn a_change_signed_by_another_key_cannot_take_an_authors_next_seq() {
+        expect_warn(
+            super::LOG_TARGET,
+            "dropping a channel change whose actor is not its signer's key",
+        );
         let (alice, mallory) = (nick("alice"), nick("mallory"));
         let alice_key = [0xaa_u8; 32];
 
@@ -1354,6 +1403,10 @@ mod tests {
     /// buffer of its signer.
     #[test]
     fn a_change_signed_by_another_key_is_not_buffered() {
+        expect_warn(
+            super::LOG_TARGET,
+            "dropping a channel change whose actor is not its signer's key",
+        );
         let alice_key = [0xaa_u8; 32];
         let mut source = MeshDoc::new_ungated();
         let _root = author_as(&mut source, &nick("alice"), &alice_key, &json!({"a": 1}));
