@@ -157,24 +157,23 @@ pub(crate) fn register_rendezvous(
     // Relay disabled (not in the allowlist) or private without a port ladder:
     // nothing to pre-register — joiners resolve the rendezvous id via
     // mDNS/DHT only.
-    //
-    // A private ladder is not registered either. The ladder names eight ports and one of them
-    // serves the beacon. A dial of the id tries every address that iroh knows for it, and a
-    // foreign listener on another rung (any process on the host can hold one) answers with its
-    // own identity or with an alert, which fails the whole dial, again and again. The walk of the
-    // ladder reads each rung with a dial of one address, and registers the rung that serves our
-    // beacon (`beacon::claim_holder`).
-    if !params.bind_ports.is_empty() {
-        return;
-    }
     let Some(addr) = crate::beacon::rendezvous_addr(params) else {
         return;
     };
-    tracing::info!(
-        target: "habilis_network::lookup",
-        relay = ?params.bootstrap_relay,
-        "pre-registered rendezvous at the relay rung for zero-lookup dial"
-    );
+    if params.bind_ports.is_empty() {
+        tracing::info!(
+            target: "habilis_network::lookup",
+            relay = ?params.bootstrap_relay,
+            "pre-registered rendezvous at the relay rung for zero-lookup dial"
+        );
+    } else {
+        // Explicit target: needs RendezvousParams, so can't live in lookups.
+        tracing::info!(
+            target: "habilis_network::lookup",
+            rungs = params.bind_ports.len(),
+            "pre-registered rendezvous on the loopback port ladder"
+        );
+    }
     add_peer_addr(book, addr);
 }
 
