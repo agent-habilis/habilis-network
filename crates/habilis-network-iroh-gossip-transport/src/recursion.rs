@@ -118,7 +118,7 @@ mod tests {
         let alice = gossip_only_endpoint(secret(1), &alice_handle).await;
         let bob = gossip_only_endpoint(secret(2), &bob_handle).await;
         let (tx, rx) = oneshot::channel();
-        let _router = Router::builder(bob.clone())
+        let router = Router::builder(bob.clone())
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice
@@ -150,6 +150,8 @@ mod tests {
             .await
             .expect("the callback did not run")
             .expect("the callback ran");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// The watch holds the connection weakly: when the gossip layer drops the last handle,
@@ -172,7 +174,7 @@ mod tests {
         };
         let (alice, bob) = (loopback(secret(5)).await, loopback(secret(6)).await);
         let (tx, _rx) = oneshot::channel();
-        let _router = Router::builder(bob.clone())
+        let router = Router::builder(bob.clone())
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
@@ -189,6 +191,8 @@ mod tests {
             .await
             .expect("the watch task did not end");
         assert!(ended.is_err(), "the callback ran: {ended:?}");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// A connection on IP is left alone.
@@ -210,7 +214,7 @@ mod tests {
         };
         let (alice, bob) = (loopback(secret(3)).await, loopback(secret(4)).await);
         let (tx, _rx) = oneshot::channel();
-        let _router = Router::builder(bob.clone())
+        let router = Router::builder(bob.clone())
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
@@ -223,5 +227,7 @@ mod tests {
             connection.close_reason().is_none(),
             "the IP connection was closed"
         );
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 }

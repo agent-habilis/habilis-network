@@ -138,8 +138,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_frame_sent_through_a_real_topic_reaches_the_other_member() {
         let lookup = MemoryLookup::new();
-        let (alice_endpoint, alice_gossip, _alice_router) = member(1, &lookup).await;
-        let (bob_endpoint, bob_gossip, _bob_router) = member(2, &lookup).await;
+        let (alice_endpoint, alice_gossip, alice_router) = member(1, &lookup).await;
+        let (bob_endpoint, bob_gossip, bob_router) = member(2, &lookup).await;
         let topic = TopicId::from_bytes([7u8; 32]);
         let alice_handle = GossipHandle::new(alice_endpoint.id());
         let bob_handle = GossipHandle::new(bob_endpoint.id());
@@ -167,6 +167,8 @@ mod tests {
         assert_eq!(bob_stats.frames_in, 1, "{bob_stats:?}");
         assert_eq!(bob_stats.bytes_in, (frame::HEADER_LEN + 100) as u64);
         reader.abort();
+        alice_router.shutdown().await.expect("shutdown");
+        bob_router.shutdown().await.expect("shutdown");
     }
 
     /// The ladder: IP first, then gossip.
@@ -336,6 +338,9 @@ mod tests {
         for reader in readers {
             reader.abort();
         }
+        for router in routers {
+            router.shutdown().await.expect("shutdown");
+        }
     }
 
     /// When the topic closes, the sink's task ends, and the path is not valid any
@@ -343,7 +348,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_closed_topic_makes_the_path_invalid() {
         let lookup = MemoryLookup::new();
-        let (endpoint, gossip, _router) = member(5, &lookup).await;
+        let (endpoint, gossip, router) = member(5, &lookup).await;
         let handle = GossipHandle::new(endpoint.id());
         let topic = gossip
             .subscribe(TopicId::from_bytes([3u8; 32]), vec![])
@@ -374,6 +379,11 @@ mod tests {
             before + 1,
             "counted as no sink"
         );
+        // The gossip is shut down already, and a shutdown of the router would shut it down
+        // again and warn. The router goes first, so that it does not run its shutdown when
+        // the endpoint closes.
+        drop(router);
+        endpoint.close().await;
     }
 
     /// A `Lagged` event of the topic is counted, and the other events that carry no

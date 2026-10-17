@@ -537,6 +537,7 @@ mod tests {
         assert!(selected_is_gossip, "the selected path is not gossip");
         connection.close(0u32.into(), b"done");
         router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     #[test]
@@ -673,6 +674,7 @@ mod tests {
         );
         connection.close(0u32.into(), b"done");
         router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// A frame is counted where it leaves and where it arrives, and the two ends
@@ -712,6 +714,7 @@ mod tests {
         );
         connection.close(0u32.into(), b"done");
         router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     #[test]
@@ -849,6 +852,7 @@ mod tests {
         echo_once(&connection, b"found by id").await;
         connection.close(0u32.into(), b"done");
         router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// A frame to a destination with an established connection is charged to the
