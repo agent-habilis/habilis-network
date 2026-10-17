@@ -257,7 +257,7 @@ async fn build_member_endpoint(
             injected.webrtc.clone(),
             injected.admission.clone(),
             None,
-            injected.mdns,
+            injected.mdns_handle(),
         ));
     }
     // Made before the endpoint, because the endpoint reports its connections
@@ -385,6 +385,21 @@ pub struct InjectedEndpoint {
     /// hears the other members of its mesh on the LAN through it, and marks the endpoint as a
     /// member in the record it announces. `None` leaves the node without that LAN arm.
     pub mdns: Option<crate::lookup::MdnsHandle>,
+}
+
+impl InjectedEndpoint {
+    /// A copy of the mDNS handle. Where mDNS is compiled in the handle is a clonable lookup, and
+    /// where it is not the handle is `Infallible`, which is `Copy`: one `clone` call cannot suit
+    /// both builds.
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    fn mdns_handle(&self) -> Option<crate::lookup::MdnsHandle> {
+        self.mdns.clone()
+    }
+
+    #[cfg(all(feature = "host", not(feature = "mdns")))]
+    fn mdns_handle(&self) -> Option<crate::lookup::MdnsHandle> {
+        self.mdns
+    }
 }
 
 impl std::fmt::Debug for InjectedEndpoint {
