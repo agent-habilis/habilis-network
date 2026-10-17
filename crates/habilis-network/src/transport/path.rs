@@ -306,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_dialer_that_closes_while_the_wait_runs_is_not_a_timeout() {
-        let (_client, _server, dialed, accepted) = connected().await;
+        let (client, server, dialed, accepted) = connected().await;
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             dialed.close(0u32.into(), b"gave up");
@@ -315,23 +315,29 @@ mod tests {
         let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| false).await;
 
         assert_eq!(outcome, PathWait::Closed);
+        client.close().await;
+        server.close().await;
     }
 
     #[tokio::test]
     async fn a_wait_with_no_path_and_no_close_times_out() {
-        let (_client, _server, _dialed, accepted) = connected().await;
+        let (client, server, _dialed, accepted) = connected().await;
 
         let outcome = wait_selected_outcome(&accepted, Duration::from_millis(300), |_| false).await;
 
         assert_eq!(outcome, PathWait::TimedOut);
+        client.close().await;
+        server.close().await;
     }
 
     #[tokio::test]
     async fn a_selected_path_ends_the_wait_at_once() {
-        let (_client, _server, _dialed, accepted) = connected().await;
+        let (client, server, _dialed, accepted) = connected().await;
 
         let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| true).await;
 
         assert_eq!(outcome, PathWait::Selected);
+        client.close().await;
+        server.close().await;
     }
 }
