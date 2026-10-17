@@ -2258,7 +2258,7 @@ mod tests {
         let alice = bind(alice_key, alice_handle, Some(admission.clone())).await;
         let bob = bind(bob_key, bob_handle, None).await;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _router = Router::builder(bob.clone())
+        let router = Router::builder(bob.clone())
             .accept(
                 iroh_gossip::net::GOSSIP_ALPN,
                 Report(Arc::new(Mutex::new(Some(tx)))),
@@ -2299,6 +2299,8 @@ mod tests {
             Some(super::super::probe::PathKind::Gossip),
             "the pair still reads as the gossip rung once its closed connection left the table"
         );
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// What the table tells the gossip transport about a peer: established when it has a live
@@ -2390,7 +2392,7 @@ mod tests {
         let hub = MemoryHub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(41, &hub, true).await;
         let (bob, bob_table, bob_handle) = ip_and_gossip_node(42, &hub, true).await;
-        let _router = iroh::protocol::Router::builder(bob.clone())
+        let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
         let both = bob
@@ -2425,6 +2427,8 @@ mod tests {
             sent,
             "a pair on IP puts no frame on the topic"
         );
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// A pair that only gossip carries is not blocked, and a peer whose connection is gone is
@@ -2437,7 +2441,7 @@ mod tests {
         let hub = MemoryHub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(43, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(44, &hub, false).await;
-        let _router = iroh::protocol::Router::builder(bob.clone())
+        let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
         let connection = alice
@@ -2458,6 +2462,8 @@ mod tests {
         alice_table.lock().sample();
         assert!(!alice_handle.is_established(bob.id()), "no connection left");
         assert!(alice_handle.is_allowed(bob.id()), "allowed again");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// A pair that a session carries is blocked for gossip though no connection is left to read.
@@ -2473,7 +2479,7 @@ mod tests {
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, false).await;
         let sessions = FakeHub::default();
         alice_table.lock().hub = Some(Arc::new(sessions.clone()));
-        let _router = iroh::protocol::Router::builder(bob.clone())
+        let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
         let connection = alice
@@ -2493,5 +2499,7 @@ mod tests {
             "the session carries the pair: the gossip rung is not allowed"
         );
         assert!(!alice_handle.is_established(bob.id()), "no connection left");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 }
