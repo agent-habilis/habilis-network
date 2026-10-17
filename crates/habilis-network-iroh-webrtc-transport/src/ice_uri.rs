@@ -61,6 +61,7 @@ pub fn accept_ice_uri(uri: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::accept_ice_uri;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn accepts_stun() {

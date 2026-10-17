@@ -1879,6 +1879,7 @@ dependencies = [
  "bytes",
  "futures",
  "habilis-network-iroh-transport-util",
+ "habilis-network-test-tracing",
  "habilis-network-util",
  "if-addrs",
  "iroh",
