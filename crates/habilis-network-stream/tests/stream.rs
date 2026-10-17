@@ -359,6 +359,26 @@ async fn a_consumer_with_no_lane_to_a_webrtc_only_producer_fails_fast() {
     assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
 }
 
+/// A WebRTC session that attaches makes its answerer dial the offerer on the nudge ALPN, to move
+/// the connections of the pair onto the session. A stream node with WebRTC must serve that ALPN,
+/// or the dial fails with a TLS alert 120 and the node logs a warning for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
+    let node = loopback().await;
+    let producer = node.create().await;
+    let addr = producer.hash().addr.clone();
+    let dialer =
+        habilis_network::iroh::Endpoint::bind(habilis_network::iroh::endpoint::presets::Minimal)
+            .await
+            .expect("bind a dialer");
+    let nudge = dialer
+        .connect(addr, habilis_network::net::direct::NUDGE_ALPN)
+        .await;
+    assert!(nudge.is_ok(), "the nudge was refused: {:?}", nudge.err());
+    dialer.close().await;
+    node.close().await;
+}
+
 /// The mirror case: the reader has only a data channel, and the producer
 /// runs none. The hash says so, so the open fails at once instead of offering
 /// a round the producer cannot answer.

@@ -975,11 +975,12 @@ pub(crate) fn negotiate_session(
 /// session's path or back to UDP. A connect that fails does neither. Not the
 /// signal ALPN (its acceptor detaches a session on a fresh connection) nor
 /// unicast (its acceptor holds a connection).
-pub(crate) const NUDGE_ALPN: &[u8] = b"habilis-mesh/nudge/0";
+pub const NUDGE_ALPN: &[u8] = b"habilis-mesh/nudge/0";
 
-/// Closes every nudge at once. See [`NUDGE_ALPN`].
+/// Closes every nudge at once. See [`NUDGE_ALPN`]. An endpoint that runs the `WebRTC` signal
+/// acceptor must serve this too: its answerer dials the nudge when a session attaches.
 #[derive(Debug, Clone)]
-pub(crate) struct NudgeAcceptor;
+pub struct NudgeAcceptor;
 
 impl ProtocolHandler for NudgeAcceptor {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
