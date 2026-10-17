@@ -352,6 +352,8 @@ mod tests {
             !reader_node.transports.webrtc,
             "no data channel to offer to"
         );
+        producer_node.close().await;
+        reader_node.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -376,5 +378,7 @@ mod tests {
         }
         let after = lookups();
         assert!(after <= before + 1, "{before} lookups grew to {after}");
+        producer_node.close().await;
+        consumer_node.close().await;
     }
 }
