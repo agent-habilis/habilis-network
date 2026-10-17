@@ -41,6 +41,29 @@ use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX
 /// gossip target sees the orphan buffer alongside the frames feeding it.
 const LOG_TARGET: &str = "habilis_network::gossip";
 
+/// Logs a refusal as a WARN when its rate limit says one is due, with the number of refusals
+/// since the last WARN of its kind in the field `changes`.
+macro_rules! warn_refusal {
+    ($doc:expr, $message:literal, $($field:tt)*) => {
+        if let Some(changes) = $doc.warn_due($message) {
+            tracing::warn!(target: LOG_TARGET, changes, $($field)* $message);
+        }
+    };
+}
+
+/// A refusal that the WARN reports is logged for the first one of its kind and then for every
+/// `WARN_EVERY`th, with the number of refusals since the last WARN of that kind. An author who
+/// floods a channel would otherwise log one line per frame. This crate keeps no clock, because it
+/// runs in a browser, so the window is a count of refusals.
+const WARN_EVERY: u64 = 16;
+
+/// How many refusals of one kind the doc has seen, and how many of them a WARN has reported.
+#[derive(Debug, Default)]
+struct Refusals {
+    seen: u64,
+    reported: u64,
+}
+
 /// The outcome of ingesting one frame into a [`MeshDoc`].
 #[derive(Debug)]
 pub enum Ingested {
@@ -125,6 +148,8 @@ pub struct MeshDoc {
     /// victim among equal seqs on every run. A counter rather than a clock:
     /// this crate runs in a browser too, where `Instant` is not available.
     pending_arrivals: u64,
+    /// The refusals by kind (the WARN text), for the rate limit of the WARNs.
+    refusals: HashMap<&'static str, Refusals>,
     /// Dedup keys of orphan frames dropped from `pending` since the last
     /// [`Self::take_dropped`]. The receive path marked them seen on arrival, so
     /// unless it forgets them the author's re-send is discarded as a repeat and
@@ -186,6 +211,7 @@ impl MeshDoc {
             frames: HashMap::new(),
             pending: HashMap::new(),
             pending_arrivals: 0,
+            refusals: HashMap::new(),
             dropped: Vec::new(),
             gate,
             key: None,
@@ -407,11 +433,7 @@ impl MeshDoc {
             .author_key()
             .filter(|author| change.actor_id().to_bytes() == author.as_bytes().as_slice())
         else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                author = %frame.author,
-                "dropping a channel change whose actor is not its signer's key"
-            );
+            warn_refusal!(self, "dropping a channel change whose actor is not its signer's key", author = %frame.author,);
             return Ingested::Ignored;
         };
         let hash = change.hash();
@@ -460,12 +482,7 @@ impl MeshDoc {
     /// the actor id is derived from the key.
     fn apply(&mut self, change: Change, hash: ChangeHash, frame: Message) -> bool {
         if let Err(error) = self.doc.apply_changes([change]) {
-            tracing::warn!(
-                target: LOG_TARGET,
-                %error,
-                author = %frame.author,
-                "dropping a channel change automerge refused"
-            );
+            warn_refusal!(self, "dropping a channel change automerge refused", %error, author = %frame.author,);
             return false;
         }
         self.applied.insert(hash);
@@ -500,29 +517,17 @@ impl MeshDoc {
             && let Some((victim, victim_seq)) = self.highest_of(&author)
         {
             if change.seq() >= victim_seq {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    author = %frame.author,
-                    "channel orphan buffer full for this author; incoming higher-seq orphan refused"
-                );
+                warn_refusal!(self, "channel orphan buffer full for this author; incoming higher-seq orphan refused", author = %frame.author,);
                 self.dropped.push(frame.dedup_key());
                 return Ingested::Ignored;
             }
             if let Some(evicted) = self.pending.remove(&victim) {
                 self.dropped.push(evicted.frame.dedup_key());
             }
-            tracing::warn!(
-                target: LOG_TARGET,
-                author = %frame.author,
-                "channel orphan buffer full for this author; highest-seq orphan evicted"
-            );
+            warn_refusal!(self, "channel orphan buffer full for this author; highest-seq orphan evicted", author = %frame.author,);
         }
         if self.pending.len() >= DOC_PENDING_TOTAL_MAX {
-            tracing::warn!(
-                target: LOG_TARGET,
-                author = %frame.author,
-                "channel orphan buffer full; incoming orphan dropped"
-            );
+            warn_refusal!(self, "channel orphan buffer full; incoming orphan dropped", author = %frame.author,);
             self.dropped.push(frame.dedup_key());
             return Ingested::Ignored;
         }
@@ -563,6 +568,20 @@ impl MeshDoc {
             .filter(|(_, entry)| entry.frame.author_key().as_ref() == Some(author))
             .max_by_key(|(_, entry)| (entry.change.seq(), entry.arrival))
             .map(|(hash, entry)| (*hash, entry.change.seq()))
+    }
+
+    /// Counts one refusal of `kind` and returns the number of refusals the WARN must report, when
+    /// one is due: the first of a kind, then every `WARN_EVERY`th.
+    fn warn_due(&mut self, kind: &'static str) -> Option<u64> {
+        let refusals = self.refusals.entry(kind).or_default();
+        refusals.seen += 1;
+        let since = refusals.seen - refusals.reported;
+        if refusals.reported == 0 || since >= WARN_EVERY {
+            refusals.reported = refusals.seen;
+            Some(since)
+        } else {
+            None
+        }
     }
 
     /// Accounting snapshot `(pending, max_author_pending)` for the adversarial
@@ -839,7 +858,9 @@ fn put_number(
 #[cfg(test)]
 mod tests {
     use super::wire::change_body;
-    use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
+    use super::{
+        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate, WARN_EVERY,
+    };
     use automerge::Change;
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
@@ -1113,6 +1134,76 @@ mod tests {
             "one author buffered {per_author} orphans, over the {DOC_PENDING_AUTHOR_MAX} ceiling"
         );
         assert!(total <= DOC_PENDING_TOTAL_MAX, "{total} orphans buffered");
+    }
+
+    /// Collects the `changes` field of every WARN that the thread logs while it is the default
+    /// subscriber. A subscriber of the thread, so the guard of the test sees none of these events.
+    struct WarnCounts(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl tracing::Subscriber for WarnCounts {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Changes(u64);
+            impl tracing::field::Visit for Changes {
+                fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                    if field.name() == "changes" {
+                        self.0 = value;
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut changes = Changes(0);
+                event.record(&mut changes);
+                self.0.lock().expect("no poison").push(changes.0);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A flood of refused changes from one author logs the first refusal at once and then one WARN
+    /// for every `WARN_EVERY` refusals, each with the number of refusals since the last WARN. The
+    /// crate keeps no clock, so the window is a count of refusals.
+    #[test]
+    fn a_flood_of_refused_changes_logs_one_warn_per_window() {
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        let chain: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 200)
+            .map(|step| author(&mut source, &alice, &json!({ "k": step })))
+            .collect();
+        let mut sink = MeshDoc::new_ungated();
+        let counts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The root is withheld, so every change is an orphan: the first
+        // `DOC_PENDING_AUTHOR_MAX` fill the buffer and each later one is refused.
+        tracing::subscriber::with_default(WarnCounts(std::sync::Arc::clone(&counts)), || {
+            for frame in chain.iter().skip(1) {
+                sink.ingest(frame);
+            }
+        });
+        let logged = counts.lock().expect("no poison").clone();
+        let refused = u64::try_from(chain.len() - 1 - DOC_PENDING_AUTHOR_MAX).expect("fits");
+        assert_eq!(
+            logged.first(),
+            Some(&1),
+            "the first refusal is logged at once"
+        );
+        assert!(
+            logged.iter().skip(1).all(|&changes| changes == WARN_EVERY),
+            "every later WARN counts a full window: {logged:?}"
+        );
+        assert_eq!(
+            u64::try_from(logged.len()).expect("fits"),
+            1 + (refused - 1) / WARN_EVERY,
+            "{refused} refusals logged {logged:?}"
+        );
     }
 
     /// The global backstop **refuses the newcomer** rather than evicting across
