@@ -254,12 +254,13 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use habilis_network::runtime::refuse_in_browser;
+    use habilis_network_test_tracing::test;
 
     use super::*;
 
     // A stream is one direct lane: a list that names `multihop` is refused
     // before anything binds.
-    #[tokio::test]
+    #[test]
     async fn a_stream_node_refuses_multihop() {
         let opts = StreamOpts {
             transport: vec![Transport::Udp, Transport::Multihop],
@@ -275,7 +276,7 @@ mod tests {
     }
 
     // A stream node never joins a gossip mesh: a list that names `gossip` is refused too.
-    #[tokio::test]
+    #[test]
     async fn a_stream_node_refuses_gossip() {
         let opts = StreamOpts {
             transport: vec![Transport::Udp, Transport::Gossip],
@@ -291,7 +292,7 @@ mod tests {
     }
 
     // The mesh default has `multihop`. An empty list for a stream must not take it.
-    #[tokio::test]
+    #[test]
     async fn an_empty_list_is_udp_and_webrtc_for_a_stream() {
         let node = StreamNode::bind(&StreamOpts::default())
             .await
@@ -337,7 +338,7 @@ mod tests {
 
     // A reader runs only the paths the producer runs: an offer to a producer
     // with no data channel would fail only after its whole JSEP round.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reader_takes_the_producers_transport_list() {
         let producer_node = StreamNode::bind(&StreamOpts {
             transport: vec![Transport::Udp],
@@ -356,7 +357,7 @@ mod tests {
         reader_node.close().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn opening_many_streams_adds_one_address_lookup() {
         let producer_node = StreamNode::bind(&StreamOpts::default())
             .await

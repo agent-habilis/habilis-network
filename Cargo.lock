@@ -1969,6 +1969,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "habilis-network",
+ "habilis-network-test-tracing",
  "n0-future",
  "rand 0.9.4",
  "serde",
