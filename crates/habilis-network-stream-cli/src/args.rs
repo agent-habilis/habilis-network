@@ -58,6 +58,7 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use habilis_network_test_tracing::test;
 
     fn parse(args: &[&str]) -> Args {
         Args::try_parse_from(std::iter::once("habilis-network-stream").chain(args.iter().copied()))

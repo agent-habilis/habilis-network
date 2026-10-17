@@ -1983,6 +1983,7 @@ dependencies = [
  "clap",
  "habilis-network",
  "habilis-network-stream",
+ "habilis-network-test-tracing",
  "libc",
  "serde_json",
  "tokio",

@@ -257,6 +257,7 @@ fn say(line: std::fmt::Arguments<'_>) {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::io::{Error, ErrorKind, Read};
 
     use tokio::sync::mpsc;
