@@ -22,8 +22,12 @@
 //! the event, so the subscriber records the event and [`Guard`] panics on the
 //! test thread when it drops.
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 use std::io;
+#[cfg(not(target_arch = "wasm32"))]
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
@@ -43,6 +47,14 @@ static LATE: Mutex<Late> = Mutex::new(Late {
     events: Vec::new(),
 });
 static CAPTURED: Mutex<String> = Mutex::new(String::new());
+
+#[cfg(not(target_arch = "wasm32"))]
+type Cleanup = Pin<Box<dyn Future<Output = ()>>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static CLEANUPS: RefCell<Vec<Cleanup>> = const { RefCell::new(Vec::new()) };
+}
 
 /// The end of the name of a thread that a runtime of this crate starts for a test.
 const WORKER: &str = "/worker";
@@ -155,6 +167,31 @@ pub fn saw_warn(target: &str, text: &str) -> bool {
         })
 }
 
+/// Registers what the test must close, for example `at_end(async move { endpoint.close().await })`.
+/// [`run`] and [`run_multi_thread`] await every registration, at the same time, after the body and
+/// before the runtime drops, so that a value the test closes does not log as dropped open.
+/// Call it from the body of the test, not from a spawned task.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn at_end(cleanup: impl Future<Output = ()> + 'static) {
+    CLEANUPS.with(|cleanups| cleanups.borrow_mut().push(Box::pin(cleanup)));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn finish<O>(output: O) -> O {
+    let mut pending: Vec<Cleanup> =
+        CLEANUPS.with(|cleanups| cleanups.borrow_mut().drain(..).collect());
+    std::future::poll_fn(|context| {
+        pending.retain_mut(|cleanup| cleanup.as_mut().poll(context).is_pending());
+        if pending.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    output
+}
+
 /// Runs `future` to its end on a current-thread runtime, drops the runtime,
 /// then drops `guard`. Use it in place of `#[tokio::test]`.
 ///
@@ -168,7 +205,7 @@ pub fn run<F: Future>(guard: Guard, future: F) -> F::Output {
         .enable_all()
         .build()
         .expect("runtime");
-    let output = runtime.block_on(future);
+    let output = runtime.block_on(async { finish(future.await).await });
     drop(runtime);
     drop(guard);
     output
@@ -188,7 +225,7 @@ pub fn run_multi_thread<F: Future>(guard: Guard, worker_threads: usize, future: 
         .enable_all()
         .build()
         .expect("runtime");
-    let output = runtime.block_on(future);
+    let output = runtime.block_on(async { finish(future.await).await });
     drop(runtime);
     drop(guard);
     output
