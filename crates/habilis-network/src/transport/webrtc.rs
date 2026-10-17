@@ -1963,6 +1963,7 @@ mod tests {
 
     fn serve(endpoint: &Endpoint, handle: &WebRtcHandle, admission: &SignalAdmission) -> Router {
         Router::builder(endpoint.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2294,6 +2295,7 @@ mod tests {
         // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
         // ALPN list, so a second Router silently unregisters the first's.
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2415,6 +2417,7 @@ mod tests {
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2540,10 +2543,12 @@ mod tests {
 
         let (held_tx, mut held_rx) = tokio::sync::mpsc::channel(1);
         let low_router = Router::builder(low.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(HOLD_ALPN, Hold(held_tx))
             .spawn();
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let high_router = Router::builder(high.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2639,6 +2644,7 @@ mod tests {
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2739,6 +2745,7 @@ mod tests {
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2885,6 +2892,7 @@ mod tests {
 
         let (server, _server_hub) = endpoint().await;
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(MESH_WEBRTC_SIGNAL_ALPN, BlackHole)
             .spawn();
 
@@ -3240,6 +3248,7 @@ mod tests {
             .await
             .expect("bind a loopback server");
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
@@ -3347,6 +3356,7 @@ mod tests {
             .await
             .expect("bind a loopback server");
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
@@ -3459,6 +3469,7 @@ mod tests {
             .await
             .expect("bind a loopback server");
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
@@ -3596,6 +3607,7 @@ mod tests {
 
         // The dial to a closed signal port would hold its slot for a long deadline.
         state.webrtc_admission.close();
+        server.close().await;
         endpoint.close().await;
     }
 
@@ -3685,6 +3697,10 @@ mod tests {
         use crate::transport::probe::PathKind;
 
         let (endpoint, handle) = endpoint().await;
+        // The answerer of the session nudges this endpoint, the offerer, on the nudge ALPN.
+        let nudge_router = Router::builder(endpoint.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
+            .spawn();
         // The peer's key must be below ours: we are the higher id, so a session is offered here
         // only for a held frame, which the test uses to attach one.
         let key = (1u16..=u16::MAX)
@@ -3765,6 +3781,10 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         server.close().await;
+        nudge_router
+            .shutdown()
+            .await
+            .expect("shutdown the nudge router");
         endpoint.close().await;
     }
 
@@ -3779,6 +3799,10 @@ mod tests {
         use crate::transport::probe::PathKind;
 
         let (endpoint, handle) = endpoint().await;
+        // The answerer of the session nudges this endpoint, the offerer, on the nudge ALPN.
+        let nudge_router = Router::builder(endpoint.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
+            .spawn();
         let key = (1u16..=u16::MAX)
             .map(|seed| {
                 let mut bytes = [0u8; 32];
@@ -3852,6 +3876,10 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         server.close().await;
+        nudge_router
+            .shutdown()
+            .await
+            .expect("shutdown the nudge router");
         endpoint.close().await;
     }
 
