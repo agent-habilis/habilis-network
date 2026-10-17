@@ -44,6 +44,7 @@ impl PathSelector for GossipLadder {
 #[cfg(test)]
 mod tests {
     use habilis_network_iroh_transport_util::Rung;
+    use habilis_network_test_tracing::test;
 
     use super::*;
 
@@ -130,7 +131,7 @@ mod tests {
 
     /// The default selector of iroh treats a custom transport as primary: with IP and gossip
     /// both open, the mesh topic would carry the bytes. This is what the ladder prevents.
-    #[tokio::test]
+    #[test]
     async fn an_endpoint_with_ip_and_gossip_selects_ip() {
         let hub = MemoryHub::new();
         let (alice, bob) = (node(31, &hub, true).await, node(32, &hub, true).await);
@@ -139,7 +140,7 @@ mod tests {
     }
 
     /// The same endpoints without the ladder: the guard that the test above can fail.
-    #[tokio::test]
+    #[test]
     async fn without_the_ladder_an_endpoint_with_ip_and_gossip_selects_gossip() {
         let hub = MemoryHub::new();
         let (alice, bob) = (node(33, &hub, false).await, node(34, &hub, false).await);
@@ -148,7 +149,7 @@ mod tests {
     }
 
     /// The ladder hides nothing: with no other path, gossip is the one that is selected.
-    #[tokio::test]
+    #[test]
     async fn the_ladder_selects_gossip_when_it_is_the_only_path() {
         let hub = MemoryHub::new();
         let key = |seed: u8| SecretKey::from_bytes(&[seed; 32]);

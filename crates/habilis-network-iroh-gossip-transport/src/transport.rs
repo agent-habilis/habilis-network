@@ -428,6 +428,7 @@ impl CustomSender for GossipSender {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::sync::atomic::AtomicUsize;
     use std::task::Wake;
     use std::time::Duration;
@@ -517,7 +518,7 @@ mod tests {
         (hub, (alice, alice_handle), (bob, bob_handle), router)
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_quic_echo_completes_with_gossip_as_the_only_transport() {
         let (_hub, (alice, _), (bob, _), router) = pair().await;
 
@@ -637,7 +638,7 @@ mod tests {
     /// A frame with a forged source arrives for a connection that exists. It must
     /// not move the connection or stop it: QUIC authenticates every packet. This
     /// test was green on its first run; it stays as a guard.
-    #[tokio::test]
+    #[test]
     async fn a_forged_source_does_not_move_or_break_an_established_connection() {
         let (hub, (alice, alice_handle), (bob, _), router) = pair().await;
         let connection = alice
@@ -679,7 +680,7 @@ mod tests {
 
     /// A frame is counted where it leaves and where it arrives, and the two ends
     /// agree with what the flood carried.
-    #[tokio::test]
+    #[test]
     async fn an_echo_moves_the_counters_of_both_ends() {
         let (hub, (alice, alice_handle), (bob, bob_handle), router) = pair().await;
         let connection = alice
@@ -818,7 +819,7 @@ mod tests {
     }
 
     /// A dial by id alone reaches the peer: the lookup supplies the gossip address.
-    #[tokio::test]
+    #[test]
     async fn a_dial_by_id_alone_is_resolved_by_the_gossip_lookup() {
         let hub = MemoryHub::new();
         let (alice_handle, bob_handle) = (

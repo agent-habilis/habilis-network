@@ -59,6 +59,7 @@ pub fn watch_recursion(
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -106,7 +107,7 @@ mod tests {
 
     /// A connection on the gossip path is closed with the code, at both ends, and the
     /// callback runs once.
-    #[tokio::test]
+    #[test]
     async fn a_connection_on_the_gossip_path_is_closed_with_the_code() {
         let hub = MemoryHub::new();
         let (alice_handle, bob_handle) = (
@@ -156,7 +157,7 @@ mod tests {
 
     /// The watch holds the connection weakly: when the gossip layer drops the last handle,
     /// the task ends and releases its callback, and nothing is closed.
-    #[tokio::test]
+    #[test]
     async fn the_watch_ends_when_the_last_handle_of_the_connection_is_dropped() {
         let loopback = |key: SecretKey| async move {
             Endpoint::builder(presets::Minimal)
@@ -196,7 +197,7 @@ mod tests {
     }
 
     /// A connection on IP is left alone.
-    #[tokio::test]
+    #[test]
     async fn a_connection_on_ip_is_left_open() {
         let loopback = |key: SecretKey| async move {
             Endpoint::builder(presets::Minimal)

@@ -85,6 +85,7 @@ impl FrameSink for GossipSink {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::address_lookup::memory::MemoryLookup;
@@ -135,7 +136,7 @@ mod tests {
 
     /// A frame that a handle sends through a real topic arrives at the other
     /// member, whose receive loop hands it to its own handle.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_frame_sent_through_a_real_topic_reaches_the_other_member() {
         let lookup = MemoryLookup::new();
         let (alice_endpoint, alice_gossip, alice_router) = member(1, &lookup).await;
@@ -221,7 +222,7 @@ mod tests {
     /// only, which is what leaves them without an IP path to each other. On a
     /// machine that cannot bind `::1` the test logs that it was skipped and
     /// passes, so that a runner without `IPv6` does not go red.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_quic_echo_between_two_members_with_no_direct_path_completes_over_real_gossip() {
         if !ipv6_loopback_available() {
             eprintln!("SKIPPED: this machine cannot bind the IPv6 loopback [::1]");
@@ -345,7 +346,7 @@ mod tests {
 
     /// When the topic closes, the sink's task ends, and the path is not valid any
     /// more: a packet on it would go nowhere.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_closed_topic_makes_the_path_invalid() {
         let lookup = MemoryLookup::new();
         let (endpoint, gossip, router) = member(5, &lookup).await;
