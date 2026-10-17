@@ -1092,6 +1092,16 @@ mod tests {
     /// in-flight entry, or every later cold send to that peer is refused.
     #[test]
     fn a_background_dial_dropped_mid_flight_clears_its_in_flight_entry() {
+        // The endpoint lives on a runtime of its own, so that dropping the runtime of the dial
+        // leaves the endpoint a runtime to close on.
+        let endpoint_runtime = tokio::runtime::Runtime::new().expect("an endpoint runtime");
+        let endpoint = endpoint_runtime.block_on(async {
+            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind a loopback endpoint")
+        });
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1099,11 +1109,6 @@ mod tests {
         let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
         let bob = iroh::SecretKey::generate().public();
         let pool = runtime.block_on(async {
-            let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-                .relay_mode(iroh::RelayMode::Disabled)
-                .bind()
-                .await
-                .expect("bind a loopback endpoint");
             let bob_addr = iroh::EndpointAddr::from_parts(
                 bob,
                 [iroh::TransportAddr::Ip(
@@ -1111,7 +1116,7 @@ mod tests {
                 )],
             );
             crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), bob_addr);
-            let pool = super::UnicastPool::new(endpoint, false);
+            let pool = super::UnicastPool::new(endpoint.clone(), false);
             assert!(
                 pool.dial_and_send_in_background(bob, bytes::Bytes::new())
                     .await
@@ -1123,8 +1128,8 @@ mod tests {
         drop(runtime);
 
         let still_in_flight = pool.inner.dialing.lock().expect("lock").contains_key(&bob);
-        let cleanup = tokio::runtime::Runtime::new().expect("a cleanup runtime");
-        let _entered = cleanup.enter();
+        let _entered = endpoint_runtime.enter();
+        endpoint_runtime.block_on(endpoint.close());
         drop(pool);
         assert!(
             !still_in_flight,
