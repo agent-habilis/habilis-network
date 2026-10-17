@@ -115,6 +115,27 @@ pub fn clear_captured_logs() {
     lock(&CAPTURED).clear();
 }
 
+/// Like [`Guard::expect_warn`], for the test of the calling thread, which the
+/// `test` attribute guards: the guard is out of its reach.
+///
+/// # Panics
+///
+/// Panics if the calling thread is not the thread of a live guard.
+pub fn expect_warn(target: &str, text: &str) {
+    let current = thread::current();
+    let name = current.name().unwrap_or_default();
+    let live = lock(&LIVE);
+    let slot = live
+        .iter()
+        .find(|slot| slot.thread == name)
+        .unwrap_or_else(|| panic!("expect_warn outside a guarded test (thread {name})"));
+    lock(&slot.expected).push(Expectation {
+        target: target.to_owned(),
+        text: text.to_owned(),
+        seen: false,
+    });
+}
+
 /// Whether the test of the calling thread has logged a WARN from `target` (a
 /// module path prefix) whose message contains `text`. A test that expects the
 /// WARN with [`Guard::expect_warn`] polls it to wait until the WARN came.
