@@ -79,21 +79,12 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
         .with_ansi(false)
         .try_init();
     let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
-    // iroh tries the addresses of an id in the order of their ports. A ladder whose first two
-    // rungs are in that order puts the foreign listener of rung 0 before the rung that the
-    // beacon takes (rung 1, the first one that binds), which is the order that fails every dial.
-    let (mesh, ladder) = loop {
-        let mesh = Mesh::new(
-            fresh_seed(),
-            MeshName::new("foreign-rung".to_owned()).expect("a name"),
-            config.clone(),
-        );
-        let ladder = mesh.rendezvous_ports();
-        if ladder[0] < ladder[1] {
-            break (mesh, ladder);
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    };
+    let mesh = Mesh::new(
+        fresh_seed(),
+        MeshName::new("foreign-rung".to_owned()).expect("a name"),
+        config,
+    );
+    let ladder = mesh.rendezvous_ports();
     let mut foreign = Vec::new();
     for &rung in foreign_rungs {
         foreign.push(foreign_on(ladder[rung]).await);
