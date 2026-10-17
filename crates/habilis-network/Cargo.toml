@@ -216,6 +216,7 @@ iroh-gossip.workspace = true
 # so leaving these unscoped makes `cargo check --target wasm32-unknown-unknown`
 # fail before it reaches any code of ours.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 proptest.workspace = true
 insta.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

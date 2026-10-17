@@ -966,7 +966,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
                     ).await {
-                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe, owned).await;
+                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe, &mut state.rungs, owned).await;
                         return Err(error);
                     }
                     let ctx = parts.ctx(&sender);
@@ -1106,7 +1106,14 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         app.drain_surfaced();
     }
 
-    release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe, owned).await;
+    release_rendezvous(
+        &mut rendezvous,
+        &mut rival_probe,
+        &mut rung_probe,
+        &mut state.rungs,
+        owned,
+    )
+    .await;
     Ok(())
 }
 

@@ -38,13 +38,16 @@ use crate::util::clock::Instant;
 /// An outstanding probe-before-claim goes the same way, and for the same
 /// reason: its throwaway endpoint is just as capable of reaching `Drop` open.
 /// So does the startup rung probe, which walks the relay ladder on endpoints
-/// of its own. The endpoints of the node close with them. All of these close
+/// of its own, and so do the rung probes that are still out: each closes a
+/// prober endpoint of its own, which a departure would drop open. The
+/// endpoints of the node close with them. All of these close
 /// concurrently, so the whole release costs one close budget, which is what
 /// `NODE_LEAVE` is sized for.
 pub(super) async fn release_rendezvous(
     rendezvous: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
     rung_probe: &mut Option<crate::lookup::StoppableTask>,
+    rungs: &mut beacon::RungWatch,
     owned: super::shutdown::OwnedEndpoints,
 ) {
     let (rendezvous, probe, rung_probe) = (rendezvous.take(), probe.take(), rung_probe.take());
@@ -64,6 +67,7 @@ pub(super) async fn release_rendezvous(
                 probe.abort_and_close().await;
             }
         },
+        rungs.finish(),
         owned.close(),
     );
 }
@@ -650,8 +654,9 @@ mod tests {
         }
     }
 
+    /// An endpoint on loopback, closed at the end of the test whatever the test does with it.
     async fn loopback_endpoint() -> iroh::Endpoint {
-        crate::lookup::build_endpoint(
+        let endpoint = crate::lookup::build_endpoint(
             &crate::protocol::mesh::LookupOpts::loopback(),
             None,
             None,
@@ -659,7 +664,10 @@ mod tests {
             crate::lookup::TransportHandles::default(),
         )
         .await
-        .expect("loopback endpoint")
+        .expect("loopback endpoint");
+        let closer = endpoint.clone();
+        habilis_network_test_tracing::at_end(async move { closer.close().await });
+        endpoint
     }
 
     /// A held beacon with one tab negotiating on it. The tab counts as a
@@ -1250,6 +1258,7 @@ mod tests {
         if let Some(held) = other_held.take() {
             held.shed_and_wait().await;
         }
+        state.rungs.finish().await;
         other_endpoint.close().await;
         endpoint.close().await;
         assert_eq!(said, 1, "a ladder that is taken whole is said");
@@ -1441,6 +1450,7 @@ mod tests {
             if let Some(held) = self.rendezvous.take() {
                 held.shed_and_wait().await;
             }
+            self.state.rungs.finish().await;
             self.endpoint.close().await;
         }
     }

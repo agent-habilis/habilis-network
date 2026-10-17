@@ -845,6 +845,9 @@ pub(crate) struct RungWatch {
     /// back each time the rendezvous is registered again.
     foreign: std::collections::BTreeSet<u16>,
     reports: mpsc::UnboundedSender<RungReport>,
+    /// The probe tasks that are out. A task reports before it closes its prober, so the loop that
+    /// ends has to wait for them: [`Self::finish`].
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl RungWatch {
@@ -858,6 +861,7 @@ impl RungWatch {
             own_counted: None,
             foreign: std::collections::BTreeSet::new(),
             reports,
+            tasks: Vec::new(),
         }
     }
 
@@ -1059,7 +1063,8 @@ impl RungWatch {
         let reports = self.reports.clone();
         let id = params.id;
         let blind = blindable && rung_probes_are_blind(node);
-        n0_future::task::spawn(async move {
+        self.tasks.retain(|task| !task.is_finished());
+        self.tasks.push(n0_future::task::spawn(async move {
             // A throwaway identity, for the reason `rung_answer` gives, and with no address
             // lookup: the dial carries the one address that it asks about, and a lookup could
             // hand it another path of the id, which would answer for the id and not the rung.
@@ -1091,7 +1096,21 @@ impl RungWatch {
             if let Some(prober) = prober {
                 prober.close().await;
             }
-        });
+        }));
+    }
+
+    /// Waits for the probe tasks that are out, so that every prober has closed its endpoint when
+    /// this returns. A prober that dials a silent rung gives up after [`RENDEZVOUS_PROBE`] and
+    /// then takes about 3 s to close, and the departure of a node would otherwise drop it open.
+    /// The bound is the dial and the close, which `NODE_LEAVE` leaves room for.
+    pub(crate) async fn finish(&mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+        let _ = n0_future::time::timeout(RENDEZVOUS_PROBE + RENDEZVOUS_CLOSE, async {
+            for task in tasks {
+                let _ = task.await;
+            }
+        })
+        .await;
     }
 
     /// The port of a rung below `own` that answered as the beacon of our own mesh, if one did.
@@ -1367,16 +1386,20 @@ pub(crate) async fn ensure_holder(
         )
         .await;
         if held != Held::Idle || !rungs.waiting() {
+            // After the test body, so that the walk keeps its own timing.
+            habilis_network_test_tracing::at_end(async move { rungs.finish().await });
             return held;
         }
-        match n0_future::time::timeout(
+        if let Ok(Some(report)) = n0_future::time::timeout(
             RECLAIM_WINDOW + std::time::Duration::from_secs(4),
             arrivals.recv(),
         )
         .await
         {
-            Ok(Some(report)) => rungs.note(report, Instant::now()),
-            Ok(None) | Err(_) => return held,
+            rungs.note(report, Instant::now());
+        } else {
+            habilis_network_test_tracing::at_end(async move { rungs.finish().await });
+            return held;
         }
     }
 }
@@ -1842,6 +1865,7 @@ mod tests {
         if let Some(held) = beacon.take() {
             held.shed_and_wait().await;
         }
+        rungs.finish().await;
         peer.close().await;
         drop(silent);
         assert_eq!(
@@ -1920,6 +1944,7 @@ mod tests {
         if let Some(held) = beacon.take() {
             held.shed_and_wait().await;
         }
+        rungs.finish().await;
         peer.close().await;
         drop((first_socket, second_socket));
         assert_eq!(asked, Held::Idle);
@@ -2246,6 +2271,7 @@ mod tests {
         let mut beacon = None;
         let mut probe = None;
 
+        let mut rungs = RungWatch::detached();
         let started = std::time::Instant::now();
         let held = walk_ladder(
             &params,
@@ -2254,7 +2280,7 @@ mod tests {
             &mut beacon,
             false,
             &mut probe,
-            &mut RungWatch::detached(),
+            &mut rungs,
         )
         .await;
         let took = started.elapsed();
@@ -2262,6 +2288,7 @@ mod tests {
         if let Some(bound) = beacon.take() {
             bound.shed_and_wait().await;
         }
+        rungs.finish().await;
         peer.close().await;
         drop(silent);
         assert_eq!(held, Held::Idle, "a silent rung binds nothing in one walk");
@@ -2380,13 +2407,15 @@ mod tests {
     /// A probe wrapped around a channel we drive by hand. The endpoint is
     /// real but inert, because `RivalProbe` retains one so a departure can
     /// close it, and these tests are about the slot, not the dial.
-    async fn probe_for(rx: oneshot::Receiver<bool>) -> RivalProbe {
-        RivalProbe {
+    async fn probe_for(rx: oneshot::Receiver<bool>) -> (RivalProbe, Endpoint) {
+        let endpoint = loopback_endpoint().await;
+        let probe = RivalProbe {
             rx,
             task: n0_future::task::spawn(std::future::pending()),
-            endpoint: Some(loopback_endpoint().await),
+            endpoint: Some(endpoint.clone()),
             cancel: None,
-        }
+        };
+        (probe, endpoint)
     }
 
     /// A beacon holding `endpoint`, whose co-host task is already finished —
@@ -2740,13 +2769,15 @@ mod tests {
     #[tokio::test]
     async fn a_verdict_is_delivered_once_and_frees_the_slot() {
         let (tx, rx) = oneshot::channel();
-        let mut slot = Some(probe_for(rx).await);
+        let (probe, endpoint) = probe_for(rx).await;
+        let mut slot = Some(probe);
         tx.send(false).expect("verdict accepted");
 
         assert!(!probe_verdict(&mut slot).await, "the rendezvous is free");
         // Cleared, or the loop's arm would re-fire on the closed channel
         // forever and no later tick could ever start a fresh probe.
         assert!(slot.is_none(), "the slot is free for the next probe");
+        endpoint.close().await;
     }
 
     #[tokio::test]
@@ -2773,7 +2804,8 @@ mod tests {
     #[tokio::test]
     async fn a_probe_whose_task_dies_frees_the_slot_too() {
         let (tx, rx) = oneshot::channel::<bool>();
-        let mut slot = Some(probe_for(rx).await);
+        let (probe, endpoint) = probe_for(rx).await;
+        let mut slot = Some(probe);
         drop(tx);
 
         assert!(
@@ -2781,6 +2813,7 @@ mod tests {
             "could not tell; stay a peer"
         );
         assert!(slot.is_none(), "a dead probe must not wedge the slot");
+        endpoint.close().await;
     }
 
     #[tokio::test]
@@ -2869,6 +2902,7 @@ mod tests {
         assert!(!releasable(&mut slot), "a live beacon is not releasable");
         assert!(slot.is_some(), "and is left alone");
         assert!(!endpoint.is_closed(), "its endpoint stays open");
+        endpoint.close().await;
     }
 
     /// The peer dials its co-hosted rendezvous (its bootstrap, or a re-graft),
@@ -3110,5 +3144,6 @@ mod tests {
         if let Some(probe) = probe.take() {
             probe.abort_and_close().await;
         }
+        peer.close().await;
     }
 }

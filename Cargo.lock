@@ -1741,6 +1741,7 @@ dependencies = [
  "habilis-network-iroh-webrtc-transport",
  "habilis-network-logging",
  "habilis-network-protocol",
+ "habilis-network-test-tracing",
  "habilis-network-util",
  "insta",
  "interprocess",
