@@ -3753,6 +3753,9 @@ mod tests {
         state.want_lane_session(bob, crate::util::clock::Instant::now());
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
+        // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
+        // from winning the race, without the WARN of a refused ALPN.
+        state.unicast_pool.note_dial_failure(bob).await;
         retry_sessions(&mut state, &ctx);
         assert!(
             until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
@@ -3852,6 +3855,9 @@ mod tests {
         state.want_lane_session(bob, crate::util::clock::Instant::now());
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
+        // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
+        // from winning the race, without the WARN of a refused ALPN.
+        state.unicast_pool.note_dial_failure(bob).await;
         retry_sessions(&mut state, &ctx);
         assert!(
             until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
