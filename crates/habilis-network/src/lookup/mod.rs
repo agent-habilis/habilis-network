@@ -1912,7 +1912,7 @@ mod tests {
                 ..TransportOpts::default()
             };
             let table = crate::transport::SignalAdmission::new(8);
-            let (_endpoint, _handle, _webrtc, leg, _mdns) = super::build_peer_multihop_with(
+            let (endpoint, handle, _webrtc, leg, _mdns) = super::build_peer_multihop_with(
                 &LookupOpts::loopback(),
                 opts,
                 Some(&table),
@@ -1921,6 +1921,8 @@ mod tests {
             )
             .await
             .expect("a multihop peer binds");
+            handle.close().await;
+            endpoint.close().await;
             (table, leg.expect("a leg when a cap is given"))
         };
 
@@ -1984,7 +1986,7 @@ mod tests {
             members.push(endpoint);
         }
         let (alice, bob) = (members.remove(0), members.remove(0));
-        let _router = iroh::protocol::Router::builder(bob.clone())
+        let router = iroh::protocol::Router::builder(bob.clone())
             .accept(ALPN, Hold)
             .spawn();
         let both = bob
@@ -2016,6 +2018,8 @@ mod tests {
             crate::transport::path::selected_is_ip(&connection),
             "IP is above gossip: the ladder of the gossip handle is the selector"
         );
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     // The underlay gets a `WebRTC` leg only when it is asked for, and only when
@@ -2052,7 +2056,7 @@ mod tests {
             .expect("a multihop peer binds")
         };
 
-        let (_endpoint, handle, _webrtc, leg, _mdns) =
+        let (endpoint, handle, _webrtc, leg, _mdns) =
             build(TransportOpts::default(), Some(5)).await;
         let leg = leg.expect("a leg when a cap is given");
         assert_eq!(leg.admission.cap(), 5, "the table has the cap of G");
@@ -2062,14 +2066,20 @@ mod tests {
             "the leg is on the underlay"
         );
         assert_eq!(leg.handle.session_count(), 0);
+        handle.close().await;
+        endpoint.close().await;
 
-        let (_, _, _, without_cap, _) = build(TransportOpts::default(), None).await;
+        let (endpoint, handle, _, without_cap, _) = build(TransportOpts::default(), None).await;
+        handle.close().await;
+        endpoint.close().await;
         assert!(without_cap.is_none(), "no cap, no leg");
         let off = TransportOpts {
             webrtc: false,
             ..TransportOpts::default()
         };
-        let (_, _, _, webrtc_off, _) = build(off, Some(5)).await;
+        let (endpoint, handle, _, webrtc_off, _) = build(off, Some(5)).await;
+        handle.close().await;
+        endpoint.close().await;
         assert!(webrtc_off.is_none(), "WebRTC off, no leg");
     }
 
@@ -2110,6 +2120,7 @@ mod tests {
             endpoint.id(),
             "a relay hands an id's packets to one endpoint only"
         );
+        handle.close().await;
         endpoint.close().await;
     }
 
