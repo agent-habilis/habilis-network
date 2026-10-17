@@ -1923,6 +1923,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "habilis-network",
+ "habilis-network-test-tracing",
  "proptest",
  "serde",
  "serde_json",

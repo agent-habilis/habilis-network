@@ -507,6 +507,7 @@ mod tests {
         session_id_for,
     };
     use habilis_network::protocol::{AuthorKey, Nickname};
+    use habilis_network_test_tracing::test;
 
     fn key(byte: u8) -> AuthorKey {
         AuthorKey::from_bytes([byte; 32])
