@@ -2726,6 +2726,9 @@ mod first_contact_tests {
             "the PeerInfo that writes the binding feeds the vector that waited for it"
         );
         node.endpoint.close().await;
+        ours.close().await;
+        theirs.close().await;
+        node.endpoint.close().await;
     }
 
     /// The address in the first `PeerInfo` of a peer must reach the endpoint, not only
@@ -3101,6 +3104,7 @@ mod link_state_tests {
         let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body);
         super::retain_own_broadcast(&mut state, &message);
         assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
+        handle.close().await;
     }
 
     // A signature proves who made a vector, not that the maker is a member, and
@@ -3149,6 +3153,8 @@ mod link_state_tests {
             1,
             "the bound peer is heard"
         );
+        ours.close().await;
+        theirs.close().await;
     }
 }
 
@@ -3277,6 +3283,10 @@ mod left_tests {
             "the leaver's links are still in our routing table after its goodbye"
         );
         endpoint.close().await;
+        leaver_endpoint.close().await;
+        handle.close().await;
+        endpoint.close().await;
+        leaver_handle.close().await;
         leaver_endpoint.close().await;
     }
 
@@ -3481,6 +3491,8 @@ mod parked_link_state_tests {
             ours.topology_view().edges.is_empty(),
             "an author bound to another endpoint cannot speak for this origin"
         );
+        ours.close().await;
+        theirs.close().await;
     }
 
     #[tokio::test]
@@ -3509,6 +3521,8 @@ mod parked_link_state_tests {
             2,
             "the newer vector, with two links, is the one that is fed"
         );
+        ours.close().await;
+        theirs.close().await;
     }
 
     #[tokio::test]
@@ -3534,5 +3548,6 @@ mod parked_link_state_tests {
             parked.park(nick("carol-cc"), vector),
             "a taken vector frees its place"
         );
+        theirs.close().await;
     }
 }
