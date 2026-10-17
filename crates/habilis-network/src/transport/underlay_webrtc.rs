@@ -743,5 +743,6 @@ mod tests {
             );
         }
         router.shutdown().await.expect("the router stops");
+        client.close().await;
     }
 }
