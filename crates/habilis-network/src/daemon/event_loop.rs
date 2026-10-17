@@ -1499,6 +1499,7 @@ mod route_wake_tests {
             .map(|edge| edge.metric)
             .collect();
         state.webrtc_admission.close();
+        me.close().await;
         node.endpoint.close().await;
         costs
     }
@@ -1600,6 +1601,9 @@ mod route_wake_tests {
             "and it is the route that the handle chooses now"
         );
         state.webrtc_admission.close();
+        me.close().await;
+        via.close().await;
+        dst.close().await;
         node.endpoint.close().await;
     }
 }
