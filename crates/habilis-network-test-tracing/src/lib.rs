@@ -69,7 +69,7 @@ enum Mode {
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init() -> Guard {
     install(Mode::Stderr, "", io::stderr);
-    new_guard()
+    new_guard(true)
 }
 
 /// Like [`init`], but the events go to a buffer that [`captured_logs`] returns,
@@ -83,7 +83,7 @@ pub fn init() -> Guard {
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init_capturing(default_directives: &str) -> Guard {
     install(Mode::Capture, default_directives, Capture);
-    new_guard()
+    new_guard(true)
 }
 
 /// Like [`init_capturing`], but the events go to `writer`, for a test that
@@ -99,7 +99,7 @@ where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
     install(Mode::Writer, default_directives, writer);
-    new_guard()
+    new_guard(true)
 }
 
 /// The log text that [`init_capturing`] collected, for the whole binary. Empty
@@ -220,18 +220,29 @@ where
     );
 }
 
-fn new_guard() -> Guard {
+/// The guard of a sync test, for the `test` attribute: it holds no lock, so the sync tests of a
+/// binary run side by side. Not for direct use.
+#[doc(hidden)]
+#[must_use]
+pub fn __sync_guard() -> Guard {
+    install(Mode::Stderr, "", io::stderr);
+    new_guard(false)
+}
+
+fn new_guard(serial: bool) -> Guard {
     let thread = thread::current().name().unwrap_or_default().to_owned();
     assert!(
         thread.is_empty() || !lock(&LIVE).iter().any(|slot| slot.thread == thread),
         "init() twice in one test (thread {thread}): the second guard would wait for the first for ever"
     );
-    let serial = HELD
-        .try_with(|held| held.borrow_mut().take())
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| lock(&SERIAL));
+    let serial = serial.then(|| {
+        HELD.try_with(|held| held.borrow_mut().take())
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| lock(&SERIAL))
+    });
     let slot = Arc::new(Slot {
+        serial: serial.is_some(),
         thread,
         events: Mutex::new(Vec::new()),
         expected: Mutex::new(Vec::new()),
@@ -239,10 +250,7 @@ fn new_guard() -> Guard {
     let mut live = lock(&LIVE);
     lock(&slot.events).append(&mut lock(&LATE).events);
     live.push(Arc::clone(&slot));
-    Guard {
-        slot,
-        serial: Some(serial),
-    }
+    Guard { slot, serial }
 }
 
 struct Capture;
@@ -315,6 +323,8 @@ impl Drop for Guard {
 
 #[derive(Debug)]
 struct Slot {
+    /// Whether the guard holds the lock of the binary, which an async test does.
+    serial: bool,
     thread: String,
     events: Mutex<Vec<Logged>>,
     expected: Mutex<Vec<Expectation>>,
@@ -338,11 +348,7 @@ impl Slot {
                     logged.target,
                     logged.text,
                     logged.thread,
-                    if logged.shared {
-                        ", from a worker thread"
-                    } else {
-                        ""
-                    }
+                    worker_note(logged)
                 )),
             }
         }
@@ -376,7 +382,22 @@ struct Logged {
     text: String,
     thread: String,
     shared: bool,
+    /// The live tests that the event is filed under, when there is more than one.
+    shared_with: Vec<String>,
     after: Option<String>,
+}
+
+fn worker_note(logged: &Logged) -> String {
+    if !logged.shared {
+        String::new()
+    } else if logged.shared_with.is_empty() {
+        ", from a worker thread".to_owned()
+    } else {
+        format!(
+            ", from a worker thread, while these tests ran: {}",
+            logged.shared_with.join(", ")
+        )
+    }
 }
 
 fn late_line(logged: &Logged) -> String {
@@ -397,8 +418,9 @@ struct Late {
 }
 
 /// A thread that is the thread of a live test files the event under that test.
-/// Any other thread (a runtime worker, a thread of iroh) files it under every
-/// live test, because the layer cannot tell which test the thread works for.
+/// Any other thread (a runtime worker, a thread of iroh) files it under the test
+/// that holds the lock of the binary, or, when no test holds it, under every
+/// live sync test, because the layer cannot tell which test the thread works for.
 struct Catch;
 
 impl<S: Subscriber> Layer<S> for Catch {
@@ -416,6 +438,7 @@ impl<S: Subscriber> Layer<S> for Catch {
             text: fields.text.clone(),
             thread: thread.to_owned(),
             shared,
+            shared_with: Vec::new(),
             after: None,
         };
         if live.is_empty() {
@@ -428,9 +451,29 @@ impl<S: Subscriber> Layer<S> for Catch {
             }
             return;
         }
-        let owners = if shared { live.iter().collect() } else { own };
+        if !shared {
+            for slot in own {
+                lock(&slot.events).push(logged());
+            }
+            return;
+        }
+        let holders: Vec<_> = live.iter().filter(|slot| slot.serial).collect();
+        let owners = if holders.is_empty() {
+            live.iter().collect()
+        } else {
+            holders
+        };
+        let mut shared_with = if owners.len() > 1 {
+            owners.iter().map(|slot| slot.thread.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        shared_with.sort();
         for slot in owners {
-            lock(&slot.events).push(logged());
+            lock(&slot.events).push(Logged {
+                shared_with: shared_with.clone(),
+                ..logged()
+            });
         }
     }
 }
