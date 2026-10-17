@@ -19,6 +19,8 @@ habilis-network = { path = "../../../../habilis-network" }
 habilis-network-netplay = { path = "../../.." }
 
 [workspace.lints.rust]
+# A warning is a test failure: the output of a build and of a test stays clean.
+warnings = "deny"
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
 

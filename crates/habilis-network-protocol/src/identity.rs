@@ -232,6 +232,7 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 mod tests {
     use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
     use crate::AuthorKey;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn sign_verify_round_trip() {

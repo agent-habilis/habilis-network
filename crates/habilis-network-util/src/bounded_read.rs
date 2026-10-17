@@ -80,8 +80,9 @@ fn finish(buf: &[u8]) -> LineRead {
 #[cfg(test)]
 mod tests {
     use super::{LineRead, io, read_bounded_line};
+    use habilis_network_test_tracing::test;
 
-    #[tokio::test]
+    #[test]
     async fn reads_lines_then_eof() {
         let data = b"hello\nworld\n";
         let mut reader = io::BufReader::new(&data[..]);
@@ -99,7 +100,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[test]
     async fn over_long_line_dropped_then_stream_realigns() {
         let data = b"thisaverylongline\nok\n";
         let mut reader = io::BufReader::new(&data[..]);
@@ -113,7 +114,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn final_line_without_newline_is_delivered() {
         let data = b"tail";
         let mut reader = io::BufReader::new(&data[..]);

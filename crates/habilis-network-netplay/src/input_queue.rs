@@ -293,6 +293,7 @@ mod tests {
     use super::InputQueue;
     use crate::frame::{Frame, InputStatus};
     use crate::testutil::{TestGame, TestInput};
+    use habilis_network_test_tracing::test;
 
     fn queue() -> InputQueue<TestGame> {
         InputQueue::<TestGame>::new()

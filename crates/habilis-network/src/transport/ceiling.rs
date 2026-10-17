@@ -369,6 +369,7 @@ impl Ceiling {
 mod tests {
     use super::*;
     use crate::testing::endpoint_id;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn an_eviction_holds_proactive_dials_for_a_minute_within_the_jitter() {

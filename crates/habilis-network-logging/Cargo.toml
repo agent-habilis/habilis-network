@@ -38,6 +38,7 @@ serde_json.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false, features = ["test-fixtures"] }
 proptest.workspace = true
 insta.workspace = true

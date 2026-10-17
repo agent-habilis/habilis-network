@@ -121,6 +121,7 @@ impl GraftBackoff {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::*;

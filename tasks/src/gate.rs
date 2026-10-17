@@ -300,6 +300,16 @@ pub(crate) const STEPS: &[Step] = &[
         args: &["--no-default-features"],
     },
     Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-test-tracing"),
+        args: &[],
+    },
+    Step {
+        kind: Kind::WasmClippy,
+        scope: Scope::Crate("habilis-network-test-tracing-macros"),
+        args: &[],
+    },
+    Step {
         kind: Kind::Test,
         scope: Scope::Workspace,
         args: &[],

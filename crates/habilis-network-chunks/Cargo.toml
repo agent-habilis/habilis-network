@@ -78,3 +78,6 @@ default = []
 # `-C target-feature=+simd128`; the flag is *assumed*, not detected, so a build
 # without it produces a module that fails validation.
 wasm-simd = ["blake3/wasm32_simd"]
+
+[dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }

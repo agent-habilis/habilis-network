@@ -114,6 +114,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
 #[cfg(test)]
 mod tests {
     use crate::testing::{fresh_state, nick};
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{Instant, Nickname, tick_sweep};

@@ -21,6 +21,8 @@ use habilis_network::protocol::{Lookup, Transport};
 const MEMBERS: usize = 18;
 const FORMATION_DEADLINE: Duration = Duration::from_mins(2);
 
+/// The tests share one log buffer, and a test counts lines in it, so a second test that runs at
+/// the same time adds its own lines to the count.
 fn serial() -> &'static tokio::sync::Mutex<()> {
     static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))

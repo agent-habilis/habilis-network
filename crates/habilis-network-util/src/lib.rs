@@ -225,6 +225,7 @@ pub fn ensure_mesh_runtime_dir(
 #[cfg(test)]
 mod tests {
     use super::{is_under_runtime_base, mesh_prefix, runtime_base};
+    use habilis_network_test_tracing::test;
     use std::path::Path;
 
     #[test]

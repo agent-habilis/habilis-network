@@ -90,6 +90,7 @@ impl Nickname {
 #[cfg(test)]
 mod tests {
     use super::Nickname;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn new_accepts_valid_nicknames() {

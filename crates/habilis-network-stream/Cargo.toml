@@ -42,3 +42,6 @@ zeroize = "1"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 habilis-network = { path = "../habilis-network", default-features = false, features = ["host", "iroh-test-utils"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }

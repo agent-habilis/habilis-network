@@ -6,7 +6,7 @@
 //! automerge merges them conflict-free — so we no longer own an ordered-log
 //! fold. Convergence is automerge's job; ours is authenticity.
 //!
-//! Every change is carried inside a signed [`Message`](habilis_network_protocol::Message),
+//! Every change is carried inside a signed [`Message`],
 //! and every change is authorized before it touches the live doc. A channel
 //! configured with a [`SelfWriteGate`] holds a per-peer map keyed by nickname in
 //! which one field belongs to the peer it names: [`MeshDoc::ingest`] applies the
@@ -40,6 +40,29 @@ use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX
 /// Matches the receive path these drops happen on, so a reader filtering the
 /// gossip target sees the orphan buffer alongside the frames feeding it.
 const LOG_TARGET: &str = "habilis_network::gossip";
+
+/// Logs a refusal as a WARN when its rate limit says one is due, with the number of refusals
+/// since the last WARN of its kind in the field `changes`.
+macro_rules! warn_refusal {
+    ($doc:expr, $message:literal, $($field:tt)*) => {
+        if let Some(changes) = $doc.warn_due($message) {
+            tracing::warn!(target: LOG_TARGET, changes, $($field)* $message);
+        }
+    };
+}
+
+/// A refusal that the WARN reports is logged for the first one of its kind and then for every
+/// `WARN_EVERY`th, with the number of refusals since the last WARN of that kind. An author who
+/// floods a channel would otherwise log one line per frame. This crate keeps no clock, because it
+/// runs in a browser, so the window is a count of refusals.
+const WARN_EVERY: u64 = 16;
+
+/// How many refusals of one kind the doc has seen, and how many of them a WARN has reported.
+#[derive(Debug, Default)]
+struct Refusals {
+    seen: u64,
+    reported: u64,
+}
 
 /// The outcome of ingesting one frame into a [`MeshDoc`].
 #[derive(Debug)]
@@ -125,6 +148,8 @@ pub struct MeshDoc {
     /// victim among equal seqs on every run. A counter rather than a clock:
     /// this crate runs in a browser too, where `Instant` is not available.
     pending_arrivals: u64,
+    /// The refusals by kind (the WARN text), for the rate limit of the WARNs.
+    refusals: HashMap<&'static str, Refusals>,
     /// Dedup keys of orphan frames dropped from `pending` since the last
     /// [`Self::take_dropped`]. The receive path marked them seen on arrival, so
     /// unless it forgets them the author's re-send is discarded as a repeat and
@@ -186,6 +211,7 @@ impl MeshDoc {
             frames: HashMap::new(),
             pending: HashMap::new(),
             pending_arrivals: 0,
+            refusals: HashMap::new(),
             dropped: Vec::new(),
             gate,
             key: None,
@@ -368,7 +394,7 @@ impl MeshDoc {
     /// so an oversize change never lands in the doc it could not be gossiped for.
     ///
     /// `actor_seed` must be unique per session — the daemon passes its signing
-    /// public key (see [`actor_for`]).
+    /// public key (see `actor_for`).
     ///
     /// # Errors
     /// Unrepresentable merge (a non-object at the document root).
@@ -407,11 +433,7 @@ impl MeshDoc {
             .author_key()
             .filter(|author| change.actor_id().to_bytes() == author.as_bytes().as_slice())
         else {
-            tracing::warn!(
-                target: LOG_TARGET,
-                author = %frame.author,
-                "dropping a channel change whose actor is not its signer's key"
-            );
+            warn_refusal!(self, "dropping a channel change whose actor is not its signer's key", author = %frame.author,);
             return Ingested::Ignored;
         };
         let hash = change.hash();
@@ -460,12 +482,7 @@ impl MeshDoc {
     /// the actor id is derived from the key.
     fn apply(&mut self, change: Change, hash: ChangeHash, frame: Message) -> bool {
         if let Err(error) = self.doc.apply_changes([change]) {
-            tracing::warn!(
-                target: LOG_TARGET,
-                %error,
-                author = %frame.author,
-                "dropping a channel change automerge refused"
-            );
+            warn_refusal!(self, "dropping a channel change automerge refused", %error, author = %frame.author,);
             return false;
         }
         self.applied.insert(hash);
@@ -500,29 +517,17 @@ impl MeshDoc {
             && let Some((victim, victim_seq)) = self.highest_of(&author)
         {
             if change.seq() >= victim_seq {
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    author = %frame.author,
-                    "channel orphan buffer full for this author; incoming higher-seq orphan refused"
-                );
+                warn_refusal!(self, "channel orphan buffer full for this author; incoming higher-seq orphan refused", author = %frame.author,);
                 self.dropped.push(frame.dedup_key());
                 return Ingested::Ignored;
             }
             if let Some(evicted) = self.pending.remove(&victim) {
                 self.dropped.push(evicted.frame.dedup_key());
             }
-            tracing::warn!(
-                target: LOG_TARGET,
-                author = %frame.author,
-                "channel orphan buffer full for this author; highest-seq orphan evicted"
-            );
+            warn_refusal!(self, "channel orphan buffer full for this author; highest-seq orphan evicted", author = %frame.author,);
         }
         if self.pending.len() >= DOC_PENDING_TOTAL_MAX {
-            tracing::warn!(
-                target: LOG_TARGET,
-                author = %frame.author,
-                "channel orphan buffer full; incoming orphan dropped"
-            );
+            warn_refusal!(self, "channel orphan buffer full; incoming orphan dropped", author = %frame.author,);
             self.dropped.push(frame.dedup_key());
             return Ingested::Ignored;
         }
@@ -563,6 +568,20 @@ impl MeshDoc {
             .filter(|(_, entry)| entry.frame.author_key().as_ref() == Some(author))
             .max_by_key(|(_, entry)| (entry.change.seq(), entry.arrival))
             .map(|(hash, entry)| (*hash, entry.change.seq()))
+    }
+
+    /// Counts one refusal of `kind` and returns the number of refusals the WARN must report, when
+    /// one is due: the first of a kind, then every `WARN_EVERY`th.
+    fn warn_due(&mut self, kind: &'static str) -> Option<u64> {
+        let refusals = self.refusals.entry(kind).or_default();
+        refusals.seen += 1;
+        let since = refusals.seen - refusals.reported;
+        if refusals.reported == 0 || since >= WARN_EVERY {
+            refusals.reported = refusals.seen;
+            Some(since)
+        } else {
+            None
+        }
     }
 
     /// Accounting snapshot `(pending, max_author_pending)` for the adversarial
@@ -839,11 +858,14 @@ fn put_number(
 #[cfg(test)]
 mod tests {
     use super::wire::change_body;
-    use super::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate};
+    use super::{
+        DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate, WARN_EVERY,
+    };
     use automerge::Change;
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
+    use habilis_network_test_tracing::{expect_warn, test};
     use serde_json::{Value, json};
     use std::collections::HashSet;
 
@@ -1044,6 +1066,10 @@ mod tests {
     /// answers `Duplicate`.
     #[test]
     fn a_change_that_fails_to_apply_is_not_recorded_as_applied() {
+        expect_warn(
+            super::LOG_TARGET,
+            "dropping a channel change automerge refused",
+        );
         let alice = nick("alice");
         let seed = b"shared-actor";
 
@@ -1086,6 +1112,10 @@ mod tests {
     /// never satisfied, so nothing drains and nothing expires.
     #[test]
     fn an_orphan_flood_from_one_author_stays_bounded() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         let chain: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 32)
@@ -1106,6 +1136,76 @@ mod tests {
         assert!(total <= DOC_PENDING_TOTAL_MAX, "{total} orphans buffered");
     }
 
+    /// Collects the `changes` field of every WARN that the thread logs while it is the default
+    /// subscriber. A subscriber of the thread, so the guard of the test sees none of these events.
+    struct WarnCounts(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl tracing::Subscriber for WarnCounts {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Changes(u64);
+            impl tracing::field::Visit for Changes {
+                fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                    if field.name() == "changes" {
+                        self.0 = value;
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut changes = Changes(0);
+                event.record(&mut changes);
+                self.0.lock().expect("no poison").push(changes.0);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A flood of refused changes from one author logs the first refusal at once and then one WARN
+    /// for every `WARN_EVERY` refusals, each with the number of refusals since the last WARN. The
+    /// crate keeps no clock, so the window is a count of refusals.
+    #[test]
+    fn a_flood_of_refused_changes_logs_one_warn_per_window() {
+        let alice = nick("alice");
+        let mut source = MeshDoc::new_ungated();
+        let chain: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 200)
+            .map(|step| author(&mut source, &alice, &json!({ "k": step })))
+            .collect();
+        let mut sink = MeshDoc::new_ungated();
+        let counts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The root is withheld, so every change is an orphan: the first
+        // `DOC_PENDING_AUTHOR_MAX` fill the buffer and each later one is refused.
+        tracing::subscriber::with_default(WarnCounts(std::sync::Arc::clone(&counts)), || {
+            for frame in chain.iter().skip(1) {
+                sink.ingest(frame);
+            }
+        });
+        let logged = counts.lock().expect("no poison").clone();
+        let refused = u64::try_from(chain.len() - 1 - DOC_PENDING_AUTHOR_MAX).expect("fits");
+        assert_eq!(
+            logged.first(),
+            Some(&1),
+            "the first refusal is logged at once"
+        );
+        assert!(
+            logged.iter().skip(1).all(|&changes| changes == WARN_EVERY),
+            "every later WARN counts a full window: {logged:?}"
+        );
+        assert_eq!(
+            u64::try_from(logged.len()).expect("fits"),
+            1 + (refused - 1) / WARN_EVERY,
+            "{refused} refusals logged {logged:?}"
+        );
+    }
+
     /// The global backstop **refuses the newcomer** rather than evicting across
     /// authors — pubkeys are free, so the per-author ceiling alone is not a
     /// bound, but evicting to make room for a Sybil would let one flush
@@ -1117,6 +1217,10 @@ mod tests {
     /// which states the same rule over the other store.
     #[test]
     fn global_budget_refuses_the_newcomer() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full; incoming orphan dropped",
+        );
         let mut sink = MeshDoc::new_ungated();
 
         // One honest orphan parked first, from its own author.
@@ -1173,6 +1277,10 @@ mod tests {
     /// evicted ones or the author's re-send is discarded as a repeat.
     #[test]
     fn an_orphan_refused_at_the_global_cap_is_reported_as_dropped() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full; incoming orphan dropped",
+        );
         let mut sink = MeshDoc::new_ungated();
         let mut refused = None;
         for who in 0..=DOC_PENDING_TOTAL_MAX {
@@ -1198,6 +1306,10 @@ mod tests {
     /// joiner's honest backfill out of the buffer.
     #[test]
     fn a_floods_orphans_do_not_evict_another_authors() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let alice = nick("alice");
         let mallory = nick("mallory");
 
@@ -1262,6 +1374,10 @@ mod tests {
     /// cannot drain until every link below it arrives again.
     #[test]
     fn a_full_orphan_buffer_keeps_the_lowest_seqs_of_an_author() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let sink = deliver(&chain, &tail, 100);
@@ -1272,6 +1388,10 @@ mod tests {
     /// the seq order keep the same links.
     #[test]
     fn a_reversed_tail_keeps_the_lowest_seqs_of_an_author() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; highest-seq orphan evicted",
+        );
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).rev().collect();
         let sink = deliver(&chain, &tail, 100);
@@ -1281,6 +1401,14 @@ mod tests {
     /// The arrival order does not change which links stay.
     #[test]
     fn a_shuffled_tail_keeps_the_lowest_seqs_of_an_author() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; highest-seq orphan evicted",
+        );
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let chain = keyed_chain(300);
         // 7919 shares no factor with 200, so it walks all 200 slots once each.
         let tail: Vec<usize> = (0..200).map(|slot| 100 + slot * 7919 % 200).collect();
@@ -1292,6 +1420,10 @@ mod tests {
     /// only those: the rest drain and must stay seen.
     #[test]
     fn a_full_orphan_buffer_reports_the_links_it_let_go() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let chain = keyed_chain(300);
         let tail: Vec<usize> = (100..300).collect();
         let mut sink = deliver(&chain, &tail, 100);
@@ -1307,6 +1439,10 @@ mod tests {
     /// when its content differs: seq is the only order the buffer trusts.
     #[test]
     fn a_full_orphan_buffer_refuses_a_second_change_at_its_highest_seq() {
+        expect_warn(
+            super::LOG_TARGET,
+            "channel orphan buffer full for this author; incoming higher-seq orphan refused",
+        );
         let chain = keyed_chain(DOC_PENDING_AUTHOR_MAX + 1);
         let alice = nick("alice");
         let mut fork = MeshDoc::new_ungated();
@@ -1328,6 +1464,10 @@ mod tests {
     /// author's real change would then be refused on every replica.
     #[test]
     fn a_change_signed_by_another_key_cannot_take_an_authors_next_seq() {
+        expect_warn(
+            super::LOG_TARGET,
+            "dropping a channel change whose actor is not its signer's key",
+        );
         let (alice, mallory) = (nick("alice"), nick("mallory"));
         let alice_key = [0xaa_u8; 32];
 
@@ -1354,6 +1494,10 @@ mod tests {
     /// buffer of its signer.
     #[test]
     fn a_change_signed_by_another_key_is_not_buffered() {
+        expect_warn(
+            super::LOG_TARGET,
+            "dropping a channel change whose actor is not its signer's key",
+        );
         let alice_key = [0xaa_u8; 32];
         let mut source = MeshDoc::new_ungated();
         let _root = author_as(&mut source, &nick("alice"), &alice_key, &json!({"a": 1}));

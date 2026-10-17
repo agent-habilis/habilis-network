@@ -260,6 +260,7 @@ impl Listings {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use habilis_network_util::clock::Instant;
     use std::time::Duration;
 

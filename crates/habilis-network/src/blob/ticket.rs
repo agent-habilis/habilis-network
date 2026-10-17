@@ -144,6 +144,7 @@ mod tests {
     use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
     use crate::protocol::mesh::LookupOpts;
+    use habilis_network_test_tracing::test;
     use iroh::{EndpointAddr, SecretKey};
 
     fn sample_addr(byte: u8) -> EndpointAddr {

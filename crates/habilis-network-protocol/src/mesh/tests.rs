@@ -1,6 +1,7 @@
 use super::{LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy};
 use crate::crypto::{Password, Seed};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
+use habilis_network_test_tracing::test;
 
 fn dummy_seed() -> Seed {
     Seed::from_bytes([7u8; SEED_LEN])
@@ -434,6 +435,7 @@ fn mesh_id_round_trips_max_byte_name() {
 }
 
 mod prop {
+    use habilis_network_test_tracing::test;
     use proptest::{
         array::{uniform16, uniform32},
         prelude::any,

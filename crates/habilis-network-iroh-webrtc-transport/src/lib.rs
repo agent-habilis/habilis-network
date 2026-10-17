@@ -207,7 +207,7 @@ impl WebRtcHandle {
 
     /// The path selector that keeps the relay a rendezvous, for
     /// `Builder::path_selector`. Install it wherever [`Self::transport`] is
-    /// registered — see [`crate::selector`] for why registering the transport
+    /// registered — see `crate::selector` for why registering the transport
     /// alone is not enough.
     #[must_use]
     pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {

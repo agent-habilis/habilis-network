@@ -31,7 +31,7 @@ use crate::util::tuning::{
 
 /// The default relay **ladder** — n0's prod relay set, in fixed
 /// preference order. The beacon homes on the first reachable rung
-/// ([`select_bootstrap_rung`]) and the joiner pre-registers
+/// (`select_bootstrap_rung`) and the joiner pre-registers
 /// `rendezvous_id` at that same rung — `EndpointAddr::new(rendezvous_id)
 /// .with_relay_url(rung)` — for a **zero-address-lookup** relay-direct
 /// dial: a creator-independent bootstrap that needs no address lookup to
@@ -82,8 +82,8 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 /// `Disabled` ⇒ empty (no relay), `Pinned` ⇒ the default n0 prod
 /// ladder, `Custom` ⇒ the operator ladder (`--relay a,b,c`, order
 /// preserved). The beacon homes on, and the joiner pre-registers at, the
-/// first reachable rung ([`select_bootstrap_rung`]) — the beacon leg of
-/// [`relay_mode`] and `daemon::setup::register_rendezvous` must agree or
+/// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
+/// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
 /// the relay-direct bootstrap dial finds nothing.
 pub fn relay_ladder(choice: &RelayChoice) -> Vec<RelayUrl> {
     match choice {
@@ -186,7 +186,7 @@ where
 }
 
 /// Probe every rung of `ladder` for reachability, in order, returning each
-/// rung's online status. Unlike [`select_bootstrap_rung`] this does **not**
+/// rung's online status. Unlike `select_bootstrap_rung` this does **not**
 /// short-circuit at the first reachable rung — `doctor --mesh` shows the full
 /// ladder's health, not just the bootstrap pick.
 pub async fn probe_ladder(ladder: &[RelayUrl], per_rung: Duration) -> Vec<(RelayUrl, bool)> {
@@ -449,6 +449,7 @@ mod tests {
         RungRefresh, next_relay_backoff, plan_rung_refresh, relay_ladder, select_bootstrap_rung,
         select_first_reachable, should_evict_rung,
     };
+    use habilis_network_test_tracing::test;
 
     /// Tripwire: the iroh fallback rungs of our pinned rendezvous ladder
     /// must stay equal to iroh's `defaults::prod` relay hosts, **in
@@ -512,7 +513,7 @@ mod tests {
         assert_eq!(relay_ladder(&RelayChoice::Custom(custom.clone())), custom);
     }
 
-    #[tokio::test]
+    #[test]
     async fn select_bootstrap_rung_empty_ladder_is_none() {
         // Relay disabled / private ⇒ empty ladder ⇒ no probing, `None`
         // (joiners fall back to mDNS/DHT). The ordering/fall-through
@@ -535,7 +536,7 @@ mod tests {
     // and the rung is correctly judged down. (The positive/up→down
     // transition is the documented manual/local check.)
 
-    #[tokio::test]
+    #[test]
     async fn unreachable_rung_is_detected_as_down() {
         // RFC-5737 TEST-NET-1, never routable ⇒ the relay handshake can
         // never connect ⇒ `select_bootstrap_rung` finds no reachable rung.
@@ -619,7 +620,7 @@ mod tests {
         (selected, probed.into_inner())
     }
 
-    #[tokio::test]
+    #[test]
     async fn ladder_picks_first_when_all_reachable() {
         let ladder = rungs(&["a", "b", "c"]);
         let (selected, probed) = walk(&ladder, &[]).await;
@@ -627,7 +628,7 @@ mod tests {
         assert_eq!(probed, vec!["a"], "stops at the first reachable rung");
     }
 
-    #[tokio::test]
+    #[test]
     async fn ladder_falls_through_to_next_reachable() {
         let ladder = rungs(&["a", "b", "c"]);
         // rung 0 down → rung 1 wins, having probed a then b.
@@ -636,7 +637,7 @@ mod tests {
         assert_eq!(probed, vec!["a", "b"]);
     }
 
-    #[tokio::test]
+    #[test]
     async fn ladder_skips_multiple_dead_prefix_rungs() {
         let ladder = rungs(&["a", "b", "c"]);
         let (selected, probed) = walk(&ladder, &["a", "b"]).await;
@@ -644,7 +645,7 @@ mod tests {
         assert_eq!(probed, vec!["a", "b", "c"]);
     }
 
-    #[tokio::test]
+    #[test]
     async fn ladder_prefers_first_rung_when_it_recovers() {
         // "reset and start from the first": the walk always re-picks the
         // earliest reachable rung, so a recovered rung 0 wins over a
@@ -654,7 +655,7 @@ mod tests {
         assert_eq!(host_of(selected.as_ref()).as_deref(), Some("a"));
     }
 
-    #[tokio::test]
+    #[test]
     async fn ladder_all_down_is_none() {
         let ladder = rungs(&["a", "b", "c"]);
         let (selected, probed) = walk(&ladder, &["a", "b", "c"]).await;
@@ -662,7 +663,7 @@ mod tests {
         assert_eq!(probed, vec!["a", "b", "c"], "probes the whole ladder");
     }
 
-    #[tokio::test]
+    #[test]
     async fn ladder_empty_is_none_without_probing() {
         let (selected, probed) = walk(&[], &[]).await;
         assert!(selected.is_none());

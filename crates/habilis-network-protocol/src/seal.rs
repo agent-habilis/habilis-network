@@ -211,6 +211,7 @@ pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::{open_symmetric, seal_symmetric, seal_to_body, unseal_from_body};
     use crate::crypto::SymmetricKey;
+    use habilis_network_test_tracing::test;
     use x25519_dalek::{PublicKey, StaticSecret};
 
     fn key(byte: u8) -> SymmetricKey {

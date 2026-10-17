@@ -101,6 +101,7 @@ mod tests {
     use super::Cell;
     use crate::addr::{MAX_ROUTE_HOPS, Route, RouteHop};
     use crate::role::{AppId, UnderlayId};
+    use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
 
     fn hop(seed: u8) -> RouteHop {

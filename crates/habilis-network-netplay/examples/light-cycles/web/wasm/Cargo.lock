@@ -1982,7 +1982,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=0e7cdb4cd73952c49699cd7ae971a1fc2982b866#0e7cdb4cd73952c49699cd7ae971a1fc2982b866"
+source = "git+https://github.com/agent-habilis/iroh?rev=ac2f71f19cc1fb1b4612a5989721855ad7960192#ac2f71f19cc1fb1b4612a5989721855ad7960192"
 dependencies = [
  "backon",
  "blake3",
@@ -2032,7 +2032,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=0e7cdb4cd73952c49699cd7ae971a1fc2982b866#0e7cdb4cd73952c49699cd7ae971a1fc2982b866"
+source = "git+https://github.com/agent-habilis/iroh?rev=ac2f71f19cc1fb1b4612a5989721855ad7960192#ac2f71f19cc1fb1b4612a5989721855ad7960192"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "data-encoding",
@@ -2050,7 +2050,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=0e7cdb4cd73952c49699cd7ae971a1fc2982b866#0e7cdb4cd73952c49699cd7ae971a1fc2982b866"
+source = "git+https://github.com/agent-habilis/iroh?rev=ac2f71f19cc1fb1b4612a5989721855ad7960192#ac2f71f19cc1fb1b4612a5989721855ad7960192"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2073,7 +2073,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=28676ce14dfa8061db7036ffa3d9c6588a34256e#28676ce14dfa8061db7036ffa3d9c6588a34256e"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=5b0da5521f87d8c8a0e3033db92bfdde60f4ced3#5b0da5521f87d8c8a0e3033db92bfdde60f4ced3"
 dependencies = [
  "blake3",
  "bytes",
@@ -2126,7 +2126,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=0e7cdb4cd73952c49699cd7ae971a1fc2982b866#0e7cdb4cd73952c49699cd7ae971a1fc2982b866"
+source = "git+https://github.com/agent-habilis/iroh?rev=ac2f71f19cc1fb1b4612a5989721855ad7960192#ac2f71f19cc1fb1b4612a5989721855ad7960192"
 dependencies = [
  "blake3",
  "bytes",
@@ -2667,8 +2667,7 @@ dependencies = [
 [[package]]
 name = "noq"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11803df44ac03a30988d61585ea50885d5428e42da944fe1e498799da7886a2"
+source = "git+https://github.com/agent-habilis/noq?rev=2e00fd44725672250ac736db73d08c7e047e1736#2e00fd44725672250ac736db73d08c7e047e1736"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -2688,9 +2687,8 @@ dependencies = [
 
 [[package]]
 name = "noq-proto"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
+version = "1.1.0"
+source = "git+https://github.com/agent-habilis/noq?rev=2e00fd44725672250ac736db73d08c7e047e1736#2e00fd44725672250ac736db73d08c7e047e1736"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -3476,9 +3474,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -3540,9 +3538,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",

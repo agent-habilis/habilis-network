@@ -390,6 +390,7 @@ fn tmp_sibling(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::path::PathBuf;
 
     use super::{MeshId, MeshName, Nickname, StateFile, clock};

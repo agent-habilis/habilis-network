@@ -41,9 +41,9 @@ pub struct RouteHop {
 /// A source route: the ordered hops **after** the sender, ending at the
 /// destination.
 ///
-/// Constructing one validates it, and [`new`](Self::new) is the only way in —
+/// Constructing one validates it, and `new` is the only way in —
 /// including from the wire, since [`Deserialize`] goes through it. So every
-/// `Route` in the program is non-empty, at most [`MAX_ROUTE_HOPS`] long, and
+/// `Route` in the program is non-empty, at most `MAX_ROUTE_HOPS` long, and
 /// visits each node once. That last property is what stops a relay being used as
 /// an amplifier: a route cannot revisit a hop, so no node forwards a given cell
 /// more than once.
@@ -158,6 +158,7 @@ impl<'de> Deserialize<'de> for Route {
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
     use crate::role::{AppId, UnderlayId};
+    use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
     use std::fmt::Write as _;
 

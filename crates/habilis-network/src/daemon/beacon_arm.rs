@@ -38,12 +38,17 @@ use crate::util::clock::Instant;
 /// An outstanding probe-before-claim goes the same way, and for the same
 /// reason: its throwaway endpoint is just as capable of reaching `Drop` open.
 /// So does the startup rung probe, which walks the relay ladder on endpoints
-/// of its own. All three close concurrently, so the whole release costs one
-/// close budget, which is what `NODE_LEAVE` is sized for.
+/// of its own, and so do the rung probes that are still out: each closes a
+/// prober endpoint of its own, which a departure would drop open. The
+/// endpoints of the node close with them. All of these close
+/// concurrently, so the whole release costs one close budget, which is what
+/// `NODE_LEAVE` is sized for.
 pub(super) async fn release_rendezvous(
     rendezvous: &mut Option<beacon::Rendezvous>,
     probe: &mut Option<beacon::RivalProbe>,
     rung_probe: &mut Option<crate::lookup::StoppableTask>,
+    rungs: &mut beacon::RungWatch,
+    owned: super::shutdown::OwnedEndpoints,
 ) {
     let (rendezvous, probe, rung_probe) = (rendezvous.take(), probe.take(), rung_probe.take());
     tokio::join!(
@@ -62,6 +67,8 @@ pub(super) async fn release_rendezvous(
                 probe.abort_and_close().await;
             }
         },
+        rungs.finish(),
+        owned.close(),
     );
 }
 /// Whether a co-hosting member probes the rendezvous before claiming it —
@@ -172,6 +179,17 @@ pub(super) async fn maybe_cohost(
             )
             .await
         } else {
+            // A holder is known, so the ladder is not walked. If the link to it is lost, it may
+            // have moved to another rung, and the book names the rung that was read last.
+            if !state.rendezvous_linked {
+                beacon::refresh_holder_rung(
+                    arm.params,
+                    ctx.endpoint,
+                    &state.address_book,
+                    &mut state.rungs,
+                )
+                .await;
+            }
             beacon::Held::Idle
         };
         match held {
@@ -317,7 +335,7 @@ fn shed_beacon(
     state.next_rival_recheck = None;
     state.cancel_rendezvous_round();
     state.address_book.remove_endpoint_info(params.id);
-    super::setup::register_rendezvous(&state.address_book, params);
+    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.foreign_rungs());
     state.rendezvous_linked = false;
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
@@ -583,7 +601,11 @@ pub(super) fn shed_rival_beacon_if_due(
     // The book still names the beacon just shed; the next holder writes its own address. What the
     // mesh registered for the id by itself (a relay rung) is written back.
     state.address_book.remove_endpoint_info(arm.params.id);
-    super::setup::register_rendezvous(&state.address_book, arm.params);
+    super::setup::register_rendezvous(
+        &state.address_book,
+        arm.params,
+        &state.rungs.foreign_rungs(),
+    );
     // Don't wait for that `NeighborDown` either — clear the link flag now
     // (mirroring the hard resume edge), or a yielding node's heal ticks
     // idle on "rendezvous linked" instead of grafting the rival's beacon.
@@ -606,6 +628,7 @@ mod tests {
         MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
         regrafts_rendezvous, rival_recheck_applies,
     };
+    use habilis_network_test_tracing::{expect_warn, test};
     use std::time::Duration;
 
     /// A shed cuts the rendezvous a browser reached us through, and the tab
@@ -632,8 +655,9 @@ mod tests {
         }
     }
 
+    /// An endpoint on loopback, closed at the end of the test whatever the test does with it.
     async fn loopback_endpoint() -> iroh::Endpoint {
-        crate::lookup::build_endpoint(
+        let endpoint = crate::lookup::build_endpoint(
             &crate::protocol::mesh::LookupOpts::loopback(),
             None,
             None,
@@ -641,7 +665,10 @@ mod tests {
             crate::lookup::TransportHandles::default(),
         )
         .await
-        .expect("loopback endpoint")
+        .expect("loopback endpoint");
+        let closer = endpoint.clone();
+        habilis_network_test_tracing::at_end(async move { closer.close().await });
+        endpoint
     }
 
     /// A held beacon with one tab negotiating on it. The tab counts as a
@@ -664,7 +691,7 @@ mod tests {
     /// before the tab's session attached, after which the tab found the
     /// rendezvous free and claimed it. The count is the beacon's own answerer:
     /// the peer's handle never holds a tab's session with the beacon.
-    #[tokio::test]
+    #[test]
     async fn a_due_shed_waits_for_a_tab_negotiating_with_the_beacon() {
         let params = public_params();
         let arm = super::CohostArm {
@@ -752,7 +779,7 @@ mod tests {
     /// A lower holder in our overlay already settled who keeps the rendezvous, so a tab on this
     /// beacon must not hold the release back: the tab re-dials, and two holders that each
     /// kept a tab would stay split.
-    #[tokio::test]
+    #[test]
     async fn a_due_shed_does_not_wait_when_a_lower_holder_was_seen() {
         let params = public_params();
         let arm = super::CohostArm {
@@ -777,7 +804,7 @@ mod tests {
     }
 
     /// A yield request belongs to the beacon it was made for: a new claim starts clean.
-    #[tokio::test]
+    #[test]
     async fn a_new_claim_forgets_a_yield_request() {
         let params = public_params();
         let endpoint = loopback_endpoint().await;
@@ -792,7 +819,7 @@ mod tests {
     /// A beacon claimed after another went without a shed (a co-host task
     /// ended, `ensure` claimed again) is a new beacon: the deferrals its
     /// predecessor used up must not cut short the wait for a tab on this one.
-    #[tokio::test]
+    #[test]
     async fn a_new_claim_starts_with_the_full_wait() {
         let params = public_params();
         let arm = super::CohostArm {
@@ -858,7 +885,7 @@ mod tests {
     /// own re-graft. The reclaim tick does that within `RECLAIM_INTERVAL`,
     /// but only while its window is open, and a heal-tick claim happens with
     /// no window open: without one, the link waits for the next heal tick.
-    #[tokio::test]
+    #[test]
     async fn a_heal_tick_claim_opens_the_reclaim_window() {
         use iroh_gossip::net::Gossip;
 
@@ -1069,7 +1096,7 @@ mod tests {
     /// have links enough to have let go of the rendezvous. Their ladder walk reads "ours" and used
     /// to return nothing, so nothing was owed and nothing was grafted, for ever. Now a member that
     /// reads a holder that none of its mesh hosts owes a return.
-    #[tokio::test]
+    #[test]
     async fn a_released_member_that_reads_a_holder_outside_its_mesh_owes_a_return() {
         let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|state| {
             state.rendezvous_release_links = 1;
@@ -1089,7 +1116,7 @@ mod tests {
 
     /// The healthy case, read on every heal tick by every released member: the holder is a member
     /// of the mesh and its flag is known. Nothing is owed.
-    #[tokio::test]
+    #[test]
     async fn a_released_member_that_knows_the_holder_of_its_mesh_owes_nothing() {
         let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|state| {
             state.rendezvous_release_links = 1;
@@ -1110,7 +1137,7 @@ mod tests {
 
     /// A joiner that has fewer links than the release count wants the rendezvous anyway. It owes
     /// nothing, and so its first visit is not made a dwell longer.
-    #[tokio::test]
+    #[test]
     async fn a_joiner_under_the_release_count_owes_no_return() {
         let (state, holds_nothing) = Box::pin(heal_tick_beside_a_foreign_holder(|_| {})).await;
 
@@ -1121,7 +1148,7 @@ mod tests {
     /// Every rung of the ladder is held by another process: nobody can serve the rendezvous and
     /// the room cannot be joined. The member says so once per repeat interval, to its log and to
     /// its sink, however often the walk runs.
-    #[tokio::test]
+    #[test]
     async fn a_ladder_that_is_taken_whole_is_said_once_per_repeat_interval() {
         use iroh_gossip::net::Gossip;
 
@@ -1134,6 +1161,11 @@ mod tests {
         use crate::testing::{fresh_state, nick};
         use crate::transport::MeshSender;
         use crate::util::clock::Instant;
+
+        expect_warn(
+            "habilis_network::beacon",
+            "no rendezvous port is free: other processes hold every port of this room",
+        );
 
         let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .and_then(|socket| socket.local_addr())
@@ -1232,6 +1264,7 @@ mod tests {
         if let Some(held) = other_held.take() {
             held.shed_and_wait().await;
         }
+        state.rungs.finish().await;
         other_endpoint.close().await;
         endpoint.close().await;
         assert_eq!(said, 1, "a ladder that is taken whole is said");
@@ -1423,6 +1456,7 @@ mod tests {
             if let Some(held) = self.rendezvous.take() {
                 held.shed_and_wait().await;
             }
+            self.state.rungs.finish().await;
             self.endpoint.close().await;
         }
     }
@@ -1430,7 +1464,7 @@ mod tests {
     /// A holder on a rung above a live one yields it. A split of two beacons on one ladder came
     /// from a rung probe that timed out, and nothing on a loopback ladder ever repaired it: the
     /// holder on the higher rung stayed for ever.
-    #[tokio::test]
+    #[test]
     async fn a_holder_on_a_higher_rung_sheds_when_a_lower_rung_answers_as_our_mesh() {
         let mut holder = HolderOnTheSecondRung::new().await;
         let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
@@ -1450,7 +1484,7 @@ mod tests {
     /// Silence is not an answer. A lower rung that nobody serves, or whose listener says nothing,
     /// never makes the holder shed: a wrong reading of a loaded host would otherwise take the
     /// beacon away from every member that joined through it.
-    #[tokio::test]
+    #[test]
     async fn a_lower_rung_that_does_not_answer_never_makes_the_holder_shed() {
         let mut holder = HolderOnTheSecondRung::new().await;
         for _ in 0..2 {
@@ -1474,7 +1508,7 @@ mod tests {
     /// that does not answer, and not at the first: a busy moment must not take a healthy beacon
     /// from the members that joined through it.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    #[tokio::test]
+    #[test]
     async fn a_holder_whose_beacon_stops_answering_sheds_at_the_second_check_and_not_the_first() {
         let mut holder = HolderOnTheSecondRung::new().await;
         holder
@@ -1502,7 +1536,7 @@ mod tests {
 
     /// A beacon that answers is never shed by the check of its own rung, however many ticks
     /// read it: the count of checks that did not answer starts again at every answer.
-    #[tokio::test]
+    #[test]
     async fn a_holder_whose_beacon_answers_is_kept_by_the_check_of_its_own_rung() {
         let mut holder = HolderOnTheSecondRung::new().await;
 
@@ -1521,7 +1555,7 @@ mod tests {
     /// walk read "not ours" over and over: the walk bound the rung it had just shed, the check of
     /// the next tick shed it again, and the member flapped for ever without ever merging.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    #[tokio::test]
+    #[test]
     async fn a_holder_that_shed_for_a_live_lower_rung_stays_a_peer_when_its_probe_is_silent() {
         let mut holder = HolderOnTheSecondRung::new().await;
         let (lower_endpoint, lower_beacon) = holder.another_member_takes_the_first_rung().await;
@@ -1551,7 +1585,7 @@ mod tests {
     /// The book kept the address of every beacon that this process held under the id, so a dial to
     /// the id tried the ports of beacons that were gone (the N=2 round: a claim-time offer that hung
     /// for the whole connect bound while the next offer took 37 ms). A shed takes the entry out.
-    #[tokio::test]
+    #[test]
     async fn a_shed_takes_the_address_of_the_shed_beacon_out_of_the_book() {
         let params = public_params();
         let arm = super::CohostArm {
@@ -1583,7 +1617,7 @@ mod tests {
     /// Every claim passes `schedule_rival_recheck`, the verdict arm of the event loop among them,
     /// and the claim of the split round came through that arm: it ends the round that ran against
     /// the missing holder.
-    #[tokio::test]
+    #[test]
     async fn the_claim_funnel_ends_the_round_that_ran_against_the_missing_holder() {
         let params = public_params();
         let endpoint = loopback_endpoint().await;
@@ -1618,7 +1652,7 @@ mod tests {
     /// this member claims next, and held the slot for the whole round deadline (observed: a
     /// split of two members that stayed 25 s or more with `not negotiating with the rendezvous
     /// reason=InFlight`). The claim ends it.
-    #[tokio::test]
+    #[test]
     async fn a_claim_ends_the_offer_that_ran_against_the_missing_holder() {
         use iroh_gossip::net::Gossip;
 
@@ -1723,7 +1757,7 @@ mod tests {
     /// A member whose probe finds the holder (the N=3 round: "staying peer" at 48.69 s) did not
     /// claim, so the claim funnel never ran for it: its round from before the holder stays until
     /// the connect bound. The held verdict ends it.
-    #[tokio::test]
+    #[test]
     async fn a_held_verdict_ends_the_round_that_ran_against_the_missing_holder() {
         use iroh_gossip::net::Gossip;
 

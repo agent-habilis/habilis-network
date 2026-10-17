@@ -263,6 +263,11 @@ impl Victims {
     }
 }
 
+/// How long a pair keeps reading as the gossip rung after the recursion rule closed its gossip
+/// connection and no other connection is left to read. The loss of the link, the race for a
+/// session and its attach all fit in it.
+const RUNG_CLOSE_MEMORY: Duration = Duration::from_secs(15);
+
 struct Inner {
     slots: HashMap<EndpointId, Slot>,
     /// Peers that refused us at their cap, each with its wait.
@@ -291,6 +296,10 @@ struct Inner {
     /// The peers that a test denied (see [`SignalAdmission::deny`]). Empty in a product build:
     /// only `deny` fills it.
     denied: HashSet<EndpointId>,
+    /// When the recursion rule last closed a gossip connection of a peer. The closed connection
+    /// leaves the table at once, so this is what keeps the pair reading as the gossip rung while
+    /// the event loop handles the loss of the link (see [`SignalAdmission::selected_kind`]).
+    closed_on_rung: HashMap<EndpointId, Instant>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -403,6 +412,7 @@ impl Inner {
             return;
         };
         for (peer, slot) in &self.slots {
+            let carried = self.hub.as_ref().is_some_and(|hub| hub.has_session(peer));
             let kinds: Vec<super::probe::PathKind> = slot
                 .conns
                 .iter()
@@ -412,7 +422,10 @@ impl Inner {
                 .collect();
             let (established, allowed) = gossip_view(&kinds);
             gossip.set_established(*peer, established);
-            gossip.allow(*peer, allowed);
+            // A session carries the pair though no connection is left to read: a gossip
+            // connection dialed now would be born on the gossip rung and closed by the
+            // recursion rule before iroh moves it onto the session.
+            gossip.allow(*peer, allowed && !carried);
         }
     }
 
@@ -426,6 +439,9 @@ impl Inner {
             });
         }
         self.sync_gossip();
+        let now = Instant::now();
+        self.closed_on_rung
+            .retain(|_, at| now.saturating_duration_since(*at) < RUNG_CLOSE_MEMORY);
         for peer in self.ceiling.quic_peers() {
             self.drop_quic_without_connection(peer);
         }
@@ -498,6 +514,7 @@ impl SignalAdmission {
                 proven_sink: None,
                 path_sink: None,
                 gossip: None,
+                closed_on_rung: HashMap::new(),
             })),
             cap,
             watch_dialed_gossip: Arc::new(AtomicBool::new(false)),
@@ -545,7 +562,12 @@ impl SignalAdmission {
     /// session now reads as the session (`[Relay, WebRtc]` reads `WebRtc`), where the first
     /// connection used to decide.
     pub(crate) fn selected_kind(&self, peer: EndpointId) -> Option<super::probe::PathKind> {
-        let handles: Vec<WeakConnectionHandle> = self.lock().slots.get(&peer)?.conns.clone();
+        let handles: Vec<WeakConnectionHandle> = self
+            .lock()
+            .slots
+            .get(&peer)
+            .map(|slot| slot.conns.clone())
+            .unwrap_or_default();
         super::probe::best_kind(
             handles
                 .iter()
@@ -553,6 +575,21 @@ impl SignalAdmission {
                 .filter(|conn| conn.close_reason().is_none())
                 .map(|conn| super::probe::selected_kind(&conn)),
         )
+        .or_else(|| self.recently_closed_on_rung(peer))
+    }
+
+    /// The recursion rule closed a gossip connection of `peer`: for a while, the pair reads as
+    /// the gossip rung though no connection is left to read it from.
+    pub(crate) fn note_closed_on_rung(&self, peer: EndpointId) {
+        self.lock().closed_on_rung.insert(peer, Instant::now());
+    }
+
+    /// The gossip rung, if the recursion rule closed a connection of `peer` lately.
+    fn recently_closed_on_rung(&self, peer: EndpointId) -> Option<super::probe::PathKind> {
+        let inner = self.lock();
+        let at = inner.closed_on_rung.get(&peer)?;
+        (Instant::now().saturating_duration_since(*at) < RUNG_CLOSE_MEMORY)
+            .then_some(super::probe::PathKind::Gossip)
     }
 
     /// Whether any live connection of `peer` with a selected path reads below IP: the relay, a
@@ -1113,7 +1150,7 @@ impl EndpointHooks for ConnectionHook {
         // both ends close it, whatever the mesh policy says, and before the relay watch, which is
         // policy-gated.
         if conn.alpn() == iroh_gossip::net::GOSSIP_ALPN {
-            super::path::watch_gossip_recursion(conn);
+            super::path::watch_gossip_recursion(conn, self.admission.clone());
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             super::path::track_gossip_conn(conn);
         }
@@ -1160,6 +1197,7 @@ impl Drop for AdmissionGuard {
 // runtime for the abort test. The logic under test is target-independent.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
@@ -1244,7 +1282,7 @@ mod tests {
 
     /// The end of a round wakes the waiter of `slot_freed`, however the round ended, and a round
     /// that was given up for the offer of the peer does not: its guard no longer holds the slot.
-    #[tokio::test]
+    #[test]
     async fn the_end_of_a_round_wakes_the_waiter_of_slot_freed() {
         let admission = SignalAdmission::new(4);
         let freed = admission.slot_freed();
@@ -1276,7 +1314,7 @@ mod tests {
     /// A round that was started while the identity had no holder never finds the holder that comes
     /// later, and held the slot for the whole round deadline: every later offer was refused
     /// `InFlight`. Cancelling the round frees the slot, and the refusals of the old holder are forgotten.
-    #[tokio::test]
+    #[test]
     async fn a_cancelled_round_frees_the_slot_and_forgets_the_refusals() {
         let admission = SignalAdmission::new(4);
         let hub = hub();
@@ -1419,7 +1457,7 @@ mod tests {
 
     /// The permanent-pin bug, under test: a task that is aborted rather than
     /// returning must still give its slot back.
-    #[tokio::test]
+    #[test]
     async fn aborting_the_task_releases_the_slot() {
         let admission = SignalAdmission::new(16);
         let hub = hub();
@@ -1745,7 +1783,7 @@ mod tests {
     /// Once the connection is gone, the session is idle a window after its last use, with no second
     /// window added for the connection.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_live_connection_holds_a_session_until_it_closes() {
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
@@ -1817,7 +1855,7 @@ mod tests {
     /// the same watch, or a link can stay up on the relay for ever while its
     /// other end believes the policy keeps it off.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_connection_this_node_dialed_is_closed_when_it_stays_on_the_relay() {
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
@@ -1969,7 +2007,7 @@ mod tests {
     /// **Two live connections of one peer.** A session may be detached only when no connection
     /// of the pair reads below IP. The table reads every live connection, not the first.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_table_reads_every_live_connection_of_a_peer() {
         let mut fixture = Fixture::new(4).await;
         let (peer, first) = fixture.dial().await;
@@ -2002,7 +2040,7 @@ mod tests {
     /// the unicast protocol. The fifth connection is admitted, and the least recently used
     /// one is closed with the `EVICTED` code, which the peer reads.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_fifth_unicast_connection_at_a_ceiling_of_four_evicts_the_least_recently_used() {
         use super::super::webrtc::close_code::EVICTED;
 
@@ -2039,7 +2077,7 @@ mod tests {
     /// holds its proactive dials to the evictor for a while. The node that evicted does not
     /// back off.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_peer_that_reads_the_evicted_code_backs_off_from_the_evictor() {
         let mut fixture = Fixture::new(1).await;
         let evicted = SignalAdmission::new(8);
@@ -2073,7 +2111,7 @@ mod tests {
     /// evicts nobody. A unit that is a ghost keeps the count at the ceiling for ever, and every newcomer
     /// then evicts a live peer.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connection_that_closes_leaves_the_ledger() {
         let mut fixture = Fixture::new(4).await;
         let mut conns = Vec::new();
@@ -2117,7 +2155,7 @@ mod tests {
     /// A connection with a send in flight is never evicted: the next least recently used
     /// one goes instead.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_busy_connection_is_not_evicted() {
         let mut fixture = Fixture::new(2).await;
         let (first, first_conn) = fixture.dial().await;
@@ -2142,7 +2180,7 @@ mod tests {
     /// ceiling by the busy connections, the gauge says so, and nothing is evicted. When the
     /// sends end, the next admission evicts again.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn when_every_connection_is_busy_the_newcomer_is_admitted_over_the_ceiling() {
         let mut fixture = Fixture::new(1).await;
         let (first, _first_conn) = fixture.dial().await;
@@ -2173,7 +2211,7 @@ mod tests {
     /// with a hook at both ends each end can close before it reads the close of the other, and
     /// then both read `LocallyClosed`. The rule reads no mesh policy: here the dialed gossip watch
     /// is off, which is its default.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
         use habilis_network_iroh_gossip_transport::memory::MemoryHub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
@@ -2217,10 +2255,11 @@ mod tests {
             };
             builder.bind().await.expect("bind a gossip-only endpoint")
         };
-        let alice = bind(alice_key, alice_handle, Some(SignalAdmission::new(8))).await;
+        let admission = SignalAdmission::new(8);
+        let alice = bind(alice_key, alice_handle, Some(admission.clone())).await;
         let bob = bind(bob_key, bob_handle, None).await;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _router = Router::builder(bob.clone())
+        let router = Router::builder(bob.clone())
             .accept(
                 iroh_gossip::net::GOSSIP_ALPN,
                 Report(Arc::new(Mutex::new(Some(tx)))),
@@ -2256,6 +2295,13 @@ mod tests {
             crate::transport::path::gossip_recursion_closes() > before,
             "the close is counted"
         );
+        assert_eq!(
+            admission.selected_kind(bob.id()),
+            Some(super::super::probe::PathKind::Gossip),
+            "the pair still reads as the gossip rung once its closed connection left the table"
+        );
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// What the table tells the gossip transport about a peer: established when it has a live
@@ -2339,7 +2385,7 @@ mod tests {
 
     /// A pair that rides IP is blocked for gossip at BOTH ends, the dialer and the acceptor, and
     /// both are established: neither end needs a path watcher, which only the lower id has.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
         use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
         use iroh::{EndpointAddr, TransportAddr};
@@ -2347,7 +2393,7 @@ mod tests {
         let hub = MemoryHub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(41, &hub, true).await;
         let (bob, bob_table, bob_handle) = ip_and_gossip_node(42, &hub, true).await;
-        let _router = iroh::protocol::Router::builder(bob.clone())
+        let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
         let both = bob
@@ -2382,11 +2428,13 @@ mod tests {
             sent,
             "a pair on IP puts no frame on the topic"
         );
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// A pair that only gossip carries is not blocked, and a peer whose connection is gone is
     /// established no more, and allowed again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
         use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
         use iroh::{EndpointAddr, TransportAddr};
@@ -2394,7 +2442,7 @@ mod tests {
         let hub = MemoryHub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(43, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(44, &hub, false).await;
-        let _router = iroh::protocol::Router::builder(bob.clone())
+        let router = iroh::protocol::Router::builder(bob.clone())
             .accept(GOSSIP_TEST_ALPN, HoldConnections)
             .spawn();
         let connection = alice
@@ -2415,5 +2463,44 @@ mod tests {
         alice_table.lock().sample();
         assert!(!alice_handle.is_established(bob.id()), "no connection left");
         assert!(alice_handle.is_allowed(bob.id()), "allowed again");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
+    }
+
+    /// A pair that a session carries is blocked for gossip though no connection is left to read.
+    /// A gossip connection dialed now would be born on the gossip rung, and the recursion rule
+    /// would close it before iroh moves it onto the session.
+    #[test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
+        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use iroh::{EndpointAddr, TransportAddr};
+
+        let hub = MemoryHub::new();
+        let (alice, alice_table, alice_handle) = ip_and_gossip_node(45, &hub, false).await;
+        let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, false).await;
+        let sessions = FakeHub::default();
+        alice_table.lock().hub = Some(Arc::new(sessions.clone()));
+        let router = iroh::protocol::Router::builder(bob.clone())
+            .accept(GOSSIP_TEST_ALPN, HoldConnections)
+            .spawn();
+        let connection = alice
+            .connect(
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
+                GOSSIP_TEST_ALPN,
+            )
+            .await
+            .expect("connect over gossip");
+        connection.close(0u32.into(), b"done");
+        connection.closed().await;
+
+        sessions.attach(bob.id());
+        alice_table.lock().sample();
+        assert!(
+            !alice_handle.is_allowed(bob.id()),
+            "the session carries the pair: the gossip rung is not allowed"
+        );
+        assert!(!alice_handle.is_established(bob.id()), "no connection left");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 }

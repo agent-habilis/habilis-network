@@ -8,9 +8,9 @@ use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
 use habilis_network::net::direct::{
-    IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, PROBE_DEADLINE, SignalAdmission,
-    WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc, dial_signal, is_cap_refusal,
-    pair_needs_lane, wait_direct,
+    IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
+    PROBE_DEADLINE, SignalAdmission, WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc,
+    dial_signal, is_cap_refusal, pair_needs_lane, wait_direct,
 };
 use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
@@ -132,6 +132,8 @@ impl StreamNode {
                     ice,
                 ),
             );
+            // The answerer of a session dials this when the session attaches.
+            router = router.accept(NUDGE_ALPN, NudgeAcceptor);
         }
         let router = router.spawn();
         Ok(Self {
@@ -150,7 +152,7 @@ impl StreamNode {
     /// Open a new stream and return its writing end. Hand its
     /// [`hash`](Producer::hash) to the one consumer.
     ///
-    /// With a relay lookup, it first waits (at most [`ONLINE_WAIT`], once) for
+    /// With a relay lookup, it first waits (at most `ONLINE_WAIT`, once) for
     /// the endpoint to reach its home relay, so the hash carries it. Here and
     /// not in `bind`: a node that only reads never pays for it.
     pub async fn create(&self) -> Producer {
@@ -252,12 +254,13 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use habilis_network::runtime::refuse_in_browser;
+    use habilis_network_test_tracing::test;
 
     use super::*;
 
     // A stream is one direct lane: a list that names `multihop` is refused
     // before anything binds.
-    #[tokio::test]
+    #[test]
     async fn a_stream_node_refuses_multihop() {
         let opts = StreamOpts {
             transport: vec![Transport::Udp, Transport::Multihop],
@@ -273,7 +276,7 @@ mod tests {
     }
 
     // A stream node never joins a gossip mesh: a list that names `gossip` is refused too.
-    #[tokio::test]
+    #[test]
     async fn a_stream_node_refuses_gossip() {
         let opts = StreamOpts {
             transport: vec![Transport::Udp, Transport::Gossip],
@@ -289,7 +292,7 @@ mod tests {
     }
 
     // The mesh default has `multihop`. An empty list for a stream must not take it.
-    #[tokio::test]
+    #[test]
     async fn an_empty_list_is_udp_and_webrtc_for_a_stream() {
         let node = StreamNode::bind(&StreamOpts::default())
             .await
@@ -335,7 +338,7 @@ mod tests {
 
     // A reader runs only the paths the producer runs: an offer to a producer
     // with no data channel would fail only after its whole JSEP round.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reader_takes_the_producers_transport_list() {
         let producer_node = StreamNode::bind(&StreamOpts {
             transport: vec![Transport::Udp],
@@ -350,9 +353,11 @@ mod tests {
             !reader_node.transports.webrtc,
             "no data channel to offer to"
         );
+        producer_node.close().await;
+        reader_node.close().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn opening_many_streams_adds_one_address_lookup() {
         let producer_node = StreamNode::bind(&StreamOpts::default())
             .await
@@ -374,5 +379,7 @@ mod tests {
         }
         let after = lookups();
         assert!(after <= before + 1, "{before} lookups grew to {after}");
+        producer_node.close().await;
+        consumer_node.close().await;
     }
 }

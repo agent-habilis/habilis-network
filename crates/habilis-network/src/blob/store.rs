@@ -242,6 +242,7 @@ mod tests {
     use super::{BlobStore, ContentMeta};
     use crate::blob::{BlobDigest, ContentId, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
+    use habilis_network_test_tracing::test;
     use rand::RngCore;
     use std::fs;
     use std::path::{Path, PathBuf};

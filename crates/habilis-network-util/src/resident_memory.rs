@@ -136,6 +136,7 @@ fn maxrss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::peak_resident_memory_bytes;
+    use habilis_network_test_tracing::test;
 
     /// The current reading falls when memory is given back, which the peak never
     /// does. A block of 128 `MiB` is mapped, touched, read, unmapped and read again;

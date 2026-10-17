@@ -110,6 +110,7 @@ mod tests {
     use crate::mesh::{MeshId, MeshName};
     use crate::message::{AppTag, CorrId, MessageBody, MessageId, ShardGroup};
     use crate::nickname::Nickname;
+    use habilis_network_test_tracing::test;
 
     /// The macro must not have changed the wire form of any of the eight. All
     /// are `#[serde(transparent)]`, so each serializes as a bare JSON string

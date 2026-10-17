@@ -268,9 +268,46 @@ pub(super) fn never_quit() -> mpsc::Receiver<()> {
     quit_rx
 }
 
+/// What the loop closes as it ends: the router with its endpoint, and the multi-hop
+/// underlay, when the engine bound them. An injected endpoint is the caller's and stays
+/// open, though the router is still held to the end so its accept loop outlives the loop.
+pub(super) struct OwnedEndpoints {
+    pub(super) router: iroh::protocol::Router,
+    pub(super) owner: super::config::EndpointOwner,
+    #[cfg(feature = "multihop")]
+    pub(super) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
+}
+
+impl OwnedEndpoints {
+    /// Dropping an endpoint that was never closed makes iroh log an ERROR and abort its
+    /// connections. `Router::shutdown` closes the router and its endpoint; the two
+    /// closes run together, as each can wait on peers that are already gone.
+    pub(super) async fn close(self) {
+        if self.owner != super::config::EndpointOwner::Engine {
+            return;
+        }
+        tokio::join!(
+            async {
+                // It fails only when a protocol handler panicked, which the task has
+                // already reported; the loop is ending either way.
+                if let Err(error) = self.router.shutdown().await {
+                    tracing::debug!(%error, "the router failed while it shut down");
+                }
+            },
+            async {
+                #[cfg(feature = "multihop")]
+                if let Some(handle) = self.multihop.as_ref() {
+                    handle.close().await;
+                }
+            },
+        );
+    }
+}
+
 #[cfg(all(unix, feature = "host"))]
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::process::{Child, Command};
     use std::time::Duration;
 
@@ -296,7 +333,7 @@ mod tests {
         quit
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_stays_while_the_owner_lives() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -305,7 +342,7 @@ mod tests {
         child.wait().unwrap();
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_owner_exits() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -314,7 +351,7 @@ mod tests {
         assert!(watch_quits(owner, Duration::from_secs(2)).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -325,7 +362,7 @@ mod tests {
 
     /// Simulates reuse with `start + 1`: that a real reissue changes the start
     /// time is a property of the OS, not something this test can show.
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_pid_is_reissued() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");

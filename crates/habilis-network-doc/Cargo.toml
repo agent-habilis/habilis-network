@@ -41,6 +41,7 @@ bs58.workspace = true
 chacha20poly1305 = "0.10"
 
 [dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 habilis-network-protocol = { path = "../habilis-network-protocol", default-features = false, features = ["test-fixtures"] }
 proptest.workspace = true
 insta.workspace = true

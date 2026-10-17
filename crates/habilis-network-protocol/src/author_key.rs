@@ -88,6 +88,7 @@ impl std::fmt::Display for AuthorKey {
 #[cfg(test)]
 mod tests {
     use super::AuthorKey;
+    use habilis_network_test_tracing::test;
 
     const HEX: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
 

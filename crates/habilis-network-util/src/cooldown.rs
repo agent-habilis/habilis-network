@@ -85,6 +85,7 @@ impl<K: Eq + Hash + Clone> Cooldown<K> {
 #[cfg(test)]
 mod tests {
     use crate::clock::Instant;
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::Cooldown;

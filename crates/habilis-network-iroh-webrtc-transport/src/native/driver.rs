@@ -440,6 +440,7 @@ mod tests {
         ChannelReadyTarget, HandshakeNoise, bind_ephemeral_udp, build_rtc,
         drive_until_channel_ready,
     };
+    use habilis_network_test_tracing::test;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
     use tokio::net::UdpSocket;
@@ -469,7 +470,7 @@ mod tests {
         assert!(text.contains("127.0.0.1:9999"), "{text}");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_stray_datagram_does_not_abort_the_handshake() {
         // The socket is reachable by anything that can route to the host
         // candidate we put in the SDP, so one garbage packet from a scanner

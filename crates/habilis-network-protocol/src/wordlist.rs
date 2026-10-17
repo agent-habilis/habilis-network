@@ -131,6 +131,7 @@ pub(super) fn random_pair() -> String {
 #[cfg(test)]
 mod js_copy {
     use super::WORDS;
+    use habilis_network_test_tracing::test;
 
     const SOURCE: &str = include_str!("../../../packages/habilis-network-api/src/wordlist.ts");
 

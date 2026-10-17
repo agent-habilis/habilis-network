@@ -102,6 +102,7 @@ pub use habilis_network_iroh_transport_util::{
 #[cfg(test)]
 mod tests {
     use habilis_network_iroh_transport_util::{Rung, custom_rung};
+    use habilis_network_test_tracing::test;
 
     /// The ladder names this crate's transport by the id that the transport uses.
     /// The ids are written twice, here and in the util crate, which is below this

@@ -46,7 +46,7 @@ use super::ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 #[cfg(feature = "host")]
 use super::shutdown::spawn_quit_signal_tasks;
-use super::shutdown::{QuitParams, announce_and_maybe_exit, never_quit};
+use super::shutdown::{OwnedEndpoints, QuitParams, announce_and_maybe_exit, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
 use super::timers;
 
@@ -83,7 +83,8 @@ pub async fn run<A: NodeDriver>(
         sink,
         mint_mesh,
         endpoint,
-        router: _router,
+        endpoint_owner,
+        router,
         max_peers,
         rendezvous_params,
         rung_rx,
@@ -181,6 +182,13 @@ pub async fn run<A: NodeDriver>(
         started,
     );
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
+    let owned = OwnedEndpoints {
+        router,
+        owner: endpoint_owner,
+        // A handle that the caller injected is the caller's; `close` skips it with the endpoint.
+        #[cfg(feature = "multihop")]
+        multihop: multihop.clone(),
+    };
     #[cfg(feature = "multihop")]
     {
         state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
@@ -350,7 +358,7 @@ pub async fn run<A: NodeDriver>(
         });
     }
 
-    // `_router` stays owned in this scope so its accept loop outlives
+    // `router` stays owned in this scope so its accept loop outlives
     // the event loop below (dropping it makes the daemon unreachable
     // to new peers).
     //
@@ -394,6 +402,7 @@ pub async fn run<A: NodeDriver>(
         direct_rx,
         path_rx,
         flush_failed_rx,
+        owned,
     }))
     .await
 }
@@ -649,6 +658,8 @@ struct EventLoop<A: NodeDriver> {
     path_rx: mpsc::UnboundedReceiver<crate::transport::probe::PathChange>,
     /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
     flush_failed_rx: mpsc::UnboundedReceiver<(Message, bytes::Bytes)>,
+    /// Closed with the rendezvous as the loop ends.
+    owned: OwnedEndpoints,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI
@@ -706,6 +717,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut direct_rx,
         mut path_rx,
         mut flush_failed_rx,
+        owned,
     } = loop_state;
 
     log_daemon_start(&author);
@@ -954,7 +966,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
                     ).await {
-                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe).await;
+                        release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe, &mut state.rungs, owned).await;
                         return Err(error);
                     }
                     let ctx = parts.ctx(&sender);
@@ -1048,6 +1060,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 }
                 crate::transport::probe::regraft_due(&mut state, &ctx).await;
+                crate::transport::probe::refill_isolated(&mut state, &ctx).await;
                 crate::transport::webrtc::detach_sessions_under_udp(&mut state, &ctx).await;
                 gossip::antientropy::resume_fast_rounds(&mut state, &ctx).await;
             }
@@ -1093,7 +1106,14 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         app.drain_surfaced();
     }
 
-    release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe).await;
+    release_rendezvous(
+        &mut rendezvous,
+        &mut rival_probe,
+        &mut rung_probe,
+        &mut state.rungs,
+        owned,
+    )
+    .await;
     Ok(())
 }
 
@@ -1395,6 +1415,7 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use tokio::sync::oneshot;
@@ -1409,12 +1430,12 @@ mod tests {
             .is_ok()
     }
 
-    #[tokio::test]
+    #[test]
     async fn no_shed_does_not_wake_the_loop() {
         assert!(!wakes_within_a_moment(&mut None).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_close_of_the_shed_beacon_wakes_the_loop() {
         let (done, closed) = oneshot::channel();
         let mut closing = Some(closed);
@@ -1428,7 +1449,7 @@ mod tests {
         assert!(wakes_within_a_moment(&mut closing).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_lost_close_task_does_not_hold_the_re_probe_back() {
         let (done, closed) = oneshot::channel::<()>();
         let mut closing = Some(closed);
@@ -1442,6 +1463,7 @@ mod tests {
 #[cfg(all(test, feature = "host"))]
 mod route_wake_tests {
     use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
+    use habilis_network_test_tracing::test;
     use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
 
     use super::{linkstate_arm, route_wake_arm};
@@ -1486,6 +1508,7 @@ mod route_wake_tests {
             .map(|edge| edge.metric)
             .collect();
         state.webrtc_admission.close();
+        me.close().await;
         node.endpoint.close().await;
         costs
     }
@@ -1501,7 +1524,7 @@ mod route_wake_tests {
 
     /// The cost on the links that a node advertises is the one of its handle, so that a browser
     /// (a handle made with `for_browser`) costs more as a hop in the middle of a route.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_link_state_arm_advertises_the_link_cost_of_its_handle() {
         for (config, expected) in [
             (HandleConfig::default(), 10),
@@ -1520,7 +1543,7 @@ mod route_wake_tests {
     /// A vector names the address of the underlay, and a neighbor dials that address. An
     /// underlay with no IP and no relay yet has none: a vector that names it points nowhere, so
     /// the tick says nothing until the underlay has one.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_link_state_arm_says_nothing_while_the_underlay_has_no_address() {
         // A browser underlay: no IP socket, and a relay that it has not reached yet, so it
         // binds and has no address. (An endpoint with neither does not bind at all.) The relay
@@ -1547,7 +1570,7 @@ mod route_wake_tests {
     /// destination as a first hop: the wake makes the pass dial the route through a
     /// third member within the same turn, without waiting for the stuck deadline and a
     /// link-state tick.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third()
     {
         let node = LaneNode::start().await;
@@ -1587,12 +1610,16 @@ mod route_wake_tests {
             "and it is the route that the handle chooses now"
         );
         state.webrtc_admission.close();
+        me.close().await;
+        via.close().await;
+        dst.close().await;
         node.endpoint.close().await;
     }
 }
 
 #[cfg(all(test, feature = "multihop"))]
 mod advertised_changed_tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::{EndpointId, SecretKey};
@@ -1638,6 +1665,7 @@ mod advertised_changed_tests {
 
 #[cfg(all(test, feature = "multihop"))]
 mod advertised_links_tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::{EndpointId, SecretKey};

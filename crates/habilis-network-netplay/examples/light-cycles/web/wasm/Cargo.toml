@@ -47,6 +47,8 @@ web-sys = { version = "0.3", features = ["console"] }
 proptest = "1"
 
 [lints.rust]
+# A warning is a test failure: the output of a build and of a test stays clean.
+warnings = "deny"
 unsafe_code = "deny"
 
 [lints.clippy]

@@ -51,3 +51,6 @@ web-time.workspace = true
 # Stamps the build's git short hash + dirty flag into `version::VERSION`.
 [build-dependencies]
 vergen-gitcl = "1"
+
+[dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }

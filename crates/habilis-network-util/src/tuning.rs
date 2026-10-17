@@ -268,7 +268,7 @@ impl Default for Tuning {
 static TUNING: std::sync::OnceLock<Tuning> = std::sync::OnceLock::new();
 
 /// Install the process tuning, once, at daemon startup (from the parsed CLI
-/// flags). A second call is ignored; if never called (in-process: library API or MCP), [`current`]
+/// flags). A second call is ignored; if never called (in-process: library API or MCP), `current`
 /// returns [`Tuning::DEFAULTS`].
 pub fn init(tuning: Tuning) {
     let _ = TUNING.set(tuning);
@@ -299,6 +299,15 @@ pub const HEAL_INTERVAL: Duration = Duration::from_secs(15);
 #[must_use]
 pub fn heal_interval() -> Duration {
     current().heal_interval.max(Duration::from_secs(1))
+}
+
+/// How long a meshed member may hold no gossip link before the census calls it a silent
+/// partition: one heal and one census tick. The heal arm re-bridges a member that lost its
+/// links, so a shorter gap is a heal that is on its way, or a link that was closed on purpose;
+/// a longer one is a heal that did not work.
+#[must_use]
+pub fn silent_partition_after() -> Duration {
+    heal_interval().saturating_add(STATE_REFRESH)
 }
 
 /// Consecutive failed gossip-topic resubscribe attempts (one per heal

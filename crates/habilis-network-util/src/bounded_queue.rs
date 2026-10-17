@@ -62,6 +62,7 @@ impl<T> BoundedQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::BoundedQueue;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn push_rejects_newest_when_full() {

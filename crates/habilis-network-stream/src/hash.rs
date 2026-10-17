@@ -269,6 +269,7 @@ impl FromStr for StreamHash {
 #[cfg(test)]
 mod tests {
     use habilis_network::iroh::{EndpointAddr, SecretKey, TransportAddr};
+    use habilis_network_test_tracing::test;
 
     use super::*;
 

@@ -66,6 +66,7 @@ impl MessageId {
 #[cfg(test)]
 mod id_tests {
     use super::MessageId;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn new_accepts_uuid_v4() {

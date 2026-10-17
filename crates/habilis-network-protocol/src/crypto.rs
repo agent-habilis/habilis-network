@@ -515,6 +515,7 @@ mod derive_secret_tests {
         Keying, RENDEZVOUS_LADDER, Seed, derive_secret, rendezvous_id, rendezvous_ports,
         rendezvous_secret, topic_seed,
     };
+    use habilis_network_test_tracing::test;
 
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
@@ -659,6 +660,7 @@ mod derive_secret_tests {
 #[cfg(test)]
 mod password_tests {
     use super::{Password, Seed, derive_secret, password_verifier, stretch_mesh_password};
+    use habilis_network_test_tracing::test;
 
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
@@ -806,6 +808,7 @@ mod password_tests {
 #[cfg(test)]
 mod topic_tests {
     use super::{Keying, MeshName, Seed, derive_topic_id};
+    use habilis_network_test_tracing::test;
 
     fn name(text: &str) -> MeshName {
         MeshName::new(text).unwrap()
@@ -871,6 +874,7 @@ mod golden_tests {
         rendezvous_id, rendezvous_ports, stretch_mesh_password,
     };
     use crate::mesh::MeshName;
+    use habilis_network_test_tracing::test;
 
     const SEED: [u8; 32] = [7u8; 32];
     const ROOT: [u8; 32] = [5u8; 32];

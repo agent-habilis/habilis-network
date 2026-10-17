@@ -1686,6 +1686,7 @@ fn is_loggable(kind: &MessageKind) -> bool {
 #[cfg(test)]
 mod arms_reclaim_tests {
     use super::arms_reclaim;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn the_beacon_link_dropping_arms_it() {
@@ -1747,6 +1748,7 @@ mod arms_reclaim_tests {
 mod is_loggable_tests {
     use super::is_loggable;
     use crate::protocol::{MessageKind, PresenceSubtype};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn alive_presence_is_not_loggable() {
@@ -1783,6 +1785,7 @@ mod is_loggable_tests {
 #[cfg(test)]
 mod retain_own_broadcast_tests {
     use crate::testing::fresh_state;
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::retain_own_broadcast;
@@ -1920,6 +1923,7 @@ mod retain_own_broadcast_tests {
 #[cfg(test)]
 mod evicted_orphan_tests {
     use bytes::Bytes;
+    use habilis_network_test_tracing::{expect_warn, test};
     use iroh::endpoint::presets;
     use iroh_gossip::net::Gossip;
     use serde_json::json;
@@ -1999,8 +2003,12 @@ mod evicted_orphan_tests {
             .is_some()
     }
 
-    #[tokio::test]
+    #[test]
     async fn an_evicted_orphan_is_recovered_when_its_frame_is_re_served() {
+        expect_warn(
+            "habilis_network::gossip",
+            "channel orphan buffer full for this author",
+        );
         let mesh = MeshId::from("test");
         let mut writer = fresh_state();
         let frames = chain(
@@ -2091,6 +2099,7 @@ mod evicted_orphan_tests {
 #[cfg(test)]
 mod first_contact_tests {
     use bytes::Bytes;
+    use habilis_network_test_tracing::test;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
@@ -2187,7 +2196,7 @@ mod first_contact_tests {
     /// A directed frame in the buffer, to a peer that nobody serves: the flush returns at once, the
     /// dial fails on its task, and the frame comes back to the loop and is buffered again. It is
     /// not lost, and the loop did not wait for the dial.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pending_frame_whose_dial_fails_is_parked_again() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2242,6 +2251,7 @@ mod first_contact_tests {
         let parked = state.pending_outbound.take();
         assert_eq!(parked.len(), 1, "the frame is in the buffer again");
         assert_eq!(parked[0].0.id, frame.id, "and it is the same frame");
+        node.endpoint.close().await;
     }
 
     /// Feed one gossip event to the handler, as the loop does.
@@ -2252,7 +2262,7 @@ mod first_contact_tests {
     /// A frame parked while the links were down is sent at the next `NeighborUp`. The
     /// node stays meshed through the gap, so the first-link edge does not come again,
     /// and no `PeerInfo` arrives to flush it.
-    #[tokio::test]
+    #[test]
     async fn a_frame_parked_across_a_gap_in_the_links_is_sent_at_the_next_neighbor_up() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2301,7 +2311,7 @@ mod first_contact_tests {
 
     /// A resend of a message that the app already read has a new gossip payload, and the ingest
     /// of the app still drops it by the id of the message inside: the app sees the frame once.
-    #[tokio::test]
+    #[test]
     async fn a_resend_of_a_known_message_reaches_the_app_once() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2336,7 +2346,7 @@ mod first_contact_tests {
     /// The messages that the old subscription queued reach the app when the topic is swapped.
     /// The loop does not read the queue while the topic is marked closed, and the gossip layer
     /// counted each message as delivered, so the queue holds the only copy.
-    #[tokio::test]
+    #[test]
     async fn the_messages_the_old_subscription_queued_reach_the_app_at_the_swap() {
         use futures_util::stream::{self, StreamExt as _};
         use iroh_gossip::api::Message as GossipMessage;
@@ -2385,7 +2395,7 @@ mod first_contact_tests {
 
     /// The frame of the field red: a directed frame parked across a gap in the links reaches
     /// its addressee at the next `NeighborUp`, with no `PeerInfo`.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_directed_frame_parked_across_a_gap_in_the_links_is_delivered_at_the_next_neighbor_up()
      {
         use iroh::protocol::Router;
@@ -2438,7 +2448,7 @@ mod first_contact_tests {
     /// connection to be closed from here: a node that left but was not marked
     /// would read the `NeighborDown` that follows as a loss and arm a reclaim.
     /// The link is still up when the mark is made; gossip ends it afterwards.
-    #[tokio::test]
+    #[test]
     async fn reaching_the_release_count_leaves_the_rendezvous_and_marks_it() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2468,7 +2478,7 @@ mod first_contact_tests {
 
     /// The `NeighborDown` that a release causes is a choice, not a loss: no
     /// reclaim window opens, and nothing wants the rendezvous back.
-    #[tokio::test]
+    #[test]
     async fn the_neighbor_down_after_a_release_arms_nothing() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2493,7 +2503,7 @@ mod first_contact_tests {
     /// The holder of the rendezvous is gone: a round that is still dialling it holds the slot, and
     /// the re-offer that follows the `NeighborDown` would be refused `InFlight` for the rest of the
     /// round deadline.
-    #[tokio::test]
+    #[test]
     async fn losing_the_rendezvous_ends_a_round_that_is_still_dialling_it() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2527,7 +2537,7 @@ mod first_contact_tests {
 
     /// Losing a rendezvous we did not release still arms the reclaim: it may
     /// be dead, and someone has to stand up the next one.
-    #[tokio::test]
+    #[test]
     async fn losing_a_rendezvous_that_was_not_released_still_arms_the_reclaim() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2545,7 +2555,7 @@ mod first_contact_tests {
 
     /// A node below the count after a release wants the rendezvous again, and
     /// the link coming back ends the release and the debt.
-    #[tokio::test]
+    #[test]
     async fn the_link_coming_back_clears_the_release_and_the_owed_return() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2573,7 +2583,7 @@ mod first_contact_tests {
     /// split by a block. Neither sees the other, so each sweeps its silent
     /// neighbours, and that sweep is what sends the island back to the place
     /// where the islands meet.
-    #[tokio::test]
+    #[test]
     async fn an_island_whose_peers_went_silent_comes_back_to_the_rendezvous() {
         use crate::testing::nick;
         use std::time::Duration;
@@ -2609,7 +2619,7 @@ mod first_contact_tests {
     /// A `PeerInfo` binds its signer to its endpoint only with that endpoint's
     /// proof over that signer. Bob's proof is public on gossip, so a frame that
     /// carries it but is signed by another key must bind nothing.
-    #[tokio::test]
+    #[test]
     async fn a_peer_info_binds_its_signer_only_with_the_endpoints_proof() {
         use crate::protocol::AuthorKey;
         use crate::protocol::identity::encode_pubkey;
@@ -2672,7 +2682,7 @@ mod first_contact_tests {
     /// few milliseconds behind it. The vector waits for the binding, and the `PeerInfo` that
     /// writes the binding feeds it: not the tick, 15 s on, after the relay policy closed the links.
     #[cfg(feature = "multihop")]
-    #[tokio::test]
+    #[test]
     async fn a_link_vector_that_came_before_the_peer_info_of_its_author_is_fed_by_that_peer_info() {
         use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
         use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
@@ -2726,12 +2736,15 @@ mod first_contact_tests {
             "the PeerInfo that writes the binding feeds the vector that waited for it"
         );
         node.endpoint.close().await;
+        ours.close().await;
+        theirs.close().await;
+        node.endpoint.close().await;
     }
 
     /// The address in the first `PeerInfo` of a peer must reach the endpoint, not only
     /// a lookup: the endpoint reads a lookup at a dial, and a connection that is live
     /// gets a path only from the call that hands the address over.
-    #[tokio::test]
+    #[test]
     async fn the_address_of_a_first_peer_info_reaches_the_endpoint() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2752,7 +2765,7 @@ mod first_contact_tests {
     /// (a home relay that came late, an interface that changed) reaches us only
     /// through its `PeerInfo`. The endpoint already knows the peer here, so only the
     /// change is under test: a relay that the peer gained must be handed over too.
-    #[tokio::test]
+    #[test]
     async fn a_linked_peers_changed_address_is_applied() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2822,7 +2835,7 @@ mod first_contact_tests {
     /// address on a newcomer's first frame) must not dial either: both sides
     /// would dial each other, iroh-gossip closes both connections, and the pair
     /// is left with no link.
-    #[tokio::test]
+    #[test]
     async fn a_second_peer_info_right_after_a_deferred_dial_does_not_dial() {
         use crate::protocol::message::MessageBody;
         use crate::protocol::peer_addr::endpoint_addr_to_json;
@@ -2868,7 +2881,7 @@ mod first_contact_tests {
     /// evictions. It therefore leaves one slot free in such a mesh; the paced
     /// fill tick takes the last one. A mesh that fits in the view has room
     /// everywhere, so there it still grafts up to G.
-    #[tokio::test]
+    #[test]
     async fn a_peer_info_leaves_one_slot_free_in_a_mesh_larger_than_g_plus_one() {
         use crate::protocol::message::MessageBody;
         use crate::protocol::peer_addr::endpoint_addr_to_json;
@@ -2933,7 +2946,7 @@ mod first_contact_tests {
     /// `idle.broadcasts` counts digest broadcasts and nothing else a link-up
     /// sends; the test sender cannot record frames, so the count stands in for
     /// the three digests.
-    #[tokio::test]
+    #[test]
     async fn only_the_first_real_peer_link_asks_for_state_again() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -2977,7 +2990,7 @@ mod first_contact_tests {
     /// new peer, whatever its kind. A `State` frame does not mark a peer
     /// present, so it floods nothing. A `joined` first frame floods in
     /// `handle_presence`, which this test does not cover.
-    #[tokio::test]
+    #[test]
     async fn a_new_peers_first_frame_floods_our_address_when_it_is_not_its_joined() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -3013,7 +3026,7 @@ mod first_contact_tests {
     /// private rendezvous has no answerer to end it. Observed as a survivor
     /// that never linked its rendezvous again, so a new joiner's first
     /// message reached nobody.
-    #[tokio::test]
+    #[test]
     async fn a_rendezvous_loss_keeps_a_native_node_grafting_on_its_timer() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -3042,7 +3055,7 @@ mod first_contact_tests {
     /// arm the offer fallback either: the fallback assumes an unreachable
     /// beacon is a tab, but a private rendezvous never answers JSEP, so the
     /// fallback would hold every timer graft with nothing to release it.
-    #[tokio::test]
+    #[test]
     async fn a_heal_tick_never_arms_the_offer_fallback_on_a_private_mesh() {
         let node = Node::spawn().await;
         let ctx = node.ctx();
@@ -3065,6 +3078,7 @@ mod first_contact_tests {
 #[cfg(all(test, feature = "host"))]
 mod link_state_tests {
     use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
+    use habilis_network_test_tracing::test;
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
@@ -3092,7 +3106,7 @@ mod link_state_tests {
     // peers that receive it. A node that kept its own would hold messages that no
     // peer holds, and every digest would ask it for them again: measured at
     // N = 33, 38% of the vectors a node received were repeats.
-    #[tokio::test]
+    #[test]
     async fn a_link_vector_this_node_broadcast_is_not_retained_in_its_log() {
         let secret = SecretKey::from_bytes(&[53; 32]);
         let handle = handle_for(&secret).await;
@@ -3101,11 +3115,12 @@ mod link_state_tests {
         let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body);
         super::retain_own_broadcast(&mut state, &message);
         assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
+        handle.close().await;
     }
 
     // A signature proves who made a vector, not that the maker is a member, and
     // the roster binding is what ties an origin to an author.
-    #[tokio::test]
+    #[test]
     async fn a_link_vector_is_taken_in_only_from_the_peer_the_roster_binds_to_its_origin() {
         let (alice, bob) = (
             SecretKey::from_bytes(&[51; 32]),
@@ -3149,6 +3164,8 @@ mod link_state_tests {
             1,
             "the bound peer is heard"
         );
+        ours.close().await;
+        theirs.close().await;
     }
 }
 
@@ -3156,6 +3173,7 @@ mod link_state_tests {
 /// that, routes keep running through a peer that left until its vector ages out.
 #[cfg(all(test, feature = "host"))]
 mod left_tests {
+    use habilis_network_test_tracing::test;
     use iroh::EndpointAddr;
     use iroh_gossip::net::Gossip;
 
@@ -3197,7 +3215,7 @@ mod left_tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_peer_that_left_takes_its_advertised_links_with_it() {
         let lookups = LookupOpts::loopback();
         let (endpoint, handle, _webrtc) =
@@ -3278,11 +3296,15 @@ mod left_tests {
         );
         endpoint.close().await;
         leaver_endpoint.close().await;
+        handle.close().await;
+        endpoint.close().await;
+        leaver_handle.close().await;
+        leaver_endpoint.close().await;
     }
 
     /// A node that is not meshed yet still drops the links of a peer that stopped
     /// advertising: the tick expires first, then returns early.
-    #[tokio::test]
+    #[test]
     async fn a_node_that_is_not_meshed_still_expires_stale_links() {
         use std::time::Duration;
 
@@ -3293,7 +3315,7 @@ mod left_tests {
         use crate::daemon::event_loop::linkstate_arm;
 
         let lookups = LookupOpts::loopback();
-        let (endpoint, _handle, _webrtc) =
+        let (endpoint, peer_handle, _webrtc) =
             build_peer_multihop(&lookups, TransportOpts::default(), None, false)
                 .await
                 .expect("a multihop peer binds");
@@ -3362,6 +3384,9 @@ mod left_tests {
             !advertises(&handle),
             "the stale links are still in the routing table of a node that is not meshed"
         );
+        handle.close().await;
+        peer_handle.close().await;
+        leaver_handle.close().await;
         endpoint.close().await;
         leaver_endpoint.close().await;
     }
@@ -3370,6 +3395,7 @@ mod left_tests {
 #[cfg(all(test, feature = "host"))]
 mod requeue_tests {
     use bytes::Bytes;
+    use habilis_network_test_tracing::test;
 
     use super::requeue;
     use crate::testing::{LaneNode, nick};
@@ -3377,7 +3403,7 @@ mod requeue_tests {
     /// A frame is parked before its addressee is known. The peer becomes known with a relay-only
     /// address, the flush delivers the frame again and it is held: the requeue asks for the session
     /// and offers it at once, so that the frame does not wait for the next tick of the retry pass.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_frame_parked_before_its_peer_is_known_asks_for_the_session_at_the_flush() {
         let node = LaneNode::start().await;
         let ctx = node.ctx();
@@ -3418,6 +3444,7 @@ mod requeue_tests {
 #[cfg(all(test, feature = "host"))]
 mod parked_link_state_tests {
     use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
+    use habilis_network_test_tracing::test;
     use iroh::endpoint::presets;
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 
@@ -3462,7 +3489,7 @@ mod parked_link_state_tests {
 
     // The trust rule is the one of a vector that arrives after its binding: the origin must be
     // the endpoint that the roster binds to the author.
-    #[tokio::test]
+    #[test]
     async fn a_parked_link_vector_whose_origin_is_not_the_bound_endpoint_is_dropped_at_the_binding()
     {
         let (alice, bob) = (
@@ -3481,9 +3508,11 @@ mod parked_link_state_tests {
             ours.topology_view().edges.is_empty(),
             "an author bound to another endpoint cannot speak for this origin"
         );
+        ours.close().await;
+        theirs.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_newer_parked_link_vector_replaces_the_older() {
         let (alice, bob, carol) = (
             SecretKey::from_bytes(&[67; 32]),
@@ -3509,9 +3538,11 @@ mod parked_link_state_tests {
             2,
             "the newer vector, with two links, is the one that is fed"
         );
+        ours.close().await;
+        theirs.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_park_holds_one_vector_per_author_up_to_its_cap() {
         let alice = SecretKey::from_bytes(&[71; 32]);
         let theirs = handle_for(&alice).await;
@@ -3534,5 +3565,6 @@ mod parked_link_state_tests {
             parked.park(nick("carol-cc"), vector),
             "a taken vector frees its place"
         );
+        theirs.close().await;
     }
 }

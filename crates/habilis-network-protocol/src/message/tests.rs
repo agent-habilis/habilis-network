@@ -2,6 +2,7 @@ use super::{
     AppFrameParams, AppTag, BuildMsgParams, ChainCtx, MeshId, Message, MessageBody, MessageId,
     MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
 };
+use habilis_network_test_tracing::test;
 
 fn nick(name: &str) -> Nickname {
     Nickname::from(name)
@@ -284,6 +285,7 @@ fn build_msg_bytes_message() {
 mod signing {
     use super::super::{CorrId, Message, MessageKind};
     use crate::identity::Identity;
+    use habilis_network_test_tracing::test;
 
     fn identity() -> Identity {
         Identity::generate()
@@ -367,6 +369,7 @@ mod chain {
     use super::super::{Message, MessageKind};
     use crate::ContentHash;
     use crate::identity::Identity;
+    use habilis_network_test_tracing::test;
 
     fn msg(body: &str) -> Message {
         Message::fixture(MessageKind::app_broadcast("app_msg"), body)
@@ -435,6 +438,7 @@ mod chain {
 mod snapshots {
     use super::super::CorrId;
     use super::{Message, MessageKind, Nickname, PresenceSubtype};
+    use habilis_network_test_tracing::test;
 
     /// A deterministic broadcast app frame. The body is a JSON payload shaped
     /// like a real consumer's — nested object, unicode, an embedded mesh id —
@@ -539,6 +543,7 @@ mod snapshots {
 }
 
 mod prop {
+    use habilis_network_test_tracing::test;
     use proptest::{
         collection::vec as arb_vec, prelude::any, prop_assert, prop_assert_eq, proptest,
         strategy::Strategy,

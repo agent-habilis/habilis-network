@@ -250,6 +250,7 @@ mod tests {
     use crate::handle::PlayerHandle;
     use crate::request::Request;
     use crate::testutil::{TestGame, TestInput, TestRunner};
+    use habilis_network_test_tracing::test;
 
     /// Two players, generous prediction window, no input delay.
     fn session() -> Sync<TestGame> {

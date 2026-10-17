@@ -196,8 +196,9 @@ struct HandleInner {
     self_id: AppId,
     underlay: Endpoint,
     transport: Arc<MultihopTransport>,
-    // Kept alive so the underlay's `FORWARD_ALPN` accept loop keeps running.
-    _router: iroh::protocol::Router,
+    // Kept alive so the underlay's `FORWARD_ALPN` accept loop keeps running;
+    // `close` shuts it down.
+    router: iroh::protocol::Router,
 }
 
 impl MultihopHandle {
@@ -291,7 +292,7 @@ impl MultihopHandle {
                 self_id: app_id,
                 underlay,
                 transport,
-                _router: router,
+                router,
             }),
         })
     }
@@ -414,6 +415,22 @@ impl MultihopHandle {
     #[must_use]
     pub fn stuck_hops(&self) -> Vec<AppId> {
         self.inner.forwarder.stuck_hops()
+    }
+
+    /// Close the underlay: stop its accept loop and close its endpoint, so iroh
+    /// does not log an ERROR for an endpoint dropped without a close. Safe to call
+    /// again and from any clone of the handle: a second call returns at once.
+    /// Close only a handle that the caller owns; every clone shares this underlay.
+    pub async fn close(&self) {
+        if let Err(error) = self.inner.router.shutdown().await {
+            tracing::debug!(%error, "the underlay router failed while it shut down");
+        }
+    }
+
+    /// Whether [`close`](Self::close) has closed the underlay endpoint.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.underlay.is_closed()
     }
 
     /// The id of this node's underlay endpoint: the key derived by
@@ -574,6 +591,7 @@ pub fn underlay_path_selector(underlay_id: UnderlayId) -> Arc<dyn PathSelector> 
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::{expect_warn, test};
     use std::time::Duration;
 
     use iroh::endpoint::presets;
@@ -663,7 +681,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_debug_output_of_a_handle_shows_no_key_material() {
         // Distinct bytes, so no pattern of one repeated byte stands for the key.
         let mut bytes = [0_u8; 32];
@@ -680,6 +698,7 @@ mod tests {
             .bind()
             .await
             .expect("bind an underlay");
+        close_at_end(&underlay);
         let handle = MultihopHandle::new(&secret, underlay, HandleConfig::default())
             .expect("underlay on the derived key");
         let shown = format!("{handle:?}");
@@ -710,9 +729,15 @@ mod tests {
         })
     }
 
+    /// Closes the endpoint at the end of the test, so that it does not drop open.
+    fn close_at_end(endpoint: &Endpoint) {
+        let endpoint = endpoint.clone();
+        habilis_network_test_tracing::at_end(async move { endpoint.close().await });
+    }
+
     /// An underlay on loopback only, bound to the derived key of `secret`.
     async fn loopback_underlay(secret: &SecretKey) -> Endpoint {
-        Endpoint::builder(presets::Minimal)
+        let underlay = Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(secret))
             .relay_mode(RelayMode::Disabled)
             .bind_addr(
@@ -723,7 +748,9 @@ mod tests {
             .expect("valid bind addr")
             .bind()
             .await
-            .expect("bind a loopback underlay")
+            .expect("bind a loopback underlay");
+        close_at_end(&underlay);
+        underlay
     }
 
     /// Counts the connections it accepts, then waits for the dialer to close.
@@ -743,7 +770,7 @@ mod tests {
 
     const EXTRA_ALPN: &[u8] = b"test/extra/1";
 
-    #[tokio::test]
+    #[test]
     async fn an_extra_protocol_is_accepted_on_the_underlay() {
         let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let secret = SecretKey::from_bytes(&[51; 32]);
@@ -769,6 +796,7 @@ mod tests {
             .bind()
             .await
             .expect("bind a client");
+        close_at_end(&client);
         let connection = client
             .connect(handle.underlay_addr(), EXTRA_ALPN)
             .await
@@ -778,7 +806,7 @@ mod tests {
         assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_forward_alpn_cannot_be_given_to_another_handler() {
         let secret = SecretKey::from_bytes(&[52; 32]);
         let result = MultihopHandle::with_protocols(
@@ -793,7 +821,7 @@ mod tests {
         assert!(result.is_err(), "the forwarder keeps its own ALPN");
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_underlay_address_of_an_origin_comes_from_its_link_vector() {
         let (me, other) = (
             SecretKey::from_bytes(&[53; 32]),
@@ -836,6 +864,7 @@ mod tests {
             .bind()
             .await
             .expect("bind a relay-only underlay");
+        close_at_end(&underlay);
         tokio::time::timeout(Duration::from_secs(10), underlay.online())
             .await
             .expect("the underlay reaches the relay");
@@ -884,13 +913,13 @@ mod tests {
         Route::decode(&addr).expect("a route").hops()[0].app_id
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_shorter_route_is_chosen_while_its_first_hop_is_not_refused() {
         let (handle, [(short, _), _, _, (dst, _)]) = handle_with_two_routes().await;
         assert_eq!(first_hop_of(&handle, dst), short);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_route_whose_first_hop_is_refused_now_gives_way_to_the_longer_one() {
         let (handle, [(short, short_underlay), (long_a, _), _, (dst, _)]) =
             handle_with_two_routes().await;
@@ -905,7 +934,7 @@ mod tests {
         assert_eq!(first_hop_of(&handle, dst), long_a);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_direct_route_whose_destination_is_refused_gives_way_to_a_route_through_a_third() {
         // The shape of a cell through a third member: the shortest route is the
         // direct edge, and its first hop is the destination itself. It has no
@@ -998,13 +1027,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_native_route_is_chosen_over_a_shorter_route_through_a_browser() {
         let (handle, [(a1, _), _, _, (dst, _)]) = handle_with_a_native_and_a_browser_route().await;
         assert_eq!(first_hop_of(&handle, dst), a1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_browser_route_is_chosen_when_the_only_native_first_hop_is_refused() {
         let (handle, [(a1, a1_underlay), _, (tab, _), (dst, _)]) =
             handle_with_a_native_and_a_browser_route().await;
@@ -1016,7 +1045,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_refused_browser_first_hop_does_not_change_the_native_route() {
         let (handle, [(a1, _), _, (tab, tab_underlay), (dst, _)]) =
             handle_with_a_native_and_a_browser_route().await;
@@ -1027,7 +1056,7 @@ mod tests {
         assert_eq!(first_hop_of(&handle, dst), a1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_address_lookup_chooses_the_route_like_route_addr() {
         use iroh::address_lookup::AddressLookup as _;
         use n0_future::StreamExt as _;
@@ -1071,7 +1100,7 @@ mod tests {
     /// The topology holds every underlay with a relay URL, as the link vectors carry it once an
     /// underlay is online. The stamp that a node puts on its cells (`self_hop`) was taken when
     /// the handle was made, before that.
-    #[tokio::test]
+    #[test]
     async fn the_return_route_of_a_cell_is_the_route_that_the_far_end_dials() {
         let relay: iroh::RelayUrl = "http://127.0.0.1:1/".parse().expect("a relay url");
         let secrets = [81_u8, 82, 83].map(|seed| SecretKey::from_bytes(&[seed; 32]));
@@ -1144,7 +1173,7 @@ mod tests {
         assert!(crate::metric::LinkMetric::new(HandleConfig::for_browser().link_cost).is_usable());
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_handle_reports_the_link_cost_of_its_config() {
         let secret = SecretKey::from_bytes(&[91; 32]);
         let native = MultihopHandle::new(
@@ -1164,7 +1193,7 @@ mod tests {
         assert_eq!(browser.link_cost(), 100);
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_shorter_route_is_kept_when_every_first_hop_is_refused() {
         let (
             handle,
@@ -1186,8 +1215,12 @@ mod tests {
         assert_eq!(first_hop_of(&handle, dst), short);
     }
 
-    #[tokio::test]
+    #[test]
     async fn two_nodes_whose_underlays_only_meet_on_the_relay_advertise_no_usable_route() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop underlay stays on the relay: this hop is not advertised as a link",
+        );
         let (url, _server) = relay_server().await;
         let (alice, bob) = (
             SecretKey::from_bytes(&[41; 32]),

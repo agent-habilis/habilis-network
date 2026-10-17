@@ -85,6 +85,7 @@ impl fmt::Display for UnderlayId {
 #[cfg(test)]
 mod tests {
     use super::{AppId, UnderlayId};
+    use habilis_network_test_tracing::test;
     use iroh::SecretKey;
 
     #[test]
