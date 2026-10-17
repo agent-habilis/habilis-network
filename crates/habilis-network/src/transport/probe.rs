@@ -2181,7 +2181,7 @@ mod tests {
             bind(alice_key, alice_handle).await,
             bind(bob_key, bob_handle).await,
         );
-        let _router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
+        let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
 
         let connection = alice
             .connect(
@@ -2192,6 +2192,8 @@ mod tests {
             .expect("connect over the gossip path");
 
         assert_eq!(super::selected_kind(&connection), PathKind::Gossip);
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     // The watcher is dropped when the pool idles a connection out, but the gossip
@@ -2700,6 +2702,7 @@ mod tests {
         assert_eq!(tried(&state), 1, "one member per tick");
         super::retry_direct(&mut state, &ctx, false).await;
         assert_eq!(tried(&state), 2, "the next tick takes the next member");
+        gossip.shutdown().await.expect("shut the gossip down");
         endpoint.close().await;
     }
 
