@@ -11,7 +11,7 @@ use iroh::EndpointId;
 use tokio::sync::oneshot;
 
 use super::outbox::Resend;
-use super::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
+use super::pool::{UnicastPool, WarmSend, COOLDOWN_REFUSED};
 use crate::daemon::state::EventLoopState;
 use crate::protocol::message::sole_addressee;
 use crate::protocol::{Message, Nickname};
@@ -355,7 +355,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{Lane, Route, lane_for, note_held, resolve, route};
+    use super::{lane_for, note_held, resolve, route, Lane, Route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
     use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody, MessageId};
@@ -597,7 +597,7 @@ mod tests {
     /// directed-message peer is often outside the active view.
     #[tokio::test]
     async fn a_background_send_to_a_cold_peer_returns_at_once() {
-        let (state, _endpoint, sender, _silent) = state_with_silent_bob().await;
+        let (state, endpoint, sender, _silent) = state_with_silent_bob().await;
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
@@ -621,6 +621,7 @@ mod tests {
             1,
             "the dial runs in the background"
         );
+        endpoint.close().await;
     }
 
     /// A peer on the dial-failure cooldown gets no dial, so nothing was
@@ -641,6 +642,7 @@ mod tests {
         );
         tokio::task::yield_now().await;
         assert_eq!(state.unicast_pool.dial_attempts(), 0);
+        _endpoint.close().await;
     }
 
     /// Two cold sends to one peer share one dial: each dial is a handshake
@@ -648,7 +650,7 @@ mod tests {
     /// send comes after a yield, while the first dial is really in flight.
     #[tokio::test]
     async fn two_background_sends_to_one_cold_peer_share_one_dial() {
-        let (state, _endpoint, sender, _silent) = state_with_silent_bob().await;
+        let (state, endpoint, sender, _silent) = state_with_silent_bob().await;
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
@@ -660,6 +662,7 @@ mod tests {
         assert!(first, "the first send starts the dial");
         assert!(second, "the second send waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
+        endpoint.close().await;
     }
 
     /// A courtesy reply and a background send to one cold linked neighbour
@@ -679,6 +682,7 @@ mod tests {
         assert!(sent, "the background send starts the dial");
         assert!(replied, "the reply waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
+        _endpoint.close().await;
     }
 
     /// No known endpoint: nothing to dial, and the caller learns that
@@ -695,6 +699,7 @@ mod tests {
         assert!(!sent, "bob has no known endpoint");
         tokio::task::yield_now().await;
         assert_eq!(state.unicast_pool.dial_attempts(), 0);
+        _endpoint.close().await;
     }
 
     /// A warm peer gets the frame, whole.
@@ -729,7 +734,7 @@ mod tests {
         let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
 
         assert!(sent, "a warm peer is sent to");
-        let (got, _bob_endpoint, _conn) =
+        let (got, bob_endpoint, _conn) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
                 .await
                 .expect("bob reads the frame in time")
@@ -740,6 +745,8 @@ mod tests {
             0,
             "the warm send entered the dial path"
         );
+        bob_endpoint.close().await;
+        endpoint.close().await;
     }
 
     fn endpoint_of_bob(state: &EventLoopState) -> EndpointId {
@@ -990,8 +997,8 @@ mod tests {
         bob_addr: iroh::EndpointAddr,
         changes: usize,
     ) -> (Net, EventLoopState, Vec<Bytes>) {
-        use crate::protocol::Channel;
         use crate::protocol::identity::Identity;
+        use crate::protocol::Channel;
 
         let (endpoint, sender) = loopback_node().await;
         let mut state = state_with_pool(&endpoint, bob_addr);
@@ -1083,13 +1090,15 @@ mod tests {
 
         assert_eq!(answered.broadcast, 0, "nothing went on gossip");
         assert_eq!(answered.unicast, 3);
-        let (got, _bob_endpoint, _conn) =
+        let (got, bob_endpoint, _conn) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
                 .await
                 .expect("bob reads the answer in time")
                 .expect("reader task");
         let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
         assert_eq!(got, expected, "every frame, in order");
+        bob_endpoint.close().await;
+        net.endpoint.close().await;
     }
 
     /// The heads that close a point-to-point answer tell the receiver how far
@@ -1123,6 +1132,8 @@ mod tests {
             state.fast_rounds.asked_heads(Channel::State).is_some(),
             "bob is ahead, so we ask him back"
         );
+        bob_endpoint.close().await;
+        net.endpoint.close().await;
     }
 
     /// A peer holds every change it signed, since a change's actor is its
@@ -1149,6 +1160,8 @@ mod tests {
             0,
             "all 3 changes are its own"
         );
+        bob_endpoint.close().await;
+        net.endpoint.close().await;
     }
 
     /// Unknown heads from anyone else still draw every change: we cannot tell
@@ -1170,6 +1183,8 @@ mod tests {
         // dialing, so the answer may take gossip.
         let answered = handle_state_digest(Channel::State, &request, &mut state, &net.ctx()).await;
         assert_eq!(answered.unicast + answered.broadcast, 3);
+        bob_endpoint.close().await;
+        net.endpoint.close().await;
     }
 
     /// A nickname is a label any signer can put on a digest, so it must not
@@ -1178,7 +1193,7 @@ mod tests {
     /// nickname. Otherwise any member could aim answers at a victim.
     #[tokio::test]
     async fn a_digest_from_a_key_with_no_proven_endpoint_is_answered_on_gossip() {
-        use crate::gossip::antientropy::{Answered, handle_state_digest};
+        use crate::gossip::antientropy::{handle_state_digest, Answered};
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -1196,6 +1211,8 @@ mod tests {
                 broadcast: 3
             }
         );
+        bob_endpoint.close().await;
+        net.endpoint.close().await;
     }
 
     /// One serve per asker, channel and plane per window: a new node sends a
@@ -1204,7 +1221,7 @@ mod tests {
     /// switches it to the unicast plane, so it is still answered.
     #[tokio::test]
     async fn a_state_digest_is_served_once_per_asker_channel_and_plane_per_window() {
-        use crate::gossip::antientropy::{Answered, handle_state_digest};
+        use crate::gossip::antientropy::{handle_state_digest, Answered};
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -1251,6 +1268,8 @@ mod tests {
             refused,
             "a second unicast answer inside the window"
         );
+        bob_endpoint.close().await;
+        net.endpoint.close().await;
     }
 
     /// Two answers in flight at once each end with the holder's heads, and our
@@ -1266,7 +1285,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let bob_addr = bob_endpoint.addr();
         let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
-        let _bob = tokio::spawn(async move {
+        let bob_task = tokio::spawn(async move {
             let conn = bob_endpoint
                 .accept()
                 .await
@@ -1277,7 +1296,7 @@ mod tests {
             while let Ok(mut stream) = conn.accept_uni().await {
                 let _ = stream.read_to_end(1 << 20).await;
             }
-            bob_endpoint
+            bob_endpoint.close().await;
         });
         let (net, mut state, _frames) = holder(bob_addr.clone(), 3).await;
         state.linked_endpoints.insert(bob_addr.id);
@@ -1324,6 +1343,12 @@ mod tests {
             first,
             "a full answer landed since the ask, so we ask again at once"
         );
+        drop(ctx);
+        net.endpoint.close().await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), bob_task)
+            .await
+            .expect("bob sees the connection close")
+            .expect("bob task");
     }
 
     /// A serve is counted when the batch is handed to the pool, not when it is
@@ -1367,6 +1392,7 @@ mod tests {
             },
             "answered again, on gossip: the pool refuses the send, the dial failed or is in flight"
         );
+        net.endpoint.close().await;
     }
 
     /// Apply one local state change, as a frame from the network would land.
@@ -1408,6 +1434,8 @@ mod tests {
         assert_eq!(nothing.broadcast + nothing.unicast, 0, "nothing is missing");
         let gap = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(gap.broadcast, 3, "the gap is served inside the window");
+        bob_endpoint.close().await;
+        net.endpoint.close().await;
     }
 
     /// A node sends its state and meta digests back to back, so a holder
@@ -1459,7 +1487,7 @@ mod tests {
 
         assert!(first, "the first batch starts");
         assert!(second, "the second batch to the same warm peer starts too");
-        let (mut got, _bob_endpoint, _conn) =
+        let (mut got, bob_endpoint, _conn) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
                 .await
                 .expect("bob reads both batches in time")
@@ -1474,6 +1502,8 @@ mod tests {
                 b"state1".to_vec()
             ]
         );
+        bob_endpoint.close().await;
+        endpoint.close().await;
     }
 
     /// Bob's side of a loopback link: the next `count` frames he reads.
@@ -1520,7 +1550,7 @@ mod tests {
         )
         .await;
 
-        let (got, _bob) = tokio::time::timeout(std::time::Duration::from_secs(5), received)
+        let (got, bob_endpoint) = tokio::time::timeout(std::time::Duration::from_secs(5), received)
             .await
             .expect("bob reads the answer in time")
             .expect("reader task");
@@ -1536,6 +1566,8 @@ mod tests {
             ),
             "carrying the holder's heads"
         );
+        bob_endpoint.close().await;
+        net.endpoint.close().await;
     }
 
     /// A linked neighbor's digest with heads we do not hold makes us ask that
@@ -1546,7 +1578,7 @@ mod tests {
         use crate::protocol::{Channel, MessageKind};
 
         let (other_endpoint, _other_sender) = loopback_node().await;
-        let (_other_net, ahead, _frames) = holder(other_endpoint.addr(), 3).await;
+        let (other_net, ahead, _frames) = holder(other_endpoint.addr(), 3).await;
         let ahead_heads = serde_json::json!(ahead.doc(Channel::State).heads());
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _none) = holder(bob_endpoint.addr(), 0).await;
@@ -1591,7 +1623,7 @@ mod tests {
         )
         .await;
         assert!(state.fast_rounds.active(Channel::State, now), "asked bob");
-        let (got, _bob) = tokio::time::timeout(std::time::Duration::from_secs(5), received)
+        let (got, bob_endpoint) = tokio::time::timeout(std::time::Duration::from_secs(5), received)
             .await
             .expect("bob reads the ask in time")
             .expect("reader task");
@@ -1601,5 +1633,9 @@ mod tests {
             ask.body.as_str(),
             serde_json::json!({ "heads": own }).to_string()
         );
+        other_endpoint.close().await;
+        bob_endpoint.close().await;
+        other_net.endpoint.close().await;
+        net.endpoint.close().await;
     }
 }
