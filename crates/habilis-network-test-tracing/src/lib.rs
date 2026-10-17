@@ -26,6 +26,7 @@ use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 
+pub use habilis_network_test_tracing_macros::test;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};

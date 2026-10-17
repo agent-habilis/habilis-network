@@ -137,6 +137,7 @@ jobs:
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-doc --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-logging --no-default-features -- -D warnings -D clippy::disallowed_methods
           cargo clippy --target wasm32-unknown-unknown -p habilis-network-test-tracing -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --target wasm32-unknown-unknown -p habilis-network-test-tracing-macros -- -D warnings -D clippy::disallowed_methods
 
       # A path in `clippy.toml` that names no function is a plain warning, which `-D warnings`
       # leaves alone: a typo would switch one entry off. Clippy prints it only when it lints the

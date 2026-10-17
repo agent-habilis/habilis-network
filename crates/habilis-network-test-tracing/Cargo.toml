@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+habilis-network-test-tracing-macros = { path = "../habilis-network-test-tracing-macros" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
