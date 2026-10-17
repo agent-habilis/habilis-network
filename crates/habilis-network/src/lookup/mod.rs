@@ -2069,17 +2069,18 @@ mod tests {
         handle.close().await;
         endpoint.close().await;
 
-        let (endpoint, handle, _, without_cap, _) = build(TransportOpts::default(), None).await;
-        handle.close().await;
-        endpoint.close().await;
+        let (capless_endpoint, capless_handle, _, without_cap, _) =
+            build(TransportOpts::default(), None).await;
+        capless_handle.close().await;
+        capless_endpoint.close().await;
         assert!(without_cap.is_none(), "no cap, no leg");
         let off = TransportOpts {
             webrtc: false,
             ..TransportOpts::default()
         };
-        let (endpoint, handle, _, webrtc_off, _) = build(off, Some(5)).await;
-        handle.close().await;
-        endpoint.close().await;
+        let (off_endpoint, off_handle, _, webrtc_off, _) = build(off, Some(5)).await;
+        off_handle.close().await;
+        off_endpoint.close().await;
         assert!(webrtc_off.is_none(), "WebRTC off, no leg");
     }
 

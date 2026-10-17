@@ -11,7 +11,7 @@ use iroh::EndpointId;
 use tokio::sync::oneshot;
 
 use super::outbox::Resend;
-use super::pool::{UnicastPool, WarmSend, COOLDOWN_REFUSED};
+use super::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
 use crate::daemon::state::EventLoopState;
 use crate::protocol::message::sole_addressee;
 use crate::protocol::{Message, Nickname};
@@ -355,7 +355,7 @@ mod tests {
 
     use iroh::EndpointId;
 
-    use super::{lane_for, note_held, resolve, route, Lane, Route};
+    use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
     use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody, MessageId};
@@ -630,7 +630,7 @@ mod tests {
     async fn a_background_send_to_a_peer_on_dial_cooldown_is_not_sent() {
         let (state, bob) = state_knowing_bob();
         state.unicast_pool.note_dial_failure(bob).await;
-        let (_endpoint, sender) = loopback_node().await;
+        let (endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
@@ -642,7 +642,7 @@ mod tests {
         );
         tokio::task::yield_now().await;
         assert_eq!(state.unicast_pool.dial_attempts(), 0);
-        _endpoint.close().await;
+        endpoint.close().await;
     }
 
     /// Two cold sends to one peer share one dial: each dial is a handshake
@@ -671,7 +671,7 @@ mod tests {
     async fn a_courtesy_reply_shares_a_background_dial_in_flight() {
         let (mut state, bob) = state_knowing_bob();
         state.linked_endpoints.insert(bob);
-        let (_endpoint, sender) = loopback_node().await;
+        let (endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
@@ -682,7 +682,7 @@ mod tests {
         assert!(sent, "the background send starts the dial");
         assert!(replied, "the reply waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
-        _endpoint.close().await;
+        endpoint.close().await;
     }
 
     /// No known endpoint: nothing to dial, and the caller learns that
@@ -690,7 +690,7 @@ mod tests {
     #[tokio::test]
     async fn a_background_send_to_an_unknown_peer_is_not_sent() {
         let state = fresh_state();
-        let (_endpoint, sender) = loopback_node().await;
+        let (endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
         let bytes = Bytes::from(msg.serialize().expect("serialize"));
 
@@ -699,7 +699,7 @@ mod tests {
         assert!(!sent, "bob has no known endpoint");
         tokio::task::yield_now().await;
         assert_eq!(state.unicast_pool.dial_attempts(), 0);
-        _endpoint.close().await;
+        endpoint.close().await;
     }
 
     /// A warm peer gets the frame, whole.
@@ -734,7 +734,7 @@ mod tests {
         let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
 
         assert!(sent, "a warm peer is sent to");
-        let (got, bob_endpoint, _conn) =
+        let (got, returned_endpoint, _conn) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
                 .await
                 .expect("bob reads the frame in time")
@@ -745,7 +745,7 @@ mod tests {
             0,
             "the warm send entered the dial path"
         );
-        bob_endpoint.close().await;
+        returned_endpoint.close().await;
         endpoint.close().await;
     }
 
@@ -997,8 +997,8 @@ mod tests {
         bob_addr: iroh::EndpointAddr,
         changes: usize,
     ) -> (Net, EventLoopState, Vec<Bytes>) {
-        use crate::protocol::identity::Identity;
         use crate::protocol::Channel;
+        use crate::protocol::identity::Identity;
 
         let (endpoint, sender) = loopback_node().await;
         let mut state = state_with_pool(&endpoint, bob_addr);
@@ -1090,14 +1090,14 @@ mod tests {
 
         assert_eq!(answered.broadcast, 0, "nothing went on gossip");
         assert_eq!(answered.unicast, 3);
-        let (got, bob_endpoint, _conn) =
+        let (got, returned_endpoint, _conn) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
                 .await
                 .expect("bob reads the answer in time")
                 .expect("reader task");
         let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
         assert_eq!(got, expected, "every frame, in order");
-        bob_endpoint.close().await;
+        returned_endpoint.close().await;
         net.endpoint.close().await;
     }
 
@@ -1193,7 +1193,7 @@ mod tests {
     /// nickname. Otherwise any member could aim answers at a victim.
     #[tokio::test]
     async fn a_digest_from_a_key_with_no_proven_endpoint_is_answered_on_gossip() {
-        use crate::gossip::antientropy::{handle_state_digest, Answered};
+        use crate::gossip::antientropy::{Answered, handle_state_digest};
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -1221,7 +1221,7 @@ mod tests {
     /// switches it to the unicast plane, so it is still answered.
     #[tokio::test]
     async fn a_state_digest_is_served_once_per_asker_channel_and_plane_per_window() {
-        use crate::gossip::antientropy::{handle_state_digest, Answered};
+        use crate::gossip::antientropy::{Answered, handle_state_digest};
         use crate::protocol::Channel;
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
@@ -1343,7 +1343,6 @@ mod tests {
             first,
             "a full answer landed since the ask, so we ask again at once"
         );
-        drop(ctx);
         net.endpoint.close().await;
         tokio::time::timeout(std::time::Duration::from_secs(5), bob_task)
             .await
@@ -1487,7 +1486,7 @@ mod tests {
 
         assert!(first, "the first batch starts");
         assert!(second, "the second batch to the same warm peer starts too");
-        let (mut got, bob_endpoint, _conn) =
+        let (mut got, returned_endpoint, _conn) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
                 .await
                 .expect("bob reads both batches in time")
@@ -1502,7 +1501,7 @@ mod tests {
                 b"state1".to_vec()
             ]
         );
-        bob_endpoint.close().await;
+        returned_endpoint.close().await;
         endpoint.close().await;
     }
 
@@ -1550,10 +1549,11 @@ mod tests {
         )
         .await;
 
-        let (got, bob_endpoint) = tokio::time::timeout(std::time::Duration::from_secs(5), received)
-            .await
-            .expect("bob reads the answer in time")
-            .expect("reader task");
+        let (got, returned_endpoint) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                .await
+                .expect("bob reads the answer in time")
+                .expect("reader task");
         let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
         assert_eq!(got[..3], expected[..], "the three frames first, in order");
         let last = Message::parse(&got[3]).expect("the last frame parses");
@@ -1566,7 +1566,7 @@ mod tests {
             ),
             "carrying the holder's heads"
         );
-        bob_endpoint.close().await;
+        returned_endpoint.close().await;
         net.endpoint.close().await;
     }
 
@@ -1623,10 +1623,11 @@ mod tests {
         )
         .await;
         assert!(state.fast_rounds.active(Channel::State, now), "asked bob");
-        let (got, bob_endpoint) = tokio::time::timeout(std::time::Duration::from_secs(5), received)
-            .await
-            .expect("bob reads the ask in time")
-            .expect("reader task");
+        let (got, returned_endpoint) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), received)
+                .await
+                .expect("bob reads the ask in time")
+                .expect("reader task");
         let ask = Message::parse(&got[0]).expect("the ask parses");
         assert_eq!(ask.kind, MessageKind::StateDigest);
         assert_eq!(
@@ -1634,7 +1635,7 @@ mod tests {
             serde_json::json!({ "heads": own }).to_string()
         );
         other_endpoint.close().await;
-        bob_endpoint.close().await;
+        returned_endpoint.close().await;
         other_net.endpoint.close().await;
         net.endpoint.close().await;
     }
