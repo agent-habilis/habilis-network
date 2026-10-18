@@ -628,7 +628,7 @@ mod tests {
         MAX_SHED_DEFERRALS, claims_at_startup, defer_shed, next_recheck_delay, probes_before_claim,
         regrafts_rendezvous, rival_recheck_applies,
     };
-    use habilis_network_test_tracing::{expect_warn, test};
+    use habilis_network_test_tracing::{expect_warn, saw_warn, test};
     use std::time::Duration;
 
     /// A shed cuts the rendezvous a browser reached us through, and the tab
@@ -1510,6 +1510,9 @@ mod tests {
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     #[test]
     async fn a_holder_whose_beacon_stops_answering_sheds_at_the_second_check_and_not_the_first() {
+        // The stalled beacon serves no protocol, so each check that dials it is refused with
+        // alert 120 and the router of the beacon logs it: the stall causes this WARN.
+        expect_warn("iroh::protocol", "peer doesn't support any known protocol");
         let mut holder = HolderOnTheSecondRung::new().await;
         holder
             .rendezvous
@@ -1522,6 +1525,12 @@ mod tests {
         holder.state.rungs.expire_readings();
         holder.heal_tick().await;
         let shed_at_the_second = holder.rendezvous.is_none();
+        for _ in 0..100 {
+            if saw_warn("iroh::protocol", "peer doesn't support any known protocol") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         holder.close().await;
         assert!(
