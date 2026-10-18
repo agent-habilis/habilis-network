@@ -333,7 +333,7 @@ mod tests {
     #[test]
     async fn rtt_samples_returns_one_timed_probe_per_round() {
         let server = loopback_endpoint().await;
-        let _router = Router::builder(server.clone())
+        let router = Router::builder(server.clone())
             .accept(BENCH_ALPN, Bench)
             .spawn();
         let socket = server
@@ -355,5 +355,9 @@ mod tests {
         assert_eq!(samples.len(), 20);
         assert!(samples.iter().all(|sample| !sample.is_zero()));
         connection.close(0u32.into(), b"done");
+        // Both endpoints are closed in order: an endpoint that is dropped open makes iroh log an
+        // ERROR, which the guard of the test turns into a failure.
+        client.close().await;
+        router.shutdown().await.expect("the router shuts down");
     }
 }
