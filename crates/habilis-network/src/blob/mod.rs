@@ -324,6 +324,7 @@ mod tests {
                 .expect("start producer");
 
         // Connect and then do nothing at all — never open a stream, never send.
+        let mut clients = Vec::new();
         let mut idle = Vec::new();
         for _ in 0..12u8 {
             let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -332,8 +333,9 @@ mod tests {
                 .await
                 .expect("bind client");
             if let Ok(conn) = client.connect(server.addr(), super::BLOB_ALPN).await {
-                idle.push((client, conn));
+                idle.push(conn);
             }
+            clients.push(client);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
@@ -352,6 +354,12 @@ mod tests {
             "a silent peer still holds serve tasks after the pre-auth deadline"
         );
 
+        for conn in idle {
+            conn.close(0u32.into(), b"done");
+        }
+        for client in clients {
+            client.close().await;
+        }
         server.shutdown().await;
     }
 
