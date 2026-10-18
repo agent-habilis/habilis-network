@@ -73,7 +73,7 @@ pub(crate) struct Delivered {
     pub(crate) packet: Vec<u8>,
 }
 
-/// How long a reading of a connection's selected path stands. The path moves
+/// How long a reading of a connection's paths stands. The path moves
 /// rarely, and asking for it on every cell would cost more than the cell.
 const PATH_RECHECK: Duration = Duration::from_millis(250);
 
@@ -89,9 +89,9 @@ fn paths_of(connection: &Connection) -> Vec<(TransportAddr, bool)> {
 /// Whether a writer sends on a selected path that is not the relay.
 /// Nothing selected is not trusted: the engine's own rule for payload
 /// (`payload_allowed_on`) refuses until a path is selected.
-fn direct_for_writer(paths: &[(TransportAddr, bool)]) -> bool {
+fn direct_for_writer<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, bool)>) -> bool {
     paths
-        .iter()
+        .into_iter()
         .any(|(addr, selected)| *selected && !matches!(addr, TransportAddr::Relay(_)))
 }
 
@@ -103,9 +103,9 @@ fn direct_for_writer(paths: &[(TransportAddr, bool)]) -> bool {
 /// so the selected path here says nothing about them. The cost: a cell that really
 /// came over the relay is admitted while an IP path is also open. The dialler's
 /// writer gate refuses relay cells, and iroh shows no path per datagram.
-fn direct_for_inbound(paths: &[(TransportAddr, bool)]) -> bool {
+fn direct_for_inbound<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, bool)>) -> bool {
     paths
-        .iter()
+        .into_iter()
         .any(|(addr, _)| !matches!(addr, TransportAddr::Relay(_)))
 }
 
@@ -116,13 +116,10 @@ fn direct_for_inbound(paths: &[(TransportAddr, bool)]) -> bool {
 /// the gate would read a direct path for ever: the cut would not reach a live writer. So the
 /// gate leaves the blocked paths out of what it reads.
 fn unblocked(
-    paths: Vec<(TransportAddr, bool)>,
+    paths: &[(TransportAddr, bool)],
     blocked: impl Fn(&TransportAddr) -> bool,
-) -> Vec<(TransportAddr, bool)> {
-    paths
-        .into_iter()
-        .filter(|(path, _)| !blocked(path))
-        .collect()
+) -> impl Iterator<Item = &(TransportAddr, bool)> {
+    paths.iter().filter(move |entry| !blocked(&entry.0))
 }
 
 /// Whether a test took `path` away from the endpoint `local`: the question that the selector
@@ -179,7 +176,10 @@ struct RelayGate {
     /// The underlay endpoint that the gate stands on: the node whose blocks a test may set.
     local: EndpointId,
     role: GateRole,
-    reading: Option<(Instant, bool)>,
+    /// The paths at the last reading. A test cut is applied to them on every call.
+    reading: Option<(Instant, Vec<(TransportAddr, bool)>)>,
+    /// The verdict of the last call, so that the log text is built when it changes.
+    last_admitted: Option<bool>,
     /// The path list at the last refusal, so that the log says it once per change.
     last_refused_paths: Option<String>,
 }
@@ -191,45 +191,56 @@ impl RelayGate {
             local,
             role,
             reading: None,
+            last_admitted: None,
             last_refused_paths: None,
         }
     }
 
     /// Whether a cell may cross `connection` now.
     fn admits(&mut self, connection: &Connection) -> bool {
+        self.admits_paths(|| paths_of(connection))
+    }
+
+    /// `admits`, with the paths of the connection read by `read_paths`, which runs only when
+    /// the last reading is old.
+    fn admits_paths(&mut self, read_paths: impl FnOnce() -> Vec<(TransportAddr, bool)>) -> bool {
         if self.allow_relay {
             return true;
         }
         let now = Instant::now();
-        match self.reading {
-            Some((at, admitted)) if now.duration_since(at) < PATH_RECHECK => admitted,
-            _ => {
-                let paths = paths_of(connection);
-                let direct = unblocked(paths.clone(), |path| blocked_by_test(self.local, path));
-                let admitted = match self.role {
-                    GateRole::Writer => direct_for_writer(&direct),
-                    GateRole::Inbound => direct_for_inbound(&direct),
-                };
-                self.reading = Some((now, admitted));
-                if !admitted {
-                    let paths = path_list(paths);
-                    if self.last_refused_paths.as_deref() != Some(paths.as_str()) {
-                        match self.role {
-                            GateRole::Writer => tracing::debug!(
-                                %paths,
-                                "multihop underlay: no direct path is selected"
-                            ),
-                            GateRole::Inbound => tracing::debug!(
-                                %paths,
-                                "multihop underlay: no open path is not the relay"
-                            ),
-                        }
-                        self.last_refused_paths = Some(paths);
+        let fresh =
+            matches!(&self.reading, Some((at, _)) if now.duration_since(*at) < PATH_RECHECK);
+        if !fresh {
+            self.reading = Some((now, read_paths()));
+        }
+        let paths = self
+            .reading
+            .as_ref()
+            .map_or(&[][..], |(_, paths)| paths.as_slice());
+        let direct = unblocked(paths, |path| blocked_by_test(self.local, path));
+        let admitted = match self.role {
+            GateRole::Writer => direct_for_writer(direct),
+            GateRole::Inbound => direct_for_inbound(direct),
+        };
+        // The cell path allocates nothing: the text of the paths is built only when the
+        // reading is new or the verdict changed.
+        let changed = !fresh || self.last_admitted != Some(admitted);
+        self.last_admitted = Some(admitted);
+        if !admitted && changed {
+            let paths = path_list(paths.iter().cloned());
+            if self.last_refused_paths.as_deref() != Some(paths.as_str()) {
+                match self.role {
+                    GateRole::Writer => {
+                        tracing::debug!(%paths, "multihop underlay: no direct path is selected");
+                    }
+                    GateRole::Inbound => {
+                        tracing::debug!(%paths, "multihop underlay: no open path is not the relay");
                     }
                 }
-                admitted
+                self.last_refused_paths = Some(paths);
             }
         }
+        admitted
     }
 }
 
@@ -1659,13 +1670,12 @@ mod tests {
             direct_for_writer(&paths),
             "before the cut the writer is admitted"
         );
-        let open = unblocked(paths, |path| *path == ip(9));
         assert!(
-            !direct_for_writer(&open),
+            !direct_for_writer(unblocked(&paths, |path| *path == ip(9))),
             "the blocked path is gone, and nothing direct is selected"
         );
         assert!(
-            open.iter().any(|(path, _)| *path == relay()),
+            unblocked(&paths, |path| *path == ip(9)).any(|(path, _)| *path == relay()),
             "the relay stays in the list"
         );
     }
@@ -1675,9 +1685,11 @@ mod tests {
         use super::{direct_for_inbound, unblocked};
         let paths = vec![(ip(9), false), (relay(), false)];
         assert!(direct_for_inbound(&paths));
-        let open = unblocked(paths, |path| matches!(path, TransportAddr::Ip(_)));
         assert!(
-            !direct_for_inbound(&open),
+            !direct_for_inbound(unblocked(&paths, |path| matches!(
+                path,
+                TransportAddr::Ip(_)
+            ))),
             "only the relay is left, and it is not direct"
         );
     }
@@ -1686,7 +1698,10 @@ mod tests {
     fn a_path_that_no_test_blocked_is_kept() {
         use super::unblocked;
         let paths = vec![(ip(9), true), (relay(), false)];
-        assert_eq!(unblocked(paths.clone(), |_| false), paths);
+        assert_eq!(
+            unblocked(&paths, |_| false).cloned().collect::<Vec<_>>(),
+            paths
+        );
     }
 
     #[test]
@@ -1827,5 +1842,35 @@ mod tests {
             forwarder.enqueue(&next, cell(vec![next.clone()], 0, source.clone()));
         }
         assert!(live_writers(&forwarder) <= MAX_WRITERS);
+    }
+
+    /// A test cut reaches a gate at once. The reading of the paths stands for `PATH_RECHECK`,
+    /// but a cut made inside that span must not: the cell would leave on the relay, and the
+    /// forwarder at the other end would refuse it.
+    #[test]
+    fn a_writer_gate_refuses_at_once_when_a_test_cuts_the_selected_path() {
+        use super::{GateRole, RelayGate};
+        use habilis_network_iroh_transport_util::{Rung, block_rung};
+
+        let local: EndpointId = SecretKey::from_bytes(&[41; 32]).public();
+        let relay: iroh::RelayUrl = "http://127.0.0.1:1".parse().expect("relay url");
+        let ip: SocketAddr = "127.0.0.1:2".parse().expect("ip addr");
+        let paths = || {
+            vec![
+                (TransportAddr::Relay(relay.clone()), false),
+                (TransportAddr::Ip(ip), true),
+            ]
+        };
+        let mut gate = RelayGate::new(false, local, GateRole::Writer);
+        assert!(gate.admits_paths(paths), "a selected IP path admits");
+
+        block_rung(local, Rung::Ip, true);
+        let admitted = gate.admits_paths(paths);
+        block_rung(local, Rung::Ip, false);
+
+        assert!(
+            !admitted,
+            "a cut IP path must not admit, even inside the recheck span"
+        );
     }
 }
