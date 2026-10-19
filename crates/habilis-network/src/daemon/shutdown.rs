@@ -62,40 +62,34 @@ pub(super) async fn shutdown<A: NodeDriver>(
 /// The mesh name (for the departure log line), the user-facing departure
 /// label (the raw topic string for a topic gossip, `#name` otherwise), and
 /// whether this quit should hard-exit the process — the plain values
-/// [`announce_and_maybe_exit`] needs beyond the loop state and the shared
+/// [`announce_departure`] needs beyond the loop state and the shared
 /// handler context.
 pub(super) struct QuitParams<'a> {
     pub(super) name: &'a MeshName,
     pub(super) leave_label: &'a str,
     pub(super) exit_on_quit: bool,
 }
-/// Announce departure, then decide whether to hard-exit the process.
+/// Announce departure, and say whether the loop must hard-exit the process once it has ended.
 ///
-/// `exit_on_quit` is the CLI hard-exit: the CLI process exits immediately on
-/// quit rather than tearing down its background tasks (advertiser,
-/// localhost HTTP server, iroh) and unwinding. In-process quits pass `false`
-/// and unwind cleanly instead. Under the `dhat-heap` profiling build we
-/// *never* `process::exit` regardless — it skips destructors, so the heap
-/// profiler would never flush `dhat-heap.json`; we fall through so `main`
-/// unwinds and the profiler drops.
-pub(super) async fn announce_and_maybe_exit<A: NodeDriver>(
+/// `exit_on_quit` is the CLI hard-exit: the CLI process exits on quit rather than tearing down
+/// its background tasks (advertiser, localhost HTTP server, iroh) and unwinding. In-process
+/// quits pass `false` and unwind cleanly instead. The exit is the loop's to make, after
+/// `release_rendezvous` has shed the beacon and closed the endpoints that the loop owns: an exit
+/// from here skips both, and the peers of the beacon wait for its idle timeout. Under the
+/// `dhat-heap` profiling build we *never* hard-exit regardless: it skips destructors, so the
+/// heap profiler would never flush `dhat-heap.json`; `main` unwinds and the profiler drops.
+pub(super) async fn announce_departure<A: NodeDriver>(
     state: &mut EventLoopState,
     app: &mut A,
     ctx: &HandlerCtx<'_>,
     quit: QuitParams<'_>,
-) {
+) -> bool {
     // Empty out any parked long-poll waiters first, so a held call returns a
-    // clean timeout (empty) rather than a dropped-channel error — and before
-    // the `exit_on_quit` path below may `std::process::exit`. Other app-owned
+    // clean timeout (empty) rather than a dropped-channel error. Other app-owned
     // waiters (app RPC calls) are failed in `on_shutdown` (inside `shutdown`).
     app.close_poll_waiters();
     shutdown(state, app, ctx, &quit).await;
-    #[cfg(not(feature = "dhat-heap"))]
-    if quit.exit_on_quit {
-        std::process::exit(0);
-    }
-    #[cfg(feature = "dhat-heap")]
-    let _ = quit.exit_on_quit;
+    quit.exit_on_quit && !cfg!(feature = "dhat-heap")
 }
 /// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix)
 /// listener tasks feeding a single internal quit channel.
@@ -428,5 +422,57 @@ mod tests {
         assert!(orphan_watch_warranted(4242));
         // Launched detached straight from init/launchd ⇒ no parent to lose.
         assert!(!orphan_watch_warranted(1));
+    }
+
+    /// The test binary runs this test again, in a process of its own, with this variable set.
+    const QUIT_CHILD: &str = "HABILIS_TEST_CLI_QUIT_CHILD";
+
+    /// A CLI quit announces the departure and asks the loop to exit the process, which it does
+    /// only after it has released the beacon and closed the endpoints that it owns. A process
+    /// that exits inside the announcement skips both: the peers of the beacon wait for its idle
+    /// timeout, and its endpoints are never closed. The check runs in a child process, because
+    /// an exit inside the announcement ends the process.
+    #[test]
+    async fn a_cli_quit_leaves_the_exit_to_the_loop() {
+        use super::{QuitParams, announce_departure};
+        use crate::testing::LaneNode;
+
+        if std::env::var_os(QUIT_CHILD).is_some() {
+            let node = LaneNode::start().await;
+            let ctx = node.ctx();
+            let mut state = node.state();
+            let (inbound, _unread) = mpsc::channel(1);
+            let mut app = crate::membership::MembershipApp::new(inbound);
+            let name = crate::protocol::MeshName::new("test".to_owned()).expect("a name");
+            let exit = announce_departure(
+                &mut state,
+                &mut app,
+                &ctx,
+                QuitParams {
+                    name: &name,
+                    leave_label: "#test",
+                    exit_on_quit: true,
+                },
+            )
+            .await;
+            println!("QUIT_ANNOUNCED exit={exit}");
+            node.endpoint.close().await;
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("the test binary"))
+            .args([
+                "--exact",
+                "daemon::shutdown::tests::a_cli_quit_leaves_the_exit_to_the_loop",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(QUIT_CHILD, "1")
+            .output()
+            .expect("run the test binary");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("QUIT_ANNOUNCED exit=true"),
+            "the process exited inside the quit, before the loop released its endpoints: {stdout}"
+        );
     }
 }

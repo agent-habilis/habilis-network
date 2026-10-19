@@ -30,10 +30,9 @@ use crate::util::clock::Instant;
 /// beacon see an immediate `NeighborDown` rather than waiting out the QUIC
 /// idle timeout on a corpse.
 ///
-/// Not in `shutdown()` — the loop owns the `Rendezvous`, and the CLI's
-/// `exit_on_quit` path `process::exit`s from inside `shutdown` before any of
-/// this could run (that path skips every destructor by design, so there is no
-/// warning to silence there either).
+/// Not in `shutdown()` — the loop owns the `Rendezvous`. The CLI's `exit_on_quit` path
+/// `process::exit`s only after the loop has run this, so the peers of the beacon see it close
+/// at once.
 ///
 /// An outstanding probe-before-claim goes the same way, and for the same
 /// reason: its throwaway endpoint is just as capable of reaching `Drop` open.

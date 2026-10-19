@@ -46,7 +46,7 @@ use super::ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
 #[cfg(feature = "host")]
 use super::shutdown::spawn_quit_signal_tasks;
-use super::shutdown::{OwnedEndpoints, QuitParams, announce_and_maybe_exit, never_quit};
+use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
 use super::state::{EventLoopState, MeshSecrets};
 use super::timers;
 
@@ -771,6 +771,8 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
     // the next flood, and the watcher keeps only the latest value.
     let mut address_changes = endpoint.watch_addr().stream_updates_only();
 
+    // A CLI quit sets it: the process exits once the beacon and the endpoints are released.
+    let mut exit_after_release = false;
     loop {
         #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
         super::beacon_arm::shed_on_request(&mut state, &rendezvous_params, &mut rendezvous);
@@ -1083,7 +1085,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             _ = recv_opt(&mut external_quit_rx) => {
                 // External quit is always in-process (MCP): never hard-exit (`false`).
                 let ctx = parts.ctx(&sender);
-                announce_and_maybe_exit(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit: false }).await;
+                announce_departure(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit: false }).await;
                 break;
             }
             req = recv_opt(&mut external_req_rx) => match req {
@@ -1098,7 +1100,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             },
             _ = quit_rx.recv() => {
                 let ctx = parts.ctx(&sender);
-                announce_and_maybe_exit(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit }).await;
+                exit_after_release = announce_departure(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit }).await;
                 break;
             }
         }
@@ -1114,6 +1116,9 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         owned,
     )
     .await;
+    if exit_after_release {
+        std::process::exit(0);
+    }
     Ok(())
 }
 
