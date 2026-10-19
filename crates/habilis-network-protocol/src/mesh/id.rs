@@ -14,7 +14,7 @@ string_newtype!(
 /// A mesh identifier — the encoded bare `Base58Check` string.
 ///
 /// Construction validates the length, Base58 charset, checksum, version, and
-/// complete payload. Consequently every `MeshId` can be decoded as a [`Mesh`].
+/// complete payload. Consequently every `MeshId` can be decoded as a [`LockedMesh`](super::LockedMesh).
     MeshId,
     error = MeshIdError,
     deserialize,

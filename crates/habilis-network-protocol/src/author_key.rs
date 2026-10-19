@@ -2,7 +2,7 @@
 
 use iroh_base::PublicKey;
 
-/// The 32 bytes of the Ed25519 key that signed a message, from [`Message::author_key`].
+/// The 32 bytes of the Ed25519 key that signed a message, from `Message::author_key`.
 ///
 /// On the wire the key is its 64-character lowercase hex text. The signed bytes of a message
 /// also hold that text, not the raw bytes, so [`Display`](std::fmt::Display) is part of the
@@ -21,7 +21,6 @@ use iroh_base::PublicKey;
 /// let _ = AuthorKey::from_bytes([0u8; 32]) == [0u8; 32];
 /// ```
 ///
-/// [`Message::author_key`]: crate::Message::author_key
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AuthorKey([u8; 32]);
 

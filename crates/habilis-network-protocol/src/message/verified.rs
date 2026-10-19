@@ -106,12 +106,12 @@ impl Verified {
         Arc::unwrap_or_clone(self.message)
     }
 
-    /// The wire bytes of the message: [`Message::serialize`], here, so a call on a `Verified` does
+    /// The wire bytes of the message: `Message::serialize`, here, so a call on a `Verified` does
     /// not reach the `Serialize` impl, which needs a serializer.
     ///
     /// # Errors
     ///
-    /// Propagates [`Message::serialize`] failure.
+    /// Propagates `Message::serialize` failure.
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
         (*self.message).serialize()
     }

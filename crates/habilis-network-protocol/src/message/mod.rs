@@ -984,7 +984,7 @@ impl Message {
 
     /// Stamp the cross-author DAG `parents` (content hashes of the tips
     /// seen when authoring) before signing. Consuming-builder, composes
-    /// with [`with_chain`](Self::with_chain) and [`signed`](Self::signed).
+    /// with [`with_chain`](Self::with_chain) and [`sign`](Self::sign).
     #[must_use]
     pub fn with_parents(mut self, parents: Vec<ContentHash>) -> Self {
         self.parents = parents;
@@ -1104,7 +1104,7 @@ impl Message {
 /// command, the library API send path, and interactive stdin.
 ///
 /// # Errors
-/// Propagates [`Message::serialize`] failure (oversized payload).
+/// Propagates `Message::serialize` failure (oversized payload).
 /// The per-author log + DAG position to stamp on an outbound `Msg`: the
 /// chain `seq`/`prev` (Phase 2) and the DAG `parents` (Phase 3). Bundled so
 /// [`build_msg_bytes`] stays within the argument budget. Test-only now that the
@@ -1207,7 +1207,7 @@ const RESEND_NONCE_LEN: usize = 8;
 /// headroom under the gossip limit that `MAX_MESSAGE_SIZE` leaves.
 pub const RESEND_TRAILER_LEN: usize = 1 + RESEND_NONCE_LEN;
 
-/// `frame` (the bytes of [`Message::serialize`]) with the trailer of a resend: a mark and a
+/// `frame` (the bytes of `Message::serialize`) with the trailer of a resend: a mark and a
 /// nonce. The gossip layer names a message by the hash of its payload and drops a payload it has
 /// seen for 90 s, so a resend of the same bytes cannot repair a message that the gossip layer
 /// delivered and the app did not read. The nonce gives each resend a new name. It sits outside
