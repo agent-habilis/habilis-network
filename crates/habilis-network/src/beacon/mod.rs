@@ -137,6 +137,9 @@ pub(crate) struct Rendezvous {
     /// The members that linked to this beacon, as its gossip task saw them come up. The holder
     /// reads them: a member that it does not know is a sign that another group may exist.
     arrivals: mpsc::Receiver<EndpointId>,
+    /// Set by the release paths, which close the endpoint themselves. A drop with it unset is a
+    /// beacon that nobody released, and closes the endpoint on its own.
+    released: bool,
 }
 
 /// A beacon's `WebRTC` answerer and the table that admits its sessions.
@@ -249,6 +252,7 @@ impl Rendezvous {
             endpoint,
             lane,
             arrivals: mpsc::channel(1).1,
+            released: false,
         }
     }
 
@@ -263,7 +267,8 @@ impl Rendezvous {
     /// [`Self::shed`], and a receiver that resolves when the close of the endpoint is done. The
     /// event loop waits on it to re-probe the id at once: the wait that the reclaim tick used to
     /// give is the close, and the close is an event, not a time.
-    pub(crate) fn shed_then(self) -> oneshot::Receiver<()> {
+    pub(crate) fn shed_then(mut self) -> oneshot::Receiver<()> {
+        self.released = true;
         let endpoint = self.endpoint.clone();
         let (done, closed) = oneshot::channel();
         let shed_at = Instant::now();
@@ -302,6 +307,7 @@ impl Rendezvous {
     pub(crate) async fn shed_and_wait(mut self) {
         let endpoint = self.endpoint.clone();
         let monitor = self.monitor.take();
+        self.released = true;
         // Abort the co-host task first, so it is not still driving the
         // endpoint while it closes.
         drop(self);
@@ -324,22 +330,36 @@ impl Rendezvous {
 }
 
 /// Aborts the co-host task and stops the monitor (dropping it signals the
-/// stop, and the monitor then closes any probe endpoint of its own) — and
-/// **does not close the endpoint**, because it cannot: closing is async and
-/// `Drop` is not.
+/// stop, and the monitor then closes any probe endpoint of its own). A beacon
+/// that was not released through [`Rendezvous::shed`] or
+/// [`Rendezvous::shed_and_wait`] hands its endpoint to a detached close, because
+/// closing is async and `Drop` is not.
 ///
-/// So a bare `drop` (or `*slot = None`, which is the same thing wearing a
-/// disguise) abandons a live, still-registered socket: iroh logs `Endpoint
-/// dropped without calling Endpoint::close. Aborting ungracefully.` and every
-/// peer linked to that beacon waits out the QUIC idle timeout instead of
-/// seeing a `NeighborDown`. Every release site must go through
-/// [`Rendezvous::shed`] (mid-run) or [`Rendezvous::shed_and_wait`] (on the way
-/// out) — the two plain drops that predated this note are the whole reason it
-/// is here.
+/// A drop is what a crash leaves, when the daemon task is aborted with the
+/// beacon in its slot. Without the close, iroh logs `Endpoint dropped without
+/// calling Endpoint::close. Aborting ungracefully.` and every peer linked to
+/// that beacon waits out the QUIC idle timeout instead of seeing a
+/// `NeighborDown`. The close runs only where a runtime is there to run it. The
+/// release sites stay the way to wait for the close.
 impl Drop for Rendezvous {
     fn drop(&mut self) {
         self.task.abort();
+        if !self.released {
+            close_detached(self.endpoint.clone());
+        }
     }
+}
+
+/// Close `endpoint` on a task of its own, for a `Drop` that cannot wait. Outside a runtime there
+/// is nothing to run the close, and the endpoint is dropped as before.
+fn close_detached(endpoint: Endpoint) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    drop(n0_future::task::spawn(async move {
+        endpoint.close().await;
+    }));
 }
 
 /// The rendezvous's **dialable** address: the id plus somewhere to reach it.
@@ -1621,6 +1641,7 @@ async fn claim_holder(
         endpoint: rendezvous_endpoint,
         lane,
         arrivals,
+        released: false,
     });
     Held::Claimed
 }
@@ -2444,6 +2465,7 @@ mod tests {
             endpoint,
             lane: None,
             arrivals: tokio::sync::mpsc::channel(1).1,
+            released: false,
         }
     }
 
@@ -2502,6 +2524,21 @@ mod tests {
         assert!(
             prober.is_closed(),
             "a dropped probe left its endpoint open; its last handle logs the ungraceful-abort error"
+        );
+    }
+
+    /// The same for a beacon that is dropped: the aborted loop drops it with no `shed`.
+    #[test]
+    async fn a_dropped_beacon_closes_its_endpoint() {
+        let endpoint = loopback_endpoint().await;
+        let beacon = dead_beacon(endpoint.clone()).await;
+
+        drop(beacon);
+
+        settle(&endpoint).await;
+        assert!(
+            endpoint.is_closed(),
+            "a dropped beacon left its endpoint open; its last handle logs the ungraceful-abort error"
         );
     }
 
@@ -2592,6 +2629,7 @@ mod tests {
                 endpoint,
                 lane: None,
                 arrivals: tokio::sync::mpsc::channel(1).1,
+                released: false,
             };
 
             rendezvous.shed_and_wait().await;
@@ -2965,6 +3003,7 @@ mod tests {
             endpoint: endpoint.clone(),
             lane: None,
             arrivals: tokio::sync::mpsc::channel(1).1,
+            released: false,
         });
 
         assert!(!releasable(&mut slot), "a live beacon is not releasable");
