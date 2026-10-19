@@ -672,7 +672,7 @@ pub(crate) fn browser_handle_config(
 /// # Errors
 /// The multi-hop handle lets the relay carry cells on a mesh whose transport list
 /// has no `relay`.
-pub(crate) fn check_injected_identity(
+pub(crate) fn check_injected_against_mesh(
     endpoint: &Endpoint,
     relay_payload: bool,
     mesh_lookups: &LookupOpts,
@@ -2059,12 +2059,12 @@ mod tests {
         let (endpoint, _webrtc) = super::build_peer_webrtc(&lookups, TransportOpts::default())
             .await
             .expect("a peer binds");
-        super::check_injected_identity(&endpoint, false, &lookups, false)
+        super::check_injected_against_mesh(&endpoint, false, &lookups, false)
             .expect("a handle that does not carry cells is allowed");
-        let relay_error = super::check_injected_identity(&endpoint, true, &lookups, false)
+        let relay_error = super::check_injected_against_mesh(&endpoint, true, &lookups, false)
             .expect_err("relay cells on a lookup-only mesh");
         assert!(relay_error.to_string().contains("relay"), "{relay_error}");
-        super::check_injected_identity(&endpoint, true, &lookups, true)
+        super::check_injected_against_mesh(&endpoint, true, &lookups, true)
             .expect("the mesh lets the relay carry cells");
         endpoint.close().await;
     }

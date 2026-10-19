@@ -238,7 +238,7 @@ async fn build_member_endpoint(
                 "the mesh policy has no multihop for this node: the injected multihop handle is not used"
             );
         }
-        crate::lookup::check_injected_identity(
+        crate::lookup::check_injected_against_mesh(
             &injected.endpoint,
             multihop.is_some_and(
                 habilis_network_iroh_multihop_transport::MultihopHandle::relay_payload,
@@ -305,7 +305,9 @@ async fn build_member_endpoint(
     Option<crate::lookup::MdnsHandle>,
 )> {
     if let Some(injected) = build.injected.as_ref() {
-        crate::lookup::check_injected_identity(
+        // A browser has no multi-hop underlay, so a multihop handle that the caller
+        // passed is ignored here, and the endpoint is used as it is.
+        crate::lookup::check_injected_against_mesh(
             &injected.endpoint,
             false,
             build.lookups,
@@ -366,12 +368,7 @@ async fn build_member_endpoint(
 /// ```compile_fail,E0451
 /// # use habilis_network::runtime::InjectedEndpoint;
 /// # fn literal() -> InjectedEndpoint {
-/// InjectedEndpoint {
-///     endpoint: todo!(),
-///     webrtc: todo!(),
-///     admission: todo!(),
-///     mdns: None,
-/// }
+/// InjectedEndpoint { ..todo!() }
 /// # }
 /// ```
 ///
@@ -412,16 +409,17 @@ pub struct InjectedEndpoint {
 }
 
 impl InjectedEndpoint {
-    /// Installs the transports of `transports` on a new endpoint that binds
-    /// `secret`, and checks that every handle carries that key.
+    /// Binds an endpoint on `secret` with the transports of `transports`, and
+    /// makes the admission table that its connection hook reports to.
     ///
-    /// `max_direct` is the ceiling of direct connections, as in
-    /// [`SetupParams::max_direct`]. The admission table is made here, so the
-    /// hook reports to the table that the mesh enforces.
+    /// The keys of the handles are checked before anything is bound, so a
+    /// refused handle is not spent on an endpoint. `max_direct` is the ceiling of
+    /// direct connections, as in [`SetupParams::max_direct`].
     ///
     /// # Errors
-    /// `transports` has no WebRTC handle, the endpoint does not bind, or a handle
-    /// was made from a key other than the one that the endpoint binds.
+    /// `transports` has no WebRTC handle, or it already has an admission table
+    /// (this method makes the one). A handle was made from a key other than the one
+    /// that `secret` derives, or the endpoint does not bind.
     pub async fn bind(
         lookups: &LookupOpts,
         secret: iroh::SecretKey,
@@ -429,10 +427,18 @@ impl InjectedEndpoint {
         mut transports: crate::lookup::TransportHandles,
         max_direct: usize,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            transports.admission.is_none(),
+            "an injected endpoint makes its own admission table: pass `max_direct`, not a table"
+        );
         let webrtc = transports
             .webrtc
             .clone()
             .ok_or_else(|| anyhow::anyhow!("an injected endpoint needs a WebRTC transport"))?;
+        let bound = secret.public();
+        check_webrtc_key(bound, &webrtc)?;
+        #[cfg(feature = "multihop")]
+        check_hop_key(bound, transports.multihop.as_ref())?;
         let admission = crate::transport::SignalAdmission::new(max_direct);
         transports.admission = Some(admission.clone());
         #[cfg(feature = "multihop")]
@@ -445,13 +451,6 @@ impl InjectedEndpoint {
             transports,
         )
         .await?;
-        let checked = check_webrtc_key(&endpoint, &webrtc);
-        #[cfg(feature = "multihop")]
-        let checked = checked.and_then(|()| check_hop_key(&endpoint, multihop.as_ref()));
-        if let Err(error) = checked {
-            endpoint.close().await;
-            return Err(error);
-        }
         Ok(Self {
             endpoint,
             webrtc,
@@ -467,10 +466,9 @@ impl InjectedEndpoint {
 /// advertises `custom_addr(local_id)`, so a mismatch is silent, and every `WebRTC`
 /// dial goes to an address nobody listens on.
 fn check_webrtc_key(
-    endpoint: &Endpoint,
+    bound: iroh::EndpointId,
     webrtc: &habilis_network_iroh_webrtc_transport::WebRtcHandle,
 ) -> Result<()> {
-    let bound = endpoint.id();
     let advertised = webrtc.transport().local_id();
     anyhow::ensure!(
         bound == advertised,
@@ -485,11 +483,10 @@ fn check_webrtc_key(
 /// see `build_peer_multihop`.
 #[cfg(feature = "multihop")]
 fn check_hop_key(
-    endpoint: &Endpoint,
+    bound: iroh::EndpointId,
     multihop: Option<&habilis_network_iroh_multihop_transport::MultihopHandle>,
 ) -> Result<()> {
     if let Some(handle) = multihop {
-        let bound = endpoint.id();
         let hop_identity = handle.app_id().get();
         anyhow::ensure!(
             bound == hop_identity,
@@ -1569,11 +1566,83 @@ mod tests {
             "{webrtc_error}"
         );
 
-        // A fresh handle: the refused binds above already attached theirs.
-        let fresh_webrtc = crate::lookup::new_webrtc_handle(secret.public());
-        bind(Some(fresh_webrtc), None)
+        // A refused handle is not bound, so the one that was refused is still free.
+        bind(Some(own_webrtc.clone()), None)
             .await
             .expect("handles on the bound key are accepted");
+
+        let table = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
+        let table_error = super::InjectedEndpoint::bind(
+            &lookups,
+            secret.clone(),
+            Vec::new(),
+            crate::lookup::TransportHandles {
+                webrtc: Some(own_webrtc),
+                admission: Some(table),
+                ..crate::lookup::TransportHandles::default()
+            },
+            crate::transport::MAX_DIRECT_PEERS,
+        )
+        .await
+        .expect_err("a caller's admission table");
+        assert!(
+            table_error.to_string().contains("admission"),
+            "{table_error}"
+        );
+    }
+
+    /// The hook of an injected endpoint reports its connections to the table the mesh
+    /// enforces: a peer that dials it holds a direct slot there, and the count rises.
+    #[tokio::test]
+    async fn an_injected_endpoints_hook_reports_to_its_admission_table() {
+        // Only the unicast ALPN counts against the ceiling; every connection still lands in the slot table.
+        const ALPN: &[u8] = crate::transport::UNICAST_ALPN;
+        let secret = iroh::SecretKey::from_bytes(&[92; 32]);
+        let injected = super::InjectedEndpoint::bind(
+            &LookupOpts::loopback(),
+            secret.clone(),
+            vec![ALPN.to_vec()],
+            crate::lookup::TransportHandles {
+                webrtc: Some(crate::lookup::new_webrtc_handle(secret.public())),
+                ..crate::lookup::TransportHandles::default()
+            },
+            crate::transport::MAX_DIRECT_PEERS,
+        )
+        .await
+        .expect("the injected endpoint binds");
+        assert_eq!(injected.admission.direct_units(), 0, "no peer dialed yet");
+
+        let dialer = crate::lookup::build_peer_endpoint(&LookupOpts::loopback())
+            .await
+            .expect("a dialer binds");
+        let server = injected.endpoint.clone();
+        let serving = tokio::spawn(async move {
+            let incoming = server.accept().await.expect("an incoming connection");
+            incoming.await.expect("the handshake completes")
+        });
+        let connection = dialer
+            .connect(injected.endpoint.addr(), ALPN)
+            .await
+            .expect("the dial connects");
+        let _served = serving.await.expect("the accept task");
+
+        // The hook runs after the handshake, so the slot may land a moment after the dial.
+        let mut units = 0;
+        for _ in 0..200 {
+            units = injected.admission.direct_units();
+            if units > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            units, 1,
+            "the endpoint's hook did not report the dialer to its table"
+        );
+
+        drop(connection);
+        dialer.close().await;
+        injected.endpoint.close().await;
     }
 
     async fn setup_with(
