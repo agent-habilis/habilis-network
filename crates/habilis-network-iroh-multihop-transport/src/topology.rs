@@ -270,6 +270,13 @@ impl Topology {
         expired.len()
     }
 
+    /// Whether a vector of `origin` was held and removed inside the last max age: the peer
+    /// left, or its vector expired.
+    #[must_use]
+    pub fn is_gone(&self, origin: AppId) -> bool {
+        self.tombstones.contains_key(&origin)
+    }
+
     /// The application ids that `origin` linked to in the vector that we hold of it.
     pub(crate) fn links_of(&self, origin: AppId) -> Option<Vec<AppId>> {
         self.vectors

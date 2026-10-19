@@ -475,20 +475,31 @@ impl Forwarder {
     /// Logged at debug when the hop is explained. A cell that this node delivered named it: a
     /// reply goes back along the reversed route of a cell, and the sender's first link-vector
     /// arrives some 15 s after it starts. Or it is a link of this node: the origin of a route
-    /// saw the vector of a new neighbor before this node did, and the link reaches it. Any other
-    /// hop without a vector is a warning.
+    /// saw the vector of a new neighbor before this node did, and the link reaches it. Or this
+    /// node held the vector and removed it, because the peer left or the vector expired: the
+    /// cells in flight to the peer still name it, and the origin of the route is behind. Any
+    /// other hop without a vector is a warning.
     fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
-        let known = self
-            .topology
-            .read()
-            .expect("topology lock poisoned")
-            .underlay_of(hop.app_id)
-            .filter(|addr| UnderlayId::new(addr.id) == hop.underlay_id);
+        let (known, gone) = {
+            let topology = self.topology.read().expect("topology lock poisoned");
+            let known = topology
+                .underlay_of(hop.app_id)
+                .filter(|addr| UnderlayId::new(addr.id) == hop.underlay_id);
+            (known, topology.is_gone(hop.app_id))
+        };
         known.unwrap_or_else(|| {
             let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
-            let explained = self.heard_hop(hop.underlay_id) || self.is_link_of_ours(hop.app_id);
+            let explained =
+                gone || self.heard_hop(hop.underlay_id) || self.is_link_of_ours(hop.app_id);
             if self.line_is_due(hop.underlay_id, total, explained) {
-                if explained {
+                if gone {
+                    tracing::debug!(
+                        total,
+                        hop = %hop.underlay_id.fmt_short(),
+                        app_id = %hop.app_id.fmt_short(),
+                        "multihop forwarder: hop whose vector is gone, dialing it by id"
+                    );
+                } else if explained {
                     tracing::debug!(
                         total,
                         hop = %hop.underlay_id.fmt_short(),
@@ -1565,6 +1576,42 @@ mod tests {
             1,
             "warned once, after the link is gone"
         );
+        forwarder.underlay.close().await;
+    }
+
+    /// A hop whose vector this node held and removed, because the peer left or its vector
+    /// expired, is still named by the cells in flight to it: the origin of the route is behind,
+    /// and the hop is no warning. A hop that this node never knew stays one.
+    #[test]
+    async fn a_hop_whose_vector_is_gone_is_not_a_warning() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let gone_key = SecretKey::from_bytes(&[145; 32]);
+        let gone = RouteHop {
+            app_id: AppId::new(gone_key.public()),
+            underlay_id: UnderlayId::new(gone_key.public()),
+        };
+        let vector = LinkVector::signed(
+            &gone_key,
+            crate::topology::wall_clock_ms(),
+            EndpointAddr::new(gone.underlay_id.get()),
+            vec![],
+        );
+        {
+            let mut topology = forwarder.topology.write().expect("topology lock poisoned");
+            assert!(topology.ingest(vector), "the vector is accepted");
+            assert!(topology.remove(gone.app_id), "the vector is removed");
+        }
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&gone);
+            forwarder.dial_addr(&stranger(146));
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "the hop that was never known is the only warning"
+        );
+        assert_eq!(forwarder.unresolved_hops(), 2, "both hops were counted");
         forwarder.underlay.close().await;
     }
 
