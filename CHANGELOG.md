@@ -36,9 +36,10 @@ published to a registry; pin it with
   of its mesh in its mDNS record, and a member that sees that tag asks the other member to be a
   neighbor, at most 8 times per minute. The tag hashes the topic, so two meshes on one LAN do not
   meet. The engine reads the LAN through the mDNS handle of the member endpoint.
-  **Breaking:** `InjectedEndpoint` has a new field, `mdns: Option<MdnsHandle>`, so every
-  `InjectedEndpoint { .. }` literal must change. Pass the handle that the endpoint was built
-  with, or `None` for a node without this arm. `runtime::MdnsHandle` is the type.
+  **Breaking:** `InjectedEndpoint` has a field `mdns: Option<MdnsHandle>`, which
+  `InjectedEndpoint::bind` fills in from the endpoint it binds: `None` for a node without this
+  arm. The fields are private, so `bind` is the only way to make one. `runtime::MdnsHandle` is the
+  type.
 - `SignalAdmission::connection_hook` and the `ConnectionHook` it returns: an
   endpoint hook that records every connection of the endpoint, on any protocol,
   under its peer in the direct-peer slot table, so that the table can prune the
@@ -69,13 +70,12 @@ published to a registry; pin it with
   the relay for lookup alone, the underlay drops a cell unless the connection's
   selected path is not the relay, and a hop that stays on the relay past a
   deadline is not advertised as a link.
-- `net::install_transports`: the one wiring of multi-hop, `WebRTC` and the
-  connection hook onto an endpoint builder. `InjectedEndpoint` carries the
-  `MultihopHandle` and the `SignalAdmission` its endpoint was built with.
-  `check_injected_identity` checks the hop identity, refuses a handle that lets
-  the relay carry cells on a mesh whose list has no `relay`, and refuses an
-  admission table that no hook reports to (`SignalAdmission::is_observed`). A
-  handle on a mesh whose list has no `multihop`, or on a node with no UDP, is
+- `InjectedEndpoint::bind(lookups, secret, alpns, handles, max_direct)`: the one way to make an
+  injected endpoint. It binds the endpoint on `secret` with the transports that `handles` names
+  (multi-hop, `WebRTC` and gossip), and makes the `SignalAdmission` that its connection hook
+  reports to. It refuses a handle that was made from another key, and a table that the caller
+  passes, before anything is bound. The transport wiring and the mesh check are crate-private.
+  A handle on a mesh whose list has no `multihop`, or on a node with no UDP, is
   dropped. `net::multihop_handle_config` gives an embedder the engine's handle
   settings.
 - `EventLoopConfig::with_owner_pid`: a CLI daemon started detached lives for
@@ -160,16 +160,20 @@ published to a registry; pin it with
 
 - **Breaking:** a decoded mesh is locked until its secret is applied. `LockedMesh` is what
   parsing an id produces, and `LockedMesh::unlock(password)` replaces `Mesh::apply_password`.
-  Only `Mesh` derives a topic, a rendezvous or a port, so the derivation cannot run before the
-  secret is applied. `InviteTicket::redeem` returns a `Mesh` with no further call.
+  `unlock` returns `UnlockError` (`InviteOnly`, `PasswordRequired`, `NoPassword`,
+  `WrongPassword`). Only `Mesh` derives a topic, a rendezvous or a port, so the derivation
+  cannot run before the secret is applied. `InviteTicket::redeem` returns a `Mesh` with no
+  further call. `Mesh::new` and `Mesh::from_topic` return a `Result`, and refuse a config that
+  carries a secret.
 - **Breaking:** a message is `Verified` or `Authored` where it used to be a bare `Message`.
   `Verified` is a message whose signature is checked, and it is what the send, receive and app
   APIs take and return, so an unsigned message cannot reach the wire. `Authored` is a message
   whose author is proven, and it is what the app surface delivers. Neither one has `Deserialize`
   or `DerefMut`. `Signed` is renamed to `Signer`.
-- **Breaking:** `InjectedEndpoint` is built only by `InjectedEndpoint::bind`, which installs the
-  transports, binds the endpoint and runs the checks that do not depend on the mesh. Its fields
-  are private, so an `InjectedEndpoint { .. }` literal no longer compiles.
+- **Breaking:** `InjectedEndpoint` is built only by `InjectedEndpoint::bind`, which checks the
+  keys of the handles and then binds the endpoint with its transports. Its fields are private,
+  so an `InjectedEndpoint { .. }` literal no longer compiles. `net::install_transports` and
+  `net::check_injected_identity` are no longer public.
 - A secret key no longer passes through a plain array that the engine writes and nobody wipes.
   The stretched password key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the
   root of an invite, the salt and the token of a blob ticket, and the secret of a stream
@@ -284,16 +288,12 @@ published to a registry; pin it with
 - **Breaking, steps for the tools that embed the engine** (agent-share,
   agent-gossip). Both must move in the same release as the engine: a member of
   version 1 and a member of version 2 never share a mesh.
-  1. An injected endpoint (agent-share) must give the engine its admission table.
-     Make a `SignalAdmission`. Build the endpoint with `net::install_transports`
-     and handles that carry this table. Pass the table in
-     `InjectedEndpoint { endpoint, webrtc, multihop, admission }`: on a host,
-     `multihop` is the handle that the endpoint was built with, or `None`. The
-     `admission` field is required on every target, so every
-     `InjectedEndpoint { .. }` literal must change.
-  2. `net::check_injected_identity` has new arguments: the multihop identity, the
-     admission table, and whether the mesh list has `relay`. It refuses a table
-     that `connection_hook` was never called on.
+  1. An injected endpoint (agent-share) is built with
+     `InjectedEndpoint::bind(lookups, secret, alpns, handles, max_direct)`. Pass the
+     `max_direct` ceiling and no table: `bind` makes the admission table, and refuses one that
+     the caller passes. The `InjectedEndpoint { .. }` literal is gone.
+  2. The mesh check of an injected endpoint runs in setup and is crate-private. A handle whose
+     key is not the one `secret` derives is refused by `bind`, before anything is bound.
   3. `TransportHandles` has a new public field, `underlay`. A struct literal must
      name it, or end with `..TransportHandles::default()`.
   4. agent-gossip: multihop is now ON by default. Every native node of a default
