@@ -101,6 +101,16 @@ impl Verified {
         self.message
     }
 
+    /// The wire bytes of the message: [`Message::serialize`], here, so a call on a `Verified` does
+    /// not reach the `Serialize` impl, which needs a serializer.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Message::serialize`] failure.
+    pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
+        self.message.serialize()
+    }
+
     /// The proof that the author is `key`, with the message's own body.
     #[must_use]
     pub fn authored(&self) -> Authored {
@@ -129,11 +139,16 @@ impl Verified {
         })
     }
 
-    /// A `Verified` for a message whose signature the test has not checked.
+    /// The one door around [`Message::verify`]: a `Verified` for a message whose signature was not
+    /// checked, claiming `key` as its author. The message gets a signature that does not verify
+    /// (see [`Message::with_unverified_key`]).
+    ///
+    /// It exists for the adversarial suite, and `test-fixtures` enables it. A non-test binary must
+    /// never enable that feature, because the door would let it forge a proof.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn fixture_unchecked(message: Message, key: AuthorKey) -> Self {
-        Self::new(message, key)
+        Self::new(message.with_unverified_key(key), key)
     }
 }
 

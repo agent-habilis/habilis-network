@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
+use crate::protocol::message::Verified;
 use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
@@ -153,7 +154,7 @@ pub(crate) async fn broadcast_digest(
     state.idle.broadcasts += 1;
     broadcast_msg(
         sender,
-        &Message::new_digest(mesh, author, body).signed(&state.identity),
+        &Message::new_digest(mesh, author, body).sign(&state.identity),
     )
     .await;
 }
@@ -228,7 +229,7 @@ fn report_unreadable_digest(message: &Message, state: &mut EventLoopState) {
 /// so a per-window `have` would re-send a message the sender holds but listed
 /// under the *other* window — wasting the shared resend budget on messages the
 /// peer already has and starving the genuinely-missing tail.
-pub(crate) fn handle_digest(message: &Message, state: &mut EventLoopState, me: &Nickname) {
+pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: &Nickname) {
     let Ok(body) = serde_json::from_str::<DigestBody>(message.body.as_str()) else {
         report_unreadable_digest(message, state);
         return;
@@ -293,7 +294,7 @@ pub(crate) fn handle_digest(message: &Message, state: &mut EventLoopState, me: &
 /// drains the outbox. Never waits. Returns whether it was attempted at all —
 /// `false` only for the unserializable frame we somehow hold, which must not be
 /// charged to the round's budget.
-fn resend_one(msg: &Message, state: &mut EventLoopState) -> bool {
+fn resend_one(msg: &Verified, state: &mut EventLoopState) -> bool {
     let Ok(bytes) = msg.serialize() else {
         return false;
     };
@@ -430,7 +431,7 @@ fn state_digest(
     state: &EventLoopState,
     origin: DigestOrigin<'_>,
     channel: Channel,
-) -> Option<Message> {
+) -> Option<Verified> {
     heads_digest(state, origin, channel, false)
 }
 
@@ -441,7 +442,7 @@ fn heads_digest(
     origin: DigestOrigin<'_>,
     channel: Channel,
     closing: bool,
-) -> Option<Message> {
+) -> Option<Verified> {
     if !state.overlay_reachable() {
         return None;
     }
@@ -449,7 +450,7 @@ fn heads_digest(
     let body = super::json_body(&HeadsBody { heads, closing })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
-            .signed(&state.identity),
+            .sign(&state.identity),
     )
 }
 
@@ -886,7 +887,7 @@ pub(crate) struct Answered {
 /// missing uses no serve.
 pub(crate) async fn handle_state_digest(
     channel: Channel,
-    message: &Message,
+    message: &Verified,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> Answered {
@@ -983,7 +984,7 @@ pub(crate) async fn handle_state_digest(
 /// the resend budget, less the ones it signed itself: with heads we do not
 /// hold we cannot tell what it has and send everything, but its own changes
 /// it always has. Empty for an undecodable digest body.
-fn missing_frames(channel: Channel, digest: &Message, state: &EventLoopState) -> Vec<Message> {
+fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -> Vec<Verified> {
     let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
         return Vec::new();
     };
@@ -1223,7 +1224,7 @@ mod budget_tests {
             .expect("compose the wire body");
         let frame =
             crate::protocol::Message::new_channel_event(&mesh, &author, wire, Channel::State)
-                .signed(&state.identity);
+                .sign(&state.identity);
         let _ = state.doc_mut(Channel::State).ingest(&frame);
         let origin = DigestOrigin {
             mesh: &mesh,
@@ -1355,7 +1356,10 @@ mod tests {
     use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
-    use crate::protocol::{Channel, DedupKey, MeshId, Message, MessageBody, Nickname, UnixSecs};
+    use crate::protocol::message::Verified;
+    use crate::protocol::{
+        AuthorKey, Channel, DedupKey, Identity, MeshId, Message, MessageBody, Nickname, UnixSecs,
+    };
     use crate::testing::{fresh_state, nick};
 
     fn members(count: usize) -> Vec<Nickname> {
@@ -1408,7 +1412,7 @@ mod tests {
 
     /// The digest of a node that holds nothing: one open-ended window with no
     /// ids, so every message of the holder is a gap.
-    fn digest_of_an_empty_log(asker: &Nickname) -> Message {
+    fn digest_of_an_empty_log(asker: &Nickname) -> Verified {
         let window = DigestWindow {
             lo: (UnixSecs::ZERO, DedupKey::MIN),
             hi: (UnixSecs::MAX, DedupKey::MAX),
@@ -1419,7 +1423,7 @@ mod tests {
             windows: vec![WireWindow::encode(&window)],
         })
         .expect("a digest serializes");
-        Message::new_digest(&MeshId::from("test"), asker, body)
+        Message::new_digest(&MeshId::from("test"), asker, body).sign(&Identity::generate())
     }
 
     /// The event loop answers a digest without waiting on anything: the resends
@@ -1460,8 +1464,8 @@ mod tests {
         let mut state = fresh_state();
         let (outbox, mut resends) = crate::transport::ResendOutbox::new(4);
         state.resend_outbox = outbox;
-        let identity = crate::protocol::Identity::generate();
-        let message = chat_at("kept in the log", 1_700_000_000).signed(&identity);
+        // A real signature: the test parses the resend and checks it verifies.
+        let message = plain_chat_at("kept in the log", 1_700_000_000).sign(&Identity::generate());
 
         assert!(super::resend_one(&message, &mut state));
         assert!(super::resend_one(&message, &mut state));
@@ -1515,7 +1519,7 @@ mod tests {
             .compose_wire_body(&change, None)
             .expect("compose the wire body");
         let frame =
-            Message::new_channel_event(mesh, author, wire, Channel::Meta).signed(&state.identity);
+            Message::new_channel_event(mesh, author, wire, Channel::Meta).sign(&state.identity);
         assert!(
             matches!(
                 state.doc_mut(Channel::Meta).ingest(&frame),
@@ -1657,7 +1661,7 @@ mod tests {
                 },
             );
             message.timestamp = UnixSecs::from_secs(1_700_000_000 + i64::try_from(index).unwrap());
-            log.push(message);
+            log.push(message.sign(&Identity::generate()));
         }
         let newest = log.recent_window(ANTIENTROPY_DIGEST_WINDOW_IDS).unwrap();
         let older = log
@@ -1779,7 +1783,16 @@ mod tests {
         );
     }
 
-    fn chat_at(body: &str, timestamp: i64) -> Message {
+    /// One fixed author for every chat fixture, as the unsigned messages of these tests always had:
+    /// per-author eviction must see one author, or two logs of the same frames diverge.
+    fn chat_at(body: &str, timestamp: i64) -> Verified {
+        Verified::fixture_unchecked(
+            plain_chat_at(body, timestamp),
+            AuthorKey::from_bytes([0x11; 32]),
+        )
+    }
+
+    fn plain_chat_at(body: &str, timestamp: i64) -> Message {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &Nickname::from("author"),
@@ -1817,7 +1830,7 @@ mod tests {
     }
 
     /// 300 messages in a scrambled order, over `seconds` seconds.
-    fn scrambled_messages(seconds: usize) -> Vec<Message> {
+    fn scrambled_messages(seconds: usize) -> Vec<Verified> {
         (0..300usize)
             .map(|index| {
                 let slot = (index * 7) % 300;
@@ -1866,7 +1879,7 @@ mod tests {
         node: &mut EventLoopState,
         holder: &MessageLog,
         mut budget: usize,
-    ) -> Vec<Message> {
+    ) -> Vec<Verified> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
         let mut have: HashSet<DedupKey> = windows
             .iter()
@@ -1969,7 +1982,7 @@ mod tests {
     fn a_message_of_the_second_a_node_joined_in_is_asked_for_whatever_its_key() {
         let second = 1_700_000_000;
         let mut pair = [chat_at("first", second), chat_at("second", second)];
-        pair.sort_by_key(Message::dedup_key);
+        pair.sort_by_key(|message| message.dedup_key());
         let [smaller, larger] = pair;
         let mut holder = MessageLog::new(1000);
         holder.push(smaller.clone());
@@ -1996,7 +2009,7 @@ mod tests {
     fn a_message_of_the_second_of_the_first_logged_message_is_asked_for_whatever_its_key() {
         let second = 1_700_000_000;
         let mut pair = [chat_at("first", second - 1), chat_at("second", second - 1)];
-        pair.sort_by_key(Message::dedup_key);
+        pair.sort_by_key(|message| message.dedup_key());
         let [smaller, larger] = pair;
         let mut holder = MessageLog::new(1000);
         holder.push(smaller.clone());
@@ -2027,7 +2040,7 @@ mod tests {
         let budget = crate::util::tuning::antientropy_max_resend();
         let base = UnixSecs::now().as_secs() - 3600;
         let ahead = 80;
-        let mut all: Vec<Message> = Vec::new();
+        let mut all: Vec<Verified> = Vec::new();
         let (mut next_honest, mut next_fast) = (0usize, 0usize);
         let mut honest_at = Vec::new();
         let mut fast_at = Vec::new();
@@ -2094,10 +2107,10 @@ mod tests {
     fn two_full_logs_with_different_history_ask_each_other_for_nothing() {
         let budget = crate::util::tuning::antientropy_max_resend();
         let base = 1_700_000_000;
-        let common: Vec<Message> = (0..300)
+        let common: Vec<Verified> = (0..300)
             .map(|index| chat_at(&format!("c{index}"), base + i64::from(index / 3)))
             .collect();
-        let earlier: Vec<Message> = (0..150)
+        let earlier: Vec<Verified> = (0..150)
             .map(|index| chat_at(&format!("e{index}"), base + i64::from(index * 2 / 3)))
             .collect();
         let mut older = fresh_state();

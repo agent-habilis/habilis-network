@@ -972,7 +972,7 @@ impl Message {
     /// Stamp the per-author log fields before signing (`Msg` only). `seq`
     /// is the author's monotonic counter, `prev` the hash of their previous
     /// `Msg` (`None` at `seq 0`). Consuming-builder so it composes with
-    /// [`signed`](Self::signed): `Message::new_app(..).with_chain(..).signed(..)`.
+    /// [`sign`](Self::sign): `Message::new_app(..).with_chain(..).sign(..)`.
     #[must_use]
     pub fn with_chain(mut self, seq: u64, prev: Option<ContentHash>) -> Self {
         self.seq = Some(seq);
@@ -1014,24 +1014,16 @@ impl Message {
         serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
     }
 
-    /// Sign this message with `identity`, setting [`signer`](Self::signer).
-    /// The key is part of the signed bytes, so they are computed with the key
-    /// and before the signature exists; consuming-builder style so it composes in
-    /// the construction expression (`Message::new_app(..).signed(&id)`).
+    /// Sign this message with `identity` and return it as a [`Verified`], the proof that its
+    /// signature covers these exact bytes. The key is part of the signed bytes, so they are
+    /// computed with the key and before the signature exists; consuming-builder style so it composes
+    /// in the construction expression (`Message::new_app(..).sign(&id)`).
     #[must_use]
-    pub fn signed(mut self, identity: &Identity) -> Self {
+    pub fn sign(mut self, identity: &Identity) -> Verified {
         let key = identity.author_key();
         let sig = identity.sign(&self.canonical_with_key(Some(&key)));
         self.signer = Some(Signed::new(key, sig));
-        self
-    }
-
-    /// Sign this message with `identity` and return it as a [`Verified`], the proof that its
-    /// signature covers these exact bytes.
-    #[must_use]
-    pub fn sign(self, identity: &Identity) -> Verified {
-        let key = identity.author_key();
-        Verified::new(self.signed(identity), key)
+        Verified::new(self, key)
     }
 
     /// Check the signature of an untrusted message over its canonical bytes. `Ok` is the proof. `Err`
@@ -1045,10 +1037,26 @@ impl Message {
         reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
     )]
     pub fn verify(self) -> Result<Verified, Message> {
+        let canonical = self.canonical_bytes();
+        self.verify_with(&canonical)
+    }
+
+    /// [`verify`](Self::verify) against canonical bytes the caller already computed, so the
+    /// receive path serializes each inbound frame once. `canonical` MUST be
+    /// [`canonical_bytes`](Self::canonical_bytes) of this message.
+    ///
+    /// # Errors
+    ///
+    /// Returns the message itself when [`verify_signature_with`](Self::verify_signature_with) fails.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
+    )]
+    pub fn verify_with(self, canonical: &[u8]) -> Result<Verified, Message> {
         let Some(signed) = self.signer else {
             return Err(self);
         };
-        if !self.verify_signature_with(&self.canonical_bytes()) {
+        if !self.verify_signature_with(canonical) {
             return Err(self);
         }
         Ok(Verified::new(self, signed.key()))
@@ -1140,7 +1148,7 @@ pub struct BuildMsgParams<'a> {
 pub fn build_msg_bytes(
     params: BuildMsgParams<'_>,
     identity: &Identity,
-) -> Result<(Bytes, Message)> {
+) -> Result<(Bytes, Verified)> {
     let msg = Message::new_app(
         params.mesh,
         params.author,
@@ -1153,8 +1161,8 @@ pub fn build_msg_bytes(
     )
     .with_chain(params.chain.seq, params.chain.prev)
     .with_parents(params.chain.parents)
-    .signed(identity);
-    let raw = msg.serialize()?;
+    .sign(identity);
+    let raw = Message::serialize(&msg)?;
     Ok((Bytes::from(raw), msg))
 }
 

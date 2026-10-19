@@ -90,7 +90,7 @@ impl NodeDriver for Chat {
             },
         );
         frame.timestamp = frame.timestamp + AHEAD;
-        let frame = frame.signed(ctx.identity);
+        let frame = frame.sign(ctx.identity);
         let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
         let _ = habilis_network::ops::deliver(&frame, bytes, state, ctx.sender)
             .await

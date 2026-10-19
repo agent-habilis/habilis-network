@@ -72,7 +72,7 @@ fn test_ping_round_trip() {
 fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
     let identity = crate::identity::Identity::generate();
     let msg = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
-        .signed(&identity);
+        .sign(&identity);
     assert!(msg.verify_signature());
     let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
     assert_eq!(parsed.kind, MessageKind::LinkState);
@@ -292,7 +292,7 @@ mod signing {
     #[test]
     fn signed_message_verifies() {
         let msg =
-            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").signed(&identity());
+            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").sign(&identity());
         assert!(msg.signer.is_some());
         assert!(msg.verify_signature());
     }
@@ -305,16 +305,18 @@ mod signing {
 
     #[test]
     fn tampered_body_breaks_signature() {
-        let mut msg =
-            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").signed(&identity());
+        let mut msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
+            .sign(&identity())
+            .into_message();
         msg.body = "tampered".into();
         assert!(!msg.verify_signature());
     }
 
     #[test]
     fn tampered_author_breaks_signature() {
-        let mut msg =
-            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").signed(&identity());
+        let mut msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
+            .sign(&identity())
+            .into_message();
         msg.author = "impostor-bot".into();
         assert!(!msg.verify_signature());
     }
@@ -325,7 +327,8 @@ mod signing {
             MessageKind::app_to("app_status", "calm-otter".into(), None),
             "{}",
         )
-        .signed(&identity());
+        .sign(&identity())
+        .into_message();
         assert!(msg.verify_signature());
         msg.kind = MessageKind::app_to("app_status", "evil-otter".into(), None);
         assert!(!msg.verify_signature(), "directed `to` is a signed field");
@@ -337,14 +340,15 @@ mod signing {
             MessageKind::app_to("app_req", "calm-otter".into(), Some(CorrId::from("aaaa"))),
             "{}",
         )
-        .signed(&identity());
+        .sign(&identity())
+        .into_message();
         msg.kind = MessageKind::app_to("app_req", "calm-otter".into(), Some(CorrId::from("bbbb")));
         assert!(!msg.verify_signature(), "`corr` is a signed field");
     }
 
     #[test]
     fn signature_survives_wire_round_trip() {
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").signed(&identity());
+        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
         let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
         assert!(parsed.verify_signature());
         assert_eq!(parsed.signer, msg.signer);
@@ -377,7 +381,7 @@ mod chain {
         let prev = ContentHash::from_bytes([0xaa; 32]);
         let signed = msg("hi")
             .with_chain(5, Some(prev))
-            .signed(&Identity::generate());
+            .sign(&Identity::generate());
         assert_eq!(signed.seq, Some(5));
         assert_eq!(signed.prev, Some(prev));
         assert!(signed.verify_signature());
@@ -401,7 +405,10 @@ mod chain {
 
     #[test]
     fn tampering_seq_breaks_signature() {
-        let mut signed = msg("x").with_chain(3, None).signed(&Identity::generate());
+        let mut signed = msg("x")
+            .with_chain(3, None)
+            .sign(&Identity::generate())
+            .into_message();
         signed.seq = Some(4);
         assert!(!signed.verify_signature(), "seq is a signed field");
     }
@@ -415,7 +422,7 @@ mod chain {
         let signed = msg("hi")
             .with_chain(1, None)
             .with_parents(parents.clone())
-            .signed(&Identity::generate());
+            .sign(&Identity::generate());
         assert_eq!(signed.parents, parents);
         let parsed = Message::parse(&signed.serialize().unwrap()).unwrap();
         assert_eq!(parsed.parents, parents);
@@ -426,7 +433,8 @@ mod chain {
     fn tampering_parents_breaks_signature() {
         let mut signed = msg("hi")
             .with_parents(vec![ContentHash::from_bytes([0xaa; 32])])
-            .signed(&Identity::generate());
+            .sign(&Identity::generate())
+            .into_message();
         signed.parents.push(ContentHash::from_bytes([0xbb; 32]));
         assert!(!signed.verify_signature(), "parents are signed");
     }
@@ -646,7 +654,7 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
             body: MessageBody::from("Hello, world!"),
         },
     )
-    .signed(&identity);
+    .sign(&identity);
     let frame = msg.serialize().unwrap();
 
     let first = super::wire_with_resend_nonce(&frame, 7);
@@ -696,6 +704,7 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
 
 /// The wire form of a signed message, captured from the code at the base commit with a fixed key
 /// (`SecretKey::from_bytes(&[7; 32])`). A change that moves one byte of it is a wire change.
+// The verified.rs doctests repeat this literal, so a change to it touches both files.
 const SIGNED_WIRE: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 
 /// The same message with no `pubkey` and no `sig` key: the canonical pre-signing form.

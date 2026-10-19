@@ -1127,7 +1127,7 @@ mod tests {
                 body: MessageBody::new(text.to_owned()).expect("body"),
             },
         )
-        .signed(&Identity::generate())
+        .sign(&Identity::generate())
         .wire_len()
     }
 

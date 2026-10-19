@@ -13,8 +13,9 @@ use tokio::sync::oneshot;
 use super::outbox::Resend;
 use super::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
 use crate::daemon::state::EventLoopState;
+use crate::protocol::Nickname;
+use crate::protocol::message::Verified;
 use crate::protocol::message::sole_addressee;
-use crate::protocol::{Message, Nickname};
 use crate::transport::MeshSender;
 
 /// What [`deliver`] did with a frame.
@@ -46,7 +47,7 @@ pub type PendingSend = oneshot::Receiver<Result<()>>;
 /// is undeliverable — the error names which; callers retry once a real
 /// endpoint is learned. A dial or a write that fails comes through the handle.
 pub async fn deliver(
-    msg: &Message,
+    msg: &Verified,
     bytes: Bytes,
     state: &EventLoopState,
     sender: &MeshSender,
@@ -66,7 +67,7 @@ pub async fn deliver(
 /// # Errors
 /// The same as [`deliver`] for a message that has no path now: held for a
 /// direct path, or its addressee has no known endpoint.
-pub(crate) fn resolve(msg: &Message, bytes: Bytes, state: &EventLoopState) -> Result<Resend> {
+pub(crate) fn resolve(msg: &Verified, bytes: Bytes, state: &EventLoopState) -> Result<Resend> {
     match route(msg, state) {
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
@@ -121,7 +122,7 @@ pub(crate) fn resolve(msg: &Message, bytes: Bytes, state: &EventLoopState) -> Re
 /// the peer on the cooldown, and directed sends to it return `false` for up
 /// to the dial budget plus the cooldown.
 pub async fn deliver_in_background(
-    msg: &Message,
+    msg: &Verified,
     bytes: Bytes,
     state: &EventLoopState,
     sender: &MeshSender,
@@ -147,7 +148,7 @@ enum Route {
     Undeliverable,
 }
 
-fn route(msg: &Message, state: &EventLoopState) -> Route {
+fn route(msg: &Verified, state: &EventLoopState) -> Route {
     let Some(nick) = sole_addressee(&msg.kind) else {
         return Route::Broadcast;
     };
@@ -358,7 +359,8 @@ mod tests {
     use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
-    use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody, MessageId};
+    use crate::protocol::message::Verified;
+    use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
 
     fn mesh() -> MeshId {
         MeshId::from("test")
@@ -385,11 +387,12 @@ mod tests {
     }
 
     /// A directed frame addressed to `bob` — a `Pong` is the simplest one.
-    fn directed_msg() -> Message {
+    fn directed_msg() -> Verified {
         Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
+            .sign(&Identity::generate())
     }
 
-    fn open_broadcast() -> Message {
+    fn open_broadcast() -> Verified {
         Message::new_app(
             &mesh(),
             &nick("alice"),
@@ -400,6 +403,7 @@ mod tests {
                 body: body(),
             },
         )
+        .sign(&Identity::generate())
     }
 
     // ── lane peers ────────────────────────────────────────────────────
@@ -768,8 +772,10 @@ mod tests {
                 corr: Some(CorrId::from("00000000-0000-0000-0000-0000000000aa")),
                 body: body(),
             },
-        );
-        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random());
+        )
+        .sign(&Identity::generate());
+        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
+            .sign(&Identity::generate());
         assert_eq!(route(&req, &state), Route::Unicast(bob));
         assert_eq!(route(&pong, &state), Route::Unicast(bob));
     }
@@ -944,11 +950,7 @@ mod tests {
     }
 
     /// [`prove`] for the key of `identity`.
-    fn prove_identity(
-        state: &mut EventLoopState,
-        identity: &crate::protocol::identity::Identity,
-        endpoint: EndpointId,
-    ) {
+    fn prove_identity(state: &mut EventLoopState, identity: &Identity, endpoint: EndpointId) {
         let pubkey = crate::protocol::identity::encode_pubkey(&identity.public());
         prove(state, &pubkey, endpoint);
     }
@@ -960,7 +962,7 @@ mod tests {
         endpoint: iroh::Endpoint,
         sender: crate::transport::MeshSender,
         mesh: MeshId,
-        identity: crate::protocol::identity::Identity,
+        identity: Identity,
         our_pubkey: crate::protocol::AuthorKey,
         author: crate::protocol::Nickname,
         sink: crate::gossip::event::SilentSink,
@@ -991,7 +993,7 @@ mod tests {
         changes: usize,
     ) -> (Net, EventLoopState, Vec<Bytes>) {
         use crate::protocol::Channel;
-        use crate::protocol::identity::Identity;
+        use Identity;
 
         let (endpoint, sender) = loopback_node().await;
         let mut state = state_with_pool(&endpoint, bob_addr);
@@ -1010,7 +1012,7 @@ mod tests {
                         .compose_wire_body(&change, None)
                         .expect("compose the wire body");
                     let frame = Message::new_channel_event(&mesh, &nick("alice"), wire, channel)
-                        .signed(&state.identity);
+                        .sign(&state.identity);
                     let _ = state.doc_mut(channel).ingest(&frame);
                     Bytes::from(frame.serialize().expect("serialize"))
                 })
@@ -1037,11 +1039,11 @@ mod tests {
         mesh: &MeshId,
         channel: crate::protocol::Channel,
         heads: &serde_json::Value,
-        asker: &crate::protocol::identity::Identity,
-    ) -> Message {
+        asker: &Identity,
+    ) -> Verified {
         let body = MessageBody::new(serde_json::json!({ "heads": heads }).to_string())
             .expect("a JSON body");
-        Message::new_channel_digest(mesh, &nick("bob"), body, channel).signed(asker)
+        Message::new_channel_digest(mesh, &nick("bob"), body, channel).sign(asker)
     }
 
     /// A state digest from a linked neighbor with a direct path is answered
@@ -1069,7 +1071,7 @@ mod tests {
             }
             (got, bob_endpoint, conn)
         });
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
@@ -1104,14 +1106,14 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
-        let bob = crate::protocol::identity::Identity::generate();
+        let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_endpoint.id());
         let body = MessageBody::new(
             serde_json::json!({ "heads": ["heads-we-do-not-hold"], "closing": true }).to_string(),
         )
         .expect("a JSON body");
         let closing =
-            Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State).signed(&bob);
+            Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State).sign(&bob);
 
         let answered = handle_state_digest(Channel::State, &closing, &mut state, &net.ctx()).await;
         assert_eq!(
@@ -1161,7 +1163,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
-        let third = crate::protocol::identity::Identity::generate();
+        let third = Identity::generate();
         prove_identity(&mut state, &third, bob_endpoint.id());
         let unknown = serde_json::json!(["heads-we-do-not-hold"]);
         let request = digest(&net.mesh, Channel::State, &unknown, &third);
@@ -1184,7 +1186,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
-        let stranger = crate::protocol::identity::Identity::generate();
+        let stranger = Identity::generate();
         let posing_as_bob = digest(&net.mesh, Channel::State, &serde_json::json!([]), &stranger);
 
         let answered =
@@ -1210,7 +1212,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         let ctx = net.ctx();
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         prove_identity(&mut state, &asker, bob_endpoint.id());
         let empty = serde_json::json!([]);
         let state_digest = digest(&net.mesh, Channel::State, &empty, &asker);
@@ -1282,7 +1284,7 @@ mod tests {
         let (net, mut state, _frames) = holder(bob_addr.clone(), 3).await;
         state.linked_endpoints.insert(bob_addr.id);
         let ctx = net.ctx();
-        let bob = crate::protocol::identity::Identity::generate();
+        let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_addr.id);
         let ahead = digest(
             &net.mesh,
@@ -1344,7 +1346,7 @@ mod tests {
         let (net, mut state, _frames) = holder(unreachable.clone(), 3).await;
         state.linked_endpoints.insert(unreachable.id);
         let ctx = net.ctx();
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         prove_identity(&mut state, &asker, unreachable.id);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
@@ -1384,7 +1386,7 @@ mod tests {
             .compose_wire_body(&change, None)
             .expect("compose the wire body");
         let frame = Message::new_channel_event(mesh, &nick("alice"), wire, Channel::State)
-            .signed(&state.identity);
+            .sign(&state.identity);
         let _ = state.doc_mut(Channel::State).ingest(&frame);
     }
 
@@ -1399,7 +1401,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         let ctx = net.ctx();
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         let current = serde_json::to_value(state.doc(Channel::State).heads()).expect("heads");
         let up_to_date = digest(&net.mesh, Channel::State, &current, &asker);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
@@ -1508,7 +1510,7 @@ mod tests {
         state.linked_endpoints.insert(bob_endpoint.id());
         let bob_id = bob_endpoint.id();
         let received = read_frames(bob_endpoint, 4);
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
@@ -1550,7 +1552,7 @@ mod tests {
         let ahead_heads = serde_json::json!(ahead.doc(Channel::State).heads());
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _none) = holder(bob_endpoint.addr(), 0).await;
-        let bob = crate::protocol::identity::Identity::generate();
+        let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_endpoint.id());
         let now = crate::util::clock::Instant::now();
 

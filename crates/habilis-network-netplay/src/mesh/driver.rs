@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
+use habilis_network::protocol::message::Verified;
 use habilis_network::protocol::{
     AppFrameParams, AppTag, AuthorKey, Message as WireMessage, MessageBody, Nickname,
 };
@@ -253,7 +254,7 @@ fn frame_for(
     tag: &str,
     to: Option<Nickname>,
     payload: String,
-) -> Option<WireMessage> {
+) -> Option<Verified> {
     let (Ok(tag), Ok(body)) = (AppTag::new(tag), MessageBody::new(payload)) else {
         return None;
     };
@@ -276,7 +277,7 @@ fn frame_for(
 async fn send(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    frame: WireMessage,
+    frame: Verified,
     class: AppClass,
 ) -> bool {
     habilis_network::ops::send_app(state, ctx, frame, class)

@@ -14,6 +14,7 @@ use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
+use crate::protocol::message::Verified;
 use crate::protocol::{Message, MessageKind, PresenceSubtype};
 
 use crate::gossip;
@@ -56,7 +57,7 @@ pub(crate) struct Observed {
 /// membership/presentation side effects live here (lifecycle layer);
 /// the gossip layer never touches the roster directly.
 pub(crate) fn observe(
-    message: &Message,
+    message: &Verified,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> Observed {
@@ -200,7 +201,7 @@ pub(crate) async fn handle_presence(
             // re-announce mints a fresh id, so without this each one becomes
             // another message we can never acknowledge and every peer re-sends to
             // us forever (see `gossip::recv::retain_own_broadcast`).
-            let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+            let joined = Message::new_joined(ctx.mesh, ctx.author).sign(ctx.identity);
             gossip::broadcast_msg(ctx.sender, &joined).await;
             gossip::retain_own_broadcast(state, &joined);
             state.last_sent_at = Instant::now();

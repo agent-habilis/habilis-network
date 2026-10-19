@@ -14,6 +14,7 @@ use super::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
+use crate::protocol::message::Verified;
 use crate::protocol::{
     AuthorKey, ContentHash, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
     UnixSecs,
@@ -247,7 +248,7 @@ pub struct EventLoopState {
         tokio::sync::mpsc::UnboundedSender<crate::transport::probe::PathChange>,
     /// Where a flushed frame whose dial failed comes back to the loop, to be buffered again
     /// (`gossip::requeue_failed`). A detached sender until the real loop installs its channel.
-    pub(crate) flush_failed: tokio::sync::mpsc::UnboundedSender<(Message, Bytes)>,
+    pub(crate) flush_failed: tokio::sync::mpsc::UnboundedSender<(Verified, Bytes)>,
     /// The pooled connection each watched peer's watcher follows, by stable
     /// id (`None` while its dial runs), so a replaced connection gets a fresh
     /// watcher and a stale one's reports are dropped.
@@ -613,7 +614,7 @@ pub struct EventLoopState {
     /// the parsed frame rides beside its wire bytes so the flush never
     /// re-parses what this node just serialized. A bounded FIFO queue (cap
     /// `PENDING_OUTBOUND_CAP`) so the backlog can't grow without limit.
-    pub(crate) pending_outbound: BoundedQueue<(Message, Bytes)>,
+    pub(crate) pending_outbound: BoundedQueue<(Verified, Bytes)>,
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
     /// Whether the event loop is serving IPC yet. Starts `false` (the
@@ -1608,7 +1609,7 @@ impl EventLoopState {
     /// victim's id hashes to a different key and cannot suppress the genuine
     /// message. Delegates to the bounded [`BoundedFifoSet`], inverting its
     /// "was newly inserted" answer into "was a duplicate".
-    pub(crate) fn mark_seen(&mut self, message: &Message) -> bool {
+    pub(crate) fn mark_seen(&mut self, message: &Verified) -> bool {
         !self.seen.insert(message.dedup_key())
     }
 
@@ -1624,7 +1625,7 @@ impl EventLoopState {
     /// buffer still completes the body — dedup (`seen`) means the healed
     /// shard is the only one re-ingested, and the store alone would sit on
     /// 1-of-N forever.
-    pub(crate) fn reassemble(&mut self, trigger: &Message) -> Option<Message> {
+    pub(crate) fn reassemble(&mut self, trigger: &Verified) -> Option<Message> {
         let shard = trigger.shard.as_ref()?;
         if self.reassembled_groups.contains(&shard.group) {
             return None;
@@ -1648,7 +1649,7 @@ impl EventLoopState {
     /// The log-backed completion path for a **small** (logged) group: scan
     /// the message log for this author's shards and synthesize when every
     /// slot is present. Mirrors the store's synthesis exactly.
-    fn reassemble_from_log(&self, trigger: &Message) -> Option<Message> {
+    fn reassemble_from_log(&self, trigger: &Verified) -> Option<Message> {
         let shard = trigger.shard.as_ref()?;
         // A message that reaches reassembly passed the signature gate, so it has a key.
         let author = trigger.author_key()?;
@@ -1668,7 +1669,7 @@ impl EventLoopState {
         // The concatenation of valid bodies is itself valid (no new control
         // chars), but fail closed rather than surface a malformed body.
         let body = crate::protocol::MessageBody::new(body).ok()?;
-        let envelope = slots[0].expect("shard 0 present").clone();
+        let envelope = slots[0].expect("shard 0 present").clone().into_message(); // step4: the logical view is Authored
         Some(super::reassembly::synthesize_from(
             envelope,
             body,
@@ -2140,7 +2141,7 @@ impl EventLoopState {
     }
 
     /// Frames queued for send while the topic was closed.
-    pub fn pending_outbound_mut(&mut self) -> &mut BoundedQueue<(Message, Bytes)> {
+    pub fn pending_outbound_mut(&mut self) -> &mut BoundedQueue<(Verified, Bytes)> {
         &mut self.pending_outbound
     }
 }
@@ -3086,7 +3087,11 @@ mod tests {
 
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).
-    fn msg_with_id(id: &MessageId) -> Message {
+    fn msg_with_id(id: &MessageId) -> crate::protocol::message::Verified {
+        plain_with_id(id).sign(&crate::protocol::Identity::generate())
+    }
+
+    fn plain_with_id(id: &MessageId) -> Message {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &nick("author-nick"),
@@ -3518,8 +3523,14 @@ mod tests {
         // attack. Distinct pubkeys ⇒ distinct `dedup_key`s.
         let mut state = fresh_state();
         let id = MessageId::random();
-        let victim = msg_with_id(&id).with_unverified_key(AuthorKey::from_bytes([0xaa; 32]));
-        let attacker = msg_with_id(&id).with_unverified_key(AuthorKey::from_bytes([0xbb; 32]));
+        let victim = crate::protocol::message::Verified::fixture_unchecked(
+            plain_with_id(&id),
+            AuthorKey::from_bytes([0xaa; 32]),
+        );
+        let attacker = crate::protocol::message::Verified::fixture_unchecked(
+            plain_with_id(&id),
+            AuthorKey::from_bytes([0xbb; 32]),
+        );
         assert!(!state.mark_seen(&victim), "victim's message is fresh");
         assert!(
             !state.mark_seen(&attacker),

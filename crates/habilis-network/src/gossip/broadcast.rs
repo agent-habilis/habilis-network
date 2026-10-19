@@ -13,6 +13,7 @@ use crate::daemon::state::{EventLoopState, PingRound};
 use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::message::AppFrameParams;
+use crate::protocol::message::Verified;
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
@@ -63,7 +64,7 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 pub async fn send_app(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    frame: Message,
+    frame: Verified,
     class: AppClass,
 ) -> anyhow::Result<crate::transport::Delivered> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
@@ -108,8 +109,8 @@ pub async fn send_app(
 /// across the `await` of [`send_app`]: the app is not `Sync`, and a future that holds it is not
 /// `Send`.
 #[must_use]
-pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Message {
-    Message::new_app(ctx.mesh, ctx.author, params).signed(ctx.identity)
+pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
+    Message::new_app(ctx.mesh, ctx.author, params).sign(ctx.identity)
 }
 
 /// Fire-and-forget gossip broadcast. Serialize errors are swallowed:
@@ -117,7 +118,7 @@ pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Message {
 /// failed serialize must not block the daemon. A failed *broadcast* is
 /// logged — it means the gossip actor refused the send (the wedge the
 /// roster-collapse soak hit silently), not a routine empty gossip.
-pub async fn broadcast_msg(sender: &MeshSender, msg: &Message) {
+pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
     crate::logging::messages::log_out(msg);
     if let Ok(bytes) = msg.serialize()
         && let Err(error) = sender.broadcast(Bytes::from(bytes)).await
@@ -140,7 +141,7 @@ pub async fn start_ping_round(
 ) {
     let now = n0_future::time::Instant::now();
     let window = crate::util::tuning::ping_window();
-    let probe = Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity);
+    let probe = Message::new_ping(ctx.mesh, ctx.author).sign(ctx.identity);
     state.arm_ping_round(PingRound::new(&probe, now, now + window, resp));
     broadcast_msg(ctx.sender, &probe).await;
 }
@@ -151,7 +152,7 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, ctx: &HandlerC
     let Some(round) = state.ping_round.as_mut() else {
         return;
     };
-    let probe = Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity);
+    let probe = Message::new_ping(ctx.mesh, ctx.author).sign(ctx.identity);
     round
         .probes
         .insert(probe.id.clone(), n0_future::time::Instant::now());
@@ -234,8 +235,7 @@ pub async fn broadcast_state_merge(
     let (wire_body, plain_body) = state
         .doc(channel)
         .compose_wire_body(&change_bytes, surface.then_some(&merge))?;
-    let signed =
-        Message::new_channel_event(mesh, author, wire_body, channel).signed(&state.identity);
+    let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
     let bytes = signed.serialize()?;
     crate::logging::messages::log_out(&signed);
 
@@ -259,7 +259,7 @@ pub async fn broadcast_state_merge(
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
-        let mut surfaced = signed.clone();
+        let mut surfaced = signed.clone().into_message(); // step4: the surfaced view is plain until NodeEvent takes Authored
         surfaced.body = plain_body;
         sink.emit(NodeEvent::StateChanged {
             channel,
@@ -366,7 +366,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
         MessageBody::new(addr_data).expect("endpoint address JSON has no control characters");
     broadcast_msg(
         ctx.sender,
-        &Message::new_peer_info(ctx.mesh, ctx.author, addr_body).signed(ctx.identity),
+        &Message::new_peer_info(ctx.mesh, ctx.author, addr_body).sign(ctx.identity),
     )
     .await;
 }
@@ -379,7 +379,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
 /// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
 /// that does not hold its own presence makes anti-entropy unconvergeable.
 pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+    let joined = Message::new_joined(ctx.mesh, ctx.author).sign(ctx.identity);
     broadcast_msg(ctx.sender, &joined).await;
     super::recv::retain_own_broadcast(state, &joined);
     broadcast_peer_info(state, ctx).await;
@@ -389,7 +389,7 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCt
 /// of a peer that needs one: a node becomes meshed by its first link to a member, and on a lane pair
 /// that link needs the session, so a frame that waited for the link could never ask for it. The rule
 /// is the one of a frame held on a meshed node ([`crate::transport::note_held`]).
-fn mark_parked(state: &mut EventLoopState, frame: &Message, bytes: &Bytes) {
+fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &Bytes) {
     if let Err(error) = crate::transport::resolve(frame, bytes.clone(), state) {
         crate::transport::note_held(state, &error);
     }
@@ -400,7 +400,7 @@ fn mark_parked(state: &mut EventLoopState, frame: &Message, bytes: &Bytes) {
 pub(crate) fn park_and_offer(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    frame: &Message,
+    frame: &Verified,
     bytes: &Bytes,
 ) {
     mark_parked(state, frame, bytes);
@@ -410,7 +410,7 @@ pub(crate) fn park_and_offer(
 /// Offer the session of the peer now, if the parked frame asked for it. Without this the offer waits
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
-fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Message) {
+fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Verified) {
     let Some(nick) = crate::protocol::message::sole_addressee(&frame.kind) else {
         return;
     };
@@ -476,7 +476,8 @@ mod tests {
             &nick("alice"),
             nick("bob"),
             &crate::protocol::MessageId::random(),
-        );
+        )
+        .sign(&crate::protocol::Identity::generate());
         let bytes = Bytes::from_static(b"frame");
         let now = crate::util::clock::Instant::now();
         assert!(
@@ -507,7 +508,8 @@ mod tests {
                 corr: None,
                 body: crate::protocol::MessageBody::from("hi"),
             },
-        );
+        )
+        .sign(&crate::protocol::Identity::generate());
         mark_parked(&mut state, &frame, &Bytes::from_static(b"frame"));
         assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
     }

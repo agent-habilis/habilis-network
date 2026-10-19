@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+use crate::message::Verified;
 use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
@@ -53,7 +54,7 @@ struct PartialGroup {
     /// for this group is addressed.
     author: Nickname,
     slots: BTreeMap<u32, String>,
-    header: Option<Message>,
+    header: Option<Verified>,
     bytes: usize,
     /// Last **progress** (a new slot filled) — duplicates don't refresh it,
     /// so resends can't keepalive a dead group past the idle TTL.
@@ -96,7 +97,7 @@ impl ReassemblyStore {
     ///
     /// # Panics
     /// Never: the group that just completed is by construction still stored.
-    pub fn ingest(&mut self, shard_msg: &Message, now: Instant) -> ShardIngest {
+    pub fn ingest(&mut self, shard_msg: &Verified, now: Instant) -> ShardIngest {
         let (Some(shard), Some(author)) = (shard_msg.shard.as_ref(), shard_msg.author_key()) else {
             return ShardIngest::Dropped;
         };
@@ -246,7 +247,7 @@ impl ReassemblyStore {
     /// its budget — the log-backed completion path calls this after finishing a group the
     /// store had only a fragment of (e.g. post-TTL, when dedup let just one healed shard
     /// re-ingest). A message with no shard header or no author key names no group.
-    pub fn forget(&mut self, shard_msg: &Message) {
+    pub fn forget(&mut self, shard_msg: &Verified) {
         if let (Some(shard), Some(author)) = (shard_msg.shard.as_ref(), shard_msg.author_key()) {
             self.evict(&(author, shard.group.clone()));
         }
@@ -312,7 +313,11 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Mess
         body.push_str(slot);
     }
     let body = MessageBody::new(body).ok()?;
-    Some(synthesize_from(group.header?, body, group_id))
+    Some(synthesize_from(
+        group.header?.into_message(),
+        body,
+        group_id,
+    ))
 }
 
 /// One stalled big group's repair ask: which author to query and which shard
@@ -393,6 +398,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{ReassemblyStore, ShardIngest};
+    use crate::message::Verified;
     use crate::{
         AppFrameParams, AuthorKey, MeshId, Message, MessageBody, Nickname, Shard, ShardGroup,
     };
@@ -417,7 +423,7 @@ mod tests {
     }
 
     /// A shard frame notionally signed by the author `name`.
-    fn shard_msg(body: &str, name: &str, shard: Shard) -> Message {
+    fn shard_msg(body: &str, name: &str, shard: Shard) -> Verified {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &Nickname::from("author"),
@@ -427,13 +433,12 @@ mod tests {
                 corr: None,
                 body: MessageBody::from(body),
             },
-        )
-        .with_unverified_key(author_of(name));
+        );
         message.shard = Some(shard);
-        message
+        Verified::fixture_unchecked(message, author_of(name))
     }
 
-    fn ingest(store: &mut ReassemblyStore, msg: &Message, now: Instant) -> ShardIngest {
+    fn ingest(store: &mut ReassemblyStore, msg: &Verified, now: Instant) -> ShardIngest {
         store.ingest(msg, now)
     }
 
@@ -591,10 +596,12 @@ mod tests {
                 idx: 1,
                 total: 3,
             },
-        );
+        )
+        .into_message();
         wrong_kind.kind = crate::MessageKind::Presence {
             subtype: crate::PresenceSubtype::Joined,
         };
+        let wrong_kind = Verified::fixture_unchecked(wrong_kind, author_of("a"));
         assert!(matches!(
             ingest(&mut store, &wrong_kind, now),
             ShardIngest::Dropped
