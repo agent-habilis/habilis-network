@@ -9,7 +9,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -28,41 +28,8 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
     SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("habilis_network=info,habilis_network::transport=debug")
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-    log_buffer().lock().expect("no poison").clear();
-}
-
 fn logs() -> String {
-    log_buffer().lock().expect("no poison").clone()
+    habilis_network_test_tracing::captured_logs()
 }
 
 async fn open(nick: &str, opts: membership::Opts) -> Membership {
@@ -150,35 +117,41 @@ async fn rosters_until(members: &[Membership], peers: usize, deadline: Duration)
     rosters
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let members = start_group(&relay).await;
-
-    let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
-
-    for member in members {
-        let _ = member.node.leave().await;
-    }
-    let trace = logs()
-        .lines()
-        .filter(|line| {
-            ["direct-peer cap", "refused a signal offer", "evicted"]
-                .iter()
-                .any(|needle| line.contains(needle))
-        })
-        .take(60)
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        rosters.iter().all(|len| *len == MEMBERS - 1),
-        "every roster must hold {} peers; roster sizes by member: {rosters:?}\n{trace}",
-        MEMBERS - 1
+#[test]
+fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug",
     );
+    habilis_network_test_tracing::run_multi_thread(guard, 8, async {
+        let _serial = serial().lock().await;
+        habilis_network_test_tracing::clear_captured_logs();
+
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let members = start_group(&relay).await;
+
+        let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
+
+        for member in members {
+            let _ = member.node.leave().await;
+        }
+        let trace = logs()
+            .lines()
+            .filter(|line| {
+                ["direct-peer cap", "refused a signal offer", "evicted"]
+                    .iter()
+                    .any(|needle| line.contains(needle))
+            })
+            .take(60)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rosters.iter().all(|len| *len == MEMBERS - 1),
+            "every roster must hold {} peers; roster sizes by member: {rosters:?}\n{trace}",
+            MEMBERS - 1
+        );
+    });
 }
 
 /// A crash is the case that puts every member back on the rendezvous: the
@@ -187,78 +160,84 @@ async fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roste
 /// must end: the members that came back must let go again, or a joiner that
 /// arrives after the crash finds the rendezvous full and the mesh is closed to
 /// it, as it was before members let go at all.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn a_joiner_after_a_crash_still_gets_the_full_roster() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let mut members = start_group(&relay).await;
-    let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
-    assert!(
-        rosters.iter().all(|len| *len == MEMBERS - 1),
-        "the mesh never formed: {rosters:?}"
+#[test]
+fn a_joiner_after_a_crash_still_gets_the_full_roster() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug",
     );
-    let released_before = logs().matches("released the rendezvous").count();
-    let visits_before = rendezvous_visits();
+    habilis_network_test_tracing::run_multi_thread(guard, 8, async {
+        let _serial = serial().lock().await;
+        habilis_network_test_tracing::clear_captured_logs();
 
-    // A crash, as a dead process leaves things: no `Left`, and its sessions
-    // abort with no close, so the survivors drop them when ICE consent times
-    // out. Dropping the member instead leaves its sessions answering consent,
-    // and each survivor keeps one of its direct-peer slots for it.
-    tracing::info!(target: "habilis_network::test", "member crashed");
-    members.pop().expect("a member to crash").node.crash().await;
-    let swept = rosters_until(&members, MEMBERS - 2, Duration::from_mins(4)).await;
-    assert!(
-        swept.iter().all(|len| *len == MEMBERS - 2),
-        "the sweep never removed the crashed member: {swept:?}"
-    );
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let mut members = start_group(&relay).await;
+        let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
+        assert!(
+            rosters.iter().all(|len| *len == MEMBERS - 1),
+            "the mesh never formed: {rosters:?}"
+        );
+        let released_before = logs().matches("released the rendezvous").count();
+        let visits_before = rendezvous_visits();
 
-    // The sweep sends the members that let go of the rendezvous back to it. A
-    // member at its own 16 sessions has no slot for the visit, so some come
-    // back and some do not. Every one that came back must let go again.
-    let started = Instant::now();
-    loop {
-        let visits = rendezvous_visits() - visits_before;
-        let releases = logs().matches("released the rendezvous").count() - released_before;
-        if visits >= 1 && releases >= visits {
-            break;
+        // A crash, as a dead process leaves things: no `Left`, and its sessions
+        // abort with no close, so the survivors drop them when ICE consent times
+        // out. Dropping the member instead leaves its sessions answering consent,
+        // and each survivor keeps one of its direct-peer slots for it.
+        tracing::info!(target: "habilis_network::test", "member crashed");
+        members.pop().expect("a member to crash").node.crash().await;
+        let swept = rosters_until(&members, MEMBERS - 2, Duration::from_mins(4)).await;
+        assert!(
+            swept.iter().all(|len| *len == MEMBERS - 2),
+            "the sweep never removed the crashed member: {swept:?}"
+        );
+
+        // The sweep sends the members that let go of the rendezvous back to it. A
+        // member at its own 16 sessions has no slot for the visit, so some come
+        // back and some do not. Every one that came back must let go again.
+        let started = Instant::now();
+        loop {
+            let visits = rendezvous_visits() - visits_before;
+            let releases = logs().matches("released the rendezvous").count() - released_before;
+            if visits >= 1 && releases >= visits {
+                break;
+            }
+            if started.elapsed() >= Duration::from_mins(3) {
+                dump_logs();
+            }
+            assert!(
+                started.elapsed() < Duration::from_mins(3),
+                "{visits} members came back to the rendezvous after the crash and {releases} let go \
+             again\n{}",
+                come_back_trace()
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        if started.elapsed() >= Duration::from_mins(3) {
-            dump_logs();
+
+        let mesh = members[0].node.mesh_id().to_string();
+        members.push(
+            open(
+                "late-joiner",
+                membership::Opts {
+                    mesh: Some(mesh),
+                    ..membership::Opts::default()
+                },
+            )
+            .await,
+        );
+        let joined = rosters_until(&members, MEMBERS - 1, Duration::from_mins(2)).await;
+
+        let trace = come_back_trace();
+        dump_logs();
+        for member in members {
+            let _ = member.node.leave().await;
         }
         assert!(
-            started.elapsed() < Duration::from_mins(3),
-            "{visits} members came back to the rendezvous after the crash and {releases} let go \
-             again\n{}",
-            come_back_trace()
+            joined.iter().all(|len| *len == MEMBERS - 1),
+            "a joiner after the crash must see everyone; roster sizes: {joined:?}\n{trace}"
         );
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    let mesh = members[0].node.mesh_id().to_string();
-    members.push(
-        open(
-            "late-joiner",
-            membership::Opts {
-                mesh: Some(mesh),
-                ..membership::Opts::default()
-            },
-        )
-        .await,
-    );
-    let joined = rosters_until(&members, MEMBERS - 1, Duration::from_mins(2)).await;
-
-    let trace = come_back_trace();
-    dump_logs();
-    for member in members {
-        let _ = member.node.leave().await;
-    }
-    assert!(
-        joined.iter().all(|len| *len == MEMBERS - 1),
-        "a joiner after the crash must see everyone; roster sizes: {joined:?}\n{trace}"
-    );
+    });
 }
 
 /// The whole log, written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.

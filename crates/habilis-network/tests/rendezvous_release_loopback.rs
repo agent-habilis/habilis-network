@@ -8,7 +8,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::{EndpointId, RelayUrl};
@@ -25,44 +25,8 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
     SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(
-            "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info,\
-             habilis_ladder=trace",
-        )
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-    log_buffer().lock().expect("no poison").clear();
-}
-
 fn logs() -> String {
-    log_buffer().lock().expect("no poison").clone()
+    habilis_network_test_tracing::captured_logs()
 }
 
 fn count(needle: &str) -> usize {
@@ -382,103 +346,121 @@ async fn leave_all(members: Vec<Member>) {
 /// Every joiner has let go, so the beacon's gossip view holds only the
 /// creator's own link. A joiner that arrives now must still find the mesh
 /// through it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_late_joiner_finds_a_mesh_where_every_member_let_go_of_the_rendezvous() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let mut members = group_that_let_go(&relay).await;
+#[test]
+fn a_late_joiner_finds_a_mesh_where_every_member_let_go_of_the_rendezvous() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info,\
+             habilis_ladder=trace",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
 
-    let late = Member::join("late-joiner", &members[0]).await;
-    members.push(late);
-    let found = all_rosters_hold(&refs(&members), GROUP, Duration::from_mins(1)).await;
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let mut members = group_that_let_go(&relay).await;
 
-    let trace = rendezvous_trace();
-    leave_all(members).await;
-    assert!(found, "the late joiner never found the mesh\n{trace}");
+        let late = Member::join("late-joiner", &members[0]).await;
+        members.push(late);
+        let found = all_rosters_hold(&refs(&members), GROUP, Duration::from_mins(1)).await;
+
+        let trace = rendezvous_trace();
+        leave_all(members).await;
+        assert!(found, "the late joiner never found the mesh\n{trace}");
+    });
 }
 
 /// Nobody but the creator holds a link to the rendezvous now, so nobody sees
 /// it go. The mesh must still get a new beacon, from the heal tick of a member
 /// that may host it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_beacon_holder_leaving_is_replaced_though_every_other_member_let_go_of_it() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let mut members = group_that_let_go(&relay).await;
-    let before = count("beacon role active");
+#[test]
+fn the_beacon_holder_leaving_is_replaced_though_every_other_member_let_go_of_it() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info,\
+             habilis_ladder=trace",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
 
-    let holder = members.remove(0);
-    let _ = holder.membership.node.leave().await;
-    let replaced = eventually(Duration::from_secs(45), || {
-        count("beacon role active") > before
-    })
-    .await;
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let mut members = group_that_let_go(&relay).await;
+        let before = count("beacon role active");
 
-    let trace = rendezvous_trace();
-    leave_all(members).await;
-    assert!(replaced, "no member took the beacon over\n{trace}");
+        let holder = members.remove(0);
+        let _ = holder.membership.node.leave().await;
+        let replaced = eventually(Duration::from_secs(45), || {
+            count("beacon role active") > before
+        })
+        .await;
+
+        let trace = rendezvous_trace();
+        leave_all(members).await;
+        assert!(replaced, "no member took the beacon over\n{trace}");
+    });
 }
 
 /// The accept gate checks the path once. A link that is later left on the
 /// relay, with the relay lookup only, is closed after a minute, and
 /// the heal brings it back once the direct path returns.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let creator = Member::create("alice", &relay).await;
-    assert!(
-        eventually(Duration::from_mins(1), || logs()
-            .contains("beacon role active"))
-        .await,
-        "alice never claimed the beacon"
+#[test]
+fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info,\
+             habilis_ladder=trace",
     );
-    let mut bob = Member::join("bob", &creator).await;
-    let alice = creator;
-    assert!(
-        all_rosters_hold(&[&alice, &bob], 1, Duration::from_secs(30)).await,
-        "the pair never linked"
-    );
-    alice.send("before the block").await;
-    assert!(
-        eventually(Duration::from_secs(20), || bob.saw_msg("before the block")).await,
-        "no payload before the block"
-    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
 
-    alice.block_udp(true).await;
-    // The relay policy waits a minute, longer than one race round, then closes.
-    let closed = eventually(Duration::from_mins(2), || {
-        logs().contains("gossip link on the relay path past the deadline: closing it")
-    })
-    .await;
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let creator = Member::create("alice", &relay).await;
+        assert!(
+            eventually(Duration::from_mins(1), || logs()
+                .contains("beacon role active"))
+            .await,
+            "alice never claimed the beacon"
+        );
+        let mut bob = Member::join("bob", &creator).await;
+        let alice = creator;
+        assert!(
+            all_rosters_hold(&[&alice, &bob], 1, Duration::from_secs(30)).await,
+            "the pair never linked"
+        );
+        alice.send("before the block").await;
+        assert!(
+            eventually(Duration::from_secs(20), || bob.saw_msg("before the block")).await,
+            "no payload before the block"
+        );
 
-    alice.block_udp(false).await;
-    // The first send may find no link yet: send again on every look.
-    let mut healed = false;
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(90) {
-        alice.send("after the heal").await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        if bob.saw_msg("after the heal") {
-            healed = true;
-            break;
+        alice.block_udp(true).await;
+        // The relay policy waits a minute, longer than one race round, then closes.
+        let closed = eventually(Duration::from_mins(2), || {
+            logs().contains("gossip link on the relay path past the deadline: closing it")
+        })
+        .await;
+
+        alice.block_udp(false).await;
+        // The first send may find no link yet: send again on every look.
+        let mut healed = false;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(90) {
+            alice.send("after the heal").await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if bob.saw_msg("after the heal") {
+                healed = true;
+                break;
+            }
         }
-    }
 
-    let trace = rendezvous_trace();
-    let _ = alice.membership.node.leave().await;
-    let _ = bob.membership.node.leave().await;
-    assert!(closed, "the relay-only link was never closed\n{trace}");
-    assert!(healed, "the link never came back after the block\n{trace}");
+        let trace = rendezvous_trace();
+        let _ = alice.membership.node.leave().await;
+        let _ = bob.membership.node.leave().await;
+        assert!(closed, "the relay-only link was never closed\n{trace}");
+        assert!(healed, "the link never came back after the block\n{trace}");
+    });
 }
 
 fn refs(members: &[Member]) -> Vec<&Member> {
@@ -499,96 +481,102 @@ fn refs(members: &[Member]) -> Vec<&Member> {
 /// It reads the log only from the cut on and only for the two members: the close
 /// of the link of any other member, the rendezvous host included, is not the
 /// cut.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let mut members = vec![Member::create("member-0", &relay).await];
-    assert!(
-        eventually(Duration::from_mins(1), || logs()
-            .contains("beacon role active"))
-        .await,
-        "the creator never claimed the beacon"
+#[test]
+fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info,\
+             habilis_ladder=trace",
     );
-    for index in 1..4 {
-        let member = Member::join(&format!("member-{index}"), &members[0]).await;
-        members.push(member);
-    }
-    assert!(
-        all_rosters_hold(&refs(&members), 3, Duration::from_mins(1)).await,
-        "the group never formed\n{}",
-        rendezvous_trace()
-    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
 
-    // The roster fills through any link, so it does not show that these two hold
-    // a link to each other. A cut that lands before they do has nothing to close.
-    let linking_since = Instant::now();
-    while !(members[1].linked_to("member-2").await && members[2].linked_to("member-1").await) {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let mut members = vec![Member::create("member-0", &relay).await];
         assert!(
-            linking_since.elapsed() < Duration::from_mins(1),
-            "member-1 and member-2 never linked to each other before the cut\n{}",
+            eventually(Duration::from_mins(1), || logs()
+                .contains("beacon role active"))
+            .await,
+            "the creator never claimed the beacon"
+        );
+        for index in 1..4 {
+            let member = Member::join(&format!("member-{index}"), &members[0]).await;
+            members.push(member);
+        }
+        assert!(
+            all_rosters_hold(&refs(&members), 3, Duration::from_mins(1)).await,
+            "the group never formed\n{}",
             rendezvous_trace()
         );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
 
-    // Cut member-1 from member-2, and nobody else. Every check about the cut reads the log from here.
-    let (one_id, two_id) = (
-        members[1].membership.node.endpoint_id(),
-        members[2].membership.node.endpoint_id(),
-    );
-    let (one, two) = (members[1].ports(), members[2].ports());
-    let cut_at = logs().lines().count();
-    members[1].block_ip_to(two.clone()).await;
-    members[2].block_ip_to(one.clone()).await;
-    // The cut took when the ladder of each member, with the other's IP path in view, chooses no IP
-    // path. That is the block working; it does not say that the link moved. The close below does.
-    let cut_took = eventually(Duration::from_secs(30), || {
-        left_ip(cut_at, &one_id, &two) && left_ip(cut_at, &two_id, &one)
-    })
-    .await;
-    let closed = cut_took
-        && eventually(Duration::from_mins(2), || {
-            pair_link_closed(cut_at, &one_id, &two_id)
+        // The roster fills through any link, so it does not show that these two hold
+        // a link to each other. A cut that lands before they do has nothing to close.
+        let linking_since = Instant::now();
+        while !(members[1].linked_to("member-2").await && members[2].linked_to("member-1").await) {
+            assert!(
+                linking_since.elapsed() < Duration::from_mins(1),
+                "member-1 and member-2 never linked to each other before the cut\n{}",
+                rendezvous_trace()
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        // Cut member-1 from member-2, and nobody else. Every check about the cut reads the log from here.
+        let (one_id, two_id) = (
+            members[1].membership.node.endpoint_id(),
+            members[2].membership.node.endpoint_id(),
+        );
+        let (one, two) = (members[1].ports(), members[2].ports());
+        let cut_at = logs().lines().count();
+        members[1].block_ip_to(two.clone()).await;
+        members[2].block_ip_to(one.clone()).await;
+        // The cut took when the ladder of each member, with the other's IP path in view, chooses no IP
+        // path. That is the block working; it does not say that the link moved. The close below does.
+        let cut_took = eventually(Duration::from_secs(30), || {
+            left_ip(cut_at, &one_id, &two) && left_ip(cut_at, &two_id, &one)
         })
         .await;
-    // The others still talk: member-0 reaches member-3 while the cut stands.
-    members[0].send("through the cut").await;
-    let others = eventually(Duration::from_secs(30), || {
-        members[3].saw_msg("through the cut")
-    })
-    .await;
+        let closed = cut_took
+            && eventually(Duration::from_mins(2), || {
+                pair_link_closed(cut_at, &one_id, &two_id)
+            })
+            .await;
+        // The others still talk: member-0 reaches member-3 while the cut stands.
+        members[0].send("through the cut").await;
+        let others = eventually(Duration::from_secs(30), || {
+            members[3].saw_msg("through the cut")
+        })
+        .await;
 
-    members[1].block_ip_to(Vec::new()).await;
-    members[2].block_ip_to(Vec::new()).await;
-    members[1].send("after the cut").await;
-    let mut healed = false;
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_mins(2) {
+        members[1].block_ip_to(Vec::new()).await;
+        members[2].block_ip_to(Vec::new()).await;
         members[1].send("after the cut").await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        if members[2].saw_msg("after the cut") {
-            healed = true;
-            break;
+        let mut healed = false;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_mins(2) {
+            members[1].send("after the cut").await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if members[2].saw_msg("after the cut") {
+                healed = true;
+                break;
+            }
         }
-    }
 
-    let trace = rendezvous_trace();
-    let ladder = format!(
-        "member-1 about member-2:\n{}\nmember-2 about member-1:\n{}",
-        ladder_lines(cut_at, &one_id, &two),
-        ladder_lines(cut_at, &two_id, &one)
-    );
-    dump_logs();
-    leave_all(members).await;
-    assert!(
-        cut_took,
-        "the cut never took: the ladder of the pair still chose an IP path\n{ladder}\n{trace}"
-    );
-    assert!(closed, "the cut link was never closed\n{trace}");
-    assert!(others, "the cut reached nodes it did not name\n{trace}");
-    assert!(healed, "the link never came back after the cut\n{trace}");
+        let trace = rendezvous_trace();
+        let ladder = format!(
+            "member-1 about member-2:\n{}\nmember-2 about member-1:\n{}",
+            ladder_lines(cut_at, &one_id, &two),
+            ladder_lines(cut_at, &two_id, &one)
+        );
+        dump_logs();
+        leave_all(members).await;
+        assert!(
+            cut_took,
+            "the cut never took: the ladder of the pair still chose an IP path\n{ladder}\n{trace}"
+        );
+        assert!(closed, "the cut link was never closed\n{trace}");
+        assert!(others, "the cut reached nodes it did not name\n{trace}");
+        assert!(healed, "the link never came back after the cut\n{trace}");
+    });
 }

@@ -20,7 +20,6 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -32,42 +31,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// would be closed inside it, and a session round takes a few seconds.
 const WINDOW: Duration = Duration::from_secs(25);
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(
-            "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info",
-        )
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-}
-
 fn logs() -> String {
-    log_buffer().lock().expect("no poison").clone()
+    habilis_network_test_tracing::captured_logs()
 }
 
 /// How many times a member reported its link to the rendezvous up, or down. The
@@ -164,44 +129,51 @@ fn trace() -> String {
         .join("\n")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_rendezvous_link_stays_up_when_ip_is_lost() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let alice = Member::create("alice", &relay).await;
-    let bob = Member::join("bob", &alice).await;
-
-    assert!(
-        eventually(Duration::from_mins(1), || rendezvous_lines("up") >= 1).await,
-        "the joiner never linked to the rendezvous\n{}",
-        trace()
+#[test]
+fn the_rendezvous_link_stays_up_when_ip_is_lost() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info",
     );
-    let linking = Instant::now();
-    while alice.roster_len().await != 1 || bob.roster_len().await != 1 {
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
+
         assert!(
-            linking.elapsed() < Duration::from_mins(1),
-            "the pair never linked\n{}",
+            eventually(Duration::from_mins(1), || rendezvous_lines("up") >= 1).await,
+            "the joiner never linked to the rendezvous\n{}",
             trace()
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    let downs_before = rendezvous_lines("down");
+        let linking = Instant::now();
+        while alice.roster_len().await != 1 || bob.roster_len().await != 1 {
+            assert!(
+                linking.elapsed() < Duration::from_mins(1),
+                "the pair never linked\n{}",
+                trace()
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let downs_before = rendezvous_lines("down");
 
-    alice.block_udp(true).await;
-    let went_down = eventually(WINDOW, || rendezvous_lines("down") > downs_before).await;
-    alice.block_udp(false).await;
+        alice.block_udp(true).await;
+        let went_down = eventually(WINDOW, || rendezvous_lines("down") > downs_before).await;
+        alice.block_udp(false).await;
 
-    assert!(
-        !went_down,
-        "the rendezvous link went down inside {WINDOW:?} of the IP loss: the \
+        assert!(
+            !went_down,
+            "the rendezvous link went down inside {WINDOW:?} of the IP loss: the \
          WebRTC session is offered only after the close\n{}",
-        trace()
-    );
-    assert!(
-        logs().contains("webrtc session attached to the linked rendezvous"),
-        "no session attached to the linked rendezvous\n{}",
-        trace()
-    );
+            trace()
+        );
+        assert!(
+            logs().contains("webrtc session attached to the linked rendezvous"),
+            "no session attached to the linked rendezvous\n{}",
+            trace()
+        );
+        for member in [alice, bob] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }

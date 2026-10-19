@@ -127,76 +127,79 @@ impl Member {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let alice = Member::create("alice", &relay).await;
-    let bob = Member::join("bob", &alice).await;
+#[test]
+fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
 
-    let formation_ends = Instant::now() + FORMATION;
-    while !alice.knows("bob").await {
-        assert!(
-            Instant::now() < formation_ends,
-            "alice did not learn bob within {FORMATION:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    alice
-        .block_ip_to(bob.membership.node.bound_ports().to_vec())
-        .await;
-    // `BlockIpTo` returns before iroh has re-run path selection, and a connection that is opened
-    // before it does rides the IP path that iroh still holds. Wait until the path to bob has left
-    // UDP, so that a new connection to bob finds no direct path.
-    let block_ends = Instant::now() + BLOCK_TAKES_EFFECT;
-    while alice.selected_rung("bob").await != Some("relay") {
-        assert!(
-            Instant::now() < block_ends,
-            "the path of alice to bob did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
-    // path can still pool one again before the send, so the send is `SendCold`: it never takes the
-    // warm fast path, and its wait does not depend on this race.
-    for _ in 0..FORGET_TRIES {
-        if !alice.forget_unicast("bob").await {
-            break;
+        let formation_ends = Instant::now() + FORMATION;
+        while !alice.knows("bob").await {
+            assert!(
+                Instant::now() < formation_ends,
+                "alice did not learn bob within {FORMATION:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-    }
+        alice
+            .block_ip_to(bob.membership.node.bound_ports().to_vec())
+            .await;
+        // `BlockIpTo` returns before iroh has re-run path selection, and a connection that is opened
+        // before it does rides the IP path that iroh still holds. Wait until the path to bob has left
+        // UDP, so that a new connection to bob finds no direct path.
+        let block_ends = Instant::now() + BLOCK_TAKES_EFFECT;
+        while alice.selected_rung("bob").await != Some("relay") {
+            assert!(
+                Instant::now() < block_ends,
+                "the path of alice to bob did not leave UDP within {BLOCK_TAKES_EFFECT:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
-    let started = Instant::now();
-    let send = async {
-        let verdict = alice.send_cold("bob", "hello").await;
-        (verdict, started.elapsed())
-    };
-    let local = async {
-        tokio::time::sleep(ASK_AFTER).await;
-        let _ = alice.message_log_len().await;
-        started.elapsed()
-    };
-    let ((verdict, send_done), local_done) = tokio::join!(send, local);
+        // Forget the connection to bob, so that the send dials in the common case. A probe of the direct
+        // path can still pool one again before the send, so the send is `SendCold`: it never takes the
+        // warm fast path, and its wait does not depend on this race.
+        for _ in 0..FORGET_TRIES {
+            if !alice.forget_unicast("bob").await {
+                break;
+            }
+        }
 
-    let _ = bob.membership.node.leave().await;
-    let _ = alice.membership.node.leave().await;
+        let started = Instant::now();
+        let send = async {
+            let verdict = alice.send_cold("bob", "hello").await;
+            (verdict, started.elapsed())
+        };
+        let local = async {
+            tokio::time::sleep(ASK_AFTER).await;
+            let _ = alice.message_log_len().await;
+            started.elapsed()
+        };
+        let ((verdict, send_done), local_done) = tokio::join!(send, local);
 
-    assert!(
-        send_done >= PREMISE,
-        "the send took {send_done:?} and returned {verdict:?}: it did not wait on a dial, so this run proves nothing"
-    );
-    assert!(
-        verdict.is_err(),
-        "a directed send with no direct path must still tell the sender it was refused"
-    );
-    assert!(
-        local_done < send_done,
-        "alice answered the local request at {local_done:?}, after the send gave up at \
+        let _ = bob.membership.node.leave().await;
+        let _ = alice.membership.node.leave().await;
+
+        assert!(
+            send_done >= PREMISE,
+            "the send took {send_done:?} and returned {verdict:?}: it did not wait on a dial, so this run proves nothing"
+        );
+        assert!(
+            verdict.is_err(),
+            "a directed send with no direct path must still tell the sender it was refused"
+        );
+        assert!(
+            local_done < send_done,
+            "alice answered the local request at {local_done:?}, after the send gave up at \
          {send_done:?}: the loop served nothing while it waited on the dial"
-    );
-    assert!(
-        local_done < ASK_AFTER + LOCAL_CEILING,
-        "alice answered the local request at {local_done:?}, more than {LOCAL_CEILING:?} after it was asked"
-    );
+        );
+        assert!(
+            local_done < ASK_AFTER + LOCAL_CEILING,
+            "alice answered the local request at {local_done:?}, more than {LOCAL_CEILING:?} after it was asked"
+        );
+    });
 }

@@ -101,7 +101,7 @@ fn round_log_path(topic: &str) -> std::path::PathBuf {
     format!("{prefix}.{topic}").into()
 }
 
-fn init_process() {
+fn init_process() -> habilis_network_test_tracing::Guard {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         init(Tuning {
@@ -112,15 +112,11 @@ fn init_process() {
             rival_recheck_alone: Duration::from_secs(12),
             ..Tuning::DEFAULTS
         });
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            tracing_subscriber::EnvFilter::new("habilis_network=info,habilis_network::beacon=info")
-        });
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(|| RoundLogWriter)
-            .with_ansi(false)
-            .try_init();
     });
+    habilis_network_test_tracing::init_with_writer(
+        "habilis_network=info,habilis_network::beacon=info",
+        || RoundLogWriter,
+    )
 }
 
 /// A member that only forms the mesh. Presence does the work.
@@ -356,47 +352,50 @@ fn distribution(times: &[Duration]) -> String {
 }
 
 /// Run `rounds` rounds one after the other and fail if any round split.
-async fn converge(members: usize, start: Start, rounds: usize) {
-    init_process();
-    let _serial = SERIAL.lock().await;
-    let mut times = Vec::new();
-    let mut splits = Vec::new();
-    for index in 0..rounds {
-        match round(members, start, index).await {
-            Ok(time) => times.push(time),
-            Err(text) => splits.push((index, text)),
+fn converge(members: usize, start: Start, rounds: usize) {
+    let guard = init_process();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = SERIAL.lock().await;
+        let mut times = Vec::new();
+        let mut splits = Vec::new();
+
+        for index in 0..rounds {
+            match round(members, start, index).await {
+                Ok(time) => times.push(time),
+                Err(text) => splits.push((index, text)),
+            }
         }
-    }
-    eprintln!(
-        "{members} members, {rounds} rounds: {}, split {} times, converged {times:?}",
-        distribution(&times),
-        splits.len()
-    );
-    assert!(
-        splits.is_empty(),
-        "{} of {rounds} rounds split with {members} members; converged times {times:?}\nfirst split, round {}: {}",
-        splits.len(),
-        splits[0].0,
-        splits[0].1
-    );
+        eprintln!(
+            "{members} members, {rounds} rounds: {}, split {} times, converged {times:?}",
+            distribution(&times),
+            splits.len()
+        );
+        assert!(
+            splits.is_empty(),
+            "{} of {rounds} rounds split with {members} members; converged times {times:?}\nfirst split, round {}: {}",
+            splits.len(),
+            splits[0].0,
+            splits[0].1
+        );
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn two_members_started_together_become_one_mesh() {
-    converge(2, Start::Together, TWO_MEMBER_ROUNDS).await;
+fn two_members_started_together_become_one_mesh() {
+    converge(2, Start::Together, TWO_MEMBER_ROUNDS);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn three_members_started_together_become_one_mesh() {
-    converge(3, Start::Together, THREE_MEMBER_ROUNDS).await;
+fn three_members_started_together_become_one_mesh() {
+    converge(3, Start::Together, THREE_MEMBER_ROUNDS);
 }
 
 /// The control of the lane: a second member that starts after the first one holds a
 /// beacon must always converge.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn two_members_started_one_after_the_other_become_one_mesh() {
-    converge(2, Start::Staggered, CONTROL_ROUNDS).await;
+fn two_members_started_one_after_the_other_become_one_mesh() {
+    converge(2, Start::Staggered, CONTROL_ROUNDS);
 }

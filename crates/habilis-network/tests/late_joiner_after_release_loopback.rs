@@ -12,7 +12,6 @@
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::membership::{self, Membership, Request};
@@ -25,40 +24,8 @@ const FORMATION_DEADLINE: Duration = Duration::from_mins(2);
 /// Less than the 90 s dedup window: a delivery that waited for it is a failure.
 const LATE_JOINER_DEADLINE: Duration = Duration::from_mins(1);
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("habilis_network=info,habilis_network::transport=debug")
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-}
-
 fn logs() -> String {
-    log_buffer().lock().expect("no poison").clone()
+    habilis_network_test_tracing::captured_logs()
 }
 
 async fn open(nick: &str, opts: membership::Opts) -> Membership {
@@ -116,116 +83,123 @@ fn release_lines() -> String {
         .join("\n")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
+#[test]
+fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
 
-    let creator = open(
-        "member-00",
-        membership::Opts {
-            lookup: vec![Lookup::Relay],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        },
-    )
-    .await;
-    let beacon_wait = Instant::now();
-    while !logs().contains("beacon role active") {
-        assert!(
-            beacon_wait.elapsed() < Duration::from_mins(1),
-            "the creator never claimed the beacon"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    let mesh = creator.node.mesh_id().to_string();
-    let mut members = vec![creator];
-    for index in 1..OLD_MEMBERS {
-        members.push(
-            open(
-                &format!("member-{index:02}"),
-                membership::Opts {
-                    mesh: Some(mesh.clone()),
-                    ..membership::Opts::default()
-                },
-            )
-            .await,
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-
-    let formation = Instant::now();
-    loop {
-        let mut full = true;
-        for member in &members {
-            full &= roster(member).await.len() == OLD_MEMBERS - 1;
+        let creator = open(
+            "member-00",
+            membership::Opts {
+                lookup: vec![Lookup::Relay],
+                relay_urls: vec![relay.to_string()],
+                ..membership::Opts::default()
+            },
+        )
+        .await;
+        let beacon_wait = Instant::now();
+        while !logs().contains("beacon role active") {
+            assert!(
+                beacon_wait.elapsed() < Duration::from_mins(1),
+                "the creator never claimed the beacon"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        if full {
-            break;
+        let mesh = creator.node.mesh_id().to_string();
+        let mut members = vec![creator];
+        for index in 1..OLD_MEMBERS {
+            members.push(
+                open(
+                    &format!("member-{index:02}"),
+                    membership::Opts {
+                        mesh: Some(mesh.clone()),
+                        ..membership::Opts::default()
+                    },
+                )
+                .await,
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        assert!(
-            formation.elapsed() < FORMATION_DEADLINE,
-            "the old mesh never formed\n{}",
-            release_lines()
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
 
-    let precondition = Instant::now();
-    while members_released_with_enough_links() < OLD_MEMBERS - 1 {
-        assert!(
-            precondition.elapsed() < PRECONDITION_DEADLINE,
-            "not every joiner released the rendezvous with {RELEASE_LINKS} links or more \
-             inside {PRECONDITION_DEADLINE:?}\n{}",
-            release_lines()
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    let late = open(
-        "member-late",
-        membership::Opts {
-            mesh: Some(mesh),
-            ..membership::Opts::default()
-        },
-    )
-    .await;
-    let started = Instant::now();
-    let mut old_learned: BTreeMap<usize, Duration> = BTreeMap::new();
-    let mut late_learned_all = None;
-    while started.elapsed() < LATE_JOINER_DEADLINE
-        && (old_learned.len() < OLD_MEMBERS || late_learned_all.is_none())
-    {
-        for (index, member) in members.iter().enumerate() {
-            if !old_learned.contains_key(&index)
-                && roster(member)
-                    .await
-                    .iter()
-                    .any(|nick| nick == "member-late")
-            {
-                old_learned.insert(index, started.elapsed());
+        let formation = Instant::now();
+        loop {
+            let mut full = true;
+            for member in &members {
+                full &= roster(member).await.len() == OLD_MEMBERS - 1;
             }
+            if full {
+                break;
+            }
+            assert!(
+                formation.elapsed() < FORMATION_DEADLINE,
+                "the old mesh never formed\n{}",
+                release_lines()
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        if late_learned_all.is_none() && roster(&late).await.len() >= OLD_MEMBERS {
-            late_learned_all = Some(started.elapsed());
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
 
-    eprintln!("old members that learned the joiner, after the join: {old_learned:?}");
-    eprintln!("the joiner learned all {OLD_MEMBERS} members after: {late_learned_all:?}");
-    assert!(
-        old_learned.len() == OLD_MEMBERS,
-        "only {} of {OLD_MEMBERS} old members learned the joiner inside \
+        let precondition = Instant::now();
+        while members_released_with_enough_links() < OLD_MEMBERS - 1 {
+            assert!(
+                precondition.elapsed() < PRECONDITION_DEADLINE,
+                "not every joiner released the rendezvous with {RELEASE_LINKS} links or more \
+             inside {PRECONDITION_DEADLINE:?}\n{}",
+                release_lines()
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        let late = open(
+            "member-late",
+            membership::Opts {
+                mesh: Some(mesh),
+                ..membership::Opts::default()
+            },
+        )
+        .await;
+        let started = Instant::now();
+        let mut old_learned: BTreeMap<usize, Duration> = BTreeMap::new();
+        let mut late_learned_all = None;
+        while started.elapsed() < LATE_JOINER_DEADLINE
+            && (old_learned.len() < OLD_MEMBERS || late_learned_all.is_none())
+        {
+            for (index, member) in members.iter().enumerate() {
+                if !old_learned.contains_key(&index)
+                    && roster(member)
+                        .await
+                        .iter()
+                        .any(|nick| nick == "member-late")
+                {
+                    old_learned.insert(index, started.elapsed());
+                }
+            }
+            if late_learned_all.is_none() && roster(&late).await.len() >= OLD_MEMBERS {
+                late_learned_all = Some(started.elapsed());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        eprintln!("old members that learned the joiner, after the join: {old_learned:?}");
+        eprintln!("the joiner learned all {OLD_MEMBERS} members after: {late_learned_all:?}");
+        assert!(
+            old_learned.len() == OLD_MEMBERS,
+            "only {} of {OLD_MEMBERS} old members learned the joiner inside \
          {LATE_JOINER_DEADLINE:?}: {old_learned:?}\n{}",
-        old_learned.len(),
-        release_lines()
-    );
-    assert!(
-        late_learned_all.is_some(),
-        "the joiner did not learn all {OLD_MEMBERS} members inside {LATE_JOINER_DEADLINE:?}\n{}",
-        release_lines()
-    );
+            old_learned.len(),
+            release_lines()
+        );
+        assert!(
+            late_learned_all.is_some(),
+            "the joiner did not learn all {OLD_MEMBERS} members inside {LATE_JOINER_DEADLINE:?}\n{}",
+            release_lines()
+        );
+        for member in members.into_iter().chain([late]) {
+            let _ = member.node.leave().await;
+        }
+    });
 }

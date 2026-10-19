@@ -15,7 +15,6 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -30,40 +29,8 @@ const NEW_ADDR: &str = "192.0.2.77:4000";
 /// How long the flood and its receipt may take after the address changed.
 const WINDOW: Duration = Duration::from_secs(10);
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("habilis_network=info,habilis_network::gossip=debug")
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-}
-
 fn logs() -> String {
-    log_buffer().lock().expect("no poison").clone()
+    habilis_network_test_tracing::captured_logs()
 }
 
 /// How many log lines of `message` name `NEW_ADDR`.
@@ -139,44 +106,51 @@ impl Member {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_member_that_changes_its_own_address_floods_it_again() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let alice = Member::create("alice", &relay).await;
-    let bob = Member::join("bob", &alice).await;
+#[test]
+fn a_member_that_changes_its_own_address_floods_it_again() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::gossip=debug",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
 
-    let linking = Instant::now();
-    while alice.roster_len().await != 1 || bob.roster_len().await != 1 {
+        let linking = Instant::now();
+        while alice.roster_len().await != 1 || bob.roster_len().await != 1 {
+            assert!(
+                linking.elapsed() < Duration::from_mins(1),
+                "the pair never linked\n{}",
+                trace()
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        assert_eq!(
+            lines_naming_new_addr("peerinfo flooded"),
+            0,
+            "the new address is named before it was added"
+        );
+
+        alice
+            .add_external_addr(NEW_ADDR.parse().expect("an address"))
+            .await;
+
         assert!(
-            linking.elapsed() < Duration::from_mins(1),
-            "the pair never linked\n{}",
+            eventually(WINDOW, || lines_naming_new_addr("peerinfo flooded") >= 1).await,
+            "no PeerInfo flood carried the new address within {WINDOW:?}\n{}",
             trace()
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    assert_eq!(
-        lines_naming_new_addr("peerinfo flooded"),
-        0,
-        "the new address is named before it was added"
-    );
-
-    alice
-        .add_external_addr(NEW_ADDR.parse().expect("an address"))
-        .await;
-
-    assert!(
-        eventually(WINDOW, || lines_naming_new_addr("peerinfo flooded") >= 1).await,
-        "no PeerInfo flood carried the new address within {WINDOW:?}\n{}",
-        trace()
-    );
-    assert!(
-        eventually(WINDOW, || lines_naming_new_addr("peerinfo received") >= 1).await,
-        "no member received a PeerInfo that carries the new address\n{}",
-        trace()
-    );
+        assert!(
+            eventually(WINDOW, || lines_naming_new_addr("peerinfo received") >= 1).await,
+            "no member received a PeerInfo that carries the new address\n{}",
+            trace()
+        );
+        for member in [alice, bob] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }
 
 /// The lines about `PeerInfo` floods and receipts, to read a failure by.

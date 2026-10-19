@@ -188,14 +188,6 @@ impl Member {
     }
 }
 
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
-}
-
 async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> bool {
     let started = Instant::now();
     loop {
@@ -225,7 +217,6 @@ struct Fixture {
 
 impl Fixture {
     async fn stand_up(name: &str) -> Self {
-        init_logging();
         let (relay_url, relay) = habilis_network::net::test_relay::spawn_plain()
             .await
             .expect("local relay");
@@ -280,87 +271,93 @@ fn skipped(name: &str) -> bool {
 /// the engine routes a directed frame with a correlation id as it routes a message
 /// (`transport/send.rs`, `directed_rpc_and_pong_also_take_unicast`), and the waiter is the
 /// application's. A broadcast does not use the transports, so it is not in this list.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung() {
-    const NAME: &str = "gossip_only_directed";
-    if skipped(NAME) {
-        return;
-    }
-    let mut fixture = Fixture::stand_up(NAME).await;
+fn a_directed_message_crosses_a_pair_with_no_other_path_on_the_gossip_rung() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        const NAME: &str = "gossip_only_directed";
+        if skipped(NAME) {
+            return;
+        }
+        let mut fixture = Fixture::stand_up(NAME).await;
 
-    let text = format!("{NAME} alice to carol");
-    fixture
-        .alice
-        .send("carol", &text)
-        .await
-        .unwrap_or_else(|error| panic!("{NAME}: the send was refused: {error}"));
-    let started = Instant::now();
-    while !fixture.carol.saw_msg(&text) {
-        assert!(
-            started.elapsed() < PAYLOAD_DEADLINE,
-            "{NAME}: the message never reached carol on the gossip rung"
+        let text = format!("{NAME} alice to carol");
+        fixture
+            .alice
+            .send("carol", &text)
+            .await
+            .unwrap_or_else(|error| panic!("{NAME}: the send was refused: {error}"));
+        let started = Instant::now();
+        while !fixture.carol.saw_msg(&text) {
+            assert!(
+                started.elapsed() < PAYLOAD_DEADLINE,
+                "{NAME}: the message never reached carol on the gossip rung"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        let reply = format!("{NAME} carol to alice");
+        fixture
+            .carol
+            .send("alice", &reply)
+            .await
+            .unwrap_or_else(|error| panic!("{NAME}: the reply was refused: {error}"));
+        let reply_started = Instant::now();
+        while !fixture.alice.saw_msg(&reply) {
+            assert!(
+                reply_started.elapsed() < PAYLOAD_DEADLINE,
+                "{NAME}: the reply never reached alice on the gossip rung"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        assert_eq!(
+            fixture.alice.rung_to("carol").await,
+            Some("gossip"),
+            "{NAME}: the pair is still on the gossip rung after the exchange"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    let reply = format!("{NAME} carol to alice");
-    fixture
-        .carol
-        .send("alice", &reply)
-        .await
-        .unwrap_or_else(|error| panic!("{NAME}: the reply was refused: {error}"));
-    let reply_started = Instant::now();
-    while !fixture.alice.saw_msg(&reply) {
-        assert!(
-            reply_started.elapsed() < PAYLOAD_DEADLINE,
-            "{NAME}: the reply never reached alice on the gossip rung"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    assert_eq!(
-        fixture.alice.rung_to("carol").await,
-        Some("gossip"),
-        "{NAME}: the pair is still on the gossip rung after the exchange"
-    );
-    fixture.leave().await;
+        fixture.leave().await;
+    });
 }
 
 /// Every member answers a ping, and carol answers alice, whose only path to her is the gossip
 /// rung. The pong goes out over a warm unicast connection or not at all, so the answer shows
 /// that this connection runs on the gossip rung. The pair stays on that rung after the round.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_ping_is_answered_across_a_pair_with_no_other_path_on_the_gossip_rung() {
-    const NAME: &str = "gossip_only_auto_pong";
-    if skipped(NAME) {
-        return;
-    }
-    let fixture = Fixture::stand_up(NAME).await;
-    // The pong goes out over a warm unicast connection or not at all, and only alice has sent
-    // to carol so far: carol warms her side the way production does, by sending.
-    fixture.carol.settle_on("alice", "gossip", NAME).await;
+fn a_ping_is_answered_across_a_pair_with_no_other_path_on_the_gossip_rung() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        const NAME: &str = "gossip_only_auto_pong";
+        if skipped(NAME) {
+            return;
+        }
+        let fixture = Fixture::stand_up(NAME).await;
+        // The pong goes out over a warm unicast connection or not at all, and only alice has sent
+        // to carol so far: carol warms her side the way production does, by sending.
+        fixture.carol.settle_on("alice", "gossip", NAME).await;
 
-    let answered = fixture.alice.ping().await;
-    for peer in ["bob", "carol", "dave"] {
+        let answered = fixture.alice.ping().await;
+        for peer in ["bob", "carol", "dave"] {
+            assert!(
+                answered.iter().any(|nick| nick == peer),
+                "{NAME}: {peer} never answered alice's ping: {answered:?}"
+            );
+        }
+        let answered_by_alice = fixture.carol.ping().await;
         assert!(
-            answered.iter().any(|nick| nick == peer),
-            "{NAME}: {peer} never answered alice's ping: {answered:?}"
+            answered_by_alice.iter().any(|nick| nick == "alice"),
+            "{NAME}: alice never answered carol's ping on the gossip rung: {answered_by_alice:?}"
         );
-    }
-    let answered_by_alice = fixture.carol.ping().await;
-    assert!(
-        answered_by_alice.iter().any(|nick| nick == "alice"),
-        "{NAME}: alice never answered carol's ping on the gossip rung: {answered_by_alice:?}"
-    );
 
-    assert_eq!(
-        fixture.alice.rung_to("carol").await,
-        Some("gossip"),
-        "{NAME}: the pair is still on the gossip rung after the round"
-    );
-    fixture.leave().await;
+        assert_eq!(
+            fixture.alice.rung_to("carol").await,
+            Some("gossip"),
+            "{NAME}: the pair is still on the gossip rung after the round"
+        );
+        fixture.leave().await;
+    });
 }
 
 const CHURN_WINDOW: Duration = Duration::from_secs(30);
@@ -371,37 +368,40 @@ const CHURN_WINDOW: Duration = Duration::from_secs(30);
 /// a pair: `request_graft` refuses it. Without the guard the engine grafted the pair again about
 /// every 10 s (3, 2 and 3 closes in 30 s). A guard in `graft_proven` alone left the `PeerInfo`
 /// graft: 2, 0, 0, 2, 0, 2, 1 and 1 closes. With the guard in `request_graft`, six runs gave 0.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
-    const NAME: &str = "gossip_only_churn";
-    if skipped(NAME) {
-        return;
-    }
-    let fixture = Fixture::stand_up(NAME).await;
-    let before = fixture.alice.recursion_closes().await;
-    let started = Instant::now();
-    let mut probes = 0_u32;
-    while started.elapsed() < CHURN_WINDOW {
-        probes += 1;
-        let _ = fixture
-            .alice
-            .send("carol", &format!("churn probe {NAME} {probes}"))
-            .await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    let closes = fixture.alice.recursion_closes().await - before;
-    eprintln!("DIAG {NAME}: {closes} closes of the recursion rule in {CHURN_WINDOW:?}");
-    assert_eq!(
-        closes, 0,
-        "{NAME}: the recursion rule closed {closes} gossip links in {CHURN_WINDOW:?}: the pair loops"
-    );
-    assert_eq!(
-        fixture.alice.rung_to("carol").await,
-        Some("gossip"),
-        "{NAME}: the pair is on the gossip rung at the end"
-    );
-    fixture.leave().await;
+fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        const NAME: &str = "gossip_only_churn";
+        if skipped(NAME) {
+            return;
+        }
+        let fixture = Fixture::stand_up(NAME).await;
+        let before = fixture.alice.recursion_closes().await;
+        let started = Instant::now();
+        let mut probes = 0_u32;
+        while started.elapsed() < CHURN_WINDOW {
+            probes += 1;
+            let _ = fixture
+                .alice
+                .send("carol", &format!("churn probe {NAME} {probes}"))
+                .await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let closes = fixture.alice.recursion_closes().await - before;
+        eprintln!("DIAG {NAME}: {closes} closes of the recursion rule in {CHURN_WINDOW:?}");
+        assert_eq!(
+            closes, 0,
+            "{NAME}: the recursion rule closed {closes} gossip links in {CHURN_WINDOW:?}: the pair loops"
+        );
+        assert_eq!(
+            fixture.alice.rung_to("carol").await,
+            Some("gossip"),
+            "{NAME}: the pair is on the gossip rung at the end"
+        );
+        fixture.leave().await;
+    });
 }
 
 /// State is a topic broadcast: a change that alice writes reaches carol through the mesh, and
@@ -410,34 +410,37 @@ async fn a_pair_with_only_the_gossip_rung_does_not_churn_its_gossip_link() {
 /// that the rung carried the change. Backfill (the unicast answer to a digest) goes only to a
 /// linked neighbor, and a gossip-only pair cannot keep a link, so the unit tests in
 /// `transport/send.rs` own it: a proven asker that is not linked is answered on the topic.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn state_written_by_alice_reaches_carol_while_the_pair_has_only_the_gossip_rung() {
-    const NAME: &str = "gossip_only_state";
-    if skipped(NAME) {
-        return;
-    }
-    let fixture = Fixture::stand_up(NAME).await;
+fn state_written_by_alice_reaches_carol_while_the_pair_has_only_the_gossip_rung() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        const NAME: &str = "gossip_only_state";
+        if skipped(NAME) {
+            return;
+        }
+        let fixture = Fixture::stand_up(NAME).await;
 
-    fixture
-        .alice
-        .state_merge(serde_json::json!({ NAME: "held" }))
-        .await
-        .unwrap_or_else(|error| panic!("{NAME}: the merge was refused: {error}"));
-    let started = Instant::now();
-    let pair = format!("\"{NAME}\":\"held\"");
-    while !fixture
-        .carol
-        .state_json()
-        .await
-        .replace(' ', "")
-        .contains(&pair)
-    {
-        assert!(
-            started.elapsed() < PAYLOAD_DEADLINE,
-            "{NAME}: carol never held alice's change"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    fixture.leave().await;
+        fixture
+            .alice
+            .state_merge(serde_json::json!({ NAME: "held" }))
+            .await
+            .unwrap_or_else(|error| panic!("{NAME}: the merge was refused: {error}"));
+        let started = Instant::now();
+        let pair = format!("\"{NAME}\":\"held\"");
+        while !fixture
+            .carol
+            .state_json()
+            .await
+            .replace(' ', "")
+            .contains(&pair)
+        {
+            assert!(
+                started.elapsed() < PAYLOAD_DEADLINE,
+                "{NAME}: carol never held alice's change"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        fixture.leave().await;
+    });
 }

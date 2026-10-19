@@ -111,83 +111,76 @@ impl Member {
     }
 }
 
-/// With `RUST_LOG` set, a failing run prints the engine's log.
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
-}
+#[test]
+fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let mut bob = Member::join("bob", &alice).await;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let alice = Member::create("alice", &relay).await;
-    let mut bob = Member::join("bob", &alice).await;
+        let linking = Instant::now();
+        while alice.roster_len().await != 1 || bob.roster_len().await != 1 {
+            assert!(
+                linking.elapsed() < Duration::from_mins(1),
+                "the pair never linked"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
 
-    let linking = Instant::now();
-    while alice.roster_len().await != 1 || bob.roster_len().await != 1 {
-        assert!(
-            linking.elapsed() < Duration::from_mins(1),
-            "the pair never linked"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+        // Both ends lose IP to each other. Nothing has been sent between them.
+        alice.block_ip_to(bob.ports()).await;
+        bob.block_ip_to(alice.ports()).await;
 
-    // Both ends lose IP to each other. Nothing has been sent between them.
-    alice.block_ip_to(bob.ports()).await;
-    bob.block_ip_to(alice.ports()).await;
+        // Let the relay policy act first, and note what the rosters read meanwhile.
+        let mut lowest = usize::MAX;
+        let settling = Instant::now();
+        while settling.elapsed() < SETTLE {
+            lowest = lowest
+                .min(alice.roster_len().await)
+                .min(bob.roster_len().await);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        eprintln!("lowest roster during the settle: {lowest}");
 
-    // Let the relay policy act first, and note what the rosters read meanwhile.
-    let mut lowest = usize::MAX;
-    let settling = Instant::now();
-    while settling.elapsed() < SETTLE {
-        lowest = lowest
-            .min(alice.roster_len().await)
-            .min(bob.roster_len().await);
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    eprintln!("lowest roster during the settle: {lowest}");
-
-    // The link may have closed and formed again; what must hold is that a
-    // broadcast arrives. A fresh text each time, so a late one is not mistaken
-    // for it.
-    let started = Instant::now();
-    let mut attempt = 0_u32;
-    let arrived = loop {
-        attempt += 1;
-        let text = format!("after the loss, try {attempt}");
-        alice.broadcast(&text).await;
-        let tried = Instant::now();
-        let mut seen = false;
-        while tried.elapsed() < Duration::from_secs(5) {
-            if bob.saw(&text) {
-                seen = true;
-                break;
+        // The link may have closed and formed again; what must hold is that a
+        // broadcast arrives. A fresh text each time, so a late one is not mistaken
+        // for it.
+        let started = Instant::now();
+        let mut attempt = 0_u32;
+        let arrived = loop {
+            attempt += 1;
+            let text = format!("after the loss, try {attempt}");
+            alice.broadcast(&text).await;
+            let tried = Instant::now();
+            let mut seen = false;
+            while tried.elapsed() < Duration::from_secs(5) {
+                if bob.saw(&text) {
+                    seen = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        if seen {
-            break true;
-        }
-        if started.elapsed() >= RECOVERY_DEADLINE {
-            break false;
-        }
-    };
+            if seen {
+                break true;
+            }
+            if started.elapsed() >= RECOVERY_DEADLINE {
+                break false;
+            }
+        };
 
-    assert!(
-        arrived,
-        "no broadcast reached bob within {RECOVERY_DEADLINE:?} of the IP loss; \
+        assert!(
+            arrived,
+            "no broadcast reached bob within {RECOVERY_DEADLINE:?} of the IP loss; \
          the roster of alice is {} and bob's is {}",
-        alice.roster_len().await,
-        bob.roster_len().await
-    );
+            alice.roster_len().await,
+            bob.roster_len().await
+        );
 
-    for member in [alice, bob] {
-        let _ = member.membership.node.leave().await;
-    }
+        for member in [alice, bob] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }

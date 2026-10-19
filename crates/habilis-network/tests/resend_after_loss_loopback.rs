@@ -9,7 +9,6 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -23,43 +22,9 @@ const RECOVERY: Duration = Duration::from_secs(75);
 const FORMATION: Duration = Duration::from_mins(1);
 const LIVE: Duration = Duration::from_secs(20);
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("habilis_network=info,habilis_network::gossip=debug")
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-}
-
 /// The lines that say how the swap and the repair went.
 fn trace() -> String {
-    log_buffer()
-        .lock()
-        .expect("no poison")
+    habilis_network_test_tracing::captured_logs()
         .lines()
         .filter(|line| {
             [
@@ -186,28 +151,43 @@ async fn meshed_pair(relay: &RelayUrl) -> (Member, Member) {
 /// subscription. The swap must hand it to the app before the queue is dropped: the gossip layer
 /// counted it as delivered, so neither the overlay nor an anti-entropy resend of the same bytes
 /// brings it again inside the 90 s dedup.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_message_that_waited_in_the_old_subscription_reaches_the_app_after_the_swap() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let (alice, mut bob) = meshed_pair(&relay).await;
-
-    bob.sever_gossip().await;
-    alice.send("during-outage").await;
-
-    let after = bob.waits_for("during-outage", RECOVERY).await;
-    eprintln!("the message reached the app after: {after:?}");
-    assert!(
-        after.is_some(),
-        "a message sent during the outage never reached the app inside {RECOVERY:?}\n{}",
-        trace()
+#[test]
+fn a_message_that_waited_in_the_old_subscription_reaches_the_app_after_the_swap() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::gossip=debug",
     );
-    alice.send("after-recovery").await;
-    assert!(
-        bob.waits_for("after-recovery", LIVE).await.is_some(),
-        "live traffic does not flow after the swap\n{}",
-        trace()
+    guard.expect_warn(
+        "habilis_network::gossip",
+        "gossip stream restored (resubscribed)",
     );
+    guard.expect_warn(
+        "habilis_network::gossip",
+        "mesh starvation: no inbound traffic",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let (alice, mut bob) = meshed_pair(&relay).await;
+
+        bob.sever_gossip().await;
+        alice.send("during-outage").await;
+
+        let after = bob.waits_for("during-outage", RECOVERY).await;
+        eprintln!("the message reached the app after: {after:?}");
+        assert!(
+            after.is_some(),
+            "a message sent during the outage never reached the app inside {RECOVERY:?}\n{}",
+            trace()
+        );
+        alice.send("after-recovery").await;
+        assert!(
+            bob.waits_for("after-recovery", LIVE).await.is_some(),
+            "live traffic does not flow after the swap\n{}",
+            trace()
+        );
+        for member in [alice, bob] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }

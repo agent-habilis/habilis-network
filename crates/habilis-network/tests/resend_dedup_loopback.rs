@@ -39,39 +39,8 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
     SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("habilis_network::gossip=debug"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-}
-
 fn logs() -> String {
-    log_buffer().lock().expect("no poison").clone()
+    habilis_network_test_tracing::captured_logs()
 }
 
 /// The lines that say how a state change travelled, from `before` on.
@@ -326,185 +295,197 @@ async fn waits_for(
 /// holds it. The author logs no app frame of her own (`send_app` keeps none), so a third member
 /// that ingested the frame is the one that has it to resend: carol answers bob's digest. Her
 /// resend has the payload that bob's gossip layer already named, unless it carries a nonce.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
-    let _one_at_a_time = serial().lock().await;
-    init_logging();
-    let topic = format!("resend-dedup-{}", rand::random::<u64>());
-    let (alice, _alice_read) = spawn(&topic, "alice").await;
-    let (bob, bob_read) = spawn(&topic, "bob").await;
-    let (carol, carol_read) = spawn(&topic, "carol").await;
+#[test]
+fn a_frame_the_app_dropped_is_repaired_by_anti_entropy() {
+    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _one_at_a_time = serial().lock().await;
+        let topic = format!("resend-dedup-{}", rand::random::<u64>());
 
-    // A first frame that reaches both proves that the three are meshed.
-    let meeting = Instant::now();
-    while !(has_read(&bob_read, "hello") && has_read(&carol_read, "hello")) {
-        assert!(meeting.elapsed() < MEETING, "the three never meshed");
-        say(&alice, "hello").await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+        let (alice, _alice_read) = spawn(&topic, "alice").await;
+        let (bob, bob_read) = spawn(&topic, "bob").await;
+        let (carol, carol_read) = spawn(&topic, "carol").await;
 
-    drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;
-    say(&alice, "dropped-once").await;
-    assert_dropped_once(&bob).await;
-    assert!(
-        waits_for(&carol_read, "dropped-once", Duration::from_secs(10))
-            .await
-            .is_some(),
-        "carol never read the frame, so nobody holds it to resend"
-    );
+        // A first frame that reaches both proves that the three are meshed.
+        let meeting = Instant::now();
+        while !(has_read(&bob_read, "hello") && has_read(&carol_read, "hello")) {
+            assert!(meeting.elapsed() < MEETING, "the three never meshed");
+            say(&alice, "hello").await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
 
-    let after = waits_for(&bob_read, "dropped-once", REPAIR).await;
-    eprintln!("the dropped frame reached the app after: {after:?}");
-    assert!(
-        after.is_some(),
-        "a frame the app dropped never came again inside {REPAIR:?}: the resend has the \
+        drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;
+        say(&alice, "dropped-once").await;
+        assert_dropped_once(&bob).await;
+        assert!(
+            waits_for(&carol_read, "dropped-once", Duration::from_secs(10))
+                .await
+                .is_some(),
+            "carol never read the frame, so nobody holds it to resend"
+        );
+
+        let after = waits_for(&bob_read, "dropped-once", REPAIR).await;
+        eprintln!("the dropped frame reached the app after: {after:?}");
+        assert!(
+            after.is_some(),
+            "a frame the app dropped never came again inside {REPAIR:?}: the resend has the \
          payload that the gossip layer already named"
-    );
+        );
 
-    alice.leave().await.expect("alice leaves");
-    bob.leave().await.expect("bob leaves");
-    carol.leave().await.expect("carol leaves");
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+        carol.leave().await.expect("carol leaves");
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
-    let _one_at_a_time = serial().lock().await;
-    init_logging();
-    let topic = format!("resend-dedup-state-{}", rand::random::<u64>());
-    let (alice, _alice_read) = spawn(&topic, "alice").await;
-    let (bob, bob_read) = spawn(&topic, "bob").await;
+#[test]
+fn a_state_change_the_app_dropped_is_repaired_by_the_state_digest_answer() {
+    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _one_at_a_time = serial().lock().await;
+        let topic = format!("resend-dedup-state-{}", rand::random::<u64>());
 
-    let meeting = Instant::now();
-    while !has_read(&bob_read, "hello") {
-        assert!(meeting.elapsed() < MEETING, "the pair never meshed");
-        say(&alice, "hello").await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+        let (alice, _alice_read) = spawn(&topic, "alice").await;
+        let (bob, bob_read) = spawn(&topic, "bob").await;
 
-    // Alice must hold the proof of bob before she forgets it, or the first `PeerInfo` of bob, late,
-    // would put it back after the forget. The line says that she took his `PeerInfo`.
-    let waiting = Instant::now();
-    while !logs()
-        .lines()
-        .any(|line| line.contains("peerinfo received") && line.contains("author=bob"))
-    {
-        assert!(
-            waiting.elapsed() < MEETING,
-            "alice never took the PeerInfo of bob"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    // The forget models a member whose `PeerInfo` does not reach the asker side, the state the
-    // gossip answer exists for; the wait below forgets again after every poll.
-    forget_proof(&alice, "bob").await;
-    drop_inbound(&bob, TestDrop::StateChange).await;
-    let before = logs().len();
-    merge(&alice, serde_json::json!({ "dropped-once": 1 })).await;
-    assert_dropped_once(&bob).await;
+        let meeting = Instant::now();
+        while !has_read(&bob_read, "hello") {
+            assert!(meeting.elapsed() < MEETING, "the pair never meshed");
+            say(&alice, "hello").await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
 
-    let started = Instant::now();
-    while !state_has(&bob, "dropped-once").await {
-        assert!(
-            started.elapsed() < REPAIR_STATE,
-            "a state change the app dropped never came again inside {REPAIR_STATE:?}: the answer has \
+        // Alice must hold the proof of bob before she forgets it, or the first `PeerInfo` of bob, late,
+        // would put it back after the forget. The line says that she took his `PeerInfo`.
+        let waiting = Instant::now();
+        while !logs()
+            .lines()
+            .any(|line| line.contains("peerinfo received") && line.contains("author=bob"))
+        {
+            assert!(
+                waiting.elapsed() < MEETING,
+                "alice never took the PeerInfo of bob"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        // The forget models a member whose `PeerInfo` does not reach the asker side, the state the
+        // gossip answer exists for; the wait below forgets again after every poll.
+        forget_proof(&alice, "bob").await;
+        drop_inbound(&bob, TestDrop::StateChange).await;
+        let before = logs().len();
+        merge(&alice, serde_json::json!({ "dropped-once": 1 })).await;
+        assert_dropped_once(&bob).await;
+
+        let started = Instant::now();
+        while !state_has(&bob, "dropped-once").await {
+            assert!(
+                started.elapsed() < REPAIR_STATE,
+                "a state change the app dropped never came again inside {REPAIR_STATE:?}: the answer has \
              the payload that the gossip layer already named\n{}",
+                lines_since(before)
+            );
+            // A PeerInfo of bob restores the proof; forgetting it again keeps the answer on gossip.
+            forget_proof(&alice, "bob").await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        eprintln!(
+            "the dropped state change reached the app after: {:?}",
+            started.elapsed()
+        );
+        let answers: Vec<String> = lines_since(before)
+            .lines()
+            .filter(|line| line.contains("state anti-entropy: resent frames a peer lacked"))
+            .map(str::to_owned)
+            .collect();
+        for line in &answers {
+            eprintln!("state digest answer: {line}");
+        }
+        assert!(
+            !answers.is_empty() && answers.iter().all(|line| !line.contains("broadcast=0")),
+            "a state digest was answered point-to-point, so the dedup was not what the repair beat\n{}",
             lines_since(before)
         );
-        // A PeerInfo of bob restores the proof; forgetting it again keeps the answer on gossip.
-        forget_proof(&alice, "bob").await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    eprintln!(
-        "the dropped state change reached the app after: {:?}",
-        started.elapsed()
-    );
-    let answers: Vec<String> = lines_since(before)
-        .lines()
-        .filter(|line| line.contains("state anti-entropy: resent frames a peer lacked"))
-        .map(str::to_owned)
-        .collect();
-    for line in &answers {
-        eprintln!("state digest answer: {line}");
-    }
-    assert!(
-        !answers.is_empty() && answers.iter().all(|line| !line.contains("broadcast=0")),
-        "a state digest was answered point-to-point, so the dedup was not what the repair beat\n{}",
-        lines_since(before)
-    );
 
-    alice.leave().await.expect("alice leaves");
-    bob.leave().await.expect("bob leaves");
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+    });
 }
 
 /// The author holds what she broadcast. A peer that holds her frame then has nothing to resend to
 /// her: her digest names it. Without it the peer answers every digest round of hers with a resend
 /// of her own frame, forever.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_peer_does_not_resend_to_its_author_the_frame_she_kept() {
-    let _one_at_a_time = serial().lock().await;
-    init_logging();
-    let topic = format!("resend-author-{}", rand::random::<u64>());
-    let (alice, _alice_read) = spawn(&topic, "alice").await;
-    let (bob, bob_read) = spawn(&topic, "bob").await;
+#[test]
+fn a_peer_does_not_resend_to_its_author_the_frame_she_kept() {
+    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _one_at_a_time = serial().lock().await;
+        let topic = format!("resend-author-{}", rand::random::<u64>());
 
-    let meeting = Instant::now();
-    while !has_read(&bob_read, "hello") {
-        assert!(meeting.elapsed() < MEETING, "the pair never meshed");
-        say(&alice, "hello").await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    // One digest round of each node to settle, then two rounds in which nothing may be resent.
-    tokio::time::sleep(Duration::from_secs(12)).await;
-    let before = logs().len();
-    tokio::time::sleep(Duration::from_secs(25)).await;
-    let log = logs();
-    let resends: Vec<&str> = log[before..]
-        .lines()
-        .filter(|line| line.contains("anti-entropy: resent messages a peer was missing"))
-        .collect();
-    for line in &resends {
-        eprintln!("resend: {line}");
-    }
-    assert!(
-        resends.is_empty(),
-        "{} resends in two digest rounds although every frame was delivered",
-        resends.len()
-    );
+        let (alice, _alice_read) = spawn(&topic, "alice").await;
+        let (bob, bob_read) = spawn(&topic, "bob").await;
 
-    alice.leave().await.expect("alice leaves");
-    bob.leave().await.expect("bob leaves");
+        let meeting = Instant::now();
+        while !has_read(&bob_read, "hello") {
+            assert!(meeting.elapsed() < MEETING, "the pair never meshed");
+            say(&alice, "hello").await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        // One digest round of each node to settle, then two rounds in which nothing may be resent.
+        tokio::time::sleep(Duration::from_secs(12)).await;
+        let before = logs().len();
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        let log = logs();
+        let resends: Vec<&str> = log[before..]
+            .lines()
+            .filter(|line| line.contains("anti-entropy: resent messages a peer was missing"))
+            .collect();
+        for line in &resends {
+            eprintln!("resend: {line}");
+        }
+        assert!(
+            resends.is_empty(),
+            "{} resends in two digest rounds although every frame was delivered",
+            resends.len()
+        );
+
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+    });
 }
 
 /// The acceptance of the dedup and of the author's log together, with two members: alice sends,
 /// bob drops the frame, and alice is the only member that can resend it. With the nonce alone
 /// there is no holder (she kept nothing); with her log alone her resend has the payload that
 /// bob's gossip layer already named. Only both bring the frame back.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_frame_the_app_dropped_comes_back_from_its_author_when_she_kept_it() {
-    let _one_at_a_time = serial().lock().await;
-    init_logging();
-    let topic = format!("resend-author-dedup-{}", rand::random::<u64>());
-    let (alice, _alice_read) = spawn(&topic, "alice").await;
-    let (bob, bob_read) = spawn(&topic, "bob").await;
+#[test]
+fn a_frame_the_app_dropped_comes_back_from_its_author_when_she_kept_it() {
+    let guard = habilis_network_test_tracing::init_capturing("habilis_network::gossip=debug");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _one_at_a_time = serial().lock().await;
+        let topic = format!("resend-author-dedup-{}", rand::random::<u64>());
 
-    let meeting = Instant::now();
-    while !has_read(&bob_read, "hello") {
-        assert!(meeting.elapsed() < MEETING, "the pair never meshed");
-        say(&alice, "hello").await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+        let (alice, _alice_read) = spawn(&topic, "alice").await;
+        let (bob, bob_read) = spawn(&topic, "bob").await;
 
-    drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;
-    say(&alice, "dropped-once").await;
-    assert_dropped_once(&bob).await;
+        let meeting = Instant::now();
+        while !has_read(&bob_read, "hello") {
+            assert!(meeting.elapsed() < MEETING, "the pair never meshed");
+            say(&alice, "hello").await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
 
-    let after = waits_for(&bob_read, "dropped-once", REPAIR).await;
-    eprintln!("the dropped frame reached the app after: {after:?}");
-    assert!(
-        after.is_some(),
-        "a frame the app dropped never came back from its author inside {REPAIR:?}"
-    );
+        drop_inbound(&bob, TestDrop::AppBody("dropped-once".to_owned())).await;
+        say(&alice, "dropped-once").await;
+        assert_dropped_once(&bob).await;
 
-    alice.leave().await.expect("alice leaves");
-    bob.leave().await.expect("bob leaves");
+        let after = waits_for(&bob_read, "dropped-once", REPAIR).await;
+        eprintln!("the dropped frame reached the app after: {after:?}");
+        assert!(
+            after.is_some(),
+            "a frame the app dropped never came back from its author inside {REPAIR:?}"
+        );
+
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+    });
 }

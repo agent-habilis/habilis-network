@@ -103,7 +103,7 @@ impl std::io::Write for RoundLogWriter {
 
 /// One global subscriber that writes to the file of the running round. A per-round
 /// `set_default` would lose the events of the worker threads.
-fn init_process() {
+fn init_process() -> habilis_network_test_tracing::Guard {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         init(Tuning {
@@ -111,14 +111,8 @@ fn init_process() {
             cohost_grace: Duration::from_secs(2),
             ..Tuning::DEFAULTS
         });
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("habilis_network=info"));
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(|| RoundLogWriter)
-            .with_ansi(false)
-            .try_init();
     });
+    habilis_network_test_tracing::init_with_writer("habilis_network=info", || RoundLogWriter)
 }
 
 /// One round: its log, kept when the round fails. `HABILIS_TEST_LOG_DUMP` names the prefix
@@ -126,11 +120,13 @@ fn init_process() {
 struct Round {
     name: &'static str,
     path: PathBuf,
+    // Last field: it drops last and sees the events of the round.
+    _log: habilis_network_test_tracing::Guard,
 }
 
 impl Round {
     fn begin(name: &'static str) -> Self {
-        init_process();
+        let log = init_process();
         let prefix = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
             std::env::temp_dir()
                 .join("loopback-room-split")
@@ -140,7 +136,11 @@ impl Round {
         let path: PathBuf = format!("{prefix}.{name}.{}", std::process::id()).into();
         *ROUND_LOG.lock().expect("no poison") =
             Some(std::fs::File::create(&path).expect("create the log file of the round"));
-        Self { name, path }
+        Self {
+            name,
+            path,
+            _log: log,
+        }
     }
 
     fn log(&self) -> String {

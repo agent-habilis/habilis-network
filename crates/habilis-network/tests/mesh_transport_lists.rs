@@ -6,7 +6,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -25,45 +25,8 @@ fn serial() -> &'static tokio::sync::Mutex<()> {
     SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Debug on the transport target (the session lines are debug) and on
-/// iroh-gossip's dialer, which says which side dialed and what it closed.
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(
-            "habilis_network=info,habilis_network::transport=debug,iroh_gossip::net=debug",
-        )
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-    log_buffer().lock().expect("no poison").clear();
-}
-
 fn logs() -> String {
-    log_buffer().lock().expect("no poison").clone()
+    habilis_network_test_tracing::captured_logs()
 }
 
 /// The engine lines that say how a link formed or why it did not.
@@ -269,7 +232,7 @@ async fn linked_pair_ordered(
         }
         let _ = alice.membership.node.leave().await;
         let _ = bob.membership.node.leave().await;
-        log_buffer().lock().expect("no poison").clear();
+        habilis_network_test_tracing::captured_logs().clear();
     }
     panic!("no draw of ids gave bob the order (higher: {bob_is_higher}) in 20 tries");
 }
@@ -300,162 +263,188 @@ async fn every_lane_carries(alice: &mut Member, bob: &mut Member) {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_webrtc_only_mesh_carries_every_lane_between_natives() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-
-    let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::WebRtc]).await;
-    every_lane_carries(&mut alice, &mut bob).await;
-
-    let logs = logs();
-    let _ = alice.membership.node.leave().await;
-    let _ = bob.membership.node.leave().await;
-    assert_eq!(
-        logs.matches("IP transports cleared").count(),
-        2,
-        "the creator and the joiner must both leave UDP out"
+#[test]
+fn a_webrtc_only_mesh_carries_every_lane_between_natives() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,iroh_gossip::net=debug",
     );
-    // No check for "relay-only path refused": the accept gate also refuses
-    // the short-lived probe endpoints of the beacon arbitration, which is
-    // not a lane. The relay may not carry payload on this mesh, so the lanes
-    // above arriving at all is what proves they rode the data channel.
-    assert!(logs.contains("webrtc session attached"), "no data channel");
-}
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
+        habilis_network_test_tracing::clear_captured_logs();
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_udp_only_mesh_never_opens_a_webrtc_session() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
 
-    let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::Udp]).await;
-    every_lane_carries(&mut alice, &mut bob).await;
+        let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::WebRtc]).await;
+        every_lane_carries(&mut alice, &mut bob).await;
 
-    let logs = logs();
-    let _ = alice.membership.node.leave().await;
-    let _ = bob.membership.node.leave().await;
-    assert!(
-        !logs.contains("webrtc session attached"),
-        "a udp mesh opened a data channel"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-
-    let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::Udp, Transport::WebRtc]).await;
-    every_lane_carries(&mut alice, &mut bob).await;
-    // The race is judged by the lower id alone, which offers. Wait for its
-    // round to end one way or the other.
-    let raced = eventually(Duration::from_secs(30), || {
         let logs = logs();
-        logs.contains("udp already selected")
-            || logs.matches("webrtc session attached (offerer)").count()
-                == logs
-                    .matches("udp won the race; webrtc session detached")
-                    .count()
-                && logs.contains("webrtc session attached (offerer)")
-    })
-    .await;
+        let _ = alice.membership.node.leave().await;
+        let _ = bob.membership.node.leave().await;
+        assert_eq!(
+            logs.matches("IP transports cleared").count(),
+            2,
+            "the creator and the joiner must both leave UDP out"
+        );
+        // No check for "relay-only path refused": the accept gate also refuses
+        // the short-lived probe endpoints of the beacon arbitration, which is
+        // not a lane. The relay may not carry payload on this mesh, so the lanes
+        // above arriving at all is what proves they rode the data channel.
+        assert!(logs.contains("webrtc session attached"), "no data channel");
+    });
+}
 
-    let logs = logs();
-    let _ = alice.membership.node.leave().await;
-    let _ = bob.membership.node.leave().await;
-    assert!(
-        raced,
-        "no race ran, or a session outlived udp:\n{}",
-        link_trace()
+#[test]
+fn a_udp_only_mesh_never_opens_a_webrtc_session() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,iroh_gossip::net=debug",
     );
-    assert!(
-        !logs.contains("both ends advertise IP"),
-        "the pair skipped the race"
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
+        habilis_network_test_tracing::clear_captured_logs();
+
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+
+        let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::Udp]).await;
+        every_lane_carries(&mut alice, &mut bob).await;
+
+        let logs = logs();
+        let _ = alice.membership.node.leave().await;
+        let _ = bob.membership.node.leave().await;
+        assert!(
+            !logs.contains("webrtc session attached"),
+            "a udp mesh opened a data channel"
+        );
+    });
+}
+
+#[test]
+fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,iroh_gossip::net=debug",
     );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
+        habilis_network_test_tracing::clear_captured_logs();
+
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+
+        let (mut alice, mut bob) =
+            linked_pair(&relay, vec![Transport::Udp, Transport::WebRtc]).await;
+        every_lane_carries(&mut alice, &mut bob).await;
+        // The race is judged by the lower id alone, which offers. Wait for its
+        // round to end one way or the other.
+        let raced = eventually(Duration::from_secs(30), || {
+            let logs = logs();
+            logs.contains("udp already selected")
+                || logs.matches("webrtc session attached (offerer)").count()
+                    == logs
+                        .matches("udp won the race; webrtc session detached")
+                        .count()
+                    && logs.contains("webrtc session attached (offerer)")
+        })
+        .await;
+
+        let logs = logs();
+        let _ = alice.membership.node.leave().await;
+        let _ = bob.membership.node.leave().await;
+        assert!(
+            raced,
+            "no race ran, or a session outlived udp:\n{}",
+            link_trace()
+        );
+        assert!(
+            !logs.contains("both ends advertise IP"),
+            "the pair skipped the race"
+        );
+    });
 }
 
 /// Requirements 3 and 4 in one cycle: UDP wins, UDP is taken away and the pair
 /// races again onto a data channel, UDP comes back and the session is dropped.
 /// Payload flows in every stage.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pair_races_again_when_udp_drops_and_detaches_when_it_returns() {
-    pair_races_again_when_udp_drops(None).await;
+#[test]
+fn a_pair_races_again_when_udp_drops_and_detaches_when_it_returns() {
+    pair_races_again_when_udp_drops(None);
 }
 
 /// The same cycle with the order of the ids fixed: bob sends the one directed message, so only
 /// bob holds a pooled connection, and the lower id has the only path watcher. With bob as the
 /// higher id nobody watches, and the engine must see the loss from the admission table.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pair_races_again_when_udp_drops_and_bob_has_the_higher_id() {
-    pair_races_again_when_udp_drops(Some(true)).await;
+#[test]
+fn a_pair_races_again_when_udp_drops_and_bob_has_the_higher_id() {
+    pair_races_again_when_udp_drops(Some(true));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pair_races_again_when_udp_drops_and_bob_has_the_lower_id() {
-    pair_races_again_when_udp_drops(Some(false)).await;
+#[test]
+fn a_pair_races_again_when_udp_drops_and_bob_has_the_lower_id() {
+    pair_races_again_when_udp_drops(Some(false));
 }
 
-async fn pair_races_again_when_udp_drops(bob_is_higher: Option<bool>) {
-    let _serial = serial().lock().await;
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-
-    let transport = vec![Transport::Udp, Transport::WebRtc];
-    let (mut alice, mut bob) = match bob_is_higher {
-        Some(higher) => linked_pair_ordered(&relay, transport, higher).await,
-        None => linked_pair(&relay, transport).await,
-    };
-    every_lane_carries(&mut alice, &mut bob).await;
-    let attached = || logs().matches("webrtc session attached (offerer)").count();
-    let before = attached();
-
-    alice.block_udp(true).await;
-    let raced = eventually(Duration::from_mins(1), || {
-        logs().contains("direct path lost; racing again") && attached() > before
-    })
-    .await;
-    // The race's own check for UDP after the attach takes at most 8 s (a
-    // 3 s dial, then 5 s for UDP to be selected). Waiting 9 s past the attach
-    // lets it end first, so the session is kept and the watcher, not the
-    // race, has to drop it once UDP is back.
-    tokio::time::sleep(Duration::from_secs(9)).await;
-    let carried_on_webrtc = if raced {
-        alice.send(None, "over the data channel").await;
-        eventually(PAYLOAD_DEADLINE, || {
-            bob.saw_msg("over the data channel", false)
-        })
-        .await
-    } else {
-        false
-    };
-
-    alice.block_udp(false).await;
-    let detached = eventually(Duration::from_secs(30), || {
-        logs().contains("udp selected again; webrtc session detached")
-    })
-    .await;
-    alice.send(None, "back on udp").await;
-    let carried_on_udp = eventually(PAYLOAD_DEADLINE, || bob.saw_msg("back on udp", false)).await;
-
-    let _ = alice.membership.node.leave().await;
-    let _ = bob.membership.node.leave().await;
-    assert!(raced, "no race after udp dropped:\n{}", link_trace());
-    assert!(carried_on_webrtc, "no payload while udp was gone");
-    assert!(
-        detached,
-        "the session outlived udp's return:\n{}",
-        link_trace()
+fn pair_races_again_when_udp_drops(bob_is_higher: Option<bool>) {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,iroh_gossip::net=debug",
     );
-    assert!(carried_on_udp, "no payload once udp was back");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let _serial = serial().lock().await;
+        habilis_network_test_tracing::clear_captured_logs();
+
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+
+        let transport = vec![Transport::Udp, Transport::WebRtc];
+        let (mut alice, mut bob) = match bob_is_higher {
+            Some(higher) => linked_pair_ordered(&relay, transport, higher).await,
+            None => linked_pair(&relay, transport).await,
+        };
+        every_lane_carries(&mut alice, &mut bob).await;
+        let attached = || logs().matches("webrtc session attached (offerer)").count();
+        let before = attached();
+
+        alice.block_udp(true).await;
+        let raced = eventually(Duration::from_mins(1), || {
+            logs().contains("direct path lost; racing again") && attached() > before
+        })
+        .await;
+        // The race's own check for UDP after the attach takes at most 8 s (a
+        // 3 s dial, then 5 s for UDP to be selected). Waiting 9 s past the attach
+        // lets it end first, so the session is kept and the watcher, not the
+        // race, has to drop it once UDP is back.
+        tokio::time::sleep(Duration::from_secs(9)).await;
+        let carried_on_webrtc = if raced {
+            alice.send(None, "over the data channel").await;
+            eventually(PAYLOAD_DEADLINE, || {
+                bob.saw_msg("over the data channel", false)
+            })
+            .await
+        } else {
+            false
+        };
+
+        alice.block_udp(false).await;
+        let detached = eventually(Duration::from_secs(30), || {
+            logs().contains("udp selected again; webrtc session detached")
+        })
+        .await;
+        alice.send(None, "back on udp").await;
+        let carried_on_udp =
+            eventually(PAYLOAD_DEADLINE, || bob.saw_msg("back on udp", false)).await;
+
+        let _ = alice.membership.node.leave().await;
+        let _ = bob.membership.node.leave().await;
+        assert!(raced, "no race after udp dropped:\n{}", link_trace());
+        assert!(carried_on_webrtc, "no payload while udp was gone");
+        assert!(
+            detached,
+            "the session outlived udp's return:\n{}",
+            link_trace()
+        );
+        assert!(carried_on_udp, "no payload once udp was back");
+    });
 }

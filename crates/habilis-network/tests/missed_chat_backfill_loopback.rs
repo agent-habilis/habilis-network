@@ -199,46 +199,46 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
     (Node::spawn(config, chat.clone(), None, false), chat, sink)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_gets_the_chat_it_missed_on_its_first_real_peer_link() {
-    pin_antientropy_tick();
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer()
-        .try_init();
-    let topic = format!("missed-chat-{}", rand::random::<u64>());
-    let (alice, _, alice_saw) = spawn(&topic, "alice").await;
-    let (early, early_chat, _) = spawn(&topic, "early").await;
-    assert!(
-        alice_saw.wait_for(&nick("early"), BUDGET).await,
-        "alice and early never meshed"
-    );
+#[test]
+fn a_node_gets_the_chat_it_missed_on_its_first_real_peer_link() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        pin_antientropy_tick();
+        let topic = format!("missed-chat-{}", rand::random::<u64>());
 
-    let (sent_tx, sent_rx) = oneshot::channel();
-    alice
-        .send(sent_tx)
-        .await
-        .expect("the send reaches the loop");
-    let sent = sent_rx.await.expect("alice broadcast the frame");
-    assert!(
-        early_chat.wait_for(&sent, BUDGET).await,
-        "early never got the frame, so it cannot hold it for late"
-    );
+        let (alice, _, alice_saw) = spawn(&topic, "alice").await;
+        let (early, early_chat, _) = spawn(&topic, "early").await;
+        assert!(
+            alice_saw.wait_for(&nick("early"), BUDGET).await,
+            "alice and early never meshed"
+        );
 
-    let started = tokio::time::Instant::now();
-    let (late, late_chat, late_saw) = spawn(&topic, "late").await;
-    assert!(
-        late_saw.wait_for(&nick("early"), BUDGET).await,
-        "late never met the mesh"
-    );
-    let got = late_chat.wait_for(&sent, BUDGET).await;
-    eprintln!(
-        "late got the missed frame: {got} after {:?}",
-        started.elapsed()
-    );
-    assert!(got, "late never got the frame it missed");
+        let (sent_tx, sent_rx) = oneshot::channel();
+        alice
+            .send(sent_tx)
+            .await
+            .expect("the send reaches the loop");
+        let sent = sent_rx.await.expect("alice broadcast the frame");
+        assert!(
+            early_chat.wait_for(&sent, BUDGET).await,
+            "early never got the frame, so it cannot hold it for late"
+        );
 
-    alice.leave().await.expect("alice leaves");
-    early.leave().await.expect("early leaves");
-    late.leave().await.expect("late leaves");
+        let started = tokio::time::Instant::now();
+        let (late, late_chat, late_saw) = spawn(&topic, "late").await;
+        assert!(
+            late_saw.wait_for(&nick("early"), BUDGET).await,
+            "late never met the mesh"
+        );
+        let got = late_chat.wait_for(&sent, BUDGET).await;
+        eprintln!(
+            "late got the missed frame: {got} after {:?}",
+            started.elapsed()
+        );
+        assert!(got, "late never got the frame it missed");
+
+        alice.leave().await.expect("alice leaves");
+        early.leave().await.expect("early leaves");
+        late.leave().await.expect("late leaves");
+    });
 }

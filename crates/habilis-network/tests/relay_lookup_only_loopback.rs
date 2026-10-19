@@ -123,26 +123,29 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
     Node::spawn(config, Probe, None, false)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_loopback_nodes_mesh_with_the_relay_lookup_only() {
-    let topic = format!("relay-lookup-only-{}", rand::random::<u64>());
-    let alice_saw = Arc::new(Joined::default());
-    let bob_saw = Arc::new(Joined::default());
-    let alice = spawn(&topic, "alice", Arc::clone(&alice_saw)).await;
-    let bob = spawn(&topic, "bob", Arc::clone(&bob_saw)).await;
+#[test]
+fn two_loopback_nodes_mesh_with_the_relay_lookup_only() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let topic = format!("relay-lookup-only-{}", rand::random::<u64>());
+        let alice_saw = Arc::new(Joined::default());
+        let bob_saw = Arc::new(Joined::default());
+        let alice = spawn(&topic, "alice", Arc::clone(&alice_saw)).await;
+        let bob = spawn(&topic, "bob", Arc::clone(&bob_saw)).await;
 
-    let deadline = Duration::from_secs(45);
-    let bob_nick = Nickname::new("bob").expect("valid");
-    let alice_nick = Nickname::new("alice").expect("valid");
-    assert!(
-        alice_saw.wait_for(&bob_nick, deadline).await,
-        "alice never saw bob join: the graft gate held a direct pair"
-    );
-    assert!(
-        bob_saw.wait_for(&alice_nick, deadline).await,
-        "bob never saw alice join: the graft gate held a direct pair"
-    );
+        let deadline = Duration::from_secs(45);
+        let bob_nick = Nickname::new("bob").expect("valid");
+        let alice_nick = Nickname::new("alice").expect("valid");
+        assert!(
+            alice_saw.wait_for(&bob_nick, deadline).await,
+            "alice never saw bob join: the graft gate held a direct pair"
+        );
+        assert!(
+            bob_saw.wait_for(&alice_nick, deadline).await,
+            "bob never saw alice join: the graft gate held a direct pair"
+        );
 
-    alice.leave().await.expect("alice leaves");
-    bob.leave().await.expect("bob leaves");
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+    });
 }
