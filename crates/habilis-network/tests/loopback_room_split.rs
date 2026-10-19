@@ -121,13 +121,13 @@ struct Round {
     name: &'static str,
     path: PathBuf,
     // Last field: it drops last and sees the events of the round.
-    _log: habilis_network_test_tracing::Guard,
+    log: habilis_network_test_tracing::Guard,
 }
 
 impl Round {
     /// The round must log this WARN, because the case is about it. See `Guard::expect_warn`.
     fn expect_warn(&self, target: &str, text: &str) {
-        self._log.expect_warn(target, text);
+        self.log.expect_warn(target, text);
     }
 
     fn begin(name: &'static str) -> Self {
@@ -141,11 +141,7 @@ impl Round {
         let path: PathBuf = format!("{prefix}.{name}.{}", std::process::id()).into();
         *ROUND_LOG.lock().expect("no poison") =
             Some(std::fs::File::create(&path).expect("create the log file of the round"));
-        Self {
-            name,
-            path,
-            _log: log,
-        }
+        Self { name, path, log }
     }
 
     fn log(&self) -> String {
