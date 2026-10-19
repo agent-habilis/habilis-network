@@ -56,6 +56,9 @@ use habilis_network::protocol::Mesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+/// How long the setup of a split waits for the rosters of its two groups to settle.
+const COUNTS_DEADLINE: Duration = Duration::from_secs(10);
+
 /// The gap between two joiners of the one-by-one flow.
 const SPACING: Duration = Duration::from_secs(2);
 
@@ -501,6 +504,20 @@ async fn four_joiners_together_after_a_long_run(
     become_one_mesh(&all, MERGE_DEADLINE).await
 }
 
+/// The roster counts of two members once both read `count`, or what they read when the deadline
+/// ends. The last joiner of a group releases the rendezvous before it has learned its last peer,
+/// so a read at the instant of the last release can fall a peer short.
+async fn wait_for_counts(first: &Member, second: &Member, count: usize) -> (usize, usize) {
+    let started = Instant::now();
+    loop {
+        let counts = (first.peers().await, second.peers().await);
+        if counts == (count, count) || started.elapsed() >= COUNTS_DEADLINE {
+            return counts;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Two meshes of one room, each with a holder, and every member released: E's setup, then one
 /// old member that binds the next rung because its probe reads "not ours". The old members hold
 /// their claims back but that one, so that the only second holder is the one that the test
@@ -522,8 +539,7 @@ async fn two_released_holders(round: &Round, members: &mut Vec<Member>) -> Resul
     open_joiners(members, &mesh, &nicks("late-after", 4)).await;
     // The five old members, and the new holder with four joiners that released: nine releases.
     wait_for_releases(round, 9).await?;
-    let old = members[0].peers().await;
-    let new = members[members.len() - 1].peers().await;
+    let (old, new) = wait_for_counts(&members[0], &members[members.len() - 1], 4).await;
     if old != 4 || new != 4 {
         return Err(format!(
             "precondition: the two meshes are not apart, an old member counts {old} peers and a new one {new}, each should count 4"
