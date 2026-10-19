@@ -11,23 +11,12 @@
 
 use std::time::{Duration, Instant};
 
+use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::endpoint::presets;
-use habilis_network::iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use habilis_network::iroh::{Endpoint, endpoint::Connection};
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Mesh, MeshConfig, MeshName, Seed};
 
 const MEET_DEADLINE: Duration = Duration::from_secs(90);
-
-/// A listener that serves one ALPN and so answers a gossip dial with a TLS alert.
-#[derive(Debug)]
-struct Foreign;
-
-impl ProtocolHandler for Foreign {
-    async fn accept(&self, _connection: Connection) -> Result<(), AcceptError> {
-        Ok(())
-    }
-}
 
 /// A seed that differs from run to run, so that the ladder of one run is not the ladder of another
 /// run on the same host.
@@ -45,7 +34,9 @@ fn fresh_seed() -> Seed {
     Seed::from_bytes(bytes)
 }
 
-async fn foreign_on(port: u16) -> Router {
+/// A listener on `port` that serves one ALPN, so it answers a gossip dial with a TLS alert. It is a
+/// plain accept loop: an iroh `Router` would log every failed accept as a warning of its own.
+async fn foreign_on(port: u16) -> (Endpoint, tokio::task::JoinHandle<()>) {
     let endpoint = Endpoint::builder(presets::Minimal)
         .alpns(vec![b"foreign".to_vec()])
         .clear_ip_transports()
@@ -54,9 +45,15 @@ async fn foreign_on(port: u16) -> Router {
         .bind()
         .await
         .expect("bind the foreign endpoint on the rung");
-    Router::builder(endpoint)
-        .accept(b"foreign", Foreign)
-        .spawn()
+    let accepting = endpoint.clone();
+    let task = tokio::spawn(async move {
+        while let Some(incoming) = accepting.accept().await {
+            if let Ok(connecting) = incoming.accept() {
+                let _ = connecting.await;
+            }
+        }
+    });
+    (endpoint, task)
 }
 
 async fn roster_len(member: &Membership) -> usize {
@@ -73,11 +70,6 @@ async fn roster_len(member: &Membership) -> usize {
 /// Two members of a fresh loopback mesh, with a foreign endpoint on the rungs of `foreign_rungs`
 /// (indexes into the ladder), and whether they met.
 async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
     let config = MeshConfig::resolve(&[], None, &[]).expect("a loopback mesh");
     // iroh tries the addresses of an id in the order of their ports. A ladder whose first two
     // rungs are in that order puts the foreign listener of rung 0 before the rung that the
@@ -124,30 +116,34 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
     }
     let _ = alice.node.leave().await;
     let _ = bob.node.leave().await;
-    for router in foreign {
-        router
-            .shutdown()
-            .await
-            .expect("shut the foreign listener down");
+    for (endpoint, task) in foreign {
+        task.abort();
+        endpoint.close().await;
     }
     (met, ladder)
 }
 
 /// The control: nobody holds a rung.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_members_meet_on_a_free_ladder() {
-    let (met, ladder) = meet(&[]).await;
-    assert!(
-        met,
-        "the two members never met on the free ladder {ladder:?}"
-    );
+#[test]
+fn two_members_meet_on_a_free_ladder() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (met, ladder) = meet(&[]).await;
+        assert!(
+            met,
+            "the two members never met on the free ladder {ladder:?}"
+        );
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_members_meet_when_a_foreign_endpoint_holds_the_first_rung() {
-    let (met, ladder) = meet(&[0]).await;
-    assert!(
-        met,
-        "the two members never met with a foreign endpoint on rung 0 of the ladder {ladder:?}"
-    );
+#[test]
+fn two_members_meet_when_a_foreign_endpoint_holds_the_first_rung() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (met, ladder) = meet(&[0]).await;
+        assert!(
+            met,
+            "the two members never met with a foreign endpoint on rung 0 of the ladder {ladder:?}"
+        );
+    });
 }

@@ -335,7 +335,7 @@ fn shed_beacon(
     state.next_rival_recheck = None;
     state.cancel_rendezvous_round();
     state.address_book.remove_endpoint_info(params.id);
-    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.foreign_rungs());
+    super::setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
     state.rendezvous_linked = false;
     state.forget_rendezvous_verdict();
     state.arm_reclaim(Instant::now());
@@ -604,7 +604,7 @@ pub(super) fn shed_rival_beacon_if_due(
     super::setup::register_rendezvous(
         &state.address_book,
         arm.params,
-        &state.rungs.foreign_rungs(),
+        &state.rungs.withheld_rungs(),
     );
     // Don't wait for that `NeighborDown` either — clear the link flag now
     // (mirroring the hard resume edge), or a yielding node's heal ticks

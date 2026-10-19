@@ -387,13 +387,13 @@ pub(crate) fn rendezvous_addr(params: &RendezvousParams) -> Option<EndpointAddr>
     Some(addr.with_relay_url(params.bootstrap_relay.clone()?))
 }
 
-/// [`rendezvous_addr`] without the rungs of `foreign`: the address that a member registers for the
-/// rendezvous id, after the walk read those rungs as held by a foreign listener.
+/// [`rendezvous_addr`] without the rungs of `withheld`: the address that a member registers for the
+/// rendezvous id while those rungs are busy and not read as ours ([`RungWatch::withheld_rungs`]).
 pub(crate) fn rendezvous_addr_without(
     params: &RendezvousParams,
-    foreign: &[u16],
+    withheld: &[u16],
 ) -> Option<EndpointAddr> {
-    rendezvous_addr(params).map(|addr| keeping_rungs(addr, |port| !foreign.contains(&port)))
+    rendezvous_addr(params).map(|addr| keeping_rungs(addr, |port| !withheld.contains(&port)))
 }
 
 /// The rendezvous id at one rung of the loopback ladder.
@@ -446,6 +446,40 @@ async fn forget_rungs(
     peer.remove_endpoint_addr(forgotten).await;
 }
 
+/// The rungs of the ladder that somebody holds, read by a bind that fails: instant, no probe. A
+/// member that starts does not know yet whether the holder is our beacon, so it keeps these out of
+/// the book until a probe answers.
+pub(crate) fn busy_rungs(params: &RendezvousParams) -> Vec<u16> {
+    params
+        .bind_ports
+        .iter()
+        .copied()
+        .filter(|&port| rung_is_busy(port))
+        .collect()
+}
+
+/// Put the rung `port` back among the addresses of the rendezvous id, when a probe said nothing
+/// of it and the book does not name it yet: a host too loaded to answer holds our beacon on it
+/// all the same. The endpoint is told too, as in [`settle_on_rung`].
+async fn admit_rung(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    port: u16,
+) {
+    let held = peer_book
+        .get_endpoint_info(params.id)
+        .is_some_and(|info| info.ip_addrs().any(|socket| socket.port() == port));
+    if held {
+        return;
+    }
+    let holder = rendezvous_holder_addr(params, port);
+    add_peer_addr(peer_book, holder.clone());
+    if let Err(error) = peer.add_endpoint_addr(holder).await {
+        tracing::debug!(target: "habilis_network::beacon", %error, port, "the endpoint did not take the rung");
+    }
+}
+
 /// The rung `port` serves our beacon: the endpoint reaches the rendezvous id there and nowhere else
 /// on the ladder, and the book names that rung. The endpoint is told too, because it does not read
 /// the book again for an id that it knows.
@@ -496,8 +530,8 @@ pub(crate) async fn refresh_holder_rung(
 /// addresses of the new holder, and what the mesh registered for the id by itself, a relay rung or
 /// the loopback ladder ([`rendezvous_addr`]). The addresses of a former holder are not in it. A
 /// member whose IP transports are cleared dials the bare id and can use only the registered part.
-fn holder_entry(holder: EndpointAddr, params: &RendezvousParams, foreign: &[u16]) -> EndpointAddr {
-    match rendezvous_addr_without(params, foreign) {
+fn holder_entry(holder: EndpointAddr, params: &RendezvousParams, withheld: &[u16]) -> EndpointAddr {
+    match rendezvous_addr_without(params, withheld) {
         Some(registered) => {
             EndpointAddr::from_parts(holder.id, holder.addrs.into_iter().chain(registered.addrs))
         }
@@ -870,6 +904,13 @@ pub(crate) struct RungWatch {
     /// A reading expires after a heal tick, this does not: the book must not take such a rung
     /// back each time the rendezvous is registered again.
     foreign: std::collections::BTreeSet<u16>,
+    /// The rungs whose last probe was answered and ended without an identity: a refusal, a close,
+    /// an alert that is not about the key. A busy, closing or starting beacon of our own mesh does
+    /// that, and so does a listener of another program, so the answer cannot tell them apart. A
+    /// dial of the rendezvous id tries every address of the id, and such a listener fails the dial
+    /// as a whole, so the rung stays out of the book until it answers as ours. Silence is not
+    /// here: a host too loaded to answer reads the same, and its beacon is found by the dial.
+    refused: std::collections::BTreeSet<u16>,
     reports: mpsc::UnboundedSender<RungReport>,
     /// The probe tasks that are out. A task reports before it closes its prober, so the loop that
     /// ends has to wait for them: [`Self::finish`].
@@ -886,6 +927,7 @@ impl RungWatch {
             own_misses: 0,
             own_counted: None,
             foreign: std::collections::BTreeSet::new(),
+            refused: std::collections::BTreeSet::new(),
             reports,
             tasks: Vec::new(),
         }
@@ -899,6 +941,7 @@ impl RungWatch {
     /// The walk read `port` as serving our beacon.
     fn clear_foreign(&mut self, port: u16) {
         self.foreign.remove(&port);
+        self.refused.remove(&port);
     }
 
     /// The walk read `port` as held by a foreign listener.
@@ -906,9 +949,15 @@ impl RungWatch {
         self.foreign.insert(port);
     }
 
-    /// The rungs that the walk read as held by a foreign listener.
-    pub(crate) fn foreign_rungs(&self) -> Vec<u16> {
-        self.foreign.iter().copied().collect()
+    /// The rungs that stay out of the book: those that the walk read as held by a foreign listener,
+    /// and those that answered the last probe without an identity ([`Self::refused`]).
+    pub(crate) fn withheld_rungs(&self) -> Vec<u16> {
+        self.foreign.union(&self.refused).copied().collect()
+    }
+
+    /// Whether the last probe of `port` was answered without an identity.
+    fn refused(&self, port: u16) -> bool {
+        self.refused.contains(&port)
     }
 
     /// Whether a probe task is out, and not dead.
@@ -958,6 +1007,11 @@ impl RungWatch {
             ),
             ProbeAnswer::Ours | ProbeAnswer::Foreign => None,
         };
+        if report.answer == ProbeAnswer::Refused {
+            self.refused.insert(report.port);
+        } else {
+            self.refused.remove(&report.port);
+        }
         self.readings.insert(
             report.port,
             RungReading {
@@ -973,6 +1027,7 @@ impl RungWatch {
     /// report of one of them is ignored.
     fn forget(&mut self) {
         self.readings.clear();
+        self.refused.clear();
         self.generation_floor = self.next_generation;
         self.own_misses = 0;
         self.own_counted = None;
@@ -1291,6 +1346,11 @@ async fn build_rendezvous_endpoint(
                 forget_rungs(params, peer, peer_book, |rung| rung == port).await;
             }
             RungRead::Silent => {
+                if rungs.refused(port) {
+                    forget_rungs(params, peer, peer_book, |rung| rung == port).await;
+                } else {
+                    admit_rung(params, peer, peer_book, port).await;
+                }
                 tracing::debug!(target: "habilis_network::beacon", node = %node.fmt_short(), port, "rung says nothing; staying peer for now");
                 return Walk::Nothing;
             }
@@ -1579,7 +1639,7 @@ async fn claim_holder(
     // relay rung or the ladder that the mesh registered, see `holder_entry`.
     replace_peer_addr(
         peer_book,
-        holder_entry(endpoint.addr(), params, &rungs.foreign_rungs()),
+        holder_entry(endpoint.addr(), params, &rungs.withheld_rungs()),
     );
     let topic_id = params.topic_id;
 
@@ -2063,6 +2123,36 @@ mod tests {
             "the report of the second probe ends its wait"
         );
         assert_eq!(read_after, RungRead::Silent);
+    }
+
+    /// A rung whose listener answered and gave no identity stays out of the book until it answers
+    /// as ours. A rung that said nothing is not kept out: a host too loaded to answer holds our
+    /// beacon on it all the same.
+    #[test]
+    fn a_refused_rung_is_withheld_until_it_answers_as_ours() {
+        use super::{ProbeAnswer, RungReport, RungWatch};
+
+        let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let mut rungs = RungWatch::new(reports);
+        let port = 4242;
+        let mut generation = 0;
+        let mut note = |watch: &mut RungWatch, answer| {
+            generation += 1;
+            watch.note(
+                RungReport {
+                    port,
+                    answer,
+                    generation,
+                },
+                crate::util::clock::Instant::now(),
+            );
+            watch.withheld_rungs()
+        };
+
+        assert_eq!(note(&mut rungs, ProbeAnswer::Refused), vec![port]);
+        assert_eq!(note(&mut rungs, ProbeAnswer::NoAnswer), Vec::<u16>::new());
+        assert_eq!(note(&mut rungs, ProbeAnswer::Refused), vec![port]);
+        assert_eq!(note(&mut rungs, ProbeAnswer::Ours), Vec::<u16>::new());
     }
 
     /// A report that comes after the report of a newer probe of the same rung says nothing new, and
@@ -2780,7 +2870,7 @@ mod tests {
         peer.close().await;
         assert_eq!(outcome, super::Held::Claimed, "the free rung is claimed");
         assert_eq!(
-            rungs.foreign_rungs(),
+            rungs.withheld_rungs(),
             Vec::<u16>::new(),
             "the rung of our own beacon is still read as foreign"
         );
