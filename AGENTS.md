@@ -46,7 +46,7 @@ Layer: identity. Optional, per mesh or per ticket.
 
 A password adds a knowledge factor to the bearer secret. For a mesh, the password is stretched with Argon2id into a `SymmetricKey` that replaces the seed in every derivation. The mesh id carries a one-way verifier of that key, so `join` checks a password before any network call. For a ticket, the consumer presents the stretch of the password in place of the raw secret.
 
-Code: `crypto::stretch_mesh_password`, `crypto::password_verifier`, `TicketAuth`, `Mesh::apply_password`.
+Code: `crypto::stretch_mesh_password`, `crypto::password_verifier`, `TicketAuth`, `LockedMesh::unlock`.
 
 ### invite
 
