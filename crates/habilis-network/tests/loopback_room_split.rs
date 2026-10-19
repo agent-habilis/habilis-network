@@ -125,6 +125,11 @@ struct Round {
 }
 
 impl Round {
+    /// The round must log this WARN, because the case is about it. See `Guard::expect_warn`.
+    fn expect_warn(&self, target: &str, text: &str) {
+        self._log.expect_warn(target, text);
+    }
+
     fn begin(name: &'static str) -> Self {
         let log = init_process();
         let prefix = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
@@ -940,6 +945,9 @@ async fn a_start_burst_on_a_host_that_answers_late_binds_no_second_rung() {
 async fn a_holder_whose_beacon_stops_answering_serves_again_and_a_joiner_finds_it() {
     let _serial = SERIAL.lock().await;
     let round = Round::begin("holder-stalled");
+    // The test wedges the beacon: it serves no ALPN, so the dials of the members fail the handshake,
+    // and the router of the beacon logs each one.
+    round.expect_warn("iroh::protocol", "error 120");
     let mut members = Vec::new();
     let verdict = holder_whose_beacon_stops_answering(&round, &mut members).await;
     finish(round, members, verdict).await;
@@ -950,6 +958,7 @@ async fn a_holder_whose_beacon_stops_answering_serves_again_and_a_joiner_finds_i
 async fn a_member_says_so_when_other_processes_hold_every_port_of_its_room() {
     let _serial = SERIAL.lock().await;
     let round = Round::begin("ladder-taken");
+    round.expect_warn("habilis_network::beacon", "no rendezvous port is free");
     let mut members = Vec::new();
     let verdict = ladder_held_by_other_processes(&round, &mut members).await;
     finish(round, members, verdict).await;
