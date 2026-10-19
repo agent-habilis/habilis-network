@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::MeshId;
 use crate::invite::InviteTicket;
-use crate::mesh::{Mesh, MeshIdError};
+use crate::mesh::{LockedMesh, MeshIdError};
 
 /// What a join accepts: a bare base58 mesh id, or a creator-minted bare
 /// base58 invite to an invite-only mesh. A shared *string* is not a join
@@ -78,17 +78,17 @@ impl FromStr for JoinTarget {
 
 /// # Errors
 /// The mesh id fails to decode, or the invite ticket fails to redeem.
-pub fn resolve(target: &JoinTarget) -> Result<Mesh> {
+pub fn resolve(target: &JoinTarget) -> Result<LockedMesh> {
     match target {
         JoinTarget::Mesh(id) => {
-            let mesh = id
+            let locked = id
                 .as_str()
-                .parse::<Mesh>()
+                .parse::<LockedMesh>()
                 .map_err(|error| anyhow!("invalid mesh id: {error}"))?;
-            if mesh.requires_invite() {
+            if locked.requires_invite() {
                 bail!("this mesh is invite-only — join with an invite ticket, not the bare hash");
             }
-            Ok(mesh)
+            Ok(locked)
         }
         // An invite carries the join key and needs the password to unwrap it, so
         // it is redeemed in `JoinParams::resolve`; `resolve` never sees it alone.

@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use super::Mesh;
+use super::LockedMesh;
 use crate::newtype::string_newtype;
 
 const MIN_LEN: usize = 3;
@@ -70,7 +70,7 @@ impl MeshId {
             return Err(MeshIdError::Charset(value));
         }
         value
-            .parse::<Mesh>()
+            .parse::<LockedMesh>()
             .map_err(|_| MeshIdError::InvalidHash)?;
         Ok(Self(value))
     }
@@ -90,17 +90,17 @@ impl From<&str> for MeshId {
         if let Ok(id) = Self::new(label) {
             return id;
         }
-        let mesh = Mesh::from_topic(label, super::MeshConfig::loopback());
+        let mesh = super::Mesh::from_topic(label, super::MeshConfig::loopback());
         Self::new(mesh.to_string()).expect("generated test mesh id must be valid")
     }
 }
 
 #[cfg(test)]
 mod mesh_id_tests {
-    use super::{Mesh, MeshId, MeshIdError};
+    use super::{LockedMesh, MeshId, MeshIdError};
 
     fn valid_id() -> String {
-        use super::super::{MeshConfig, MeshName};
+        use super::super::{Mesh, MeshConfig, MeshName};
         Mesh::new(
             crate::crypto::Seed::from_bytes([1u8; 32]),
             MeshName::new("test").unwrap(),
@@ -161,7 +161,7 @@ mod mesh_id_tests {
     #[test]
     fn every_mesh_id_decodes_as_a_mesh() {
         let id = MeshId::new(valid_id()).unwrap();
-        id.as_str().parse::<Mesh>().unwrap();
+        id.as_str().parse::<LockedMesh>().unwrap();
     }
 
     #[test]

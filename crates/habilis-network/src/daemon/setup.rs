@@ -91,7 +91,7 @@ fn rendezvous_params(
         bind_ports,
         id: mesh.rendezvous_id(),
         lookups: lookups.clone(),
-        relay_transport: mesh.config.transport.relay_transport,
+        relay_transport: mesh.config().transport.relay_transport,
         bootstrap_relay,
         rung_tx,
     }
@@ -664,7 +664,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // from the id — one source of truth either way.
     let mesh_config = match &kind {
         SetupKind::Create { config, .. } => config,
-        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => &mesh.config,
+        SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.config(),
     };
     // Decode already validated a joined id; a minted config has had no check
     // yet, and an invalid one would produce an id every joiner rejects.
@@ -1062,7 +1062,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // `ready` is emitted by `run`, once the IPC socket accepts — not here.
     lifecycle::log_ready(
         topic_id,
-        mesh.name.as_str(),
+        mesh.name().as_str(),
         author.as_str(),
         mesh.network_label(),
     );
@@ -1070,12 +1070,12 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // name is lossy and the string is what a user shares to meet peers.
     sink.emit(NodeEvent::Info(match &topic_string {
         Some(raw_topic) => format!("joined topic {raw_topic} as <{author}>"),
-        None => format!("joined #{} as <{author}>", mesh.name),
+        None => format!("joined #{} as <{author}>", mesh.name()),
     }));
 
     Ok(Assembled {
         mesh_id,
-        mesh_name: mesh.name,
+        mesh_name: mesh.name().clone(),
         endpoint,
         router,
         gossip,

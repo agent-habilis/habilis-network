@@ -123,15 +123,13 @@ impl JoinParams {
     pub fn resolve(self) -> Result<Resolved> {
         let mesh = match &self.target {
             JoinTarget::Mesh(_) => {
-                let mut mesh = resolver::resolve(&self.target)?;
-                match (&self.password, mesh.requires_password()) {
-                    (None, true) => return Err(PasswordRequired.into()),
-                    (None, false) => {}
-                    // ~100ms of Argon2id, accepted synchronously: this runs once
-                    // per join, before the daemon exists.
-                    (Some(password), _) => mesh.apply_password(password)?,
+                let locked = resolver::resolve(&self.target)?;
+                if self.password.is_none() && locked.requires_password() {
+                    return Err(PasswordRequired.into());
                 }
-                mesh
+                // ~100ms of Argon2id, accepted synchronously: this runs once
+                // per join, before the daemon exists.
+                locked.unlock(self.password.as_ref())?
             }
             // Redeem the invite: verify the creator's signature + expiry and
             // unwrap the join root. An invite-only mesh carries no id-level

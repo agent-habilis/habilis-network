@@ -102,12 +102,42 @@ const NAME_MAX_BYTES: usize = super::ident::MAX_CHARS * 4;
 /// ```
 #[derive(Clone)]
 pub struct Mesh {
-    pub name: MeshName,
+    name: MeshName,
     seed: Seed,
     /// What every derivation actually keys on. Never serialized —
     /// `encode_bytes` writes `seed`.
     secret: MeshSecret,
-    pub config: MeshConfig,
+    config: MeshConfig,
+}
+
+/// A decoded mesh id that has no secret yet.
+///
+/// Decoding an id (`FromStr`) yields this, not a [`Mesh`]: the id declares
+/// what the mesh needs (a password verifier, an issuer key), but it cannot
+/// derive anything, so there is no `topic_id` or `rendezvous_id` to call. The
+/// secret is applied by [`LockedMesh::unlock`] (a password) or, for an
+/// invite-only mesh, by redeeming an invite ticket.
+///
+/// A locked id has no derivation, so calling one does not compile:
+///
+/// ```compile_fail,E0599
+/// fn derive(locked: habilis_network_protocol::mesh::LockedMesh) {
+///     let _ = locked.topic_id();
+/// }
+/// ```
+///
+/// Unlocking it makes the same call compile:
+///
+/// ```
+/// fn derive(locked: habilis_network_protocol::mesh::LockedMesh) {
+///     let _ = locked.unlock(None).unwrap().topic_id();
+/// }
+/// ```
+#[derive(Clone)]
+pub struct LockedMesh {
+    name: MeshName,
+    seed: Seed,
+    config: MeshConfig,
 }
 
 /// The mesh's derivation secret.
@@ -169,6 +199,134 @@ impl fmt::Debug for Mesh {
     }
 }
 
+impl fmt::Debug for LockedMesh {
+    // The seed is the join capability, so it is redacted as it is on `Mesh`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LockedMesh")
+            .field("name", &self.name)
+            .field("seed", &"***")
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl LockedMesh {
+    /// The wire seed (test-only, as on [`Mesh`]).
+    #[cfg(test)]
+    pub(crate) fn seed(&self) -> &Seed {
+        &self.seed
+    }
+
+    /// The mesh's name.
+    #[must_use]
+    pub fn name(&self) -> &MeshName {
+        &self.name
+    }
+
+    /// The config the id carries.
+    #[must_use]
+    pub fn config(&self) -> &MeshConfig {
+        &self.config
+    }
+
+    /// Whether the id carries a password verifier, so a joiner must present
+    /// the password.
+    #[must_use]
+    pub fn requires_password(&self) -> bool {
+        self.config.password.is_some()
+    }
+
+    /// Whether the id carries an issuer key, so the bare id cannot join and an
+    /// invite is required.
+    #[must_use]
+    pub fn requires_invite(&self) -> bool {
+        self.config.issuer_pubkey.is_some()
+    }
+
+    /// True when the mesh is loopback-only (no off-machine lookups).
+    #[must_use]
+    pub fn is_loopback(&self) -> bool {
+        self.config.lookups.is_loopback()
+    }
+
+    /// `"private"`/`"public"` label for output, derived from the lookups.
+    #[must_use]
+    pub fn network_label(&self) -> &'static str {
+        self.config.lookups.network_label()
+    }
+
+    /// The canonical config bytes mixed into the topic derivation (test-only:
+    /// the derivation runs on an unlocked [`Mesh`]).
+    #[cfg(test)]
+    pub(crate) fn config_bytes(&self) -> Vec<u8> {
+        self.config.to_bytes()
+    }
+
+    /// The id's canonical text (Base58Check), the same as `Display`.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        base58check::encode(&encode_id(&self.seed, &self.name, &self.config))
+    }
+
+    /// Join-side: apply the password the id asks for, and get the mesh that
+    /// derives from it. Stretches `password` (salt = the wire seed), checks it
+    /// against the verifier the id carries, and switches every derivation onto
+    /// the stretched key. ~100ms of Argon2id by design.
+    ///
+    /// # Errors
+    /// The id is invite-only (redeem an invite instead); the id needs a
+    /// password and none is given; the id has no password and one is given;
+    /// or the password is wrong.
+    pub fn unlock(self, password: Option<&crypto::Password>) -> Result<Mesh> {
+        if self.requires_invite() {
+            bail!("this mesh is invite-only — join with an invite ticket, not the bare hash");
+        }
+        let secret = match (&self.config.password, password) {
+            (None, None) => MeshSecret::Open,
+            (None, Some(_)) => bail!("this mesh has no password — drop --password"),
+            (Some(_), None) => bail!("this mesh requires a password"),
+            (Some(expected), Some(password)) => {
+                let key = crypto::stretch_mesh_password(password, &self.seed);
+                if crypto::password_verifier(&key) != *expected {
+                    bail!("wrong password");
+                }
+                MeshSecret::Password(key)
+            }
+        };
+        Ok(Mesh {
+            name: self.name,
+            seed: self.seed,
+            secret,
+            config: self.config,
+        })
+    }
+
+    /// Redeem-side: the invite `root` a verified invite ticket carries becomes
+    /// the derivation secret. The redeemer holds no issuer secret, so it can
+    /// join but never mint.
+    pub(crate) fn redeem_with(self, root: SymmetricKey) -> Mesh {
+        Mesh {
+            name: self.name,
+            seed: self.seed,
+            secret: MeshSecret::Invite { root, issuer: None },
+            config: self.config,
+        }
+    }
+
+    /// The issuer public key the id carries — a redeemer verifies each invite's
+    /// signature against it.
+    pub(crate) fn issuer_pubkey(&self) -> Option<&[u8; 32]> {
+        self.config.issuer_pubkey.as_ref()
+    }
+
+    /// The public identity salt (the wire seed) an invite ticket wraps its root
+    /// under when password-protected.
+    pub(crate) fn wrap_salt(&self) -> &Seed {
+        &self.seed
+    }
+}
+
 impl Mesh {
     /// A mesh with the wire `seed` of its id.
     #[must_use]
@@ -209,30 +367,41 @@ impl Mesh {
 
     /// The seed every derivation uses: the invite root for an invite-only
     /// mesh, the stretched password key when a password is applied, else the
-    /// wire seed. Asserts the secret is present before deriving — deriving from
-    /// the raw seed would silently land in an unreachable topic, strictly worse
-    /// than failing loudly. (Invite-only and password are mutually exclusive in
-    /// the id: an invite-only mesh's password, if any, only wraps its invite
-    /// tickets — it never folds into the topic here.)
+    /// wire seed. (Invite-only and password are mutually exclusive in the id:
+    /// an invite-only mesh's password, if any, only wraps its invite tickets —
+    /// it never folds into the topic here.)
+    ///
+    /// Derivations reach a secret only through [`LockedMesh::unlock`],
+    /// [`LockedMesh::redeem_with`], [`Mesh::set_password`] or [`Mesh::set_invite`],
+    /// and a [`LockedMesh`] has no derivation methods at all.
     fn effective_seed(&self) -> Keying<'_> {
         match &self.secret {
             MeshSecret::Invite { root, .. } => Keying::Secret(root),
             MeshSecret::Password(key) => Keying::Secret(key),
-            // The id declares what the mesh needs; the secret is supplied
-            // afterwards. Deriving from the raw seed while one is still
-            // outstanding lands silently in a topic no peer shares, which is
-            // strictly worse than failing here.
-            MeshSecret::Open => {
-                assert!(
-                    !self.requires_invite(),
-                    "invite-only mesh derived before an invite was applied"
-                );
-                assert!(
-                    self.config.password.is_none(),
-                    "passworded mesh derived before the password was applied"
-                );
-                Keying::Wire(&self.seed)
-            }
+            MeshSecret::Open => Keying::Wire(&self.seed),
+        }
+    }
+
+    /// The mesh's name.
+    #[must_use]
+    pub fn name(&self) -> &MeshName {
+        &self.name
+    }
+
+    /// The config the mesh was built with (or unlocked from).
+    #[must_use]
+    pub fn config(&self) -> &MeshConfig {
+        &self.config
+    }
+
+    /// This mesh as a locked id, with its secret dropped. Round-trips through
+    /// [`Display`](fmt::Display): `mesh.locked().encode()` is the id text.
+    #[must_use]
+    pub fn locked(&self) -> LockedMesh {
+        LockedMesh {
+            name: self.name.clone(),
+            seed: self.seed,
+            config: self.config.clone(),
         }
     }
 
@@ -253,25 +422,6 @@ impl Mesh {
             MeshSecret::Password(key) => Some(key.clone()),
             MeshSecret::Open | MeshSecret::Invite { .. } => None,
         }
-    }
-
-    /// Join-side: stretch `password` (salt = the wire seed), check it
-    /// against the verifier the id carries, and switch every derivation
-    /// onto the stretched key. ~100ms of Argon2id by design.
-    ///
-    /// # Errors
-    /// The id carries no verifier (passwordless mesh), or the password is
-    /// wrong.
-    pub fn apply_password(&mut self, password: &crypto::Password) -> Result<()> {
-        let Some(expected) = &self.config.password else {
-            bail!("this mesh has no password — drop --password");
-        };
-        let key = crypto::stretch_mesh_password(password, &self.seed);
-        if crypto::password_verifier(&key) != *expected {
-            bail!("wrong password");
-        }
-        self.secret = MeshSecret::Password(key);
-        Ok(())
     }
 
     /// Create-side: stretch `password`, bake its verifier into the config
@@ -308,25 +458,12 @@ impl Mesh {
         };
     }
 
-    /// Redeem-side: switch every derivation onto the invite `root` carried by a
-    /// verified invite ticket. The redeemer holds no issuer secret, so it can
-    /// join but never mint.
-    pub(crate) fn apply_invite(&mut self, root: SymmetricKey) {
-        self.secret = MeshSecret::Invite { root, issuer: None };
-    }
-
     /// The issuer private key, for signing a minted invite (creator only).
     pub(crate) fn issuer_secret(&self) -> Option<&SecretKey> {
         match &self.secret {
             MeshSecret::Invite { issuer, .. } => issuer.as_deref(),
             MeshSecret::Open | MeshSecret::Password(_) => None,
         }
-    }
-
-    /// The issuer public key the id carries — a redeemer verifies each invite's
-    /// signature against it.
-    pub(crate) fn issuer_pubkey(&self) -> Option<&[u8; 32]> {
-        self.config.issuer_pubkey.as_ref()
     }
 
     /// The invite root secret to embed in a minted invite (creator only).
@@ -403,21 +540,28 @@ impl Mesh {
     }
 
     fn encode_bytes(&self) -> Vec<u8> {
-        let config = self.config.to_bytes();
-        let mut buf =
-            Vec::with_capacity(1 + SEED_LEN + 1 + self.name.as_bytes().len() + 2 + config.len());
-        buf.push(VERSION);
-        buf.extend_from_slice(self.seed.as_bytes());
-        // MeshName guarantees 1..=128 UTF-8 bytes, so a 1-byte length is safe.
-        buf.push(self.name.len_u8());
-        buf.extend_from_slice(self.name.as_bytes());
-        let config_len =
-            u16::try_from(config.len()).expect("MeshConfig encodes well within a u16 length");
-        buf.extend_from_slice(&config_len.to_le_bytes());
-        buf.extend_from_slice(&config);
-        buf
+        encode_id(&self.seed, &self.name, &self.config)
     }
+}
 
+/// The wire bytes of an id: version, seed, name, config. The secret is never
+/// part of it.
+fn encode_id(seed: &Seed, name: &MeshName, config: &MeshConfig) -> Vec<u8> {
+    let config = config.to_bytes();
+    let mut buf = Vec::with_capacity(1 + SEED_LEN + 1 + name.as_bytes().len() + 2 + config.len());
+    buf.push(VERSION);
+    buf.extend_from_slice(seed.as_bytes());
+    // MeshName guarantees 1..=128 UTF-8 bytes, so a 1-byte length is safe.
+    buf.push(name.len_u8());
+    buf.extend_from_slice(name.as_bytes());
+    let config_len =
+        u16::try_from(config.len()).expect("MeshConfig encodes well within a u16 length");
+    buf.extend_from_slice(&config_len.to_le_bytes());
+    buf.extend_from_slice(&config);
+    buf
+}
+
+impl LockedMesh {
     fn decode_bytes(bytes: &[u8]) -> Result<Self> {
         let mut pos = 0usize;
         let version = *bytes.get(pos).context("Mesh identifier too short")?;
@@ -460,12 +604,13 @@ impl Mesh {
         }
         let config = MeshConfig::from_bytes(config_raw)?;
 
-        Ok(Mesh {
-            name,
-            seed,
-            secret: MeshSecret::Open,
-            config,
-        })
+        Ok(LockedMesh { name, seed, config })
+    }
+}
+
+impl fmt::Display for LockedMesh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.encode())
     }
 }
 
@@ -476,7 +621,7 @@ impl fmt::Display for Mesh {
     }
 }
 
-impl FromStr for Mesh {
+impl FromStr for LockedMesh {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
