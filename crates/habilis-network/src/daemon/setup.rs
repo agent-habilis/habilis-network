@@ -1646,7 +1646,7 @@ mod browser_tests {
             ..crate::membership::Opts::default()
         };
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
-        let config = super::setup_mesh(
+        let mut config = super::setup_mesh(
             kind,
             super::SetupParams {
                 author,
@@ -1676,6 +1676,18 @@ mod browser_tests {
                 .link_cost(),
             100
         );
+        // The router closes the endpoint that it serves on. The handle closes the underlay, the
+        // WebRTC leg of the underlay has an endpoint of its own, and so has the startup rung probe.
+        if let Some(probe) = config.rung_probe.take() {
+            probe.stop_and_wait().await;
+        }
         config.router.shutdown().await.expect("the router stops");
+        if let Some(handle) = config.multihop.as_ref() {
+            handle.close().await;
+        }
+        if let Some(leg) = config.underlay_webrtc.as_ref() {
+            leg.endpoint.close().await;
+        }
+        config.endpoint.close().await;
     }
 }
