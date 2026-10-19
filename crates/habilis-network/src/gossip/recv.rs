@@ -3275,6 +3275,7 @@ mod left_tests {
         let update = MembershipUpdate {
             returned: false,
             joined_new: false,
+            stale: false,
         };
         let mut app = Inert;
         handle_presence(

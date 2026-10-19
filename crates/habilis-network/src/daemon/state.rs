@@ -376,6 +376,14 @@ pub struct EventLoopState {
     /// it stays bounded by `QUIET_CAP`; `roster_snapshot` only reads it for
     /// peers currently in `quiet`, so a stale entry never surfaces.
     pub(crate) quiet_since: HashMap<Nickname, Instant>,
+    /// Peers that said goodbye, with the timestamp of their `left`. A message of such a peer
+    /// that is stamped no later was sent before the goodbye and reached us after it (a
+    /// re-announce still in flight, a replayed message): it is no proof of presence and brings
+    /// the peer back into neither the roster nor the surfaced arrivals. A message stamped later is
+    /// a real return. Bounded like `quiet`; pruned to the same FIFO on every sweep.
+    pub(crate) left: BoundedFifoSet<Nickname>,
+    /// The timestamps of [`Self::left`], pruned to its membership.
+    pub(crate) left_at: HashMap<Nickname, UnixSecs>,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -960,6 +968,8 @@ impl EventLoopState {
             rendezvous_id: None,
             quiet: BoundedFifoSet::new(QUIET_CAP),
             quiet_since: HashMap::new(),
+            left: BoundedFifoSet::new(QUIET_CAP),
+            left_at: HashMap::new(),
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -1360,6 +1370,19 @@ impl EventLoopState {
     /// stays. It describes the pooled unicast connection, which outlives the
     /// link; erasing it parked every directed frame on a link flap until the
     /// alive tick re-probed (about 40 s with the relink cooldown).
+    /// Remember that `nick` said goodbye at `at`. A later `left` of the same peer moves the mark
+    /// forward, and an older one (a delayed copy) leaves it where it is.
+    pub(crate) fn note_left(&mut self, nick: &Nickname, at: UnixSecs) {
+        self.left.insert(nick.clone());
+        let mark = self.left_at.entry(nick.clone()).or_insert(at);
+        *mark = (*mark).max(at);
+    }
+
+    /// Whether a message of `nick` stamped `at` was sent no later than the goodbye of `nick`.
+    pub(crate) fn sent_before_goodbye(&self, nick: &Nickname, at: UnixSecs) -> bool {
+        self.left_at.get(nick).is_some_and(|left| at <= *left)
+    }
+
     pub(crate) fn unlink(&mut self, peer: EndpointId) {
         self.linked_endpoints.remove(&peer);
         if self.linked_endpoints.is_empty() {
