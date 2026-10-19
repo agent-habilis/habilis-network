@@ -34,7 +34,14 @@ use crate::util::clock::millis_saturating;
 /// override (`iroh::test_utils::run_relay_server` is https-only). No QUIC
 /// address discovery: a tab has no UDP, and the tests that use this force
 /// the relay to be the only path anyway.
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+#[cfg(all(any(test, feature = "iroh-test-utils"), not(target_arch = "wasm32")))]
+#[cfg_attr(
+    not(feature = "iroh-test-utils"),
+    expect(
+        unreachable_pub,
+        reason = "`net` re-exports it only with `iroh-test-utils`"
+    )
+)]
 pub mod test_relay {
     use anyhow::Context as _;
 
@@ -43,6 +50,13 @@ pub mod test_relay {
     ///
     /// # Errors
     /// Binding or spawning the relay server fails.
+    #[cfg_attr(
+        not(feature = "iroh-test-utils"),
+        expect(
+            unreachable_pub,
+            reason = "`net` re-exports it only with `iroh-test-utils`"
+        )
+    )]
     pub async fn spawn_plain() -> anyhow::Result<(iroh::RelayUrl, iroh_relay::server::Server)> {
         let mut config = iroh_relay::server::ServerConfig::default();
         config.relay = Some(iroh_relay::server::RelayConfig::new((

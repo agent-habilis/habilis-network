@@ -1254,6 +1254,9 @@ mod tests {
     // meets a node that has no `udp`.
     #[test]
     async fn a_member_without_udp_gets_a_multihop_handle_when_it_has_webrtc() {
+        let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("a local relay");
         for (transports, expected) in [
             (
                 crate::lookup::TransportOpts {
@@ -1275,6 +1278,7 @@ mod tests {
             let opts = crate::membership::Opts {
                 transport: vec![Transport::WebRtc, Transport::Multihop],
                 lookup: vec![crate::protocol::mesh::Lookup::Relay],
+                relay_urls: vec![relay_url.to_string()],
                 ..crate::membership::Opts::default()
             };
             let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
@@ -1310,9 +1314,13 @@ mod tests {
     // the relay: it has no IP socket, and it has the WebRTC leg that carries its cells.
     #[test]
     async fn the_underlay_of_a_member_without_udp_has_no_ip_socket_and_has_a_webrtc_leg() {
+        let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("a local relay");
         let opts = crate::membership::Opts {
             transport: vec![Transport::WebRtc, Transport::Multihop],
             lookup: vec![crate::protocol::mesh::Lookup::Relay],
+            relay_urls: vec![relay_url.to_string()],
             ..crate::membership::Opts::default()
         };
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
@@ -1628,9 +1636,13 @@ mod browser_tests {
 
     #[test]
     async fn a_browser_member_has_a_multihop_handle_with_the_link_cost_of_a_browser() {
+        let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("a local relay");
         let opts = crate::membership::Opts {
             transport: vec![Transport::WebRtc, Transport::Multihop],
             lookup: vec![Lookup::Relay],
+            relay_urls: vec![relay_url.to_string()],
             ..crate::membership::Opts::default()
         };
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
