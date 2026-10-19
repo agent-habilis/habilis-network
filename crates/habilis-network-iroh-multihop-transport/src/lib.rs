@@ -119,7 +119,7 @@ pub const BROWSER_HOP_FACTOR: u32 = 10;
 
 /// How a [`MultihopHandle`] behaves. The mesh policy and the caller decide it;
 /// an endpoint that is injected into a mesh must be built with the values that
-/// mesh's policy implies (see `check_injected_identity` in the engine).
+/// mesh's policy implies (see `InjectedEndpoint::bind` in the engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HandleConfig {
     /// Whether the relay may carry cells (the mesh's `relay_transport`). Off, the
