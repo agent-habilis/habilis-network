@@ -239,85 +239,90 @@ async fn drive(
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn two_peers_play_a_match_over_a_loopback_mesh() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-    let topic = format!("habilis-network-netplay-loopback-{}", std::process::id());
-    let mut players = vec![spawn(&topic, "alice").await, spawn(&topic, "bob").await];
+#[test]
+fn two_peers_play_a_match_over_a_loopback_mesh() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(
+        guard,
+        std::thread::available_parallelism().map_or(1, usize::from),
+        async {
+            let topic = format!("habilis-network-netplay-loopback-{}", std::process::id());
 
-    // 1. The mesh forms and both peers see each other in the lobby.
-    let met = drive(&mut players, Duration::from_secs(30), |players| {
-        players.iter().all(|player| {
-            player
+            let mut players = vec![spawn(&topic, "alice").await, spawn(&topic, "bob").await];
+
+            // 1. The mesh forms and both peers see each other in the lobby.
+            let met = drive(&mut players, Duration::from_secs(30), |players| {
+                players.iter().all(|player| {
+                    player
+                        .lobby
+                        .as_ref()
+                        .is_some_and(|lobby| lobby.present().len() >= 2)
+                })
+            })
+            .await;
+            assert!(met, "the two peers never found each other in the lobby");
+
+            // 2. One of them starts the match. The other adopts it off the wire.
+            let start = players[0]
                 .lobby
+                .as_mut()
+                .expect("alice has a lobby")
+                .propose()
+                .expect("two distinct players are present");
+            players[0]
+                .transport
                 .as_ref()
-                .is_some_and(|lobby| lobby.present().len() >= 2)
-        })
-    })
-    .await;
-    assert!(met, "the two peers never found each other in the lobby");
+                .expect("alice still holds her transport")
+                .broadcast_lobby(&start);
 
-    // 2. One of them starts the match. The other adopts it off the wire.
-    let start = players[0]
-        .lobby
-        .as_mut()
-        .expect("alice has a lobby")
-        .propose()
-        .expect("two distinct players are present");
-    players[0]
-        .transport
-        .as_ref()
-        .expect("alice still holds her transport")
-        .broadcast_lobby(&start);
+            // 3. Both build a session and complete the rollback handshake.
+            let running = drive(&mut players, Duration::from_secs(30), |players| {
+                players.iter().all(|player| {
+                    player
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.state() == SessionState::Running)
+                })
+            })
+            .await;
+            assert!(running, "the rollback handshake never completed");
 
-    // 3. Both build a session and complete the rollback handshake.
-    let running = drive(&mut players, Duration::from_secs(30), |players| {
-        players.iter().all(|player| {
-            player
-                .session
-                .as_ref()
-                .is_some_and(|session| session.state() == SessionState::Running)
-        })
-    })
-    .await;
-    assert!(running, "the rollback handshake never completed");
+            // 4. And they actually play.
+            let played = drive(&mut players, Duration::from_secs(30), |players| {
+                players.iter().all(|player| player.state.frame >= 30)
+            })
+            .await;
+            assert!(
+                played,
+                "frames did not advance: {:?}",
+                players
+                    .iter()
+                    .map(|player| player.state.frame)
+                    .collect::<Vec<_>>()
+            );
 
-    // 4. And they actually play.
-    let played = drive(&mut players, Duration::from_secs(30), |players| {
-        players.iter().all(|player| player.state.frame >= 30)
-    })
-    .await;
-    assert!(
-        played,
-        "frames did not advance: {:?}",
-        players
-            .iter()
-            .map(|player| player.state.frame)
-            .collect::<Vec<_>>()
+            // The claim under test: both peers, having exchanged only inputs,
+            // independently agree on the state — and say so via checksums.
+            assert!(
+                players.iter().all(|player| !player.desynced),
+                "a peer reported a checksum mismatch"
+            );
+
+            let frames: Vec<i32> = players.iter().map(|player| player.state.frame).collect();
+            let lowest = *frames.iter().min().expect("two players");
+            let highest = *frames.iter().max().expect("two players");
+            assert!(
+                highest - lowest <= 16,
+                "peers drifted apart instead of pacing together: {frames:?}"
+            );
+
+            // Leave, rather than letting the runtime drop these mid-flight.
+            // `iroh-gossip`'s actor loop `expect`s on its `JoinSet`, so a task
+            // cancelled by runtime shutdown panics ("connection task panicked")
+            // and fails an otherwise passing test.
+            for player in players {
+                player.node.leave().await.expect("leave the mesh cleanly");
+            }
+        },
     );
-
-    // The claim under test: both peers, having exchanged only inputs,
-    // independently agree on the state — and say so via checksums.
-    assert!(
-        players.iter().all(|player| !player.desynced),
-        "a peer reported a checksum mismatch"
-    );
-
-    let frames: Vec<i32> = players.iter().map(|player| player.state.frame).collect();
-    let lowest = *frames.iter().min().expect("two players");
-    let highest = *frames.iter().max().expect("two players");
-    assert!(
-        highest - lowest <= 16,
-        "peers drifted apart instead of pacing together: {frames:?}"
-    );
-
-    // Leave, rather than letting the runtime drop these mid-flight.
-    // `iroh-gossip`'s actor loop `expect`s on its `JoinSet`, so a task
-    // cancelled by runtime shutdown panics ("connection task panicked")
-    // and fails an otherwise passing test.
-    for player in players {
-        player.node.leave().await.expect("leave the mesh cleanly");
-    }
 }

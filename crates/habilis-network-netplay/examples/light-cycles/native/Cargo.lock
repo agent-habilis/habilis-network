@@ -1714,6 +1714,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "habilis-network-test-tracing"
+version = "0.6.0"
+dependencies = [
+ "habilis-network-test-tracing-macros",
+ "libc",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "habilis-network-test-tracing-macros"
+version = "0.6.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "habilis-network-util"
 version = "0.6.0"
 dependencies = [
@@ -2603,6 +2623,7 @@ dependencies = [
  "crossterm",
  "habilis-network",
  "habilis-network-netplay",
+ "habilis-network-test-tracing",
  "proptest",
  "serde",
  "serde_json",
