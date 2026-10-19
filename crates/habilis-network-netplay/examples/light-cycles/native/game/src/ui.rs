@@ -350,6 +350,7 @@ fn flush_run(owner: Option<u8>, run: &mut String, spans: &mut Vec<View>) {
 #[cfg(test)]
 mod tests {
     use super::room_label;
+    use habilis_network_test_tracing::test;
 
     /// Regression: the room code used to be uppercased for display, but
     /// `crypto::topic_seed` hashes the topic byte-for-byte. A player who

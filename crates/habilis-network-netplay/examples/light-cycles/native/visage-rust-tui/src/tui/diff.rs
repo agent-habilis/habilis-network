@@ -190,6 +190,7 @@ mod tests {
     use super::{CLEAR_LINE, RESET, diff};
     use crate::tui::color::palette;
     use crate::tui::paint::ScreenBuffer;
+    use habilis_network_test_tracing::test;
 
     fn set(buffer: &mut ScreenBuffer, x: i32, y: i32, s: &str) {
         let i =

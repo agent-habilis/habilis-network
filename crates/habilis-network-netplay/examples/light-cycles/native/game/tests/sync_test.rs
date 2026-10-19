@@ -15,6 +15,7 @@
 //! starts.
 
 use habilis_network_netplay::{PlayerHandle, Request, RollbackError, SyncTestSession};
+use habilis_network_test_tracing::test;
 
 use light_cycles_native::app::LightCycles;
 use light_cycles_native::grid::{Dir, Input};

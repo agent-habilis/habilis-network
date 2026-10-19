@@ -377,6 +377,7 @@ mod tests {
     use super::LayoutState;
     use crate::tui::node::{Arena, Tag};
     use crate::view::{Direction, Justify};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_row_of_two_fixed_children_places_them_side_by_side() {

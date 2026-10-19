@@ -400,6 +400,7 @@ mod tests {
     use super::{ScreenBuffer, paint};
     use crate::tui::node::{Arena, Tag};
     use crate::tui::width::string_width;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_text_node_writes_its_content_into_the_buffer() {

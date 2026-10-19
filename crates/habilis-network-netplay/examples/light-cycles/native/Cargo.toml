@@ -17,6 +17,7 @@ publish = false
 [workspace.dependencies]
 habilis-network = { path = "../../../../habilis-network" }
 habilis-network-netplay = { path = "../../.." }
+habilis-network-test-tracing = { path = "../../../../habilis-network-test-tracing" }
 
 [workspace.lints.rust]
 # A warning is a test failure: the output of a build and of a test stays clean.

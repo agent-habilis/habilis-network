@@ -183,6 +183,7 @@ mod tests {
     use super::{Instance, Yield};
     use crate::reactive::Signal;
     use crate::view::View;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_loop_component_re_renders_from_the_coroutine_on_every_resume() {

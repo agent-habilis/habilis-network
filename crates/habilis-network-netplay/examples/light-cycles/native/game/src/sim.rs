@@ -220,6 +220,7 @@ mod tests {
     use super::{Outcome, World, outcome, step};
     use crate::grid::{Dir, Input};
     use crate::round::RoundDescriptor;
+    use habilis_network_test_tracing::test;
     use proptest::prelude::*;
 
     /// Runs `count` ticks with nobody steering.
