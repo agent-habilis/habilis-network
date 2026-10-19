@@ -996,12 +996,11 @@ fn retain_and_index(
         // is cryptographic proof of equivocation — surface a `fork` once per
         // offending key (order-independent; we keep both).
         if let Some(seq) = message.seq
-            && let Some(author) = message.author_key()
-            && state.note_msg_seq(&author, seq, hash)
+            && state.note_msg_seq(&message.key(), seq, hash)
         {
             ctx.sink.emit(NodeEvent::Fork {
                 nickname: message.author.clone(),
-                pubkey: author.to_string(),
+                pubkey: message.key().to_string(),
                 seq,
             });
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
@@ -1020,10 +1019,8 @@ pub(super) fn push_to_log(state: &mut EventLoopState, message: Verified) {
     if let Some(evicted) = state.message_log.push(message) {
         let evicted_hash = evicted.content_hash();
         state.forget_hash(&evicted_hash);
-        if let Some(seq) = evicted.seq
-            && let Some(author) = evicted.author_key()
-        {
-            state.forget_msg_seq(&author, seq, &evicted_hash);
+        if let Some(seq) = evicted.seq {
+            state.forget_msg_seq(&evicted.key(), seq, &evicted_hash);
         }
     }
 }
@@ -1499,7 +1496,7 @@ fn peer_info_graft_below(max_peers: usize, members: usize) -> usize {
 }
 
 async fn handle_peer_info(
-    message: &Message,
+    message: &Verified,
     content: Bytes,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
@@ -1531,7 +1528,8 @@ async fn handle_peer_info(
     // The only binding a digest's answer may follow: this signer proved it
     // owns `peer_id`. A `PeerInfo` arrives many times, so a known pair is not
     // checked again.
-    if let (Some(signer), Some(proof)) = (message.author_key(), parsed["proof"].as_str())
+    let signer = message.key();
+    if let Some(proof) = parsed["proof"].as_str()
         && state.proven_endpoints.get(&signer) != Some(peer_id)
         && crate::transport::endpoint_proof::verifies(peer_id, ctx.mesh, &signer, proof)
     {
@@ -1541,19 +1539,17 @@ async fn handle_peer_info(
     }
     // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
     // endpoint is believed.
-    if let Some(signer) = message.author_key() {
-        let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
-        state.note_rival_beacon_flag(
-            ctx.endpoint.id(),
-            signer,
-            peer_id,
-            RivalFlag {
-                proven,
-                held: parsed["beacon"].as_bool() == Some(true),
-            },
-            Instant::now(),
-        );
-    }
+    let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
+    state.note_rival_beacon_flag(
+        ctx.endpoint.id(),
+        signer,
+        peer_id,
+        RivalFlag {
+            proven,
+            held: parsed["beacon"].as_bool() == Some(true),
+        },
+        Instant::now(),
+    );
     // Remember every advertised peer for the rendezvous-independent
     // re-bridge, and register its address once. Unconditional on link
     // state — a `PeerInfo` normally arrives over an already-formed link,

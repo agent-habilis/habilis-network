@@ -308,10 +308,10 @@ pub struct EventLoopState {
     /// than the nickname, which an author picks freely. The key is an `Option`
     /// because a digest built with no signature is a valid input of the tests: `None`
     /// is its own bucket, as the empty string was.
-    digest_serves: Cooldown<Option<AuthorKey>>,
+    digest_serves: Cooldown<AuthorKey>,
     /// When we last reported an author whose digest we could not read. An `Option` key
     /// for the same reason as `digest_serves`.
-    digest_unreadable: Cooldown<Option<AuthorKey>>,
+    digest_unreadable: Cooldown<AuthorKey>,
     /// Where a digest answer goes, so that the loop never waits to send it. The
     /// task that drains it takes `resend_receiver` when the loop starts.
     pub(crate) resend_outbox: crate::transport::ResendOutbox,
@@ -1651,8 +1651,8 @@ impl EventLoopState {
     /// slot is present. Mirrors the store's synthesis exactly.
     fn reassemble_from_log(&self, trigger: &Verified) -> Option<Authored> {
         let shard = trigger.shard.as_ref()?;
-        // A message that reaches reassembly passed the signature gate, so it has a key.
-        let author = trigger.author_key()?;
+        // A verified shard always has its author key.
+        let author = trigger.key();
         if !crate::protocol::message::shard_fits_log(trigger) {
             return None;
         }
@@ -2008,7 +2008,7 @@ impl EventLoopState {
     /// so without a per-peer gate a single crafted digest buys that from every
     /// member — an amplifier that grows with the mesh. Serving at most one per
     /// window per author bounds it to the honest cadence.
-    pub fn admit_digest(&mut self, author: Option<AuthorKey>, now: Instant) -> bool {
+    pub fn admit_digest(&mut self, author: AuthorKey, now: Instant) -> bool {
         if self.digest_serves.on_cooldown(&author, now) {
             return false;
         }
@@ -2038,7 +2038,7 @@ impl EventLoopState {
     /// Whether to report that this author's digest could not be read: once per
     /// author per window. The author runs a build with another digest format, or
     /// sends garbage; either way the two never repair each other's gaps.
-    pub fn report_unreadable_digest(&mut self, author: Option<AuthorKey>, now: Instant) -> bool {
+    pub fn report_unreadable_digest(&mut self, author: AuthorKey, now: Instant) -> bool {
         if self.digest_unreadable.on_cooldown(&author, now) {
             return false;
         }
@@ -3469,20 +3469,20 @@ mod tests {
         let mut state = fresh_state();
         let now = Instant::now();
         assert!(
-            state.report_unreadable_digest(Some(author_of("aa")), now),
+            state.report_unreadable_digest(author_of("aa"), now),
             "the first is reported"
         );
         assert!(
-            !state.report_unreadable_digest(Some(author_of("aa")), now + Duration::from_secs(10)),
+            !state.report_unreadable_digest(author_of("aa"), now + Duration::from_secs(10)),
             "the same author every round is one line, not one line per round"
         );
         assert!(
-            state.report_unreadable_digest(Some(author_of("bb")), now),
+            state.report_unreadable_digest(author_of("bb"), now),
             "another author is reported on its own"
         );
         assert!(
             state.report_unreadable_digest(
-                Some(author_of("aa")),
+                author_of("aa"),
                 now + super::UNREADABLE_DIGEST_LOG_WINDOW + Duration::from_secs(1)
             ),
             "the author is reported again after the window"
@@ -3496,22 +3496,19 @@ mod tests {
         let window = habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN;
 
         assert!(
-            state.admit_digest(Some(author_of("aa")), now),
+            state.admit_digest(author_of("aa"), now),
             "the first is served"
         );
         assert!(
-            !state.admit_digest(Some(author_of("aa")), now),
+            !state.admit_digest(author_of("aa"), now),
             "a second digest inside the window must not buy another round of resends"
         );
         assert!(
-            state.admit_digest(Some(author_of("bb")), now),
+            state.admit_digest(author_of("bb"), now),
             "one peer's flood must not deny another peer service"
         );
         assert!(
-            state.admit_digest(
-                Some(author_of("aa")),
-                now + window + Duration::from_millis(1)
-            ),
+            state.admit_digest(author_of("aa"), now + window + Duration::from_millis(1)),
             "the honest cadence resumes after the window"
         );
     }

@@ -8,9 +8,7 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
 use habilis_network::protocol::message::Verified;
-use habilis_network::protocol::{
-    AppFrameParams, AppTag, AuthorKey, MessageBody, Nickname,
-};
+use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody, Nickname};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -143,11 +141,7 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
         let Some(tag) = frame.message.kind.app_tag().map(AppTag::as_str) else {
             return false;
         };
-        // A frame that reached the app passed the signature gate, so it has a
-        // key. One without it could be addressed to nobody.
-        let Some(pubkey) = frame.message.author_key() else {
-            return false;
-        };
+        let pubkey = frame.message.key();
 
         // Learn the pubkey -> nickname pairing from any frame. The signed
         // pubkey is the identity; the nickname is only how `send_app`

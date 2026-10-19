@@ -93,15 +93,15 @@ impl ReassemblyStore {
     /// Buffer one shard; when it completes its group, synthesize and return
     /// the logical message and free the group's budget. The caller keys
     /// surfacing-once separately (`reassembled_groups`). A message with no shard header,
-    /// or with no author key, is dropped: a shard that passed the signature gate has both.
+    /// is dropped: a `Verified` shard always has its author key.
     ///
     /// # Panics
     /// Never: the group that just completed is by construction still stored.
     pub fn ingest(&mut self, shard_msg: &Verified, now: Instant) -> ShardIngest {
-        let (Some(shard), Some(author)) = (shard_msg.shard.as_ref(), shard_msg.author_key()) else {
+        let Some(shard) = shard_msg.shard.as_ref() else {
             return ShardIngest::Dropped;
         };
-        let key: GroupKey = (author, shard.group.clone());
+        let key: GroupKey = (shard_msg.key(), shard.group.clone());
         let charge = slot_charge(shard_msg.body.as_str().len());
 
         if let Some(group) = self.groups.get(&key) {
@@ -248,8 +248,8 @@ impl ReassemblyStore {
     /// store had only a fragment of (e.g. post-TTL, when dedup let just one healed shard
     /// re-ingest). A message with no shard header or no author key names no group.
     pub fn forget(&mut self, shard_msg: &Verified) {
-        if let (Some(shard), Some(author)) = (shard_msg.shard.as_ref(), shard_msg.author_key()) {
-            self.evict(&(author, shard.group.clone()));
+        if let Some(shard) = shard_msg.shard.as_ref() {
+            self.evict(&(shard_msg.key(), shard.group.clone()));
         }
     }
 

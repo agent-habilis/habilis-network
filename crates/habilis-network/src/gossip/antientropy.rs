@@ -198,8 +198,8 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
 /// Say once per author that its digest could not be read. A build with another
 /// window format sends one every round, and the two builds never repair each
 /// other's gaps: without this line nothing tells the user why.
-fn report_unreadable_digest(message: &Message, state: &mut EventLoopState) {
-    if state.report_unreadable_digest(message.author_key(), Instant::now()) {
+fn report_unreadable_digest(message: &Verified, state: &mut EventLoopState) {
+    if state.report_unreadable_digest(message.key(), Instant::now()) {
         tracing::warn!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -243,7 +243,7 @@ pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: 
     // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
     // small frame into that much flooding from every member that hears it —
     // the cost scaling with the mesh rather than with the sender.
-    if !state.admit_digest(message.author_key(), Instant::now()) {
+    if !state.admit_digest(message.key(), Instant::now()) {
         tracing::debug!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -465,9 +465,8 @@ fn heads_digest(
 /// digest with made-up heads would be new every time.
 #[derive(Debug, Default)]
 pub(crate) struct ServeBudget {
-    /// The asker's key is an `Option` because a digest built with no signature is a valid
-    /// input of the tests: `None` is its own bucket, as the empty string was.
-    windows: HashMap<(Option<AuthorKey>, Channel, Plane), Served>,
+    /// The asker's key: every digest is verified, so it always has one.
+    windows: HashMap<(AuthorKey, Channel, Plane), Served>,
 }
 
 #[derive(Debug)]
@@ -491,7 +490,7 @@ impl ServeBudget {
     /// Whether an answer to these heads may go out now.
     pub(crate) fn admits(
         &self,
-        key: &(Option<AuthorKey>, Channel, Plane),
+        key: &(AuthorKey, Channel, Plane),
         heads: u64,
         now: Instant,
     ) -> bool {
@@ -509,12 +508,7 @@ impl ServeBudget {
     }
 
     /// Record an answer to these heads, dropping windows that have ended.
-    pub(crate) fn note(
-        &mut self,
-        key: (Option<AuthorKey>, Channel, Plane),
-        heads: u64,
-        now: Instant,
-    ) {
+    pub(crate) fn note(&mut self, key: (AuthorKey, Channel, Plane), heads: u64, now: Instant) {
         self.windows
             .retain(|_, served| now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN);
         let served = self.windows.entry(key).or_insert_with(|| Served {
@@ -732,7 +726,7 @@ impl FastRounds {
 /// it when this ask cannot go out or its answer is lost.
 async fn ask_back(
     channel: Channel,
-    digest: &Message,
+    digest: &Verified,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) {
@@ -742,10 +736,7 @@ async fn ask_back(
     if state.doc(channel).holds_heads(&body.heads) {
         return;
     }
-    // A digest that passed the signature gate has a key. One without it names no peer to ask.
-    let Some(key) = digest.author_key() else {
-        return;
-    };
+    let key = digest.key();
     let now = Instant::now();
     state
         .fast_rounds
@@ -897,10 +888,9 @@ pub(crate) async fn handle_state_digest(
     }
     let now = Instant::now();
     let heads = heads_key(message);
-    let serve = |plane| (message.author_key(), channel, plane);
-    let target = message
-        .author_key()
-        .and_then(|key| crate::transport::unicast_answer_target(&key, state));
+    let author = message.key();
+    let serve = |plane| (author, channel, plane);
+    let target = crate::transport::unicast_answer_target(&author, state);
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -990,7 +980,7 @@ fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -
     };
     state.doc(channel).changes_since_not_by(
         &body.heads,
-        digest.author_key().as_ref(),
+        Some(&digest.key()),
         antientropy_max_resend(),
     )
 }
@@ -1007,15 +997,15 @@ mod budget_tests {
         ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY, antientropy_max_resend,
     };
 
-    fn key() -> (Option<AuthorKey>, Channel, Plane) {
-        (Some(author_of("asker")), Channel::State, Plane::Unicast)
+    fn key() -> (AuthorKey, Channel, Plane) {
+        (author_of("asker"), Channel::State, Plane::Unicast)
     }
 
     #[test]
     fn the_serve_budget_takes_new_heads_up_to_its_count() {
         let now = Instant::now();
         let mut budget = ServeBudget::default();
-        let gossip = (Some(author_of("asker")), Channel::State, Plane::Gossip);
+        let gossip = (author_of("asker"), Channel::State, Plane::Gossip);
         budget.note(gossip, 1, now);
         assert!(
             !budget.admits(&gossip, 2, now),

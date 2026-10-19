@@ -200,7 +200,7 @@ impl MessageLog {
             let Some(shard) = &msg.shard else { continue };
             if shard.group == *group
                 && shard.total == total
-                && msg.author_key().as_ref() == Some(author)
+                && msg.key() == *author
                 && let Some(slot) = slots.get_mut(shard.idx as usize)
                 && slot.is_none()
             {

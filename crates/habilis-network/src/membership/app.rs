@@ -12,9 +12,7 @@ use crate::embed::{
 };
 use crate::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
 use crate::protocol::message::Authored;
-use crate::protocol::{
-    AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname,
-};
+use crate::protocol::{AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
 /// The one `App`-frame tag a member sends: a whole UTF-8 text, broadcast or
@@ -1089,8 +1087,8 @@ fn route_diag(state: &EventLoopState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::Message;
     use super::*;
+    use crate::protocol::Message;
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, RelayLadder};
     use crate::runtime::derive_topic_mesh_config;
 
