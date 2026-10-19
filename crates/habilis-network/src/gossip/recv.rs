@@ -1231,7 +1231,7 @@ enum Gated {
     Drop,
     Pass {
         class: Option<AppClass>,
-        view: Box<Authored>,
+        view: Authored,
     },
 }
 
@@ -1268,7 +1268,7 @@ fn gate_and_decrypt<F: Opened>(
             // addressee), so it needs no classification here.
             return Gated::Pass {
                 class: None,
-                view: Box::new(frame.authored()),
+                view: frame.authored(),
             };
         }
         return gate_directed_to_us(frame, state, app);
@@ -1290,7 +1290,7 @@ fn gate_and_decrypt<F: Opened>(
         };
         return Gated::Pass {
             class: Some(class),
-            view: Box::new(view),
+            view,
         };
     }
     // Broadcast app / infra logical frames validate as they are. An infra kind has
@@ -1300,14 +1300,11 @@ fn gate_and_decrypt<F: Opened>(
         Some(_) => match gate_app_payload(&view, app) {
             Some(class) => Gated::Pass {
                 class: Some(class),
-                view: Box::new(view),
+                view,
             },
             None => Gated::Drop,
         },
-        None => Gated::Pass {
-            class: None,
-            view: Box::new(view),
-        },
+        None => Gated::Pass { class: None, view },
     }
 }
 
@@ -1327,7 +1324,7 @@ fn gate_directed_to_us<F: Opened>(frame: &F, state: &EventLoopState, app: &dyn N
         };
         return Gated::Pass {
             class: Some(class),
-            view: Box::new(wire),
+            view: wire,
         };
     }
     let Some(body) = decrypt_directed(frame, state) else {
@@ -1341,7 +1338,7 @@ fn gate_directed_to_us<F: Opened>(frame: &F, state: &EventLoopState, app: &dyn N
     };
     Gated::Pass {
         class: Some(class),
-        view: Box::new(view),
+        view,
     }
 }
 

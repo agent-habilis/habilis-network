@@ -2,6 +2,7 @@
 //! bytes. [`Authored`] says who wrote a body that may have been derived from one.
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 use serde::{Serialize, Serializer};
 
@@ -78,15 +79,19 @@ use crate::AuthorKey;
 /// ```
 #[derive(Debug, Clone)]
 pub struct Verified {
-    message: Message,
+    /// Shared, so a copy of the proof (and the view a gate makes of it) is a count bump.
+    message: Arc<Message>,
     key: AuthorKey,
 }
 
 impl Verified {
     /// Wrap a message whose signature is known to be valid under `key`. Only the message module
     /// calls it, from [`Message::sign`] and [`Message::verify`].
-    pub(super) const fn new(message: Message, key: AuthorKey) -> Self {
-        Self { message, key }
+    pub(super) fn new(message: Message, key: AuthorKey) -> Self {
+        Self {
+            message: Arc::new(message),
+            key,
+        }
     }
 
     /// The key that signed the message. Never absent: a `Verified` has a signature.
@@ -98,7 +103,7 @@ impl Verified {
     /// The message, without its proof.
     #[must_use]
     pub fn into_message(self) -> Message {
-        self.message
+        Arc::unwrap_or_clone(self.message)
     }
 
     /// The wire bytes of the message: [`Message::serialize`], here, so a call on a `Verified` does
@@ -108,14 +113,14 @@ impl Verified {
     ///
     /// Propagates [`Message::serialize`] failure.
     pub fn serialize(&self) -> anyhow::Result<Vec<u8>> {
-        self.message.serialize()
+        (*self.message).serialize()
     }
 
     /// The proof that the author is `key`, with the message's own body.
     #[must_use]
     pub fn authored(&self) -> Authored {
         Authored {
-            message: self.message.clone(),
+            message: Arc::clone(&self.message),
             key: self.key,
         }
     }
@@ -131,10 +136,10 @@ impl Verified {
         open: impl FnOnce(&MessageBody) -> Option<MessageBody>,
     ) -> Option<Authored> {
         let body = open(&self.message.body)?;
-        let mut message = self.message.clone();
+        let mut message = (*self.message).clone();
         message.body = body;
         Some(Authored {
-            message,
+            message: Arc::new(message),
             key: self.key,
         })
     }
@@ -162,7 +167,7 @@ impl Deref for Verified {
 
 impl Serialize for Verified {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        Serialize::serialize(&self.message, serializer)
+        Serialize::serialize(&*self.message, serializer)
     }
 }
 
@@ -186,15 +191,19 @@ impl Serialize for Verified {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Authored {
-    message: Message,
+    /// Shared with the [`Verified`] it came from, so a view is a count bump.
+    message: Arc<Message>,
     key: AuthorKey,
 }
 
 impl Authored {
     /// A proof for `message`, whose author `key` proved. Only [`Verified::authored`],
     /// [`Verified::open_with`] and the reassembly that builds a logical message call it.
-    pub(crate) const fn new(message: Message, key: AuthorKey) -> Self {
-        Self { message, key }
+    pub(crate) fn new(message: Message, key: AuthorKey) -> Self {
+        Self {
+            message: Arc::new(message),
+            key,
+        }
     }
 
     /// The key that signed the message this body came from.
@@ -211,15 +220,14 @@ impl Authored {
         open: impl FnOnce(&MessageBody) -> Option<MessageBody>,
     ) -> Option<Authored> {
         let body = open(&self.message.body)?;
-        let mut message = self.message.clone();
+        let mut message = (*self.message).clone();
         message.body = body;
         Some(Authored {
-            message,
+            message: Arc::new(message),
             key: self.key,
         })
     }
 }
-
 
 impl Deref for Authored {
     type Target = Message;
