@@ -136,12 +136,19 @@ impl Verified {
         open: impl FnOnce(&MessageBody) -> Option<MessageBody>,
     ) -> Option<Authored> {
         let body = open(&self.message.body)?;
+        Some(self.with_body(body))
+    }
+
+    /// The proof with `body` in place of the wire body. It cannot fail: the caller supplies the
+    /// body, and the author is the one this proof already names.
+    #[must_use]
+    pub fn with_body(&self, body: MessageBody) -> Authored {
         let mut message = (*self.message).clone();
         message.body = body;
-        Some(Authored {
+        Authored {
             message: Arc::new(message),
             key: self.key,
-        })
+        }
     }
 
     /// The one door around [`Message::verify`]: a `Verified` for a message whose signature was not
@@ -175,7 +182,28 @@ impl Serialize for Verified {
 /// its signature is not checked and it has no wire form: it cannot be serialized, and it cannot go
 /// back on the wire or into the log.
 ///
+/// The `Deref` to [`Message`] is a read door, not a wire door. The `Serialize` impl of `Message` is
+/// still reachable through `&*authored`, so the rule rests on the senders: every sender takes a
+/// [`Verified`], and only [`Verified::serialize`] produces wire bytes.
+///
 /// # Examples
+///
+/// Calling `serialize` on an `Authored` does not reach the wire, because the message's own method is
+/// private to the crate:
+///
+/// ```compile_fail,E0624
+/// use habilis_network_protocol::message::Message;
+///
+/// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+///
+/// let authored = Message::parse(SIGNED.as_bytes())
+///     .unwrap()
+///     .verify()
+///     .unwrap()
+///     .authored();
+/// let _ = authored.serialize();
+/// ```
+///
 ///
 /// ```compile_fail,E0277
 /// use habilis_network_protocol::message::Message;
@@ -220,12 +248,18 @@ impl Authored {
         open: impl FnOnce(&MessageBody) -> Option<MessageBody>,
     ) -> Option<Authored> {
         let body = open(&self.message.body)?;
+        Some(self.with_body(body))
+    }
+
+    /// The proof with `body` in place of its body. It cannot fail, as [`Verified::with_body`].
+    #[must_use]
+    pub fn with_body(&self, body: MessageBody) -> Authored {
         let mut message = (*self.message).clone();
         message.body = body;
-        Some(Authored {
+        Authored {
             message: Arc::new(message),
             key: self.key,
-        })
+        }
     }
 }
 

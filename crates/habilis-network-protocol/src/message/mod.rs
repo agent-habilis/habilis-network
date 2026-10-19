@@ -845,10 +845,11 @@ impl Message {
         Self::new(mesh, author, MessageKind::StateDigest, body)
     }
 
-    /// Serialize to compact JSON bytes for the gossip wire.
+    /// Serialize to compact JSON bytes for the gossip wire. Outside this crate only a [`Verified`]
+    /// serializes, through [`Verified::serialize`]: an unverified or an authored view has no wire form.
     /// # Errors
     /// Serialization of a field fails.
-    pub fn serialize(&self) -> Result<Vec<u8>> {
+    pub(crate) fn serialize(&self) -> Result<Vec<u8>> {
         let bytes = serde_json::to_vec(self).context("failed to serialize message")?;
         if bytes.len() > MAX_MESSAGE_SIZE {
             bail!(

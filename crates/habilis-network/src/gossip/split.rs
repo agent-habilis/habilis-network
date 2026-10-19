@@ -485,8 +485,10 @@ mod tests {
             &author,
             crate::testing::nick("bob"),
             &crate::protocol::MessageId::random(),
-        );
-        let request = crate::protocol::Message::new_ping(&mesh, &author);
+        )
+        .sign(&crate::protocol::Identity::generate());
+        let request = crate::protocol::Message::new_ping(&mesh, &author)
+            .sign(&crate::protocol::Identity::generate());
         for message in [answer, request] {
             let bytes = message.serialize().expect("serialize");
             assert_ne!(bytes.first(), Some(&FRAME_KIND), "{bytes:?}");

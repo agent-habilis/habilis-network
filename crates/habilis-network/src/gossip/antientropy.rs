@@ -1671,7 +1671,8 @@ mod tests {
         let mesh = MeshId::from(
             "6bLvZNPGxuqnsbaPVGwf277NyTp8cYPCMiBxXED8d6TyBZpDDzZADkKHL7tTB1EjFagbCXYZ",
         );
-        let digest = Message::new_digest(&mesh, &Nickname::from("a-fairly-long-nickname"), body);
+        let digest = Message::new_digest(&mesh, &Nickname::from("a-fairly-long-nickname"), body)
+            .sign(&Identity::generate());
         let wire = digest.serialize().expect("serialize digest");
         assert!(
             wire.len() <= crate::util::consts::MAX_MESSAGE_SIZE,
@@ -1763,7 +1764,7 @@ mod tests {
         assert_eq!(back.heads, heads);
 
         let body = MessageBody::new(json).expect("heads body has no control chars");
-        let digest = Message::new_state_digest(&mesh, &author, body);
+        let digest = Message::new_state_digest(&mesh, &author, body).sign(&Identity::generate());
         let wire = digest.serialize().expect("serialize state digest");
         assert!(
             wire.len() <= crate::util::consts::MAX_MESSAGE_SIZE,
