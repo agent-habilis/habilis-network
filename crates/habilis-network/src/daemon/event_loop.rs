@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
-use crate::protocol::message::Verified;
+use crate::protocol::message::{Authored, Verified};
 use crate::protocol::{AuthorKey, MeshId, Message, Nickname, UnixSecs};
 use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
@@ -630,7 +630,7 @@ struct EventLoop<A: NodeDriver> {
     external_quit_rx: Option<mpsc::Receiver<()>>,
     /// The in-process typed session channel (in-process: library API or MCP); `None` on the CLI.
     external_req_rx: Option<mpsc::Receiver<A::Session>>,
-    external_msg_tx: Option<broadcast::Sender<Message>>,
+    external_msg_tx: Option<broadcast::Sender<Authored>>,
     quit_rx: mpsc::Receiver<()>,
     exit_on_quit: bool,
     /// The application's localhost HTTP binding request channel; `None` off.
@@ -1281,7 +1281,7 @@ pub(super) struct CtxParts<'a> {
     pub(super) our_pubkey: AuthorKey,
     pub(super) max_peers: usize,
     pub(super) rendezvous_id: EndpointId,
-    pub(super) external_msg_tx: Option<&'a broadcast::Sender<Message>>,
+    pub(super) external_msg_tx: Option<&'a broadcast::Sender<Authored>>,
     pub(super) sink: &'a dyn NodeSink,
 }
 

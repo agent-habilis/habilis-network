@@ -1414,7 +1414,7 @@ fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
 /// classification (`None` for an infra frame).
 fn maybe_push_inbound(
     ctx: &HandlerCtx<'_>,
-    message: &Message,
+    message: &Authored,
     surfaceable: bool,
     class: Option<&AppClass>,
 ) {

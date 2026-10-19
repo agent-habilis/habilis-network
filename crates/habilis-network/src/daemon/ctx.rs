@@ -5,7 +5,8 @@ use tokio::sync::broadcast;
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::identity::Identity;
-use crate::protocol::{AuthorKey, MeshId, Message, Nickname};
+use crate::protocol::message::Authored;
+use crate::protocol::{AuthorKey, MeshId, Nickname};
 use crate::transport::MeshSender;
 
 /// Immutable loop-level context threaded through every handler.
@@ -31,7 +32,7 @@ pub struct HandlerCtx<'a> {
     /// (`DriverMode::InProcess::msg_tx`); every inbound message that survives
     /// the self-author filter is forwarded here before kind routing. `None` for
     /// the CLI, and for an in-process consumer that drains frames some other way.
-    pub(crate) external_msg_tx: Option<&'a broadcast::Sender<Message>>,
+    pub(crate) external_msg_tx: Option<&'a broadcast::Sender<Authored>>,
     /// Per-loop generic event sink: the engine emits
     /// [`NodeEvent`](crate::gossip::event::NodeEvent) through it and never names
     /// the app's concrete `Output`. Borrowed for the loop's lifetime; handlers

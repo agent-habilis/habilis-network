@@ -12,7 +12,8 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::mesh::{Mesh, MeshName};
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::message::Authored;
+use crate::protocol::{MeshId, Nickname};
 
 use crate::beacon;
 
@@ -32,7 +33,7 @@ pub enum DriverMode {
     /// session, or an app that consumes every frame inside the loop). Never
     /// exits the process and binds no socket; shutdown on `quit_rx`.
     InProcess {
-        msg_tx: Option<broadcast::Sender<Message>>,
+        msg_tx: Option<broadcast::Sender<Authored>>,
         quit_rx: mpsc::Receiver<()>,
         /// Whether this session registers the process-wide
         /// ctrl-c/SIGTERM/SIGHUP/SIGQUIT listeners for a graceful leave.
