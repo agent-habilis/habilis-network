@@ -395,8 +395,9 @@ pub struct InjectedEndpoint {
     webrtc: habilis_network_iroh_webrtc_transport::WebRtcHandle,
     /// The multi-hop handle the endpoint was built with. `None` leaves this
     /// node without multi-hop, whatever the mesh policy allows: a transport
-    /// cannot be added to an endpoint that is already bound.
-    #[cfg(feature = "multihop")]
+    /// cannot be added to an endpoint that is already bound. Only the host branch of
+    /// `build_member_endpoint` reads it, so a browser build does not keep it.
+    #[cfg(all(feature = "multihop", feature = "host"))]
     multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     /// The admission table the endpoint's connection hook reports to. The mesh
     /// enforces its direct-peer cap on this table, so a table made elsewhere would
@@ -441,7 +442,7 @@ impl InjectedEndpoint {
         check_hop_key(bound, transports.multihop.as_ref())?;
         let admission = crate::transport::SignalAdmission::new(max_direct);
         transports.admission = Some(admission.clone());
-        #[cfg(feature = "multihop")]
+        #[cfg(all(feature = "multihop", feature = "host"))]
         let multihop = transports.multihop.clone();
         let (endpoint, mdns) = crate::lookup::build_endpoint_keeping_mdns(
             lookups,
@@ -454,7 +455,7 @@ impl InjectedEndpoint {
         Ok(Self {
             endpoint,
             webrtc,
-            #[cfg(feature = "multihop")]
+            #[cfg(all(feature = "multihop", feature = "host"))]
             multihop,
             admission,
             mdns,
