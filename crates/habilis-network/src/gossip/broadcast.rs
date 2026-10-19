@@ -259,14 +259,12 @@ pub async fn broadcast_state_merge(
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
-        if let Some(surfaced) = signed.open_with(|_| Some(plain_body)) {
-            sink.emit(NodeEvent::StateChanged {
-                channel,
-                event: Box::new(surfaced),
-                document: after,
-                is_self: true,
-            });
-        }
+        sink.emit(NodeEvent::StateChanged {
+            channel,
+            event: Box::new(signed.with_body(plain_body)),
+            document: after,
+            is_self: true,
+        });
     }
     let bytes = Bytes::from(bytes);
     if state.overlay_reachable() {

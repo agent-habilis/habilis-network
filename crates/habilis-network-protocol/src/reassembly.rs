@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::message::{Authored, Verified};
-use crate::{AuthorKey, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
+use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
     LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
@@ -380,7 +380,7 @@ impl ShardCache {
 /// # Panics
 /// If the envelope carries no shard header; callers only pass shard messages.
 pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGroup) -> Authored {
-    let mut envelope = header.clone().into_message();
+    let mut envelope = Message::clone(header);
     envelope.id = MessageId::new(group_id.as_str()).expect("a shard group is a valid message id");
     envelope.body = body;
     envelope.shard = None;

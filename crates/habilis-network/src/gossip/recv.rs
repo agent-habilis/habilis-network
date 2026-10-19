@@ -1116,9 +1116,7 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
         .filter(|text| text != frame.body.as_str())
         .and_then(|text| MessageBody::new(text).ok());
     match body {
-        Some(body) => frame
-            .open_with(|_| Some(body))
-            .unwrap_or_else(|| frame.authored()),
+        Some(body) => frame.with_body(body),
         None => frame.authored(),
     }
 }
@@ -1195,9 +1193,8 @@ trait Opened: std::ops::Deref<Target = Message> {
     /// This frame as a proof, with its wire body.
     fn authored(&self) -> Authored;
 
-    /// This frame as a proof, with `body` in place of the wire body. `None` only if
-    /// the proof cannot be made, which the callers treat as a drop.
-    fn with_body(&self, body: MessageBody) -> Option<Authored>;
+    /// This frame as a proof, with `body` in place of the wire body.
+    fn with_body(&self, body: MessageBody) -> Authored;
 }
 
 impl Opened for Verified {
@@ -1205,8 +1202,8 @@ impl Opened for Verified {
         Verified::authored(self)
     }
 
-    fn with_body(&self, body: MessageBody) -> Option<Authored> {
-        self.open_with(|_| Some(body))
+    fn with_body(&self, body: MessageBody) -> Authored {
+        Verified::with_body(self, body)
     }
 }
 
@@ -1215,8 +1212,8 @@ impl Opened for Authored {
         self.clone()
     }
 
-    fn with_body(&self, body: MessageBody) -> Option<Authored> {
-        self.open_with(|_| Some(body))
+    fn with_body(&self, body: MessageBody) -> Authored {
+        Authored::with_body(self, body)
     }
 }
 
@@ -1279,9 +1276,7 @@ fn gate_and_decrypt<F: Opened>(
         let Some(body) = decrypt_broadcast(frame, state) else {
             return Gated::Drop;
         };
-        let Some(view) = frame.with_body(body) else {
-            return Gated::Drop;
-        };
+        let view = frame.with_body(body);
         let Some(class) = gate_app_payload(&view, app) else {
             return Gated::Drop;
         };
@@ -1327,9 +1322,7 @@ fn gate_directed_to_us<F: Opened>(frame: &F, state: &EventLoopState, app: &dyn N
     let Some(body) = decrypt_directed(frame, state) else {
         return Gated::Drop;
     };
-    let Some(view) = frame.with_body(body) else {
-        return Gated::Drop;
-    };
+    let view = frame.with_body(body);
     let Some(class) = gate_app_payload(&view, app) else {
         return Gated::Drop;
     };
