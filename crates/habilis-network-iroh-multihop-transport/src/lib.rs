@@ -92,7 +92,9 @@ use crate::underlay::{ForwardAcceptor, Forwarder};
 
 /// Transport-type id for the multihop transport, tagging every multihop
 /// [`CustomAddr`](iroh_base::CustomAddr) (see iroh's `TRANSPORTS.md` registry).
-pub const MULTIHOP_TRANSPORT_ID: u64 = 0x6d68; // "mh"
+/// Declared once, in `habilis-network-iroh-transport-util`, next to the rung
+/// table that reads it.
+pub use habilis_network_iroh_transport_util::MULTIHOP_TRANSPORT_ID;
 
 /// The key of the underlay endpoint that belongs to the peer holding `app`.
 ///

@@ -28,6 +28,14 @@ pub use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_j
 /// once here and again in each frontend, and the UI's copy drifted from the
 /// one that was enforced.
 pub use crate::transport::MAX_DIRECT_PEERS;
+/// The ids of the custom transports, so a consumer that names the path of a
+/// peer (`TransportAddr::Custom(addr)` with `addr.id()`) reads the engine's
+/// values. A copy in the consumer would drift with no error. They are here
+/// with any set of features: a peer can reach this node over multihop even
+/// when this build does not register it.
+pub use habilis_network_iroh_transport_util::{
+    GOSSIP_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, WEBRTC_TRANSPORT_ID,
+};
 
 /// A direct lane to one peer, without a mesh: the `WebRTC` endpoint, both
 /// halves of the JSEP round, and the gate that holds payload until iroh

@@ -10,6 +10,14 @@ published to a registry; pin it with
 
 ### Added
 
+- `habilis_network::net::{WEBRTC_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, GOSSIP_TRANSPORT_ID}`:
+  the ids of the custom transports, re-exported for every set of features, so a consumer that
+  names the path of a peer reads the engine's values and keeps no copy of its own (#9).
+  `habilis-network-iroh-multihop-transport` re-exports its id from
+  `habilis-network-iroh-transport-util` in place of a second `const`.
+- `LookupSet::any` is public: whether the set names at least one lookup. A set that names none
+  resolves to a loopback-only mesh, and a consumer with another default for that case asks this
+  in place of its own copy of the rule (#9).
 - `SymmetricKey::from_zeroizing`, `TicketSecret::from_zeroizing`, and
   `StreamSecret::from_zeroizing` take a `Zeroizing<[u8; 32]>` whole, so a consumer that holds a
   secret in a wiped buffer (a salt, a token read off a stream) moves it into its type without a

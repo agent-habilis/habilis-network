@@ -138,6 +138,9 @@ habilis-network-iroh-multihop-transport = { workspace = true, optional = true }
 # Gossip as an iroh custom transport. The recursion rule of the connection hook needs it; the
 # transport itself is wired by Phase 6 step 10.
 habilis-network-iroh-gossip-transport = { workspace = true }
+# The transport ids, re-exported from `net` so a consumer names a path kind
+# without a copy of its own. Already in the build through the gossip transport.
+habilis-network-iroh-transport-util = { path = "../habilis-network-iroh-transport-util" }
 # Leaf crate: runtime dirs, clock, tuning dials, bounded containers, build stamp.
 habilis-network-util = { path = "../habilis-network-util", default-features = false, features = ["async-io"] }
 # Wire vocabulary: messages, mesh ids, nicknames, identity, sealing, invites.
