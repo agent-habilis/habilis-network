@@ -69,8 +69,8 @@ enum Mode {
 /// Installs the subscriber on the first call and returns the guard of the
 /// calling test.
 ///
-/// The events print to stderr as they do with `tracing_subscriber::fmt()`,
-/// filtered by `RUST_LOG`. The guard sees every WARN and ERROR event, whatever
+/// The events print to stderr as they do with `tracing_subscriber::fmt()`, through the
+/// capture of the test harness, and filtered by `RUST_LOG`. The guard sees every WARN and ERROR event, whatever
 /// `RUST_LOG` says.
 ///
 /// # Panics
@@ -80,8 +80,24 @@ enum Mode {
 /// was [`init_capturing`] or [`init_with_writer`].
 #[must_use = "the guard fails the test when it drops; bind it to a local"]
 pub fn init() -> Guard {
-    install(Mode::Stderr, "", io::stderr);
+    install(Mode::Stderr, "", || CapturedStderr);
     new_guard()
+}
+
+/// Stderr through `eprint!`. The capture of the test harness holds what `eprint!` writes, so the
+/// events of a passing test stay out of the suite output and a failing test shows them. A write
+/// straight to `io::stderr` goes round that capture.
+struct CapturedStderr;
+
+impl io::Write for CapturedStderr {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        eprint!("{}", String::from_utf8_lossy(bytes));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Like [`init`], but the events go to a buffer that [`captured_logs`] returns,
