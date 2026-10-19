@@ -207,22 +207,7 @@ impl Rendezvous {
     /// The index of the rung in `ladder` that this beacon is bound on: `0` is the first rung that a
     /// joiner tries. `None` when it is bound on none of them (a public beacon).
     pub(crate) fn rung_in(&self, ladder: &[u16]) -> Option<usize> {
-        // A browser binds no socket, so it holds no rung of a loopback ladder.
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = (self, ladder);
-            None
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let bound: Vec<u16> = self
-                .endpoint
-                .bound_sockets()
-                .iter()
-                .map(SocketAddr::port)
-                .collect();
-            ladder.iter().position(|port| bound.contains(port))
-        }
+        rung_of(&self.endpoint, ladder)
     }
 
     /// Tests only: make this beacon stop answering and keep its rung. The endpoint stays bound and
@@ -415,6 +400,26 @@ fn keeping_rungs(addr: EndpointAddr, keep: impl Fn(u16) -> bool) -> EndpointAddr
     )
 }
 
+/// The index in `ladder` of the rung that `endpoint` is bound on, `None` when it is bound on none of
+/// them.
+fn rung_of(endpoint: &Endpoint, ladder: &[u16]) -> Option<usize> {
+    // A browser binds no socket, so it holds no rung of a loopback ladder.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (endpoint, ladder);
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bound: Vec<u16> = endpoint
+            .bound_sockets()
+            .iter()
+            .map(SocketAddr::port)
+            .collect();
+        ladder.iter().position(|port| bound.contains(port))
+    }
+}
+
 /// Take the rungs that `forget` names out of the addresses of the rendezvous id: out of the book,
 /// and out of what the endpoint knows. A dial of the id tries every address that the endpoint
 /// knows for it, and a listener of another identity on one of them (any process on the host can
@@ -530,6 +535,7 @@ pub(crate) async fn refresh_holder_rung(
 /// addresses of the new holder, and what the mesh registered for the id by itself, a relay rung or
 /// the loopback ladder ([`rendezvous_addr`]). The addresses of a former holder are not in it. A
 /// member whose IP transports are cleared dials the bare id and can use only the registered part.
+/// A claim on a ladder does not write this entry: it settles on the rung that the beacon bound.
 fn holder_entry(holder: EndpointAddr, params: &RendezvousParams, withheld: &[u16]) -> EndpointAddr {
     match rendezvous_addr_without(params, withheld) {
         Some(registered) => {
@@ -1637,10 +1643,17 @@ async fn claim_holder(
     // And the other way: our peer is the one that dials the rendezvous, and a
     // public mesh without a relay rung gives it no lookup to find the id by. The entry keeps the
     // relay rung or the ladder that the mesh registered, see `holder_entry`.
-    replace_peer_addr(
-        peer_book,
-        holder_entry(endpoint.addr(), params, &rungs.withheld_rungs()),
-    );
+    match rung_of(&endpoint, &params.bind_ports) {
+        // A ladder: this node dials its own beacon by the id, and the endpoint tries every address
+        // that it knows for the id. A rung that it did not bind can be held by an endpoint of
+        // another identity, which fails the dial as a whole. The ladder was registered whole at
+        // start, when no rung was busy yet.
+        Some(index) => settle_on_rung(params, peer, peer_book, params.bind_ports[index]).await,
+        None => replace_peer_addr(
+            peer_book,
+            holder_entry(endpoint.addr(), params, &rungs.withheld_rungs()),
+        ),
+    }
     let topic_id = params.topic_id;
 
     // Relay-monitor inputs. The monitor runs as its **own** task (below),
@@ -2731,14 +2744,13 @@ mod tests {
         );
     }
 
-    /// The claim writes the address of the new beacon into the book of the member endpoint. The
-    /// entry of the rendezvous id must keep what the mesh registered for it by itself, here every
-    /// rung of the ladder. A member that dials the bare id has only that registered address to use:
-    /// on a public mesh it is the relay rung, and a lane peer with its IP transports cleared finds
-    /// nothing else.
+    /// A holder dials its own beacon, and the endpoint tries every address that it knows for the id:
+    /// a rung that it did not bind can be held by an endpoint of another identity, which fails the
+    /// dial as a whole. The mesh registers the whole ladder at start, when no rung is busy yet, so
+    /// the claim leaves the endpoint knowing the rung that the beacon bound and no other.
     #[test]
-    async fn a_claim_keeps_the_rungs_the_mesh_registered_for_the_rendezvous() {
-        let sockets: Vec<_> = (0..2)
+    async fn a_claim_leaves_the_endpoint_knowing_only_the_rung_it_bound() {
+        let sockets: Vec<_> = (0..3)
             .map(|_| {
                 std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                     .expect("a free loopback port")
@@ -2754,27 +2766,55 @@ mod tests {
         let peer = loopback_endpoint().await;
         let book = crate::lookup::address_book(&peer);
         crate::daemon::setup::register_rendezvous(&book, &params, &[]);
+        peer.add_endpoint_addr(rendezvous_addr(&params).expect("the ladder"))
+            .await
+            .expect("the endpoint takes the ladder");
         let mut beacon = None;
 
         let claimed = claim(&params, &peer, &book, &mut beacon).await;
 
-        let entry = book
+        let on = beacon
+            .as_ref()
+            .and_then(|held| held.rung_in(&rungs))
+            .map(|index| rungs[index]);
+        let known: Vec<u16> = peer
+            .remote_info(params.id)
+            .await
+            .map(|info| {
+                info.addrs()
+                    .filter_map(|info| {
+                        if let iroh::TransportAddr::Ip(socket) = info.addr() {
+                            Some(socket.port())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let booked: Vec<u16> = book
             .get_endpoint_info(params.id)
             .expect("an entry")
-            .into_endpoint_addr();
-        let kept: std::collections::BTreeSet<u16> =
-            entry.ip_addrs().map(std::net::SocketAddr::port).collect();
+            .into_endpoint_addr()
+            .ip_addrs()
+            .map(std::net::SocketAddr::port)
+            .collect();
         if let Some(held) = beacon.take() {
             held.shed_and_wait().await;
         }
         peer.close().await;
         assert!(claimed, "a free rung is claimed");
-        for rung in rungs {
-            assert!(
-                kept.contains(&rung),
-                "the claim wrote over the rung {rung} that the mesh registered for the rendezvous: {kept:?}"
-            );
-        }
+        let on = on.expect("the beacon is bound on a rung");
+        assert_eq!(
+            known,
+            vec![on],
+            "the endpoint knows rungs that the beacon did not bind"
+        );
+        assert_eq!(
+            booked,
+            vec![on],
+            "the book names rungs that the beacon did not bind"
+        );
     }
 
     /// A member that knows a holder does not walk the ladder, and its book names the rung of the
