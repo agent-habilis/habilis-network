@@ -268,7 +268,12 @@ fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
     );
     assert_eq!(
         mesh.rendezvous_ports(),
-        [9654, 21191, 64941, 55185, 63449, 5703, 10814, 29199]
+        [9654, 21191, 1453, 23441, 31705, 5703, 10814, 29199]
+    );
+    assert_ne!(
+        mesh.rendezvous_ports(),
+        [9654, 21191, 64941, 55185, 63449, 5703, 10814, 29199],
+        "the ladder of the range 1024..=65535 is no longer derived"
     );
 }
 
