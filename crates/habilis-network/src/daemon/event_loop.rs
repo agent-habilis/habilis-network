@@ -20,7 +20,7 @@ use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
 use crate::protocol::message::{Authored, Verified};
-use crate::protocol::{AuthorKey, MeshId, Message, Nickname, UnixSecs};
+use crate::protocol::{AuthorKey, MeshId, Nickname, UnixSecs};
 use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
@@ -541,7 +541,8 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
     // replaces this one, and peers never log what they receive (see
     // `is_loggable`), so a retained copy would be one that nobody else holds and
     // that every digest asks us for again.
-    let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).sign(&state.identity);
+    let vector_msg =
+        crate::protocol::Message::new_link_state(ctx.mesh, ctx.author, body).sign(&state.identity);
     gossip::broadcast_msg(ctx.sender, &vector_msg).await;
     // The vector that this node just sent is what a peer that turned our offer away lacked: the
     // wait that its turn-aways earned ends, and the underlay offers again at once. One offer per
