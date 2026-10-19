@@ -546,9 +546,15 @@ impl RivalProbe {
     }
 }
 
+/// A drop that no one asked to close (the daemon task was aborted, as a crash does) cancels the
+/// dial and leaves the task to run its own close. An abort would drop the last handle of the
+/// prober open. A probe with no dial to cancel has no endpoint, so its task is aborted.
 impl Drop for RivalProbe {
     fn drop(&mut self) {
-        self.task.abort();
+        match self.cancel.take() {
+            Some(_cancel) => {}
+            None => self.task.abort(),
+        }
     }
 }
 
@@ -2468,6 +2474,35 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    /// A probe that is dropped, not asked to close, is what a crash leaves: the loop is aborted and
+    /// its slot drops the probe. The prober endpoint must still close.
+    #[test]
+    async fn a_dropped_rival_probe_closes_its_endpoint() {
+        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a silent loopback socket");
+        let mut params = public_params();
+        params.bind_ports = vec![silent.local_addr().expect("its address").port()];
+        let probe = spawn_rival_probe(&params, SecretKey::generate().public())
+            .await
+            .expect("a probe with a rung to dial");
+        let prober = probe.endpoint.clone().expect("the probe dials");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        drop(probe);
+
+        // A close in the middle of a handshake drains for about 3 s, as in the test above.
+        for _ in 0..600 {
+            if prober.is_closed() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            prober.is_closed(),
+            "a dropped probe left its endpoint open; its last handle logs the ungraceful-abort error"
+        );
     }
 
     /// Regression for `Endpoint dropped without calling Endpoint::close` on
