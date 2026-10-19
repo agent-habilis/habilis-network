@@ -56,7 +56,7 @@ const FORWARD_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 /// can tell its first hop. The ids come off the wire, so the set has a ceiling.
 const HEARD_HOPS_CAP: usize = 1024;
 
-/// Hops without a vector that get a log line of their own. The ids come off the wire, so the set
+/// Hops without a vector that get a log line of their own. The ids come off the wire, so the map
 /// that remembers them has a ceiling.
 const UNRESOLVED_SEEN_CAP: usize = 128;
 
@@ -423,8 +423,8 @@ pub(crate) struct Forwarder {
     topology: Arc<RwLock<Topology>>,
     /// Hops that a writer was spawned for with no vector in the topology: a hop without a vector.
     unresolved_hops: AtomicU64,
-    /// The hops that were warned about, one line each: see [`UNRESOLVED_SEEN_CAP`].
-    unresolved_seen: Mutex<HashSet<UnderlayId>>,
+    /// The hops that got a log line, and whether it was a warning: see [`UNRESOLVED_SEEN_CAP`].
+    unresolved_seen: Mutex<HashMap<UnderlayId, bool>>,
     /// The hops that named a cell this node delivered: the sender and the hops of its route. A
     /// reply goes back along that route reversed, so these are the hops that can lack a vector
     /// for a normal reason: see [`HEARD_HOPS_CAP`].
@@ -456,7 +456,7 @@ impl Forwarder {
             },
             topology,
             unresolved_hops: AtomicU64::new(0),
-            unresolved_seen: Mutex::new(HashSet::new()),
+            unresolved_seen: Mutex::new(HashMap::new()),
             heard_hops: Mutex::new(HeardHops::default()),
         }
     }
@@ -486,8 +486,9 @@ impl Forwarder {
             .filter(|addr| UnderlayId::new(addr.id) == hop.underlay_id);
         known.unwrap_or_else(|| {
             let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
-            if self.first_without_vector(hop.underlay_id, total) {
-                if self.heard_hop(hop.underlay_id) || self.is_link_of_ours(hop.app_id) {
+            let explained = self.heard_hop(hop.underlay_id) || self.is_link_of_ours(hop.app_id);
+            if self.line_is_due(hop.underlay_id, total, explained) {
+                if explained {
                     tracing::debug!(
                         total,
                         hop = %hop.underlay_id.fmt_short(),
@@ -543,18 +544,24 @@ impl Forwarder {
     }
 
     /// Whether a log line is due for the hop `underlay_id`, found without a vector for the
-    /// `total`-th time: one per distinct hop. The ids come off the wire, so the set that
-    /// remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`] hops the rule is one line in 256.
-    fn first_without_vector(&self, underlay_id: UnderlayId, total: u64) -> bool {
+    /// `total`-th time, `explained` or not: one line per distinct hop, and one warning per hop,
+    /// which a hop that was explained the first time still gets when it is not any more. The ids
+    /// come off the wire, so the map that remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`]
+    /// hops the rule is one line in 256.
+    fn line_is_due(&self, underlay_id: UnderlayId, total: u64, explained: bool) -> bool {
         let mut seen = self
             .unresolved_seen
             .lock()
             .expect("unresolved set poisoned");
-        if seen.contains(&underlay_id) {
-            return false;
+        if let Some(warned) = seen.get_mut(&underlay_id) {
+            if *warned || explained {
+                return false;
+            }
+            *warned = true;
+            return true;
         }
         if seen.len() < UNRESOLVED_SEEN_CAP {
-            seen.insert(underlay_id);
+            seen.insert(underlay_id, !explained);
             return true;
         }
         total.is_multiple_of(256)
@@ -1501,23 +1508,64 @@ mod tests {
     async fn a_hop_without_a_vector_is_logged_once_each() {
         let (forwarder, _app, _received) = forwarder().await;
         let (one, other) = (stranger(130).underlay_id, stranger(131).underlay_id);
-        assert!(forwarder.first_without_vector(one, 1), "the first hop");
-        assert!(
-            !forwarder.first_without_vector(one, 2),
-            "the same hop again"
-        );
-        assert!(forwarder.first_without_vector(other, 3), "another hop");
+        assert!(forwarder.line_is_due(one, 1, false), "the first hop");
+        assert!(!forwarder.line_is_due(one, 2, false), "the same hop again");
+        assert!(forwarder.line_is_due(other, 3, false), "another hop");
         // Past the ceiling the rule is one line in 256.
         for seed in 0..u8::try_from(UNRESOLVED_SEEN_CAP).expect("fits") {
             let id = SecretKey::from_bytes(&[seed.wrapping_add(1); 32]).public();
-            forwarder.first_without_vector(UnderlayId::new(id), 4);
+            forwarder.line_is_due(UnderlayId::new(id), 4, false);
         }
         let beyond = stranger(200).underlay_id;
-        assert!(
-            !forwarder.first_without_vector(beyond, 5),
-            "past the ceiling"
+        assert!(!forwarder.line_is_due(beyond, 5, false), "past the ceiling");
+        assert!(forwarder.line_is_due(beyond, 256, false), "one in 256");
+    }
+
+    /// A hop that was explained once, by a link of this node, is warned about when the link is
+    /// gone and nothing else explains it: the line at debug does not spend the warning of the hop.
+    #[test]
+    async fn a_hop_explained_by_a_link_that_is_gone_is_warned_about() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let neighbor = stranger(144);
+        let own_key = SecretKey::from_bytes(&[99; 32]);
+        let own_vector = LinkVector::signed(
+            &own_key,
+            crate::topology::wall_clock_ms(),
+            EndpointAddr::new(forwarder.underlay.id()),
+            vec![(neighbor.app_id, 1)],
         );
-        assert!(forwarder.first_without_vector(beyond, 256), "one in 256");
+        assert!(
+            forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .ingest(own_vector),
+            "the vector of this node is accepted"
+        );
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&neighbor);
+        });
+        assert_eq!(warnings.load(Ordering::Relaxed), 0, "a link of ours");
+
+        assert!(
+            forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .remove(forwarder.self_app_id),
+            "the vector of this node is removed"
+        );
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&neighbor);
+            forwarder.dial_addr(&neighbor);
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "warned once, after the link is gone"
+        );
+        forwarder.underlay.close().await;
     }
 
     /// The hops that delivered cells named are remembered past [`HEARD_HOPS_CAP`]: the oldest
