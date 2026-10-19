@@ -354,12 +354,6 @@ async fn build_member_endpoint(
 /// per-peer count wrong: the same machine is reachable twice and there is
 /// nothing to deduplicate on.
 ///
-/// Lets one process run an application protocol and a mesh node on **one**
-/// identity instead of two. Without it a process that does both appears on the
-/// network as two unrelated peers — which, among other things, makes any
-/// per-peer count wrong: the same machine is reachable twice and there is
-/// nothing to deduplicate on.
-///
 /// The fields are private, so [`InjectedEndpoint::bind`] is the only way to make
 /// one. It installs the transports and binds the endpoint in one step, and the
 /// connection hook reports to the admission table that it makes. The mesh checks

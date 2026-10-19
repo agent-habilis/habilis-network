@@ -303,10 +303,7 @@ Runtime events drive these transitions, so their state is not known at compile t
 
 | Place | Reason |
 |---|---|
-| `SessionState` | Network events, probes and timers drive its transitions, so the state is not known at compile time. |
-| `PeerState` | Network events, probes and timers drive its transitions, so the state is not known at compile time. |
-| `DirectState` | Network events, probes and timers drive its transitions, so the state is not known at compile time. |
-| `ConnectionPhase` | Network events, probes and timers drive its transitions, so the state is not known at compile time. |
+| `SessionState` (`habilis-network-netplay/src/session.rs`), `PeerState` (`habilis-network-netplay/src/protocol.rs`), `DirectState` (`habilis-network/src/daemon/state.rs`), `ConnectionPhase` (`habilis-network-iroh-webrtc-transport/src/liveness.rs`) | Network events, probes and timers drive their transitions, so the state is not known at compile time. |
 
 ### Typestates that exist
 
