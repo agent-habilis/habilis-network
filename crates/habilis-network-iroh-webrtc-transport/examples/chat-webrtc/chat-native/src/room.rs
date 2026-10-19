@@ -217,8 +217,9 @@ impl Drop for Membership {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use habilis_network_test_tracing::test;
 
-    #[tokio::test]
+    #[test]
     async fn a_second_bob_is_renamed_and_told_so() {
         let room = Room::new();
         let first = room.join("bob");
@@ -230,7 +231,7 @@ mod tests {
 
     /// The regression this guards: a client that renders its own line locally
     /// *and* receives it back prints everything twice.
-    #[tokio::test]
+    #[test]
     async fn a_member_does_not_hear_its_own_message() {
         let room = Room::new();
         let mut alice = room.join("alice");
@@ -255,7 +256,7 @@ mod tests {
     /// Leaving is a `Drop`, so a handler that unwinds still cleans up. If this
     /// regresses, a tab that closes mid-frame leaves a name in the roster
     /// forever.
-    #[tokio::test]
+    #[test]
     async fn dropping_a_membership_announces_the_departure() {
         let room = Room::new();
         let mut alice = room.join("alice");
@@ -271,7 +272,7 @@ mod tests {
 
     /// And the name comes free again, so a reconnecting tab is `bob`, not
     /// `bob#2` climbing forever.
-    #[tokio::test]
+    #[test]
     async fn a_departed_nick_is_reusable() {
         let room = Room::new();
         let _alice = room.join("alice");

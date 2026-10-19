@@ -409,6 +409,7 @@ dependencies = [
  "chat-proto",
  "clap",
  "habilis-network-iroh-webrtc-transport",
+ "habilis-network-test-tracing",
  "serde",
  "serde_json",
  "tokio",
@@ -423,6 +424,7 @@ dependencies = [
  "anyhow",
  "bs58",
  "habilis-network-iroh-webrtc-transport",
+ "habilis-network-test-tracing",
  "serde",
  "serde_json",
 ]
@@ -1285,6 +1287,26 @@ dependencies = [
  "str0m-aws-lc-rs",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "habilis-network-test-tracing"
+version = "0.6.0"
+dependencies = [
+ "habilis-network-test-tracing-macros",
+ "libc",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "habilis-network-test-tracing-macros"
+version = "0.6.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

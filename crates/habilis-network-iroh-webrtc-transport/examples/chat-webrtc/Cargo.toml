@@ -38,6 +38,7 @@ publish = false
 # crate can only be one of those things.
 habilis-network-iroh-webrtc-transport = { path = "../.." }
 chat-proto = { path = "chat-proto" }
+habilis-network-test-tracing = { path = "../../../habilis-network-test-tracing" }
 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
