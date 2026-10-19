@@ -412,7 +412,6 @@ impl Inner {
             return;
         };
         for (peer, slot) in &self.slots {
-            let carried = self.hub.as_ref().is_some_and(|hub| hub.has_session(peer));
             let kinds: Vec<super::probe::PathKind> = slot
                 .conns
                 .iter()
@@ -424,7 +423,11 @@ impl Inner {
             gossip.set_established(*peer, established);
             // A session carries the pair though no connection is left to read: a gossip
             // connection dialed now would be born on the gossip rung and closed by the
-            // recursion rule before iroh moves it onto the session.
+            // recursion rule before iroh moves it onto the session. With a live connection its
+            // own path decides: a session whose rung is cut carries nothing, and a block would
+            // starve the connection that does.
+            let carried =
+                kinds.is_empty() && self.hub.as_ref().is_some_and(|hub| hub.has_session(peer));
             gossip.allow(*peer, allowed && !carried);
         }
     }
@@ -2500,6 +2503,46 @@ mod tests {
             "the session carries the pair: the gossip rung is not allowed"
         );
         assert!(!alice_handle.is_established(bob.id()), "no connection left");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
+    }
+
+    /// A session is attached while a live connection still reads the gossip rung: gossip is not
+    /// blocked. That connection carries the pair. A block would starve it, and iroh would give it
+    /// up for the relay, though the session may carry nothing (its rung is cut).
+    #[test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pair_with_a_session_and_a_connection_on_the_gossip_rung_is_allowed_for_gossip() {
+        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use iroh::{EndpointAddr, TransportAddr};
+
+        let hub = MemoryHub::new();
+        let (alice, alice_table, alice_handle) = ip_and_gossip_node(47, &hub, false).await;
+        let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(48, &hub, false).await;
+        let sessions = FakeHub::default();
+        alice_table.lock().hub = Some(Arc::new(sessions.clone()));
+        let router = iroh::protocol::Router::builder(bob.clone())
+            .accept(GOSSIP_TEST_ALPN, HoldConnections)
+            .spawn();
+        let connection = alice
+            .connect(
+                EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
+                GOSSIP_TEST_ALPN,
+            )
+            .await
+            .expect("connect over gossip");
+
+        sessions.attach(bob.id());
+        alice_table.lock().sample();
+        assert!(
+            alice_handle.is_established(bob.id()),
+            "a connection is left"
+        );
+        assert!(
+            alice_handle.is_allowed(bob.id()),
+            "a live connection reads the gossip rung: the session does not block it"
+        );
+        connection.close(0u32.into(), b"done");
+        connection.closed().await;
         router.shutdown().await.expect("shutdown");
         alice.close().await;
     }
