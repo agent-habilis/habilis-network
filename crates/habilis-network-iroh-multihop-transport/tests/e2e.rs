@@ -181,163 +181,196 @@ async fn echo_roundtrip(conn: &Connection, msg: &[u8]) {
     assert_eq!(echoed, msg, "echo mismatch over multihop");
 }
 
-#[tokio::test]
-async fn connects_end_to_end_through_one_relay() {
-    // A ──underlay──> R ──underlay──> B, with A and B sharing only the multihop
-    // transport. The whole QUIC handshake is relayed through R.
-    let alice = make_node(secret(1)).await;
-    let relay = make_relay(secret(2)).await;
-    let relay_id = secret(2).public();
-    let bob = make_node(secret(3)).await;
+#[test]
+fn connects_end_to_end_through_one_relay() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run(guard, async {
+        // A ──underlay──> R ──underlay──> B, with A and B sharing only the multihop
+        // transport. The whole QUIC handshake is relayed through R.
+        let alice = make_node(secret(1)).await;
+        let relay = make_relay(secret(2)).await;
+        let relay_id = secret(2).public();
+        let bob = make_node(secret(3)).await;
 
-    // Alice's routing table: the chain A→R→B, each vector carrying that node's
-    // real underlay dial address.
-    gossip_all(&[
-        (&alice.handle, vec![(relay_id, COST)]),
-        (&relay, vec![(alice.id, COST), (bob.id, COST)]),
-        (&bob.handle, vec![(relay_id, COST)]),
-    ]);
+        // Alice's routing table: the chain A→R→B, each vector carrying that node's
+        // real underlay dial address.
+        gossip_all(&[
+            (&alice.handle, vec![(relay_id, COST)]),
+            (&relay, vec![(alice.id, COST), (bob.id, COST)]),
+            (&bob.handle, vec![(relay_id, COST)]),
+        ]);
 
-    let echo = Router::builder(bob.app.clone())
-        .accept(ECHO_ALPN, Echo)
-        .spawn();
+        let echo = Router::builder(bob.app.clone())
+            .accept(ECHO_ALPN, Echo)
+            .spawn();
 
-    let conn = tokio::time::timeout(
-        Duration::from_secs(30),
-        alice.app.connect(bob.id, ECHO_ALPN),
-    )
-    .await
-    .expect("connect timed out")
-    .expect("connect over one relay");
+        let conn = tokio::time::timeout(
+            Duration::from_secs(30),
+            alice.app.connect(bob.id, ECHO_ALPN),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("connect over one relay");
 
-    assert_multihop_selected(&conn);
-    echo_roundtrip(&conn, b"hello over one hop").await;
+        assert_multihop_selected(&conn);
+        echo_roundtrip(&conn, b"hello over one hop").await;
 
-    conn.close(0u32.into(), b"done");
-    echo.shutdown().await.expect("shutdown echo router");
+        conn.close(0u32.into(), b"done");
+        echo.shutdown().await.expect("shutdown echo router");
+        alice.app.close().await;
+        alice.handle.close().await;
+        bob.app.close().await;
+        bob.handle.close().await;
+        relay.close().await;
+    });
 }
 
 /// Two paths for one route would exist from the first reply, since the way back is the
 /// route that bob builds from the first cell. So the count is read right after the first
 /// round trip, with no wait for a path to idle out (15 s).
-#[tokio::test]
-async fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
-    // Cells go both ways over A -> R -> B. A hop is named by ids, so the route that A dials and
-    // the way back that B builds from a cell are the same bytes, and iroh maps them to one path.
-    let alice = make_node(secret(31)).await;
-    let relay = make_relay(secret(32)).await;
-    let relay_id = secret(32).public();
-    let bob = make_node(secret(33)).await;
-    gossip_all(&[
-        (&alice.handle, vec![(relay_id, COST)]),
-        (&relay, vec![(alice.id, COST), (bob.id, COST)]),
-        (&bob.handle, vec![(relay_id, COST)]),
-    ]);
-    let (counted, mut server_side) = tokio::sync::mpsc::unbounded_channel();
-    let echo = Router::builder(bob.app.clone())
-        .accept(ECHO_ALPN, EchoCountingPaths(counted))
-        .spawn();
+#[test]
+fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run(guard, async {
+        // Cells go both ways over A -> R -> B. A hop is named by ids, so the route that A dials and
+        // the way back that B builds from a cell are the same bytes, and iroh maps them to one path.
+        let alice = make_node(secret(31)).await;
+        let relay = make_relay(secret(32)).await;
+        let relay_id = secret(32).public();
+        let bob = make_node(secret(33)).await;
+        gossip_all(&[
+            (&alice.handle, vec![(relay_id, COST)]),
+            (&relay, vec![(alice.id, COST), (bob.id, COST)]),
+            (&bob.handle, vec![(relay_id, COST)]),
+        ]);
+        let (counted, mut server_side) = tokio::sync::mpsc::unbounded_channel();
+        let echo = Router::builder(bob.app.clone())
+            .accept(ECHO_ALPN, EchoCountingPaths(counted))
+            .spawn();
 
-    let conn = tokio::time::timeout(
-        Duration::from_secs(30),
-        alice.app.connect(bob.id, ECHO_ALPN),
-    )
-    .await
-    .expect("connect timed out")
-    .expect("connect over one relay");
-    echo_roundtrip(&conn, b"cells both ways").await;
-
-    let at_bob = tokio::time::timeout(Duration::from_secs(10), server_side.recv())
+        let conn = tokio::time::timeout(
+            Duration::from_secs(30),
+            alice.app.connect(bob.id, ECHO_ALPN),
+        )
         .await
-        .expect("bob reports his paths")
-        .expect("the handler is alive");
-    assert_eq!(multihop_paths(&conn), 1, "alice's end");
-    assert_eq!(at_bob, 1, "bob's end");
+        .expect("connect timed out")
+        .expect("connect over one relay");
+        echo_roundtrip(&conn, b"cells both ways").await;
 
-    conn.close(0u32.into(), b"done");
-    echo.shutdown().await.expect("shutdown echo router");
+        let at_bob = tokio::time::timeout(Duration::from_secs(10), server_side.recv())
+            .await
+            .expect("bob reports his paths")
+            .expect("the handler is alive");
+        assert_eq!(multihop_paths(&conn), 1, "alice's end");
+        assert_eq!(at_bob, 1, "bob's end");
+
+        conn.close(0u32.into(), b"done");
+        echo.shutdown().await.expect("shutdown echo router");
+        alice.app.close().await;
+        alice.handle.close().await;
+        bob.app.close().await;
+        bob.handle.close().await;
+        relay.close().await;
+    });
 }
 
-#[tokio::test]
-async fn connects_end_to_end_through_two_relays() {
-    // A → R1 → R2 → B: a genuine multi-hop route.
-    let alice = make_node(secret(11)).await;
-    let r1 = make_relay(secret(12)).await;
-    let r1_id = secret(12).public();
-    let r2 = make_relay(secret(13)).await;
-    let r2_id = secret(13).public();
-    let bob = make_node(secret(14)).await;
+#[test]
+fn connects_end_to_end_through_two_relays() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run(guard, async {
+        // A → R1 → R2 → B: a genuine multi-hop route.
+        let alice = make_node(secret(11)).await;
+        let r1 = make_relay(secret(12)).await;
+        let r1_id = secret(12).public();
+        let r2 = make_relay(secret(13)).await;
+        let r2_id = secret(13).public();
+        let bob = make_node(secret(14)).await;
 
-    gossip_all(&[
-        (&alice.handle, vec![(r1_id, COST)]),
-        (&r1, vec![(alice.id, COST), (r2_id, COST)]),
-        (&r2, vec![(r1_id, COST), (bob.id, COST)]),
-        (&bob.handle, vec![(r2_id, COST)]),
-    ]);
+        gossip_all(&[
+            (&alice.handle, vec![(r1_id, COST)]),
+            (&r1, vec![(alice.id, COST), (r2_id, COST)]),
+            (&r2, vec![(r1_id, COST), (bob.id, COST)]),
+            (&bob.handle, vec![(r2_id, COST)]),
+        ]);
 
-    let echo = Router::builder(bob.app.clone())
-        .accept(ECHO_ALPN, Echo)
-        .spawn();
+        let echo = Router::builder(bob.app.clone())
+            .accept(ECHO_ALPN, Echo)
+            .spawn();
 
-    let conn = tokio::time::timeout(
-        Duration::from_secs(30),
-        alice.app.connect(bob.id, ECHO_ALPN),
-    )
-    .await
-    .expect("connect timed out")
-    .expect("connect over two relays");
+        let conn = tokio::time::timeout(
+            Duration::from_secs(30),
+            alice.app.connect(bob.id, ECHO_ALPN),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("connect over two relays");
 
-    assert_multihop_selected(&conn);
-    echo_roundtrip(&conn, b"hello across two hops").await;
+        assert_multihop_selected(&conn);
+        echo_roundtrip(&conn, b"hello across two hops").await;
 
-    conn.close(0u32.into(), b"done");
-    echo.shutdown().await.expect("shutdown echo router");
+        conn.close(0u32.into(), b"done");
+        echo.shutdown().await.expect("shutdown echo router");
+        alice.app.close().await;
+        alice.handle.close().await;
+        bob.app.close().await;
+        bob.handle.close().await;
+        r1.close().await;
+        r2.close().await;
+    });
 }
 
-#[tokio::test]
-async fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
-    // The same A -> R -> B chain, with the WebRTC transport registered beside
-    // multihop on both application endpoints and one key each. No session is
-    // negotiated, so multihop must carry the connection.
-    let (alice, alice_webrtc) = make_dual_node(secret(21)).await;
-    let relay = make_relay(secret(22)).await;
-    let relay_id = secret(22).public();
-    let (bob, bob_webrtc) = make_dual_node(secret(23)).await;
+#[test]
+fn connects_through_one_relay_with_webrtc_on_the_same_endpoint() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run(guard, async {
+        // The same A -> R -> B chain, with the WebRTC transport registered beside
+        // multihop on both application endpoints and one key each. No session is
+        // negotiated, so multihop must carry the connection.
+        let (alice, alice_webrtc) = make_dual_node(secret(21)).await;
+        let relay = make_relay(secret(22)).await;
+        let relay_id = secret(22).public();
+        let (bob, bob_webrtc) = make_dual_node(secret(23)).await;
 
-    assert_eq!(
-        alice.handle.app_id().get(),
-        alice.app.id(),
-        "one key: hop identity is the endpoint id"
-    );
-    assert_eq!(
-        alice_webrtc.transport().local_id(),
-        alice.app.id(),
-        "and so is the WebRTC address"
-    );
+        assert_eq!(
+            alice.handle.app_id().get(),
+            alice.app.id(),
+            "one key: hop identity is the endpoint id"
+        );
+        assert_eq!(
+            alice_webrtc.transport().local_id(),
+            alice.app.id(),
+            "and so is the WebRTC address"
+        );
 
-    gossip_all(&[
-        (&alice.handle, vec![(relay_id, COST)]),
-        (&relay, vec![(alice.id, COST), (bob.id, COST)]),
-        (&bob.handle, vec![(relay_id, COST)]),
-    ]);
+        gossip_all(&[
+            (&alice.handle, vec![(relay_id, COST)]),
+            (&relay, vec![(alice.id, COST), (bob.id, COST)]),
+            (&bob.handle, vec![(relay_id, COST)]),
+        ]);
 
-    let echo = Router::builder(bob.app.clone())
-        .accept(ECHO_ALPN, Echo)
-        .spawn();
+        let echo = Router::builder(bob.app.clone())
+            .accept(ECHO_ALPN, Echo)
+            .spawn();
 
-    let conn = tokio::time::timeout(
-        Duration::from_secs(30),
-        alice.app.connect(bob.id, ECHO_ALPN),
-    )
-    .await
-    .expect("connect timed out")
-    .expect("connect over one relay with WebRTC registered");
+        let conn = tokio::time::timeout(
+            Duration::from_secs(30),
+            alice.app.connect(bob.id, ECHO_ALPN),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("connect over one relay with WebRTC registered");
 
-    assert_multihop_selected(&conn);
-    echo_roundtrip(&conn, b"hello with both transports").await;
-    assert_eq!(alice_webrtc.session_count(), 0);
-    assert_eq!(bob_webrtc.session_count(), 0);
+        assert_multihop_selected(&conn);
+        echo_roundtrip(&conn, b"hello with both transports").await;
+        assert_eq!(alice_webrtc.session_count(), 0);
+        assert_eq!(bob_webrtc.session_count(), 0);
 
-    conn.close(0u32.into(), b"done");
-    echo.shutdown().await.expect("shutdown echo router");
+        conn.close(0u32.into(), b"done");
+        echo.shutdown().await.expect("shutdown echo router");
+        alice.app.close().await;
+        alice.handle.close().await;
+        bob.app.close().await;
+        bob.handle.close().await;
+        relay.close().await;
+    });
 }
