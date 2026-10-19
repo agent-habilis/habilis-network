@@ -29,9 +29,7 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::{
-    LookupOpts, MessageKind, Nickname, PresenceSubtype, RelayChoice,
-};
+use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype, RelayChoice};
 use habilis_network::runtime::tuning::{Tuning, init};
 use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
 use tokio::sync::Notify;

@@ -19,9 +19,7 @@ use habilis_network::embed::{
 };
 use habilis_network::iroh::RelayUrl;
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::{
-    LookupOpts, MeshConfig, Nickname, RelayChoice, TransportPolicy,
-};
+use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, RelayChoice, TransportPolicy};
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
 };

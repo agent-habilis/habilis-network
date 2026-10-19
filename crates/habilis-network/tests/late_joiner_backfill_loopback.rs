@@ -17,9 +17,7 @@ use habilis_network::embed::{
 };
 use habilis_network::net::TransportOpts;
 use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
-use habilis_network::protocol::{
-    Channel, LookupOpts, MessageKind, Nickname, PresenceSubtype,
-};
+use habilis_network::protocol::{Channel, LookupOpts, MessageKind, Nickname, PresenceSubtype};
 use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
 use tokio::sync::{Notify, oneshot};
 
