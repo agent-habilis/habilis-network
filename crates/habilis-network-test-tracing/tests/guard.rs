@@ -99,3 +99,14 @@ fn an_expected_warn_does_not_excuse_an_error() {
     let text = text.expect("the guard must panic");
     assert!(text.contains("unexpected ERROR"), "{text}");
 }
+
+#[test]
+fn an_expected_warn_does_not_cover_a_target_with_a_longer_name() {
+    let text = panic_text(|| {
+        let log = init();
+        log.expect_warn("net::peer", "link lost");
+        tracing::warn!(target: "net::peer_extra", "link lost");
+    });
+    let text = text.expect("the guard must panic");
+    assert!(text.contains("unexpected WARN net::peer_extra"), "{text}");
+}

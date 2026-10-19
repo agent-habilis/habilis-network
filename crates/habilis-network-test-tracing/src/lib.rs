@@ -165,7 +165,7 @@ pub fn expect_warn(target: &str, text: &str) {
 }
 
 /// Whether the test of the calling thread has logged a WARN from `target` (a
-/// module path prefix) whose message contains `text`. A test that expects the
+/// module path: the target itself or a module below it) whose message contains `text`. A test that expects the
 /// WARN with [`Guard::expect_warn`] polls it to wait until the WARN came.
 #[must_use]
 pub fn saw_warn(target: &str, text: &str) -> bool {
@@ -177,7 +177,7 @@ pub fn saw_warn(target: &str, text: &str) -> bool {
         .any(|slot| {
             lock(&slot.events).iter().any(|logged| {
                 logged.level == Level::WARN
-                    && logged.target.starts_with(target)
+                    && target_is_within(&logged.target, target)
                     && logged.text.contains(text)
             })
         })
@@ -350,9 +350,9 @@ pub struct Guard {
 }
 
 impl Guard {
-    /// Asserts that the test logs a WARN event from `target` (a module path
-    /// prefix) whose message contains `text`. Use it only where the warning
-    /// is the subject of the test; fix the code for every other warning.
+    /// Asserts that the test logs a WARN event from `target` (a module path: the target itself or a
+    /// module below it) whose message contains `text`. Use it only where the warning is the subject
+    /// of the test; fix the code for every other warning.
     pub fn expect_warn(&self, target: &str, text: &str) {
         lock(&self.slot.expected).push(Expectation {
             target: target.to_owned(),
@@ -420,6 +420,13 @@ impl Slot {
     }
 }
 
+/// Whether `logged` is `wanted` or a module below it, so that `net::peer` does not match `net::peer_extra`.
+fn target_is_within(logged: &str, wanted: &str) -> bool {
+    logged
+        .strip_prefix(wanted)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
 #[derive(Debug)]
 struct Expectation {
     target: String,
@@ -429,7 +436,7 @@ struct Expectation {
 
 impl Expectation {
     fn matches(&self, logged: &Logged) -> bool {
-        logged.target.starts_with(&self.target) && logged.text.contains(&self.text)
+        target_is_within(&logged.target, &self.target) && logged.text.contains(&self.text)
     }
 }
 
