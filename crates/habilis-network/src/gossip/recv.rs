@@ -2051,7 +2051,7 @@ mod evicted_orphan_tests {
         };
         let mut reader = fresh_state();
         let mut app = Inert;
-        let wire = |frame: &Message| Bytes::from(frame.serialize().expect("serialize"));
+        let wire = |frame: &Verified| Bytes::from(frame.serialize().expect("serialize"));
 
         // Newest first: every frame but the root arrives as an orphan, so the
         // per-author ceiling evicts the stalest of them before the root lands.
@@ -2999,7 +2999,7 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut app = Inert;
         let newcomer = Identity::generate();
-        let wire = |frame: &Message| Bytes::from(frame.serialize().expect("serialize"));
+        let wire = |frame: &Verified| Bytes::from(frame.serialize().expect("serialize"));
         let heads = || MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
 
         let mut digest_first = fresh_state();
