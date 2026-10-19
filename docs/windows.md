@@ -18,11 +18,29 @@ Ids, wire formats, the IPC protocol and the C ABI can change.
 
 ## 2. Current state
 
-Today the workspace does not compile for Windows.
-Every native artifact turns on `host`, and `host` pulls in Unix-only code.
-The lists below give each problem with its location, so you do not have to find them again.
+The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy and the tests there.
+The daemon does not work on Windows yet: the IPC and the stop do not work, and the state file can fail to update.
+
+| Requirement | State |
+|---|---|
+| R1. Compile | Done. `libc` and `windows-sys` come in through `host`, each on its own target. |
+| R2. Runtime base | Open. `runtime_base` on Windows is a stub that returns `temp_dir()\<product>` (`crates/habilis-network-util/src/lib.rs`). |
+| R3. IPC | Open. `to_name` still uses `GenericFilePath`. The two IPC socket tests in `ipc.rs` expect `bind` to fail on Windows (`should_panic`). R3 removes the attribute. |
+| R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
+| R5. Graceful stop | Open. There is no IPC `Quit`. `terminate` on Windows returns `Unsupported`. |
+| R6. Owner watch | Open. `spawn_orphan_watch` is `cfg(unix)` only. |
+| R7. Console events | Open. Only ctrl-c reaches the quit channel. |
+| R8. State file | Open. `state_file.rs` still replaces the file with `std::fs::rename`. |
+| R9. FFI | Open. `ffi.rs` and `habilis_network.h` still use `c_long` / `long`. `dlopen/node.ts` and `abi.ts` are not changed. `tasks/src/ffi.rs` still reads `libhabilis_network_ffi.a`. |
+| R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
+| R11. Windows on CI | Partly done. The `windows` job of `ci.yml` and the Windows leg of `matrix.yml` run. Open: `cargo task ffi` (with R9), `host_lifecycle.rs`, the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
+
+The descriptions of [§2.2](#22-runtime-breaks) and the open lines of [§2.3](#23-tooling-and-tests) are still true. Their line numbers can be out of date.
+[§2.1](#21-build-blockers) is kept as the record of what R1 changed.
 
 ### 2.1 Build blockers
+
+All of these are fixed (R1). The line numbers are from before the fix.
 
 | Location | Problem |
 |---|---|
@@ -36,7 +54,7 @@ The lists below give each problem with its location, so you do not have to find 
 | `crates/habilis-network-logging/src/sink.rs:57`, `:139` | `OpenOptionsExt::mode(0o600)` on the log file, with no `cfg(unix)`. |
 | `Cargo.toml:188`, `crates/habilis-network/Cargo.toml:151`, `crates/habilis-network-util/Cargo.toml:46` | `libc` is not scoped to a target. |
 
-These parts are already correct on Windows:
+These parts were already correct on Windows:
 
 - `crates/habilis-network/src/daemon/state_file.rs:209-221` has a `cfg(unix)` / `cfg(not(unix))` split.
 - `habilis-network-util` `resident_memory` falls back to `None`.
@@ -51,7 +69,7 @@ These problems occur after the workspace compiles.
 - **IPC name.** `socket_path` (`ipc.rs:24`) joins a file path with `/`. `to_name` (`ipc.rs:32`) uses `GenericFilePath`. On Windows, `interprocess` maps this to a named pipe and rejects every path outside `\\.\pipe\`. So `bind`, `send` and `send_to_path` fail.
 - **IPC discovery.** `active_socket_paths` (`ipc.rs:316`) finds daemons by a scan for `*.sock` files. A named pipe is not a file, so `doctor` and `leave` find nothing.
 - **IPC security.** On Unix, the socket has no auth. Security comes from the `0700` runtime directory and the `0600` socket. A named pipe needs its own security descriptor.
-- **Stop.** `terminate` sends `SIGTERM`. Windows has no polite signal. `TerminateProcess` is a hard kill, so the `Left` broadcast does not go out and the state file stays.
+- **Stop.** `terminate` sends `SIGTERM`. Windows has no polite signal. `TerminateProcess` is a hard kill, so the `Left` broadcast does not go out and the state file stays. Until R5, `terminate` on Windows returns `Unsupported`.
 - **Owner watch.** `spawn_orphan_watch` (`shutdown.rs:214`) is `cfg(unix)` only. On Windows a daemon does not stop when its owner dies.
 - **Console events.** Only ctrl-c is handled. Close, logoff and shutdown events skip the graceful path.
 - **State file.** `state_file.rs:225` writes a temporary file and renames it over the target. On Windows the rename fails while a reader holds the file open without `FILE_SHARE_DELETE`.
@@ -60,14 +78,22 @@ These problems occur after the workspace compiles.
 
 ### 2.3 Tooling and tests
 
-- `tasks/src/ffi.rs:16` uses `libhabilis_network_ffi.a`. On MSVC the static library is `habilis_network_ffi.lib`.
-- `tasks/src/ffi.rs:90` falls back to `nm -gU`. `:104` finds `bin/llvm-nm` with no `.exe`. The symbol filter knows Mach-O and ELF, not COFF.
-- `tasks/src/util/webdriver.rs:62` calls `which`.
-- `tasks/src/util/cdp.rs:65-80` has no `win64` Chrome for Testing build, and calls `curl` (`:84`, `:113`) and `unzip` (`:126`).
+Open (R9):
+
+- `tasks/src/ffi.rs:17` uses `libhabilis_network_ffi.a`. On MSVC the static library is `habilis_network_ffi.lib`.
+- `tasks/src/ffi.rs` falls back to `nm -gU`, and finds `bin/llvm-nm` with no `.exe`. The symbol filter knows Mach-O and ELF, not COFF.
+
+Open (other):
+
+- `tasks/src/util/cdp.rs` has no `win64` Chrome for Testing build. It says so, and `$CHROME_FOR_TESTING` names a local Chrome instead.
 - `tasks/src/util/wasm.rs` looks for clang only in Homebrew paths.
-- `crates/habilis-network-chunks/tests/origin.rs:221` calls `touch -t`.
-- `crates/habilis-network-util/src/lib.rs:238`, `:255` and `crates/habilis-network/src/transport/ipc.rs:403` assert Unix paths.
 - `scripts/perf/*.sh` and `examples/tail/tail.sh` are bash. They stay Unix-only. Say so in their headers.
+
+Done (R10):
+
+- `tasks/src/util/webdriver.rs` uses the `which` crate.
+- `crates/habilis-network-chunks/tests/origin.rs` uses `File::set_modified`, not `touch -t`.
+- The path assertions in `crates/habilis-network-util/src/lib.rs` and `crates/habilis-network/src/transport/ipc.rs` are correct on each OS.
 
 ### 2.4 Toolchain
 
@@ -165,7 +191,9 @@ The real machine of [§6](#6-test-plan-on-a-real-windows-machine) then tests onl
   cargo task ffi
   ```
 
-- It also runs `bun install --frozen-lockfile` and `bun run test`. This tests `discover.ts` and the Node `isize` mapping on `win32`.
+  `cargo task ffi` is not in the job yet: it needs R9. Add it to the job with R9.
+- The job sets `CARGO_PROFILE_DEV_DEBUG=0`. With debug info, two debug builds wrote 19.9 GB on a developer machine and did not finish. Without it, all the cargo commands of the job wrote 6 GB.
+- It also runs `bun install --frozen-lockfile` and `bun run test`. This tests `discover.ts` and the Node `isize` mapping on `win32`. Until R9, the smoke test is skipped on Windows, so the `isize` mapping is not tested.
 - The Linux job keeps `cargo fmt --check`, `cargo doc` and the wasm32 steps.
 - Steps that need bash stay on Linux: `Clippy list names only functions` and the light-cycles web job.
 
@@ -245,6 +273,7 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. In step 4, R4 is done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
@@ -270,6 +299,14 @@ For each failure, attach the log from the log directory that `doctor` shows.
 4. Install Claude Code.
 5. Clone the repository and check out `feat-windows-support`.
 6. On the first run, allow the Windows Firewall prompt for private networks.
+7. Make sure that the disk has 15 GB free or more. Build without debug info, as the CI job does:
+
+   ```powershell
+   $env:CARGO_PROFILE_DEV_DEBUG = "0"
+   ```
+
+   With debug info, two debug builds of the test executables wrote 19.9 GB and did not finish.
+   To keep the setting, use `setx CARGO_PROFILE_DEV_DEBUG 0` and open a new shell. The setting then applies to all Rust projects of the user.
 
 ### T1. Build and unit tests
 
@@ -350,3 +387,66 @@ Pass:
 | Windows and macOS on the same LAN. | mDNS finds the peer. |
 | Windows behind a home NAT, macOS on a different network. | A direct path or the relay connects them. |
 | Windows Firewall blocks the program. | The relay still connects them. |
+
+## 7. Build on Linux and WSL
+
+Use WSL 2 on the same machine to run the Linux steps of `ci.yml`.
+A WSL peer is not a second machine. In the default NAT networking mode, it does not test T7. Use it for T1 to T3 only, or set `networkingMode=mirrored`.
+
+### 7.1 Limits
+
+With the WSL defaults, a build of the workspace can stop with no memory.
+The defaults are half of the RAM, a small swap (2 GB on a machine with 16 GB) and all of the processors.
+Cargo then runs one `rustc` and one link for each processor, and the test executables are large with debug info.
+
+1. Set the limits of the WSL VM in `%USERPROFILE%\.wslconfig`. These values are for a machine with 16 GB and 16 threads:
+
+   ```ini
+   [wsl2]
+   memory=10GB
+   swap=8GB
+   processors=8
+   ```
+
+   Run `wsl --shutdown` from PowerShell. The limits apply when WSL starts again.
+   Docker Desktop uses the same VM memory. Stop it while you build.
+2. Set the build limits in `~/.bashrc`:
+
+   ```bash
+   export CARGO_PROFILE_DEV_DEBUG=0
+   export CARGO_BUILD_JOBS=6
+   export RUST_TEST_THREADS=4
+   ```
+
+   `RUST_TEST_THREADS` limits the tests that run at the same time in one test executable. Many tests start real nodes.
+
+### 7.2 Disk
+
+- Clone the repository in the Linux file system, for example `~/dev/habilis-network`. Do not build in `/mnt/c`. There, all file access goes through 9P. 9P is slow. Also, `target/` goes to the Windows disk.
+- The disk of the distribution is an `ext4.vhdx` file on the Windows disk. It grows when the build writes, and it does not become smaller when you delete files. To give the free space back:
+
+  1. In WSL, run `sudo fstrim -a`.
+  2. In PowerShell, run `wsl -l -v` to find the name of the distribution, then `wsl --shutdown`.
+  3. Run `diskpart` as administrator, and type:
+
+     ```
+     select vdisk file="<path to ext4.vhdx>"
+     compact vdisk
+     exit
+     ```
+
+  `wsl --manage <distribution> --set-sparse true` makes WSL do this automatically. Some WSL releases turned sparse disks off after reports of data corruption, so use `diskpart`.
+- If the disk is full, run `cargo clean`. It removes `target/`.
+
+### 7.3 Commands
+
+These are some of the native steps of the `check` job of `ci.yml`.
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo test -p habilis-network --features blob
+cargo test -p habilis-network-iroh-webrtc-transport --features native
+```
+
+The Linux job of `ci.yml` also runs `cargo fmt --check`, `cargo doc`, the `--all-features` clippy, `cargo test -p tasks --features bench` and the wasm32 steps. You can run them in WSL too.
