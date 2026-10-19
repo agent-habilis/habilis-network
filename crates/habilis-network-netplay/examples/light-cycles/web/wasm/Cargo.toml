@@ -44,6 +44,7 @@ console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", features = ["console"] }
 
 [dev-dependencies]
+habilis-network-test-tracing = { path = "../../../../../habilis-network-test-tracing" }
 proptest = "1"
 
 [lints.rust]
