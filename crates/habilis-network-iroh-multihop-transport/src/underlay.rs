@@ -14,7 +14,7 @@
 //! only after the cell proves it belongs here, since `FORWARD_ALPN` accepts a
 //! connection from anyone and an unchecked relay is an amplifying reflector.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -59,6 +59,14 @@ const HEARD_HOPS_CAP: usize = 1024;
 /// Hops without a vector that get a log line of their own. The ids come off the wire, so the set
 /// that remembers them has a ceiling.
 const UNRESOLVED_SEEN_CAP: usize = 128;
+
+/// The hops that named a cell this node delivered, newest last. Past [`HEARD_HOPS_CAP`] hops
+/// the oldest is forgotten.
+#[derive(Debug, Default)]
+struct HeardHops {
+    order: VecDeque<UnderlayId>,
+    set: HashSet<UnderlayId>,
+}
 
 /// Dial attempts before a writer task gives up on an unreachable next hop.
 const DIAL_ATTEMPTS: usize = 4;
@@ -420,7 +428,7 @@ pub(crate) struct Forwarder {
     /// The hops that named a cell this node delivered: the sender and the hops of its route. A
     /// reply goes back along that route reversed, so these are the hops that can lack a vector
     /// for a normal reason: see [`HEARD_HOPS_CAP`].
-    heard_hops: Mutex<HashSet<UnderlayId>>,
+    heard_hops: Mutex<HeardHops>,
 }
 
 impl Forwarder {
@@ -449,7 +457,7 @@ impl Forwarder {
             topology,
             unresolved_hops: AtomicU64::new(0),
             unresolved_seen: Mutex::new(HashSet::new()),
-            heard_hops: Mutex::new(HashSet::new()),
+            heard_hops: Mutex::new(HeardHops::default()),
         }
     }
 
@@ -513,17 +521,24 @@ impl Forwarder {
         self.heard_hops
             .lock()
             .expect("heard hops poisoned")
+            .set
             .contains(&underlay_id)
     }
 
-    /// Remember the hops of the reply route of a delivered cell, up to [`HEARD_HOPS_CAP`].
+    /// Remember the hops of the reply route of a delivered cell. Past [`HEARD_HOPS_CAP`] hops
+    /// the oldest is forgotten.
     fn note_heard(&self, reply_route: &Route) {
         let mut heard = self.heard_hops.lock().expect("heard hops poisoned");
         for hop in reply_route.hops() {
-            if heard.len() >= HEARD_HOPS_CAP {
-                return;
+            if !heard.set.insert(hop.underlay_id) {
+                continue;
             }
-            heard.insert(hop.underlay_id);
+            heard.order.push_back(hop.underlay_id);
+            if heard.order.len() > HEARD_HOPS_CAP
+                && let Some(oldest) = heard.order.pop_front()
+            {
+                heard.set.remove(&oldest);
+            }
         }
     }
 
@@ -1503,6 +1518,41 @@ mod tests {
             "past the ceiling"
         );
         assert!(forwarder.first_without_vector(beyond, 256), "one in 256");
+    }
+
+    /// The hops that delivered cells named are remembered past [`HEARD_HOPS_CAP`]: the oldest
+    /// hop is forgotten, and a reply to the newest cell is explained.
+    #[test]
+    async fn a_hop_named_by_a_cell_past_the_heard_cap_is_not_a_warning() {
+        let (forwarder, _app, mut received) = forwarder().await;
+        let hop = |seed: u16| {
+            let mut bytes = [0u8; 32];
+            bytes[..2].copy_from_slice(&seed.to_be_bytes());
+            bytes[2] = 7;
+            let id = SecretKey::from_bytes(&bytes).public();
+            RouteHop {
+                app_id: AppId::new(id),
+                underlay_id: UnderlayId::new(id),
+            }
+        };
+        let cap = u16::try_from(super::HEARD_HOPS_CAP).expect("fits");
+        for seed in 0..=cap {
+            let sender = hop(seed);
+            let delivered = cell(vec![self_hop(&forwarder)], 0, sender.clone());
+            forwarder.handle_cell(delivered, sender.underlay_id);
+            received.try_recv().expect("delivered");
+        }
+        let newest = hop(cap);
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&newest);
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            0,
+            "the newest delivered cell named the hop"
+        );
+        forwarder.underlay.close().await;
     }
 
     #[test]
