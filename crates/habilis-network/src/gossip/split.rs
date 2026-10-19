@@ -516,7 +516,7 @@ mod tests {
 /// `MESH` is the number of mesh messages that A sends beside the frames.
 #[cfg(test)]
 mod real_gossip {
-    use habilis_network_test_tracing::test;
+    use habilis_network_test_tracing::{at_end, expect_warn, test};
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
@@ -579,9 +579,21 @@ mod real_gossip {
         let rate_fps =
             rate_mib * 1_048_576.0 / u64_to_f64(u64::try_from(frame::MAX_FRAME_LEN).unwrap_or(1));
 
+        // The flood is meant to overflow the send queue of the connection. A run at a set rate is
+        // not: a drop there is the finding of the sweep, so the guard fails it.
+        if rate_fps <= 0.0 {
+            expect_warn(
+                "iroh_gossip::net",
+                "dropped a data message: the send queue of the connection is full",
+            );
+        }
+
         let lookup = MemoryLookup::new();
-        let (a_endpoint, a_gossip, _a_router) = member(1, &lookup).await;
-        let (b_endpoint, b_gossip, _b_router) = member(2, &lookup).await;
+        let (a_endpoint, a_gossip, a_router) = member(1, &lookup).await;
+        let (b_endpoint, b_gossip, b_router) = member(2, &lookup).await;
+        // A dropped endpoint that was not closed logs an ERROR.
+        at_end(async move { a_router.shutdown().await.expect("a shuts down") });
+        at_end(async move { b_router.shutdown().await.expect("b shuts down") });
         let topic_id = TopicId::from_bytes([42u8; 32]);
         let b_handle = GossipHandle::new(b_endpoint.id());
 
