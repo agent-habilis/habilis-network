@@ -2434,6 +2434,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs the public relay ladder; run with --ignored"]
     async fn public_default_relay_binds() {
         // No lookup wired: exercises the `Minimal` + pinned-ladder
         // composition. `bind()` is non-blocking wrt the relay, so this
