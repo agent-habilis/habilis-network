@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use crate::message::Verified;
-use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
+use crate::message::{Authored, Verified};
+use crate::{AuthorKey, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
     LOGGED_SHARD_GROUP_MAX_TOTAL, REASSEMBLY_AUTHOR_BUDGET_BYTES, REASSEMBLY_GROUP_MAX_BYTES,
@@ -33,7 +33,7 @@ pub enum ShardIngest {
     /// The shard completed its group: the synthesized logical message, with
     /// the group's budget already freed. Boxed — the completed arm is rare
     /// and the enum otherwise carries nothing (`large_enum_variant`).
-    Complete(Box<Message>),
+    Complete(Box<Authored>),
     /// Dropped — a duplicate slot, a header mismatch, or a budget breach
     /// (which drops the whole group, fail closed).
     Dropped,
@@ -305,7 +305,7 @@ impl ReassemblyStore {
 /// `id`, and no `shard`/chain (the view is neither a wire message nor a chain
 /// entry — the shards are). `None` only when the concatenated body fails
 /// validation — fail closed rather than surface a malformed body.
-fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Message> {
+fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Authored> {
     // Sized up front: this runs on every completed multipart body, and the
     // total is already known from the slots.
     let mut body = String::with_capacity(group.slots.values().map(String::len).sum());
@@ -313,11 +313,8 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Mess
         body.push_str(slot);
     }
     let body = MessageBody::new(body).ok()?;
-    Some(synthesize_from(
-        group.header?.into_message(),
-        body,
-        group_id,
-    ))
+    let header = group.header?;
+    Some(synthesize_from(&header, body, group_id))
 }
 
 /// One stalled big group's repair ask: which author to query and which shard
@@ -382,14 +379,15 @@ impl ShardCache {
 #[must_use]
 /// # Panics
 /// If the envelope carries no shard header; callers only pass shard messages.
-pub fn synthesize_from(mut envelope: Message, body: MessageBody, group_id: &ShardGroup) -> Message {
+pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGroup) -> Authored {
+    let mut envelope = header.clone().into_message();
     envelope.id = MessageId::new(group_id.as_str()).expect("a shard group is a valid message id");
     envelope.body = body;
     envelope.shard = None;
     envelope.seq = None;
     envelope.prev = None;
     envelope.parents = Vec::new();
-    envelope
+    Authored::new(envelope, header.key())
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 use crate::protocol::mesh::MeshName;
-use crate::protocol::{Channel, MeshId, Message, Nickname};
+use crate::protocol::message::Authored;
+use crate::protocol::{Channel, MeshId, Nickname};
 
 /// A generic surfacing the engine emits — the chat-agnostic subset of the app's
 /// `OutputEvent`. The app's [`NodeSink`] impl maps each variant onto the
@@ -31,7 +32,7 @@ pub enum NodeEvent {
         nickname: Nickname,
     },
     Presence {
-        msg: Box<Message>,
+        msg: Box<Authored>,
     },
     PingReport {
         /// Each responder and its round-trip time in milliseconds, sorted by
@@ -43,7 +44,7 @@ pub enum NodeEvent {
     },
     StateChanged {
         channel: Channel,
-        event: Box<Message>,
+        event: Box<Authored>,
         document: serde_json::Value,
         is_self: bool,
     },

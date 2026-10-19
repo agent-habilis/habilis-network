@@ -16,7 +16,7 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
-use crate::protocol::message::{MessageBody, Verified};
+use crate::protocol::message::{Authored, MessageBody, Verified};
 use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -593,21 +593,17 @@ pub(crate) async fn ingest(
     // dropped. Retention gets the original `verified` frame, so the log keeps
     // the ciphertext the author signed.
     //
-    // step4: the decrypt and the surfacing work on a plain copy until gate_and_decrypt takes
-    // &Verified and returns an Authored view.
-    let mut plain = verified.clone().into_message();
-    // Classify the (now-decrypted) App payload **once** here — inside the gate,
-    // where the boundary check already parses it — and thread the result to the
-    // push and retain steps so neither re-parses the body. `None` for an infra
-    // frame (no app payload).
-    let app_class = match gate_and_decrypt(&mut plain, state, ctx, &*app) {
-        Gated::Pass { class } => class,
+    // The gate hands back the view to surface, which holds the plaintext body. The
+    // classification is computed once there, so the push and retain steps never
+    // re-parse the payload. `None` for an infra frame (no app payload).
+    let (app_class, view) = match gate_and_decrypt(&verified, state, ctx, &*app) {
+        Gated::Pass { class, view } => (class, view),
         Gated::Drop => return,
     };
 
-    maybe_push_inbound(ctx, &plain, surfaceable, app_class.as_ref()); // step4: pushes the plaintext view
+    maybe_push_inbound(ctx, &view, surfaceable, app_class.as_ref());
 
-    match &plain.kind {
+    match &view.kind {
         MessageKind::App { .. } => {
             // The app-payload seam: dispatch RPC legs / chat / task frames.
             // `false` means the frame is plumbing or addressed elsewhere —
@@ -615,7 +611,7 @@ pub(crate) async fn ingest(
             if !app
                 .on_app_frame(
                     InboundApp {
-                        message: &plain, // step4: NodeApp takes the Authored view
+                        message: &view,
                         surfaceable,
                     },
                     state,
@@ -913,7 +909,10 @@ async fn handle_shard(
     }
     // The raw shard's own per-tag policy (loggability/chain) — computed from its
     // fragment body, matching the pre-thread behavior of the internal classify.
-    let shard_class = message.kind.app_tag().map(|_| app.classify(message));
+    let shard_class = message
+        .kind
+        .app_tag()
+        .map(|_| app.classify(&message.authored()));
     // Only a small group's shards enter the message log (anti-entropy heals
     // them like any message — point-to-point when the shard is directed, so
     // the addressee still recovers); a big group would evict the mesh's whole
@@ -932,17 +931,17 @@ async fn handle_shard(
             ctx,
         );
     }
-    if let Some(mut logical) = state.reassemble(message) {
+    if let Some(logical) = state.reassemble(message) {
         // The same gate the single-frame path runs, now on the reassembled body:
         // unseal a directed frame sealed to us or a mesh-key-sealed broadcast,
         // then validate the payload. Shared rather than restated, so a change to
         // the gate cannot reach one path and silently miss the other. The
         // ciphertext it hands back is for `ingest`'s retention step — the shards
         // here were already retained above, as ciphertext.
-        let Gated::Pass { class, .. } = gate_and_decrypt(&mut logical, state, ctx, app) else {
+        let Gated::Pass { class, view } = gate_and_decrypt(&logical, state, ctx, app) else {
             return;
         };
-        maybe_push_inbound(ctx, &logical, surfaceable, class.as_ref());
+        maybe_push_inbound(ctx, &view, surfaceable, class.as_ref());
         // Dispatch the reassembled logical frame exactly like a single-frame one:
         // a directed RPC request/response (both shard now) reaches its handler,
         // and content surfaces. The shards were already retained above, so the
@@ -950,7 +949,7 @@ async fn handle_shard(
         let _ = app
             .on_app_frame(
                 InboundApp {
-                    message: &logical,
+                    message: &view,
                     surfaceable,
                 },
                 state,
@@ -1115,16 +1114,15 @@ fn dispatch_channel(
 /// the wire body (a decrypted `enc` body), a clone with the body replaced; else
 /// the original borrowed unchanged. The output helpers read `event.body` for the
 /// `m` delta, so they must see plaintext.
-fn surface_view(message: &Message, plain: Option<String>) -> std::borrow::Cow<'_, Message> {
-    match plain {
-        Some(text) if text != message.body.as_str() => {
-            let mut clone = message.clone();
-            if let Ok(body) = MessageBody::new(text) {
-                clone.body = body;
-            }
-            std::borrow::Cow::Owned(clone)
-        }
-        _ => std::borrow::Cow::Borrowed(message),
+fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
+    let body = plain
+        .filter(|text| text != frame.body.as_str())
+        .and_then(|text| MessageBody::new(text).ok());
+    match body {
+        Some(body) => frame
+            .open_with(|_| Some(body))
+            .unwrap_or_else(|| frame.authored()),
+        None => frame.authored(),
     }
 }
 
@@ -1160,7 +1158,7 @@ fn ingest_channel_event(
             let surfaced = surface_view(message, doc.surface_body(message));
             ctx.sink.emit(NodeEvent::StateChanged {
                 channel,
-                event: Box::new(surfaced.into_owned()),
+                event: Box::new(surfaced),
                 document: after,
                 is_self: false,
             });
@@ -1193,34 +1191,61 @@ fn is_directed_content(kind: &MessageKind) -> bool {
     matches!(kind, MessageKind::App { to: Some(_), .. })
 }
 
-/// If `message` is a directed payload sealed **to us**, decrypt its body in
-/// place so the surfacing pipeline sees plaintext. Returns `false` only when a
-/// frame sealed to us fails to open (tampered / wrong key), so the caller drops
-/// it. A relay (not the addressee), broadcast, and plumbing pass through
-/// untouched — the caller only invokes this on the addressee's path.
-/// Outcome of the inbound gate. `Pass` carries the original **sealed** body to
-/// restore before retention (`sealed`: `Some` when we decrypted a directed or
-/// mesh-key body addressed to us, so anti-entropy re-serves the wire frame not
-/// our decrypted view; `None` otherwise) plus the frame's [`AppClass`] (`class`:
-/// `Some` for an App frame, classified once here on the decrypted body; `None`
-/// for an infra frame with no app payload). Threading the class out means the
-/// push + retain steps never re-parse the payload.
+/// A frame the inbound gate can open: a [`Verified`] wire frame, or the [`Authored`]
+/// logical view of a reassembled group. Both deref to the message, and both can hand
+/// back a proof whose body the gate derived.
+trait Opened: std::ops::Deref<Target = Message> {
+    /// This frame as a proof, with its wire body.
+    fn authored(&self) -> Authored;
+
+    /// This frame as a proof, with `body` in place of the wire body. `None` only if
+    /// the proof cannot be made, which the callers treat as a drop.
+    fn with_body(&self, body: MessageBody) -> Option<Authored>;
+}
+
+impl Opened for Verified {
+    fn authored(&self) -> Authored {
+        Verified::authored(self)
+    }
+
+    fn with_body(&self, body: MessageBody) -> Option<Authored> {
+        self.open_with(|_| Some(body))
+    }
+}
+
+impl Opened for Authored {
+    fn authored(&self) -> Authored {
+        self.clone()
+    }
+
+    fn with_body(&self, body: MessageBody) -> Option<Authored> {
+        self.open_with(|_| Some(body))
+    }
+}
+
+/// Outcome of the inbound gate. `Pass` carries the frame's [`AppClass`] (`class`:
+/// `Some` for an App frame, classified once on the opened body; `None` for an infra
+/// frame with no app payload) and the [`Authored`] view to surface, which holds the
+/// plaintext body the gate opened. The frame the caller retains is untouched.
 enum Gated {
     Drop,
-    Pass { class: Option<AppClass> },
+    Pass {
+        class: Option<AppClass>,
+        view: Box<Authored>,
+    },
 }
 
 /// Classify an App frame and enforce the app boundary gate in one parse:
 /// returns the [`AppClass`] on a valid payload, `None` (logging the drop) when
 /// the payload fails its frame's contract. Callers reuse the returned class
 /// rather than re-classifying.
-fn gate_app_payload(message: &Message, app: &dyn NodeApp) -> Option<AppClass> {
-    let class = app.classify(message);
+fn gate_app_payload(view: &Authored, app: &dyn NodeApp) -> Option<AppClass> {
+    let class = app.classify(view);
     if class.valid {
         Some(class)
     } else {
         tracing::warn!(target: "habilis_network::gossip",
-            author = %message.author,
+            author = %view.author,
             "dropping app frame with an invalid payload"
         );
         None
@@ -1228,84 +1253,106 @@ fn gate_app_payload(message: &Message, app: &dyn NodeApp) -> Option<AppClass> {
 }
 
 /// Validate + (for the addressee) decrypt an inbound **non-sharded** logical
-/// frame before surfacing, returning the once-computed [`AppClass`] alongside
-/// the sealed-body-to-restore.
-fn gate_and_decrypt(
-    message: &mut Message,
+/// frame before surfacing. The decrypted body lives only in the returned view, so
+/// retention keeps the frame the author signed.
+fn gate_and_decrypt<F: Opened>(
+    frame: &F,
     state: &EventLoopState,
     ctx: &HandlerCtx<'_>,
     app: &dyn NodeApp,
 ) -> Gated {
-    if is_directed_content(&message.kind) {
-        if !addressed_to_us(message, ctx.author) {
+    if is_directed_content(&frame.kind) {
+        if !addressed_to_us(frame, ctx.author) {
             // Relay: an opaque directed frame — forwarded + retained, never
             // validated or surfaced (the dispatch below is gated to the
             // addressee), so it needs no classification here.
-            return Gated::Pass { class: None };
+            return Gated::Pass {
+                class: None,
+                view: Box::new(frame.authored()),
+            };
         }
-        return gate_directed_to_us(message, state, ctx, app);
+        return gate_directed_to_us(frame, state, app);
     }
     // A broadcast app frame on a passworded mesh must arrive sealed with the
-    // mesh key: decrypt in place so validation + surfacing see plaintext,
-    // rejecting an unsealed or unopenable body (cleartext can't slip past the
-    // guarantee). Only broadcast MSG is ever mesh-key sealed — a structural
-    // `App{to:None}` gate is behavior-identical to the former `is_app(MSG)` one.
-    // The ciphertext stays with the caller's verified frame: retention never reads this copy.
-    if matches!(&message.kind, MessageKind::App { to: None, .. }) && state.broadcast_key.is_some() {
-        if decrypt_broadcast(message, state).is_none() {
-            return Gated::Drop;
-        }
-        let Some(class) = gate_app_payload(message, app) else {
+    // mesh key: decrypt it so validation + surfacing see plaintext, rejecting an
+    // unsealed or unopenable body (cleartext can't slip past the guarantee). Only
+    // broadcast MSG is ever mesh-key sealed — a structural `App{to:None}` gate is
+    // behavior-identical to the former `is_app(MSG)` one.
+    if matches!(&frame.kind, MessageKind::App { to: None, .. }) && state.broadcast_key.is_some() {
+        let Some(body) = decrypt_broadcast(frame, state) else {
             return Gated::Drop;
         };
-        return Gated::Pass { class: Some(class) };
+        let Some(view) = frame.with_body(body) else {
+            return Gated::Drop;
+        };
+        let Some(class) = gate_app_payload(&view, app) else {
+            return Gated::Drop;
+        };
+        return Gated::Pass {
+            class: Some(class),
+            view: Box::new(view),
+        };
     }
-    // Broadcast app / infra logical frames validate in place. An infra kind has
+    // Broadcast app / infra logical frames validate as they are. An infra kind has
     // no app payload — it passes with `class: None`.
-    match message.kind.app_tag() {
-        Some(_) => match gate_app_payload(message, app) {
-            Some(class) => Gated::Pass { class: Some(class) },
+    let view = frame.authored();
+    match frame.kind.app_tag() {
+        Some(_) => match gate_app_payload(&view, app) {
+            Some(class) => Gated::Pass {
+                class: Some(class),
+                view: Box::new(view),
+            },
             None => Gated::Drop,
         },
-        None => Gated::Pass { class: None },
+        None => Gated::Pass {
+            class: None,
+            view: Box::new(view),
+        },
     }
 }
 
 /// Validate + decrypt a directed frame that's addressed to us (as opposed to
 /// one we're only relaying).
-fn gate_directed_to_us(
-    message: &mut Message,
-    state: &EventLoopState,
-    ctx: &HandlerCtx<'_>,
-    app: &dyn NodeApp,
-) -> Gated {
+fn gate_directed_to_us<F: Opened>(frame: &F, state: &EventLoopState, app: &dyn NodeApp) -> Gated {
     // Whether the directed body is sealed is the app's call, not a
     // structural given: an app's directed tags may arrive encrypted, but a
     // consumer with its own data model may send plaintext directed bytes. The frame is
     // signature-authenticated either way; `sealed=false` only means "not
     // additionally encrypted".
-    if !app.classify(message).sealed {
-        // Plaintext directed body: the wire body is already the final body,
-        // so retain_and_index re-serves it unchanged (`sealed: None`).
-        let Some(class) = gate_app_payload(message, app) else {
+    let wire = frame.authored();
+    if !app.classify(&wire).sealed {
+        // Plaintext directed body: the wire body is already the final body.
+        let Some(class) = gate_app_payload(&wire, app) else {
             return Gated::Drop;
         };
-        return Gated::Pass { class: Some(class) };
+        return Gated::Pass {
+            class: Some(class),
+            view: Box::new(wire),
+        };
     }
-    if !decrypt_directed(message, state, ctx) {
-        return Gated::Drop;
-    }
-    let Some(class) = gate_app_payload(message, app) else {
+    let Some(body) = decrypt_directed(frame, state) else {
         return Gated::Drop;
     };
-    Gated::Pass { class: Some(class) }
+    let Some(view) = frame.with_body(body) else {
+        return Gated::Drop;
+    };
+    let Some(class) = gate_app_payload(&view, app) else {
+        return Gated::Drop;
+    };
+    Gated::Pass {
+        class: Some(class),
+        view: Box::new(view),
+    }
 }
 
-/// Decrypt a broadcast chat body sealed under the mesh key, **in place**.
-/// Returns the original (ciphertext) body to restore before retention, or `None`
-/// when there is no key or the body is not a decryptable `enc` envelope (on a
-/// passworded mesh that means an unsealed/tampered body — the caller drops it).
-fn decrypt_broadcast(message: &mut Message, state: &EventLoopState) -> Option<MessageBody> {
+/// Decrypt a broadcast chat body sealed under the mesh key. Returns the plaintext
+/// body, or `None` when there is no key or the body is not a decryptable `enc`
+/// envelope (on a passworded mesh that means an unsealed/tampered body — the caller
+/// drops it).
+fn decrypt_broadcast<F: std::ops::Deref<Target = Message>>(
+    message: &F,
+    state: &EventLoopState,
+) -> Option<MessageBody> {
     let key = state.broadcast_key.as_ref()?;
     // A key exists (passworded mesh), so a body that will not open is either
     // cleartext or tampered — drop it, but say so (mirroring the directed-drop
@@ -1318,25 +1365,21 @@ fn decrypt_broadcast(message: &mut Message, state: &EventLoopState) -> Option<Me
         );
         return None;
     };
-    let body = MessageBody::new(plain).ok()?;
-    Some(std::mem::replace(&mut message.body, body))
+    MessageBody::new(plain).ok()
 }
 
-fn decrypt_directed(message: &mut Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) -> bool {
-    if !is_directed_content(&message.kind) || !addressed_to_us(message, ctx.author) {
-        return true;
-    }
+/// Unseal a directed body sealed to us. Returns the plaintext body, or `None` when
+/// the frame fails to open (tampered / wrong key), so the caller drops it. The
+/// caller only calls this on the addressee's path.
+fn decrypt_directed<F: std::ops::Deref<Target = Message>>(
+    message: &F,
+    state: &EventLoopState,
+) -> Option<MessageBody> {
     match crate::protocol::seal::unseal_from_body(&state.identity.seal_secret(), &message.body) {
-        Ok(plaintext) => match MessageBody::new(plaintext) {
-            Ok(body) => {
-                message.body = body;
-                true
-            }
-            Err(_) => false,
-        },
+        Ok(plaintext) => MessageBody::new(plaintext).ok(),
         Err(error) => {
             tracing::warn!(target: "habilis_network::gossip", %error, author = %message.author, "dropping a directed frame sealed to us that failed to open");
-            false
+            None
         }
     }
 }
@@ -1913,7 +1956,7 @@ mod evicted_orphan_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::message::Verified;
+    use crate::protocol::message::{Authored, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -1924,7 +1967,7 @@ mod evicted_orphan_tests {
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
-        fn classify(&self, _message: &Message) -> AppClass {
+        fn classify(&self, _message: &Authored) -> AppClass {
             AppClass {
                 loggable: false,
                 beat: true,
@@ -2085,7 +2128,7 @@ mod first_contact_tests {
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
     use crate::protocol::message::MessageBody;
-    use crate::protocol::message::Verified;
+    use crate::protocol::message::{Authored, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -2094,7 +2137,7 @@ mod first_contact_tests {
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
-        fn classify(&self, _message: &Message) -> AppClass {
+        fn classify(&self, _message: &Authored) -> AppClass {
             AppClass {
                 loggable: false,
                 beat: true,
@@ -2263,7 +2306,7 @@ mod first_contact_tests {
 
     #[async_trait::async_trait]
     impl NodeApp for Counting {
-        fn classify(&self, _message: &Message) -> AppClass {
+        fn classify(&self, _message: &Authored) -> AppClass {
             AppClass {
                 loggable: false,
                 beat: true,
@@ -3156,6 +3199,7 @@ mod left_tests {
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
     use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::message::Authored;
     use crate::protocol::{MeshId, Message, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -3165,7 +3209,7 @@ mod left_tests {
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
-        fn classify(&self, _message: &Message) -> AppClass {
+        fn classify(&self, _message: &Authored) -> AppClass {
             AppClass {
                 loggable: false,
                 beat: true,

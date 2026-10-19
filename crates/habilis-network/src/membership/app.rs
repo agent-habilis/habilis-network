@@ -11,8 +11,9 @@ use crate::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent,
 };
 use crate::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
+use crate::protocol::message::Authored;
 use crate::protocol::{
-    AppFrameParams, AppTag, Channel, Message, MessageBody, MessageKind, Nickname,
+    AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname,
 };
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
@@ -445,7 +446,7 @@ impl MembershipApp {
 
 #[async_trait]
 impl NodeApp for MembershipApp {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         // Ephemeral text: never logged, never a task beat, always valid, no
         // per-author hash chain. `sealed: false` is load-bearing — a member
         // publishes no a2a card, so it can neither seal to a peer nor be sealed
@@ -521,7 +522,7 @@ impl NodeDriver for MembershipApp {
                         body,
                     },
                 );
-                let class = self.classify(&frame);
+                let class = self.classify(&frame.authored());
                 match send_app(state, ctx, frame, class).await {
                     Ok(crate::transport::Delivered::Done) => {
                         let _ = reply.send(Ok(()));
@@ -1088,6 +1089,7 @@ fn route_diag(state: &EventLoopState) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::Message;
     use super::*;
     use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, RelayLadder};
     use crate::runtime::derive_topic_mesh_config;

@@ -191,12 +191,35 @@ pub struct Authored {
 }
 
 impl Authored {
+    /// A proof for `message`, whose author `key` proved. Only [`Verified::authored`],
+    /// [`Verified::open_with`] and the reassembly that builds a logical message call it.
+    pub(crate) const fn new(message: Message, key: AuthorKey) -> Self {
+        Self { message, key }
+    }
+
     /// The key that signed the message this body came from.
     #[must_use]
     pub const fn key(&self) -> AuthorKey {
         self.key
     }
+
+    /// The proof with a body that `open` derives from this one, as
+    /// [`Verified::open_with`]. The result proves the author only.
+    #[must_use]
+    pub fn open_with(
+        &self,
+        open: impl FnOnce(&MessageBody) -> Option<MessageBody>,
+    ) -> Option<Authored> {
+        let body = open(&self.message.body)?;
+        let mut message = self.message.clone();
+        message.body = body;
+        Some(Authored {
+            message,
+            key: self.key,
+        })
+    }
 }
+
 
 impl Deref for Authored {
     type Target = Message;

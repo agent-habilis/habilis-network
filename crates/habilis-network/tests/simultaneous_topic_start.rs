@@ -21,6 +21,7 @@
 
 #![cfg(feature = "host")]
 
+use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,7 @@ use habilis_network::embed::{
 };
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
-    LookupOpts, Message, MessageKind, Nickname, PresenceSubtype, RelayChoice,
+    LookupOpts, MessageKind, Nickname, PresenceSubtype, RelayChoice,
 };
 use habilis_network::runtime::tuning::{Tuning, init};
 use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
@@ -128,7 +129,7 @@ struct Member;
 
 #[habilis_network::async_trait]
 impl NodeApp for Member {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: false,
             beat: true,

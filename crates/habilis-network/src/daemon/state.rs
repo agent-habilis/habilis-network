@@ -14,7 +14,7 @@ use super::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
-use crate::protocol::message::Verified;
+use crate::protocol::message::{Authored, Verified};
 use crate::protocol::{
     AuthorKey, ContentHash, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
     UnixSecs,
@@ -1625,7 +1625,7 @@ impl EventLoopState {
     /// buffer still completes the body — dedup (`seen`) means the healed
     /// shard is the only one re-ingested, and the store alone would sit on
     /// 1-of-N forever.
-    pub(crate) fn reassemble(&mut self, trigger: &Verified) -> Option<Message> {
+    pub(crate) fn reassemble(&mut self, trigger: &Verified) -> Option<Authored> {
         let shard = trigger.shard.as_ref()?;
         if self.reassembled_groups.contains(&shard.group) {
             return None;
@@ -1649,7 +1649,7 @@ impl EventLoopState {
     /// The log-backed completion path for a **small** (logged) group: scan
     /// the message log for this author's shards and synthesize when every
     /// slot is present. Mirrors the store's synthesis exactly.
-    fn reassemble_from_log(&self, trigger: &Verified) -> Option<Message> {
+    fn reassemble_from_log(&self, trigger: &Verified) -> Option<Authored> {
         let shard = trigger.shard.as_ref()?;
         // A message that reaches reassembly passed the signature gate, so it has a key.
         let author = trigger.author_key()?;
@@ -1669,9 +1669,9 @@ impl EventLoopState {
         // The concatenation of valid bodies is itself valid (no new control
         // chars), but fail closed rather than surface a malformed body.
         let body = crate::protocol::MessageBody::new(body).ok()?;
-        let envelope = slots[0].expect("shard 0 present").clone().into_message(); // step4: the logical view is Authored
+        let header = slots[0].expect("shard 0 present");
         Some(super::reassembly::synthesize_from(
-            envelope,
+            header,
             body,
             &shard.group,
         ))

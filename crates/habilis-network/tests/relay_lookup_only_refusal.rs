@@ -12,6 +12,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ use habilis_network::embed::{
 use habilis_network::iroh::RelayUrl;
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
-    LookupOpts, MeshConfig, Message, MessageKind, Nickname, PresenceSubtype, RelayChoice,
+    LookupOpts, MeshConfig, MessageKind, Nickname, PresenceSubtype, RelayChoice,
     TransportPolicy,
 };
 use habilis_network::runtime::{
@@ -34,7 +35,7 @@ struct Probe;
 
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: false,
             beat: true,

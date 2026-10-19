@@ -8,6 +8,7 @@
 
 #![cfg(feature = "host")]
 
+use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -39,7 +40,7 @@ struct Chat {
 
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: true,
             beat: false,

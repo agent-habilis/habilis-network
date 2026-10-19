@@ -110,8 +110,11 @@ pub(crate) fn observe(
         && !matches!(message.kind, MessageKind::Presence { .. })
     {
         state.surfaced.insert(message.author.clone());
+        // Engine-minted: the arrival is a fact this node surfaces, so this node signs
+        // the presence that reports it. The nickname stays the peer's.
+        let arrival = Message::new_joined(ctx.mesh, &message.author).sign(ctx.identity);
         ctx.sink.emit(NodeEvent::Presence {
-            msg: Box::new(Message::new_joined(ctx.mesh, &message.author)),
+            msg: Box::new(arrival.authored()),
         });
         tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined");
     }
@@ -127,7 +130,7 @@ pub(crate) fn observe(
 /// [`crate::gossip::recv::ingest`], across the `gossip`/`lifecycle` module
 /// boundary — hence `pub(crate)` rather than module-private.
 pub(crate) struct PresenceEvent<'a> {
-    pub(crate) message: &'a Message,
+    pub(crate) message: &'a Verified,
     pub(crate) subtype: PresenceSubtype,
     pub(crate) update: &'a membership::MembershipUpdate,
     pub(crate) surfaceable: bool,
@@ -173,7 +176,7 @@ pub(crate) async fn handle_presence(
         // already showed going quiet) is dropped.
         if state.surfaced.remove(message.author.as_str()) {
             ctx.sink.emit(NodeEvent::Presence {
-                msg: Box::new(message.clone()),
+                msg: Box::new(message.authored()),
             });
             tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer left");
         }
@@ -211,7 +214,7 @@ pub(crate) async fn handle_presence(
             if surfaceable && !update.returned {
                 state.surfaced.insert(message.author.clone());
                 ctx.sink.emit(NodeEvent::Presence {
-                    msg: Box::new(message.clone()),
+                    msg: Box::new(message.authored()),
                 });
                 tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
             }

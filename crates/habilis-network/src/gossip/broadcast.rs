@@ -259,14 +259,14 @@ pub async fn broadcast_state_merge(
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
-        let mut surfaced = signed.clone().into_message(); // step4: the surfaced view is plain until NodeEvent takes Authored
-        surfaced.body = plain_body;
-        sink.emit(NodeEvent::StateChanged {
-            channel,
-            event: Box::new(surfaced),
-            document: after,
-            is_self: true,
-        });
+        if let Some(surfaced) = signed.open_with(|_| Some(plain_body)) {
+            sink.emit(NodeEvent::StateChanged {
+                channel,
+                event: Box::new(surfaced),
+                document: after,
+                is_self: true,
+            });
+        }
     }
     let bytes = Bytes::from(bytes);
     if state.overlay_reachable() {
