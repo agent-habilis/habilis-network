@@ -1784,6 +1784,11 @@ impl EventLoopState {
         if self.degraded {
             self.degraded = false;
             self.meshed = true;
+            // A node that held no link has had no unlink to start the gap that the census counts.
+            // A gap that already runs keeps its start.
+            if self.linked_endpoints.is_empty() {
+                self.zero_links_since.get_or_insert(now);
+            }
             return true;
         }
         false
@@ -3862,6 +3867,52 @@ mod tests {
         assert!(
             !state.silent_partition_due(roster, Instant::now()),
             "a new gap is young"
+        );
+    }
+
+    /// A degraded node that a relayed frame heals while it holds no link is meshed with zero links.
+    /// It never lost a link, so no unlink started the gap: the heal starts it, and the census calls
+    /// the state a silent partition once the gap outlasts a heal.
+    #[test]
+    fn a_degraded_node_that_heals_without_a_link_starts_counting_the_gap() {
+        let roster = 3;
+        let after = crate::util::tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.note_degraded();
+        let healed_at = Instant::now();
+
+        assert!(state.note_inbound(healed_at), "the first inbound heals it");
+
+        assert!(
+            !state.silent_partition_due(roster, healed_at),
+            "the gap is young"
+        );
+        assert!(
+            state.silent_partition_due(roster, healed_at + after + Duration::from_secs(1)),
+            "meshed with no link for longer than a heal"
+        );
+    }
+
+    /// A heal does not restart a gap that already runs: the unlink that began it is the start.
+    #[test]
+    fn a_heal_does_not_restart_a_gap_that_already_runs() {
+        let (bob, roster) = (endpoint_id(1), 3);
+        let after = crate::util::tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.link(bob);
+        state.unlink(bob);
+        let began = Instant::now();
+        state.note_degraded();
+
+        assert!(
+            state.note_inbound(began + after / 2),
+            "the first inbound heals it"
+        );
+
+        assert!(
+            state.silent_partition_due(roster, began + after + Duration::from_secs(1)),
+            "the heal restarted the clock"
         );
     }
 
