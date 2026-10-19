@@ -194,11 +194,27 @@ fn loopback_builder() -> Result<Builder, String> {
 /// milliseconds. The server's router is returned so it stays alive.
 async fn webrtc_pair() -> Result<(WebRtcPeer, WebRtcPeer, Router, f64), String> {
     let client = WebRtcPeer::bind().await?;
-    let server = WebRtcPeer::bind().await?;
+    let server = match WebRtcPeer::bind().await {
+        Ok(server) => server,
+        Err(error) => {
+            client.endpoint.close().await;
+            return Err(error);
+        }
+    };
     let router = Router::builder(server.endpoint.clone())
         .accept(BENCH_ALPN, Bench)
         .spawn();
+    match Box::pin(negotiate(&client, &server)).await {
+        Ok(negotiate_ms) => Ok((client, server, router, negotiate_ms)),
+        Err(error) => {
+            close_cell(&client.endpoint, router).await;
+            Err(error)
+        }
+    }
+}
 
+/// The JSEP round between `client` and `server`, with the sessions attached: its milliseconds.
+async fn negotiate(client: &WebRtcPeer, server: &WebRtcPeer) -> Result<f64, String> {
     let started = Instant::now();
     let (pending_offer, offer) = offer_with(client.id, &IceConfig::host_only())
         .await
@@ -224,8 +240,60 @@ async fn webrtc_pair() -> Result<(WebRtcPeer, WebRtcPeer, Router, f64), String> 
             server_session.map_err(|error| format!("server complete failed: {error:#}"))?,
         )
         .map_err(|error| format!("server attach failed: {error:#}"))?;
-    let negotiate_ms = started.elapsed().as_secs_f64() * 1000.0;
-    Ok((client, server, router, negotiate_ms))
+    Ok(started.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// Close the client endpoint of a cell and shut the router of its server down, which closes the
+/// server endpoint. A dropped endpoint makes iroh log an error and abort its connections, in a
+/// bench run as in a test. The cell has measured or failed on its own: a router that failed to
+/// shut down changes neither.
+async fn close_cell(client: &Endpoint, router: Router) {
+    client.close().await;
+    drop(router.shutdown().await);
+}
+
+/// Bind the client and the server of a cell, and close the client when the server does not bind.
+async fn bind_two<F: Future<Output = Result<Endpoint, String>>>(
+    bind: impl Fn() -> F,
+) -> Result<(Endpoint, Endpoint), String> {
+    let client = bind().await?;
+    match bind().await {
+        Ok(server) => Ok((client, server)),
+        Err(error) => {
+            client.close().await;
+            Err(error)
+        }
+    }
+}
+
+/// Serve [`Bench`] on `server`, run `measure` from `client` against `addr`, and close both
+/// endpoints whatever `measure` returns.
+async fn bench_between<T, F: Future<Output = Result<T, String>>>(
+    client: Endpoint,
+    server: Endpoint,
+    addr: EndpointAddr,
+    measure: impl FnOnce(Endpoint, EndpointAddr) -> F,
+) -> Result<T, String> {
+    let router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+    let result = measure(client.clone(), addr).await;
+    close_cell(&client, router).await;
+    result
+}
+
+/// [`bench_between`] for two endpoints that are dialed by their IP address.
+async fn bench_ip<T, F: Future<Output = Result<T, String>>>(
+    client: Endpoint,
+    server: Endpoint,
+    measure: impl FnOnce(Endpoint, EndpointAddr) -> F,
+) -> Result<T, String> {
+    match ip_addr(&server) {
+        Ok(addr) => bench_between(client, server, addr, measure).await,
+        Err(error) => {
+            client.close().await;
+            server.close().await;
+            Err(error)
+        }
+    }
 }
 
 fn webrtc_addr(server: &WebRtcPeer) -> EndpointAddr {
@@ -235,9 +303,14 @@ fn webrtc_addr(server: &WebRtcPeer) -> EndpointAddr {
 /// str0m at both ends: JSEP in memory, then the data channel is the only path.
 pub(crate) async fn habilis_network_native_native_webrtc(args: &Args) -> Outcome {
     let run = async {
-        let (client, server, _router, negotiate_ms) = Box::pin(webrtc_pair()).await?;
-        let samples = rounds(&client.endpoint, webrtc_addr(&server), args).await?;
-        Measured::from_samples(negotiate_ms, samples)
+        let (client, server, router, negotiate_ms) = Box::pin(webrtc_pair()).await?;
+        let measured = async {
+            let samples = rounds(&client.endpoint, webrtc_addr(&server), args).await?;
+            Measured::from_samples(negotiate_ms, samples)
+        }
+        .await;
+        close_cell(&client.endpoint, router).await;
+        measured
     };
     Box::pin(run).await.into()
 }
@@ -279,12 +352,12 @@ async fn ip_pair<F: Future<Output = Result<Endpoint, String>>>(
     bind: impl Fn() -> F,
 ) -> Outcome {
     let run = async {
-        let client = bind().await?;
-        let server = bind().await?;
-        let addr = ip_addr(&server)?;
-        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
-        let samples = rounds(&client, addr, args).await?;
-        Measured::from_samples(0.0, samples)
+        let (client, server) = bind_two(bind).await?;
+        bench_ip(client, server, |client, addr| async move {
+            let samples = rounds(&client, addr, args).await?;
+            Measured::from_samples(0.0, samples)
+        })
+        .await
     };
     run.await.into()
 }
@@ -292,11 +365,11 @@ async fn ip_pair<F: Future<Output = Result<Endpoint, String>>>(
 /// The ladder's UDP cell: plain iroh on loopback, throughput and round trips.
 pub(crate) async fn ladder_udp(args: &Args) -> Outcome {
     let run = async {
-        let client = vanilla().await?;
-        let server = vanilla().await?;
-        let addr = ip_addr(&server)?;
-        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
-        ladder_measure(&client, addr, args, 0.0).await
+        let (client, server) = bind_two(vanilla).await?;
+        bench_ip(client, server, |client, addr| async move {
+            ladder_measure(&client, addr, args, 0.0).await
+        })
+        .await
     };
     run.await.into()
 }
@@ -305,8 +378,11 @@ pub(crate) async fn ladder_udp(args: &Args) -> Outcome {
 /// path, throughput and round trips.
 pub(crate) async fn ladder_webrtc(args: &Args) -> Outcome {
     let run = async {
-        let (client, server, _router, negotiate_ms) = Box::pin(webrtc_pair()).await?;
-        ladder_measure(&client.endpoint, webrtc_addr(&server), args, negotiate_ms).await
+        let (client, server, router, negotiate_ms) = Box::pin(webrtc_pair()).await?;
+        let measured =
+            ladder_measure(&client.endpoint, webrtc_addr(&server), args, negotiate_ms).await;
+        close_cell(&client.endpoint, router).await;
+        measured
     };
     Box::pin(run).await.into()
 }
@@ -326,11 +402,12 @@ pub(crate) async fn ladder_relay(args: &Args) -> Outcome {
                 .await
                 .map_err(|error| format!("bind failed: {error:#}"))
         };
-        let client = bind().await?;
-        let server = bind().await?;
+        let (client, server) = bind_two(bind).await?;
         let addr = EndpointAddr::new(server.id()).with_relay_url(relay_url.clone());
-        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
-        ladder_measure(&client, addr, args, 0.0).await
+        bench_between(client, server, addr, |client, addr| async move {
+            ladder_measure(&client, addr, args, 0.0).await
+        })
+        .await
     };
     Box::pin(run).await.into()
 }
@@ -338,8 +415,8 @@ pub(crate) async fn ladder_relay(args: &Args) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, BENCH_ALPN, Bench, Outcome, Router, ip_addr, ladder_relay, ladder_udp, ladder_webrtc,
-        rounds, vanilla,
+        Args, BENCH_ALPN, Outcome, bench_ip, ladder_relay, ladder_udp, ladder_webrtc, rounds,
+        vanilla,
     };
     use crate::bench::Direction;
     use habilis_network_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
@@ -357,10 +434,13 @@ mod tests {
         };
         let client = vanilla().await.expect("bind the client");
         let server = vanilla().await.expect("bind the server");
-        let addr = ip_addr(&server).expect("the server has an IPv4 socket");
-        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+        let args_ref = &args;
 
-        let samples = rounds(&client, addr, &args).await.expect("the rounds run");
+        let samples = bench_ip(client, server, |client, addr| async move {
+            rounds(&client, addr, args_ref).await
+        })
+        .await
+        .expect("the rounds run");
 
         let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
         assert!(
@@ -383,10 +463,13 @@ mod tests {
         };
         let client = vanilla().await.expect("bind the client");
         let server = vanilla().await.expect("bind the server");
-        let addr = ip_addr(&server).expect("the server has an IPv4 socket");
-        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+        let args_ref = &args;
 
-        let samples = rounds(&client, addr, &args).await.expect("the rounds run");
+        let samples = bench_ip(client, server, |client, addr| async move {
+            rounds(&client, addr, args_ref).await
+        })
+        .await
+        .expect("the rounds run");
 
         let counted: Vec<usize> = samples.iter().map(|sample| sample.bytes).collect();
         assert!(
@@ -400,20 +483,31 @@ mod tests {
     async fn reply_to(mode: u8, wanted: u32) -> usize {
         let client = vanilla().await.expect("bind the client");
         let server = vanilla().await.expect("bind the server");
-        let addr = ip_addr(&server).expect("the server has an IPv4 socket");
-        let _router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
-        let connection = client.connect(addr, BENCH_ALPN).await.expect("connect");
-        let (mut send, mut recv) = connection.open_bi().await.expect("open a stream");
-        let mut head = vec![mode];
-        head.extend_from_slice(&wanted.to_le_bytes());
-        send.write_all(&head).await.expect("send the header");
-        let _ = send.finish();
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut total = 0;
-        while let Ok(Some(read)) = recv.read(&mut buf).await {
-            total += read;
-        }
-        total
+        bench_ip(client, server, |client, addr| async move {
+            let connection = client
+                .connect(addr, BENCH_ALPN)
+                .await
+                .map_err(|error| format!("connect: {error:#}"))?;
+            let (mut send, mut recv) = connection
+                .open_bi()
+                .await
+                .map_err(|error| format!("open a stream: {error:#}"))?;
+            let mut head = vec![mode];
+            head.extend_from_slice(&wanted.to_le_bytes());
+            send.write_all(&head)
+                .await
+                .map_err(|error| format!("send the header: {error:#}"))?;
+            let _ = send.finish();
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut total = 0;
+            while let Ok(Some(read)) = recv.read(&mut buf).await {
+                total += read;
+            }
+            connection.close(0u32.into(), b"done");
+            Ok(total)
+        })
+        .await
+        .expect("the request runs")
     }
 
     #[tokio::test]
