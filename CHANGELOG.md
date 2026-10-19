@@ -166,7 +166,9 @@ published to a registry; pin it with
   return a `Result` and refuse a config that carries a secret, so add `?`.
 - **Breaking:** `Message::signed` is gone. Embedder: sign with `Message::sign(&Identity)`, which
   returns a `Verified`, and check a received message with `Message::verify()` or
-  `verify_with(canonical)`, which return `Result<Verified, Message>`.
+  `verify_with(canonical)`, which return `Result<Verified, Message>`. `Message::author_key` and
+  `Message::serialize` are crate-private: read the key with `Verified::key` or `Authored::key`,
+  and the wire bytes with `Verified::serialize`.
 - **Breaking:** the send, receive and log APIs take a `Verified`: `send_app`, `broadcast_msg`,
   `deliver`, `MeshDoc::ingest` and the message log. Embedder: an unsigned `Message` does not
   compile there, so sign it before it is sent.
@@ -399,7 +401,7 @@ published to a registry; pin it with
   codec packs the same 16 bytes, so the wire does not change.
 - **Breaking:** `Message.pubkey` and `Message.sig`, two strings with an empty-string sentinel, are
   one field, `Message::signer: Option<Signer>`. `Signer` pairs an `AuthorKey` with an
-  `iroh_base::Signature`, so a message has both or neither. `Message::author_key()` reads the key.
+  `iroh_base::Signature`, so a message has both or neither. The key is read with `Verified::key()` or `Authored::key()`.
   `identity::decode_pubkey` and `identity::encode_sig` are removed, and `AuthorKey::public_key`
   replaces them. The per-author maps of the engine, the reassembly store and the doc sink are
   keyed by `AuthorKey`. `ReassemblyStore::ingest` and `forget` read the author key and the shard
