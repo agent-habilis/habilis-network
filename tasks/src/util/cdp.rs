@@ -518,6 +518,7 @@ fn time_of_day(params: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 

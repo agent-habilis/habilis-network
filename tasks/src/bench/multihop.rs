@@ -189,6 +189,7 @@ async fn third(args: &Args, open: &mut Open) -> Result<Measured, String> {
 mod tests {
     use super::{Args, Outcome, ladder_multihop_direct, ladder_multihop_third, require_forwarded};
     use crate::bench::Direction;
+    use habilis_network_test_tracing::test;
 
     fn small_args() -> Args {
         Args {
@@ -201,7 +202,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_direct_multihop_cell_is_on_the_multihop_path_with_round_trips() {
         let Outcome::Ok(measured) = ladder_multihop_direct(&small_args()).await else {
             panic!("the direct multihop cell did not measure");
@@ -211,7 +212,7 @@ mod tests {
         assert!(measured.rtt.is_some());
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_third_member_cell_is_on_the_multihop_path_through_the_third() {
         let Outcome::Ok(measured) = ladder_multihop_third(&small_args()).await else {
             panic!("the third-member multihop cell did not measure");

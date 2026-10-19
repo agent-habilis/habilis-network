@@ -61,3 +61,6 @@ bench = ["dep:habilis-network-iroh-webrtc-transport", "dep:habilis-network-iroh-
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+habilis-network-test-tracing = { path = "../crates/habilis-network-test-tracing" }

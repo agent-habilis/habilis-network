@@ -523,6 +523,7 @@ async fn measure_group(
 mod tests {
     use super::{Args, Outcome, ladder_gossip, ladder_gossip_backup};
     use crate::bench::Direction;
+    use habilis_network_test_tracing::test;
 
     fn small_args() -> Args {
         Args {
@@ -537,7 +538,7 @@ mod tests {
 
     /// The cell keeps IP selected, reports the flood of both runs, and the run with
     /// no gossip address puts nothing on the topic.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_backup_path_cell_reports_the_flood_under_ip_and_a_control_with_none() {
         let Outcome::Ok(measured) = ladder_gossip_backup(&small_args()).await else {
             panic!("the backup-path cell did not measure");
@@ -563,7 +564,7 @@ mod tests {
     /// The gossip cell: a transfer and the round trips over the real flood, on the
     /// gossip path, and the cost of the flood at the member between the two ends.
     /// Skipped, with a log line, where the `IPv6` loopback cannot bind.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_gossip_cell_measures_a_quic_transfer_over_the_real_flood() {
         let measured = match ladder_gossip(&small_args()).await {
             Outcome::Ok(measured) => measured,

@@ -420,9 +420,10 @@ mod tests {
     };
     use crate::bench::Direction;
     use habilis_network_iroh_webrtc_transport::bench::MAX_TRANSFER_BYTES;
+    use habilis_network_test_tracing::{expect_warn, test};
 
     /// An upload's throughput is the bulk it sent, not the token it got back.
-    #[tokio::test]
+    #[test]
     async fn an_upload_sample_counts_the_bulk_it_sent() {
         let args = Args {
             only: None,
@@ -451,7 +452,7 @@ mod tests {
     }
 
     /// Bulk both ways at once moves twice the bulk, and the rate counts both.
-    #[tokio::test]
+    #[test]
     async fn a_both_ways_sample_counts_both_directions() {
         let args = Args {
             only: None,
@@ -510,14 +511,17 @@ mod tests {
         .expect("the request runs")
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_bench_server_refuses_an_unknown_mode() {
+        // The server logs each refusal it sends, and this test asks for one.
+        expect_warn("iroh::protocol", "refused request: mode 7");
         assert_eq!(reply_to(7, 1024).await, 0);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_bench_server_refuses_a_reply_past_the_transfer_ceiling() {
         let past = u32::try_from(MAX_TRANSFER_BYTES + 1).expect("the ceiling fits in u32");
+        expect_warn("iroh::protocol", "refused request: mode 0");
         assert_eq!(reply_to(0, past).await, 0);
     }
 
@@ -534,7 +538,7 @@ mod tests {
 
     /// The ladder's UDP cell carries both measurements: the transfer rounds
     /// and the 1000 round trips after 50 warm-up probes, on the IP path.
-    #[tokio::test]
+    #[test]
     async fn the_ladder_udp_cell_measures_throughput_and_round_trips_on_ip() {
         let Outcome::Ok(measured) = ladder_udp(&small_args()).await else {
             panic!("the ladder udp cell did not measure");
@@ -546,7 +550,7 @@ mod tests {
     }
 
     /// The ladder's `WebRTC` cell is on the data channel, and measures both.
-    #[tokio::test]
+    #[test]
     async fn the_ladder_webrtc_cell_measures_throughput_and_round_trips_on_webrtc() {
         let Outcome::Ok(measured) = ladder_webrtc(&small_args()).await else {
             panic!("the ladder webrtc cell did not measure");
@@ -558,7 +562,7 @@ mod tests {
 
     /// With no IP transport on either side and a local relay between them, the
     /// relay is the only path there is, and the cell says so.
-    #[tokio::test]
+    #[test]
     async fn the_ladder_relay_cell_is_on_the_relay_path_with_round_trips() {
         let Outcome::Ok(measured) = ladder_relay(&small_args()).await else {
             panic!("the ladder relay cell did not measure");

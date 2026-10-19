@@ -4899,6 +4899,7 @@ dependencies = [
  "habilis-network-iroh-gossip-transport",
  "habilis-network-iroh-multihop-transport",
  "habilis-network-iroh-webrtc-transport",
+ "habilis-network-test-tracing",
  "serde",
  "serde_json",
  "tokio",

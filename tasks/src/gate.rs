@@ -445,6 +445,7 @@ impl Step {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use xshell::Shell;
 
     use super::{Kind, STEPS, Scope};
