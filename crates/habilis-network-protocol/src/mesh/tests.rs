@@ -1,5 +1,6 @@
 use super::{
     LockedMesh, LookupOpts, Mesh, MeshConfig, MeshName, RelayChoice, SEED_LEN, TransportPolicy,
+    UnlockError,
 };
 use crate::crypto::{Password, Seed};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
@@ -233,7 +234,7 @@ fn set_password_bakes_verifier_and_unlock_verifies_it() {
         .unwrap()
         .unlock(Some(&Password::new("hunter3".to_owned())))
         .unwrap_err();
-    assert!(error.to_string().contains("wrong password"), "got: {error}");
+    assert_eq!(error, UnlockError::WrongPassword);
 }
 
 #[test]
@@ -244,7 +245,7 @@ fn unlock_with_a_password_on_a_passwordless_id_is_rejected() {
     let error = locked
         .unlock(Some(&Password::new("hunter2".to_owned())))
         .unwrap_err();
-    assert!(error.to_string().contains("no password"), "got: {error}");
+    assert_eq!(error, UnlockError::NoPassword);
 }
 
 #[test]
@@ -252,10 +253,7 @@ fn unlock_without_the_password_on_a_passworded_id_is_rejected() {
     let mut creator = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     creator.set_password(&Password::new("hunter2".to_owned()));
     let error = creator.locked().unlock(None).unwrap_err();
-    assert!(
-        error.to_string().contains("requires a password"),
-        "got: {error}"
-    );
+    assert_eq!(error, UnlockError::PasswordRequired);
 }
 
 #[test]
@@ -263,7 +261,7 @@ fn unlock_refuses_an_invite_only_id() {
     let mut creator = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
     creator.set_invite();
     let error = creator.locked().unlock(None).unwrap_err();
-    assert!(error.to_string().contains("invite-only"), "got: {error}");
+    assert_eq!(error, UnlockError::InviteOnly);
 }
 
 #[test]

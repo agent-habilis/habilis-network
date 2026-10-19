@@ -140,6 +140,34 @@ pub struct LockedMesh {
     config: MeshConfig,
 }
 
+/// Why a [`LockedMesh`] would not unlock. The messages are the operator's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnlockError {
+    /// The id is invite-only: a bare hash never joins, redeem an invite.
+    InviteOnly,
+    /// The id carries a password verifier and none was given.
+    PasswordRequired,
+    /// The id carries no password verifier and one was given.
+    NoPassword,
+    /// The password does not match the id's verifier.
+    WrongPassword,
+}
+
+impl fmt::Display for UnlockError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InviteOnly => {
+                "this mesh is invite-only — join with an invite ticket, not the bare hash"
+            }
+            Self::PasswordRequired => "this mesh requires a password",
+            Self::NoPassword => "this mesh has no password — drop --password",
+            Self::WrongPassword => "wrong password",
+        })
+    }
+}
+
+impl std::error::Error for UnlockError {}
+
 /// The mesh's derivation secret.
 ///
 /// One enum rather than three `Option` fields, because at most one of them was
@@ -288,21 +316,20 @@ impl LockedMesh {
     /// the stretched key. ~100ms of Argon2id by design.
     ///
     /// # Errors
-    /// The id is invite-only (redeem an invite instead); the id needs a
-    /// password and none is given; the id has no password and one is given;
-    /// or the password is wrong.
-    pub fn unlock(self, password: Option<&crypto::Password>) -> Result<Mesh> {
+    /// See [`UnlockError`]: the id is invite-only, the password is missing,
+    /// unneeded or wrong.
+    pub fn unlock(self, password: Option<&crypto::Password>) -> Result<Mesh, UnlockError> {
         if self.requires_invite() {
-            bail!("this mesh is invite-only — join with an invite ticket, not the bare hash");
+            return Err(UnlockError::InviteOnly);
         }
         let secret = match (&self.config.password, password) {
             (None, None) => MeshSecret::Open,
-            (None, Some(_)) => bail!("this mesh has no password — drop --password"),
-            (Some(_), None) => bail!("this mesh requires a password"),
+            (None, Some(_)) => return Err(UnlockError::NoPassword),
+            (Some(_), None) => return Err(UnlockError::PasswordRequired),
             (Some(expected), Some(password)) => {
                 let key = crypto::stretch_mesh_password(password, &self.seed);
                 if crypto::password_verifier(&key) != *expected {
-                    bail!("wrong password");
+                    return Err(UnlockError::WrongPassword);
                 }
                 MeshSecret::Password(key)
             }

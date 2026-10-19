@@ -58,7 +58,7 @@ pub use mesh::{
     AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, LockedMesh,
     Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError,
     OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
-    TransportPolicy, resolve_lookups, validate_advertise,
+    TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
 };
 pub use message::{
     AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,
