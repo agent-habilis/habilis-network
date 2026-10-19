@@ -189,7 +189,7 @@ impl Listings {
     pub fn note(&mut self, body: &str, now: Instant) -> Option<ListingChange> {
         let ad = Ad::parse(body)?;
         // `ad.id` is a `MeshId` (shallow charset check only); the
-        // structural `Mesh` decode below is the real validity gate, so
+        // structural `LockedMesh` decode below is the real validity gate, so
         // an id that doesn't decode is dropped here.
         let mesh: LockedMesh = ad.id.as_str().parse().ok()?;
         let mesh_id = ad.id;
