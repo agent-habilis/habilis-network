@@ -838,3 +838,54 @@ fn a_key_with_no_signature_is_rejected_and_so_is_a_signature_with_no_key() {
     let no_key = Message::parse(sig_only.as_bytes()).expect_err("a signature with no key");
     assert_eq!(no_key.to_string(), "signature without a pubkey");
 }
+
+mod verified {
+    use super::super::{Message, MessageKind};
+    use super::SIGNED_WIRE;
+    use crate::identity::Identity;
+
+    fn msg(body: &str) -> Message {
+        Message::fixture(MessageKind::app_broadcast("app_msg"), body)
+    }
+
+    #[test]
+    fn a_signed_message_verifies_and_keeps_its_key() {
+        let identity = Identity::generate();
+        let key = identity.author_key();
+        let verified = msg("hello").sign(&identity);
+        assert_eq!(verified.key(), key);
+        let back = verified
+            .into_message()
+            .verify()
+            .expect("a signed message verifies");
+        assert_eq!(back.author_key(), Some(key));
+    }
+
+    #[test]
+    fn an_unsigned_message_is_given_back_by_verify() {
+        let unsigned = msg("hello");
+        let back = unsigned
+            .clone()
+            .verify()
+            .expect_err("an unsigned message does not verify");
+        assert_eq!(back.body.as_str(), unsigned.body.as_str());
+        assert!(back.signer.is_none());
+    }
+
+    #[test]
+    fn a_tampered_body_fails_verify_and_is_given_back() {
+        let mut tampered = msg("hello").sign(&Identity::generate()).into_message();
+        tampered.body = "tampered".into();
+        let back = tampered
+            .verify()
+            .expect_err("a tampered body does not verify");
+        assert_eq!(back.body.as_str(), "tampered");
+    }
+
+    #[test]
+    fn verified_serializes_to_the_same_bytes_as_its_message() {
+        let parsed = Message::parse(SIGNED_WIRE.as_bytes()).expect("the signed literal parses");
+        let verified = parsed.verify().expect("the golden signature verifies");
+        assert_eq!(serde_json::to_string(&verified).unwrap(), SIGNED_WIRE);
+    }
+}

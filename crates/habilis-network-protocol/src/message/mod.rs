@@ -25,6 +25,9 @@ use crate::newtype::string_newtype;
 mod body;
 mod id;
 mod shard;
+mod verified;
+
+pub use verified::{Authored, Verified};
 
 pub use body::{BodyError, MessageBody};
 pub use id::{IdError, MessageId};
@@ -1021,6 +1024,34 @@ impl Message {
         let sig = identity.sign(&self.canonical_with_key(Some(&key)));
         self.signer = Some(Signed::new(key, sig));
         self
+    }
+
+    /// Sign this message with `identity` and return it as a [`Verified`], the proof that its
+    /// signature covers these exact bytes.
+    #[must_use]
+    pub fn sign(self, identity: &Identity) -> Verified {
+        let key = identity.author_key();
+        Verified::new(self.signed(identity), key)
+    }
+
+    /// Check the signature of an untrusted message over its canonical bytes. `Ok` is the proof. `Err`
+    /// gives the message back unchanged, because it is unsigned or its signature does not verify.
+    ///
+    /// # Errors
+    ///
+    /// Returns the message itself when [`verify_signature_with`](Self::verify_signature_with) fails.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
+    )]
+    pub fn verify(self) -> Result<Verified, Message> {
+        let Some(signed) = self.signer else {
+            return Err(self);
+        };
+        if !self.verify_signature_with(&self.canonical_bytes()) {
+            return Err(self);
+        }
+        Ok(Verified::new(self, signed.key()))
     }
 
     /// Verify the detached signature against the embedded key over the
