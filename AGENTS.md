@@ -263,7 +263,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `TicketSecret` | `habilis-network-protocol/src/crypto.rs` | The bearer secret of a ticket, and the token that a consumer presents. Wiped on drop. |
 | `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup and anti-entropy key of a message. |
 | `AuthorKey` | `habilis-network-protocol/src/author_key.rs` | The public key of the author of a message. |
-| `Signed` | `habilis-network-protocol/src/message/mod.rs` | The pair of an `AuthorKey` and its signature. A message holds both or neither. |
+| `Signer` | `habilis-network-protocol/src/message/mod.rs` | The pair of an `AuthorKey` and its signature. A message holds both or neither (`Message::signer`). |
 | `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The hash of a message that `prev` and `parents` link to. |
 | `BlobDigest` | `habilis-network/src/blob/mod.rs` | The SHA-256 of a blob. |
 | `StreamId`, `StreamSecret` | `habilis-network-stream/src/hash.rs` | The public id and the bearer secret of a stream. |
@@ -309,8 +309,8 @@ Runtime events drive these transitions, so their state is not known at compile t
 
 | Type | File | Holds |
 |---|---|---|
-| `LockedMesh` / `Mesh` | `habilis-network-protocol/src/mesh/mod.rs` | A decoded mesh with no secret, and the unlocked mesh whose secret is applied before derivation. Only `Mesh` derives a topic or a rendezvous. |
-| `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | A message whose signature is checked, and a message whose author is proven. Only a `Verified` goes to the wire or the log. |
-| `InjectedEndpoint` | `habilis-network/src/daemon/setup.rs` | An endpoint with its transports installed before it is bound. Only `InjectedEndpoint::bind` builds one. |
+| `LockedMesh` / `Mesh` | `habilis-network-protocol/src/mesh/mod.rs` | A decoded mesh with no secret. `unlock` turns it into a `Mesh`, or returns an `UnlockError` that says why not. Only `Mesh` derives a topic, a rendezvous or a port, and `Mesh::new` refuses a config that carries a secret. |
+| `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | `Verified` is a message whose signature is checked, with its key. It is what the wire and the log take. `Authored` is a message whose author is proven: a read-only view with no `Serialize`, so it cannot go back on the wire. Both share the message behind an `Arc`. |
+| `InjectedEndpoint` | `habilis-network/src/daemon/setup.rs` | An endpoint that `InjectedEndpoint::bind` binds. `bind` checks the keys of the handles before it binds, and makes the admission table the hook reports to. The fields are private, so no other path builds one. |
 | `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |
-| `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/driver.rs` | A data channel that is open and ready to carry datagrams. Only `complete` produces one. |
+| `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/driver.rs` | A data channel that is open and ready to carry datagrams. Only the `complete` of a pending offer or answer produces one. |

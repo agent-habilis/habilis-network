@@ -158,22 +158,28 @@ published to a registry; pin it with
 
 ### Changed
 
-- **Breaking:** a decoded mesh is locked until its secret is applied. `LockedMesh` is what
-  parsing an id produces, and `LockedMesh::unlock(password)` replaces `Mesh::apply_password`.
-  `unlock` returns `UnlockError` (`InviteOnly`, `PasswordRequired`, `NoPassword`,
-  `WrongPassword`). Only `Mesh` derives a topic, a rendezvous or a port, so the derivation
-  cannot run before the secret is applied. `InviteTicket::redeem` returns a `Mesh` with no
-  further call. `Mesh::new` and `Mesh::from_topic` return a `Result`, and refuse a config that
-  carries a secret.
-- **Breaking:** a message is `Verified` or `Authored` where it used to be a bare `Message`.
-  `Verified` is a message whose signature is checked, and it is what the send, receive and app
-  APIs take and return, so an unsigned message cannot reach the wire. `Authored` is a message
-  whose author is proven, and it is what the app surface delivers. Neither one has `Deserialize`
-  or `DerefMut`. `Signed` is renamed to `Signer`.
+- **Breaking:** a decoded mesh is locked until its secret is applied. Parsing an id gives a
+  `LockedMesh`, and `LockedMesh::unlock(password)` gives the `Mesh`; it replaces
+  `Mesh::apply_password`, and returns `UnlockError` (`InviteOnly`, `PasswordRequired`,
+  `NoPassword`, `WrongPassword`). Only `Mesh` derives a topic, a rendezvous or a port.
+  `InviteTicket::redeem` returns a `Mesh`. Embedder: `Mesh::new` and `Mesh::from_topic` now
+  return a `Result` and refuse a config that carries a secret, so add `?`.
+- **Breaking:** `Message::signed` is gone. Embedder: sign with `Message::sign(&Identity)`, which
+  returns a `Verified`, and check a received message with `Message::verify()` or
+  `verify_with(canonical)`, which return `Result<Verified, Message>`.
+- **Breaking:** the send, receive and log APIs take a `Verified`: `send_app`, `broadcast_msg`,
+  `deliver`, `MeshDoc::ingest` and the message log. Embedder: an unsigned `Message` does not
+  compile there, so sign it before it is sent.
+- **Breaking:** the app surface takes an `Authored`: `NodeApp::classify`, `InboundApp.message`,
+  `NodeEvent::Presence`, `NodeEvent::StateChanged`, and the external message channel
+  (`broadcast::Sender<Authored>`). Embedder: read the message from the `Authored` view. It has no
+  `Serialize`, `Deserialize` or `DerefMut`, and a `Verified` has no `Deserialize` or
+  `DerefMut`. Both share the message behind an `Arc`, so a copy is a count bump.
+- **Breaking:** `Signed` is renamed to `Signer`.
 - **Breaking:** `InjectedEndpoint` is built only by `InjectedEndpoint::bind`, which checks the
-  keys of the handles and then binds the endpoint with its transports. Its fields are private,
-  so an `InjectedEndpoint { .. }` literal no longer compiles. `net::install_transports` and
-  `net::check_injected_identity` are no longer public.
+  keys of the handles before it binds the endpoint with its transports. Its fields are private,
+  so an `InjectedEndpoint { .. }` literal no longer compiles. The transport wiring and the mesh
+  check are crate-private.
 - A secret key no longer passes through a plain array that the engine writes and nobody wipes.
   The stretched password key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the
   root of an invite, the salt and the token of a blob ticket, and the secret of a stream
@@ -392,7 +398,7 @@ published to a registry; pin it with
   doc sink hold it. `KEY_MIN` and `KEY_MAX` are `DedupKey::MIN` and `DedupKey::MAX`. The digest
   codec packs the same 16 bytes, so the wire does not change.
 - **Breaking:** `Message.pubkey` and `Message.sig`, two strings with an empty-string sentinel, are
-  one field, `Message::signer: Option<Signed>`. `Signed` pairs an `AuthorKey` with an
+  one field, `Message::signer: Option<Signer>`. `Signer` pairs an `AuthorKey` with an
   `iroh_base::Signature`, so a message has both or neither. `Message::author_key()` reads the key.
   `identity::decode_pubkey` and `identity::encode_sig` are removed, and `AuthorKey::public_key`
   replaces them. The per-author maps of the engine, the reassembly store and the doc sink are
