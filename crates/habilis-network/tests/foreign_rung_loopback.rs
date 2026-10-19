@@ -124,7 +124,12 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
     }
     let _ = alice.node.leave().await;
     let _ = bob.node.leave().await;
-    drop(foreign);
+    for router in foreign {
+        router
+            .shutdown()
+            .await
+            .expect("shut the foreign listener down");
+    }
     (met, ladder)
 }
 
