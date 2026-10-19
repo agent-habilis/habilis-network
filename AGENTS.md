@@ -277,3 +277,43 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `Contest` | `habilis-network/src/beacon/mod.rs` | The two holders of one beacon, `own` and `rival`. |
 | `GraftTarget` | `habilis-network/src/transport/probe.rs` | The peer of a graft and the rendezvous it is told apart from. |
 | `RivalFlag` | `habilis-network/src/daemon/state.rs` | What a `PeerInfo` says about the rendezvous: `proven` says that the sender proved its endpoint, and `held` says that it carries the beacon flag. |
+
+## Typestate
+
+A typestate is a type per state of a value, where each operation exists only on the type of the state it is legal in. A transition consumes the value and returns the value of the next state, so the compiler rejects an operation in the wrong order. Use it where the order is a rule of the code, not a fact of the network.
+
+### When to use one
+
+- Use it when the state is known at compile time: the caller can name the state it holds.
+- Use it when one function drives the whole sequence, from the first state to the last.
+- Use it when a wrong order is guarded only by a runtime check or a comment today. Examples are an `ensure!` on the order of setup steps, or a `let Some(key) = … else { return }` fallback.
+
+### How to write one
+
+- Write one type per state, not one type with a state field. A state field brings back the runtime check.
+- Make each transition take `self` by value, so the old state cannot be used after it.
+- Make every field private. The constructor and the transitions are the only way in.
+- Make the constructor the only entry. A struct literal in another module must not compile.
+- Do not implement `DerefMut` on a proof type. A `Deref` to the data is fine, because it gives only read access.
+- Add a `compile_fail` doc test for each illegal transition, and a passing control next to it, so that the test fails for the reason it names.
+
+### Where an enum stays
+
+Runtime events drive these transitions, so their state is not known at compile time.
+
+| Place | Reason |
+|---|---|
+| `SessionState` | Network events, probes and timers drive its transitions, so the state is not known at compile time. |
+| `PeerState` | Network events, probes and timers drive its transitions, so the state is not known at compile time. |
+| `DirectState` | Network events, probes and timers drive its transitions, so the state is not known at compile time. |
+| `ConnectionPhase` | Network events, probes and timers drive its transitions, so the state is not known at compile time. |
+
+### Typestates that exist
+
+| Type | File | Holds |
+|---|---|---|
+| `LockedMesh` / `Mesh` | `habilis-network-protocol/src/mesh/mod.rs` | A decoded mesh with no secret, and the unlocked mesh whose secret is applied before derivation. Only `Mesh` derives a topic or a rendezvous. |
+| `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | A message whose signature is checked, and a message whose author is proven. Only a `Verified` goes to the wire or the log. |
+| `InjectedEndpoint` | `habilis-network/src/daemon/setup.rs` | An endpoint with its transports installed before it is bound. Only `InjectedEndpoint::bind` builds one. |
+| `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |
+| `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/driver.rs` | A data channel that is open and ready to carry datagrams. Only `complete` produces one. |

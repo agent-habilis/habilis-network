@@ -158,6 +158,18 @@ published to a registry; pin it with
 
 ### Changed
 
+- **Breaking:** a decoded mesh is locked until its secret is applied. `LockedMesh` is what
+  parsing an id produces, and `LockedMesh::unlock(password)` replaces `Mesh::apply_password`.
+  Only `Mesh` derives a topic, a rendezvous or a port, so the derivation cannot run before the
+  secret is applied. `InviteTicket::redeem` returns a `Mesh` with no further call.
+- **Breaking:** a message is `Verified` or `Authored` where it used to be a bare `Message`.
+  `Verified` is a message whose signature is checked, and it is what the send, receive and app
+  APIs take and return, so an unsigned message cannot reach the wire. `Authored` is a message
+  whose author is proven, and it is what the app surface delivers. Neither one has `Deserialize`
+  or `DerefMut`. `Signed` is renamed to `Signer`.
+- **Breaking:** `InjectedEndpoint` is built only by `InjectedEndpoint::bind`, which installs the
+  transports, binds the endpoint and runs the checks that do not depend on the mesh. Its fields
+  are private, so an `InjectedEndpoint { .. }` literal no longer compiles.
 - A secret key no longer passes through a plain array that the engine writes and nobody wipes.
   The stretched password key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the
   root of an invite, the salt and the token of a blob ticket, and the secret of a stream

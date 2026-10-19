@@ -206,9 +206,9 @@ pub struct EventLoopConfig {
     /// transports share signature-verify + dedup. Built in `setup_mesh`.
     pub(crate) unicast_rx: mpsc::Receiver<bytes::Bytes>,
     /// When advertising (`create --advertise`), the shared counter the
-    /// directory re-broadcast task reads the live peer count
-    /// from. `setup_mesh` leaves this `None`; the advertise path sets
-    /// it before `run` (same late-assignment pattern as `driver`).
+    /// directory re-broadcast task reads the live peer count from. Supplied
+    /// up front through `SetupParams::live_count`, so the config is complete
+    /// when it is built; `run` stores it before the first advertisement.
     pub(crate) live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
