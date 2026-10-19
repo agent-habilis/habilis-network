@@ -963,12 +963,17 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     // beacon on the way out for the same reason the normal
                     // one does — see `release_rendezvous`.
                     if let Err(error) = resubscribe_tick(
-                        &ResubscribeEnv { gossip: &gossip, params: &rendezvous_params, parts: &parts, exit_on_quit },
+                        &ResubscribeEnv { gossip: &gossip, params: &rendezvous_params, parts: &parts },
                         &mut state,
                         &mut app,
                         GossipLink { sender: &mut sender, receiver: &mut receiver, attempts: &mut resubscribe_attempts },
                     ).await {
                         release_rendezvous(&mut rendezvous, &mut rival_probe, &mut rung_probe, &mut state.rungs, owned).await;
+                        // The CLI exits with code 1 once everything is released.
+                        #[cfg(not(feature = "dhat-heap"))]
+                        if exit_on_quit {
+                            std::process::exit(1);
+                        }
                         return Err(error);
                     }
                     let ctx = parts.ctx(&sender);
