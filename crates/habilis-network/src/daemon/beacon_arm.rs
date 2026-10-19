@@ -1086,6 +1086,7 @@ mod tests {
         if let Some(held) = held.take() {
             held.shed_and_wait().await;
         }
+        state.rungs.finish().await;
         endpoint.close().await;
         holder_endpoint.close().await;
         (state, holds_nothing)
