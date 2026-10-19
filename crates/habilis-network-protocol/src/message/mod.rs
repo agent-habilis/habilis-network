@@ -448,7 +448,7 @@ pub struct Message {
     /// (the signature cannot cover itself). Real outbound traffic is always signed on the
     /// broadcast path, and the receive path drops anything that fails verification. See
     /// `docs/history-integrity.md`.
-    pub signer: Option<Signed>,
+    pub signer: Option<Signer>,
     /// Per-author hash-linked log (Phase 2), set on `Msg` only: `seq` is
     /// this author's monotonic counter and `prev` the content hash of their
     /// previous `Msg` (`None` at `seq 0`). Both are signed. Plumbing /
@@ -473,12 +473,12 @@ pub struct Message {
 /// The key that signed a message and its signature. The two are one value, so a message cannot
 /// carry a key with no signature, or a signature with no key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Signed {
+pub struct Signer {
     key: AuthorKey,
     sig: Signature,
 }
 
-impl Signed {
+impl Signer {
     /// Pair a key with the signature it made. Nothing checks it here: [`Message::verify_signature_with`]
     /// does.
     #[must_use]
@@ -637,7 +637,7 @@ impl TryFrom<WireIn> for Message {
             (None, false) => return Err("signature without a pubkey"),
             (Some(key), false) => {
                 let sig = identity::decode_sig(&wire.sig).map_err(|_| "malformed signature")?;
-                Some(Signed::new(key, sig))
+                Some(Signer::new(key, sig))
             }
         };
         Ok(Message {
@@ -1022,7 +1022,7 @@ impl Message {
     pub fn sign(mut self, identity: &Identity) -> Verified {
         let key = identity.author_key();
         let sig = identity.sign(&self.canonical_with_key(Some(&key)));
-        self.signer = Some(Signed::new(key, sig));
+        self.signer = Some(Signer::new(key, sig));
         Verified::new(self, key)
     }
 
@@ -1162,7 +1162,7 @@ pub fn build_msg_bytes(
     .with_chain(params.chain.seq, params.chain.prev)
     .with_parents(params.chain.parents)
     .sign(identity);
-    let raw = Message::serialize(&msg)?;
+    let raw = msg.serialize()?;
     Ok((Bytes::from(raw), msg))
 }
 
@@ -1172,7 +1172,7 @@ impl Message {
     /// test that needs a message with an author key and never checks the signature.
     #[must_use]
     pub fn with_unverified_key(mut self, key: AuthorKey) -> Self {
-        self.signer = Some(Signed::new(key, Signature::from_bytes(&[0u8; 64])));
+        self.signer = Some(Signer::new(key, Signature::from_bytes(&[0u8; 64])));
         self
     }
 

@@ -61,8 +61,8 @@ pub use mesh::{
     TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
 };
 pub use message::{
-    AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,
-    MessageKind, PresenceSubtype, Shard, ShardGroup, Signed, sole_addressee,
+    AppFrameParams, AppTag, Authored, BodyError, Channel, CorrId, IdError, Message, MessageBody,
+    MessageId, MessageKind, PresenceSubtype, Shard, ShardGroup, Signer, Verified, sole_addressee,
 };
 pub use nickname::{Nickname, NicknameError};
 pub use seal::seal_to_body;
