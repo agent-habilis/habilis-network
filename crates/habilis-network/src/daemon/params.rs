@@ -237,7 +237,7 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
         anyhow::bail!("topic string must not be empty");
     }
     config.validate()?;
-    Ok(Mesh::from_topic(
+    Mesh::from_topic(
         string,
         MeshConfig {
             lookups: config.lookups,
@@ -245,7 +245,7 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
             issuer_pubkey: None,
             transport: config.transport,
         },
-    ))
+    )
 }
 
 impl TopicParams {

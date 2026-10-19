@@ -199,6 +199,19 @@ impl fmt::Debug for Mesh {
     }
 }
 
+/// Refuse a config that names a secret the caller does not hold. A password
+/// verifier needs the password to unlock it, and an issuer needs the minting
+/// session, so neither may arrive with a bare [`Mesh`].
+fn refuse_secret_config(config: &MeshConfig) -> Result<()> {
+    if config.password.is_some() || config.issuer_pubkey.is_some() {
+        bail!(
+            "a config with a password or an invite issuer is set by set_password or set_invite, \
+             or unlocked from a LockedMesh"
+        );
+    }
+    Ok(())
+}
+
 impl fmt::Debug for LockedMesh {
     // The seed is the join capability, so it is redacted as it is on `Mesh`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -329,14 +342,20 @@ impl LockedMesh {
 
 impl Mesh {
     /// A mesh with the wire `seed` of its id.
-    #[must_use]
-    pub fn new(seed: Seed, name: MeshName, config: MeshConfig) -> Self {
-        Mesh {
+    ///
+    /// # Errors
+    /// The config carries a password verifier or an invite issuer. Such a
+    /// mesh has a secret the caller does not hold, so it is set by
+    /// [`Mesh::set_password`] or [`Mesh::set_invite`], or unlocked from a
+    /// [`LockedMesh`].
+    pub fn new(seed: Seed, name: MeshName, config: MeshConfig) -> Result<Self> {
+        refuse_secret_config(&config)?;
+        Ok(Mesh {
             name,
             seed,
             secret: MeshSecret::Open,
             config,
-        }
+        })
     }
 
     /// Build a mesh deterministically from an arbitrary string (the `topic`
@@ -345,16 +364,20 @@ impl Mesh {
     /// (`MeshName::from_topic_string`). Both are deterministic functions of
     /// the string, so callers passing the same string + config converge on the
     /// same id with zero coordination.
-    #[must_use]
-    pub fn from_topic(topic: &str, config: MeshConfig) -> Self {
+    ///
+    /// # Errors
+    /// The config carries a password verifier or an invite issuer (see
+    /// [`Mesh::new`]). A topic's secret is the string itself.
+    pub fn from_topic(topic: &str, config: MeshConfig) -> Result<Self> {
+        refuse_secret_config(&config)?;
         let seed = crypto::topic_seed(topic);
         let name = MeshName::from_topic_string(topic);
-        Mesh {
+        Ok(Mesh {
             name,
             seed,
             secret: MeshSecret::Open,
             config,
-        }
+        })
     }
 
     /// The wire seed (what the encoded id carries). Test-only: production
@@ -413,7 +436,7 @@ impl Mesh {
     }
 
     /// The Argon2id-stretched password key, once a password has been applied
-    /// (`set_password`/`apply_password`) — `None` for a passwordless mesh. The
+    /// (`set_password`, or `LockedMesh::unlock`) — `None` for a passwordless mesh. The
     /// daemon retains this to key the state/meta channel encryption; it is the
     /// same value every derivation switches onto, and it wipes itself on drop.
     #[must_use]

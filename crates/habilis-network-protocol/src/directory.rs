@@ -52,6 +52,10 @@ const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/dom
 /// only) and the discoverer's `--mdns/--dht/--relay` choice, and the two must
 /// align to see each other. A different name still yields a fully independent
 /// directory.
+///
+/// # Panics
+/// Never. The directory config carries no password or invite issuer, which
+/// [`Mesh::new`] refuses, so the constructor cannot fail here.
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::new(
@@ -62,6 +66,7 @@ pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
         directory.clone(),
         directory_config(lookups),
     )
+    .expect("the directory config carries no secret")
 }
 
 /// The config a directory mesh uses for `lookups`: the caller's chosen

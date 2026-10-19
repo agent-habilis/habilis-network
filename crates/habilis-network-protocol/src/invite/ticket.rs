@@ -279,7 +279,8 @@ mod tests {
             Seed::from_bytes([1u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
-        );
+        )
+        .unwrap();
         mesh.set_invite();
         assert!(
             mesh.issuer_secret().is_some(),
@@ -411,7 +412,8 @@ mod tests {
             Seed::from_bytes([2u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
-        );
+        )
+        .unwrap();
         assert!(mint(&plain, Some(Duration::from_hours(1)), None).is_err());
     }
 
@@ -529,7 +531,8 @@ mod tests {
             Seed::from_bytes([3u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
-        );
+        )
+        .unwrap();
         assert!(InviteTicket::decode(&plain.to_string()).is_err());
     }
 

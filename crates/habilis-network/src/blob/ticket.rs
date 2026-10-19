@@ -240,6 +240,7 @@ mod tests {
             crate::protocol::mesh::MeshName::new("t").unwrap(),
             crate::protocol::mesh::MeshConfig::loopback(),
         )
+        .unwrap()
         .to_string();
         assert!(BlobTicket::decode(&mesh).is_err());
     }
@@ -256,7 +257,8 @@ mod tests {
             crate::protocol::Seed::from_bytes([1u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
-        );
+        )
+        .unwrap();
         creator.set_invite();
         let invite = crate::invite::mint(&creator, Some(std::time::Duration::from_hours(1)), None)
             .expect("mint");

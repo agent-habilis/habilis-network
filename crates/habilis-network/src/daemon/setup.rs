@@ -894,7 +894,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         crate::protocol::Seed::from_bytes(seed),
         name.clone(),
         config,
-    );
+    )?;
     // Invite-only: mint the invite root + issuer keypair and bake the issuer
     // pubkey into the id BEFORE it is rendered. Cheap (random keys, no Argon2).
     if invite_only {
