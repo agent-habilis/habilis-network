@@ -272,6 +272,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `LinkMetric` | `habilis-network-iroh-multihop-transport/src/metric.rs` | The cost of a link. |
 | `ChunkHash`, `Root` | `habilis-network-chunks/src/lib.rs` | A chunk hash and the root of a chunk tree. |
 | `UnixSecs` | `habilis-network-util/src/clock.rs` | A point in time, in whole seconds since the epoch. `Message::timestamp`, `Listing::first_seen_unix`, and the expiry of an invite ticket hold one. A wire struct converts with `as_secs`. |
+| `IpcName` | `habilis-network/src/transport/ipc.rs` | The name of the local control endpoint of a daemon: a socket path on Unix, a named pipe on Windows. |
 | `Sid` | `habilis-network-util/src/win_security.rs` | A Windows security identifier, as its own bytes. Windows only. |
 | `AppId`, `UnderlayId` | `habilis-network-iroh-multihop-transport/src/role.rs` | The application endpoint and the underlay endpoint of a node. |
 | `Leg` | `habilis-network-iroh-multihop-transport/src/graph.rs` | The two ends of a route, `src` and `dst`, both `AppId`. |

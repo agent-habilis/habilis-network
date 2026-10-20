@@ -42,6 +42,12 @@ pub(super) async fn shutdown<A: NodeDriver>(
     if let Some(sf) = state.state_file.as_ref() {
         sf.remove();
     }
+    // Explicit, not a `Drop`: in CLI mode the process leaves through
+    // `std::process::exit`, which runs no destructor.
+    #[cfg(feature = "host")]
+    if let Some(marker) = state.ipc_marker.as_ref() {
+        marker.remove_if_ours();
+    }
     ctx.sink
         .emit(NodeEvent::Info(format!("left {}", quit.leave_label)));
     // The `Left` rides gossip only — deliberately NOT mirrored over unicast

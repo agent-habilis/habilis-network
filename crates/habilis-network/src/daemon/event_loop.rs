@@ -300,7 +300,12 @@ pub async fn run<A: NodeDriver>(
         &mesh_str,
         &author,
         &sink,
-    );
+    )
+    .map(|(rx, marker)| {
+        // The shutdown removes the marker, so the state holds it.
+        state.ipc_marker = Some(marker);
+        rx
+    });
     // A browser binds no control socket. The loop keeps its IPC `select!` arm —
     // `IpcMessage` is portable — and the arm simply never fires.
     #[cfg(not(feature = "host"))]
@@ -1142,7 +1147,10 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
     mesh: &MeshId,
     author: &Nickname,
     sink: &std::sync::Arc<dyn NodeSink>,
-) -> Option<mpsc::Receiver<IpcMessage<C>>> {
+) -> Option<(
+    mpsc::Receiver<IpcMessage<C>>,
+    crate::transport::ipc::IpcMarker,
+)> {
     // In-process mode (in-process: library API or MCP): no socket. Returning `None` leaves
     // the loop's IPC `select!` arm inert (it pends forever), so the
     // unix-socket listener is never bound — those drivers use the typed
@@ -1159,21 +1167,25 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
     // failure is non-fatal — the daemon still gossips; it just can't take
     // IPC — matching the prior best-effort behavior, only now observed
     // before readiness rather than racing it.
-    let listener = match crate::transport::ipc::bind(base, mesh, author) {
-        Ok(listener) => listener,
+    let bound = match crate::transport::ipc::bind(base, mesh, author) {
+        Ok(bound) => bound,
         Err(error) => {
             sink.emit(NodeEvent::Error(format!("IPC: {error}")));
-            tracing::warn!(%error, "IPC: failed to bind socket");
+            tracing::warn!(
+                target: "habilis_network::lifecycle",
+                %error,
+                "IPC: failed to bind socket"
+            );
             return None;
         }
     };
     let (ipc_tx, rx) = mpsc::channel::<IpcMessage<C>>(32);
     tokio::spawn(crate::transport::ipc::serve::<C>(
-        listener,
+        bound.listener,
         ipc_tx,
         std::sync::Arc::clone(sink),
     ));
-    Some(rx)
+    Some((rx, bound.marker))
 }
 
 /// Sleep until a ping round's deadline, or pend forever when no round

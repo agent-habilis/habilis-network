@@ -198,34 +198,7 @@ impl StateFile {
         let mut json = serde_json::to_vec(&obj).map_err(std::io::Error::other)?;
         json.push(b'\n');
 
-        // No fsync: statusline is best-effort; kernel buffer-writeback
-        // is plenty. Atomic rename still gives readers a consistent view.
-        let tmp = tmp_sibling(&self.path);
-        // 0o600 at create, not chmod-after: an app's discovery fields may carry
-        // a bearer token, and a create-then-chmod sequence leaves a
-        // window where the token is written at the umask-default mode (often
-        // world-readable) — a local co-tenant polling the predictable tmp
-        // path could open an fd during that window (POSIX checks perms at
-        // open, not per read). Being born at 0o600 closes the window; the
-        // uniform mode also keeps the common (no-token) case indistinguishable.
-        let mut file = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp)?
-            }
-            #[cfg(not(unix))]
-            {
-                std::fs::File::create(&tmp)?
-            }
-        };
-        file.write_all(&json)?;
-        std::fs::rename(&tmp, &self.path)
+        write_private_atomic(&self.path, &json)
     }
 
     /// Delete the state file. Safe to call on a path that does not exist.
@@ -377,6 +350,54 @@ pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>> {
         ready,
         last_updated,
     }))
+}
+
+/// Write `bytes` to `path` so that a reader sees the old file or the new one,
+/// never half of one: a sibling `<file>.tmp.<pid>`, then a rename over the
+/// target. The one writer of the state file and of the IPC marker, so a fix to
+/// the rename (R8 of `docs/windows.md`) covers both.
+///
+/// The tmp name carries the pid and is opened with `create` + `truncate`, not
+/// `create_new`: a tmp file that a killed process left behind is reused, and
+/// does not make every later write fail.
+///
+/// # Errors
+/// The create, the write, or the rename fails.
+pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // No fsync: statusline is best-effort; kernel buffer-writeback
+    // is plenty. Atomic rename still gives readers a consistent view.
+    let tmp = tmp_sibling(path);
+    // 0o600 at create, not chmod-after: an app's discovery fields may carry
+    // a bearer token, and a create-then-chmod sequence leaves a
+    // window where the token is written at the umask-default mode (often
+    // world-readable) — a local co-tenant polling the predictable tmp
+    // path could open an fd during that window (POSIX checks perms at
+    // open, not per read). Being born at 0o600 closes the window; the
+    // uniform mode also keeps the common (no-token) case indistinguishable.
+    let mut file = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::File::create(&tmp)?
+        }
+    };
+    file.write_all(bytes)?;
+    drop(file);
+    let renamed = std::fs::rename(&tmp, path);
+    if renamed.is_err() {
+        // A failed rename must not leave the tmp file behind.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    renamed
 }
 
 fn tmp_sibling(path: &Path) -> PathBuf {
