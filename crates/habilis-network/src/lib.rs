@@ -95,7 +95,7 @@ pub(crate) mod testing;
 pub mod util {
     // Listed rather than a glob, for the reason given on [`protocol`].
     pub use habilis_network_util::{
-        bounded_fifo_set, bounded_queue, clock, consts, cooldown, logs, mesh_prefix,
+        bounded_fifo_set, bounded_queue, clock, consts, cooldown, file_name, logs, mesh_prefix,
         resident_memory, tuning, version,
     };
     // The runtime-directory helpers are `host`-gated in the leaf crate: they

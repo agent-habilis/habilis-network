@@ -40,7 +40,10 @@ pub(super) fn is_forbidden_mesh_name(ch: char) -> bool {
 /// plus the path separators `/ \`. A nickname is embedded raw in the per-member
 /// filenames (`<prefix>/<nick>.ipc.sock`, `<nick>.tracing.log`,
 /// `<nick>.state.json`), and clients recompute those paths to reach the daemon,
-/// so a path separator would break the socket bind/connect.
+/// so a path separator would break the socket bind/connect. Windows refuses
+/// more in a file name; the engine checks the local nickname for that with
+/// `habilis_network_util::file_name::windows_file_stem_problem`, on Windows only,
+/// so the wire rule here stays the same on every OS.
 pub(super) fn is_forbidden(ch: char) -> bool {
     is_forbidden_mesh_name(ch) || matches!(ch, '/' | '\\')
 }
