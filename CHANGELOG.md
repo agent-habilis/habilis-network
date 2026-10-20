@@ -138,7 +138,7 @@ published to a registry; pin it with
   Pubky relays. Pkarr is on in the default preset, so a topic, a directory
   and a bare stream producer all use it; a topic always takes the default
   list and refuses a custom one, which is a create-only choice.
-  `habilis_network_opts` grows to 80 bytes (main's 72 with `pkarr_urls` appended after
+  `habilis_network_opts` grows to 80 bytes (72 before `pkarr_urls`, which is appended after
   `max_direct`) and `habilis_network_stream_opts` to 32, with `pkarr_urls` appended. A lookup bit this build does not know is
   now an error, not a silent drop. `pkarr` needs `relay` among the lookups,
   because a record names the home relay and nothing else. A list holds at
