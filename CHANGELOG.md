@@ -178,6 +178,8 @@ published to a registry; pin it with
   (`broadcast::Sender<Authored>`). Embedder: read the message from the `Authored` view. It has no
   `Serialize`, `Deserialize` or `DerefMut`, and a `Verified` has no `Deserialize` or
   `DerefMut`. Both share the message behind an `Arc`, so a copy is a count bump.
+  `NodeEvent::Presence` gains `peer` and `synthetic`: read the peer's identity from `peer`, not from
+  `msg`'s proof, which is this node's for a synthetic presence.
 - **Breaking:** `Signed` is renamed to `Signer`.
 - **Breaking:** `InjectedEndpoint` is built only by `InjectedEndpoint::bind`, which checks the
   keys of the handles before it binds the endpoint with its transports. Its fields are private,
