@@ -2003,7 +2003,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=6710404ce9b1aa4211374fd00e9680cc38c69b1c#6710404ce9b1aa4211374fd00e9680cc38c69b1c"
+source = "git+https://github.com/agent-habilis/iroh?rev=d0851b2b0b05571a1e3316ec9b167fa3cf3df601#d0851b2b0b05571a1e3316ec9b167fa3cf3df601"
 dependencies = [
  "backon",
  "blake3",
@@ -2053,7 +2053,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=6710404ce9b1aa4211374fd00e9680cc38c69b1c#6710404ce9b1aa4211374fd00e9680cc38c69b1c"
+source = "git+https://github.com/agent-habilis/iroh?rev=d0851b2b0b05571a1e3316ec9b167fa3cf3df601#d0851b2b0b05571a1e3316ec9b167fa3cf3df601"
 dependencies = [
  "curve25519-dalek 5.0.0",
  "data-encoding",
@@ -2071,7 +2071,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=6710404ce9b1aa4211374fd00e9680cc38c69b1c#6710404ce9b1aa4211374fd00e9680cc38c69b1c"
+source = "git+https://github.com/agent-habilis/iroh?rev=d0851b2b0b05571a1e3316ec9b167fa3cf3df601#d0851b2b0b05571a1e3316ec9b167fa3cf3df601"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -2094,7 +2094,7 @@ dependencies = [
 [[package]]
 name = "iroh-gossip"
 version = "0.101.0"
-source = "git+https://github.com/agent-habilis/iroh-gossip?rev=e102abe68617ddf0081186b8838eb27d356b2b15#e102abe68617ddf0081186b8838eb27d356b2b15"
+source = "git+https://github.com/agent-habilis/iroh-gossip?rev=ab83e81d71b00f3f12cf53946ba48bebf25f5ebe#ab83e81d71b00f3f12cf53946ba48bebf25f5ebe"
 dependencies = [
  "blake3",
  "bytes",
@@ -2147,7 +2147,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=6710404ce9b1aa4211374fd00e9680cc38c69b1c#6710404ce9b1aa4211374fd00e9680cc38c69b1c"
+source = "git+https://github.com/agent-habilis/iroh?rev=d0851b2b0b05571a1e3316ec9b167fa3cf3df601#d0851b2b0b05571a1e3316ec9b167fa3cf3df601"
 dependencies = [
  "blake3",
  "bytes",
