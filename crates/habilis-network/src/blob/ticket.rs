@@ -178,7 +178,7 @@ mod tests {
         assert!(!decoded.password);
     }
 
-    /// The bytes of a ticket minted by the code at the base commit. A change
+    /// The bytes of a ticket minted before pkarr joined the public preset. A change
     /// here is a wire change: tokens of this shape exist outside the code.
     const GOLDEN: &str = "7uoCFwgsTez8XFb4njvMAMtE2vJeBnmBrmZUx5yWRCWRQLMdHteB1NQfJibHEK1WioE5QiSF1L29xXB7Jz1Q6z65hGReoUL4qgUyMKUtBckU2R4HjmNLn7zoZYAuDhn78MVNP74XfEGDYouUBkCfpgCMcbLBMC95nPSfXM29dKJQcxJFDNHm3oru4aahCpinXYdSWy1CSoGnARMP1Dn5sqESwRYVmMk5r5PmniPn8j7imhizqdSzCtJeB9CLahaiC7ht";
 

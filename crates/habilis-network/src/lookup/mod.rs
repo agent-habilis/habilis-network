@@ -27,7 +27,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, endpoint::presets, prot
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
-use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
+use crate::protocol::mesh::{LookupOpts, PkarrChoice, RelayChoice, TransportPolicy};
 use crate::util::clock::millis_saturating;
 
 /// A local relay server every side of a test can reach: plain HTTP, so the
@@ -709,7 +709,10 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     let network = lookups.network_label();
     let mut builder = if lookups.is_loopback() {
         debug_assert!(
-            lookups.is_loopback(),
+            !lookups.mdns
+                && !lookups.dht
+                && lookups.relay_lookup == RelayChoice::Disabled
+                && lookups.pkarr == PkarrChoice::Disabled,
             "loopback-only mesh must resolve to all-off lookups"
         );
         // Loopback-only = strictly loopback, **zero external network calls**.
@@ -1191,6 +1194,9 @@ pub(crate) async fn build_peer_multihop_with(
             crate::transport::SignalAdmission::new_route_table(cap),
         )
     });
+    // The underlay takes the mesh's lookups, pkarr included: a forwarder dials an underlay it has
+    // no route vector for by its bare id (`dial_addr`, iroh-multihop-transport underlay.rs:446-466),
+    // and only the address lookup can resolve that id, so pkarr stays on here.
     let underlay = build_endpoint(
         lookups,
         Some(underlay_secret),
@@ -1568,6 +1574,26 @@ pub(crate) fn build_mesh(
 
 #[cfg(test)]
 mod tests {
+    /// A tripwire on the source: the underlay endpoint takes the mesh's lookups unchanged, pkarr
+    /// included, because a forwarder resolves a hop it has no vector for by its bare id. A change
+    /// to that first argument fails here and asks for a new decision.
+    #[test]
+    fn the_underlay_is_built_with_the_mesh_lookups_unchanged() {
+        let source = include_str!("mod.rs");
+        let call = "let underlay = build_endpoint(";
+        let start = source.find(call).expect("the underlay build") + call.len();
+        let first_arg = source[start..]
+            .trim_start()
+            .split(',')
+            .next()
+            .expect("the first argument");
+        assert_eq!(
+            first_arg.trim(),
+            "lookups",
+            "the underlay takes the mesh lookups as they are"
+        );
+    }
+
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
     use crate::protocol::mesh::PkarrChoice;
 
