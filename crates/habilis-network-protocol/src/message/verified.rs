@@ -271,6 +271,9 @@ impl Proof for Authored {
     }
 }
 
+/// The JSON record of a verified message, for the places that echo or compare it: the IPC echo and
+/// the tests. It skips the `MAX_MESSAGE_SIZE` gate of [`Message::serialize`], and it is never a wire
+/// door: the wire takes a [`WireFrame`](super::WireFrame) from [`Verified::serialize`].
 impl Serialize for Verified {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         Serialize::serialize(&super::Wire(&self.message), serializer)
@@ -281,9 +284,9 @@ impl Serialize for Verified {
 /// its signature is not checked and it has no wire form: it cannot be serialized, and it cannot go
 /// back on the wire or into the log.
 ///
-/// The `Deref` to [`Message`] is a read door, not a wire door. The `Serialize` impl of `Message` is
-/// still reachable through `&*authored`, so the rule rests on the senders: every sender takes a
-/// [`Verified`], and only [`Verified::serialize`] produces wire bytes.
+/// The `Deref` to [`Message`] is a read door, not a wire door. `Message` has no public `Serialize`,
+/// so `&*authored` does not serialize either: only [`Verified::serialize`] makes a
+/// [`WireFrame`](super::WireFrame), and every sender takes one.
 ///
 /// # Examples
 ///

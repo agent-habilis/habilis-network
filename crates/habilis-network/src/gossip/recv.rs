@@ -2771,6 +2771,29 @@ mod first_contact_tests {
     }
 
     /// A `PeerInfo` of the author `bob` that carries `addr`.
+    /// A relayed PeerInfo is re-serialized from its verified form, so the bytes that go out are the bytes
+    /// that came in: a PeerInfo carries no resend trailer, and the signed form round-trips exactly.
+    #[test]
+    fn a_relayed_peer_info_is_the_inbound_bytes() {
+        let inbound = crate::protocol::Message::new_peer_info(
+            &MeshId::from("test"),
+            &nick("alice"),
+            crate::protocol::MessageBody::from("{}"),
+        )
+        .sign(&Identity::generate())
+        .serialize()
+        .expect("serialize");
+        let (parsed, nonce) =
+            crate::protocol::Message::parse_wire(inbound.as_bytes()).expect("parses");
+        assert!(nonce.is_none());
+        let relayed = parsed
+            .verify()
+            .expect("verifies")
+            .serialize()
+            .expect("serialize");
+        assert_eq!(relayed.as_bytes(), inbound.as_bytes());
+    }
+
     fn peer_info(node: &Node, addr: &iroh::EndpointAddr) -> Verified {
         use crate::protocol::message::MessageBody;
         use crate::protocol::peer_addr::endpoint_addr_to_json;

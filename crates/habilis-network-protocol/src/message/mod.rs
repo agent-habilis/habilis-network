@@ -881,7 +881,7 @@ impl Message {
     }
 
     /// Parse a gossip payload that may end in the trailer of a resend (see
-    /// [`wire_with_resend_nonce`]). Returns the message and the nonce, if any. The trailer is
+    /// [`WireFrame::with_resend_nonce`](wire::WireFrame::with_resend_nonce)). Returns the message and the nonce, if any. The trailer is
     /// outside the signature: it changes the gossip message id and nothing else.
     ///
     /// # Errors

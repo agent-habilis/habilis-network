@@ -11,7 +11,7 @@ use bytes::Bytes;
 ///
 /// A frame cannot be built from bytes outside the crate: the field is private.
 ///
-/// ```compile_fail,E0603
+/// ```compile_fail,E0423
 /// use habilis_network_protocol::message::WireFrame;
 ///
 /// let _ = WireFrame(bytes::Bytes::from_static(b"not signed"));
@@ -49,10 +49,15 @@ impl WireFrame {
         self.0.is_empty()
     }
 
-    /// The frame with a resend nonce trailer: the new name a re-sent frame carries (see
-    /// [`wire_with_resend_nonce`](super::wire_with_resend_nonce)). The signed fields are unchanged.
+    /// The frame with a resend nonce trailer: the new name a re-sent frame carries. The signed fields
+    /// are unchanged. Call it on a frame from [`Verified::serialize`](super::Verified::serialize); a
+    /// frame that already carries a trailer is not re-named.
     #[must_use]
     pub fn with_resend_nonce(&self, nonce: u64) -> WireFrame {
+        debug_assert!(
+            super::split_resend_trailer(&self.0).1.is_none(),
+            "a frame from Verified::serialize has no resend trailer yet"
+        );
         WireFrame(Bytes::from(super::wire_with_resend_nonce(&self.0, nonce)))
     }
 
