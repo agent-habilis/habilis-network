@@ -159,8 +159,8 @@ impl Verified {
     /// (see [`Message::with_unverified_key`]). It does not carry a signature: see
     /// [`Verified::fixture_with_signature`] for one that keeps the signature as parsed.
     ///
-    /// It exists for the adversarial suite, and `test-fixtures` enables it. A non-test binary must
-    /// never enable that feature, because the door would let it forge a proof.
+    /// It exists in unit tests and in any build that enables `test-fixtures`. A release binary must
+    /// not enable that feature, because the door would let it forge a proof.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn fixture_unchecked(message: Message, key: AuthorKey) -> Self {
@@ -172,8 +172,8 @@ impl Verified {
     /// keeps the original signature, so a body edited after signing fails `verify` at the receiver, and
     /// captured bytes can be replayed unchanged.
     ///
-    /// `test-fixtures` enables it, for the adversarial suite only. A non-test binary must never enable
-    /// that feature.
+    /// It exists in unit tests and in any build that enables `test-fixtures`. A release binary must
+    /// not enable that feature.
     ///
     /// # Panics
     ///

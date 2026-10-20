@@ -37,6 +37,18 @@ impl WireFrame {
         Self(bytes)
     }
 
+    /// The door for a test that must put exact bytes on the wire: an unsigned frame, or a
+    /// malformed one. No engine-made frame can be either, so the adversarial suite needs this.
+    ///
+    /// It exists in unit tests and in any build that enables `test-fixtures`. A release binary must
+    /// not enable that feature, because the door would let it send bytes that no signed message
+    /// produced.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    #[must_use]
+    pub fn fixture_raw(bytes: Bytes) -> Self {
+        Self(bytes)
+    }
+
     /// The number of bytes on the wire.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -71,5 +83,19 @@ impl WireFrame {
     #[must_use]
     pub fn into_bytes(self) -> Bytes {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::WireFrame;
+
+    #[test]
+    fn a_fixture_frame_carries_exactly_the_bytes_it_was_given() {
+        let raw: &[u8] = b"\xff not a signed message \x00";
+        let frame = WireFrame::fixture_raw(Bytes::copy_from_slice(raw));
+        assert_eq!(frame.as_bytes(), raw);
     }
 }
