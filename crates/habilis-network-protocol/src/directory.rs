@@ -28,7 +28,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{Seed, derive_secret};
-use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
+use crate::mesh::{LockedMesh, LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
 use crate::{MeshId, MessageBody};
 use habilis_network_util::clock::{Instant, UnixSecs};
 
@@ -52,6 +52,10 @@ const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/dom
 /// only) and the discoverer's `--mdns/--dht/--relay` choice, and the two must
 /// align to see each other. A different name still yields a fully independent
 /// directory.
+///
+/// # Panics
+/// Never. The directory config carries no password or invite issuer, which
+/// [`Mesh::new`] refuses, so the constructor cannot fail here.
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::new(
@@ -62,6 +66,7 @@ pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
         directory.clone(),
         directory_config(lookups),
     )
+    .expect("the directory config carries no secret")
 }
 
 /// The config a directory mesh uses for `lookups`: the caller's chosen
@@ -184,9 +189,9 @@ impl Listings {
     pub fn note(&mut self, body: &str, now: Instant) -> Option<ListingChange> {
         let ad = Ad::parse(body)?;
         // `ad.id` is a `MeshId` (shallow charset check only); the
-        // structural `Mesh` decode below is the real validity gate, so
+        // structural `LockedMesh` decode below is the real validity gate, so
         // an id that doesn't decode is dropped here.
-        let mesh: Mesh = ad.id.as_str().parse().ok()?;
+        let mesh: LockedMesh = ad.id.as_str().parse().ok()?;
         let mesh_id = ad.id;
 
         if let Some(listing) = self.entries.get_mut(&mesh_id) {
@@ -214,7 +219,7 @@ impl Listings {
                 mesh: mesh_id.clone(),
                 public: !mesh.is_loopback(),
                 password: mesh.requires_password(),
-                name: mesh.name,
+                name: mesh.name().clone(),
                 peers: ad.peers,
                 last_seen: now,
                 first_seen_unix: UnixSecs::now(),

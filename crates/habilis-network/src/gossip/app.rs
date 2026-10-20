@@ -1,6 +1,7 @@
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
-use crate::protocol::{Message, Nickname};
+use crate::protocol::Nickname;
+use crate::protocol::message::Authored;
 
 /// Per-frame classification the engine needs to decide retention, push
 /// surfacing, and fork/DAG indexing without knowing the app's tag taxonomy.
@@ -39,7 +40,7 @@ pub struct AppClass {
 /// [`NodeApp::on_app_frame`].
 #[derive(Debug)]
 pub struct InboundApp<'a> {
-    pub message: &'a Message,
+    pub message: &'a Authored,
     pub surfaceable: bool,
 }
 
@@ -51,7 +52,7 @@ pub struct InboundApp<'a> {
 #[async_trait::async_trait]
 pub trait NodeApp: Send {
     /// Classify one inbound `App` frame by tag/payload — see [`AppClass`].
-    fn classify(&self, message: &Message) -> AppClass;
+    fn classify(&self, message: &Authored) -> AppClass;
 
     /// Dispatch an inbound `App` frame (addressed to us, or broadcast) after
     /// the engine's generic prefix. Returns `true` when the engine should
@@ -71,7 +72,7 @@ pub trait NodeApp: Send {
     /// Defaults to a no-op — an app that never splits a body past
     /// [`crate::util::consts::MAX_MESSAGE_SIZE`] (so the engine never reassembles
     /// one for it) has nothing to surface here.
-    fn surface_logical(&mut self, logical: &Message, surfaceable: bool, ctx: &HandlerCtx<'_>) {
+    fn surface_logical(&mut self, logical: &Authored, surfaceable: bool, ctx: &HandlerCtx<'_>) {
         let _ = (logical, surfaceable, ctx);
     }
 

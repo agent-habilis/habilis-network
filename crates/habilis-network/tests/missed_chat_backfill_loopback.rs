@@ -8,6 +8,7 @@
 
 #![cfg(feature = "host")]
 
+use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -39,7 +40,7 @@ struct Chat {
 
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: true,
             beat: false,
@@ -90,9 +91,9 @@ impl NodeDriver for Chat {
             },
         );
         frame.timestamp = frame.timestamp + AHEAD;
-        let frame = frame.signed(ctx.identity);
-        let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
-        let _ = habilis_network::ops::deliver(&frame, bytes, state, ctx.sender)
+        let frame = frame.sign(ctx.identity);
+        let bytes = frame.serialize().expect("serialize");
+        let _ = habilis_network::ops::deliver(&frame, bytes.clone(), state, ctx.sender)
             .await
             .expect("a meshed node broadcasts");
         // The sender keeps its own frame, as a chat app does, so any peer late
@@ -128,7 +129,7 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg } = event
+        if let NodeEvent::Presence { msg, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
             } = msg.kind

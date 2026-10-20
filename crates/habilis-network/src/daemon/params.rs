@@ -17,7 +17,7 @@ use crate::protocol::Nickname;
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{
     AdvertiseRequiresReachable, DirectorySelection, LookupOpts, Mesh, MeshConfig, MeshName,
-    TransportPolicy, validate_advertise,
+    TransportPolicy, UnlockError, validate_advertise,
 };
 use crate::resolver::{self, JoinTarget};
 
@@ -123,15 +123,18 @@ impl JoinParams {
     pub fn resolve(self) -> Result<Resolved> {
         let mesh = match &self.target {
             JoinTarget::Mesh(_) => {
-                let mut mesh = resolver::resolve(&self.target)?;
-                match (&self.password, mesh.requires_password()) {
-                    (None, true) => return Err(PasswordRequired.into()),
-                    (None, false) => {}
-                    // ~100ms of Argon2id, accepted synchronously: this runs once
-                    // per join, before the daemon exists.
-                    (Some(password), _) => mesh.apply_password(password)?,
-                }
-                mesh
+                let locked = resolver::resolve(&self.target)?;
+                // ~100ms of Argon2id, accepted synchronously: this runs once
+                // per join, before the daemon exists. `unlock` decides whether a
+                // password is needed; only its typed reason is mapped here.
+                locked
+                    .unlock(self.password.as_ref())
+                    .map_err(|error| match error {
+                        UnlockError::PasswordRequired => anyhow::Error::from(PasswordRequired),
+                        error @ (UnlockError::InviteOnly
+                        | UnlockError::NoPassword
+                        | UnlockError::WrongPassword) => anyhow::Error::from(error),
+                    })?
             }
             // Redeem the invite: verify the creator's signature + expiry and
             // unwrap the join root. An invite-only mesh carries no id-level
@@ -239,7 +242,7 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
         anyhow::bail!("topic string must not be empty");
     }
     config.validate()?;
-    Ok(Mesh::from_topic(
+    Mesh::from_topic(
         string,
         MeshConfig {
             lookups: config.lookups,
@@ -247,7 +250,7 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
             issuer_pubkey: None,
             transport: config.transport,
         },
-    ))
+    )
 }
 
 impl TopicParams {
@@ -365,5 +368,38 @@ mod topic_derivation_tests {
             },
         };
         assert!(derive_topic_mesh_config("standup", config).is_err());
+    }
+}
+
+#[cfg(test)]
+mod join_password_tests {
+    use super::*;
+    use crate::protocol::Seed;
+    use crate::protocol::mesh::{Mesh, MeshConfig, MeshName};
+
+    /// A passworded id, as a joiner is handed it.
+    fn passworded_id() -> String {
+        let mut mesh = Mesh::new(
+            Seed::from_bytes([9u8; 32]),
+            MeshName::new("pw").unwrap(),
+            MeshConfig::loopback(),
+        )
+        .unwrap();
+        mesh.set_password(&Password::new("hunter2".to_owned()));
+        mesh.to_string()
+    }
+
+    #[test]
+    fn a_passworded_id_without_a_password_is_password_required() {
+        let params = JoinParams {
+            target: passworded_id().parse().unwrap(),
+            nickname: None,
+            password: None,
+        };
+        let error = params.resolve().unwrap_err();
+        assert!(
+            error.downcast_ref::<PasswordRequired>().is_some(),
+            "got: {error}"
+        );
     }
 }

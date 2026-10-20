@@ -55,14 +55,15 @@ pub use dedup_key::DedupKey;
 pub use habilis_network_util::clock::UnixSecs;
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
-    AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, Lookup,
-    LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError, OptFlag,
-    RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport, TransportPolicy,
-    resolve_lookups, validate_advertise,
+    AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, LockedMesh,
+    Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError,
+    OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
+    TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
 };
 pub use message::{
-    AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,
-    MessageKind, PresenceSubtype, Shard, ShardGroup, Signed, sole_addressee,
+    AppFrameParams, AppTag, Authored, BodyError, Channel, CorrId, IdError, Message, MessageBody,
+    MessageId, MessageKind, PresenceSubtype, Proof, Shard, ShardGroup, Signer, Verified,
+    sole_addressee,
 };
 pub use nickname::{Nickname, NicknameError};
 pub use seal::seal_to_body;

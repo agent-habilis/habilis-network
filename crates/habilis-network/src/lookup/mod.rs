@@ -250,21 +250,17 @@ impl TransportOpts {
 /// `WebRTC` transport with its selector, and the connection hook that records
 /// the endpoint's connections in the admission table.
 ///
-/// The one definition of that wiring. [`build_endpoint`] calls it, and a caller
-/// that builds its own endpoint to inject into a mesh calls it too, so the two
-/// cannot drift. Without the hook the table sees none of the endpoint's
-/// connections: the relay policy is not kept on the gossip connections that the
-/// node dials, and a slot whose connection is gone is never pruned.
+/// The one definition of that wiring. [`build_endpoint`] calls it, and so does
+/// [`InjectedEndpoint::bind`](crate::runtime::InjectedEndpoint::bind), so an
+/// injected endpoint and an engine-built one cannot drift. Without the hook the
+/// table sees none of the endpoint's connections: the relay policy is not kept on
+/// the gossip connections that the node dials, and a slot whose connection is gone
+/// is never pruned.
 ///
-/// The handles must have been made from the key the builder is given, and the
-/// admission table must be the one the mesh is set up with: see
-/// [`check_injected_identity`].
-///
-/// Call it after your own `preset` and before `bind`, and make no
-/// `path_selector` or `hooks` call after it: both are single slots, and the last
-/// call wins.
+/// The builder is consumed here, so no caller can add a `path_selector` or a
+/// `hooks` call after it: both are single slots, and the last call wins.
 #[must_use]
-pub fn install_transports(
+pub(crate) fn install_transports(
     mut builder: iroh::endpoint::Builder,
     transports: &TransportHandles,
 ) -> iroh::endpoint::Builder {
@@ -628,25 +624,6 @@ pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
     build_endpoint(lookups, None, None, Vec::new(), TransportHandles::default()).await
 }
 
-/// What `check_injected_identity` reads off an injected multi-hop handle.
-#[derive(Debug, Clone, Copy)]
-pub struct InjectedMultihop {
-    /// The hop identity the handle stamps on every cell.
-    pub hop_identity: iroh::EndpointId,
-    /// Whether the handle lets the relay carry cells.
-    pub relay_payload: bool,
-}
-
-#[cfg(feature = "multihop")]
-impl From<&habilis_network_iroh_multihop_transport::MultihopHandle> for InjectedMultihop {
-    fn from(handle: &habilis_network_iroh_multihop_transport::MultihopHandle) -> Self {
-        Self {
-            hop_identity: handle.app_id().get(),
-            relay_payload: handle.relay_payload(),
-        }
-    }
-}
-
 /// The multi-hop handle configuration this engine uses for a mesh: whether the
 /// relay may carry cells is the mesh's `relay` rule, the other numbers are the
 /// engine's. A caller that builds its own handle to inject uses this.
@@ -685,66 +662,29 @@ pub(crate) fn browser_handle_config(
     }
 }
 
-/// Assert a caller-supplied endpoint and hub agree on identity.
+/// Assert that an injected endpoint agrees with the mesh it joins.
 ///
-/// The `WebRTC` transport advertises `custom_addr(local_id)` as the address peers
-/// dial it on, so the hub must have been built from the same key the endpoint
-/// binds. Getting this wrong is **silent**: the endpoint comes up fine and every
-/// `WebRTC` dial goes to an address nobody listens on. `build_peer_webrtc` gets
-/// this right by construction; an injected pair is only as good as its caller,
-/// so it is checked here instead of assumed.
-///
-/// The reach check is a `warn!`, not an error: relay home is not established at
-/// bind time, so a false negative would fail a perfectly good setup.
+/// [`InjectedEndpoint::bind`](crate::runtime::InjectedEndpoint::bind) already
+/// checks the identities, so only the mesh-dependent part is left here: whether
+/// the relay may carry the cells of the multi-hop handle, and whether the endpoint
+/// can reach the rendezvous that the mesh uses.
 ///
 /// # Errors
-/// The endpoint and hub advertise different identities.
-pub fn check_injected_identity(
+/// The multi-hop handle lets the relay carry cells on a mesh whose transport list
+/// has no `relay`.
+pub(crate) fn check_injected_against_mesh(
     endpoint: &Endpoint,
-    webrtc: &habilis_network_iroh_webrtc_transport::WebRtcHandle,
-    multihop: Option<InjectedMultihop>,
-    admission: &crate::transport::SignalAdmission,
+    relay_payload: bool,
     mesh_lookups: &LookupOpts,
     mesh_relay_transport: bool,
 ) -> Result<()> {
-    let bound = endpoint.id();
-    let advertised = webrtc.transport().local_id();
+    // Whether the relay may carry cells is a rule of the mesh, in its id. A
+    // handle that lets it, on a mesh that does not, would carry other peers'
+    // cells over the relay.
     anyhow::ensure!(
-        bound == advertised,
-        "injected endpoint binds {bound} but its WebRTC transport advertises \
-         {advertised}; they must share one key or every WebRTC dial goes nowhere"
-    );
-    // The hop identity the multi-hop handle stamps on every cell must be the key
-    // the endpoint binds, or a route that names this peer reaches nobody. Its
-    // underlay has a key of its own, see `build_peer_multihop`.
-    if let Some(InjectedMultihop {
-        hop_identity,
-        relay_payload,
-    }) = multihop
-    {
-        anyhow::ensure!(
-            bound == hop_identity,
-            "injected endpoint binds {bound} but its multihop handle has hop identity \
-             {hop_identity}; they must share one key or every route to this peer goes nowhere"
-        );
-        // Whether the relay may carry cells is a rule of the mesh, in its id. A
-        // handle that lets it, on a mesh that does not, would carry other peers'
-        // cells over the relay.
-        anyhow::ensure!(
-            !relay_payload || mesh_relay_transport,
-            "injected multihop handle lets the relay carry cells but the mesh's transport \
-             list has no `relay`: build the handle with `relay_payload` off"
-        );
-    }
-    // A table that no hook reports to cannot keep the relay policy on the dialed
-    // gossip connections, and never prunes a slot whose connection is gone. This
-    // proves that `connection_hook` was called on the table, not that the hook
-    // is on this endpoint.
-    anyhow::ensure!(
-        admission.is_observed(),
-        "injected admission table has no endpoint hook reporting to it: build the endpoint \
-         with `install_transports` and this table, or the relay policy on dialed gossip \
-         connections is not kept and slots of closed connections are not pruned"
+        !relay_payload || mesh_relay_transport,
+        "injected multihop handle lets the relay carry cells but the mesh's transport \
+         list has no `relay`: build the handle with `relay_payload` off"
     );
 
     // The other half of the injection contract, and the half that had no check
@@ -2111,67 +2051,22 @@ mod tests {
         endpoint.close().await;
     }
 
-    // An injected endpoint's handles must all carry the key it binds, the
-    // multihop handle must obey the mesh's relay rule, and the admission table
-    // must have a hook reporting to it.
+    // An injected endpoint's multihop handle must obey the mesh's relay rule. Its
+    // keys are checked when it is bound: see `InjectedEndpoint::bind`.
     #[tokio::test]
-    async fn an_injected_endpoint_is_checked_against_every_handle() {
-        use crate::transport::SignalAdmission;
-
+    async fn an_injected_multihop_handle_must_obey_the_mesh_relay_rule() {
         let lookups = LookupOpts::loopback();
-        let (endpoint, webrtc) = super::build_peer_webrtc(&lookups, TransportOpts::default())
+        let (endpoint, _webrtc) = super::build_peer_webrtc(&lookups, TransportOpts::default())
             .await
             .expect("a peer binds");
-        let observed = SignalAdmission::new(16);
-        let _hook = observed.connection_hook();
-        let check = |multihop, admission: &SignalAdmission, mesh_relay| {
-            super::check_injected_identity(
-                &endpoint, &webrtc, multihop, admission, &lookups, mesh_relay,
-            )
-        };
-        let hop = |id, relay_payload| {
-            Some(super::InjectedMultihop {
-                hop_identity: id,
-                relay_payload,
-            })
-        };
-
-        check(None, &observed, false).expect("no multihop handle is allowed");
-        check(hop(endpoint.id(), false), &observed, false).expect("a hop identity on the same key");
-
-        let other = iroh::SecretKey::from_bytes(&[5; 32]).public();
-        let key_error =
-            check(hop(other, false), &observed, false).expect_err("a hop identity on another key");
-        assert!(key_error.to_string().contains("multihop"), "{key_error}");
-
-        let relay_error = check(hop(endpoint.id(), true), &observed, false)
+        super::check_injected_against_mesh(&endpoint, false, &lookups, false)
+            .expect("a handle that does not carry cells is allowed");
+        let relay_error = super::check_injected_against_mesh(&endpoint, true, &lookups, false)
             .expect_err("relay cells on a lookup-only mesh");
         assert!(relay_error.to_string().contains("relay"), "{relay_error}");
-        check(hop(endpoint.id(), true), &observed, true)
+        super::check_injected_against_mesh(&endpoint, true, &lookups, true)
             .expect("the mesh lets the relay carry cells");
-
-        let unobserved = SignalAdmission::new(16);
-        let hook_error = check(None, &unobserved, false).expect_err("a table no hook reports to");
-        assert!(hook_error.to_string().contains("hook"), "{hook_error}");
-
-        let (stranger, other_webrtc) = super::build_peer_webrtc(&lookups, TransportOpts::default())
-            .await
-            .expect("a second peer binds");
-        let webrtc_error = super::check_injected_identity(
-            &endpoint,
-            &other_webrtc,
-            None,
-            &observed,
-            &lookups,
-            false,
-        )
-        .expect_err("a WebRTC handle on another key");
-        assert!(
-            webrtc_error.to_string().contains("WebRTC"),
-            "{webrtc_error}"
-        );
         endpoint.close().await;
-        stranger.close().await;
     }
 
     /// The window of a starting holder: the rung is bound with an empty ALPN list and its router

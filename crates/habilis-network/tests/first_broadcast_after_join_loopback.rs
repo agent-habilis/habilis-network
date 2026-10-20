@@ -34,6 +34,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use habilis_network::protocol::message::Authored;
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex};
@@ -46,7 +47,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::net::TransportOpts;
 use habilis_network::ops::{app_frame, send_app};
 use habilis_network::protocol::{
-    AppFrameParams, AppTag, Lookup, LookupOpts, Message, MessageBody, Nickname, Transport,
+    AppFrameParams, AppTag, Lookup, LookupOpts, MessageBody, Nickname, Transport,
 };
 use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -248,7 +249,7 @@ enum ChatSession {
 
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: true,
             beat: false,
@@ -297,7 +298,7 @@ impl NodeDriver for Chat {
                         body: MessageBody::new(text).expect("a short body"),
                     },
                 );
-                let class = self.classify(&frame);
+                let class = self.classify(&frame.authored());
                 let sent = send_app(state, ctx, frame, class).await.map(|_| ());
                 let _ = reply.send(sent.map_err(|error| error.to_string()));
                 true

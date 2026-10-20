@@ -3,7 +3,6 @@
 //! lifecycle subsystem (it drives `peer_timeout` / the roster).
 
 use crate::transport::MeshSender;
-use bytes::Bytes;
 
 use crate::daemon::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
@@ -22,9 +21,9 @@ pub(crate) async fn tick_alive(
     if state.last_sent_at.elapsed() < ALIVE_INTERVAL {
         return;
     }
-    let msg = Message::new_alive(mesh, author).signed(&state.identity);
+    let msg = Message::new_alive(mesh, author).sign(&state.identity);
     if let Ok(bytes) = msg.serialize() {
-        let _ = sender.broadcast(Bytes::from(bytes)).await;
+        let _ = sender.broadcast(bytes).await;
     }
     state.idle.broadcasts += 1;
     state.last_sent_at = Instant::now();

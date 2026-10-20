@@ -51,7 +51,7 @@ pub trait Addressed {
 #[must_use]
 /// # Panics
 /// Panics if an internal invariant is violated.
-pub fn json_ok_msg(id: &MessageId, msg: &crate::protocol::Message) -> String {
+pub fn json_ok_msg(id: &MessageId, msg: &crate::protocol::message::Verified) -> String {
     serde_json::json!({
         "ok": true,
         "id": id,

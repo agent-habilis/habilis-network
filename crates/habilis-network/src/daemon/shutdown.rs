@@ -52,7 +52,7 @@ pub(super) async fn shutdown<A: NodeDriver>(
     // post-departure-join test's SIGKILL choreography).
     gossip::broadcast_msg(
         ctx.sender,
-        &Message::new_left(ctx.mesh, ctx.author).signed(&state.identity),
+        &Message::new_left(ctx.mesh, ctx.author).sign(&state.identity),
     )
     .await;
     // After the broadcast, so peers get the `Left` even when logging fails.

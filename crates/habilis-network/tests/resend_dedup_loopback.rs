@@ -11,6 +11,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ use habilis_network::embed::{
 use habilis_network::net::TransportOpts;
 use habilis_network::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
 use habilis_network::protocol::{
-    AppFrameParams, AppTag, Channel, LookupOpts, Message, MessageBody, Nickname,
+    AppFrameParams, AppTag, Channel, LookupOpts, MessageBody, Nickname,
 };
 use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
 use tokio::sync::oneshot;
@@ -103,7 +104,7 @@ struct Chat {
 
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: true,
             beat: false,
@@ -150,7 +151,7 @@ impl NodeDriver for Chat {
                         body: MessageBody::from(text.as_str()),
                     },
                 );
-                let class = self.classify(&frame);
+                let class = self.classify(&frame.authored());
                 let _ = send_app(state, ctx, frame, class)
                     .await
                     .expect("a small frame is accepted");

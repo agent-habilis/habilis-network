@@ -6,13 +6,13 @@
 //! lives in [`super::recv`].
 
 use crate::transport::MeshSender;
-use bytes::Bytes;
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
 use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::message::AppFrameParams;
+use crate::protocol::message::{Verified, WireFrame};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
@@ -63,7 +63,7 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 pub async fn send_app(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    frame: Message,
+    frame: Verified,
     class: AppClass,
 ) -> anyhow::Result<crate::transport::Delivered> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
@@ -72,7 +72,7 @@ pub async fn send_app(
             frame.wire_len()
         );
     }
-    let bytes = Bytes::from(frame.serialize()?);
+    let bytes = frame.serialize()?;
     crate::logging::messages::log_out(&frame);
     if state.meshed {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
@@ -108,8 +108,8 @@ pub async fn send_app(
 /// across the `await` of [`send_app`]: the app is not `Sync`, and a future that holds it is not
 /// `Send`.
 #[must_use]
-pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Message {
-    Message::new_app(ctx.mesh, ctx.author, params).signed(ctx.identity)
+pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
+    Message::new_app(ctx.mesh, ctx.author, params).sign(ctx.identity)
 }
 
 /// Fire-and-forget gossip broadcast. Serialize errors are swallowed:
@@ -117,10 +117,10 @@ pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Message {
 /// failed serialize must not block the daemon. A failed *broadcast* is
 /// logged — it means the gossip actor refused the send (the wedge the
 /// roster-collapse soak hit silently), not a routine empty gossip.
-pub async fn broadcast_msg(sender: &MeshSender, msg: &Message) {
+pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
     crate::logging::messages::log_out(msg);
     if let Ok(bytes) = msg.serialize()
-        && let Err(error) = sender.broadcast(Bytes::from(bytes)).await
+        && let Err(error) = sender.broadcast(bytes).await
     {
         tracing::warn!(
             target: "habilis_network::gossip",
@@ -140,7 +140,7 @@ pub async fn start_ping_round(
 ) {
     let now = n0_future::time::Instant::now();
     let window = crate::util::tuning::ping_window();
-    let probe = Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity);
+    let probe = Message::new_ping(ctx.mesh, ctx.author).sign(ctx.identity);
     state.arm_ping_round(PingRound::new(&probe, now, now + window, resp));
     broadcast_msg(ctx.sender, &probe).await;
 }
@@ -151,7 +151,7 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, ctx: &HandlerC
     let Some(round) = state.ping_round.as_mut() else {
         return;
     };
-    let probe = Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity);
+    let probe = Message::new_ping(ctx.mesh, ctx.author).sign(ctx.identity);
     round
         .probes
         .insert(probe.id.clone(), n0_future::time::Instant::now());
@@ -202,7 +202,7 @@ pub struct StateMergeParams<'a> {
 pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
-) -> anyhow::Result<Option<Bytes>> {
+) -> anyhow::Result<Option<WireFrame>> {
     use crate::doc::Ingested;
 
     let StateMergeParams {
@@ -234,8 +234,7 @@ pub async fn broadcast_state_merge(
     let (wire_body, plain_body) = state
         .doc(channel)
         .compose_wire_body(&change_bytes, surface.then_some(&merge))?;
-    let signed =
-        Message::new_channel_event(mesh, author, wire_body, channel).signed(&state.identity);
+    let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
     let bytes = signed.serialize()?;
     crate::logging::messages::log_out(&signed);
 
@@ -259,16 +258,13 @@ pub async fn broadcast_state_merge(
     if surface {
         // Surface our own change from a plaintext-bodied view so the `m` delta
         // renders even when the wire body we signed is sealed.
-        let mut surfaced = signed.clone();
-        surfaced.body = plain_body;
         sink.emit(NodeEvent::StateChanged {
             channel,
-            event: Box::new(surfaced),
+            event: Box::new(signed.with_body(plain_body)),
             document: after,
             is_self: true,
         });
     }
-    let bytes = Bytes::from(bytes);
     if state.overlay_reachable() {
         sender
             .broadcast(bytes.clone())
@@ -297,7 +293,7 @@ pub async fn broadcast_state_merge(
 /// still holds the dying beacon's link, and the presence-driven fast-reclaim
 /// then re-stands the beacon into a stale connection and stalls
 /// (iroh-gossip#10).
-pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
+pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
     for (nick, endpoint_id) in &state.peer_endpoints {
         // The rendezvous pseudo-node is never a directed target, and a
         // quiet/ghost peer's stale hint isn't worth a dial at shutdown.
@@ -308,7 +304,7 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
         let endpoint_id = endpoint_id.id;
         let bytes = bytes.clone();
         n0_future::task::spawn(async move {
-            if let Err(error) = pool.dial_and_send(endpoint_id, bytes).await {
+            if let Err(error) = pool.dial_and_send(endpoint_id, bytes.into_bytes()).await {
                 tracing::debug!(target: "habilis_network::gossip", %error, "unicast farewell mirror failed");
             }
         });
@@ -366,7 +362,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
         MessageBody::new(addr_data).expect("endpoint address JSON has no control characters");
     broadcast_msg(
         ctx.sender,
-        &Message::new_peer_info(ctx.mesh, ctx.author, addr_body).signed(ctx.identity),
+        &Message::new_peer_info(ctx.mesh, ctx.author, addr_body).sign(ctx.identity),
     )
     .await;
 }
@@ -379,7 +375,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
 /// [`retain_own_broadcast`](super::recv::retain_own_broadcast) for why a node
 /// that does not hold its own presence makes anti-entropy unconvergeable.
 pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+    let joined = Message::new_joined(ctx.mesh, ctx.author).sign(ctx.identity);
     broadcast_msg(ctx.sender, &joined).await;
     super::recv::retain_own_broadcast(state, &joined);
     broadcast_peer_info(state, ctx).await;
@@ -389,7 +385,7 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCt
 /// of a peer that needs one: a node becomes meshed by its first link to a member, and on a lane pair
 /// that link needs the session, so a frame that waited for the link could never ask for it. The rule
 /// is the one of a frame held on a meshed node ([`crate::transport::note_held`]).
-fn mark_parked(state: &mut EventLoopState, frame: &Message, bytes: &Bytes) {
+fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &WireFrame) {
     if let Err(error) = crate::transport::resolve(frame, bytes.clone(), state) {
         crate::transport::note_held(state, &error);
     }
@@ -400,8 +396,8 @@ fn mark_parked(state: &mut EventLoopState, frame: &Message, bytes: &Bytes) {
 pub(crate) fn park_and_offer(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    frame: &Message,
-    bytes: &Bytes,
+    frame: &Verified,
+    bytes: &WireFrame,
 ) {
     mark_parked(state, frame, bytes);
     offer_for_parked(state, ctx, frame);
@@ -410,7 +406,7 @@ pub(crate) fn park_and_offer(
 /// Offer the session of the peer now, if the parked frame asked for it. Without this the offer waits
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
-fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Message) {
+fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Verified) {
     let Some(nick) = crate::protocol::message::sole_addressee(&frame.kind) else {
         return;
     };
@@ -424,7 +420,6 @@ fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Me
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
 
     use super::{mark_parked, peer_info_json};
     use crate::protocol::{MeshId, Message};
@@ -476,8 +471,9 @@ mod tests {
             &nick("alice"),
             nick("bob"),
             &crate::protocol::MessageId::random(),
-        );
-        let bytes = Bytes::from_static(b"frame");
+        )
+        .sign(&crate::protocol::Identity::generate());
+        let bytes = frame.serialize().expect("serialize");
         let now = crate::util::clock::Instant::now();
         assert!(
             !state.lane_session_wanted(bob, now),
@@ -507,8 +503,9 @@ mod tests {
                 corr: None,
                 body: crate::protocol::MessageBody::from("hi"),
             },
-        );
-        mark_parked(&mut state, &frame, &Bytes::from_static(b"frame"));
+        )
+        .sign(&crate::protocol::Identity::generate());
+        mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));
         assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
     }
 

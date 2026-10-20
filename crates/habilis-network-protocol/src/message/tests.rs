@@ -72,9 +72,9 @@ fn test_ping_round_trip() {
 fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
     let identity = crate::identity::Identity::generate();
     let msg = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
-        .signed(&identity);
+        .sign(&identity);
     assert!(msg.verify_signature());
-    let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
+    let parsed = Message::parse(msg.serialize().unwrap().as_bytes()).unwrap();
     assert_eq!(parsed.kind, MessageKind::LinkState);
     assert_eq!(parsed.body.as_str(), "{}");
 }
@@ -276,7 +276,7 @@ fn build_msg_bytes_message() {
     .unwrap();
     assert!(!built.id.as_str().is_empty());
     assert!(!bytes.is_empty());
-    let msg = Message::parse(&bytes).unwrap();
+    let msg = Message::parse(bytes.as_bytes()).unwrap();
     assert_eq!(msg.body.as_str(), "hello");
     assert_eq!(msg.author, alice);
 }
@@ -292,7 +292,7 @@ mod signing {
     #[test]
     fn signed_message_verifies() {
         let msg =
-            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").signed(&identity());
+            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").sign(&identity());
         assert!(msg.signer.is_some());
         assert!(msg.verify_signature());
     }
@@ -305,16 +305,18 @@ mod signing {
 
     #[test]
     fn tampered_body_breaks_signature() {
-        let mut msg =
-            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").signed(&identity());
+        let mut msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
+            .sign(&identity())
+            .into_message();
         msg.body = "tampered".into();
         assert!(!msg.verify_signature());
     }
 
     #[test]
     fn tampered_author_breaks_signature() {
-        let mut msg =
-            Message::fixture(MessageKind::app_broadcast("app_msg"), "hello").signed(&identity());
+        let mut msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hello")
+            .sign(&identity())
+            .into_message();
         msg.author = "impostor-bot".into();
         assert!(!msg.verify_signature());
     }
@@ -325,7 +327,8 @@ mod signing {
             MessageKind::app_to("app_status", "calm-otter".into(), None),
             "{}",
         )
-        .signed(&identity());
+        .sign(&identity())
+        .into_message();
         assert!(msg.verify_signature());
         msg.kind = MessageKind::app_to("app_status", "evil-otter".into(), None);
         assert!(!msg.verify_signature(), "directed `to` is a signed field");
@@ -337,15 +340,16 @@ mod signing {
             MessageKind::app_to("app_req", "calm-otter".into(), Some(CorrId::from("aaaa"))),
             "{}",
         )
-        .signed(&identity());
+        .sign(&identity())
+        .into_message();
         msg.kind = MessageKind::app_to("app_req", "calm-otter".into(), Some(CorrId::from("bbbb")));
         assert!(!msg.verify_signature(), "`corr` is a signed field");
     }
 
     #[test]
     fn signature_survives_wire_round_trip() {
-        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").signed(&identity());
-        let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
+        let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
+        let parsed = Message::parse(msg.serialize().unwrap().as_bytes()).unwrap();
         assert!(parsed.verify_signature());
         assert_eq!(parsed.signer, msg.signer);
     }
@@ -377,7 +381,7 @@ mod chain {
         let prev = ContentHash::from_bytes([0xaa; 32]);
         let signed = msg("hi")
             .with_chain(5, Some(prev))
-            .signed(&Identity::generate());
+            .sign(&Identity::generate());
         assert_eq!(signed.seq, Some(5));
         assert_eq!(signed.prev, Some(prev));
         assert!(signed.verify_signature());
@@ -401,7 +405,10 @@ mod chain {
 
     #[test]
     fn tampering_seq_breaks_signature() {
-        let mut signed = msg("x").with_chain(3, None).signed(&Identity::generate());
+        let mut signed = msg("x")
+            .with_chain(3, None)
+            .sign(&Identity::generate())
+            .into_message();
         signed.seq = Some(4);
         assert!(!signed.verify_signature(), "seq is a signed field");
     }
@@ -415,9 +422,9 @@ mod chain {
         let signed = msg("hi")
             .with_chain(1, None)
             .with_parents(parents.clone())
-            .signed(&Identity::generate());
+            .sign(&Identity::generate());
         assert_eq!(signed.parents, parents);
-        let parsed = Message::parse(&signed.serialize().unwrap()).unwrap();
+        let parsed = Message::parse(signed.serialize().unwrap().as_bytes()).unwrap();
         assert_eq!(parsed.parents, parents);
         assert!(parsed.verify_signature());
     }
@@ -426,7 +433,8 @@ mod chain {
     fn tampering_parents_breaks_signature() {
         let mut signed = msg("hi")
             .with_parents(vec![ContentHash::from_bytes([0xaa; 32])])
-            .signed(&Identity::generate());
+            .sign(&Identity::generate())
+            .into_message();
         signed.parents.push(ContentHash::from_bytes([0xbb; 32]));
         assert!(!signed.verify_signature(), "parents are signed");
     }
@@ -646,8 +654,8 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
             body: MessageBody::from("Hello, world!"),
         },
     )
-    .signed(&identity);
-    let frame = msg.serialize().unwrap();
+    .sign(&identity);
+    let frame = msg.serialize().unwrap().as_bytes().to_vec();
 
     let first = super::wire_with_resend_nonce(&frame, 7);
     let second = super::wire_with_resend_nonce(&frame, 8);
@@ -696,6 +704,7 @@ fn a_frame_of_the_largest_size_still_parses_with_the_trailer() {
 
 /// The wire form of a signed message, captured from the code at the base commit with a fixed key
 /// (`SecretKey::from_bytes(&[7; 32])`). A change that moves one byte of it is a wire change.
+// The verified.rs doctests repeat this literal, so a change to it touches both files.
 const SIGNED_WIRE: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
 
 /// The same message with no `pubkey` and no `sig` key: the canonical pre-signing form.
@@ -786,7 +795,10 @@ fn a_signed_message_keeps_its_wire_form() {
         "the literal carries a valid signature"
     );
     assert_eq!(parsed.author_key().unwrap().to_string(), SIGNED_PUBKEY);
-    assert_eq!(serde_json::to_string(&parsed).unwrap(), SIGNED_WIRE);
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed)).unwrap(),
+        SIGNED_WIRE
+    );
     assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
     assert_eq!(
         parsed.content_hash().to_string(),
@@ -805,7 +817,10 @@ fn a_message_with_no_key_fields_parses_as_unsigned() {
     let parsed = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
     assert!(parsed.signer.is_none());
     assert!(!parsed.verify_signature());
-    assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed)).unwrap(),
+        UNSIGNED_WIRE
+    );
     assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
     assert_eq!(
         parsed.content_hash().to_string(),
@@ -820,7 +835,10 @@ fn empty_key_fields_parse_as_unsigned_and_serialize_without_the_keys() {
     let parsed = Message::parse(EMPTY_KEYS_WIRE.as_bytes()).expect("empty key fields parse");
     assert!(parsed.signer.is_none());
     assert!(!parsed.verify_signature());
-    assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed)).unwrap(),
+        UNSIGNED_WIRE
+    );
     assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
 }
 
@@ -837,4 +855,98 @@ fn a_key_with_no_signature_is_rejected_and_so_is_a_signature_with_no_key() {
     assert!(!sig_only.contains("pubkey"));
     let no_key = Message::parse(sig_only.as_bytes()).expect_err("a signature with no key");
     assert_eq!(no_key.to_string(), "signature without a pubkey");
+}
+
+mod verified {
+    use super::super::{Message, MessageKind, Verified};
+    use super::SIGNED_WIRE;
+    use crate::identity::Identity;
+
+    fn msg(body: &str) -> Message {
+        Message::fixture(MessageKind::app_broadcast("app_msg"), body)
+    }
+
+    #[test]
+    fn a_signed_message_verifies_and_keeps_its_key() {
+        let identity = Identity::generate();
+        let key = identity.author_key();
+        let verified = msg("hello").sign(&identity);
+        assert_eq!(verified.key(), key);
+        let back = verified
+            .into_message()
+            .verify()
+            .expect("a signed message verifies");
+        assert_eq!(back.author_key(), Some(key));
+    }
+
+    #[test]
+    fn an_unsigned_message_is_given_back_by_verify() {
+        let unsigned = msg("hello");
+        let back = unsigned
+            .clone()
+            .verify()
+            .expect_err("an unsigned message does not verify");
+        assert_eq!(back.body.as_str(), unsigned.body.as_str());
+        assert!(back.signer.is_none());
+    }
+
+    #[test]
+    fn a_tampered_body_fails_verify_and_is_given_back() {
+        let mut tampered = msg("hello").sign(&Identity::generate()).into_message();
+        tampered.body = "tampered".into();
+        let back = tampered
+            .verify()
+            .expect_err("a tampered body does not verify");
+        assert_eq!(back.body.as_str(), "tampered");
+    }
+
+    #[test]
+    fn a_fixture_keeps_the_signature_as_parsed() {
+        let signed = msg("hello").sign(&Identity::generate());
+        let wire = signed.serialize().expect("serialize");
+        let parsed = Message::parse(wire.as_bytes()).expect("parses");
+
+        let unmodified = Verified::fixture_with_signature(parsed.clone());
+        assert_eq!(
+            unmodified.serialize().expect("serialize").as_bytes(),
+            wire.as_bytes(),
+            "the original signature is kept"
+        );
+        assert!(unmodified.into_message().verify().is_ok());
+
+        let mut tampered = parsed;
+        tampered.body = "tampered".into();
+        let forged = Verified::fixture_with_signature(tampered);
+        let replayed =
+            Message::parse(forged.serialize().expect("serialize").as_bytes()).expect("parses");
+        assert!(
+            replayed.verify().is_err(),
+            "a body edited after signing does not verify at the receiver"
+        );
+    }
+
+    #[test]
+    fn verify_canonical_refuses_an_edited_clone() {
+        let original = msg("hello").sign(&Identity::generate()).into_message();
+        let (_, canonical) = original
+            .clone()
+            .verify_canonical()
+            .expect("the original verifies");
+        assert_eq!(canonical, original.canonical_bytes());
+
+        let mut edited = original.clone();
+        edited.body = "edited".into();
+        assert!(
+            edited.clone().verify_canonical().is_err(),
+            "an edited clone does not verify, so no proof is made over its bytes"
+        );
+        assert_ne!(edited.canonical_bytes(), canonical);
+    }
+
+    #[test]
+    fn verified_serializes_to_the_same_bytes_as_its_message() {
+        let parsed = Message::parse(SIGNED_WIRE.as_bytes()).expect("the signed literal parses");
+        let verified = parsed.verify().expect("the golden signature verifies");
+        assert_eq!(serde_json::to_string(&verified).unwrap(), SIGNED_WIRE);
+    }
 }

@@ -12,7 +12,8 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::mesh::{Mesh, MeshName};
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::message::Authored;
+use crate::protocol::{MeshId, Nickname};
 
 use crate::beacon;
 
@@ -32,7 +33,7 @@ pub enum DriverMode {
     /// session, or an app that consumes every frame inside the loop). Never
     /// exits the process and binds no socket; shutdown on `quit_rx`.
     InProcess {
-        msg_tx: Option<broadcast::Sender<Message>>,
+        msg_tx: Option<broadcast::Sender<Authored>>,
         quit_rx: mpsc::Receiver<()>,
         /// Whether this session registers the process-wide
         /// ctrl-c/SIGTERM/SIGHUP/SIGQUIT listeners for a graceful leave.
@@ -206,9 +207,9 @@ pub struct EventLoopConfig {
     /// transports share signature-verify + dedup. Built in `setup_mesh`.
     pub(crate) unicast_rx: mpsc::Receiver<bytes::Bytes>,
     /// When advertising (`create --advertise`), the shared counter the
-    /// directory re-broadcast task reads the live peer count
-    /// from. `setup_mesh` leaves this `None`; the advertise path sets
-    /// it before `run` (same late-assignment pattern as `driver`).
+    /// directory re-broadcast task reads the live peer count from. Supplied
+    /// up front through `SetupParams::live_count`, so the config is complete
+    /// when it is built; `run` stores it before the first advertisement.
     pub(crate) live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
