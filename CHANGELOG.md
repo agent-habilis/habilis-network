@@ -169,7 +169,9 @@ published to a registry; pin it with
   `Message::verify_canonical()`, which also returns the canonical bytes it checked. Both return
   `Result<Verified, Message>`. `Message::author_key` and
   `Message::serialize` are crate-private: read the key with `Verified::key` or `Authored::key`,
-  and the wire bytes with `Verified::serialize`.
+  and the wire bytes with `Verified::serialize`, which returns a `WireFrame`. The senders take a
+  `WireFrame`, not `Bytes`, so only a signed message reaches the wire by type. `Message` has no public
+  `Serialize`.
 - **Breaking:** the send, receive and log APIs take a `Verified`: `send_app`, `broadcast_msg`,
   `deliver`, `MeshDoc::ingest` and the message log. Embedder: an unsigned `Message` does not
   compile there, so sign it before it is sent.

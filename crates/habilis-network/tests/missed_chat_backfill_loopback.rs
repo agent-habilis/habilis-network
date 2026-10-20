@@ -92,8 +92,8 @@ impl NodeDriver for Chat {
         );
         frame.timestamp = frame.timestamp + AHEAD;
         let frame = frame.sign(ctx.identity);
-        let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
-        let _ = habilis_network::ops::deliver(&frame, bytes, state, ctx.sender)
+        let bytes = frame.serialize().expect("serialize");
+        let _ = habilis_network::ops::deliver(&frame, bytes.clone(), state, ctx.sender)
             .await
             .expect("a meshed node broadcasts");
         // The sender keeps its own frame, as a chat app does, so any peer late

@@ -6,14 +6,13 @@
 //! lives in [`super::recv`].
 
 use crate::transport::MeshSender;
-use bytes::Bytes;
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
 use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::message::AppFrameParams;
-use crate::protocol::message::Verified;
+use crate::protocol::message::{Verified, WireFrame};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
@@ -73,7 +72,7 @@ pub async fn send_app(
             frame.wire_len()
         );
     }
-    let bytes = Bytes::from(frame.serialize()?);
+    let bytes = frame.serialize()?;
     crate::logging::messages::log_out(&frame);
     if state.meshed {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
@@ -121,7 +120,7 @@ pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
 pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
     crate::logging::messages::log_out(msg);
     if let Ok(bytes) = msg.serialize()
-        && let Err(error) = sender.broadcast(Bytes::from(bytes)).await
+        && let Err(error) = sender.broadcast(bytes).await
     {
         tracing::warn!(
             target: "habilis_network::gossip",
@@ -203,7 +202,7 @@ pub struct StateMergeParams<'a> {
 pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
-) -> anyhow::Result<Option<Bytes>> {
+) -> anyhow::Result<Option<WireFrame>> {
     use crate::doc::Ingested;
 
     let StateMergeParams {
@@ -266,7 +265,6 @@ pub async fn broadcast_state_merge(
             is_self: true,
         });
     }
-    let bytes = Bytes::from(bytes);
     if state.overlay_reachable() {
         sender
             .broadcast(bytes.clone())
@@ -295,7 +293,7 @@ pub async fn broadcast_state_merge(
 /// still holds the dying beacon's link, and the presence-driven fast-reclaim
 /// then re-stands the beacon into a stale connection and stalls
 /// (iroh-gossip#10).
-pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
+pub fn unicast_farewell(state: &EventLoopState, bytes: &WireFrame) {
     for (nick, endpoint_id) in &state.peer_endpoints {
         // The rendezvous pseudo-node is never a directed target, and a
         // quiet/ghost peer's stale hint isn't worth a dial at shutdown.
@@ -306,7 +304,7 @@ pub fn unicast_farewell(state: &EventLoopState, bytes: &Bytes) {
         let endpoint_id = endpoint_id.id;
         let bytes = bytes.clone();
         n0_future::task::spawn(async move {
-            if let Err(error) = pool.dial_and_send(endpoint_id, bytes).await {
+            if let Err(error) = pool.dial_and_send(endpoint_id, bytes.into_bytes()).await {
                 tracing::debug!(target: "habilis_network::gossip", %error, "unicast farewell mirror failed");
             }
         });
@@ -387,7 +385,7 @@ pub(super) async fn announce_arrival(state: &mut EventLoopState, ctx: &HandlerCt
 /// of a peer that needs one: a node becomes meshed by its first link to a member, and on a lane pair
 /// that link needs the session, so a frame that waited for the link could never ask for it. The rule
 /// is the one of a frame held on a meshed node ([`crate::transport::note_held`]).
-fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &Bytes) {
+fn mark_parked(state: &mut EventLoopState, frame: &Verified, bytes: &WireFrame) {
     if let Err(error) = crate::transport::resolve(frame, bytes.clone(), state) {
         crate::transport::note_held(state, &error);
     }
@@ -399,7 +397,7 @@ pub(crate) fn park_and_offer(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
     frame: &Verified,
-    bytes: &Bytes,
+    bytes: &WireFrame,
 ) {
     mark_parked(state, frame, bytes);
     offer_for_parked(state, ctx, frame);
@@ -422,7 +420,6 @@ fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Ve
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
 
     use super::{mark_parked, peer_info_json};
     use crate::protocol::{MeshId, Message};
@@ -476,7 +473,7 @@ mod tests {
             &crate::protocol::MessageId::random(),
         )
         .sign(&crate::protocol::Identity::generate());
-        let bytes = Bytes::from_static(b"frame");
+        let bytes = frame.serialize().expect("serialize");
         let now = crate::util::clock::Instant::now();
         assert!(
             !state.lane_session_wanted(bob, now),
@@ -508,7 +505,7 @@ mod tests {
             },
         )
         .sign(&crate::protocol::Identity::generate());
-        mark_parked(&mut state, &frame, &Bytes::from_static(b"frame"));
+        mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));
         assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
     }
 

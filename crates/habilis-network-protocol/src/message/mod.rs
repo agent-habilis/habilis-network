@@ -26,8 +26,10 @@ mod body;
 mod id;
 mod shard;
 mod verified;
+mod wire;
 
 pub use verified::{Authored, Proof, Verified};
+pub use wire::WireFrame;
 
 pub use body::{BodyError, MessageBody};
 pub use id::{IdError, MessageId};
@@ -572,25 +574,30 @@ impl Serialize for HexOut<'_> {
     }
 }
 
-impl Serialize for Message {
+/// The wire form of a message. The serde impl lives on this private wrapper, not on [`Message`], so a
+/// message that a caller holds through a `Deref` (an [`Authored`] view) has no public `Serialize`.
+struct Wire<'a>(&'a Message);
+
+impl Serialize for Wire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let signer = self.signer.as_ref();
+        let message = self.0;
+        let signer = message.signer.as_ref();
         let sig_bytes = signer.map(|signed| signed.sig.to_bytes());
         WireOut {
-            version: &self.version,
-            id: &self.id,
-            kind: &self.kind,
-            mesh: &self.mesh,
-            author: &self.author,
-            timestamp: self.timestamp.as_secs(),
-            body: &self.body,
+            version: &message.version,
+            id: &message.id,
+            kind: &message.kind,
+            mesh: &message.mesh,
+            author: &message.author,
+            timestamp: message.timestamp.as_secs(),
+            body: &message.body,
             pubkey: signer.map(|signed| HexOut(signed.key.as_bytes())),
             sig: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
-            seq: self.seq,
-            prev: &self.prev,
-            parents: &self.parents,
-            shard: &self.shard,
-            ext: &self.ext,
+            seq: message.seq,
+            prev: &message.prev,
+            parents: &message.parents,
+            shard: &message.shard,
+            ext: &message.ext,
         }
         .serialize(serializer)
     }
@@ -850,7 +857,7 @@ impl Message {
     /// # Errors
     /// Serialization of a field fails.
     pub(crate) fn serialize(&self) -> Result<Vec<u8>> {
-        let bytes = serde_json::to_vec(self).context("failed to serialize message")?;
+        let bytes = serde_json::to_vec(&Wire(self)).context("failed to serialize message")?;
         if bytes.len() > MAX_MESSAGE_SIZE {
             bail!(
                 "message too large: {} bytes (max {})",
@@ -1013,7 +1020,7 @@ impl Message {
     /// deciding how to split a body. `serialize` is the gated counterpart.
     #[must_use]
     pub fn wire_len(&self) -> usize {
-        serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
+        serde_json::to_vec(&Wire(self)).map_or(usize::MAX, |bytes| bytes.len())
     }
 
     /// Sign this message with `identity` and return it as a [`Verified`], the proof that its
@@ -1191,7 +1198,7 @@ pub fn build_msg_bytes(
     .with_parents(params.chain.parents)
     .sign(identity);
     let raw = msg.serialize()?;
-    Ok((Bytes::from(raw), msg))
+    Ok((raw.into_bytes(), msg))
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]

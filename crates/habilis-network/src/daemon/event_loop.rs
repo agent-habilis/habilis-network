@@ -650,7 +650,7 @@ struct EventLoop<A: NodeDriver> {
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<crate::transport::probe::PathChange>,
     /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
-    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, bytes::Bytes)>,
+    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, crate::protocol::message::WireFrame)>,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI

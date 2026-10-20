@@ -6,7 +6,6 @@
 //! receiver's path is identical either way.
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use iroh::EndpointId;
 use tokio::sync::oneshot;
 
@@ -14,8 +13,7 @@ use super::outbox::Resend;
 use super::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
 use crate::daemon::state::EventLoopState;
 use crate::protocol::Nickname;
-use crate::protocol::message::Verified;
-use crate::protocol::message::sole_addressee;
+use crate::protocol::message::{Verified, WireFrame, sole_addressee};
 use crate::transport::MeshSender;
 
 /// What [`deliver`] did with a frame.
@@ -48,7 +46,7 @@ pub type PendingSend = oneshot::Receiver<Result<()>>;
 /// endpoint is learned. A dial or a write that fails comes through the handle.
 pub async fn deliver(
     msg: &Verified,
-    bytes: Bytes,
+    bytes: WireFrame,
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> Result<Delivered> {
@@ -67,7 +65,7 @@ pub async fn deliver(
 /// # Errors
 /// The same as [`deliver`] for a message that has no path now: held for a
 /// direct path, or its addressee has no known endpoint.
-pub(crate) fn resolve(msg: &Verified, bytes: Bytes, state: &EventLoopState) -> Result<Resend> {
+pub(crate) fn resolve(msg: &Verified, bytes: WireFrame, state: &EventLoopState) -> Result<Resend> {
     match route(msg, state) {
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
@@ -123,7 +121,7 @@ pub(crate) fn resolve(msg: &Verified, bytes: Bytes, state: &EventLoopState) -> R
 /// to the dial budget plus the cooldown.
 pub async fn deliver_in_background(
     msg: &Verified,
-    bytes: Bytes,
+    bytes: WireFrame,
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> bool {
@@ -284,8 +282,8 @@ fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
 /// caller never waits on the dial, the path wait or the write. The dial error is the send's
 /// outcome, through the handle — there is no fallback. A cold peer on the dial-failure cooldown is
 /// refused at once.
-async fn send_unicast(eid: EndpointId, bytes: Bytes, pool: &UnicastPool) -> Result<Delivered> {
-    match pool.send_if_warm(eid, bytes.clone()).await {
+async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> Result<Delivered> {
+    match pool.send_if_warm(eid, bytes.clone().into_bytes()).await {
         WarmSend::Sent => Ok(Delivered::Done),
         WarmSend::Refused => Err(anyhow::anyhow!("{}", super::RELAY_REFUSED)),
         WarmSend::Cold => {
@@ -300,7 +298,7 @@ async fn send_unicast(eid: EndpointId, bytes: Bytes, pool: &UnicastPool) -> Resu
             let pool = pool.clone();
             n0_future::task::spawn(async move {
                 let sent = pool
-                    .send_registered(registration, eid, bytes)
+                    .send_registered(registration, eid, bytes.into_bytes())
                     .await
                     .with_context(|| format!("unicast dial to {eid} failed"));
                 if let Err(Err(error)) = outcome_tx.send(sent) {
@@ -321,7 +319,7 @@ async fn send_unicast(eid: EndpointId, bytes: Bytes, pool: &UnicastPool) -> Resu
 /// us.
 pub(crate) async fn send_best_effort(
     eid: EndpointId,
-    bytes: Bytes,
+    bytes: WireFrame,
     state: &EventLoopState,
 ) -> bool {
     // Never dial inline: that would let anyone who can be pinged back choose
@@ -329,19 +327,23 @@ pub(crate) async fn send_best_effort(
     // neighbor still gets a dial, off the loop — its address is proven by the
     // link, and a link can come up with neither side holding a unicast
     // connection, which left a peer linked only by gossip unanswerable.
-    match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
+    match state
+        .unicast_pool
+        .send_if_warm(eid, bytes.clone().into_bytes())
+        .await
+    {
         WarmSend::Sent => true,
         WarmSend::Cold if state.linked_endpoints.contains(&eid) => {
             state
                 .unicast_pool
-                .dial_and_send_in_background(eid, bytes)
+                .dial_and_send_in_background(eid, bytes.into_bytes())
                 .await
         }
         WarmSend::Cold | WarmSend::Refused => false,
     }
 }
 
-async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
+async fn broadcast(sender: &MeshSender, bytes: WireFrame) -> Result<()> {
     sender
         .broadcast(bytes)
         .await
@@ -359,7 +361,7 @@ mod tests {
     use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
-    use crate::protocol::message::Verified;
+    use crate::protocol::message::{Verified, WireFrame};
     use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
 
     fn mesh() -> MeshId {
@@ -430,8 +432,12 @@ mod tests {
         let now = crate::util::clock::Instant::now();
         assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
 
-        let error = resolve(&directed_msg(), Bytes::from_static(b"hi"), &state)
-            .expect_err("a lookup-only relay holds the frame");
+        let error = resolve(
+            &directed_msg(),
+            directed_msg().serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
         note_held(&mut state, &error);
 
         assert!(state.lane_session_wanted(bob, now), "the held frame asks");
@@ -449,8 +455,12 @@ mod tests {
         );
         state.local_udp_transport = true;
 
-        let error = resolve(&directed_msg(), Bytes::from_static(b"hi"), &state)
-            .expect_err("a lookup-only relay holds the frame");
+        let error = resolve(
+            &directed_msg(),
+            directed_msg().serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
         note_held(&mut state, &error);
 
         assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
@@ -473,8 +483,12 @@ mod tests {
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
 
-        let error = resolve(&directed_msg(), Bytes::from_static(b"hi"), &state)
-            .expect_err("a lookup-only relay holds the frame");
+        let error = resolve(
+            &directed_msg(),
+            directed_msg().serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
         note_held(&mut state, &error);
 
         assert!(state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
@@ -502,7 +516,9 @@ mod tests {
     #[tokio::test]
     async fn a_courtesy_reply_to_a_cold_peer_does_not_dial() {
         let (state, bob) = state_knowing_bob();
-        let sent = super::send_best_effort(bob, Bytes::from_static(b"pong"), &state).await;
+        let sent =
+            super::send_best_effort(bob, directed_msg().serialize().expect("serialize"), &state)
+                .await;
 
         assert!(!sent, "there is no warm path to this peer");
         assert_eq!(
@@ -523,7 +539,9 @@ mod tests {
     async fn a_courtesy_reply_to_a_cold_linked_neighbor_dials_off_the_loop() {
         let (mut state, bob) = state_knowing_bob();
         state.linked_endpoints.insert(bob);
-        let sent = super::send_best_effort(bob, Bytes::from_static(b"pong"), &state).await;
+        let sent =
+            super::send_best_effort(bob, directed_msg().serialize().expect("serialize"), &state)
+                .await;
 
         assert!(sent, "a linked neighbor is answered even with a cold pool");
         assert_eq!(
@@ -603,7 +621,7 @@ mod tests {
     async fn a_background_send_to_a_cold_peer_returns_at_once() {
         let (state, _endpoint, sender, _silent) = state_with_silent_bob().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let started = std::time::Instant::now();
         let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
@@ -635,7 +653,7 @@ mod tests {
         state.unicast_pool.note_dial_failure(bob).await;
         let (_endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
 
@@ -654,7 +672,7 @@ mod tests {
     async fn two_background_sends_to_one_cold_peer_share_one_dial() {
         let (state, _endpoint, sender, _silent) = state_with_silent_bob().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let first = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
         tokio::task::yield_now().await;
@@ -674,7 +692,7 @@ mod tests {
         state.linked_endpoints.insert(bob);
         let (_endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
         let replied = super::send_best_effort(bob, bytes, &state).await;
@@ -692,7 +710,7 @@ mod tests {
         let state = fresh_state();
         let (_endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
 
@@ -728,7 +746,7 @@ mod tests {
             "loopback selects a direct path"
         );
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
 
@@ -738,7 +756,7 @@ mod tests {
                 .await
                 .expect("bob reads the frame in time")
                 .expect("reader task");
-        assert_eq!(got, bytes.to_vec());
+        assert_eq!(got, bytes.as_bytes().to_vec());
         assert_eq!(
             state.unicast_pool.dial_attempts(),
             0,
@@ -991,7 +1009,7 @@ mod tests {
     async fn holder(
         bob_addr: iroh::EndpointAddr,
         changes: usize,
-    ) -> (Net, EventLoopState, Vec<Bytes>) {
+    ) -> (Net, EventLoopState, Vec<WireFrame>) {
         use crate::protocol::Channel;
         use Identity;
 
@@ -999,7 +1017,7 @@ mod tests {
         let mut state = state_with_pool(&endpoint, bob_addr);
         let mesh = MeshId::from("test");
         let seed = *state.identity.public().as_bytes();
-        let mut write = |channel: Channel| -> Vec<Bytes> {
+        let mut write = |channel: Channel| -> Vec<WireFrame> {
             (0..changes)
                 .map(|step| {
                     let change = state
@@ -1014,7 +1032,7 @@ mod tests {
                     let frame = Message::new_channel_event(&mesh, &nick("alice"), wire, channel)
                         .sign(&state.identity);
                     let _ = state.doc_mut(channel).ingest(&frame);
-                    Bytes::from(frame.serialize().expect("serialize"))
+                    frame.serialize().expect("serialize")
                 })
                 .collect()
         };
@@ -1090,7 +1108,10 @@ mod tests {
                 .await
                 .expect("bob reads the answer in time")
                 .expect("reader task");
-        let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
+        let expected: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|bytes| bytes.as_bytes().to_vec())
+            .collect();
         assert_eq!(got, expected, "every frame, in order");
     }
 
@@ -1526,7 +1547,10 @@ mod tests {
             .await
             .expect("bob reads the answer in time")
             .expect("reader task");
-        let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
+        let expected: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|bytes| bytes.as_bytes().to_vec())
+            .collect();
         assert_eq!(got[..3], expected[..], "the three frames first, in order");
         let last = Message::parse(&got[3]).expect("the last frame parses");
         assert_eq!(last.kind, MessageKind::StateDigest, "then a state digest");

@@ -74,7 +74,7 @@ fn a_link_state_message_is_built_signed_and_round_tripped_on_every_target() {
     let msg = Message::new_link_state(&sid(), &nick("word-word"), MessageBody::from("{}"))
         .sign(&identity);
     assert!(msg.verify_signature());
-    let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
+    let parsed = Message::parse(msg.serialize().unwrap().as_bytes()).unwrap();
     assert_eq!(parsed.kind, MessageKind::LinkState);
     assert_eq!(parsed.body.as_str(), "{}");
 }
@@ -349,7 +349,7 @@ mod signing {
     #[test]
     fn signature_survives_wire_round_trip() {
         let msg = Message::fixture(MessageKind::app_broadcast("app_msg"), "hi").sign(&identity());
-        let parsed = Message::parse(&msg.serialize().unwrap()).unwrap();
+        let parsed = Message::parse(msg.serialize().unwrap().as_bytes()).unwrap();
         assert!(parsed.verify_signature());
         assert_eq!(parsed.signer, msg.signer);
     }
@@ -424,7 +424,7 @@ mod chain {
             .with_parents(parents.clone())
             .sign(&Identity::generate());
         assert_eq!(signed.parents, parents);
-        let parsed = Message::parse(&signed.serialize().unwrap()).unwrap();
+        let parsed = Message::parse(signed.serialize().unwrap().as_bytes()).unwrap();
         assert_eq!(parsed.parents, parents);
         assert!(parsed.verify_signature());
     }
@@ -655,7 +655,7 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
         },
     )
     .sign(&identity);
-    let frame = msg.serialize().unwrap();
+    let frame = msg.serialize().unwrap().as_bytes().to_vec();
 
     let first = super::wire_with_resend_nonce(&frame, 7);
     let second = super::wire_with_resend_nonce(&frame, 8);
@@ -795,7 +795,10 @@ fn a_signed_message_keeps_its_wire_form() {
         "the literal carries a valid signature"
     );
     assert_eq!(parsed.author_key().unwrap().to_string(), SIGNED_PUBKEY);
-    assert_eq!(serde_json::to_string(&parsed).unwrap(), SIGNED_WIRE);
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed)).unwrap(),
+        SIGNED_WIRE
+    );
     assert_eq!(hex(&parsed.canonical_bytes()), SIGNED_CANONICAL_HEX);
     assert_eq!(
         parsed.content_hash().to_string(),
@@ -814,7 +817,10 @@ fn a_message_with_no_key_fields_parses_as_unsigned() {
     let parsed = Message::parse(UNSIGNED_WIRE.as_bytes()).expect("the unsigned literal parses");
     assert!(parsed.signer.is_none());
     assert!(!parsed.verify_signature());
-    assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed)).unwrap(),
+        UNSIGNED_WIRE
+    );
     assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
     assert_eq!(
         parsed.content_hash().to_string(),
@@ -829,7 +835,10 @@ fn empty_key_fields_parse_as_unsigned_and_serialize_without_the_keys() {
     let parsed = Message::parse(EMPTY_KEYS_WIRE.as_bytes()).expect("empty key fields parse");
     assert!(parsed.signer.is_none());
     assert!(!parsed.verify_signature());
-    assert_eq!(serde_json::to_string(&parsed).unwrap(), UNSIGNED_WIRE);
+    assert_eq!(
+        serde_json::to_string(&super::Wire(&parsed)).unwrap(),
+        UNSIGNED_WIRE
+    );
     assert_eq!(hex(&parsed.canonical_bytes()), UNSIGNED_CANONICAL_HEX);
 }
 

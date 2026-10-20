@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bytes::Bytes;
+use crate::protocol::message::WireFrame;
 use iroh::EndpointId;
 use tokio::sync::mpsc;
 
@@ -21,8 +21,8 @@ use super::sender::MeshSender;
 /// One message that is ready to go, with the plane its addressing chose.
 #[derive(Debug)]
 pub(crate) enum Resend {
-    Broadcast(Bytes),
-    Unicast(EndpointId, Bytes),
+    Broadcast(WireFrame),
+    Unicast(EndpointId, WireFrame),
 }
 
 /// The loop's end of the queue. A full queue refuses the resend: it is dropped
@@ -81,12 +81,15 @@ pub(crate) async fn drain(
                     tracing::debug!(target: "habilis_network::gossip", %error, "anti-entropy resend failed");
                 }
             }
-            Resend::Unicast(peer, bytes) => match pool.send_if_warm(peer, bytes.clone()).await {
-                WarmSend::Sent | WarmSend::Refused => {}
-                WarmSend::Cold => {
-                    pool.dial_and_send_in_background(peer, bytes).await;
+            Resend::Unicast(peer, bytes) => {
+                match pool.send_if_warm(peer, bytes.clone().into_bytes()).await {
+                    WarmSend::Sent | WarmSend::Refused => {}
+                    WarmSend::Cold => {
+                        pool.dial_and_send_in_background(peer, bytes.into_bytes())
+                            .await;
+                    }
                 }
-            },
+            }
         }
     }
 }

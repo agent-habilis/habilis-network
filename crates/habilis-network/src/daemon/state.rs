@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use n0_future::time::Instant as TokioInstant;
 
-use bytes::Bytes;
 use iroh::{EndpointAddr, EndpointId};
 use serde::Serialize;
 
@@ -14,7 +13,7 @@ use super::message_log::MessageLog;
 use crate::daemon::state_file::StateFile;
 use crate::protocol::identity::Identity;
 use crate::protocol::mesh::Mesh;
-use crate::protocol::message::{Authored, Verified};
+use crate::protocol::message::{Authored, Verified, WireFrame};
 use crate::protocol::{
     AuthorKey, ContentHash, DedupKey, Message, MessageId, Nickname, ShardGroup, SymmetricKey,
     UnixSecs,
@@ -248,7 +247,7 @@ pub struct EventLoopState {
         tokio::sync::mpsc::UnboundedSender<crate::transport::probe::PathChange>,
     /// Where a flushed frame whose dial failed comes back to the loop, to be buffered again
     /// (`gossip::requeue_failed`). A detached sender until the real loop installs its channel.
-    pub(crate) flush_failed: tokio::sync::mpsc::UnboundedSender<(Verified, Bytes)>,
+    pub(crate) flush_failed: tokio::sync::mpsc::UnboundedSender<(Verified, WireFrame)>,
     /// The pooled connection each watched peer's watcher follows, by stable
     /// id (`None` while its dial runs), so a replaced connection gets a fresh
     /// watcher and a stale one's reports are dropped.
@@ -614,7 +613,7 @@ pub struct EventLoopState {
     /// the parsed frame rides beside its wire bytes so the flush never
     /// re-parses what this node just serialized. A bounded FIFO queue (cap
     /// `PENDING_OUTBOUND_CAP`) so the backlog can't grow without limit.
-    pub(crate) pending_outbound: BoundedQueue<(Verified, Bytes)>,
+    pub(crate) pending_outbound: BoundedQueue<(Verified, WireFrame)>,
     #[cfg(feature = "host")]
     pub(crate) state_file: Option<StateFile>,
     /// Whether the event loop is serving IPC yet. Starts `false` (the
@@ -2141,7 +2140,7 @@ impl EventLoopState {
     }
 
     /// Frames queued for send while the topic was closed.
-    pub fn pending_outbound_mut(&mut self) -> &mut BoundedQueue<(Verified, Bytes)> {
+    pub fn pending_outbound_mut(&mut self) -> &mut BoundedQueue<(Verified, WireFrame)> {
         &mut self.pending_outbound
     }
 }

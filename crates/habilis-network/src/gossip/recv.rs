@@ -16,7 +16,7 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
-use crate::protocol::message::{Authored, MessageBody, Proof, Verified};
+use crate::protocol::message::{Authored, MessageBody, Proof, Verified, WireFrame};
 use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -415,8 +415,8 @@ pub(crate) async fn flush_pending(
 fn watch_flush(
     handle: crate::transport::PendingSend,
     msg: Verified,
-    bytes: Bytes,
-    failed: tokio::sync::mpsc::UnboundedSender<(Verified, Bytes)>,
+    bytes: WireFrame,
+    failed: tokio::sync::mpsc::UnboundedSender<(Verified, WireFrame)>,
 ) {
     n0_future::task::spawn(async move {
         match handle.await {
@@ -437,7 +437,7 @@ pub(crate) fn requeue_failed(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
     msg: Verified,
-    bytes: Bytes,
+    bytes: WireFrame,
 ) {
     if !requeue(state, ctx, msg, bytes) {
         tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
@@ -448,7 +448,12 @@ pub(crate) fn requeue_failed(
 /// peer asks for its session, at every flush: a frame that was parked before the peer was known has
 /// no other chance to ask, and without the session the lane pair never links. Returns whether the
 /// frame was kept.
-fn requeue(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, msg: Verified, bytes: Bytes) -> bool {
+fn requeue(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    msg: Verified,
+    bytes: WireFrame,
+) -> bool {
     super::broadcast::park_and_offer(state, ctx, &msg, &bytes);
     state.pending_outbound.push((msg, bytes))
 }
@@ -868,7 +873,7 @@ async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'
         .filter(|eid| Some(*eid) != state.rendezvous_id);
     match (warm_endpoint, pong.serialize()) {
         (Some(eid), Ok(bytes)) => {
-            if !crate::transport::send_best_effort(eid, Bytes::from(bytes), state).await {
+            if !crate::transport::send_best_effort(eid, bytes, state).await {
                 tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
             }
         }
@@ -1618,7 +1623,9 @@ async fn handle_peer_info(
         } else {
             tracing::debug!(target: "habilis_network::gossip", endpoint_id = %peer_id, "graft held until a direct path is proven");
         }
-        let _ = ctx.sender.broadcast(content).await;
+        if let Some(frame) = WireFrame::relayed(content, message) {
+            let _ = ctx.sender.broadcast(frame).await;
+        }
         state.last_sent_at = Instant::now();
         tracing::debug!(target: "habilis_network::gossip",
             endpoint_id = %peer_id,
@@ -1898,7 +1905,6 @@ mod retain_own_broadcast_tests {
 /// so it carries the dedup key the receive path recorded on first arrival.
 #[cfg(test)]
 mod evicted_orphan_tests {
-    use bytes::Bytes;
     use iroh::endpoint::presets;
     use iroh_gossip::net::Gossip;
     use serde_json::json;
@@ -2019,7 +2025,7 @@ mod evicted_orphan_tests {
         };
         let mut reader = fresh_state();
         let mut app = Inert;
-        let wire = |frame: &Verified| Bytes::from(frame.serialize().expect("serialize"));
+        let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
 
         // Newest first: every frame but the root arrives as an orphan, so the
         // per-author ceiling evicts the stalest of them before the root lands.
@@ -2200,7 +2206,7 @@ mod first_contact_tests {
             &crate::protocol::MessageId::random(),
         )
         .sign(&Identity::generate());
-        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        let bytes = frame.serialize().expect("serialize");
         assert!(state.pending_outbound.push((frame.clone(), bytes)));
 
         let started = std::time::Instant::now();
@@ -2243,7 +2249,7 @@ mod first_contact_tests {
         feed(Event::NeighborDown(endpoint_id(1)), &mut state, &ctx).await;
         assert!(state.meshed, "the gap does not clear meshed");
         let frame = Message::new_joined(&node.mesh, &node.author).sign(&Identity::generate());
-        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        let bytes = frame.serialize().expect("serialize");
         assert!(state.pending_outbound.push((frame, bytes)));
 
         feed(Event::NeighborUp(endpoint_id(2)), &mut state, &ctx).await;
@@ -2302,10 +2308,10 @@ mod first_contact_tests {
         )
         .sign(&Identity::generate());
         let original = frame.serialize().expect("serialize");
-        let resend = crate::protocol::message::wire_with_resend_nonce(&original, 42);
+        let resend = original.with_resend_nonce(42);
 
-        ingest(Bytes::from(original), &mut state, &mut app, &ctx).await;
-        ingest(Bytes::from(resend), &mut state, &mut app, &ctx).await;
+        ingest(original.into_bytes(), &mut state, &mut app, &ctx).await;
+        ingest(resend.into_bytes(), &mut state, &mut app, &ctx).await;
 
         assert_eq!(
             reads.load(std::sync::atomic::Ordering::Relaxed),
@@ -2339,7 +2345,7 @@ mod first_contact_tests {
         .boxed();
         let mut receiver = crate::gossip::split::spawn_split(events, None);
         for frame in &frames {
-            let content = Bytes::from(frame.serialize().expect("serialize"));
+            let content = frame.serialize().expect("serialize").into_bytes();
             let delivered = GossipMessage {
                 content,
                 scope: DeliveryScope::Neighbors,
@@ -2398,7 +2404,7 @@ mod first_contact_tests {
         assert!(state.meshed, "the gap does not clear meshed");
         let frame = Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random())
             .sign(&Identity::generate());
-        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        let bytes = frame.serialize().expect("serialize");
         assert!(state.pending_outbound.push((frame, bytes.clone())));
 
         feed(Event::NeighborUp(bob.id()), &mut state, &ctx).await;
@@ -2407,7 +2413,7 @@ mod first_contact_tests {
             tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv()).await;
         assert_eq!(
             delivered.ok().flatten(),
-            Some(bytes),
+            Some(bytes.into_bytes()),
             "bob never got the parked frame"
         );
         assert!(state.pending_outbound.is_empty());
@@ -2967,7 +2973,7 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut app = Inert;
         let newcomer = Identity::generate();
-        let wire = |frame: &Verified| Bytes::from(frame.serialize().expect("serialize"));
+        let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
         let heads = || MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
 
         let mut digest_first = fresh_state();
@@ -3355,7 +3361,6 @@ mod left_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod requeue_tests {
-    use bytes::Bytes;
 
     use super::requeue;
     use crate::testing::{LaneNode, nick};
@@ -3374,7 +3379,7 @@ mod requeue_tests {
             .remove(&nick("bob"))
             .expect("the fixture knows bob");
         let frame = node.frame_to_bob();
-        let bytes = Bytes::from_static(b"frame");
+        let bytes = frame.serialize().expect("serialize");
         let now = crate::util::clock::Instant::now();
         crate::transport::resolve(&frame, bytes.clone(), &state)
             .expect_err("no endpoint is known for bob yet");

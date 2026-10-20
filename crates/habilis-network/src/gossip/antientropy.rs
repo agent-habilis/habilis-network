@@ -23,13 +23,12 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
 
 use crate::transport::{MeshSender, Resend};
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::message::Verified;
+use crate::protocol::message::{Verified, WireFrame};
 use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
@@ -298,14 +297,14 @@ fn resend_one(msg: &Verified, state: &mut EventLoopState) -> bool {
     let Ok(bytes) = msg.serialize() else {
         return false;
     };
-    match crate::transport::resolve(msg, Bytes::from(bytes), state) {
+    match crate::transport::resolve(msg, bytes, state) {
         Ok(resend) => {
             // The gossip layer drops a payload it has seen for 90 s, whether the app read it or
             // not. A broadcast resend therefore carries a new nonce, and so a new name.
             let resend = match resend {
-                Resend::Broadcast(frame) => Resend::Broadcast(Bytes::from(
-                    crate::protocol::message::wire_with_resend_nonce(&frame, rand::random()),
-                )),
+                Resend::Broadcast(frame) => {
+                    Resend::Broadcast(frame.with_resend_nonce(rand::random()))
+                }
                 unicast @ Resend::Unicast(..) => unicast,
             };
             if state.resend_outbox.offer(resend) {
@@ -824,12 +823,12 @@ async fn ask(
     };
     let ours_key = heads_key(&ours);
     let now = Instant::now();
-    let Ok(bytes) = ours.serialize().map(Bytes::from) else {
+    let Ok(bytes) = ours.serialize() else {
         return false;
     };
     if !state
         .unicast_pool
-        .send_batch_in_background(eid, vec![bytes])
+        .send_batch_in_background(eid, vec![bytes.into_bytes()])
         .await
     {
         return false;
@@ -901,9 +900,9 @@ pub(crate) async fn handle_state_digest(
         tracing::debug!(me = %ctx.author, author = %message.author, ?channel, ?plane, heads, "state digest ignored: this asker was served within the window");
         return Answered::default();
     }
-    let frames: Vec<Bytes> = missing_frames(channel, message, state)
+    let frames: Vec<WireFrame> = missing_frames(channel, message, state)
         .iter()
-        .filter_map(|frame| frame.serialize().ok().map(Bytes::from))
+        .filter_map(|frame| frame.serialize().ok())
         .collect();
     let mut answered = Answered::default();
     if frames.is_empty() {
@@ -916,15 +915,22 @@ pub(crate) async fn handle_state_digest(
         mesh: ctx.mesh,
         author: ctx.author,
     };
-    let our_heads = heads_digest(state, origin, channel, true)
-        .and_then(|ours| ours.serialize().ok())
-        .map(Bytes::from);
+    let our_heads =
+        heads_digest(state, origin, channel, true).and_then(|ours| ours.serialize().ok());
     let fallback = match target {
         None => Some("asker has no proven endpoint that is a linked neighbor with a direct path"),
         Some(eid)
             if state
                 .unicast_pool
-                .send_batch_in_background(eid, frames.iter().cloned().chain(our_heads).collect())
+                .send_batch_in_background(
+                    eid,
+                    frames
+                        .iter()
+                        .cloned()
+                        .chain(our_heads)
+                        .map(WireFrame::into_bytes)
+                        .collect(),
+                )
                 .await =>
         {
             None
@@ -944,8 +950,8 @@ pub(crate) async fn handle_state_digest(
         }
         for bytes in frames {
             // A new name for each answer, as for the resend of a message (see `resend_one`).
-            let answer = crate::protocol::message::wire_with_resend_nonce(&bytes, rand::random());
-            let _ = ctx.sender.broadcast(Bytes::from(answer)).await;
+            let answer = bytes.with_resend_nonce(rand::random());
+            let _ = ctx.sender.broadcast(answer).await;
         }
         answered.broadcast = count;
         state
@@ -1468,13 +1474,13 @@ mod tests {
         let original = message.serialize().expect("serialize");
         assert_ne!(payloads[0], payloads[1], "two resends, two names");
         for payload in &payloads {
-            assert_ne!(&payload[..], original.as_slice());
-            let (parsed, nonce) = Message::parse_wire(payload).expect("a resend parses");
+            assert_ne!(payload.as_bytes(), original.as_bytes());
+            let (parsed, nonce) = Message::parse_wire(payload.as_bytes()).expect("a resend parses");
             assert!(nonce.is_some());
             assert_eq!(parsed.id, message.id);
             assert!(parsed.verify_signature_with(&parsed.canonical_bytes()));
             assert!(
-                Message::parse(payload).is_err(),
+                Message::parse(payload.as_bytes()).is_err(),
                 "a reader that does not know the trailer must fail closed"
             );
         }

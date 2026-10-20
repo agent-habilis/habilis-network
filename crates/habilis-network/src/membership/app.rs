@@ -556,7 +556,7 @@ impl NodeDriver for MembershipApp {
                     .serialize()
                     .map_err(|error| error.to_string())
                     .and_then(|bytes| {
-                        crate::transport::resolve(&frame, bytes::Bytes::from(bytes), state)
+                        crate::transport::resolve(&frame, bytes, state)
                             .map_err(|error| error.to_string())
                     });
                 match routed {
@@ -564,7 +564,9 @@ impl NodeDriver for MembershipApp {
                         let pool = state.unicast_pool.clone();
                         let registration = pool.register_dial(eid);
                         n0_future::task::spawn(async move {
-                            let sent = pool.send_registered(registration, eid, bytes).await;
+                            let sent = pool
+                                .send_registered(registration, eid, bytes.into_bytes())
+                                .await;
                             let _ = reply.send(sent.map_err(|error| error.to_string()));
                         });
                     }
