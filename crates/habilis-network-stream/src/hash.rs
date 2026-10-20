@@ -235,10 +235,10 @@ impl StreamHash {
         let value: serde_json::Value =
             serde_json::from_slice(addr_json).context("invalid stream hash address")?;
         let (_id, addr) = endpoint_addr_from_json(&value)?;
+        // A stream is one direct lane: its node has no multi-hop and never gossips.
         let transport = TransportPolicy {
             udp: flags & NO_UDP_BIT == 0,
             webrtc: flags & NO_WEBRTC_BIT == 0,
-            // A stream is one direct lane: its node has no multi-hop and never gossips.
             multihop: false,
             gossip: false,
             relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
@@ -256,14 +256,7 @@ impl StreamHash {
         Ok(Self {
             addr,
             lookups,
-            transport: TransportPolicy {
-                udp: flags & NO_UDP_BIT == 0,
-                webrtc: flags & NO_WEBRTC_BIT == 0,
-                // A stream is one direct lane: its node has no multi-hop.
-                multihop: false,
-                gossip: false,
-                relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
-            },
+            transport,
             id,
             secret,
         })
