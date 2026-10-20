@@ -24,7 +24,7 @@ The daemon does not work on Windows yet: the IPC and the stop do not work, and t
 | Requirement | State |
 |---|---|
 | R1. Compile | Done. `libc` and `windows-sys` come in through `host`, each on its own target. |
-| R2. Runtime base | Open. `runtime_base` on Windows is a stub that returns `temp_dir()\<product>` (`crates/habilis-network-util/src/lib.rs`). |
+| R2. Runtime base | Done. `runtime_base` returns `<LocalAppData>\<product>\run`, and `ensure_runtime_base` rejects a reparse point at the base (`crates/habilis-network-util/src/lib.rs`). |
 | R3. IPC | Open. `to_name` still uses `GenericFilePath`. The two IPC socket tests in `ipc.rs` expect `bind` to fail on Windows (`should_panic`). R3 removes the attribute. |
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
 | R5. Graceful stop | Open. There is no IPC `Quit`. `terminate` on Windows returns `Unsupported`. |
@@ -118,6 +118,7 @@ Do this work on the `feat-windows-support` branch (PR #5).
 - Do not add a uid suffix. The profile directory is already per user.
 - `ensure_runtime_base` rejects a reparse point at the base. This replaces the symlink check.
 - The directory inherits the profile ACL. Do not set a new ACL.
+- Ask for the path with `KF_FLAG_DONT_VERIFY`, so a profile folder that is not on disk yet gives the same path. If the shell cannot name a profile for the token of the process, the base is `<temp>\<product>\run`, and a warn says so. The temp directory is also per user.
 
 ### R3. IPC
 

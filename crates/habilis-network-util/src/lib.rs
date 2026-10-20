@@ -64,14 +64,76 @@ pub fn runtime_base(product: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/tmp/{product}-{}", current_uid()))
 }
 
-/// The Windows base. R2 of `docs/windows.md` asks for
-/// `<LocalAppData>\<product>\run` from `SHGetKnownFolderPath`: not built yet,
-/// so this is a stub. `temp_dir` is the per-user temp directory, so two users
-/// still do not share a base.
+/// The Windows base: `<LocalAppData>\<product>\run` (R2 of
+/// `docs/windows.md`). The profile directory is already per user, so there is
+/// no uid suffix. `LocalAppData` comes from the shell, not from `%LOCALAPPDATA%`,
+/// for the rule above: every context computes the same base.
+///
+/// The shell call fails only when it cannot name a profile for the token of
+/// the process. The base is then the per-user temp directory, which two users
+/// also do not share, and a warn says that the base moved: a daemon and a CLI
+/// that see two different bases cannot find each other.
 #[must_use]
 #[cfg(all(windows, feature = "host"))]
 pub fn runtime_base(product: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(product)
+    let root = local_app_data().unwrap_or_else(|| {
+        let temp = std::env::temp_dir();
+        tracing::warn!(
+            target: "habilis_network::lifecycle",
+            temp = %temp.display(),
+            "the shell gave no LocalAppData folder; the runtime base is in the temp directory"
+        );
+        temp
+    });
+    root.join(product).join("run")
+}
+
+/// The `LocalAppData` known folder of the current user. `KF_FLAG_DONT_VERIFY`
+/// asks for the path without a check that the folder is on disk, so a profile
+/// folder that is not made yet still gives the same path. `None` when the
+/// shell cannot name the folder for this user.
+#[cfg(all(windows, feature = "host"))]
+#[expect(
+    unsafe_code,
+    reason = "SHGetKnownFolderPath and CoTaskMemFree FFI; no safe std wrapper"
+)]
+fn local_app_data() -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath,
+    };
+
+    // The GUID is a `const`, so it needs a place before it has an address.
+    let folder = FOLDERID_LocalAppData;
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // The flag is a positive `i32` constant and the parameter is a `u32`.
+    let flags = KF_FLAG_DONT_VERIFY.cast_unsigned();
+    // SAFETY: `folder` lives for the call, `flags` is a plain value, a null
+    // token names the current user, and `raw` is a valid pointer to one
+    // `PWSTR`.
+    let status = unsafe {
+        SHGetKnownFolderPath(&raw const folder, flags, std::ptr::null_mut(), &raw mut raw)
+    };
+    let path = (status >= 0 && !raw.is_null()).then(|| {
+        // SAFETY: on success `raw` is a NUL-terminated UTF-16 string that the
+        // shell allocated. The scan stops at the NUL, and the slice is copied
+        // before the free below.
+        let wide = unsafe {
+            let mut len = 0;
+            while *raw.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts(raw, len)
+        };
+        std::path::PathBuf::from(std::ffi::OsString::from_wide(wide))
+    });
+    // SAFETY: the shell allocates `raw` with the COM allocator, also when the
+    // call fails, and nothing reads it after this. A null pointer is a no-op.
+    unsafe {
+        CoTaskMemFree(raw.cast_const().cast());
+    }
+    path
 }
 
 /// This process's effective user id — the id a newly created file/dir is
@@ -165,20 +227,36 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// The Windows twin of [`ensure_runtime_base`]: create the base and check that
-/// it is a directory. R2 of `docs/windows.md` also asks to reject a reparse
-/// point and to leave the ACL to the profile; the reparse check is not built
-/// yet, and the ACL needs no code.
+/// it is a directory and not a reparse point (R2 of `docs/windows.md`). The
+/// check refuses every reparse point, not only a link: a junction or a symlink
+/// at the base could send the state file into a folder that another user
+/// reads. The ACL is the one that the profile gives, so there
+/// is nothing to set.
 ///
 /// # Errors
-/// The create failed, or the base is not a directory.
+/// The create failed, or the base is a reparse point or not a directory.
 #[cfg(all(windows, feature = "host"))]
 pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
     match private_dir_builder().create(base) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
-    if !std::fs::symlink_metadata(base)?.file_type().is_dir() {
+    // `symlink_metadata` reads the reparse point itself, not its target.
+    let meta = std::fs::symlink_metadata(base)?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "runtime dir {} is a reparse point (a junction or a link) — remove it and retry",
+                base.display()
+            ),
+        ));
+    }
+    if !meta.file_type().is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             format!(
@@ -276,14 +354,24 @@ mod tests {
         let shown = runtime_base("demo").to_string_lossy().into_owned();
         #[cfg(unix)]
         assert!(shown.starts_with("/tmp/demo-"), "unexpected base: {shown}");
-        // Windows has no uid suffix: the per-user part is the temp directory
-        // (R2 will move it to the profile). The product is the last component.
+        // Windows has no uid suffix: the per-user part is the profile, and the
+        // base is `<LocalAppData>\demo\run`.
         #[cfg(windows)]
-        assert_eq!(
-            runtime_base("demo").file_name(),
-            Some(std::ffi::OsStr::new("demo")),
-            "unexpected base: {shown}"
-        );
+        {
+            let base = runtime_base("demo");
+            assert_eq!(
+                base.file_name(),
+                Some(std::ffi::OsStr::new("run")),
+                "{shown}"
+            );
+            let product = base.parent().and_then(std::path::Path::file_name);
+            assert_eq!(product, Some(std::ffi::OsStr::new("demo")), "{shown}");
+            assert!(
+                base.components()
+                    .any(|part| part.as_os_str().eq_ignore_ascii_case("AppData")),
+                "the base is not in the profile: {shown}"
+            );
+        }
         // …and two embedders never share a base, so their daemons can never
         // collide on a socket or read each other's state files.
         assert_ne!(runtime_base("demo"), runtime_base("other"));
@@ -318,6 +406,49 @@ mod tests {
             &base,
             std::path::Path::new("/tmp/demo/sessions/x.json")
         ));
+    }
+
+    /// A junction needs no privilege, so a user who can write next to the base
+    /// can put one there. The base must refuse it, and accept a plain folder.
+    #[cfg(windows)]
+    #[test]
+    fn ensure_runtime_base_rejects_a_junction() {
+        /// Removes the junction and the test folder also when an assertion
+        /// fails. `remove_dir` on a junction removes the link, not the target.
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(self.0.join("base"));
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("hn-r2-{}", std::process::id()));
+        // A pid can come back, so a folder that an earlier run left goes first.
+        drop(Cleanup(root.clone()));
+        let cleanup = Cleanup(root.clone());
+        let target = root.join("target");
+        let base = root.join("base");
+        std::fs::create_dir_all(&target).expect("create the target");
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&base)
+            .arg(&target)
+            .output()
+            .expect("run mklink");
+        assert!(made.status.success(), "mklink /J failed: {made:?}");
+
+        let error = super::ensure_runtime_base(&base).expect_err("a junction is refused");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{error}"
+        );
+        super::ensure_runtime_base(&target).expect("a plain folder is accepted");
+        drop(cleanup);
+        assert!(!root.exists(), "the test folder is removed");
     }
 
     #[test]

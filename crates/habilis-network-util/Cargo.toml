@@ -52,14 +52,20 @@ web-time.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true, optional = true }
 
-# Only the features that `process.rs` calls: `Win32_Foundation` for `HANDLE`,
+# Only the features that the code calls: `Win32_Foundation` for `HANDLE`,
 # `FILETIME` and `STILL_ACTIVE`, `Win32_System_Threading` for the process
-# queries, `Win32_System_Diagnostics_ToolHelp` for the process snapshot.
+# queries, `Win32_System_Diagnostics_ToolHelp` for the process snapshot. The
+# runtime base (`lib.rs`) adds `Win32_UI_Shell` for `SHGetKnownFolderPath`,
+# `Win32_System_Com` for `CoTaskMemFree`, and `Win32_Storage_FileSystem` for
+# the reparse-point attribute.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, optional = true, features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
 ] }
 
 # Stamps the build's git short hash + dirty flag into `version::VERSION`.
