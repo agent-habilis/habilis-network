@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(StreamHash::decode(&ok.encode()).expect("decodes"), ok);
     }
 
-    /// The bytes of a hash minted by the code at the base commit. A change
+    /// The bytes of a hash minted before pkarr joined the public preset. A change
     /// here is a wire change: tokens of this shape exist outside the code.
     const GOLDEN: &str = "JNa7ZgZwvMzW441NiDGTgK654QRhVajAbdBBcye6WJ3gqu3uyqWdEZZAUNs5cyu9H6FsQrdy5dPUHcXeYCWTt4axrbcFDhWuoDBjr4zRLF98ACN2SN8hF96pm2WHcREaPriXuG613yAxqeRHKVaXq4QbTPe8me6qUV3Q7exwREKfQQUDgzxzjrV6N39HD5pHWydqyxYeiHnqMGNtHPvQqeLoA93LabKCNiK";
 
@@ -387,13 +387,14 @@ mod tests {
         assert_eq!(sample(policy(true, true, true)).encode(), GOLDEN);
     }
 
-    /// The golden before pkarr joined the default lookups. Its lookup bytes have no pkarr part,
-    /// so the new decoder refuses it: a stream hash minted before the change is not a hash now.
+    /// The golden before pkarr joined the default lookups. It encodes a loopback sample with a
+    /// relay transport, and the decoder refuses that: a relay transport needs a relay lookup.
     const GOLDEN_BEFORE_PKARR: &str = "JNa7ZgZwvMzW441NiDGTgK654QRhVajAbdBBcye6WJ3gqu3uyqWdEZZAUNs5cyu9H6FsPMQhkgfib2UHxLsS7a3Xq8jURe1VErA8rdM3UdgvXdmQH74aYiQHPj6hFUCK8dkMb5eFCLZy8D3f3cYXiScH5c7Uk23z4gfeoEbH3ZPX2DSk8niKsyZG1C2mtWdpeMuYQc5f4ytXUKRb5vPHyKrKT4BKPSjA3rK";
 
     #[test]
     fn a_golden_from_before_pkarr_is_refused() {
-        assert!(StreamHash::decode(GOLDEN_BEFORE_PKARR).is_err());
+        let refused = StreamHash::decode(GOLDEN_BEFORE_PKARR).expect_err("refused");
+        assert!(refused.to_string().contains("relay"), "{refused}");
     }
 
     #[test]

@@ -57,11 +57,25 @@ impl StreamOpts {
     /// # Errors
     /// The lists conflict, or a URL is invalid.
     pub fn config(&self) -> Result<MeshConfig> {
+        anyhow::ensure!(
+            !self.transport.contains(&Transport::Multihop),
+            "a stream has no multihop: it is one direct lane"
+        );
+        anyhow::ensure!(
+            !self.transport.contains(&Transport::Gossip),
+            "a stream has no gossip: its node never joins a gossip mesh"
+        );
+        // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
+        let list = if self.transport.is_empty() {
+            &[Transport::Udp, Transport::WebRtc][..]
+        } else {
+            &self.transport
+        };
         MeshConfig::resolve(
             &self.lookup,
             relay_ladder(&self.relay_urls)?,
             habilis_network::protocol::parse_pkarr_urls(&self.pkarr_urls)?,
-            &self.transport,
+            list,
         )
     }
 }
@@ -89,26 +103,7 @@ impl StreamNode {
     /// Conflicting or invalid options, a loopback node in a browser, or an
     /// endpoint that fails to bind.
     pub async fn bind(opts: &StreamOpts) -> Result<Self> {
-        anyhow::ensure!(
-            !opts.transport.contains(&Transport::Multihop),
-            "a stream has no multihop: it is one direct lane"
-        );
-        anyhow::ensure!(
-            !opts.transport.contains(&Transport::Gossip),
-            "a stream has no gossip: its node never joins a gossip mesh"
-        );
-        // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
-        let list = if opts.transport.is_empty() {
-            &[Transport::Udp, Transport::WebRtc][..]
-        } else {
-            &opts.transport
-        };
-        let config = MeshConfig::resolve(
-            &opts.lookup,
-            relay_ladder(&opts.relay_urls)?,
-            habilis_network::protocol::parse_pkarr_urls(&opts.pkarr_urls)?,
-            list,
-        )?;
+        let config = opts.config()?;
         let transports = TransportOpts::default().within(&config.transport);
         Self::bind_with(config.lookups, config.transport, transports).await
     }
