@@ -19,13 +19,13 @@ Ids, wire formats, the IPC protocol and the C ABI can change.
 ## 2. Current state
 
 The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy and the tests there.
-The daemon does not work on Windows yet: the IPC and the stop do not work, and the state file can fail to update.
+The IPC of a daemon works on Windows, over a named pipe. The graceful stop does not work yet, and the state file can fail to update.
 
 | Requirement | State |
 |---|---|
 | R1. Compile | Done. `libc` and `windows-sys` come in through `host`, each on its own target. |
 | R2. Runtime base | Done. `runtime_base` returns `<LocalAppData>\<product>\run`, and `ensure_runtime_base` rejects a reparse point at the base (`crates/habilis-network-util/src/lib.rs`). |
-| R3. IPC | Open. `to_name` still uses `GenericFilePath`. The two IPC socket tests in `ipc.rs` expect `bind` to fail on Windows (`should_panic`). R3 removes the attribute. |
+| R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. Discovery reads a `<nick>.ipc` marker on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
 | R5. Graceful stop | Open. There is no IPC `Quit`. `terminate` on Windows returns `Unsupported`. |
 | R6. Owner watch | Open. `spawn_orphan_watch` is `cfg(unix)` only. |
@@ -33,7 +33,8 @@ The daemon does not work on Windows yet: the IPC and the stop do not work, and t
 | R8. State file | Open. `state_file.rs` still replaces the file with `std::fs::rename`. |
 | R9. FFI | Open. `ffi.rs` and `habilis_network.h` still use `c_long` / `long`. `dlopen/node.ts` and `abi.ts` are not changed. `tasks/src/ffi.rs` still reads `libhabilis_network_ffi.a`. |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
-| R11. Windows on CI | Partly done. The `windows` job of `ci.yml` and the Windows leg of `matrix.yml` run. Open: `cargo task ffi` (with R9), `host_lifecycle.rs`, the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
+| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and part 1 of `host_lifecycle.rs` (steps 1 and 2) run. Open: `cargo task ffi` (with R9), steps 3 and 4 of `host_lifecycle.rs` (with R5 and R6), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
+| R12. Runtime base of a Unix client | Open. A Unix client does not check the base before it reads a marker. |
 
 The descriptions of [§2.2](#22-runtime-breaks) and the open lines of [§2.3](#23-tooling-and-tests) are still true. Their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
@@ -64,11 +65,8 @@ These parts were already correct on Windows:
 
 ### 2.2 Runtime breaks
 
-These problems occur after the workspace compiles.
+These problems occur after the workspace compiles. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3.
 
-- **IPC name.** `socket_path` (`ipc.rs:24`) joins a file path with `/`. `to_name` (`ipc.rs:32`) uses `GenericFilePath`. On Windows, `interprocess` maps this to a named pipe and rejects every path outside `\\.\pipe\`. So `bind`, `send` and `send_to_path` fail.
-- **IPC discovery.** `active_socket_paths` (`ipc.rs:316`) finds daemons by a scan for `*.sock` files. A named pipe is not a file, so `doctor` and `leave` find nothing.
-- **IPC security.** On Unix, the socket has no auth. Security comes from the `0700` runtime directory and the `0600` socket. A named pipe needs its own security descriptor.
 - **Stop.** `terminate` sends `SIGTERM`. Windows has no polite signal. `TerminateProcess` is a hard kill, so the `Left` broadcast does not go out and the state file stays. Until R5, `terminate` on Windows returns `Unsupported`.
 - **Owner watch.** `spawn_orphan_watch` (`shutdown.rs:214`) is `cfg(unix)` only. On Windows a daemon does not stop when its owner dies.
 - **Console events.** Only ctrl-c is handled. Close, logoff and shutdown events skip the graceful path.
@@ -119,13 +117,42 @@ Do this work on the `feat-windows-support` branch (PR #5).
 - `ensure_runtime_base` rejects a reparse point at the base. This replaces the symlink check.
 - The directory inherits the profile ACL. Do not set a new ACL.
 - Ask for the path with `KF_FLAG_DONT_VERIFY`, so a profile folder that is not on disk yet gives the same path. If the shell cannot name a profile for the token of the process, the base is `<temp>\<product>\run`, and a warn says so. The temp directory is also per user.
+- The local nickname is the stem of every per-member file: `<nick>.state.json`, `<nick>.tracing.log` and `<nick>.ipc`.
+- On Windows, `setup_mesh` refuses a local nickname that is no valid file stem, and gives the reason. The reason is one of these:
+  - the nickname contains one of `: * ? " |`;
+  - it ends with a dot;
+  - it is a device name, also with an extension: `con`, `prn`, `aux`, `nul`, `com0` to `com9`, `lpt0` to `lpt9`, the superscript `com¹` to `com³` and `lpt¹` to `lpt³`, `conin$` or `conout$`.
+- Windows 10 and Windows Server 2022 map a device name to the device. Windows 11 accepts it. The rule follows the documented naming rules, so one nickname works on every Windows.
+- The rule is `file_name::windows_file_stem_problem` in `habilis-network-util`. The wire rule of `Nickname` does not change, so a peer on another OS keeps its name. A random nickname (`word-word`) always passes.
+- The file system of Windows does not differentiate case. `Alice` and `alice` on one mesh on one machine share the state file and the marker. A local check cannot see the other daemon, so this is not refused.
 
 ### R3. IPC
 
-- On Windows, the endpoint is a named pipe: `\\.\pipe\<product>-<user>-<mesh-prefix>-<nick>`. `<user>` is a short hash of the user SID. Use `GenericNamespaced`.
-- Give the pipe a security descriptor that grants access only to the current user SID. `interprocess` `ListenerOptions` accepts a security descriptor on Windows.
-- Discovery does not depend on socket files on any OS. Write the endpoint name in the state file, or in a `<nick>.ipc` marker file next to it. Rename `active_socket_paths` to `active_endpoints`, and make it read these records.
-- Fix the tests in `ipc.rs` that assume a file path.
+Done. The design changed from the first text of this section, after review. The reasons are below.
+
+**The marker, on every OS.** A daemon writes the name of its endpoint in `<mesh folder>/<nick>.ipc`, one line, after the listener exists and before the daemon reports ready. A client finds the daemon through the marker, so discovery does not depend on the endpoint being a file. `active_endpoints` reads the markers. The marker is written by the writer of the state file (`.tmp.<pid>`, then a rename), born `0600` on Unix. A marker that cannot be written fails the bind. The shutdown removes the marker only while it still names this daemon. The marker is not in the state file, because a `--state-file` override can put the state file outside the base, and an in-process node writes none. On Unix the endpoint is the same socket as before.
+
+**The name of the pipe.** `\\.\pipe\habilis-` and 128 random bits in hex. Pipe names live in one namespace for the whole machine, and any account can make a pipe with a free name.
+
+- A fixed name, as this section first asked (`<product>-<user hash>-<mesh-prefix>-<nick>`), lets another account make the pipe first. Then the bind fails, and clients reach that account.
+- A random name cannot be taken before it exists. After that it is public: any account lists pipe names, for example with `Get-ChildItem \\.\pipe\`. So the name is no secret, and the protection is the DACL and the owner check below.
+- The name has no mesh prefix and no nickname. The mesh prefix is part of the mesh id, and the list of pipe names is open to every account.
+
+**The DACL.** The pipe has the security descriptor `O:<user>D:P(A;;GA;;;<user>)`: the user owns it, and no other account can open it.
+
+- Without a descriptor, a pipe gives read access to Everyone.
+- The `O:` sets the owner to the user, also in an elevated process, whose default owner is the Administrators group. `OW` (owner rights) is not used, because an elevated daemon would then refuse a non-elevated client of the same user.
+- `GA` is needed: the listener makes a new instance after each accept. `SYSTEM` and `Administrators` are not in the DACL: the control plane is per user.
+
+**The client.** On Windows a client opens the pipe with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so the server can identify the client but not act as it. Without the flags, an account with `SeImpersonatePrivilege` (every service account) that took the name after a crash could act as the user. Then the client checks that the user owns the pipe, before it sends a byte. A pipe of another owner, or one whose owner cannot be read, is `ForeignEndpoint`. An absent endpoint, a pipe that is still busy after 3 more tries, and a pipe whose DACL leaves the user out are `NoDaemon`.
+
+**The API.** `runtime::ipc::active_socket_paths` is `active_endpoints` (`Vec<IpcName>`), and `send_to_path` is `send_to_endpoint`. `IpcName`, `ForeignEndpoint` and `NoDaemon` are public. The Win32 calls are in `habilis-network-util` (`win_security`).
+
+**Limits.**
+
+- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file did. Until R5, `terminate` has no stop on Windows but `TerminateProcess`, so a stale marker is the common case there.
+- On Unix, two daemons with the same nickname on one mesh have the same socket path, and the second bind replaces the first. That is not new.
+- The DACL cannot be tested with a second user on CI. T4 tests it on the real machine.
 
 ### R4. Process helpers
 
@@ -141,7 +168,7 @@ Add Windows versions in `crates/habilis-network-util/src/process.rs`:
 
 ### R5. Graceful stop
 
-- Add an IPC `Quit` command. It runs the same path as `SIGTERM`: broadcast `Left`, remove the state file, exit.
+- Add an IPC `Quit` command. It runs the same path as `SIGTERM`: broadcast `Left`, remove the state file and the marker, exit. It answers the client before the process exits.
 - `terminate` sends `Quit` on every OS. On Unix, `SIGTERM` stays as the fallback when the IPC send fails.
 
 ### R6. Owner watch
@@ -207,6 +234,8 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 3. IPC `Quit` stops the node. The state file and the endpoint are gone.
 4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval.
 
+Steps 1 and 2 are done (part 1). Steps 3 and 4 need the node in a child process: in `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. Part 1 stops the node with an abort of its task.
+
 **Nightly and e2e.**
 
 - `matrix.yml`: add `windows-latest` next to `ubuntu-latest` with `strategy.matrix.os`.
@@ -216,6 +245,14 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 
 - Install NASM for `aws-lc-sys`, for example with `ilammy/setup-nasm`. CMake and the MSVC build tools are already on `windows-latest`.
 - Use `Swatinem/rust-cache`, as the other jobs do.
+
+### R12. Runtime base of a Unix client
+
+On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Today only the writers check the base (`ensure_runtime_base`). If another user creates the base, the daemon refuses to start, but a client reads the socket or the marker that the other user put there, and sends it the commands. This gap was there before R3, with the socket file.
+
+- Add `check_runtime_base(base)`, with the checks of `ensure_runtime_base` and no create: a folder, owned by the user, with no group or other bits.
+- The client calls it before it reads a marker, and returns `ForeignEndpoint` when the base is not the user's.
+- On Windows the base is in the profile, which another user cannot create, so the client needs only the owner check of the pipe.
 
 ## 4. Requirements: agent-gossip
 
@@ -247,6 +284,9 @@ Start it after the engine work of [§3](#3-requirements-habilis-network).
 - `cli/bell.rs`: put `mode(0o600)` behind `cfg(unix)`. `File::try_lock` works on Windows.
 - `cli/signal.rs`: on Windows, use ctrl-c only.
 - `home_dir` (`cli/agent.rs`) and `home_path` (`status.rs`): fall back to `USERPROFILE`.
+- The engine renamed two IPC calls (R3): `cli/doctor.rs` and `cli/session.rs` change `active_socket_paths` to `active_endpoints` and `send_to_path` to `send_to_endpoint`, four lines.
+- The test fixtures build the path of the unix socket by hand (`agent-gossip-test-fixtures/src/lib.rs`, and the readiness checks of three `tests/*.rs` files). On Unix they keep working. On Windows they use `active_endpoints` and `send_to_endpoint`.
+- `docs/manual.txt` and `docs/windows-port/specs/E3-control-socket.md` name the old socket design. Update them.
 
 ### G3. Leave
 
@@ -274,7 +314,7 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. In step 4, R4 is done.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 is done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
@@ -348,7 +388,8 @@ Pass: the messages arrive, and the peer count is correct on both sides.
 
 1. Start a daemon. The runtime base appears under `%LOCALAPPDATA%`.
 2. `Get-Acl` on the base shows only the user, `SYSTEM` and `Administrators`.
-3. `[System.IO.Directory]::GetFiles("\\.\pipe\")` lists the pipe.
+3. `[System.IO.Directory]::GetFiles("\\.\pipe\")` lists the pipe, `habilis-` and 32 hex digits. The marker `<nick>.ipc` in the mesh folder holds the same name.
+   Read the ACL of the pipe with Sysinternals `accesschk.exe -l -o \\.\pipe\habilis-*`. The user is the owner and the only entry. `Get-Acl` cannot read a pipe.
 4. Create a second local user. Connect to the pipe as that user with `runas /user:<second-user>`. The connection is refused.
 
 ### T5. agent-gossip lifecycle
@@ -437,6 +478,7 @@ Cargo then runs one `rustc` and one link for each processor, and the test execut
      ```
 
   `wsl --manage <distribution> --set-sparse true` makes WSL do this automatically. Some WSL releases turned sparse disks off after reports of data corruption, so use `diskpart`.
+- If the disk is already sparse, step 1 alone gives the space back, while WSL runs. `diskpart` then refuses `compact vdisk`: its message ends with "must not be sparse". Steps 2 and 3 do not apply. This was seen on one WSL release.
 - If the disk is full, run `cargo clean`. It removes `target/`.
 
 ### 7.3 Commands
