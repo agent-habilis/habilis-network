@@ -114,6 +114,9 @@ pub mod util {
     pub use habilis_network_util::bounded_read;
     #[cfg(feature = "host")]
     pub use habilis_network_util::process;
+    // The Windows security calls of the IPC named pipe.
+    #[cfg(all(windows, feature = "host"))]
+    pub use habilis_network_util::win_security;
 
     /// Deferred `tracing` sink and the pinned directive filter.
     pub mod logging {

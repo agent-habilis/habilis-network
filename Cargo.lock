@@ -1764,6 +1764,7 @@ dependencies = [
  "uuid",
  "wasm-bindgen-test",
  "web-time",
+ "widestring",
  "x25519-dalek",
  "zeroize",
 ]

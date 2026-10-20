@@ -1,12 +1,8 @@
 use std::time::Duration;
 
 use anyhow::Result;
-// `ListenerOptions` is only for the unix socket: the Windows listener comes
-// with the named pipe of R3.
-#[cfg(unix)]
-use interprocess::local_socket::ListenerOptions;
 use interprocess::local_socket::{
-    Name,
+    ListenerOptions, Name,
     tokio::{Listener, Stream, prelude::*},
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -21,7 +17,7 @@ use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO
 use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
 
 /// The longest marker line that a reader takes. A real name is a socket path
-/// inside the runtime base, or the 48 characters of a pipe name.
+/// inside the runtime base, or the 49 characters of a pipe name.
 const MAX_IPC_NAME_BYTES: usize = 512;
 
 /// The name of the local control endpoint of one daemon: the path of a unix
@@ -29,7 +25,9 @@ const MAX_IPC_NAME_BYTES: usize = 512;
 ///
 /// A daemon writes it in its marker (`<mesh folder>/<nick>.ipc`), and a client
 /// reads it from there, so discovery does not depend on the endpoint being a
-/// file. Not a secret: on Windows any local account can list pipe names.
+/// file. Not a secret: on Windows any local account can list pipe names. That
+/// is why a Windows name carries no mesh prefix and no nickname, only
+/// `habilis-` and 128 random bits.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IpcName(String);
 
@@ -231,8 +229,7 @@ pub fn json_error(error: &str) -> String {
 ///
 /// # Errors
 /// The runtime folder is rejected, the OS refuses the bind, or the marker
-/// cannot be written. On Windows, always for now: the named pipe of R3 comes in
-/// the next step, and a file path is no endpoint there.
+/// cannot be written.
 pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Bound> {
     // The runtime base must exist and be private (0700) before the socket is
     // created inside it: this control socket has no in-band auth, so the base's
@@ -298,17 +295,49 @@ fn listen(
     Ok((listener, name))
 }
 
-/// The Windows endpoint is a named pipe with a security descriptor of the
-/// current user, which is R3 of `docs/windows.md` and the next step. Until
-/// then there is no IPC on Windows, and the bind says so instead of failing on
-/// a file path.
+/// The prefix of every pipe name of the engine, before the random part.
+#[cfg(windows)]
+const PIPE_PREFIX: &str = r"\\.\pipe\habilis-";
+
+/// Create the listener of a named pipe (R3 of `docs/windows.md`).
+///
+/// The name is `\\.\pipe\habilis-` and 128 random bits in hex. Pipe names
+/// live in one namespace for the whole machine, and any account can make a pipe
+/// with a free name: a fixed name lets another account make it first, so the
+/// bind fails and clients reach that account. A random name cannot be taken
+/// before it exists. After that it is public (any account lists pipes), so the
+/// security descriptor and the client check of the owner protect it.
+///
+/// The descriptor is `O:<user>D:P(A;;GA;;;<user>)`: the user owns the pipe, also
+/// in an elevated process, and nobody else may open it. With no descriptor, a
+/// pipe gives read access to Everyone. `interprocess` puts the descriptor on
+/// every instance, the first and each one after an accept.
 #[cfg(windows)]
 fn listen(
     _base: &std::path::Path,
     _mesh: &MeshId,
     _nickname: &Nickname,
 ) -> Result<(Listener, IpcName)> {
-    anyhow::bail!("IPC over a named pipe does not exist yet on Windows (R3 of docs/windows.md)")
+    use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    use rand::Rng as _;
+
+    let name = IpcName::new(format!(
+        "{PIPE_PREFIX}{:032x}",
+        rand::rng().random::<u128>()
+    ))?;
+    let sddl = crate::util::win_security::user_sddl()
+        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
+    let sddl = widestring::U16CStr::from_slice(&sddl)
+        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
+    let descriptor = SecurityDescriptor::deserialize(sddl)
+        .map_err(|error| anyhow::anyhow!("the security descriptor of the IPC pipe: {error}"))?;
+    let listener = ListenerOptions::new()
+        .name(name.to_name()?)
+        .security_descriptor(descriptor)
+        .create_tokio()
+        .map_err(|error| anyhow::anyhow!("failed to bind IPC pipe {name}: {error}"))?;
+    Ok((listener, name))
 }
 
 /// Server-side accept loop over an already-[`bind`]-ed socket: forward
@@ -443,6 +472,119 @@ impl std::fmt::Display for NoDaemon {
 
 impl std::error::Error for NoDaemon {}
 
+/// The endpoint that a client reached is owned by another account: on Windows
+/// the owner of the pipe is not the current user, or its owner cannot be read.
+/// A squat, not an absent daemon, so the remedy "start one" does not fit it. The
+/// client sends nothing to such an endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignEndpoint {
+    /// The nickname that the client asked for; `None` for [`send_to_endpoint`],
+    /// which addresses the endpoint by name.
+    pub nickname: Option<Nickname>,
+    /// The endpoint that was reached.
+    pub name: IpcName,
+}
+
+impl std::fmt::Display for ForeignEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.nickname {
+            Some(nickname) => write!(
+                formatter,
+                "The IPC endpoint for '{nickname}' is held by another user; refusing to talk to it."
+            ),
+            None => write!(
+                formatter,
+                "The IPC endpoint {} is held by another user; refusing to talk to it.",
+                self.name
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ForeignEndpoint {}
+
+/// Why a client could not reach an endpoint.
+enum Unreached {
+    /// Nothing accepts on the name: a stale marker, or a pipe whose DACL leaves
+    /// us out, which is no endpoint of ours either.
+    Absent(std::io::Error),
+    /// The endpoint belongs to another account. Only the Windows connect can
+    /// tell: on Unix the socket sits in the private runtime folder.
+    #[cfg_attr(
+        not(windows),
+        expect(dead_code, reason = "only the Windows connect reads the owner")
+    )]
+    Foreign,
+    /// The name could not be used.
+    Other(anyhow::Error),
+}
+
+/// How long to wait before the next try when every instance of the pipe is busy,
+/// or `None` to give up. `attempt` counts from 0. A new instance follows every
+/// accept and there are 255, so a busy pipe is rare and short.
+#[cfg(any(windows, test))]
+fn pipe_busy_retry(attempt: u32) -> Option<Duration> {
+    const TRIES: u32 = 3;
+    (attempt < TRIES).then_some(Duration::from_millis(50))
+}
+
+/// Connect to `name`. On Unix the socket sits in the private runtime folder, so
+/// a connect is enough. On Windows the client opens the pipe itself with
+/// `SECURITY_IDENTIFICATION`, so the server cannot act as the client, and checks
+/// that `owner` owns the pipe before it sends a byte.
+async fn connect(
+    name: &IpcName,
+    #[cfg(windows)] owner: &crate::util::win_security::Sid,
+) -> std::result::Result<Stream, Unreached> {
+    #[cfg(unix)]
+    {
+        let name_for_os = name.to_name().map_err(Unreached::Other)?;
+        Stream::connect(name_for_os)
+            .await
+            .map_err(Unreached::Absent)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle as _;
+
+        let mut attempt = 0;
+        let handle = loop {
+            match crate::util::win_security::open_pipe_identification(name.as_str()) {
+                Ok(handle) => break handle,
+                Err(error) if crate::util::win_security::is_pipe_busy(&error) => {
+                    let Some(wait) = pipe_busy_retry(attempt) else {
+                        return Err(Unreached::Absent(error));
+                    };
+                    attempt += 1;
+                    tokio::time::sleep(wait).await;
+                }
+                Err(error) => return Err(Unreached::Absent(error)),
+            }
+        };
+        if !crate::util::win_security::handle_owner_is(handle.as_handle(), owner) {
+            tracing::warn!(
+                target: "habilis_network::lifecycle",
+                name = %name,
+                "IPC: the pipe is not owned by this user; refusing it"
+            );
+            return Err(Unreached::Foreign);
+        }
+        let pipe =
+            interprocess::os::windows::named_pipe::local_socket::tokio::Stream::try_from(handle)
+                .map_err(|error| {
+                    Unreached::Other(anyhow::anyhow!("open IPC pipe {name}: {error}"))
+                })?;
+        Ok(Stream::from(pipe))
+    }
+}
+
+/// The owner that a client expects: the current user.
+#[cfg(windows)]
+fn current_owner() -> Result<crate::util::win_security::Sid> {
+    crate::util::win_security::current_user_sid()
+        .map_err(|error| anyhow::anyhow!("read the SID of the current user: {error}"))
+}
+
 /// Client-side: send an IPC command to the running server and return the raw JSON response.
 ///
 /// The server is found through its marker (`<mesh folder>/<nick>.ipc`).
@@ -450,7 +592,8 @@ impl std::error::Error for NoDaemon {}
 /// # Panics
 /// If called with a command that carries no mesh id — never: `Info` uses `send_to_endpoint`.
 /// # Errors
-/// [`NoDaemon`] when no marker exists or nothing accepts on its name; otherwise
+/// [`NoDaemon`] when no marker exists or nothing accepts on its name;
+/// [`ForeignEndpoint`] when the endpoint belongs to another account; otherwise
 /// an unreadable or invalid marker, or a failed request/response round trip.
 pub async fn send<C>(base: &std::path::Path, cmd: &C, nickname: &Nickname) -> Result<String>
 where
@@ -465,10 +608,22 @@ where
     let Some(name) = read_marker(&marker_path(base, mesh, nickname))? else {
         return Err(no_daemon().into());
     };
-    let stream = Stream::connect(name.to_name()?)
-        .await
-        .map_err(|_| no_daemon())?;
-    round_trip(stream, cmd).await
+    let reached = connect(
+        &name,
+        #[cfg(windows)]
+        &current_owner()?,
+    )
+    .await;
+    match reached {
+        Ok(stream) => round_trip(stream, cmd).await,
+        Err(Unreached::Absent(_)) => Err(no_daemon().into()),
+        Err(Unreached::Foreign) => Err(ForeignEndpoint {
+            nickname: Some(nickname.clone()),
+            name,
+        }
+        .into()),
+        Err(Unreached::Other(error)) => Err(error),
+    }
 }
 
 /// Client-side: send an IPC command to the endpoint `name`. `doctor` uses this
@@ -476,13 +631,42 @@ where
 /// is a plain `Err` that the caller can skip.
 ///
 /// # Errors
-/// Nothing accepts on `name` (no live daemon), or the request/response round
-/// trip fails.
+/// Nothing accepts on `name` (no live daemon), [`ForeignEndpoint`] when the
+/// endpoint belongs to another account, or the request/response round trip
+/// fails.
 pub async fn send_to_endpoint<C: Serialize>(name: &IpcName, cmd: &C) -> Result<String> {
-    let stream = Stream::connect(name.to_name()?)
-        .await
-        .map_err(|error| anyhow::anyhow!("connect {name}: {error}"))?;
-    round_trip(stream, cmd).await
+    send_to_endpoint_owned_by(
+        name,
+        cmd,
+        #[cfg(windows)]
+        &current_owner()?,
+    )
+    .await
+}
+
+/// [`send_to_endpoint`] with the expected owner as a parameter, so a test can
+/// expect another account and see the refusal.
+async fn send_to_endpoint_owned_by<C: Serialize>(
+    name: &IpcName,
+    cmd: &C,
+    #[cfg(windows)] owner: &crate::util::win_security::Sid,
+) -> Result<String> {
+    let reached = connect(
+        name,
+        #[cfg(windows)]
+        owner,
+    )
+    .await;
+    match reached {
+        Ok(stream) => round_trip(stream, cmd).await,
+        Err(Unreached::Absent(error)) => Err(anyhow::anyhow!("connect {name}: {error}")),
+        Err(Unreached::Foreign) => Err(ForeignEndpoint {
+            nickname: None,
+            name: name.clone(),
+        }
+        .into()),
+        Err(Unreached::Other(error)) => Err(error),
+    }
 }
 
 /// Write `cmd`, half-close, and read back the single-line JSON response.
@@ -546,7 +730,7 @@ mod tests {
     use super::new_endpoint_name;
     use super::{
         Addressed, IpcMarker, IpcMessage, IpcName, MeshId, Nickname, NoDaemon, active_endpoints,
-        bind, json_error, json_ok, marker_path, mpsc, read_marker, send, serve,
+        bind, json_error, json_ok, marker_path, mpsc, pipe_busy_retry, read_marker, send, serve,
     };
     use crate::util::mesh_runtime_dir;
 
@@ -787,6 +971,85 @@ mod tests {
         assert!(!std::path::Path::new(socket.as_str()).exists(), "no socket");
     }
 
+    #[test]
+    fn a_busy_pipe_is_tried_three_more_times_then_given_up() {
+        let waits: Vec<_> = (0..5).map(pipe_busy_retry).collect();
+        let fifty = Some(std::time::Duration::from_millis(50));
+        assert_eq!(waits, vec![fifty, fifty, fifty, None, None]);
+    }
+
+    /// On Windows the endpoint is a pipe with a random name, no mesh prefix and
+    /// no nickname in it, and a DACL of the user alone.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_windows_endpoint_is_a_random_pipe_of_the_user() {
+        let base = TestBase::new("pipe");
+        let mesh = test_mesh("pipe");
+        let nickname = Nickname::from("piper");
+        let bound = bind(base.path(), &mesh, &nickname).expect("bind");
+        let name = read_marker(&marker_path(base.path(), &mesh, &nickname))
+            .unwrap()
+            .expect("a marker");
+        let random = name
+            .as_str()
+            .strip_prefix(super::PIPE_PREFIX)
+            .expect("the engine prefix");
+        assert_eq!(random.len(), 32, "{name}");
+        assert!(
+            random.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{name}"
+        );
+        assert!(!name.as_str().contains("piper"), "no nickname in {name}");
+
+        // A second bind gets another name.
+        let other = bind(base.path(), &test_mesh("pipe2"), &nickname).expect("bind");
+        let other_name = read_marker(&marker_path(base.path(), &test_mesh("pipe2"), &nickname))
+            .unwrap()
+            .expect("a marker");
+        assert_ne!(name, other_name);
+        drop(other);
+
+        // The DACL of a client handle of the pipe: one entry, the user.
+        let client =
+            crate::util::win_security::open_pipe_identification(name.as_str()).expect("open");
+        let user = crate::util::win_security::current_user_sid()
+            .unwrap()
+            .to_text()
+            .unwrap();
+        let dacl = crate::util::win_security::dacl_text(std::os::windows::io::AsHandle::as_handle(
+            &client,
+        ))
+        .expect("the DACL");
+        assert_eq!(dacl, format!("D:P(A;;FA;;;{user})"));
+        drop(bound);
+    }
+
+    // The client refuses a pipe that another account owns, and sends it
+    // nothing. One user on CI cannot make such a pipe, so the test expects
+    // SYSTEM to own our own pipe, and gets the refusal.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_pipe_of_another_owner_is_refused_as_foreign() {
+        let base = TestBase::new("foreign");
+        let mesh = test_mesh("foreign");
+        let nickname = Nickname::from("owner");
+        let bound = bind(base.path(), &mesh, &nickname).expect("bind");
+        let name = read_marker(&marker_path(base.path(), &mesh, &nickname))
+            .unwrap()
+            .expect("a marker");
+        let system = crate::util::win_security::Sid::from_text("S-1-5-18").expect("SYSTEM");
+        let cmd = TestCommand::Ping { mesh };
+        let error = super::send_to_endpoint_owned_by(&name, &cmd, &system)
+            .await
+            .expect_err("a foreign owner");
+        let foreign = error
+            .downcast_ref::<super::ForeignEndpoint>()
+            .expect("a ForeignEndpoint");
+        assert_eq!(foreign.name, name);
+        assert_eq!(foreign.nickname, None);
+        drop(bound);
+    }
+
     // ── property-based tests ───────────────────────────────────────
 
     mod prop {
@@ -876,10 +1139,6 @@ mod tests {
         }
     }
 
-    // On Windows `bind` fails for now: the named pipe of R3 comes in the next
-    // step. The attribute expects that error, so the test passes only while
-    // `bind` fails; the step that builds the pipe removes the attribute.
-    #[cfg_attr(windows, should_panic(expected = "does not exist yet on Windows"))]
     #[test]
     async fn ipc_listen_and_send_msg() {
         let base = TestBase::new("roundtrip");
@@ -945,9 +1204,6 @@ mod tests {
     // I/O deadline instead of pinning a handler task + fd for the
     // daemon's lifetime, and the listener must keep serving others
     // throughout. Real-time: waits out `IPC_IO_TIMEOUT` (10s).
-    //
-    // On Windows `bind` fails for now, as in `ipc_listen_and_send_msg`.
-    #[cfg_attr(windows, should_panic(expected = "does not exist yet on Windows"))]
     #[test]
     async fn idle_connection_is_closed_at_the_read_deadline() {
         use interprocess::local_socket::{tokio::Stream, tokio::prelude::*};
@@ -971,6 +1227,10 @@ mod tests {
         let name = read_marker(&marker_path(base.path(), &mesh, &nickname))
             .unwrap()
             .expect("a marker");
+        // The parked client uses the plain `interprocess` connect: no SQOS and
+        // no owner check. That is fine here: the server is this test's own
+        // listener, and the test is about the server's read deadline. The user
+        // DACL admits it, because the DACL names who may open, not how.
         let mut idle = Stream::connect(name.to_name().unwrap()).await.unwrap();
 
         // A healthy command still round-trips while the idle one is parked.

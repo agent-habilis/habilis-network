@@ -103,6 +103,7 @@ host = [
     "multihop",
     "dep:interprocess",
     "dep:libc",
+    "dep:widestring",
     # Base tokio is the portable floor (`sync`, `macros`, `time`, `rt`); these
     # are the pieces with no wasm32 equivalent. `net` in particular drags in
     # `mio`, which refuses to build for wasm32 at all.
@@ -214,10 +215,16 @@ iroh.workspace = true
 iroh-gossip.workspace = true
 
 # Unix only, and only under `host` (`dep:libc`). Windows has no libc: its
-# process queries go through `windows-sys` in `habilis-network-util`. The pipe
-# of the IPC endpoint (R3 of `docs/windows.md`) is not built yet.
+# process queries and the security calls of the IPC pipe go through
+# `windows-sys` in `habilis-network-util`.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true, optional = true }
+
+# Windows only, and only under `host`: `interprocess` takes the security
+# descriptor of the IPC pipe as a `U16CStr`, and does not re-export the type.
+# The same version as the one `interprocess` already pulls in.
+[target.'cfg(windows)'.dependencies]
+widestring = { version = "1.2", optional = true }
 
 # Scoped to non-wasm on purpose. The workspace `tokio` dev-dep turns on `net`,
 # which drags in `mio` — and dev-dependencies are resolved for test targets too,

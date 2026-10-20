@@ -28,6 +28,15 @@ published to a registry; pin it with
   still names that daemon. On Windows, where the pipe name is per process, a second daemon with
   the same nickname keeps its marker. On Unix both have the same socket path, and the second
   bind replaces the first's socket, as before. A marker that cannot be written fails the bind.
+- The IPC of a daemon works on Windows, over a named pipe. Its name is `\\.\pipe\habilis-` and
+  128 random bits, with no mesh prefix and no nickname in it, because any local account can list
+  pipe names. The pipe has the security descriptor `O:<user>D:P(A;;GA;;;<user>)`: the user owns
+  it, also in an elevated process, and no other account can open it. A client opens the pipe
+  with `SECURITY_IDENTIFICATION`, so the server can identify the client but not act as it, and
+  checks that the user owns the pipe before it sends a byte.
+- `runtime::ipc::ForeignEndpoint`: the error of a client whose endpoint belongs to another
+  account (on Windows, a pipe that the user does not own). It is not `NoDaemon`: the endpoint is
+  there, and the remedy "start a daemon" does not fit.
 - On Windows, a local nickname that is no valid Windows file stem stops the setup with the
   reason: one of `: * ? " |`, a trailing dot, or a device name such as `con` or `com1`, also
   with an extension. The wire rule of `Nickname` does not change.

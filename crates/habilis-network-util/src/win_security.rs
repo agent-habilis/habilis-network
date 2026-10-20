@@ -13,14 +13,15 @@ use std::os::windows::io::{
 };
 
 use windows_sys::Win32::Foundation::{
-    GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree,
+    ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSidToSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
+    ConvertStringSidToSidW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    CopySid, EqualSid, GetLengthSid, GetTokenInformation, IsValidSid, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    CopySid, DACL_SECURITY_INFORMATION, EqualSid, GetLengthSid, GetTokenInformation, IsValidSid,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
@@ -244,6 +245,77 @@ pub fn handle_owner_is(handle: BorrowedHandle<'_>, expected: &Sid) -> bool {
     same
 }
 
+/// The DACL of the kernel object behind `handle`, as SDDL text such as
+/// `D:P(A;;FA;;;S-1-5-21-…)`. The access mask is the specific one: a generic
+/// right such as `GA` reads back as the right of the object type, `FA` for a
+/// pipe. For a check or a diagnosis of the IPC pipe.
+///
+/// # Errors
+/// The handle has no `READ_CONTROL`, or the conversion fails.
+#[expect(
+    unsafe_code,
+    reason = "GetSecurityInfo, ConvertSecurityDescriptorToStringSecurityDescriptorW and LocalFree FFI"
+)]
+pub fn dacl_text(handle: BorrowedHandle<'_>) -> io::Result<String> {
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `handle` is open for the call. The descriptor out pointer is
+    // valid, and the four that are null ask for nothing.
+    let status = unsafe {
+        GetSecurityInfo(
+            handle.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(
+            i32::try_from(status).unwrap_or(i32::MAX),
+        ));
+    }
+    let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: `descriptor` is the valid descriptor that the call just gave, and
+    // `raw` is a valid pointer to one `PWSTR`; the length pointer may be null.
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &raw mut raw,
+            std::ptr::null_mut(),
+        )
+    };
+    let text = if converted == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: on success `raw` is a NUL-terminated UTF-16 string. The scan
+        // stops at the NUL, and the text is copied before the free below.
+        let text = unsafe {
+            let mut len = 0;
+            while *raw.add(len) != 0 {
+                len += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(raw, len))
+        };
+        // SAFETY: the conversion allocated `raw` with `LocalAlloc`, and nothing
+        // reads it after the copy above.
+        unsafe {
+            LocalFree(raw.cast());
+        }
+        Ok(text)
+    };
+    // SAFETY: `GetSecurityInfo` allocated `descriptor` with `LocalAlloc`, and
+    // nothing reads it after this.
+    unsafe {
+        LocalFree(descriptor);
+    }
+    text
+}
+
 /// Open the client end of the named pipe `name` (a `\\.\pipe\…` path) for
 /// overlapped read and write, as `interprocess` does, plus
 /// `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`. With those flags the
@@ -278,6 +350,13 @@ pub fn open_pipe_identification(name: &str) -> io::Result<OwnedHandle> {
     Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
 }
 
+/// Whether an error of [`open_pipe_identification`] says that every instance of
+/// the pipe is in use (`ERROR_PIPE_BUSY`), which a short wait can clear.
+#[must_use]
+pub fn is_pipe_busy(error: &io::Error) -> bool {
+    error.raw_os_error() == i32::try_from(ERROR_PIPE_BUSY).ok()
+}
+
 /// `text` as UTF-16 with a trailing NUL, the form that the `W` calls take.
 fn wide_nul(text: &str) -> Vec<u16> {
     std::ffi::OsStr::new(text)
@@ -290,7 +369,9 @@ fn wide_nul(text: &str) -> Vec<u16> {
 mod tests {
     use std::os::windows::io::{AsHandle as _, FromRawHandle as _, OwnedHandle};
 
-    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE, LocalFree,
+    };
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
@@ -299,7 +380,8 @@ mod tests {
     use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE};
 
     use super::{
-        Sid, current_user_sid, handle_owner_is, open_pipe_identification, user_sddl, wide_nul,
+        Sid, current_user_sid, dacl_text, handle_owner_is, open_pipe_identification, user_sddl,
+        wide_nul,
     };
 
     /// A pipe name of this test run alone.
@@ -309,9 +391,13 @@ mod tests {
 
     /// The server end of a byte pipe with the descriptor of [`user_sddl`], made
     /// with the raw call so that the test does not depend on `interprocess`.
-    #[expect(unsafe_code, reason = "the test builds a pipe with raw Win32 calls")]
     fn serve_pipe(name: &str) -> OwnedHandle {
-        let sddl = user_sddl().expect("the SDDL of the user");
+        serve_pipe_with(name, &user_sddl().expect("the SDDL of the user"))
+    }
+
+    /// The server end of a byte pipe with the descriptor `sddl` (UTF-16, NUL).
+    #[expect(unsafe_code, reason = "the test builds a pipe with raw Win32 calls")]
+    fn serve_pipe_with(name: &str, sddl: &[u16]) -> OwnedHandle {
         let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         // SAFETY: `sddl` is NUL-terminated and lives for the call, and
         // `descriptor` is a valid out pointer; the size pointer may be null.
@@ -399,6 +485,10 @@ mod tests {
         let system = Sid::from_text("S-1-5-18").expect("the SYSTEM SID");
         assert!(handle_owner_is(server.as_handle(), &user));
         assert!(!handle_owner_is(server.as_handle(), &system));
+        // The DACL has one entry, all access for the user.
+        let dacl = dacl_text(server.as_handle()).expect("the DACL");
+        let user_text = user.to_text().expect("text");
+        assert_eq!(dacl, format!("D:P(A;;FA;;;{user_text})"));
     }
 
     #[test]
@@ -473,6 +563,26 @@ mod tests {
         let reverted = unsafe { RevertToSelf() };
         assert_ne!(reverted, 0, "{}", std::io::Error::last_os_error());
         assert_eq!(level.flatten(), Some(SecurityIdentification));
+    }
+
+    // A pipe whose DACL leaves us out refuses the open with ERROR_ACCESS_DENIED,
+    // which is no busy pipe: the client treats it as no daemon of ours. An empty
+    // protected DACL refuses even the owner the read and write rights.
+    #[test]
+    fn the_identification_open_of_a_pipe_that_leaves_us_out_is_access_denied() {
+        let name = pipe_name("denied");
+        let user = current_user_sid()
+            .expect("the user SID")
+            .to_text()
+            .expect("text");
+        let _server = serve_pipe_with(&name, &wide_nul(&format!("O:{user}D:P")));
+        let error = open_pipe_identification(&name).expect_err("access denied");
+        assert_eq!(
+            error.raw_os_error(),
+            i32::try_from(ERROR_ACCESS_DENIED).ok(),
+            "{error}"
+        );
+        assert!(!super::is_pipe_busy(&error));
     }
 
     #[test]
