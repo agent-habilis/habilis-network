@@ -296,7 +296,7 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     // into the id encoding (id held).
     //
     // The mesh is the default preset (seed `[7; 32]`, name `test`), which a
-    // topic, a directory and every bare default derive from. Its config byte
+    // topic, a directory and every bare default derive from. Its lookups byte
     // is `0x47`: mdns, dht, relay and pkarr, all on their pinned lists. Both
     // constants moved when pkarr joined the preset, on purpose and once: that
     // is what moves every default mesh to the new topic.
@@ -318,6 +318,79 @@ fn golden_passwordless_id_and_topic_are_pinned() {
     assert_eq!(
         format!("{topic:?}"),
         "TopicId(55d56661c3aca3720b5eef51a3ca5c2f57ea33c63415d7cf18a66b552d17082e)"
+    );
+}
+
+// The golden derivations of a passworded mesh, for a fixed seed and password, on the default
+// preset (pkarr on). The password key replaces the seed in every derivation.
+#[test]
+fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
+    let mut mesh = Mesh::new(dummy_seed(), dummy_name(), MeshConfig::public_preset()).unwrap();
+    mesh.set_password(&Password::new("hunter2".to_owned()));
+    assert_eq!(
+        mesh.to_string(),
+        "Xts3MujFJ6LPpDwNyubQmyofWgxZkrhDTx3ohPc8iYvUxpTMyBg1yXcr6KV44yrydJ3zSwcFnx2yN3qpzrHsu"
+    );
+    assert_eq!(
+        format!("{:?}", mesh.topic_id()),
+        "TopicId(c07ed9429da56e48d8f436b636ab397ebdfd42c59200cae5ccf7831c8f7e639b)"
+    );
+    assert_eq!(
+        mesh.rendezvous_id().to_string(),
+        "0114a2e8ae14744cb2573befc064f196108e6a403eadc32a51b752e22be3517a"
+    );
+    assert_eq!(
+        mesh.rendezvous_ports(),
+        [9654, 21191, 64941, 55185, 63449, 5703, 10814, 29199]
+    );
+}
+
+// The same passworded derivations on the public preset before pkarr joined it: pkarr off, so the
+// id and the topic are the ones an older build made. They still decode, unlock with the password
+// and keep their topic.
+#[test]
+fn a_passworded_id_from_before_pkarr_unlocks_and_keeps_its_topic() {
+    let older =
+        "Xts3MujFJ6LPpDwNyubQmyofWgxZkrhDTx3ohPc8iYvUxpTMyBg1yWJBJ39x2RSLzPzUV1nGDdx7YL5nX41SP";
+    let locked: LockedMesh = older.parse().expect("an older id decodes");
+    assert_eq!(locked.config().lookups.pkarr, PkarrChoice::Disabled);
+    let mesh = locked
+        .unlock(Some(&Password::new("hunter2".to_owned())))
+        .expect("the password unlocks it");
+    assert_eq!(
+        format!("{:?}", mesh.topic_id()),
+        "TopicId(47afc8fd71963d7bcbc78dac9588dbb142b4ae79013489ff3d0f09361479a322)"
+    );
+}
+
+// The default preset before pkarr joined it. Its id still decodes, with pkarr off, and its
+// topic is the one an older build derived: the id did not move, only the default did.
+#[test]
+fn a_default_id_from_before_pkarr_decodes_with_pkarr_off() {
+    let older = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqazmpTSgH";
+    let locked: LockedMesh = older.parse().expect("an older default id decodes");
+    assert_eq!(locked.config().lookups.pkarr, PkarrChoice::Disabled);
+    assert_eq!(locked.to_string(), older, "and it keeps its id");
+    let mesh = locked.unlock(None).expect("a passwordless id unlocks");
+    assert_eq!(
+        format!("{:?}", mesh.topic_id()),
+        "TopicId(1898d0078596295e6f69e42e9284e139d69921f2db46026b16611a924e65bd1d)"
+    );
+}
+
+// The golden id and topic of a mesh that an older build made (the default had no gossip). The id
+// decodes, gossip reads as off, and the id and the topic come out the same: nothing that exists
+// moves when the default turns gossip on.
+#[test]
+fn an_id_of_an_older_default_mesh_keeps_its_id_and_its_topic() {
+    let older = "DqrLWcbLaiVzMV2mvqefxWxWmgLCYmGWAK5jCxeTgFqc6dk1MQrfiqay2YxkRe";
+    let mesh: LockedMesh = older.parse().expect("an older id decodes");
+    assert!(!mesh.config().transport.gossip, "it has no gossip");
+    assert_eq!(mesh.to_string(), older, "and it keeps its id");
+    let unlocked = mesh.unlock(None).expect("a passwordless id unlocks");
+    assert_eq!(
+        format!("{:?}", unlocked.topic_id()),
+        "TopicId(0efae5467ad7c26c9b6a3f0a64a97d1799412ac891282711077401b8ecd8c0e7)"
     );
 }
 

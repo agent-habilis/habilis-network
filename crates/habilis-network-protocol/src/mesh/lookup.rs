@@ -129,9 +129,9 @@ impl LookupOpts {
     /// rejects, and past 255 the count no longer fits its `u8`.
     ///
     /// # Errors
-    /// The custom ladder is longer than [`MAX_RELAY_LADDER`], one of its
-    /// URLs is longer than [`MAX_RELAY_URL_BYTES`], the pkarr list fails
-    /// [`validate_pkarr_urls`], or it has an `http` URL while a relay rung is
+    /// The custom ladder is longer than `MAX_RELAY_LADDER`, one of its
+    /// URLs is longer than `MAX_RELAY_URL_BYTES`, the pkarr list fails
+    /// `validate_pkarr_urls`, or it has an `http` URL while a relay rung is
     /// not on this machine.
     pub fn validate(&self) -> Result<()> {
         if let PkarrChoice::Custom(urls) = &self.pkarr {
@@ -1642,7 +1642,7 @@ mod choice_tests {
     #[test]
     fn a_set_names_a_lookup_when_any_field_is_set() {
         assert!(!LookupSet::default().any());
-        for lookup in [Lookup::Mdns, Lookup::Dht, Lookup::Relay] {
+        for lookup in [Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr] {
             let set = LookupSet::from_lookups(&[lookup], None, None).unwrap();
             assert!(set.any(), "{lookup:?} alone is a lookup");
         }
@@ -1982,7 +1982,11 @@ mod choice_tests {
         assert!(MeshConfig::from_bytes(&too_many).is_err());
         // A URL that is not in its canonical text.
         let mut shouting = bytes.clone();
-        let host = shouting.len() - "a.example/pkarr".len();
+        let url = b"a.example/pkarr";
+        let host = shouting
+            .windows(url.len())
+            .position(|window| window == url)
+            .expect("the pkarr url is in the bytes");
         shouting[host] = b'A';
         assert!(MeshConfig::from_bytes(&shouting).is_err());
         // Pkarr without a relay lookup.

@@ -270,6 +270,7 @@ mod tests {
 
     use super::{Ad, ListingChange, Listings, directory_mesh};
     use crate::MeshId;
+    use crate::mesh::{LockedMesh, PkarrChoice};
     use crate::mesh::{LookupOpts, MeshName};
 
     fn directory(name: &str) -> MeshName {
@@ -282,9 +283,25 @@ mod tests {
             .expect("directory mesh id is valid")
     }
 
-    // The golden id, topic and rendezvous of the `global` directory. They equal what the code
-    // before the newtype refactor (795c4f88) gives. The rendezvous holds for both lookups, and the
-    // topic differs, because only the topic mixes in the config.
+    // The golden id, topic and rendezvous of the `global` directory on the public preset, with pkarr
+    // on. The rendezvous holds for both lookups, and the topic differs, because only the topic mixes
+    // in the config.
+    // The `global` directory before pkarr joined the public preset: its id still decodes with pkarr
+    // off, and its topic is the one that build derived.
+    #[test]
+    fn the_global_directory_from_before_pkarr_decodes_with_pkarr_off() {
+        let locked: LockedMesh =
+            "6V2BWDBYyzZ2JSgSeNnSuaDLLyeWXYsCMx51Rrx6uAahPifGmAhw4oGrZ7X4fAAoK"
+                .parse()
+                .expect("an older directory id decodes");
+        assert_eq!(locked.config().lookups.pkarr, PkarrChoice::Disabled);
+        let mesh = locked.unlock(None).expect("a passwordless id unlocks");
+        assert_eq!(
+            format!("{:?}", mesh.topic_id()),
+            "TopicId(0ac3690b9968f8fd7f2183337984af2629df292a94165f0405135ed001db0dc7)"
+        );
+    }
+
     #[test]
     fn golden_global_directory_is_pinned() {
         let name = directory("global");
