@@ -1593,13 +1593,12 @@ mod tests {
         let own_webrtc = crate::lookup::new_webrtc_handle(secret.public());
         let other_webrtc = crate::lookup::new_webrtc_handle(other.public());
 
-        let hop_error = bind(
-            Some(own_webrtc.clone()),
-            Some(multihop_on(&other, false).await),
-        )
-        .await
-        .expect_err("a hop identity on another key");
+        let other_hop = multihop_on(&other, false).await;
+        let hop_error = bind(Some(own_webrtc.clone()), Some(other_hop.clone()))
+            .await
+            .expect_err("a hop identity on another key");
         assert!(hop_error.to_string().contains("multihop"), "{hop_error}");
+        other_hop.close().await;
 
         let webrtc_error = bind(Some(other_webrtc), None)
             .await
@@ -1610,9 +1609,10 @@ mod tests {
         );
 
         // A refused handle is not bound, so the one that was refused is still free.
-        bind(Some(own_webrtc.clone()), None)
+        let accepted = bind(Some(own_webrtc.clone()), None)
             .await
             .expect("handles on the bound key are accepted");
+        accepted.endpoint.close().await;
 
         let table = crate::transport::SignalAdmission::new(crate::transport::MAX_DIRECT_PEERS);
         let table_error = super::InjectedEndpoint::bind(

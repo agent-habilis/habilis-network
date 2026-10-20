@@ -470,8 +470,11 @@ mod tests {
             .output()
             .expect("run the test binary");
         let stdout = String::from_utf8_lossy(&output.stdout);
+        // A `dhat-heap` build does not exit the process on a quit, so that dhat can write its
+        // profile: the loop then gets `false`.
+        let exit = !cfg!(feature = "dhat-heap");
         assert!(
-            stdout.contains("QUIT_ANNOUNCED exit=true"),
+            stdout.contains(&format!("QUIT_ANNOUNCED exit={exit}")),
             "the process exited inside the quit, before the loop released its endpoints: {stdout}"
         );
     }
