@@ -22,12 +22,21 @@ use tokio::sync::{mpsc, oneshot};
 use crate::util::tuning::MESH_TOPIC_EVENTS_CAP;
 
 /// Join the mesh topic with a queue that outlasts a stall of the splitter.
+///
+/// The rendezvous takes no slot of the active view. It serves to let others in, and the node that
+/// hosts it keeps its link for that (the view of the beacon is never empty), so a link that took
+/// one of the G places would leave that node at G - 1 peers forever. A resubscribe names it
+/// again, as the fresh topic knows nothing of the last one. Every member names it, so a joiner
+/// that is linked to it holds G + 1 links until `release_rendezvous_if_due` lets the link go.
 pub(crate) async fn subscribe_mesh(
     gossip: &Gossip,
     topic_id: TopicId,
+    rendezvous: EndpointId,
     bootstrap: impl IntoIterator<Item = EndpointId>,
 ) -> Result<GossipTopic, ApiError> {
-    subscribe_mesh_capped(gossip, topic_id, bootstrap, MESH_TOPIC_EVENTS_CAP).await
+    let topic = subscribe_mesh_capped(gossip, topic_id, bootstrap, MESH_TOPIC_EVENTS_CAP).await?;
+    topic.uncounted_peers(vec![rendezvous]).await?;
+    Ok(topic)
 }
 
 /// [`subscribe_mesh`] with the capacity given: the load run of the split sweeps it.

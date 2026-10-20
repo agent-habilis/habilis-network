@@ -183,6 +183,30 @@ fn a_mesh_of_ten_links_every_member_to_every_other() {
     });
 }
 
+/// G + 1 members form a full mesh, so every member holds G links: the holder of the beacon too.
+/// Its link to its own rendezvous is no link to a peer, and it must not take one of its G slots,
+/// or the holder stays at G - 1 peers forever and, by parity, so does one member more.
+#[test]
+fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (members, keep) = mesh(VIEW_CAP + 1, VIEW_CAP).await;
+
+        let result = until_every_view_holds(&members, VIEW_CAP, FILL_DEADLINE).await;
+        assert!(
+            result.is_ok(),
+            "every member must hold {VIEW_CAP} links, the holder of the beacon too; \
+             (roster, linked) per member: {:?}",
+            result.unwrap_err()
+        );
+
+        for member in members {
+            let _ = member.membership.node.leave().await;
+        }
+        keep.abort();
+    });
+}
+
 /// Twelve members with G = 4. A graft is a join, and a full view cannot refuse a
 /// join, so every graft evicts a neighbor and the views must not be pushed around by
 /// grafts nobody needs. After the views settle, the links may change at most twice per

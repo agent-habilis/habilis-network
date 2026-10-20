@@ -242,7 +242,9 @@ pub(super) async fn try_resubscribe(
         bootstrap.push(env.params.id);
     }
     bootstrap.extend(state.known_endpoints.iter().copied());
-    match gossip::split::subscribe_mesh(env.gossip, env.params.topic_id, bootstrap).await {
+    match gossip::split::subscribe_mesh(env.gossip, env.params.topic_id, env.params.id, bootstrap)
+        .await
+    {
         Ok(topic) => {
             *attempts = 0;
             tracing::warn!(
@@ -345,9 +347,14 @@ mod tests {
         if std::env::var_os(FATAL_CHILD).is_some() {
             let node = LaneNode::start().await;
             let topic_id = iroh_gossip::proto::TopicId::from_bytes([8u8; 32]);
-            let topic = crate::gossip::split::subscribe_mesh(&node.gossip, topic_id, [])
-                .await
-                .expect("subscribe while the actor lives");
+            let topic = crate::gossip::split::subscribe_mesh(
+                &node.gossip,
+                topic_id,
+                iroh::SecretKey::generate().public(),
+                [],
+            )
+            .await
+            .expect("subscribe while the actor lives");
             let (gossip_sender, gossip_receiver) = topic.split();
             let mut sender = crate::transport::MeshSender::new(gossip_sender);
             let mut receiver = crate::gossip::split::spawn_split(gossip_receiver, None);
