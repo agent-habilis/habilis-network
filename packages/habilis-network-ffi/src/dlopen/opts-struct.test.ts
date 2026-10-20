@@ -40,7 +40,7 @@ describe('encodeOpts', () => {
     const { struct } = encodeOpts(BASE, fakePointers().pointerOf)
     expect(struct.byteLength).toBe(OPTS_BYTES)
     const view = new DataView(struct.buffer)
-    for (const offset of [0, 8, 16, 24, 32, 40, 48, 64]) {
+    for (const offset of [0, 8, 16, 24, 32, 40, 48, 64, 72]) {
       expect(view.getBigUint64(offset, true)).toBe(0n)
     }
   })
