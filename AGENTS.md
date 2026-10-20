@@ -315,3 +315,5 @@ Runtime events drive these transitions, so their state is not known at compile t
 | `InjectedEndpoint` | `habilis-network/src/daemon/setup.rs` | An endpoint that `InjectedEndpoint::bind` binds. `bind` checks the keys of the handles before it binds, and makes the admission table the hook reports to. The fields are private, so no other path builds one. |
 | `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |
 | `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/driver.rs` | A data channel that is open and ready to carry datagrams. Only the `complete` of a pending offer or answer produces one. |
+
+The test-only fixture doors are `Verified::fixture_unchecked`, `Verified::fixture_with_signature` and `WireFrame::fixture_raw`. Each one is behind `test-fixtures`, so a non-test binary never has them.
