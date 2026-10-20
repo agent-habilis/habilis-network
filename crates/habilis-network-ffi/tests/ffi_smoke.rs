@@ -37,6 +37,7 @@ fn create_opts(nick: &CStr) -> HabilisNetworkOpts {
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
         max_peers: 0,
+        max_direct: 0,
         pkarr_urls: std::ptr::null(),
     }
 }
@@ -550,6 +551,7 @@ fn create_opts_for_join(id: &CStr, nick: &CStr) -> HabilisNetworkOpts {
         transport: std::ptr::null(),
         relay_urls: std::ptr::null(),
         max_peers: 0,
+        max_direct: 0,
         pkarr_urls: std::ptr::null(),
     }
 }

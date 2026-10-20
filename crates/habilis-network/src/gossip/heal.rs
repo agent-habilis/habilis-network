@@ -1,14 +1,38 @@
 //! Gossip healer — the sole reconnect primitive for the gossip mesh.
 
-use std::time::Duration;
-
 use crate::transport::MeshSender;
 use iroh::{Endpoint, EndpointId};
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::util::clock::Instant;
-use crate::util::tuning::HEAL_HARD_PROBE_SECS;
+use crate::util::tuning::HEAL_HARD_PROBE;
+
+/// Let go of the rendezvous if this node is due to
+/// ([`EventLoopState::should_release_rendezvous`]).
+///
+/// Gossip is told to leave it: the beacon then keeps no claim on this node and
+/// does not dial it back, and gossip closes the link once the beacon has the
+/// notice. The link is never closed from here: an early close would reach the
+/// beacon as a lost connection, not as a leave. The `WebRTC` session, which
+/// gossip does not own, is not touched here either: once the link is down and
+/// the rendezvous is not wanted, the heal tick detaches it
+/// (`negotiate_rendezvous_session`). A timer here could detach the session of a
+/// later visit.
+pub(crate) async fn release_rendezvous_if_due(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    if !state.should_release_rendezvous(Instant::now()) {
+        return;
+    }
+    if let Err(error) = ctx.sender.leave_peers(vec![ctx.rendezvous_id]).await {
+        tracing::warn!(
+            target: "habilis_network::gossip",
+            %error,
+            "could not tell gossip to leave the rendezvous"
+        );
+        return;
+    }
+    state.mark_rendezvous_released(ctx.endpoint.id());
+}
 
 /// Re-graft the rendezvous. `join_peers` is a cheap enqueue.
 ///
@@ -54,7 +78,7 @@ pub(crate) async fn tick_heal(rendezvous_id: EndpointId, sender: &MeshSender) {
 }
 
 /// Resume-edge re-bootstrap: [`tick_heal`] with a longer probe budget
-/// ([`HEAL_HARD_PROBE_SECS`]) so a cold relay re-home after a freeze
+/// ([`HEAL_HARD_PROBE`]) so a cold relay re-home after a freeze
 /// completes (the steady-state 5s cap routinely aborts it). The caller
 /// (`run_heal`) logs the edge and pairs this with clearing
 /// `state.meshed` and re-asserting the rendezvous hint.
@@ -68,12 +92,7 @@ pub(crate) async fn tick_heal_hard(
     // take seconds and this must never run on the sole event loop.
     let endpoint = endpoint.clone();
     n0_future::task::spawn(async move {
-        let _ = crate::lookup::probe_connect(
-            &endpoint,
-            rendezvous_id,
-            Duration::from_secs(HEAL_HARD_PROBE_SECS),
-        )
-        .await;
+        let _ = crate::lookup::probe_connect(&endpoint, rendezvous_id, HEAL_HARD_PROBE).await;
     });
     regraft(rendezvous_id, sender).await;
 }
@@ -95,7 +114,12 @@ pub(crate) async fn tick_heal_hard(
 ///
 /// [`EventLoopState::known_endpoints`]: crate::daemon::state::EventLoopState::known_endpoints
 pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    let peers: Vec<EndpointId> = state.known_endpoints.iter().copied().collect();
+    let peers: Vec<EndpointId> = state
+        .known_endpoints
+        .iter()
+        .copied()
+        .filter(|peer| !state.rides_gossip_rung(*peer))
+        .collect();
     // `info`, not `debug`: this fires only on the isolation signal (rare,
     // event-driven), and a re-bridge attempt is part of the always-on
     // connectivity story we keep at `info` for post-incident diagnosis —
@@ -141,7 +165,6 @@ pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &Ha
     )));
     state.note_degraded();
     state.relink.clear();
-    state.peerinfo.clear();
     rebridge_known(state, ctx).await;
     super::broadcast::announce_arrival(state, ctx).await;
     let now = Instant::now();

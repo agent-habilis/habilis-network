@@ -362,6 +362,98 @@ Divergences from upstream, in the order they were made.
     [standalone repo](https://github.com/agent-habilis/iroh-multihop-transport)
     they point at still is.
 
+28. **Newtypes on the keys, the hashes, and the netplay ids.** A primitive that
+    carries a domain meaning became a type, in the shape of `TopicId`: `DedupKey`,
+    `AuthorKey`, `Signed`, `TicketSecret`, `BlobDigest`, `StreamId`, `StreamSecret`,
+    `Seed`, `SymmetricKey`, `ContentHash`, `UnixSecs`, `PlayerHandle`, `Frame`, `Epoch`,
+    `SessionId`, `Tick`, `TickSpan`, `AppId`, `UnderlayId`, and a private field on
+    `LinkMetric`. `AGENTS.md` holds the rules and the list. `CHANGELOG.md` has one entry
+    per break.
+
+    The wire does not change, with two named exceptions: `Message::parse` rejects a
+    `pubkey` with no `sig` and the reverse, and netplay's `ack_frame` is an absent
+    field in place of `-1`. A port **from** upstream must keep the typed signatures
+    of the files above. A port **to** upstream is a break for each caller below.
+
+    The call sites in agent-gossip (`feat-webmcp`) that stop compiling against this
+    fork, with the new form:
+
+    - `bridge/connect.rs:44`, `bridge/expose.rs:127`, and `bridge/tests.rs:141`, `:163`,
+      `:188`, `:223`, `:284`: `TicketAuth::derive(&secret, ..)` takes a `&TicketSecret`.
+      Wrap the agent's own `[u8; 32]` once, with `TicketSecret::from_bytes`.
+    - `bridge/connect.rs:118` and `bridge/expose.rs:196`: `auth.token` is a
+      `TicketSecret`. Write it with `auth.token.as_bytes()`, and compare it with
+      `ct_eq(&token, auth.token.as_bytes())`.
+    - `a2a/send.rs:795` and `harness/adversarial.rs:283`: `seal_to_body` takes the
+      `x25519_dalek::PublicKey` of the recipient in place of `&[u8; 32]`.
+    - `a2a/send.rs:34`, `output/json.rs:216`, `:511`, `:680`, and `output/tests.rs:73`:
+      `msg.pubkey` is gone. Read the key with `msg.author_key()`.
+    - `bridge/ticket.rs:183`: a `BlobTicket` literal holds a `TicketSecret` and a
+      `BlobDigest`.
+    - `a2a/send.rs:362` and `a2a/card.rs:403,410` (agent-gossip `main`):
+      `ops::doc::encrypt_body` takes a `&SymmetricKey`. Wrap the key once, with
+      `SymmetricKey::from_bytes`.
+    - `a2a/send.rs:31,34,51-53,169-170,370,384,438,506` and `harness/adversarial.rs:410`
+      (agent-gossip `main`): `Message::prev` and `Message::parents` hold `ContentHash`;
+      `content_hash_hex()` is `content_hash()`, and `.to_string()` gives the text. `forget_hash`,
+      `advance_chain`, `note_dag`, `chain_head`, `dag_parents`, `note_msg_seq` and
+      `forget_msg_seq` take or return a `ContentHash`.
+    - `a2a/send.rs:53`, `output/json.rs:217,490,512,681`, `api/directory.rs:56`
+      (`feat-webmcp`) and `a2a/task.rs:220` (`main`): `Message::timestamp` and
+      `Listing::first_seen_unix` are a `UnixSecs`. Read the number with `as_secs()`, and
+      write an age with `UnixSecs::now().since(timestamp)`. `harness/adversarial.rs:354`
+      sets it with `UnixSecs::from_secs(ts)`.
+    - `a2a/task.rs:959` (`beat.timestamp -= 3600`), `mcp/session.rs:528`
+      (`echo.timestamp > 0`) and `tests/adversarial.rs:664` (`main`): `timestamp` is a
+      `UnixSecs`, so write `UnixSecs::from_secs(beat.timestamp.as_secs() - 3600)`, compare
+      `echo.timestamp.as_secs() > 0`, and note that `.timestamp(4_102_444_800)` goes through
+      the harness builder at `harness/adversarial.rs:360`, which takes an `i64`: it converts
+      with `UnixSecs::from_secs`.
+    - `output/json.rs:547`, `cli/mod.rs:967` (`feat-webmcp`) and `a2a/task.rs:220` (`main`):
+      `clock::unix_secs()` is removed. Call `UnixSecs::now().as_secs()`.
+    - agent-gossip does not call the multihop handle. A port that does wraps an `EndpointId`
+      with `AppId::new` or `UnderlayId::new`, as `CHANGELOG.md` lists.
+    - `harness/bench.rs:64`, `benches/hot_paths.rs:30`: `crypto::derive_secret` is crate-private.
+      Derive with `Seed::derive`.
+    - `bridge/ticket.rs:170`, `harness/bench.rs:86`, `cli/doctor.rs:612`: `Mesh::new` takes a
+      `Seed`.
+    - `a2a/node.rs:261`, `a2a/rpc.rs:314`: `Identity::seal_public()` returns an
+      `x25519_dalek::PublicKey`. Encode `seal_public().as_bytes()`.
+
+29. **Time spans are `Duration`.** The `*_SECS` and `*_MS` constants of
+    `habilis-network-util`, their accessors, and the `Tuning` fields lose the unit suffix
+    and are `Duration`. `CHANGELOG.md` lists each name, and `AGENTS.md` holds the rule.
+    The wire does not change.
+
+    agent-gossip builds `Tuning` from its hidden flags (`cli/args/tuning.rs`). Each flag
+    keeps its unit: seconds, or milliseconds for `--ppid-watch-interval-ms`. The CLI
+    converts each value to a `Duration` at that one edge, with `Duration::from_secs` or
+    `Duration::from_millis`. A port **from** upstream must pass a `Duration` in each
+    `Tuning` field. agent-gossip is carried on its branch `refactor-newtype-pattern`.
+
+30. **Typestate: a message is signed into a `Verified`, and only a `Verified` is sent or
+    logged.** `CHANGELOG.md` lists each break, and `AGENTS.md` holds the rule. The wire does
+    not change.
+
+    The call sites in agent-gossip (`build-habilis-typestate`) that stop compiling against this
+    fork, with the new form:
+
+    - `a2a/send.rs`, `a2a/node.rs`, `a2a/card.rs`, `a2a/task.rs`, `harness/adversarial.rs`:
+      `Message::signed(&identity)` is `Message::sign(&identity)`, and it returns a `Verified`.
+      A `Verified` is what `deliver`, `broadcast_msg` and the message log take.
+    - `output/json.rs`, `a2a/model/mod.rs`, `a2a/send.rs`: `Message::author_key()` and
+      `Message::serialize()` are crate-private. Read the key with `Verified::key()` or
+      `Authored::key()`, and the wire bytes with `Verified::serialize()`.
+    - `cli/mod.rs`, `cli/doctor.rs`, `a2a/send.rs`, `topic.rs`, `bridge/ticket.rs`:
+      `parse::<Mesh>()` is `parse::<LockedMesh>()`. Read the config with `config()`, and
+      derive with `LockedMesh::unlock(password)`, which returns `UnlockError`.
+    - `Mesh::new` and `Mesh::from_topic` return a `Result`.
+    - `a2a/node.rs`, `output/mod.rs`, `api/inproc.rs`, `api/session.rs`: `NodeApp::classify`,
+      `InboundApp::message`, `NodeEvent::Presence` and `NodeEvent::StateChanged`, and the
+      external message channel take an `Authored`.
+    - `Signed` is `Signer`, and an `InjectedEndpoint` is built only by `InjectedEndpoint::bind`.
+    - `crates/agent-gossip-wasm-client/src/driver.rs`: the same sign and `Authored` changes.
+
 ## Fork pins — where each one lives, and why
 
 Three forks are in play: `agent-habilis/{iroh, iroh-gossip, net-tools}`. They do
@@ -383,10 +475,16 @@ patch.
 |---|---|---|
 | `iroh-gossip` | a **direct git dep** in this workspace's `[workspace.dependencies]` | `habilis-network` is the only crate in the graph that names it, so consumers inherit it and restate nothing |
 | `netwatch` + `portmapper` | **git deps inside the `iroh` fork's own `iroh/Cargo.toml`** | `iroh` and `portmapper` both name netwatch from crates.io, so no dep edge *here* could redirect them — but the fork's own edges can. They move as a pair: the fork's `portmapper` takes `netwatch` by path, so splitting them puts two netwatch crates in one graph and the types cross the boundary |
-| `iroh`, `iroh-base`, `iroh-dns` | `[patch.crates-io]`, **restated by every consumer** | `iroh-relay`, the mdns/mainline address-lookup crates, `iroh-gossip` and the consumers themselves all name these from crates.io. Nothing we declare can redirect a third party's edge |
+| `iroh`, `iroh-base`, `iroh-dns` | **direct git deps** in this workspace's `[workspace.dependencies]`, at the same rev, and the same line in each fork that names them | `iroh-relay` is part of the `iroh` fork. The mdns/mainline address-lookup crates and `iroh-gossip` are our forks too, and their own manifests name these three by `git` and the same `rev`. No crate that we do not control names them from crates.io, so the consumers restate nothing |
 
-So a consumer carries **three** patch lines, not five, and the two that left are
-the two it had no business knowing about.
+So a consumer carries **no** `[patch]` and no `iroh` line of its own:
+`habilis-network` owns which fork and which rev. `agent-gossip` and `agent-share`
+both resolve the whole family to the forks through it alone. The check is the
+consumer's `Cargo.lock`: no `iroh`, `iroh-base`, `iroh-dns`, `iroh-relay`,
+`netwatch` or `portmapper` with a registry source (`iroh-metrics` and its derive
+come from crates.io, and nobody forks them). If a crate that we do not control
+ever names `iroh` from crates.io, a second `iroh` shows up in that lock, and the
+fix is a `[patch.crates-io]` in the root of each consumer.
 
 `iroh-base` must stay pinned to the **same repo and rev as `iroh`**: the forked
 `iroh` uses its workspace-local copy, and mixing that with the crates.io release
@@ -394,9 +492,20 @@ puts two `iroh_base` versions in the graph, which makes types from
 iroh-gossip and the address-lookup crates fail to unify (E0308).
 
 Current revs: `iroh`/`iroh-base`/`iroh-dns` →
-`agent-habilis/iroh` `c814688e6c0967b2764efe7159059d1d68c4b2f4` (mapped_addrs
-eviction + relay teardown, **plus** the netwatch/portmapper repoint);
-`iroh-gossip` → `5d57f946eb9e3a1f5f6342c33a0dc7bc22550f49`; `net-tools` →
+`agent-habilis/iroh` `0e7cdb4cd73952c49699cd7ae971a1fc2982b866` (on fork `main`: PR #2 merged as `c45bea2`, same tree; mapped_addrs
+eviction + relay teardown, **plus** the netwatch/portmapper repoint, **plus**
+PR #1: a custom-transport path that is learned while another custom path is
+selected is opened too, and a pair selected on IP skips it until it leaves IP, so a `WebRTC`
+session that comes up after multihop was selected can be selected over it,
+**plus** PR #2: a path open that failed for lack of a free path id is queued
+once, not once per connection at every retry; the queue doubled at each 333 ms
+retry and took gigabytes in a mesh of 24, **plus** a custom address learned while IP is
+selected is queued again when the selected path leaves IP, so a `WebRTC` session that
+attached while the pair was on IP can be opened after the IP path is lost, **plus** the `selector-test-utils` feature (a test-only API: public `for_test` constructors and `PathSelection::selected_for_test`, so that a path selector outside iroh can be unit-tested; no change of behaviour). Cost: once a
+pair has left IP, its custom path stays open on every connection of the pair, also after IP
+returns; each custom address keeps one more path id and its keep-alive while the connections live, **plus** `Endpoint::add_endpoint_addr`, a public call that gives a remote an address without a dial, and a relay that is learned after a connection exists becomes a path of that connection, as the custom address does. Cost: one `Backup` relay path on each client connection of a pair that learns its relay late, with its keep-alive, also while IP is selected. That keep-alive is one PING per idle path per 5 s (`HEARTBEAT_INTERVAL`, `iroh/src/socket.rs:109`, applied as `default_path_keep_alive_interval` in `iroh/src/endpoint/quic.rs:157`), not about one packet per second. Both sides arm it, because the same transport config reaches the client config (`iroh/src/endpoint.rs:1165`) and the server config (`iroh/src/endpoint.rs:1791`), so 2 PINGs per 5 s is the upper bound; each side also resets its timer on an authenticated packet from the other side (noq-proto `connection/mod.rs:3764`, and on send at `connection/packet_builder.rs:305`), so the steady state is about one PING and its ACK per 5 s. Read from the code, not measured on the wire. A relay that moved gets a path of its own (the old one stays until it closes). This makes a learned relay a path; it does not make the relay learned: the caller gives it with `add_endpoint_addr`, **plus** `relay_url` and `ip_addresses` on the `iroh::_events::conn::connecting` event);
+`iroh-gossip` → `28676ce14dfa8061db7036ffa3d9c6588a34256e` (fork `main`: PR #5 squash-merged, the same tree as its branch head `523b0b3`: `NeighborPeers`, a low priority request for a link, and a fix for a stuck pending Neighbor request, and a fix for two dials that cross: both sides keep the connection that the lower endpoint id dialed (each side kept the one that the other closed, and both reported the peer down), where a replaced connection and the loser keep reading for 2 s before they close, so that a Neighbor request on them is not lost, the rule holds only while the active connection is alive: its task reads the datagrams it received once per second, and a connection that received nothing for 10 s (`LIVENESS_BOUND`, two keep-alive intervals of iroh) is no half of a crossing, so that a gate that holds a dial for longer than any fixed time cannot make the two sides read different things and a peer keeps a set of connections and sends on the best one: alive, then carried (a message of the peer was read on it), then dialed by the lower endpoint id, then the newest, so that a gate that refuses or holds the dial that the rule keeps cannot leave the pair with no connection (a connection that is not chosen keeps reading, and is stopped only when it is dead while the chosen one is alive or after `PARK`, 30 s; a swap tells the protocol nothing, and only the close of the last connection is `PeerDisconnected`; this also ends the known cost of the liveness rule, a restart less than 10 s after the last datagram) (cost: one extra connection per crossing for up to 30 s when the chosen one has not carried, and after a swap two messages can arrive in the other order; the log lines `crossing: the active connection was dialed by the lower endpoint id, the new one only reads` and `connection that lost a crossing closed after its drain` are gone, and `send on this connection from now on`, `stop sending on this connection: it drains and closes`, `connection closed, others left` and `last connection to send on closed, mark peer as disconnected` are new), and a request made with `RequestNeighbors` stops being pending after 20 s, and a node remembers the peers it answered (`answered_neighbors`), so that one extra Neighbor request, such as the second one that a failed dial leaves, cannot start a ping-pong of Neighbor messages between two nodes (cost: a renew sent for a peer that is already active no longer holds a pending entry, and the first renew after an answered request is read as an answer), and the renew arm of a ForwardJoin, a ForwardJoin for a peer that is already active, goes on with the walk while its ttl lasts, so that the joiner of a swarm of three nodes gets a link to a real peer and not to the contact node only (cost: up to ttl more ForwardJoin hops per join in a dense swarm, and one Neighbor to the joiner from each holder that renews), and an answer to a Neighbor request is forgotten after 20 s, so that a peer that shed its side and asks again is answered and not read as an answer (cost: a second answer to the same peer inside 20 s can be dropped by the first timer), and the drain of a closing connection is timed with n0_future (tokio::time panics in a browser), and a wasm32 clippy row forbids the Tokio calls that panic in a browser (`clippy.toml`, run by the wasm32 job of the CI), and a `Join` from a peer that is already active starts no walk (a joiner re-sends its `Join` every 400 ms while its link is not up, and each copy started a walk; the `Neighbor{High}` lines of a 4-node cell went from 20 to 152) (cost: a peer that restarts, or dials again, while the contact still holds its old connection is answered and gets no walk from that `Join`; the old connection ends at the QUIC idle timeout (30 s) and the next `Join` runs the walk; in habilis-network the links also come from `PeerInfo` grafts and the fill tick, so the walk is not the only source; a change that told the protocol `PeerDisconnected` on a re-dial was tried and reverted: it broke a live link when two sides raced a connection at once), and a peer whose chosen connection has a dead send loop is dropped at the next send, not when the actor gets to the end of the connection task (under load that end could wait for minutes, and the dead peer got every topic message: 3.2 million `failed to send: connection task send loop terminated` lines in a 66-node run on one host); the peer gets a `NeighborDown` when no other connection is left, or the set chooses the other connection, and the warning is logged once per connection, on top of `b379de6`, branch `chore/iroh-51e891c`, PR #4 in the fork, not merged: the `iroh` pin above on top of `eca06e4`, branch `leave-peers`, PR #2 in the fork, not merged, with its own `iroh` and `iroh-base` at the rev above: `leave_peers`, a tombstone for a peer that left on purpose, and the TimeBoundCache expiry-heap fix on top of fork main `5d57f94`; the workspace uses `GossipSender::leave_peers` to let go of the rendezvous; two fixes in the gossip actor: it never waits for a full connection queue (`e12580e`), and it splits the overflow rule by message kind, so data is dropped and counted while any other message disconnects the peer (`eca06e4`)); `iroh-mdns-address-lookup` and `iroh-mainline-address-lookup` →
+`agent-habilis/iroh-address-lookups` `3e27a04a2948b2c69f503c775dd48a1aea1ac87c` (fork `main`: PR #4 squash-merged, the same tree as its branch head `8a5fb2e`: its `iroh`, `iroh-base` and `iroh-dns` at the rev above, on top of `69c8102`, PR #3); `net-tools` →
 `e02960255ef2f5b2ba4aa3d4cf195e0b8673f370`.
 
 ## Verifying a change

@@ -25,7 +25,7 @@ the other.
   code instead of unwinding across `extern "C"`.
 - `habilis_network_opts` takes four comma-separated lists, one concept each:
   `lookup` (`"mdns,dht,relay,pkarr"`, any subset) is how members find each other,
-  `transport` (`"udp,webrtc,relay"`, any subset with `udp` or `webrtc`) is
+  `transport` (`"udp,webrtc,multihop,gossip,relay"`, any subset with `udp` or `webrtc`) is
   what payload may ride, and `relay_urls` is which relay (NULL for the
   default ladder), and `pkarr_urls` is which pkarr relays (NULL for the
   default list; needs `pkarr` in `lookup`). `relay` in `transport`, or a list without `udp`, needs

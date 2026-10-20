@@ -10,6 +10,8 @@ pub(crate) mod webdriver;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use xshell::{Shell, cmd};
+
 /// The workspace root — `tasks/..`, resolved from the manifest directory
 /// rather than the current one, so `cargo task` behaves the same wherever it is
 /// invoked from inside the workspace.
@@ -18,6 +20,36 @@ pub(crate) fn repo_root() -> PathBuf {
         .parent()
         .expect("the tasks crate always sits directly under the workspace root")
         .to_path_buf()
+}
+
+/// What `cargo metadata --no-deps` says about the workspace.
+///
+/// Cargo is the one authority on where a build lands: `CARGO_TARGET_DIR` and
+/// `build.target-dir` both move it, so a path spelled `target/…` would not follow.
+#[derive(serde::Deserialize)]
+pub(crate) struct Metadata {
+    pub(crate) packages: Vec<Package>,
+    pub(crate) target_directory: PathBuf,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct Package {
+    pub(crate) name: String,
+}
+
+pub(crate) fn metadata(sh: &Shell) -> Result<Metadata, Box<dyn std::error::Error>> {
+    let json = cmd!(sh, "cargo metadata --no-deps --format-version 1")
+        .quiet()
+        .ignore_stderr()
+        .read()?;
+    Ok(serde_json::from_str(&json)?)
+}
+
+/// Where cargo puts build output, and so where a task leaves the log of a failed run.
+pub(crate) fn target_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let sh = Shell::new()?;
+    sh.change_dir(repo_root());
+    Ok(metadata(&sh)?.target_directory)
 }
 
 /// Poll `probe` until it yields a value, or give up.

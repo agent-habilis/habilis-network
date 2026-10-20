@@ -11,9 +11,10 @@ use habilis_network::iroh::protocol::{AcceptError, ProtocolHandler};
 use habilis_network::net::direct::{PROBE_DEADLINE, refuse_unless_direct};
 use habilis_network::protocol::ct_eq;
 use tokio::sync::oneshot;
+use zeroize::Zeroizing;
 
 use crate::code;
-use crate::hash::{ID_LEN, SECRET_LEN, StreamHash};
+use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 
 /// How long a connection may take to present `id ‖ secret`. Nothing the peer
 /// has proved yet, so it gets no more than a slow link needs.
@@ -32,23 +33,23 @@ struct Link {
 /// One open stream. `waiting` is taken by the first consumer that presents the
 /// secret; afterwards the stream is spent.
 struct Entry {
-    secret: [u8; SECRET_LEN],
+    secret: StreamSecret,
     waiting: Option<oneshot::Sender<Link>>,
 }
 
 /// Every stream a node has open, by public id.
 #[derive(Default)]
-pub(crate) struct Registry(Mutex<HashMap<[u8; ID_LEN], Entry>>);
+pub(crate) struct Registry(Mutex<HashMap<StreamId, Entry>>);
 
 impl Registry {
-    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<[u8; ID_LEN], Entry>> {
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<StreamId, Entry>> {
         // A panic while holding the lock leaves a map that is still whole.
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn open(&self, id: [u8; ID_LEN], secret: [u8; SECRET_LEN]) -> oneshot::Receiver<Link> {
+    fn open(&self, id: StreamId, secret: StreamSecret) -> oneshot::Receiver<Link> {
         let (waiting, attached) = oneshot::channel();
         self.entries().insert(
             id,
@@ -60,14 +61,14 @@ impl Registry {
         attached
     }
 
-    fn forget(&self, id: &[u8; ID_LEN]) {
+    fn forget(&self, id: &StreamId) {
         self.entries().remove(id);
     }
 
     /// Forget `id` unless a consumer has claimed it; `true` when forgotten.
     /// Under the lock [`claim`](Self::claim) takes, so a consumer that has
     /// presented the secret cannot be dropped between its claim and its link.
-    fn forget_unless_claimed(&self, id: &[u8; ID_LEN]) -> bool {
+    fn forget_unless_claimed(&self, id: &StreamId) -> bool {
         let mut entries = self.entries();
         if entries.get(id).is_some_and(|entry| entry.waiting.is_none()) {
             return false;
@@ -84,14 +85,12 @@ impl Registry {
     /// The one consumer slot for `id`, if `secret` opens it. Taking the slot and
     /// checking it was free are one critical section, so two consumers racing
     /// the same hash cannot both be admitted.
-    fn claim(
-        &self,
-        id: &[u8; ID_LEN],
-        secret: &[u8; SECRET_LEN],
-    ) -> Result<oneshot::Sender<Link>, u32> {
+    fn claim(&self, id: &StreamId, secret: &StreamSecret) -> Result<oneshot::Sender<Link>, u32> {
         let mut entries = self.entries();
         match entries.get_mut(id) {
-            Some(entry) if ct_eq(secret, &entry.secret) => entry.waiting.take().ok_or(code::TAKEN),
+            Some(entry) if ct_eq(secret.as_bytes(), entry.secret.as_bytes()) => {
+                entry.waiting.take().ok_or(code::TAKEN)
+            }
             Some(_) | None => Err(code::UNKNOWN),
         }
     }
@@ -160,13 +159,19 @@ impl ProtocolHandler for StreamAcceptor {
     }
 }
 
-async fn read_header(conn: &Connection) -> Result<(SendStream, ([u8; ID_LEN], [u8; SECRET_LEN]))> {
+async fn read_header(conn: &Connection) -> Result<(SendStream, (StreamId, StreamSecret))> {
     let (send, mut recv) = conn.accept_bi().await?;
     let mut id = [0; ID_LEN];
-    let mut secret = [0; SECRET_LEN];
+    let mut secret = Zeroizing::new([0; SECRET_LEN]);
     recv.read_exact(&mut id).await?;
-    recv.read_exact(&mut secret).await?;
-    Ok((send, (id, secret)))
+    recv.read_exact(&mut *secret).await?;
+    Ok((
+        send,
+        (
+            StreamId::from_bytes(id),
+            StreamSecret::from_zeroizing(secret),
+        ),
+    ))
 }
 
 /// One stream's writing end. It admits exactly one consumer.
@@ -194,7 +199,7 @@ impl std::fmt::Debug for Link {
 
 impl Producer {
     pub(crate) fn new(hash: StreamHash, registry: Arc<Registry>) -> Self {
-        let attach = registry.open(hash.id, hash.secret);
+        let attach = registry.open(hash.id, hash.secret.clone());
         Self {
             hash,
             registry,

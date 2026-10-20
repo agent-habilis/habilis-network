@@ -14,7 +14,9 @@ use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
-use crate::protocol::{Message, MessageKind, PresenceSubtype};
+use crate::protocol::identity::Identity;
+use crate::protocol::message::Verified;
+use crate::protocol::{MeshId, Message, MessageKind, PresenceSubtype};
 
 use crate::gossip;
 use crate::util::clock::Instant;
@@ -56,7 +58,7 @@ pub(crate) struct Observed {
 /// membership/presentation side effects live here (lifecycle layer);
 /// the gossip layer never touches the roster directly.
 pub(crate) fn observe(
-    message: &Message,
+    message: &Verified,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> Observed {
@@ -109,9 +111,8 @@ pub(crate) fn observe(
         && !matches!(message.kind, MessageKind::Presence { .. })
     {
         state.surfaced.insert(message.author.clone());
-        ctx.sink.emit(NodeEvent::Presence {
-            msg: Box::new(Message::new_joined(ctx.mesh, &message.author)),
-        });
+        ctx.sink
+            .emit(synthetic_arrival(ctx.mesh, ctx.identity, message));
         tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined");
     }
 
@@ -121,12 +122,24 @@ pub(crate) fn observe(
     }
 }
 
+/// The presence this node surfaces for a peer's first arrival. This node signs the
+/// `joined` that reports it, so the proof names this node, and the nickname stays the
+/// peer's. `peer` is the key of the frame that triggered it, which is the peer's own.
+fn synthetic_arrival(mesh: &MeshId, identity: &Identity, triggering: &Verified) -> NodeEvent {
+    let arrival = Message::new_joined(mesh, &triggering.author).sign(identity);
+    NodeEvent::Presence {
+        msg: Box::new(arrival.authored()),
+        peer: triggering.key(),
+        synthetic: true,
+    }
+}
+
 /// A received `Presence` frame plus the roster delta [`membership::observe`]
 /// already computed for it, passed to [`handle_presence`]. Constructed by
 /// [`crate::gossip::recv::ingest`], across the `gossip`/`lifecycle` module
 /// boundary — hence `pub(crate)` rather than module-private.
 pub(crate) struct PresenceEvent<'a> {
-    pub(crate) message: &'a Message,
+    pub(crate) message: &'a Verified,
     pub(crate) subtype: PresenceSubtype,
     pub(crate) update: &'a membership::MembershipUpdate,
     pub(crate) surfaceable: bool,
@@ -156,6 +169,14 @@ pub(crate) async fn handle_presence(
         // rejoin re-dials cold.
         if let Some(endpoint_id) = state.forget_peer_endpoint(message.author.as_str()) {
             state.unicast_pool.forget(endpoint_id.id).await;
+            // Its advertised links go too, or routes keep running through a peer
+            // that said goodbye until its vector ages out.
+            #[cfg(feature = "multihop")]
+            if let Some(handle) = state.multihop.as_ref() {
+                handle.remove_origin(habilis_network_iroh_multihop_transport::AppId::new(
+                    endpoint_id.id,
+                ));
+            }
         }
         state.quiet.remove(message.author.as_str());
         // Only announce a departure for a peer whose arrival we
@@ -164,7 +185,9 @@ pub(crate) async fn handle_presence(
         // already showed going quiet) is dropped.
         if state.surfaced.remove(message.author.as_str()) {
             ctx.sink.emit(NodeEvent::Presence {
-                msg: Box::new(message.clone()),
+                msg: Box::new(message.authored()),
+                peer: message.key(),
+                synthetic: false,
             });
             tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer left");
         }
@@ -192,7 +215,7 @@ pub(crate) async fn handle_presence(
             // re-announce mints a fresh id, so without this each one becomes
             // another message we can never acknowledge and every peer re-sends to
             // us forever (see `gossip::recv::retain_own_broadcast`).
-            let joined = Message::new_joined(ctx.mesh, ctx.author).signed(ctx.identity);
+            let joined = Message::new_joined(ctx.mesh, ctx.author).sign(ctx.identity);
             gossip::broadcast_msg(ctx.sender, &joined).await;
             gossip::retain_own_broadcast(state, &joined);
             state.last_sent_at = Instant::now();
@@ -202,10 +225,38 @@ pub(crate) async fn handle_presence(
             if surfaceable && !update.returned {
                 state.surfaced.insert(message.author.clone());
                 ctx.sink.emit(NodeEvent::Presence {
-                    msg: Box::new(message.clone()),
+                    msg: Box::new(message.authored()),
+                    peer: message.key(),
+                    synthetic: false,
                 });
                 tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Identity, MeshId, Message, NodeEvent, synthetic_arrival};
+    use crate::testing::nick;
+
+    #[test]
+    fn a_synthetic_presence_names_the_peer_apart_from_its_signer() {
+        let mesh = MeshId::from("test");
+        let node = Identity::generate();
+        let peer = Identity::generate();
+        let joined = Message::new_joined(&mesh, &nick("bob")).sign(&peer);
+        let NodeEvent::Presence {
+            msg,
+            peer: key,
+            synthetic,
+        } = synthetic_arrival(&mesh, &node, &joined)
+        else {
+            panic!("a synthetic arrival is a presence");
+        };
+        assert!(synthetic, "this node minted it");
+        assert_eq!(key, peer.author_key(), "the peer is the triggering signer");
+        assert_eq!(msg.key(), node.author_key(), "the proof is this node's");
+        assert_eq!(msg.author.as_str(), "bob", "the nickname stays the peer's");
     }
 }

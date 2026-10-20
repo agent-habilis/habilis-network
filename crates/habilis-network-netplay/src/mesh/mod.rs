@@ -41,5 +41,5 @@ mod lobby;
 mod transport;
 
 pub use driver::{LOBBY_TAG, Outbound, ROLLBACK_TAG, RollbackDriver};
-pub use lobby::{Lobby, LobbyError, StartedMatch};
+pub use lobby::{Epoch, Lobby, LobbyError, SessionId, StartedMatch, Tick, TickSpan};
 pub use transport::MeshTransport;

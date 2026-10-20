@@ -56,15 +56,17 @@ pub mod protocol {
     // is how a surface nobody chose ends up needing a cross-repo grep to
     // shrink. Adding a name below is now a deliberate line.
     pub use habilis_network_protocol::{
-        AdvertiseRequiresReachable, AppFrameParams, AppTag, BodyError, Channel, ChoiceError,
-        CorrId, DEFAULT_DIRECTORY, DirectorySelection, IdError, Identity, InviteTicket, JoinTarget,
-        JoinTargetError, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError,
-        MeshName, Message, MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError,
-        OptFlag, Password, PkarrChoice, PresenceSubtype, RelayChoice, RelayLadder,
-        RelayLadderError, RelaySelection, Shard, ShardGroup, TicketAuth, TopicId, Transport,
-        TransportPolicy, Url, base58check, crypto, ct_eq, directory, encode_pubkey, identity,
-        invite, iroh_base, mesh, message, nickname, parse_pkarr_urls, peer_addr, reassembly,
-        resolve_lookups, resolver, seal, seal_to_body, sole_addressee, validate_advertise,
+        AdvertiseRequiresReachable, AppFrameParams, AppTag, AuthorKey, Authored, BodyError,
+        Channel, ChoiceError, ContentHash, CorrId, DEFAULT_DIRECTORY, DedupKey, DirectorySelection,
+        IdError, Identity, InviteTicket, JoinTarget, JoinTargetError, LockedMesh, Lookup,
+        LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, Message,
+        MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError, OptFlag, Password,
+        PkarrChoice, PresenceSubtype, Proof, RelayChoice, RelayLadder, RelayLadderError,
+        RelaySelection, Seed, Shard, ShardGroup, Signer, SymmetricKey, TicketAuth, TicketSecret,
+        TopicId, Transport, TransportPolicy, UnixSecs, UnlockError, Url, Verified, base58check,
+        crypto, ct_eq, directory, encode_pubkey, identity, invite, iroh_base, mesh, message,
+        nickname, parse_pkarr_urls, peer_addr, reassembly, resolve_lookups, resolver, seal,
+        seal_to_body, sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
     pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};
@@ -172,6 +174,14 @@ pub use iroh_mainline_address_lookup;
 /// [`iroh_mainline_address_lookup`], gated on `mdns`.
 #[cfg(feature = "mdns")]
 pub use iroh_mdns_address_lookup;
+
+/// The `x25519-dalek` crate that the seal keys of this engine come from.
+/// `protocol::Identity::seal_public` returns an `x25519_dalek::PublicKey`, and
+/// `protocol::seal_to_body` takes one. A consumer that names its own
+/// `x25519-dalek` can get a second copy of the crate in the graph, and the two
+/// `PublicKey` types then do not match. Take the type from here:
+/// `habilis_network::x25519_dalek::PublicKey`.
+pub use x25519_dalek;
 
 // Shared config for the crate's `proptest!` blocks. Overrides the default
 // failure-persistence path so regression seeds land in

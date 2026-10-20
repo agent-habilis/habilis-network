@@ -178,8 +178,9 @@ impl LightCyclesPeer {
         let config = setup_mesh(
             kind,
             SetupParams {
-                author,
+                author: author.clone(),
                 max_peers: 16,
+                max_direct: 0,
                 endpoint: None,
                 protocols: Vec::new(),
                 transports: TransportOpts::default(),
@@ -187,7 +188,6 @@ impl LightCyclesPeer {
                 runtime_base: None,
                 state_file: None,
                 sink: Arc::new(SilentSink),
-                multihop: false,
                 per_peer_gate: None,
                 cohost: None,
                 live_count: None,
@@ -199,7 +199,7 @@ impl LightCyclesPeer {
         // `handle_signals: false` — nothing to catch in a browser.
         let (driver, pending) = RollbackDriver::<LightCycles>::new();
         let node: Node<RollbackDriver<LightCycles>> = Node::spawn(config, driver, None, false);
-        let game = Game::new(pending.connect(node.sender()), nick);
+        let game = Game::new(pending.connect(node.sender()), author);
 
         Ok(LightCyclesPeer {
             _node: node,

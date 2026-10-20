@@ -12,8 +12,8 @@ use iroh::endpoint::Connection;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
-use crate::lookup::{add_peer_addr, build_peer_endpoint};
-use crate::protocol::crypto::{Password, TicketAuth};
+use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
+use crate::protocol::crypto::{Password, TicketAuth, TicketSecret};
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::ticket::BlobTicket;
@@ -40,7 +40,7 @@ where
 {
     let token = auth_token(ticket, password.as_ref())?;
     let endpoint = build_peer_endpoint(&ticket.lookups).await?;
-    add_peer_addr(&endpoint, ticket.addr.clone())?;
+    add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
     let result = fetch_over(&endpoint, ticket, &token, out).await;
     endpoint.close().await;
     result
@@ -49,7 +49,7 @@ where
 async fn fetch_over<W>(
     endpoint: &Endpoint,
     ticket: &BlobTicket,
-    token: &[u8; SECRET_LEN],
+    token: &TicketSecret,
     out: &mut W,
 ) -> Result<()>
 where
@@ -70,8 +70,8 @@ where
     let (mut send, mut recv) = conn.open_bi().await?;
 
     // Request: sha256 ‖ secret, then done sending.
-    send.write_all(&ticket.sha256).await?;
-    send.write_all(token).await?;
+    send.write_all(ticket.sha256.as_bytes()).await?;
+    send.write_all(token.as_bytes()).await?;
     let _ = send.finish();
 
     // Response: size(u64) ‖ <size bytes>. A refusal closes the connection with a
@@ -107,7 +107,7 @@ where
     out.flush().await?;
 
     let digest = hasher.finalize();
-    if digest.as_slice() != ticket.sha256 {
+    if digest.as_slice() != ticket.sha256.as_bytes() {
         bail!("content hash mismatch — the fetched bytes are not what the ticket promised");
     }
     Ok(())
@@ -115,12 +115,12 @@ where
 
 /// The 32-byte auth token opening the fetch stream: the raw secret, or its
 /// Argon2id stretch when the ticket is password-protected.
-fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<[u8; SECRET_LEN]> {
+fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<TicketSecret> {
     match (ticket.password, password) {
         (true, Some(pw)) => Ok(TicketAuth::blob(&ticket.secret, Some(pw)).token),
         (true, None) => bail!("this blob ticket is password-protected — pass --password"),
         (false, Some(_)) => bail!("this blob ticket has no password — drop --password"),
-        (false, None) => Ok(ticket.secret),
+        (false, None) => Ok(ticket.secret.clone()),
     }
 }
 

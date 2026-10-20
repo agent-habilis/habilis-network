@@ -18,17 +18,18 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::lookup::build_endpoint;
-use crate::protocol::crypto::{Password, TicketAuth, ct_eq};
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
+use crate::protocol::mesh::{LookupOpts, PkarrChoice};
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::store::BlobStore;
 use super::ticket::BlobTicket;
 use super::{
-    BAD_SECRET, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN, UNKNOWN_BLOB,
-    wait_online,
+    BAD_SECRET, BlobDigest, ContentId, DONE, HASH_LEN, RELAY_REFUSED_CODE, SECRET_LEN,
+    UNKNOWN_BLOB, wait_online,
 };
 
 /// What one fetch may cost before the requester has proved anything.
@@ -120,6 +121,12 @@ impl BlobServer {
         relay_transport: bool,
         limits: ServeLimits,
     ) -> Result<Self> {
+        // No pkarr: the server has a fresh random key, and its ticket already carries
+        // its address, so publishing it would only name the server to the public relays.
+        let lookups = LookupOpts {
+            pkarr: PkarrChoice::Disabled,
+            ..lookups
+        };
         let endpoint =
             // `TransportHandles::default()` — IP and relay only. The blob
             // server is a side-channel endpoint of its own; the mesh's custom
@@ -194,19 +201,23 @@ impl BlobServer {
         // paying the ~100ms Argon2 stretch again. (A benign race with a
         // concurrent offload of the same content is caught by `snapshot`'s own
         // dedup below.)
-        if let Some(existing) = self.store.lock().await.registered(&sha256) {
+        if let Some(existing) = self.store.lock().await.claim(&sha256, &content_id) {
             return Ok(ticket(existing));
         }
-        let mut salt = [0u8; SECRET_LEN];
-        rand::rng().fill_bytes(&mut salt);
+        let mut salt_bytes = Zeroizing::new([0u8; SECRET_LEN]);
+        rand::rng().fill_bytes(&mut *salt_bytes);
+        let salt = TicketSecret::from_zeroizing(salt_bytes);
         let compare = match self.password.clone() {
             Some(password) => {
                 // ~100ms of Argon2id off the async worker (mirrors mesh join).
-                tokio::task::spawn_blocking(move || TicketAuth::blob(&salt, Some(&password)).token)
-                    .await
-                    .context("blob token stretch task panicked")?
+                let stretch_salt = salt.clone();
+                tokio::task::spawn_blocking(move || {
+                    TicketAuth::blob(&stretch_salt, Some(&password)).token
+                })
+                .await
+                .context("blob token stretch task panicked")?
             }
-            None => salt,
+            None => salt.clone(),
         };
         let registered = self.store.lock().await.snapshot(
             path,
@@ -224,8 +235,9 @@ impl BlobServer {
         Ok(ticket(registered))
     }
 
-    /// Drop every blob owned by `content_id` — whatever sweep the application
-    /// runs when a content group is done with.
+    /// Release `content_id`'s hold on its blobs — whatever sweep the
+    /// application runs when a content group is done with. A blob another group
+    /// also offloaded stays until that group is evicted too.
     pub async fn evict_content(&self, content_id: &ContentId) {
         self.store.lock().await.evict_content(content_id);
     }
@@ -326,24 +338,28 @@ async fn serve_stream(
     store: &Mutex<BlobStore>,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
-    let mut request = [0u8; HASH_LEN + SECRET_LEN];
+    let mut request = Zeroizing::new([0u8; HASH_LEN + SECRET_LEN]);
     // Still inside the pre-auth deadline: a peer that opens a stream and then
     // sends 63 bytes is the same parked task as one that sends none.
-    match tokio::time::timeout_at(deadline, recv.read_exact(&mut request)).await {
+    match tokio::time::timeout_at(deadline, recv.read_exact(&mut *request)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) | Err(_) => return Ok(()),
     }
-    let mut hash = [0u8; HASH_LEN];
-    hash.copy_from_slice(&request[..HASH_LEN]);
-    let mut token = [0u8; SECRET_LEN];
-    token.copy_from_slice(&request[HASH_LEN..]);
+    let mut hash_bytes = [0u8; HASH_LEN];
+    hash_bytes.copy_from_slice(&request[..HASH_LEN]);
+    let hash = BlobDigest::from_bytes(hash_bytes);
+    let mut token_bytes = Zeroizing::new([0u8; SECRET_LEN]);
+    token_bytes.copy_from_slice(&request[HASH_LEN..]);
+    let token = TicketSecret::from_zeroizing(token_bytes);
 
     // Resolve under the lock, then release it before streaming from disk.
     let served = {
         let guard = store.lock().await;
         match guard.get(&hash) {
             None => None,
-            Some(entry) if ct_eq(&token, &entry.secret) => Some((entry.path.clone(), entry.size)),
+            Some(entry) if ct_eq(token.as_bytes(), entry.secret.as_bytes()) => {
+                Some((entry.path.clone(), entry.size))
+            }
             Some(_) => {
                 conn.close(BAD_SECRET.into(), b"bad secret");
                 return Ok(());
@@ -385,7 +401,7 @@ async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
 
 /// Read + SHA-256-hash a file off the async runtime (`spawn_blocking`), never
 /// loading it whole. Returns the digest and byte length.
-async fn hash_file(path: PathBuf) -> Result<([u8; HASH_LEN], u64)> {
+async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
     tokio::task::spawn_blocking(move || {
         let mut file = std::fs::File::open(&path)
             .with_context(|| format!("opening {} failed", path.display()))?;
@@ -405,7 +421,7 @@ async fn hash_file(path: PathBuf) -> Result<([u8; HASH_LEN], u64)> {
         let digest = hasher.finalize();
         let mut sha256 = [0u8; HASH_LEN];
         sha256.copy_from_slice(&digest);
-        Ok((sha256, size))
+        Ok((BlobDigest::from_bytes(sha256), size))
     })
     .await
     .context("blob hash task panicked")?

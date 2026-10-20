@@ -70,7 +70,9 @@ typedef struct habilis_network_mesh habilis_network_mesh;
  * a topic fixes `lookup` to "mdns,dht,relay,pkarr".
  *
  * String fields are NUL-terminated or NULL. `max_peers == 0` takes the engine's
- * default active-view cap.
+ * default active-view cap (G, 32). `max_direct == 0` takes the default ceiling
+ * of direct connections (C, 64): the WebRTC sessions and unicast connections
+ * together. A newcomer past C evicts the least valuable peer.
  */
 typedef struct {
   const char *mesh;
@@ -86,6 +88,7 @@ typedef struct {
   const char *relay_urls; /* comma-separated custom relay ladder; NULL = the
                              default. Needs "relay" in `lookup` */
   size_t max_peers;
+  size_t max_direct;
   const char *pkarr_urls; /* comma-separated pkarr relays, each gets every
                              record; NULL = the default. Needs "pkarr" in
                              `lookup` */

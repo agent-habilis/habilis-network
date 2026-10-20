@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use habilis_network::net::test_relay;
 use habilis_network::protocol::{Lookup, Transport};
-use habilis_network_stream::{Producer, Reader, Refused, StreamHash, StreamNode, StreamOpts};
+use habilis_network_stream::{
+    Producer, Reader, Refused, StreamHash, StreamNode, StreamOpts, StreamSecret,
+};
 
 /// Generous: a relay dial, a JSEP round and a hole punch all fit inside it.
 const BUDGET: Duration = Duration::from_mins(1);
@@ -138,7 +140,9 @@ async fn a_wrong_secret_reads_nothing() {
     let (producer_node, consumer_node) = (loopback().await, loopback().await);
     let producer = producer_node.create().await;
     let mut forged: StreamHash = producer.hash().clone();
-    forged.secret[0] ^= 1;
+    let mut wrong = *forged.secret.as_bytes();
+    wrong[0] ^= 1;
+    forged.secret = StreamSecret::from_bytes(wrong);
     let mut reader = consumer_node.open(&forged).await.expect("open");
     let error = read_all(&mut reader).await.expect_err("forged hash");
     assert_eq!(refusal(&error), Some(Refused::Unknown), "{error:#}");
@@ -407,4 +411,27 @@ async fn a_hash_minted_by_a_bind_for_node_carries_its_relay() {
         "no relay in {:?}",
         minted.addr
     );
+}
+
+/// Gossip-only mesh: a stream is one direct lane between two endpoints that never join a mesh,
+/// so it cannot ride the gossip rung. A node that asks for `gossip` or `multihop` is refused
+/// at bind, with the reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_node_refuses_the_gossip_and_multihop_transports() {
+    for (transport, reason) in [
+        (Transport::Gossip, "a stream has no gossip"),
+        (Transport::Multihop, "a stream has no multihop"),
+    ] {
+        let opts = StreamOpts {
+            transport: vec![Transport::Udp, transport],
+            ..StreamOpts::default()
+        };
+        let error = StreamNode::bind(&opts)
+            .await
+            .expect_err("the transport must be refused");
+        assert!(
+            format!("{error:#}").contains(reason),
+            "{transport:?}: {error:#}"
+        );
+    }
 }

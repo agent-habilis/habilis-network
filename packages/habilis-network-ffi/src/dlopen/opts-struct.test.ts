@@ -12,6 +12,7 @@ const BASE: WireOpts = {
   relayUrls: null,
   maxPeers: 0,
   pkarrUrls: null,
+  maxDirect: 0,
 }
 
 /** Hands out a distinct fake address per buffer and remembers which was which. */
@@ -31,8 +32,8 @@ describe('encodeOpts', () => {
   // is the layout assert on `HabilisNetworkOpts` in crates/habilis-network-ffi/src/ffi.rs; a
   // linked C consumer keeps passing the old struct when it moves, so both
   // sides must be edited together.
-  test('the struct is the 72 bytes the C header lays out', () => {
-    expect(OPTS_BYTES).toBe(72)
+  test('the struct is the 80 bytes the C header lays out', () => {
+    expect(OPTS_BYTES).toBe(80)
   })
 
   test('null selectors and empty lists encode as NULL pointers', () => {
@@ -68,6 +69,16 @@ describe('encodeOpts', () => {
     expect(view.getBigUint64(56, true)).toBe(12n)
   })
 
+  test('max_direct follows max_peers', () => {
+    const { struct } = encodeOpts(
+      { ...BASE, maxPeers: 12, maxDirect: 7 },
+      fakePointers().pointerOf,
+    )
+    const view = new DataView(struct.buffer)
+    expect(view.getBigUint64(56, true)).toBe(12n)
+    expect(view.getBigUint64(64, true)).toBe(7n)
+  })
+
   test('the three lists land at their offsets as comma strings', () => {
     const pointers = fakePointers()
     const { struct, keepAlive } = encodeOpts(
@@ -86,13 +97,24 @@ describe('encodeOpts', () => {
     ])
   })
 
-  test('pkarr_urls lands after max_peers', () => {
+  test('pkarr_urls lands after max_direct, at offset 72', () => {
     const pointers = fakePointers()
     const { struct } = encodeOpts({ ...BASE, maxPeers: 3, pkarrUrls: 'https://p/' }, pointers.pointerOf)
     const view = new DataView(struct.buffer)
     expect(view.getBigUint64(56, true)).toBe(3n)
-    expect(view.getBigUint64(64, true)).toBe(0x1000n)
+    expect(view.getBigUint64(64, true)).toBe(0n)
+    expect(view.getBigUint64(72, true)).toBe(0x1000n)
     expect(Array.from(pointers.buffers[0] ?? [])).toEqual([...new TextEncoder().encode('https://p/'), 0])
+  })
+
+  test('max_direct and pkarr_urls both keep their own offsets', () => {
+    const { struct } = encodeOpts(
+      { ...BASE, maxDirect: 7, pkarrUrls: 'https://p/' },
+      fakePointers().pointerOf,
+    )
+    const view = new DataView(struct.buffer)
+    expect(view.getBigUint64(64, true)).toBe(7n)
+    expect(view.getBigUint64(72, true)).toBe(0x1000n)
   })
 
   test('keepAlive roots every encoded string', () => {
@@ -103,7 +125,7 @@ describe('encodeOpts', () => {
 })
 
 describe('encodeStreamOpts', () => {
-  // The literal, for the reason the 72 above is one: the other side is the
+  // The literal, for the reason the 80 above is one: the other side is the
   // layout assert on `HabilisNetworkStreamOpts` in crates/habilis-network-ffi/src/ffi.rs.
   test('the struct is the 32 bytes the C header lays out', () => {
     expect(STREAM_OPTS_BYTES).toBe(32)

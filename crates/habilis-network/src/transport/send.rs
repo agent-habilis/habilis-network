@@ -1,38 +1,74 @@
 //! The single send decision. Every outbound message funnels through
 //! [`deliver`]: a broadcast (no sole addressee) rides gossip, structurally; a
 //! directed message goes over the unicast connection only — warm pooled
-//! connection first, inline dial otherwise — and gossip never carries it. The
+//! connection first, a dial on a task of its own otherwise — and gossip never carries it. The
 //! bytes are the same canonical wire `Message` on both planes, so the
 //! receiver's path is identical either way.
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use iroh::EndpointId;
+use tokio::sync::oneshot;
 
-use super::pool::WarmSend;
+use super::outbox::Resend;
+use super::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::message::sole_addressee;
-use crate::protocol::{Message, Nickname};
+use crate::protocol::Nickname;
+use crate::protocol::message::{Verified, WireFrame, sole_addressee};
 use crate::transport::MeshSender;
+
+/// What [`deliver`] did with a frame.
+#[derive(Debug)]
+#[must_use = "a dropped Pending handle loses the verdict of the send"]
+pub enum Delivered {
+    /// Sent, or handed to a warm connection: nothing is left to wait for.
+    Done,
+    /// A unicast leg runs on a task of its own. Its outcome comes through the handle.
+    Pending(PendingSend),
+}
+
+/// The outcome of a send that runs on a task. A caller that needs the verdict awaits it off its
+/// event loop. Dropping it does not cancel the send: a failure is then only logged.
+pub type PendingSend = oneshot::Receiver<Result<()>>;
 
 /// Route one already-signed, already-serialized message. `bytes` MUST be
 /// `msg.serialize()` — the same wire form gossip uses.
 ///
+/// It returns at once: it never waits on a dial, on the wait for a direct path, or on a write.
+/// A broadcast, a frame held for a direct path, a refused frame, and a send to a warm connection
+/// give their verdict here. A directed message to a cold peer is sent by a task, and the verdict
+/// comes through [`Delivered::Pending`].
+///
 /// # Errors
-/// Propagates a gossip broadcast failure or a unicast dial/send failure. A
-/// directed message whose addressee has no dialable endpoint (its `PeerInfo`
+/// Propagates a gossip broadcast failure, a refused path, or a cold peer on the dial-failure
+/// cooldown. A directed message whose addressee has no dialable endpoint (its `PeerInfo`
 /// hasn't arrived, or its advertised endpoint is the rendezvous pseudo-node)
 /// is undeliverable — the error names which; callers retry once a real
-/// endpoint is learned.
+/// endpoint is learned. A dial or a write that fails comes through the handle.
 pub async fn deliver(
-    msg: &Message,
-    bytes: Bytes,
+    msg: &Verified,
+    bytes: WireFrame,
     state: &EventLoopState,
     sender: &MeshSender,
-) -> Result<()> {
+) -> Result<Delivered> {
+    match resolve(msg, bytes, state)? {
+        Resend::Broadcast(bytes) => {
+            broadcast(sender, bytes).await?;
+            Ok(Delivered::Done)
+        }
+        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool).await,
+    }
+}
+
+/// The routing decision of [`deliver`], without the send: which plane carries
+/// `msg`, so that a caller that must not wait can queue it for another task.
+///
+/// # Errors
+/// The same as [`deliver`] for a message that has no path now: held for a
+/// direct path, or its addressee has no known endpoint.
+pub(crate) fn resolve(msg: &Verified, bytes: WireFrame, state: &EventLoopState) -> Result<Resend> {
     match route(msg, state) {
-        Route::Broadcast => broadcast(sender, bytes).await,
-        Route::Unicast(eid) => send_unicast(eid, bytes, state).await,
+        Route::Broadcast => Ok(Resend::Broadcast(bytes)),
+        Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
         Route::Held(eid) => Err(HeldForDirect { eid }.into()),
         Route::Undeliverable => {
             let addressee = sole_addressee(&msg.kind);
@@ -70,8 +106,6 @@ pub async fn deliver(
 ///   moments ago reads the same way until its path is selected, for up to
 ///   the path-select budget.
 /// - it is cold and on the per-peer dial-failure cooldown.
-/// - it is cold and a background dial or batch send to it is already in
-///   flight.
 /// - the gossip broadcast failed.
 ///
 /// A `false` send is not queued: the caller tries again later.
@@ -86,25 +120,12 @@ pub async fn deliver(
 /// the peer on the cooldown, and directed sends to it return `false` for up
 /// to the dial budget plus the cooldown.
 pub async fn deliver_in_background(
-    msg: &Message,
-    bytes: Bytes,
+    msg: &Verified,
+    bytes: WireFrame,
     state: &EventLoopState,
     sender: &MeshSender,
 ) -> bool {
-    match route(msg, state) {
-        Route::Broadcast => broadcast(sender, bytes).await.is_ok(),
-        Route::Unicast(eid) => match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
-            WarmSend::Sent => true,
-            WarmSend::Cold => {
-                state
-                    .unicast_pool
-                    .dial_and_send_in_background(eid, bytes)
-                    .await
-            }
-            WarmSend::Refused => false,
-        },
-        Route::Held(_) | Route::Undeliverable => false,
-    }
+    deliver(msg, bytes, state, sender).await.is_ok()
 }
 
 /// The chosen transport for a message — a **pure** decision so both planes are
@@ -125,7 +146,7 @@ enum Route {
     Undeliverable,
 }
 
-fn route(msg: &Message, state: &EventLoopState) -> Route {
+fn route(msg: &Verified, state: &EventLoopState) -> Route {
     let Some(nick) = sole_addressee(&msg.kind) else {
         return Route::Broadcast;
     };
@@ -136,18 +157,20 @@ fn route(msg: &Message, state: &EventLoopState) -> Route {
     }
 }
 
-/// Where an answer to the digest signed by `signer` (its hex `pubkey`) can go
+/// Where an answer to the digest signed by `signer` can go
 /// point-to-point: the endpoint that key proved in its `PeerInfo`, when it is
 /// a linked gossip neighbor with a usable path. Proven, because a nickname is
 /// a label any signer can claim, and one answer is up to a whole resend budget
 /// of frames aimed at whoever holds that endpoint. Linked, because every
 /// holder that hears a digest answers it: the asker's link count bounds how
 /// many answers reach its unicast inbox. `None` means answer on gossip.
-pub(crate) fn unicast_answer_target(signer: &str, state: &EventLoopState) -> Option<EndpointId> {
-    let signer = crate::transport::endpoint_proof::signer_bytes(signer)?;
+pub(crate) fn unicast_answer_target(
+    signer: &crate::protocol::AuthorKey,
+    state: &EventLoopState,
+) -> Option<EndpointId> {
     let eid = state
         .proven_endpoints
-        .get(&signer)
+        .get(signer)
         .filter(|eid| state.rendezvous_id != Some(*eid))?;
     (state.linked_endpoints.contains(&eid) && !held(eid, state)).then_some(eid)
 }
@@ -171,6 +194,27 @@ impl std::fmt::Display for HeldForDirect {
 }
 
 impl std::error::Error for HeldForDirect {}
+
+/// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
+/// a send could not dial it without one. So is a frame held for a pair that lost its direct path
+/// and reads as the relay. Call this when a send failed with [`HeldForDirect`]; any other error,
+/// and a peer that has an IP path and no relay reading, change nothing.
+pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
+    let Some(held) = error.downcast_ref::<HeldForDirect>() else {
+        return;
+    };
+    let needs_lane = state
+        .peer_endpoints
+        .values()
+        .find(|addr| addr.id == held.eid)
+        .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport));
+    // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
+    // offer again, so the parked frame asks.
+    let reads_as_relay = state.pair_path_kind(held.eid) == Some(super::probe::PathKind::Relay);
+    if needs_lane || reads_as_relay {
+        state.want_lane_session(held.eid, crate::util::clock::Instant::now());
+    }
+}
 
 /// Whether a directed frame to `eid` is parked right now: the relay is lookup
 /// only and no direct path to the peer is proven yet. An unprobed peer is
@@ -234,17 +278,35 @@ fn directly_meshed(nick: &Nickname, state: &EventLoopState) -> bool {
 
 /// Warm pooled connection first (steady state, no dial — an optimistic
 /// fire-and-forget handoff; a write that fails on a dead connection redials
-/// and resends once in the background); a cold peer is dialed inline, and the
-/// dial error is the send's outcome — there is no fallback.
-async fn send_unicast(eid: EndpointId, bytes: Bytes, state: &EventLoopState) -> Result<()> {
-    let pool = state.unicast_pool.clone();
-    match pool.send_if_warm(eid, bytes.clone()).await {
-        WarmSend::Sent => Ok(()),
+/// and resends once in the background). A cold peer is dialed on a task of its own, so that the
+/// caller never waits on the dial, the path wait or the write. The dial error is the send's
+/// outcome, through the handle — there is no fallback. A cold peer on the dial-failure cooldown is
+/// refused at once.
+async fn send_unicast(eid: EndpointId, bytes: WireFrame, pool: &UnicastPool) -> Result<Delivered> {
+    match pool.send_if_warm(eid, bytes.clone().into_bytes()).await {
+        WarmSend::Sent => Ok(Delivered::Done),
         WarmSend::Refused => Err(anyhow::anyhow!("{}", super::RELAY_REFUSED)),
-        WarmSend::Cold => pool
-            .dial_and_send(eid, bytes)
-            .await
-            .with_context(|| format!("unicast dial to {eid} failed")),
+        WarmSend::Cold => {
+            if pool.is_cooling(eid).await {
+                return Err(anyhow::anyhow!("{COOLDOWN_REFUSED}")
+                    .context(format!("unicast dial to {eid} failed")));
+            }
+            // The guard of the dial of this peer is taken here, before the spawn: a second send
+            // finds this dial in flight even when it ends at once.
+            let registration = pool.register_dial(eid);
+            let (outcome_tx, outcome) = oneshot::channel();
+            let pool = pool.clone();
+            n0_future::task::spawn(async move {
+                let sent = pool
+                    .send_registered(registration, eid, bytes.into_bytes())
+                    .await
+                    .with_context(|| format!("unicast dial to {eid} failed"));
+                if let Err(Err(error)) = outcome_tx.send(sent) {
+                    tracing::debug!(target: "habilis_network::gossip", %eid, %error, "background send not delivered");
+                }
+            });
+            Ok(Delivered::Pending(outcome))
+        }
     }
 }
 
@@ -257,7 +319,7 @@ async fn send_unicast(eid: EndpointId, bytes: Bytes, state: &EventLoopState) -> 
 /// us.
 pub(crate) async fn send_best_effort(
     eid: EndpointId,
-    bytes: Bytes,
+    bytes: WireFrame,
     state: &EventLoopState,
 ) -> bool {
     // Never dial inline: that would let anyone who can be pinged back choose
@@ -265,19 +327,23 @@ pub(crate) async fn send_best_effort(
     // neighbor still gets a dial, off the loop — its address is proven by the
     // link, and a link can come up with neither side holding a unicast
     // connection, which left a peer linked only by gossip unanswerable.
-    match state.unicast_pool.send_if_warm(eid, bytes.clone()).await {
+    match state
+        .unicast_pool
+        .send_if_warm(eid, bytes.clone().into_bytes())
+        .await
+    {
         WarmSend::Sent => true,
         WarmSend::Cold if state.linked_endpoints.contains(&eid) => {
             state
                 .unicast_pool
-                .dial_and_send_in_background(eid, bytes)
+                .dial_and_send_in_background(eid, bytes.into_bytes())
                 .await
         }
         WarmSend::Cold | WarmSend::Refused => false,
     }
 }
 
-async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
+async fn broadcast(sender: &MeshSender, bytes: WireFrame) -> Result<()> {
     sender
         .broadcast(bytes)
         .await
@@ -288,14 +354,13 @@ async fn broadcast(sender: &MeshSender, bytes: Bytes) -> Result<()> {
 mod tests {
     use crate::testing::{endpoint_id, fresh_state, nick};
 
-    use bytes::Bytes;
-
     use iroh::EndpointId;
 
-    use super::{Lane, Route, lane_for, route};
+    use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
     use crate::protocol::message::AppFrameParams;
-    use crate::protocol::{AppTag, CorrId, MeshId, Message, MessageBody};
+    use crate::protocol::message::{Verified, WireFrame};
+    use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
 
     fn mesh() -> MeshId {
         MeshId::from("test")
@@ -322,11 +387,12 @@ mod tests {
     }
 
     /// A directed frame addressed to `bob` — a `Pong` is the simplest one.
-    fn directed_msg() -> Message {
-        Message::new_pong(&mesh(), &nick("alice"), nick("bob"))
+    fn directed_msg() -> Verified {
+        Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
+            .sign(&Identity::generate())
     }
 
-    fn open_broadcast() -> Message {
+    fn open_broadcast() -> Verified {
         Message::new_app(
             &mesh(),
             &nick("alice"),
@@ -337,6 +403,103 @@ mod tests {
                 body: body(),
             },
         )
+        .sign(&Identity::generate())
+    }
+
+    // ── lane peers ────────────────────────────────────────────────────
+
+    /// A lane peer: no IP address, only a relay. On a mesh whose relay is lookup only, a frame to
+    /// it is held, and holding it is what asks for its session.
+    fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.local_udp_transport = true;
+        let bob = endpoint_id(1);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+        );
+        (state, bob)
+    }
+
+    /// A cold send to a lane peer with no session holds the frame and marks the session wanted.
+    #[test]
+    fn a_frame_held_for_a_lane_peer_marks_its_session_wanted() {
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        let now = crate::util::clock::Instant::now();
+        assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
+
+        let error = resolve(
+            &directed_msg(),
+            directed_msg().serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(state.lane_session_wanted(bob, now), "the held frame asks");
+    }
+
+    /// A peer with an IP path is held too on a lookup-only relay, but its direct path comes
+    /// from the probe, so no session is wanted for it.
+    #[test]
+    fn a_frame_held_for_a_peer_with_an_ip_path_does_not_want_a_session() {
+        let (mut state, bob) = state_knowing_bob();
+        state.direct.remove(&bob);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
+        );
+        state.local_udp_transport = true;
+
+        let error = resolve(
+            &directed_msg(),
+            directed_msg().serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+    }
+
+    /// A pair that had a direct path and lost it reads as the relay. Its parked frame asks for a
+    /// session even though the pair has an IP address: a failed offer leaves the pair on the
+    /// relay with nobody to offer again, and the next parked frame renews the want.
+    #[test]
+    fn a_frame_held_for_a_pair_that_reads_as_relay_wants_a_session() {
+        use crate::daemon::state::DirectState;
+        use crate::transport::probe::PathKind;
+
+        let (mut state, bob) = state_knowing_bob();
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
+        );
+        state.local_udp_transport = true;
+        state.direct.insert(bob, DirectState::RelayOnly);
+        state.path_kinds.insert(bob, PathKind::Relay);
+
+        let error = resolve(
+            &directed_msg(),
+            directed_msg().serialize().expect("serialize"),
+            &state,
+        )
+        .expect_err("a lookup-only relay holds the frame");
+        note_held(&mut state, &error);
+
+        assert!(state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+    }
+
+    /// On a mesh whose relay carries payload, the cold send to a lane peer is not held: it goes
+    /// over the relay, and the climb opens the session later.
+    #[test]
+    fn on_a_payload_relay_the_cold_send_to_a_lane_peer_is_not_held() {
+        let (mut state, bob) = state_knowing_a_lane_bob();
+        state.relay_transport = true;
+
+        assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
     }
 
     // ── the p2p path ──────────────────────────────────────────────────
@@ -351,7 +514,9 @@ mod tests {
     #[tokio::test]
     async fn a_courtesy_reply_to_a_cold_peer_does_not_dial() {
         let (state, bob) = state_knowing_bob();
-        let sent = super::send_best_effort(bob, Bytes::from_static(b"pong"), &state).await;
+        let sent =
+            super::send_best_effort(bob, directed_msg().serialize().expect("serialize"), &state)
+                .await;
 
         assert!(!sent, "there is no warm path to this peer");
         assert_eq!(
@@ -372,7 +537,9 @@ mod tests {
     async fn a_courtesy_reply_to_a_cold_linked_neighbor_dials_off_the_loop() {
         let (mut state, bob) = state_knowing_bob();
         state.linked_endpoints.insert(bob);
-        let sent = super::send_best_effort(bob, Bytes::from_static(b"pong"), &state).await;
+        let sent =
+            super::send_best_effort(bob, directed_msg().serialize().expect("serialize"), &state)
+                .await;
 
         assert!(sent, "a linked neighbor is answered even with a cold pool");
         assert_eq!(
@@ -415,7 +582,7 @@ mod tests {
         state
             .direct
             .insert(bob_addr.id, crate::daemon::state::DirectState::Direct);
-        crate::lookup::add_peer_addr(endpoint, bob_addr.clone()).expect("register bob");
+        crate::lookup::add_peer_addr(&crate::lookup::address_book(endpoint), bob_addr.clone());
         state.peer_endpoints.insert(nick("bob"), bob_addr);
         state
     }
@@ -452,7 +619,7 @@ mod tests {
     async fn a_background_send_to_a_cold_peer_returns_at_once() {
         let (state, _endpoint, sender, _silent) = state_with_silent_bob().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let started = std::time::Instant::now();
         let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
@@ -484,7 +651,7 @@ mod tests {
         state.unicast_pool.note_dial_failure(bob).await;
         let (_endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
 
@@ -503,7 +670,7 @@ mod tests {
     async fn two_background_sends_to_one_cold_peer_share_one_dial() {
         let (state, _endpoint, sender, _silent) = state_with_silent_bob().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let first = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
         tokio::task::yield_now().await;
@@ -511,7 +678,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(first, "the first send starts the dial");
-        assert!(!second, "the second send finds the dial in flight");
+        assert!(second, "the second send waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
     }
 
@@ -523,14 +690,14 @@ mod tests {
         state.linked_endpoints.insert(bob);
         let (_endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
         let replied = super::send_best_effort(bob, bytes, &state).await;
         tokio::task::yield_now().await;
 
         assert!(sent, "the background send starts the dial");
-        assert!(!replied, "the reply finds the dial in flight");
+        assert!(replied, "the reply waits for the dial in flight");
         assert_eq!(state.unicast_pool.dial_attempts(), 1);
     }
 
@@ -541,7 +708,7 @@ mod tests {
         let state = fresh_state();
         let (_endpoint, sender) = loopback_node().await;
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let sent = super::deliver_in_background(&msg, bytes, &state, &sender).await;
 
@@ -577,7 +744,7 @@ mod tests {
             "loopback selects a direct path"
         );
         let msg = directed_msg();
-        let bytes = Bytes::from(msg.serialize().expect("serialize"));
+        let bytes = msg.serialize().expect("serialize");
 
         let sent = super::deliver_in_background(&msg, bytes.clone(), &state, &sender).await;
 
@@ -587,7 +754,7 @@ mod tests {
                 .await
                 .expect("bob reads the frame in time")
                 .expect("reader task");
-        assert_eq!(got, bytes.to_vec());
+        assert_eq!(got, bytes.as_bytes().to_vec());
         assert_eq!(
             state.unicast_pool.dial_attempts(),
             0,
@@ -621,8 +788,10 @@ mod tests {
                 corr: Some(CorrId::from("00000000-0000-0000-0000-0000000000aa")),
                 body: body(),
             },
-        );
-        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"));
+        )
+        .sign(&Identity::generate());
+        let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
+            .sign(&Identity::generate());
         assert_eq!(route(&req, &state), Route::Unicast(bob));
         assert_eq!(route(&pong, &state), Route::Unicast(bob));
     }
@@ -747,6 +916,8 @@ mod tests {
         let bob = endpoint_id(1);
         let bob_key = "bb".repeat(32);
         let carol_key = "cc".repeat(32);
+        let bob_signer = crate::protocol::AuthorKey::from_hex(&bob_key).expect("a key");
+        let carol_signer = crate::protocol::AuthorKey::from_hex(&carol_key).expect("a key");
         let linked = || {
             let mut state = fresh_state();
             prove(&mut state, &bob_key, bob);
@@ -757,30 +928,30 @@ mod tests {
             state
         };
 
-        assert_eq!(unicast_answer_target(&bob_key, &linked()), Some(bob));
+        assert_eq!(unicast_answer_target(&bob_signer, &linked()), Some(bob));
         assert_eq!(
-            unicast_answer_target(&carol_key, &linked()),
+            unicast_answer_target(&carol_signer, &linked()),
             None,
             "no known endpoint"
         );
         let mut rendezvous = linked();
         rendezvous.rendezvous_id = Some(bob);
         assert_eq!(
-            unicast_answer_target(&bob_key, &rendezvous),
+            unicast_answer_target(&bob_signer, &rendezvous),
             None,
             "the rendezvous pseudo-node"
         );
         let mut held = linked();
         held.direct.remove(&bob);
         assert_eq!(
-            unicast_answer_target(&bob_key, &held),
+            unicast_answer_target(&bob_signer, &held),
             None,
             "no proven direct path on a lookup-only relay"
         );
         let mut unlinked = linked();
         unlinked.linked_endpoints.remove(&bob);
         assert_eq!(
-            unicast_answer_target(&bob_key, &unlinked),
+            unicast_answer_target(&bob_signer, &unlinked),
             None,
             "known but not a gossip neighbor"
         );
@@ -789,17 +960,13 @@ mod tests {
     /// Record, as a verified `PeerInfo` proof would, that the signing key
     /// `pubkey` (hex) owns `endpoint`.
     fn prove(state: &mut EventLoopState, pubkey: &str, endpoint: EndpointId) {
-        let signer = crate::transport::endpoint_proof::signer_bytes(pubkey).expect("a 32-byte key");
+        let signer = crate::protocol::AuthorKey::from_hex(pubkey).expect("a 32-byte key");
         let linked = state.linked_endpoints.clone();
         state.proven_endpoints.insert(signer, endpoint, &linked);
     }
 
     /// [`prove`] for the key of `identity`.
-    fn prove_identity(
-        state: &mut EventLoopState,
-        identity: &crate::protocol::identity::Identity,
-        endpoint: EndpointId,
-    ) {
+    fn prove_identity(state: &mut EventLoopState, identity: &Identity, endpoint: EndpointId) {
         let pubkey = crate::protocol::identity::encode_pubkey(&identity.public());
         prove(state, &pubkey, endpoint);
     }
@@ -811,8 +978,8 @@ mod tests {
         endpoint: iroh::Endpoint,
         sender: crate::transport::MeshSender,
         mesh: MeshId,
-        identity: crate::protocol::identity::Identity,
-        our_pubkey: String,
+        identity: Identity,
+        our_pubkey: crate::protocol::AuthorKey,
         author: crate::protocol::Nickname,
         sink: crate::gossip::event::SilentSink,
     }
@@ -825,7 +992,7 @@ mod tests {
                 mesh: &self.mesh,
                 author: &self.author,
                 identity: &self.identity,
-                our_pubkey: &self.our_pubkey,
+                our_pubkey: self.our_pubkey,
                 max_peers: 16,
                 rendezvous_id: endpoint_id(9),
                 external_msg_tx: None,
@@ -840,15 +1007,15 @@ mod tests {
     async fn holder(
         bob_addr: iroh::EndpointAddr,
         changes: usize,
-    ) -> (Net, EventLoopState, Vec<Bytes>) {
+    ) -> (Net, EventLoopState, Vec<WireFrame>) {
         use crate::protocol::Channel;
-        use crate::protocol::identity::{Identity, encode_pubkey};
+        use Identity;
 
         let (endpoint, sender) = loopback_node().await;
         let mut state = state_with_pool(&endpoint, bob_addr);
         let mesh = MeshId::from("test");
         let seed = *state.identity.public().as_bytes();
-        let mut write = |channel: Channel| -> Vec<Bytes> {
+        let mut write = |channel: Channel| -> Vec<WireFrame> {
             (0..changes)
                 .map(|step| {
                     let change = state
@@ -861,16 +1028,16 @@ mod tests {
                         .compose_wire_body(&change, None)
                         .expect("compose the wire body");
                     let frame = Message::new_channel_event(&mesh, &nick("alice"), wire, channel)
-                        .signed(&state.identity);
+                        .sign(&state.identity);
                     let _ = state.doc_mut(channel).ingest(&frame);
-                    Bytes::from(frame.serialize().expect("serialize"))
+                    frame.serialize().expect("serialize")
                 })
                 .collect()
         };
         let frames = write(Channel::State);
         write(Channel::Meta);
         let identity = Identity::generate();
-        let our_pubkey = encode_pubkey(&identity.public());
+        let our_pubkey = identity.author_key();
         let net = Net {
             endpoint,
             sender,
@@ -888,11 +1055,11 @@ mod tests {
         mesh: &MeshId,
         channel: crate::protocol::Channel,
         heads: &serde_json::Value,
-        asker: &crate::protocol::identity::Identity,
-    ) -> Message {
+        asker: &Identity,
+    ) -> Verified {
         let body = MessageBody::new(serde_json::json!({ "heads": heads }).to_string())
             .expect("a JSON body");
-        Message::new_channel_digest(mesh, &nick("bob"), body, channel).signed(asker)
+        Message::new_channel_digest(mesh, &nick("bob"), body, channel).sign(asker)
     }
 
     /// A state digest from a linked neighbor with a direct path is answered
@@ -920,7 +1087,7 @@ mod tests {
             }
             (got, bob_endpoint, conn)
         });
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
@@ -939,7 +1106,10 @@ mod tests {
                 .await
                 .expect("bob reads the answer in time")
                 .expect("reader task");
-        let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
+        let expected: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|bytes| bytes.as_bytes().to_vec())
+            .collect();
         assert_eq!(got, expected, "every frame, in order");
     }
 
@@ -955,14 +1125,14 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
-        let bob = crate::protocol::identity::Identity::generate();
+        let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_endpoint.id());
         let body = MessageBody::new(
             serde_json::json!({ "heads": ["heads-we-do-not-hold"], "closing": true }).to_string(),
         )
         .expect("a JSON body");
         let closing =
-            Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State).signed(&bob);
+            Message::new_channel_digest(&net.mesh, &nick("bob"), body, Channel::State).sign(&bob);
 
         let answered = handle_state_digest(Channel::State, &closing, &mut state, &net.ctx()).await;
         assert_eq!(
@@ -1012,7 +1182,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
-        let third = crate::protocol::identity::Identity::generate();
+        let third = Identity::generate();
         prove_identity(&mut state, &third, bob_endpoint.id());
         let unknown = serde_json::json!(["heads-we-do-not-hold"]);
         let request = digest(&net.mesh, Channel::State, &unknown, &third);
@@ -1035,7 +1205,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         state.linked_endpoints.insert(bob_endpoint.id());
-        let stranger = crate::protocol::identity::Identity::generate();
+        let stranger = Identity::generate();
         let posing_as_bob = digest(&net.mesh, Channel::State, &serde_json::json!([]), &stranger);
 
         let answered =
@@ -1061,7 +1231,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         let ctx = net.ctx();
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         prove_identity(&mut state, &asker, bob_endpoint.id());
         let empty = serde_json::json!([]);
         let state_digest = digest(&net.mesh, Channel::State, &empty, &asker);
@@ -1133,7 +1303,7 @@ mod tests {
         let (net, mut state, _frames) = holder(bob_addr.clone(), 3).await;
         state.linked_endpoints.insert(bob_addr.id);
         let ctx = net.ctx();
-        let bob = crate::protocol::identity::Identity::generate();
+        let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_addr.id);
         let ahead = digest(
             &net.mesh,
@@ -1195,7 +1365,7 @@ mod tests {
         let (net, mut state, _frames) = holder(unreachable.clone(), 3).await;
         state.linked_endpoints.insert(unreachable.id);
         let ctx = net.ctx();
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         prove_identity(&mut state, &asker, unreachable.id);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
@@ -1205,9 +1375,9 @@ mod tests {
             "handed to the pool as a point-to-point batch"
         );
 
-        tokio::time::sleep(std::time::Duration::from_millis(
-            crate::util::tuning::FAST_ROUND_MIN_INTERVAL_MS + 50,
-        ))
+        tokio::time::sleep(
+            crate::util::tuning::FAST_ROUND_MIN_INTERVAL + std::time::Duration::from_millis(50),
+        )
         .await;
         let again = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(
@@ -1235,7 +1405,7 @@ mod tests {
             .compose_wire_body(&change, None)
             .expect("compose the wire body");
         let frame = Message::new_channel_event(mesh, &nick("alice"), wire, Channel::State)
-            .signed(&state.identity);
+            .sign(&state.identity);
         let _ = state.doc_mut(Channel::State).ingest(&frame);
     }
 
@@ -1250,7 +1420,7 @@ mod tests {
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _frames) = holder(bob_endpoint.addr(), 3).await;
         let ctx = net.ctx();
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         let current = serde_json::to_value(state.doc(Channel::State).heads()).expect("heads");
         let up_to_date = digest(&net.mesh, Channel::State, &current, &asker);
         let behind = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
@@ -1293,19 +1463,23 @@ mod tests {
             crate::transport::path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
             "loopback selects a direct path"
         );
-        let batch = |tag: &str| {
+        // Two batches of signed frames, each frame with its own id, so the reader sees four distinct
+        // frames in whatever order the batches land.
+        let batch = || -> Vec<WireFrame> {
             (0..2)
-                .map(|step| Bytes::from(format!("{tag}{step}")))
-                .collect::<Vec<_>>()
+                .map(|_| directed_msg().serialize().expect("serialize"))
+                .collect()
         };
+        let state_batch = batch();
+        let meta_batch = batch();
 
         let first = state
             .unicast_pool
-            .send_batch_in_background(bob, batch("state"))
+            .send_batch_in_background(bob, state_batch.clone())
             .await;
         let second = state
             .unicast_pool
-            .send_batch_in_background(bob, batch("meta"))
+            .send_batch_in_background(bob, meta_batch.clone())
             .await;
 
         assert!(first, "the first batch starts");
@@ -1316,15 +1490,13 @@ mod tests {
                 .expect("bob reads both batches in time")
                 .expect("reader task");
         got.sort();
-        assert_eq!(
-            got,
-            vec![
-                b"meta0".to_vec(),
-                b"meta1".to_vec(),
-                b"state0".to_vec(),
-                b"state1".to_vec()
-            ]
-        );
+        let mut expected: Vec<Vec<u8>> = state_batch
+            .iter()
+            .chain(&meta_batch)
+            .map(|frame| frame.as_bytes().to_vec())
+            .collect();
+        expected.sort();
+        assert_eq!(got, expected);
     }
 
     /// Bob's side of a loopback link: the next `count` frames he reads.
@@ -1359,7 +1531,7 @@ mod tests {
         state.linked_endpoints.insert(bob_endpoint.id());
         let bob_id = bob_endpoint.id();
         let received = read_frames(bob_endpoint, 4);
-        let asker = crate::protocol::identity::Identity::generate();
+        let asker = Identity::generate();
         prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
@@ -1375,7 +1547,10 @@ mod tests {
             .await
             .expect("bob reads the answer in time")
             .expect("reader task");
-        let expected: Vec<Vec<u8>> = frames.iter().map(|bytes| bytes.to_vec()).collect();
+        let expected: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|bytes| bytes.as_bytes().to_vec())
+            .collect();
         assert_eq!(got[..3], expected[..], "the three frames first, in order");
         let last = Message::parse(&got[3]).expect("the last frame parses");
         assert_eq!(last.kind, MessageKind::StateDigest, "then a state digest");
@@ -1401,7 +1576,7 @@ mod tests {
         let ahead_heads = serde_json::json!(ahead.doc(Channel::State).heads());
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let (net, mut state, _none) = holder(bob_endpoint.addr(), 0).await;
-        let bob = crate::protocol::identity::Identity::generate();
+        let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_endpoint.id());
         let now = crate::util::clock::Instant::now();
 

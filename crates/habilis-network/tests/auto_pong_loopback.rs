@@ -9,26 +9,69 @@
 
 #![cfg(feature = "host")]
 
-use std::sync::{Arc, Mutex};
+use habilis_network::protocol::message::Authored;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
-    PingRound,
 };
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::{LookupOpts, Message, MessageKind, Nickname, PresenceSubtype};
+use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype};
 use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
 use tokio::sync::{Notify, oneshot};
 
 type Rtts = Vec<(Nickname, u64)>;
+
+fn log_buffer() -> &'static Mutex<String> {
+    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
+    BUFFER.get_or_init(|| Mutex::new(String::new()))
+}
+
+struct BufferWriter;
+
+impl std::io::Write for BufferWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        log_buffer()
+            .lock()
+            .expect("no poison")
+            .push_str(&String::from_utf8_lossy(bytes));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("habilis_network=info,habilis_network::transport=debug")
+    });
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(|| BufferWriter)
+        .with_ansi(false)
+        .try_init();
+}
+
+/// The last lines of the log, for the message of a failed assertion. The log is
+/// also written to the file that `HABILIS_TEST_LOG_DUMP` names, if set.
+fn trace() -> String {
+    let log = log_buffer().lock().expect("no poison").clone();
+    if let Ok(path) = std::env::var("HABILIS_TEST_LOG_DUMP") {
+        let _ = std::fs::write(path, &log);
+    }
+    let lines: Vec<&str> = log.lines().collect();
+    lines[lines.len().saturating_sub(200)..].join("\n")
+}
 
 /// Presence alone forms the mesh; a session request runs one ping round.
 struct Pinger;
 
 #[habilis_network::async_trait]
 impl NodeApp for Pinger {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: false,
             beat: true,
@@ -60,19 +103,7 @@ impl NodeDriver for Pinger {
         state: &mut EventLoopState,
         ctx: &HandlerCtx<'_>,
     ) -> bool {
-        let now = tokio::time::Instant::now();
-        state.arm_ping_round(PingRound {
-            t1: now,
-            deadline: now
-                + Duration::from_secs(habilis_network::runtime::tuning::ping_window_secs()),
-            pongs: std::collections::HashMap::new(),
-            resp: Some(resp),
-        });
-        habilis_network::ops::broadcast_msg(
-            ctx.sender,
-            &Message::new_ping(ctx.mesh, ctx.author).signed(ctx.identity),
-        )
-        .await;
+        habilis_network::ops::start_ping_round(state, ctx, Some(resp)).await;
         true
     }
 }
@@ -86,7 +117,7 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg } = event
+        if let NodeEvent::Presence { msg, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
             } = msg.kind
@@ -128,13 +159,13 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Pinger> {
         SetupParams {
             author,
             max_peers: 16,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),
             runtime_base: None,
             state_file: None,
             sink,
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,
@@ -155,6 +186,7 @@ async fn ping(node: &Node<Pinger>) -> Rtts {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
+    init_logging();
     let topic = format!("auto-pong-{}", rand::random::<u64>());
     let alice_saw = Arc::new(Joined::default());
     let bob_saw = Arc::new(Joined::default());
@@ -166,24 +198,50 @@ async fn each_peer_linked_only_by_gossip_answers_the_others_ping() {
     let bob_nick = Nickname::new("bob").expect("valid");
     assert!(
         alice_saw.wait_for(&bob_nick, deadline).await,
-        "alice never saw bob join"
+        "alice never saw bob join\n{}",
+        trace()
     );
     assert!(
         bob_saw.wait_for(&alice_nick, deadline).await,
-        "bob never saw alice join"
+        "bob never saw alice join\n{}",
+        trace()
     );
 
     let (alice_rtts, bob_rtts) = tokio::join!(ping(&alice), ping(&bob));
     let answered = |rtts: &Rtts, nick: &Nickname| rtts.iter().any(|(peer, _)| peer == nick);
     assert!(
         answered(&alice_rtts, &bob_nick),
-        "bob never answered alice's ping: {alice_rtts:?}"
+        "bob never answered alice's ping: {alice_rtts:?}\n{}",
+        trace()
     );
     assert!(
         answered(&bob_rtts, &alice_nick),
-        "alice never answered bob's ping: {bob_rtts:?}"
+        "alice never answered bob's ping: {bob_rtts:?}\n{}",
+        trace()
     );
 
+    alice.leave().await.expect("alice leaves");
+    bob.leave().await.expect("bob leaves");
+}
+
+/// A probe sent while no link exists reaches nobody, so the first probe of a round is lost. The
+/// second one, sent at the middle of the window, meets a linked peer, and the round holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ping_sent_before_any_link_exists_is_answered_after_the_second_probe() {
+    init_logging();
+    let topic = format!("auto-pong-early-{}", rand::random::<u64>());
+    let alice = spawn(&topic, "alice", Arc::new(Joined::default())).await;
+    let bob = spawn(&topic, "bob", Arc::new(Joined::default())).await;
+    let bob_nick = Nickname::new("bob").expect("valid");
+
+    // No wait for `joined`: the round starts before the pair is linked.
+    let rtts = ping(&alice).await;
+
+    assert!(
+        rtts.iter().any(|(peer, _)| *peer == bob_nick),
+        "bob never answered alice's early ping: {rtts:?}\n{}",
+        trace()
+    );
     alice.leave().await.expect("alice leaves");
     bob.leave().await.expect("bob leaves");
 }

@@ -42,15 +42,15 @@ async fn spawn_bot(topic: &str, nick: &str) -> Bot {
     let config = setup_mesh(
         kind,
         SetupParams {
-            author,
+            author: author.clone(),
             max_peers: 16,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),
             runtime_base: None,
             state_file: None,
             sink: std::sync::Arc::new(SilentSink),
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,
@@ -61,11 +61,7 @@ async fn spawn_bot(topic: &str, nick: &str) -> Bot {
 
     let (driver, pending) = RollbackDriver::<LightCycles>::new();
     let node: Node<RollbackDriver<LightCycles>> = Node::spawn(config, driver, None, false);
-    let game = Game::new(
-        pending.connect(node.sender()),
-        topic.to_string(),
-        nick.to_string(),
-    );
+    let game = Game::new(pending.connect(node.sender()), topic.to_string(), author);
 
     Bot { node, game }
 }

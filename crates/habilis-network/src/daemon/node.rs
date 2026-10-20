@@ -1,5 +1,4 @@
 use std::fmt;
-use std::time::Duration;
 
 // `n0_future::task` is `tokio::task` verbatim off wasm32, and a
 // `wasm-bindgen-futures` shim in a browser — where there is no runtime to
@@ -11,8 +10,9 @@ use tokio::sync::{broadcast, mpsc};
 use crate::daemon::app::NodeDriver;
 use crate::daemon::config::{DriverMode, EventLoopConfig};
 use crate::protocol::mesh::MeshName;
-use crate::protocol::{MeshId, Message, Nickname};
-use crate::util::tuning::{NODE_LEAVE_SECS, SESSION_REQUEST_CAP};
+use crate::protocol::message::Authored;
+use crate::protocol::{MeshId, Nickname};
+use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 
 /// A live in-process membership over a background event loop, generic over the
 /// application driver `A`. Drop it (or call [`Node::leave`]) to wind the loop
@@ -24,6 +24,25 @@ pub struct Node<A: NodeDriver> {
     req_tx: mpsc::Sender<A::Session>,
     quit_tx: mpsc::Sender<()>,
     task: Option<JoinHandle<anyhow::Result<()>>>,
+    /// The ports this node's endpoint is bound on, for a test that names which
+    /// nodes to cut from which. Read once at spawn: the ports do not change.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    bound_ports: Vec<u16>,
+    /// The id and bound ports of this node's multihop underlay endpoint, `None`
+    /// when multihop is off. For a test that blocks IP on the underlay.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    underlay: Option<(iroh::EndpointId, Vec<u16>)>,
+    /// What a test needs to make this node die as a process does: its sessions
+    /// and its endpoint.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    crash_handles: (
+        habilis_network_iroh_webrtc_transport::WebRtcHandle,
+        iroh::Endpoint,
+    ),
 }
 
 // `A::Session` need not be `Debug`, and the channels/handle aren't useful in a
@@ -56,7 +75,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     pub fn spawn(
         mut cfg: EventLoopConfig,
         app: A,
-        push: Option<broadcast::Sender<Message>>,
+        push: Option<broadcast::Sender<Authored>>,
         handle_signals: bool,
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<A::Session>(SESSION_REQUEST_CAP);
@@ -69,6 +88,24 @@ impl<A: NodeDriver + 'static> Node<A> {
         let mesh_id = cfg.mesh.clone();
         let name = cfg.name.clone();
         let nickname = cfg.author.clone();
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        let bound_ports = cfg
+            .endpoint
+            .bound_sockets()
+            .iter()
+            .map(std::net::SocketAddr::port)
+            .collect();
+        #[cfg(all(
+            feature = "iroh-test-utils",
+            feature = "host",
+            not(target_arch = "wasm32")
+        ))]
+        let underlay = cfg
+            .multihop
+            .as_ref()
+            .map(|handle| (handle.underlay_id().get(), handle.underlay_ports()));
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        let crash_handles = (cfg.webrtc_handle(), cfg.endpoint.clone());
         let task = n0_future::task::spawn(crate::daemon::run(cfg, app, Some(req_rx), None));
         Self {
             mesh_id,
@@ -77,7 +114,77 @@ impl<A: NodeDriver + 'static> Node<A> {
             req_tx,
             quit_tx,
             task: Some(task),
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            bound_ports,
+            #[cfg(all(
+                feature = "iroh-test-utils",
+                feature = "host",
+                not(target_arch = "wasm32")
+            ))]
+            underlay,
+            #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+            crash_handles,
         }
+    }
+
+    /// Tests only: make this node die as a process does. The loop is aborted
+    /// with no `Left`, the `WebRTC` sessions are aborted with no close, so their
+    /// far ends find out when ICE consent times out (about 22 s), and the
+    /// endpoint is closed so nothing answers a later dial. Dropping the node
+    /// does only the first, and leaves its sessions answering ICE consent.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    pub async fn crash(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        let (webrtc, endpoint) = &self.crash_handles;
+        let _ = webrtc.abort_sessions();
+        endpoint.close().await;
+    }
+
+    /// Tests only: the ports this node's endpoint is bound on. A test that cuts
+    /// one group of nodes from another gives each node the other group's ports
+    /// (`Request::BlockIpTo`).
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn bound_ports(&self) -> &[u16] {
+        &self.bound_ports
+    }
+
+    /// Tests only: the id of this node's member endpoint. A test that reads
+    /// the log for one pair of nodes matches its lines by these ids.
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn endpoint_id(&self) -> iroh::EndpointId {
+        self.crash_handles.1.id()
+    }
+
+    /// Tests only: the id of this node's multihop underlay endpoint, or `None`
+    /// when multihop is off. The underlay has a key of its own, so a test that
+    /// matches it to a member goes through `MultihopHandle::app_id_of`.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    #[must_use]
+    pub fn underlay_id(&self) -> Option<iroh::EndpointId> {
+        self.underlay.as_ref().map(|(id, _)| *id)
+    }
+
+    /// Tests only: the ports this node's multihop underlay endpoint is bound on,
+    /// empty when multihop is off. Like [`bound_ports`](Self::bound_ports), but
+    /// for the underlay: blocking IP on it is what forces cells onto a hop.
+    #[cfg(all(
+        feature = "iroh-test-utils",
+        feature = "host",
+        not(target_arch = "wasm32")
+    ))]
+    #[must_use]
+    pub fn underlay_ports(&self) -> &[u16] {
+        self.underlay
+            .as_ref()
+            .map_or(&[], |(_, ports)| ports.as_slice())
     }
 
     /// The resolved mesh id.
@@ -123,7 +230,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     }
 
     /// Ask the loop to broadcast `Left` and wind down, waiting up to
-    /// [`NODE_LEAVE_SECS`]. On
+    /// [`NODE_LEAVE`]. On
     /// timeout returns `Ok(())` and the task detaches.
     ///
     /// # Errors
@@ -131,7 +238,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     pub async fn leave(mut self) -> anyhow::Result<()> {
         let _ = self.quit_tx.send(()).await;
         if let Some(task) = self.task.take() {
-            let timeout = n0_future::time::sleep(Duration::from_secs(NODE_LEAVE_SECS));
+            let timeout = n0_future::time::sleep(NODE_LEAVE);
             tokio::select! {
                 joined = task => {
                     joined

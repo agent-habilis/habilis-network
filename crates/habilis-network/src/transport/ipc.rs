@@ -13,9 +13,7 @@ use crate::protocol::{MeshId, MessageId, Nickname};
 use crate::util::bounded_read::{LineRead, read_bounded_line};
 use crate::util::clock::millis_saturating;
 use crate::util::consts::{MAX_IPC_COMMAND_BYTES, MAX_IPC_RESPONSE_BYTES};
-use crate::util::tuning::{
-    IPC_ACCEPT_BACKOFF_MAX_SECS, IPC_ACCEPT_BACKOFF_MIN_MS, IPC_IO_TIMEOUT_SECS,
-};
+use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
 use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
 
 /// Returns the IPC endpoint identifier for a specific agent on a mesh —
@@ -53,7 +51,7 @@ pub trait Addressed {
 #[must_use]
 /// # Panics
 /// Panics if an internal invariant is violated.
-pub fn json_ok_msg(id: &MessageId, msg: &crate::protocol::Message) -> String {
+pub fn json_ok_msg(id: &MessageId, msg: &crate::protocol::message::Verified) -> String {
     serde_json::json!({
         "ok": true,
         "id": id,
@@ -138,12 +136,12 @@ pub(crate) async fn serve<C>(
     // meant to run for weeks. The backoff keeps a persistently failing
     // listener from spinning; the operator-facing error event fires
     // once per failure streak, not once per retry.
-    let mut backoff = Duration::from_millis(IPC_ACCEPT_BACKOFF_MIN_MS);
+    let mut backoff = IPC_ACCEPT_BACKOFF_MIN;
     let mut failing = false;
     loop {
         match listener.accept().await {
             Ok(stream) => {
-                backoff = Duration::from_millis(IPC_ACCEPT_BACKOFF_MIN_MS);
+                backoff = IPC_ACCEPT_BACKOFF_MIN;
                 failing = false;
                 let tx = tx.clone();
                 tokio::spawn(handle_connection::<C>(stream, tx));
@@ -169,9 +167,7 @@ pub(crate) async fn serve<C>(
 
 /// Double the accept backoff up to its cap.
 fn next_accept_backoff(current: Duration) -> Duration {
-    current
-        .saturating_mul(2)
-        .min(Duration::from_secs(IPC_ACCEPT_BACKOFF_MAX_SECS))
+    current.saturating_mul(2).min(IPC_ACCEPT_BACKOFF_MAX)
 }
 
 async fn handle_connection<C>(stream: Stream, tx: mpsc::Sender<IpcMessage<C>>)
@@ -184,7 +180,7 @@ where
     // I/O deadline on both legs: a client that connects and goes silent
     // (or stops draining the response) would otherwise pin this task and
     // its fd for the daemon's lifetime.
-    let io_deadline = Duration::from_secs(IPC_IO_TIMEOUT_SECS);
+    let io_deadline = IPC_IO_TIMEOUT;
     let line = match tokio::time::timeout(
         io_deadline,
         read_bounded_line(&mut reader, MAX_IPC_COMMAND_BYTES),
@@ -529,12 +525,10 @@ mod tests {
 
     #[test]
     fn accept_backoff_doubles_to_cap() {
-        use std::time::Duration;
+        use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN};
 
-        use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX_SECS, IPC_ACCEPT_BACKOFF_MIN_MS};
-
-        let cap = Duration::from_secs(IPC_ACCEPT_BACKOFF_MAX_SECS);
-        let mut backoff = Duration::from_millis(IPC_ACCEPT_BACKOFF_MIN_MS);
+        let cap = IPC_ACCEPT_BACKOFF_MAX;
+        let mut backoff = IPC_ACCEPT_BACKOFF_MIN;
         let mut previous = backoff;
         for _ in 0..16 {
             backoff = super::next_accept_backoff(backoff);
@@ -557,7 +551,7 @@ mod tests {
     // An idle client (connects, never sends) must be disconnected at the
     // I/O deadline instead of pinning a handler task + fd for the
     // daemon's lifetime, and the listener must keep serving others
-    // throughout. Real-time: waits out `IPC_IO_TIMEOUT_SECS` (10s).
+    // throughout. Real-time: waits out `IPC_IO_TIMEOUT` (10s).
     #[tokio::test]
     async fn idle_connection_is_closed_at_the_read_deadline() {
         use interprocess::local_socket::{
@@ -592,7 +586,7 @@ mod tests {
         // The parked connection is closed (EOF) at the deadline, with margin.
         let mut sink = Vec::new();
         let read = tokio::time::timeout(
-            std::time::Duration::from_secs(crate::util::tuning::IPC_IO_TIMEOUT_SECS + 5),
+            crate::util::tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
             idle.read_to_end(&mut sink),
         )
         .await;

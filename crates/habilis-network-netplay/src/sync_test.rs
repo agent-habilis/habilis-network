@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use crate::config::Config;
 use crate::error::RollbackError;
 use crate::frame::Frame;
+use crate::handle::PlayerHandle;
 use crate::request::Request;
 use crate::sync::Sync;
 
@@ -68,7 +69,7 @@ impl<T: Config> SyncTestSession<T> {
             // The saved-state ring must span the forced rollback.
             // No delay, and every input is supplied locally, so the
             // local-handle argument is immaterial here.
-            sync: Sync::new(num_players, check_distance + 1, 0, 0),
+            sync: Sync::new(num_players, check_distance + 1, 0, PlayerHandle::new(0)),
             num_players,
             check_distance,
             pending: vec![None; num_players],
@@ -80,10 +81,14 @@ impl<T: Config> SyncTestSession<T> {
     ///
     /// # Errors
     /// [`RollbackError::InvalidPlayer`] if `player` is out of range.
-    pub fn add_input(&mut self, player: usize, input: T::Input) -> Result<(), RollbackError> {
+    pub fn add_input(
+        &mut self,
+        player: PlayerHandle,
+        input: T::Input,
+    ) -> Result<(), RollbackError> {
         let slot = self
             .pending
-            .get_mut(player)
+            .get_mut(player.index())
             .ok_or(RollbackError::InvalidPlayer(player))?;
         *slot = Some(input);
         Ok(())
@@ -105,22 +110,23 @@ impl<T: Config> SyncTestSession<T> {
         self.harvest_checksums()?;
 
         if let Some(missing) = self.pending.iter().position(Option::is_none) {
-            return Err(RollbackError::InvalidPlayer(missing));
+            return Err(RollbackError::InvalidPlayer(PlayerHandle::new(missing)));
         }
         // Infallible after the check above, and written without an `expect`
         // so this function has no panicking path at all.
         let frame = self.sync.current_frame();
         let supplied: Vec<T::Input> = self.pending.iter_mut().filter_map(Option::take).collect();
         for (player, input) in supplied.into_iter().enumerate() {
-            self.sync.add_remote_input(player, frame, input)?;
+            self.sync
+                .add_remote_input(PlayerHandle::new(player), frame, input)?;
         }
         // Every player's real input is present every frame, so nothing is
         // ever predicted here — the rollback below is forced, not provoked.
         self.sync.confirm_through(frame);
 
         let mut requests = Vec::new();
-        let rollback_to = frame - Frame::try_from(self.check_distance).unwrap_or(Frame::MAX);
-        if rollback_to >= 0 {
+        let rollback_to = frame - i32::try_from(self.check_distance).unwrap_or(i32::MAX);
+        if rollback_to >= Frame::ZERO {
             self.sync.force_rollback(rollback_to, &mut requests);
         }
         requests.push(self.sync.save_current_state());
@@ -135,8 +141,9 @@ impl<T: Config> SyncTestSession<T> {
     /// the first time, recording it if this is the first time.
     fn harvest_checksums(&mut self) -> Result<(), RollbackError> {
         let current = self.sync.current_frame();
-        let oldest = current - Frame::try_from(self.check_distance + 1).unwrap_or(Frame::MAX);
-        for frame in oldest.max(0)..=current {
+        let oldest = current - i32::try_from(self.check_distance + 1).unwrap_or(i32::MAX);
+        for number in oldest.max(Frame::ZERO).get()..=current.get() {
+            let frame = Frame::new(number);
             let Some(cell) = self.sync.saved_state(frame) else {
                 continue;
             };
@@ -159,7 +166,7 @@ impl<T: Config> SyncTestSession<T> {
         }
         // Frames older than the rollback window can never be re-simulated,
         // so their checksums are dead weight.
-        self.history = self.history.split_off(&oldest.max(0));
+        self.history = self.history.split_off(&oldest.max(Frame::ZERO));
         Ok(())
     }
 

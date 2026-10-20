@@ -2,9 +2,9 @@
 //! messages a node missed while partitioned/asleep/just-joined.
 //!
 //! The digest advertises a **window** of the message log: an inclusive
-//! `[lo, hi]` timestamp range plus the compact ids the sender holds in it
-//! (raw 16-byte UUIDs, Base58-packed, so ~10× more fit one gossip message
-//! than the old 36-char strings). A log larger than one window is swept
+//! `[lo, hi]` timestamp range plus the compact dedup keys the sender holds in
+//! it (`DedupKey`, 16 bytes each, Base58-packed, so ~10× more fit one gossip
+//! message than the old 36-char ids). A log larger than one window is swept
 //! across rounds via a rolling cursor; the `[lo, hi]` bounds let a receiver
 //! re-send only **in-window** gaps, so advertising a sub-window never makes
 //! peers perpetually re-broadcast the out-of-window remainder.
@@ -12,56 +12,81 @@
 //! A chat resend rides the same plane the original send chose: broadcast
 //! content goes back on gossip, and a directed frame goes point-to-point to
 //! its addressee — never to the peer that merely asked. Both follow from
-//! routing every chat resend through [`crate::transport::deliver`]. A state
+//! routing every chat resend through [`crate::transport::resolve`], the
+//! decision of [`crate::transport::deliver`]. Only a few members answer a
+//! digest ([`answers_digest`]), and the event loop only queues the answer: a
+//! task sends it (see `transport::outbox`). A state
 //! or meta answer is the exception: it goes point-to-point to the linked
 //! neighbor that asked, see [`handle_state_digest`].
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash as _, Hasher as _};
-use std::time::Duration;
 
-use crate::transport::MeshSender;
-use bytes::Bytes;
+use crate::transport::{MeshSender, Resend};
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::message_log::{DigestWindow, MissingQuery, WindowRange};
 use crate::daemon::state::EventLoopState;
-use crate::protocol::{Channel, MeshId, Message, Nickname};
+use crate::protocol::message::{Verified, WireFrame};
+use crate::protocol::{AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, UnixSecs};
 use crate::util::clock::Instant;
 use crate::util::tuning::{
-    ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN_SECS, ANTIENTROPY_SERVES_PER_WINDOW,
-    FAST_ROUND_ACTIVE_MS, FAST_ROUND_AHEAD_MAX, FAST_ROUND_AHEAD_TTL_SECS,
-    FAST_ROUND_MIN_INTERVAL_MS, FAST_ROUND_RETRY_MS, antientropy_max_resend,
+    ANTIENTROPY_ANSWERERS, ANTIENTROPY_DIGEST_WINDOW_IDS, ANTIENTROPY_SERVE_COOLDOWN,
+    ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_AHEAD_MAX, FAST_ROUND_AHEAD_TTL,
+    FAST_ROUND_MIN_INTERVAL, FAST_ROUND_RETRY, antientropy_max_resend,
 };
 
 use super::broadcast_msg;
 
-/// One window on the wire: its `[lo, hi]` ts bounds (`hi == i64::MAX` ⇒
-/// open-ended) plus its ids packed as raw 16-byte UUIDs, Base58-encoded.
+/// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
+/// open-ended), each a timestamp and the id key of the message at that edge, plus
+/// its dedup keys packed as 16 bytes each, Base58-encoded. The key is what lets an
+/// edge fall inside a second that holds more messages than a window lists.
 #[derive(Serialize, Deserialize)]
 struct WireWindow {
     lo: i64,
+    lo_key: String,
     hi: i64,
+    hi_key: String,
     ids: String,
+}
+
+fn encode_key(key: &DedupKey) -> String {
+    bs58::encode(key.as_bytes()).into_string()
+}
+
+fn decode_key(text: &str) -> Option<DedupKey> {
+    let bytes: [u8; 16] = bs58::decode(text).into_vec().ok()?.try_into().ok()?;
+    Some(DedupKey::from_bytes(bytes))
 }
 
 impl WireWindow {
     fn encode(window: &DigestWindow) -> Self {
         let mut packed = Vec::with_capacity(window.ids.len() * 16);
         for id in &window.ids {
-            packed.extend_from_slice(id);
+            packed.extend_from_slice(id.as_bytes());
         }
         WireWindow {
-            lo: window.lo,
-            hi: window.hi,
+            lo: window.lo.0.as_secs(),
+            lo_key: encode_key(&window.lo.1),
+            hi: window.hi.0.as_secs(),
+            hi_key: encode_key(&window.hi.1),
             ids: bs58::encode(packed).into_string(),
         }
     }
 
+    /// The window's bounds, or `None` if a key is malformed.
+    fn range(&self) -> Option<WindowRange> {
+        Some(WindowRange {
+            lo: (UnixSecs::from_secs(self.lo), decode_key(&self.lo_key)?),
+            hi: (UnixSecs::from_secs(self.hi), decode_key(&self.hi_key)?),
+        })
+    }
+
     /// Decode the packed ids into a set, or `None` if the Base58 / length
     /// is malformed.
-    fn decode_ids(&self) -> Option<HashSet<[u8; 16]>> {
+    fn decode_ids(&self) -> Option<HashSet<DedupKey>> {
         let raw = bs58::decode(&self.ids).into_vec().ok()?;
         if raw.len() % 16 != 0 {
             return None;
@@ -71,7 +96,7 @@ impl WireWindow {
                 .map(|chunk| {
                     let mut id = [0u8; 16];
                     id.copy_from_slice(chunk);
-                    id
+                    DedupKey::from_bytes(id)
                 })
                 .collect(),
         )
@@ -128,7 +153,7 @@ pub(crate) async fn broadcast_digest(
     state.idle.broadcasts += 1;
     broadcast_msg(
         sender,
-        &Message::new_digest(mesh, author, body).signed(&state.identity),
+        &Message::new_digest(mesh, author, body).sign(&state.identity),
     )
     .await;
 }
@@ -139,13 +164,18 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
     let recent = ANTIENTROPY_DIGEST_WINDOW_IDS;
     let mut newest = state.message_log.recent_window(recent)?;
     let older_len = state.message_log.older_len(recent);
-    if older_len == 0 {
-        // The window is the whole log, so its `lo` is only our first entry: the
-        // moment we first spoke, not when we joined. A node alone at start logs
-        // nothing until a link forms, and without this floor what the mesh said
-        // before that was never asked for. Nothing older than `joined_at` is
-        // ever surfaced, so asking from there costs no budget on history.
-        newest.lo = newest.lo.min(state.joined_at);
+    // The window that holds our oldest message reaches back to the moment we
+    // joined: a node alone at start logs nothing until a link forms, and
+    // without this floor what the mesh said before that was never asked for.
+    // Nothing older than `joined_at` is ever surfaced, so asking from there
+    // costs no budget on history. The floor takes in the whole second of the
+    // earlier of the two: a message of that second with a smaller id key than
+    // the first one we hold sorts before it, and is in range.
+    let floor = |window: &mut DigestWindow| {
+        window.lo = (state.joined_at.min(window.lo.0), DedupKey::MIN);
+    };
+    if newest.from_start {
+        floor(&mut newest);
     }
     let mut windows = vec![WireWindow::encode(&newest)];
 
@@ -153,12 +183,29 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
         state.digest_cursor = 0;
     } else {
         let start = state.digest_cursor % older_len;
-        if let Some(older) = state.message_log.older_window(recent, start, recent) {
+        if let Some(mut older) = state.message_log.older_window(recent, start, recent) {
+            if older.from_start {
+                floor(&mut older);
+            }
             state.digest_cursor = (start + older.ids.len()) % older_len;
             windows.push(WireWindow::encode(&older));
         }
     }
     Some(windows)
+}
+
+/// Say once per author that its digest could not be read. A build with another
+/// window format sends one every round, and the two builds never repair each
+/// other's gaps: without this line nothing tells the user why.
+fn report_unreadable_digest(message: &Verified, state: &mut EventLoopState) {
+    if state.report_unreadable_digest(message.key(), Instant::now()) {
+        tracing::warn!(
+            target: "habilis_network::gossip",
+            author = %message.author,
+            "digest from this peer could not be read: its window format differs, so \
+             it and this node do not repair each other's gaps"
+        );
+    }
 }
 
 /// Handle a received anti-entropy digest: for each advertised window, re-send
@@ -168,8 +215,8 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
 /// the repeat (dedup); the sender (and anyone else who missed them) recovers.
 /// Never logged.
 ///
-/// Each resend goes through [`crate::transport::deliver`] rather than straight
-/// onto gossip, so it takes the plane its addressing dictates — the same
+/// Each resend is routed by [`crate::transport::resolve`] rather than sent
+/// straight onto gossip, so it takes the plane its addressing dictates — the same
 /// decision the original send made. Paired with `missing_in_window`'s own
 /// addressee gate, a directed frame is re-sent point-to-point to its addressee
 /// and to nobody else, so backfill can't put on the gossip flood what the send
@@ -181,19 +228,21 @@ fn digest_windows(state: &mut EventLoopState) -> Option<Vec<WireWindow>> {
 /// so a per-window `have` would re-send a message the sender holds but listed
 /// under the *other* window — wasting the shared resend budget on messages the
 /// peer already has and starving the genuinely-missing tail.
-pub(crate) async fn handle_digest(
-    message: &Message,
-    state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
-) {
+pub(crate) fn handle_digest(message: &Verified, state: &mut EventLoopState, me: &Nickname) {
     let Ok(body) = serde_json::from_str::<DigestBody>(message.body.as_str()) else {
+        report_unreadable_digest(message, state);
         return;
     };
+    // Only a few members answer one digest (see `answers_digest`).
+    let members = state.peers.iter().chain(std::iter::once(me));
+    if !answers_digest(me, &message.author, message.id.as_str(), members) {
+        return;
+    }
     // One serve per author per window. Answering costs up to
     // `ANTIENTROPY_MAX_RESEND` mesh-wide broadcasts, so ungated this turns one
     // small frame into that much flooding from every member that hears it —
     // the cost scaling with the mesh rather than with the sender.
-    if !state.admit_digest(&message.pubkey, Instant::now()) {
+    if !state.admit_digest(message.key(), Instant::now()) {
         tracing::debug!(
             target: "habilis_network::gossip",
             author = %message.author,
@@ -201,7 +250,7 @@ pub(crate) async fn handle_digest(
         );
         return;
     }
-    let mut have: HashSet<[u8; 16]> = HashSet::new();
+    let mut have: HashSet<DedupKey> = HashSet::new();
     for window in &body.windows {
         if let Some(ids) = window.decode_ids() {
             have.extend(ids);
@@ -213,16 +262,17 @@ pub(crate) async fn handle_digest(
         if budget == 0 {
             break;
         }
+        let Some(range) = window.range() else {
+            report_unreadable_digest(message, state);
+            continue;
+        };
         for msg in state.message_log.missing_in_window(MissingQuery {
-            range: WindowRange {
-                lo: window.lo,
-                hi: window.hi,
-            },
+            range,
             have: &have,
             max: budget,
             requester: &message.author,
         }) {
-            if !resend_one(&msg, state, ctx).await {
+            if !resend_one(&msg, state) {
                 continue;
             }
             // Mark it sent so the next (overlapping) window doesn't re-send it
@@ -239,18 +289,79 @@ pub(crate) async fn handle_digest(
     }
 }
 
-/// Re-send one message on the plane its addressing dictates. Returns whether it
-/// was attempted at all — `false` only for the unserializable frame we somehow
-/// hold, which must not be charged to the round's budget.
-async fn resend_one(msg: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) -> bool {
+/// Queue one message on the plane its addressing dictates, for the task that
+/// drains the outbox. Never waits. Returns whether it was attempted at all —
+/// `false` only for the unserializable frame we somehow hold, which must not be
+/// charged to the round's budget.
+fn resend_one(msg: &Verified, state: &mut EventLoopState) -> bool {
     let Ok(bytes) = msg.serialize() else {
         return false;
     };
-    if let Err(error) = crate::transport::deliver(msg, Bytes::from(bytes), state, ctx.sender).await
-    {
-        tracing::debug!(target: "habilis_network::gossip", %error, "anti-entropy resend failed");
+    match crate::transport::resolve(msg, bytes, state) {
+        Ok(resend) => {
+            // The gossip layer drops a payload it has seen for 90 s, whether the app read it or
+            // not. A broadcast resend therefore carries a new nonce, and so a new name.
+            let resend = match resend {
+                Resend::Broadcast(frame) => {
+                    Resend::Broadcast(frame.with_resend_nonce(rand::random()))
+                }
+                unicast @ Resend::Unicast(..) => unicast,
+            };
+            if state.resend_outbox.offer(resend) {
+                state.idle.resent += 1;
+            } else {
+                state.idle.resend_dropped += 1;
+            }
+        }
+        Err(error) => {
+            tracing::debug!(target: "habilis_network::gossip", %error, "anti-entropy resend failed");
+        }
     }
     true
+}
+
+/// A member's place in the line for one digest: lower answers first.
+///
+/// A hash of the digest id and the member, so it is the same on every member
+/// that knows both, with no message to agree on it, and it changes with each
+/// digest. SHA-256 and not `DefaultHasher`, whose output may differ between
+/// builds: members on different builds would then pick different answerers.
+fn answer_rank(digest_id: &str, member: &Nickname) -> (u64, String) {
+    use sha2::{Digest as _, Sha256};
+
+    let hash = Sha256::new()
+        .chain_update(digest_id.as_bytes())
+        .chain_update([0])
+        .chain_update(member.as_str().as_bytes())
+        .finalize();
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&hash[..8]);
+    // The name breaks a tie, so the order is total.
+    (u64::from_be_bytes(head), member.as_str().to_owned())
+}
+
+/// Whether `me` is one of the [`ANTIENTROPY_ANSWERERS`] members that answer this
+/// digest: the first of the members in the order of [`answer_rank`], the asker
+/// left out.
+///
+/// Every member that holds what the asker lacks used to answer, and all but the
+/// first copy of each message were waste. A uniform rule that needs no talk
+/// between members: each one hashes the digest id with every member name and
+/// answers when it is among the lowest. Members that know slightly different
+/// rosters can pick slightly different sets, and that costs a duplicate or a
+/// missing answer, which the next digest repairs: a new digest id picks again.
+pub(crate) fn answers_digest<'a>(
+    me: &Nickname,
+    asker: &Nickname,
+    digest_id: &str,
+    members: impl Iterator<Item = &'a Nickname>,
+) -> bool {
+    let mine = answer_rank(digest_id, me);
+    let ahead = members
+        .filter(|member| *member != asker && *member != me)
+        .filter(|member| answer_rank(digest_id, member) < mine)
+        .count();
+    ahead < ANTIENTROPY_ANSWERERS
 }
 
 /// Sweep both shared-state channels' anti-entropy digests (one tick).
@@ -319,7 +430,7 @@ fn state_digest(
     state: &EventLoopState,
     origin: DigestOrigin<'_>,
     channel: Channel,
-) -> Option<Message> {
+) -> Option<Verified> {
     heads_digest(state, origin, channel, false)
 }
 
@@ -330,7 +441,7 @@ fn heads_digest(
     origin: DigestOrigin<'_>,
     channel: Channel,
     closing: bool,
-) -> Option<Message> {
+) -> Option<Verified> {
     if !state.overlay_reachable() {
         return None;
     }
@@ -338,14 +449,14 @@ fn heads_digest(
     let body = super::json_body(&HeadsBody { heads, closing })?;
     Some(
         Message::new_channel_digest(origin.mesh, origin.author, body, channel)
-            .signed(&state.identity),
+            .sign(&state.identity),
     )
 }
 
 /// The state digest answers served in the current window, per asker, channel
 /// and plane: at most [`ANTIENTROPY_SERVES_PER_WINDOW`] on the unicast plane,
 /// one on gossip. On unicast the same heads are answered again only after
-/// [`FAST_ROUND_MIN_INTERVAL_MS`], so a burst of one asker's digests draws one
+/// [`FAST_ROUND_MIN_INTERVAL`], so a burst of one asker's digests draws one
 /// answer and a lost answer can still be asked for again. A serve is counted
 /// when the answer is handed to the pool, not when it is delivered, so a batch
 /// that fails costs one serve, and the asker's next ask is answered. The
@@ -353,7 +464,8 @@ fn heads_digest(
 /// digest with made-up heads would be new every time.
 #[derive(Debug, Default)]
 pub(crate) struct ServeBudget {
-    windows: HashMap<(String, Channel, Plane), Served>,
+    /// The asker's key: every digest is verified, so it always has one.
+    windows: HashMap<(AuthorKey, Channel, Plane), Served>,
 }
 
 #[derive(Debug)]
@@ -365,11 +477,6 @@ struct Served {
 }
 
 impl ServeBudget {
-    const WINDOW: Duration = Duration::from_secs(ANTIENTROPY_SERVE_COOLDOWN_SECS);
-    /// The same heads are answered again after this on the unicast plane: the
-    /// asker repeats them when an answer was lost.
-    const REPEAT: Duration = Duration::from_millis(FAST_ROUND_MIN_INTERVAL_MS);
-
     /// Fast rounds run point-to-point only, so only the unicast plane needs
     /// more than one answer per window.
     fn limit(plane: Plane) -> usize {
@@ -380,11 +487,18 @@ impl ServeBudget {
     }
 
     /// Whether an answer to these heads may go out now.
-    pub(crate) fn admits(&self, key: &(String, Channel, Plane), heads: u64, now: Instant) -> bool {
+    pub(crate) fn admits(
+        &self,
+        key: &(AuthorKey, Channel, Plane),
+        heads: u64,
+        now: Instant,
+    ) -> bool {
         match self.windows.get(key) {
-            Some(served) if now.duration_since(served.since) < Self::WINDOW => {
+            Some(served) if now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN => {
+                // The same heads are answered again after the fast-round interval on
+                // the unicast plane: the asker repeats them when an answer was lost.
                 let repeat_too_soon = served.heads.get(&heads).is_some_and(|at| {
-                    key.2 == Plane::Gossip || now.duration_since(*at) < Self::REPEAT
+                    key.2 == Plane::Gossip || now.duration_since(*at) < FAST_ROUND_MIN_INTERVAL
                 });
                 !repeat_too_soon && served.answers < Self::limit(key.2)
             }
@@ -393,9 +507,9 @@ impl ServeBudget {
     }
 
     /// Record an answer to these heads, dropping windows that have ended.
-    pub(crate) fn note(&mut self, key: (String, Channel, Plane), heads: u64, now: Instant) {
+    pub(crate) fn note(&mut self, key: (AuthorKey, Channel, Plane), heads: u64, now: Instant) {
         self.windows
-            .retain(|_, served| now.duration_since(served.since) < Self::WINDOW);
+            .retain(|_, served| now.duration_since(served.since) < ANTIENTROPY_SERVE_COOLDOWN);
         let served = self.windows.entry(key).or_insert_with(|| Served {
             since: now,
             answers: 0,
@@ -410,7 +524,7 @@ impl ServeBudget {
 /// asked, and our heads and change count at that ask.
 #[derive(Debug)]
 struct Round {
-    peer: String,
+    peer: AuthorKey,
     at: Instant,
     heads: u64,
     changes: usize,
@@ -419,7 +533,7 @@ struct Round {
 /// A peer whose heads showed it is ahead of us.
 #[derive(Debug, Clone)]
 struct Waiting {
-    pubkey: String,
+    key: AuthorKey,
     author: Nickname,
     heads: Vec<String>,
     noted: Instant,
@@ -445,42 +559,39 @@ pub(crate) struct FastRounds {
 }
 
 impl FastRounds {
-    const MIN_INTERVAL: Duration = Duration::from_millis(FAST_ROUND_MIN_INTERVAL_MS);
-    const ACTIVE: Duration = Duration::from_millis(FAST_ROUND_ACTIVE_MS);
-
     /// The peer of the running round may be asked at once once a full answer
     /// landed since the last ask: the heads that close an answer are the cue
     /// to go on. New heads alone are not, because two answers can be in
     /// flight at once and our heads move with every frame of either; asking
     /// on each ran two chains of asks at two serves per round. Otherwise the
-    /// round waits [`FAST_ROUND_MIN_INTERVAL_MS`] or the retry tick, 400 to
+    /// round waits [`FAST_ROUND_MIN_INTERVAL`] or the retry tick, 400 to
     /// 800 ms, so a peer that advertises heads nobody can hold costs one small
     /// frame per interval. A holder with a smaller resend budget never sends a
     /// full answer, so each of its rounds takes that wait. Another peer starts
     /// a round only when the running one went quiet for
-    /// [`FAST_ROUND_ACTIVE_MS`].
+    /// [`FAST_ROUND_ACTIVE`].
     fn may_ask(
         &self,
-        peer: &str,
+        peer: &AuthorKey,
         channel: Channel,
         heads: u64,
         changes: usize,
         now: Instant,
     ) -> bool {
         self.rounds.get(&channel).is_none_or(|round| {
-            if round.peer == peer {
+            if round.peer == *peer {
                 let quiet = now.duration_since(self.quiet_since(channel, round));
                 let answered = changes.saturating_sub(round.changes) >= antientropy_max_resend();
-                (round.heads != heads && answered) || quiet >= Self::MIN_INTERVAL
+                (round.heads != heads && answered) || quiet >= FAST_ROUND_MIN_INTERVAL
             } else {
-                now.duration_since(round.at) >= Self::ACTIVE
+                now.duration_since(round.at) >= FAST_ROUND_ACTIVE
             }
         })
     }
 
     fn note_asked(
         &mut self,
-        peer: String,
+        peer: AuthorKey,
         channel: Channel,
         heads: u64,
         changes: usize,
@@ -502,26 +613,26 @@ impl FastRounds {
         self.last_change.insert(channel, now);
     }
 
-    /// Whether a change landed on `channel` within [`FAST_ROUND_MIN_INTERVAL_MS`]:
+    /// Whether a change landed on `channel` within [`FAST_ROUND_MIN_INTERVAL`]:
     /// a holder is serving us, so a digest an event would send now draws a
     /// second answer that overlaps the one arriving.
     pub(crate) fn changed_recently(&self, channel: Channel, now: Instant) -> bool {
         self.last_change
             .get(&channel)
-            .is_some_and(|&changed| now.duration_since(changed) < Self::MIN_INTERVAL)
+            .is_some_and(|&changed| now.duration_since(changed) < FAST_ROUND_MIN_INTERVAL)
     }
 
     /// Where a round's wait starts: its ask, or the last change that landed
     /// after it, since under load an answer's frames arrive over more than the
     /// wait and an ask sent meanwhile draws an answer that overlaps it. Capped
-    /// at [`FAST_ROUND_ACTIVE_MS`] after the ask, so live writes cannot hold a
+    /// at [`FAST_ROUND_ACTIVE`] after the ask, so live writes cannot hold a
     /// stalled round; an answer slower than that overlaps again.
     fn quiet_since(&self, channel: Channel, round: &Round) -> Instant {
         let latest = self
             .last_change
             .get(&channel)
             .map_or(round.at, |&changed| changed.max(round.at));
-        latest.min(round.at + Self::ACTIVE)
+        latest.min(round.at + FAST_ROUND_ACTIVE)
     }
 
     /// Our heads when we last asked for `channel`, if a round ran.
@@ -533,7 +644,7 @@ impl FastRounds {
     fn note_ahead(
         &mut self,
         channel: Channel,
-        pubkey: String,
+        key: AuthorKey,
         author: Nickname,
         heads: Vec<String>,
         now: Instant,
@@ -541,12 +652,12 @@ impl FastRounds {
         let ahead = self.ahead.entry(channel).or_default();
         ahead.retain(|peer| Self::fresh(peer, now));
         let peer = Waiting {
-            pubkey,
+            key,
             author,
             heads,
             noted: now,
         };
-        if let Some(known) = ahead.iter_mut().find(|known| known.pubkey == peer.pubkey) {
+        if let Some(known) = ahead.iter_mut().find(|known| known.key == peer.key) {
             *known = peer;
         } else if ahead.len() < FAST_ROUND_AHEAD_MAX {
             ahead.push(peer);
@@ -559,12 +670,12 @@ impl FastRounds {
     }
 
     fn fresh(peer: &Waiting, now: Instant) -> bool {
-        now.duration_since(peer.noted) < Duration::from_secs(FAST_ROUND_AHEAD_TTL_SECS)
+        now.duration_since(peer.noted) < FAST_ROUND_AHEAD_TTL
     }
 
     /// The peer to ask again for `channel` once nothing was asked for
-    /// [`FAST_ROUND_RETRY_MS`]. Peers whose heads we now hold (`holds`), or
-    /// whose heads have not shown for [`FAST_ROUND_AHEAD_TTL_SECS`], are
+    /// [`FAST_ROUND_RETRY`]. Peers whose heads we now hold (`holds`), or
+    /// whose heads have not shown for [`FAST_ROUND_AHEAD_TTL`], are
     /// forgotten first. While the round brings progress (`ours`, our heads
     /// now, moved since the last ask) its own peer stays first; when it does
     /// not, the next `reachable` peer after it takes a turn, so one peer that
@@ -575,11 +686,10 @@ impl FastRounds {
         now: Instant,
         ours: u64,
         holds: impl Fn(&[String]) -> bool,
-        reachable: impl Fn(&str) -> bool,
-    ) -> Option<(String, Nickname)> {
+        reachable: impl Fn(&AuthorKey) -> bool,
+    ) -> Option<(AuthorKey, Nickname)> {
         let waiting = self.rounds.get(&channel).is_some_and(|round| {
-            now.duration_since(self.quiet_since(channel, round))
-                < Duration::from_millis(FAST_ROUND_RETRY_MS)
+            now.duration_since(self.quiet_since(channel, round)) < FAST_ROUND_RETRY
         });
         let ahead = self.ahead.get_mut(&channel)?;
         ahead.retain(|peer| !holds(&peer.heads) && Self::fresh(peer, now));
@@ -587,29 +697,26 @@ impl FastRounds {
         if waiting {
             return None;
         }
-        let candidates: Vec<&Waiting> = ahead
-            .iter()
-            .filter(|peer| reachable(&peer.pubkey))
-            .collect();
+        let candidates: Vec<&Waiting> = ahead.iter().filter(|peer| reachable(&peer.key)).collect();
         let round_index =
-            round.and_then(|round| candidates.iter().position(|peer| peer.pubkey == round.peer));
+            round.and_then(|round| candidates.iter().position(|peer| peer.key == round.peer));
         let progress = round.is_none_or(|round| round.heads != ours);
         let pick = match round_index {
             Some(index) if progress => candidates.get(index),
             Some(index) => candidates.get((index + 1) % candidates.len()),
             None => candidates.first(),
         };
-        pick.map(|peer| (peer.pubkey.clone(), peer.author.clone()))
+        pick.map(|peer| (peer.key, peer.author.clone()))
     }
 
     /// Whether a direct round runs for `channel`: we asked a peer within
-    /// [`FAST_ROUND_ACTIVE_MS`]. Our broadcast digests wait meanwhile: during
+    /// [`FAST_ROUND_ACTIVE`]. Our broadcast digests wait meanwhile: during
     /// a backfill each one draws a full answer from every linked holder, and
     /// together they overflow our unicast inbox.
     pub(crate) fn active(&self, channel: Channel, now: Instant) -> bool {
         self.rounds
             .get(&channel)
-            .is_some_and(|round| now.duration_since(round.at) < Self::ACTIVE)
+            .is_some_and(|round| now.duration_since(round.at) < FAST_ROUND_ACTIVE)
     }
 }
 
@@ -618,7 +725,7 @@ impl FastRounds {
 /// it when this ask cannot go out or its answer is lost.
 async fn ask_back(
     channel: Channel,
-    digest: &Message,
+    digest: &Verified,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) {
@@ -628,22 +735,19 @@ async fn ask_back(
     if state.doc(channel).holds_heads(&body.heads) {
         return;
     }
+    let key = digest.key();
     let now = Instant::now();
-    state.fast_rounds.note_ahead(
-        channel,
-        digest.pubkey.clone(),
-        digest.author.clone(),
-        body.heads,
-        now,
-    );
+    state
+        .fast_rounds
+        .note_ahead(channel, key, digest.author.clone(), body.heads, now);
     if state.fast_rounds.may_ask(
-        &digest.pubkey,
+        &key,
         channel,
         heads_key_of(state, channel),
         state.doc(channel).change_count(),
         now,
     ) {
-        ask(channel, &digest.pubkey, &digest.author, state, ctx).await;
+        ask(channel, &key, &digest.author, state, ctx).await;
     } else {
         tracing::debug!(me = %ctx.author, peer = %digest.author, ?channel, "a peer is ahead, but a fast round waits");
     }
@@ -675,10 +779,10 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
             .filter(|peer| state.doc(channel).holds_heads(&peer.heads))
             .map(|peer| peer.heads.as_slice())
             .collect();
-        let reachable: Vec<&str> = ahead
+        let reachable: Vec<AuthorKey> = ahead
             .iter()
-            .filter(|peer| crate::transport::unicast_answer_target(&peer.pubkey, state).is_some())
-            .map(|peer| peer.pubkey.as_str())
+            .filter(|peer| crate::transport::unicast_answer_target(&peer.key, state).is_some())
+            .map(|peer| peer.key)
             .collect();
         let ours = heads_key_of(state, channel);
         let target = state.fast_rounds.retry_target(
@@ -686,12 +790,12 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
             now,
             ours,
             |heads| held.contains(&heads),
-            |pubkey| reachable.contains(&pubkey),
+            |key| reachable.contains(key),
         );
-        let Some((pubkey, author)) = target else {
+        let Some((key, author)) = target else {
             continue;
         };
-        if ask(channel, &pubkey, &author, state, ctx).await {
+        if ask(channel, &key, &author, state, ctx).await {
             tracing::debug!(me = %ctx.author, peer = %author, ?channel, "retried a fast round with a peer that is ahead");
         }
     }
@@ -702,12 +806,12 @@ pub(crate) async fn resume_fast_rounds(state: &mut EventLoopState, ctx: &Handler
 /// it. Returns whether it went out.
 async fn ask(
     channel: Channel,
-    pubkey: &str,
+    key: &AuthorKey,
     author: &Nickname,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> bool {
-    let Some(eid) = crate::transport::unicast_answer_target(pubkey, state) else {
+    let Some(eid) = crate::transport::unicast_answer_target(key, state) else {
         return false;
     };
     let origin = DigestOrigin {
@@ -719,7 +823,7 @@ async fn ask(
     };
     let ours_key = heads_key(&ours);
     let now = Instant::now();
-    let Ok(bytes) = ours.serialize().map(Bytes::from) else {
+    let Ok(bytes) = ours.serialize() else {
         return false;
     };
     if !state
@@ -732,7 +836,7 @@ async fn ask(
     let changes = state.doc(channel).change_count();
     state
         .fast_rounds
-        .note_asked(pubkey.to_owned(), channel, ours_key, changes, now);
+        .note_asked(*key, channel, ours_key, changes, now);
     tracing::debug!(me = %ctx.author, peer = %author, ?channel, heads = ours_key, "asked a peer that is ahead for state directly (fast round)");
     true
 }
@@ -773,7 +877,7 @@ pub(crate) struct Answered {
 /// missing uses no serve.
 pub(crate) async fn handle_state_digest(
     channel: Channel,
-    message: &Message,
+    message: &Verified,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
 ) -> Answered {
@@ -783,8 +887,9 @@ pub(crate) async fn handle_state_digest(
     }
     let now = Instant::now();
     let heads = heads_key(message);
-    let serve = |plane| (message.pubkey.clone(), channel, plane);
-    let target = crate::transport::unicast_answer_target(&message.pubkey, state);
+    let author = message.key();
+    let serve = |plane| (author, channel, plane);
+    let target = crate::transport::unicast_answer_target(&author, state);
     let plane = if target.is_some() {
         Plane::Unicast
     } else {
@@ -795,9 +900,9 @@ pub(crate) async fn handle_state_digest(
         tracing::debug!(me = %ctx.author, author = %message.author, ?channel, ?plane, heads, "state digest ignored: this asker was served within the window");
         return Answered::default();
     }
-    let frames: Vec<Bytes> = missing_frames(channel, message, state)
+    let frames: Vec<WireFrame> = missing_frames(channel, message, state)
         .iter()
-        .filter_map(|frame| frame.serialize().ok().map(Bytes::from))
+        .filter_map(|frame| frame.serialize().ok())
         .collect();
     let mut answered = Answered::default();
     if frames.is_empty() {
@@ -810,9 +915,8 @@ pub(crate) async fn handle_state_digest(
         mesh: ctx.mesh,
         author: ctx.author,
     };
-    let our_heads = heads_digest(state, origin, channel, true)
-        .and_then(|ours| ours.serialize().ok())
-        .map(Bytes::from);
+    let our_heads =
+        heads_digest(state, origin, channel, true).and_then(|ours| ours.serialize().ok());
     let fallback = match target {
         None => Some("asker has no proven endpoint that is a linked neighbor with a direct path"),
         Some(eid)
@@ -837,7 +941,9 @@ pub(crate) async fn handle_state_digest(
             return answered;
         }
         for bytes in frames {
-            let _ = ctx.sender.broadcast(bytes).await;
+            // A new name for each answer, as for the resend of a message (see `resend_one`).
+            let answer = bytes.with_resend_nonce(rand::random());
+            let _ = ctx.sender.broadcast(answer).await;
         }
         answered.broadcast = count;
         state
@@ -866,13 +972,15 @@ pub(crate) async fn handle_state_digest(
 /// the resend budget, less the ones it signed itself: with heads we do not
 /// hold we cannot tell what it has and send everything, but its own changes
 /// it always has. Empty for an undecodable digest body.
-fn missing_frames(channel: Channel, digest: &Message, state: &EventLoopState) -> Vec<Message> {
+fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -> Vec<Verified> {
     let Ok(body) = serde_json::from_str::<HeadsBody>(digest.body.as_str()) else {
         return Vec::new();
     };
-    state
-        .doc(channel)
-        .changes_since_not_by(&body.heads, &digest.pubkey, antientropy_max_resend())
+    state.doc(channel).changes_since_not_by(
+        &body.heads,
+        Some(&digest.key()),
+        antientropy_max_resend(),
+    )
 }
 
 #[cfg(test)]
@@ -880,24 +988,23 @@ mod budget_tests {
     use std::time::Duration;
 
     use super::{FastRounds, Plane, ServeBudget};
-    use crate::protocol::Channel;
-    use crate::testing::nick;
+    use crate::protocol::{AuthorKey, Channel};
+    use crate::testing::{author_of, nick};
     use crate::util::clock::Instant;
     use crate::util::tuning::{
-        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE_MS, FAST_ROUND_RETRY_MS,
-        antientropy_max_resend,
+        ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY, antientropy_max_resend,
     };
 
-    fn key() -> (String, Channel, Plane) {
-        ("asker".to_owned(), Channel::State, Plane::Unicast)
+    fn key() -> (AuthorKey, Channel, Plane) {
+        (author_of("asker"), Channel::State, Plane::Unicast)
     }
 
     #[test]
     fn the_serve_budget_takes_new_heads_up_to_its_count() {
         let now = Instant::now();
         let mut budget = ServeBudget::default();
-        let gossip = ("asker".to_owned(), Channel::State, Plane::Gossip);
-        budget.note(gossip.clone(), 1, now);
+        let gossip = (author_of("asker"), Channel::State, Plane::Gossip);
+        budget.note(gossip, 1, now);
         assert!(
             !budget.admits(&gossip, 2, now),
             "one gossip answer per window"
@@ -937,25 +1044,25 @@ mod budget_tests {
         let channel = Channel::State;
         let early_heads = vec!["e".to_owned()];
         let alice_heads = vec!["a".to_owned()];
-        rounds.note_ahead(channel, "early".to_owned(), nick("early"), early_heads, now);
+        rounds.note_ahead(channel, author_of("early"), nick("early"), early_heads, now);
         rounds.note_ahead(
             channel,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             alice_heads.clone(),
             now,
         );
-        rounds.note_asked("alice".to_owned(), channel, 1, 0, now);
+        rounds.note_asked(author_of("alice"), channel, 1, 0, now);
         let never_held = |_: &[String]| false;
-        let all_reachable = |_: &str| true;
+        let all_reachable = |_: &AuthorKey| true;
         let moved = 2;
         let pick = |fast: &mut FastRounds,
                     at,
                     ours,
                     holds: &dyn Fn(&[String]) -> bool,
-                    reachable: &dyn Fn(&str) -> bool| {
+                    reachable: &dyn Fn(&AuthorKey) -> bool| {
             fast.retry_target(channel, at, ours, holds, reachable)
-                .map(|(pubkey, _)| pubkey)
+                .map(|(key, _)| key)
         };
 
         let soon = now + Duration::from_millis(100);
@@ -966,25 +1073,25 @@ mod budget_tests {
         );
         let quiet = now + Duration::from_millis(500);
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &never_held, &all_reachable).as_deref(),
-            Some("alice"),
+            pick(&mut rounds, quiet, moved, &never_held, &all_reachable),
+            Some(author_of("alice")),
             "the round's peer first, while it brings progress"
         );
         assert_eq!(
-            pick(&mut rounds, quiet, 1, &never_held, &all_reachable).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, 1, &never_held, &all_reachable),
+            Some(author_of("early")),
             "no progress since the last ask: the next peer"
         );
-        let alice_away = |pubkey: &str| pubkey != "alice";
+        let alice_away = |key: &AuthorKey| *key != author_of("alice");
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &never_held, &alice_away).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, moved, &never_held, &alice_away),
+            Some(author_of("early")),
             "else one reachable now"
         );
         let alice_held = |heads: &[String]| heads == alice_heads.as_slice();
         assert_eq!(
-            pick(&mut rounds, quiet, moved, &alice_held, &all_reachable).as_deref(),
-            Some("early"),
+            pick(&mut rounds, quiet, moved, &alice_held, &all_reachable),
+            Some(author_of("early")),
             "alice is no longer ahead"
         );
         let stale = now + Duration::from_secs(61);
@@ -1018,7 +1125,7 @@ mod budget_tests {
         state.meshed = true;
         state
             .fast_rounds
-            .note_asked("holder".to_owned(), Channel::State, 1, 0, Instant::now());
+            .note_asked(author_of("holder"), Channel::State, 1, 0, Instant::now());
         let (mesh, author) = (MeshId::from("test"), nick("late"));
 
         let before = state.idle.broadcasts;
@@ -1105,7 +1212,7 @@ mod budget_tests {
             .expect("compose the wire body");
         let frame =
             crate::protocol::Message::new_channel_event(&mesh, &author, wire, Channel::State)
-                .signed(&state.identity);
+                .sign(&state.identity);
         let _ = state.doc_mut(Channel::State).ingest(&frame);
         let origin = DigestOrigin {
             mesh: &mesh,
@@ -1126,21 +1233,21 @@ mod budget_tests {
         let mut rounds = FastRounds::default();
         rounds.note_ahead(
             state,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             vec!["a".to_owned()],
             t0,
         );
-        rounds.note_asked("alice".to_owned(), state, 1, 0, t0);
+        rounds.note_asked(author_of("alice"), state, 1, 0, t0);
         rounds.note_change(state, t0 + ms(150));
         assert!(
-            !rounds.may_ask("alice", state, 1, 0, t0 + ms(250)),
+            !rounds.may_ask(&author_of("alice"), state, 1, 0, t0 + ms(250)),
             "the same heads 100 ms after a change"
         );
         rounds.note_change(state, t0 + ms(300));
         let retry = |fast: &mut FastRounds, at| {
             fast.retry_target(state, at, 1, |_| false, |_| true)
-                .map(|(pubkey, _)| pubkey)
+                .map(|(key, _)| key)
         };
         assert_eq!(
             retry(&mut rounds, t0 + ms(450)),
@@ -1149,13 +1256,13 @@ mod budget_tests {
         );
         assert_eq!(
             retry(&mut rounds, t0 + ms(750)),
-            Some("alice".to_owned()),
+            Some(author_of("alice")),
             "quiet for 450 ms"
         );
     }
 
     /// A steady stream of changes, such as live writes, must not hold a stalled
-    /// round forever: the wait is capped at `FAST_ROUND_ACTIVE_MS` after the ask.
+    /// round forever: the wait is capped at `FAST_ROUND_ACTIVE` after the ask.
     #[test]
     fn the_wait_after_changes_is_capped() {
         let t0 = Instant::now();
@@ -1164,13 +1271,13 @@ mod budget_tests {
         let mut rounds = FastRounds::default();
         rounds.note_ahead(
             state,
-            "alice".to_owned(),
+            author_of("alice"),
             nick("alice"),
             vec!["a".to_owned()],
             t0,
         );
-        rounds.note_asked("alice".to_owned(), state, 1, 0, t0);
-        let later = t0 + ms(FAST_ROUND_ACTIVE_MS + FAST_ROUND_RETRY_MS);
+        rounds.note_asked(author_of("alice"), state, 1, 0, t0);
+        let later = t0 + FAST_ROUND_ACTIVE + FAST_ROUND_RETRY;
         let mut at = t0;
         while at < later {
             rounds.note_change(state, at);
@@ -1178,8 +1285,8 @@ mod budget_tests {
         }
         let target = rounds
             .retry_target(state, later, 1, |_| false, |_| true)
-            .map(|(pubkey, _)| pubkey);
-        assert_eq!(target, Some("alice".to_owned()));
+            .map(|(key, _)| key);
+        assert_eq!(target, Some(author_of("alice")));
     }
 
     #[test]
@@ -1188,39 +1295,39 @@ mod budget_tests {
         let full = antientropy_max_resend();
         let mut rounds = FastRounds::default();
         let state = Channel::State;
-        assert!(rounds.may_ask("holder", state, 1, 0, now));
-        rounds.note_asked("holder".to_owned(), state, 1, 0, now);
+        assert!(rounds.may_ask(&author_of("holder"), state, 1, 0, now));
+        rounds.note_asked(author_of("holder"), state, 1, 0, now);
         assert!(rounds.active(state, now));
         assert!(!rounds.active(Channel::Meta, now));
         assert!(
-            !rounds.may_ask("holder", state, 1, 0, now),
+            !rounds.may_ask(&author_of("holder"), state, 1, 0, now),
             "the same heads at once"
         );
         assert!(
-            !rounds.may_ask("holder", state, 2, 5, now),
+            !rounds.may_ask(&author_of("holder"), state, 2, 5, now),
             "new heads after a partial answer wait"
         );
         assert!(
-            rounds.may_ask("holder", state, 2, full, now),
+            rounds.may_ask(&author_of("holder"), state, 2, full, now),
             "new heads after a full answer at once"
         );
         assert!(
-            !rounds.may_ask("other", state, 2, full, now),
+            !rounds.may_ask(&author_of("other"), state, 2, full, now),
             "another peer while the round runs"
         );
         assert!(
-            rounds.may_ask("other", Channel::Meta, 2, full, now),
+            rounds.may_ask(&author_of("other"), Channel::Meta, 2, full, now),
             "another channel"
         );
         let later = now + Duration::from_millis(250);
         assert!(
-            rounds.may_ask("holder", state, 1, 0, later),
+            rounds.may_ask(&author_of("holder"), state, 1, 0, later),
             "the same heads after the interval"
         );
         let quiet = now + Duration::from_secs(2);
         assert!(!rounds.active(state, quiet));
         assert!(
-            rounds.may_ask("other", state, 2, full, quiet),
+            rounds.may_ask(&author_of("other"), state, 2, full, quiet),
             "another peer once the round is quiet"
         );
     }
@@ -1232,13 +1339,144 @@ mod tests {
 
     use super::{
         ANTIENTROPY_DIGEST_WINDOW_IDS, DigestBody, DigestOrigin, HeadsBody, WireWindow,
-        digest_windows, missing_frames, state_digest,
+        digest_windows, encode_key, missing_frames, state_digest,
     };
-    use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery, WindowRange};
+    use crate::daemon::message_log::{DigestWindow, MessageLog, MissingQuery};
     use crate::daemon::state::EventLoopState;
     use crate::doc::Ingested;
-    use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
+    use crate::protocol::message::Verified;
+    use crate::protocol::{
+        AuthorKey, Channel, DedupKey, Identity, MeshId, Message, MessageBody, Nickname, UnixSecs,
+    };
     use crate::testing::{fresh_state, nick};
+
+    fn members(count: usize) -> Vec<Nickname> {
+        (0..count)
+            .map(|index| nick(&format!("member-{index:02}")))
+            .collect()
+    }
+
+    /// One digest is answered by `ANTIENTROPY_ANSWERERS` members, not by every
+    /// member that holds what the asker lacks.
+    #[test]
+    fn one_digest_is_answered_by_k_members_not_by_all() {
+        let members = members(48);
+        let asker = &members[0];
+        let answering = members
+            .iter()
+            .filter(|me| *me != asker)
+            .filter(|me| super::answers_digest(me, asker, "digest-1", members.iter()))
+            .count();
+        assert_eq!(answering, crate::util::tuning::ANTIENTROPY_ANSWERERS);
+    }
+
+    /// The answerers change with the digest, so a message that only one member
+    /// holds comes back once that member has had a turn.
+    #[test]
+    fn every_member_gets_a_turn_to_answer() {
+        let members = members(48);
+        let asker = &members[0];
+        let mut had_a_turn = HashSet::new();
+        for round in 0..200 {
+            let id = format!("digest-{round}");
+            for me in members.iter().filter(|me| *me != asker) {
+                if super::answers_digest(me, asker, &id, members.iter()) {
+                    had_a_turn.insert(me.clone());
+                }
+            }
+        }
+        assert_eq!(had_a_turn.len(), 47, "all but the asker answered once");
+    }
+
+    /// A mesh no larger than the answerers has nobody to hold back.
+    #[test]
+    fn a_small_mesh_is_answered_by_every_member() {
+        let members = members(3);
+        let asker = &members[0];
+        for me in members.iter().filter(|me| *me != asker) {
+            assert!(super::answers_digest(me, asker, "digest-1", members.iter()));
+        }
+    }
+
+    /// The digest of a node that holds nothing: one open-ended window with no
+    /// ids, so every message of the holder is a gap.
+    fn digest_of_an_empty_log(asker: &Nickname) -> Verified {
+        let window = DigestWindow {
+            lo: (UnixSecs::ZERO, DedupKey::MIN),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
+            ids: Vec::new(),
+            from_start: true,
+        };
+        let body = crate::gossip::json_body(&DigestBody {
+            windows: vec![WireWindow::encode(&window)],
+        })
+        .expect("a digest serializes");
+        Message::new_digest(&MeshId::from("test"), asker, body).sign(&Identity::generate())
+    }
+
+    /// The event loop answers a digest without waiting on anything: the resends
+    /// go to a bounded outbox, and what does not fit is dropped and counted. The
+    /// next digest asks again. An answer used to broadcast up to 64 messages from
+    /// inside the loop, and a command queue that the gossip actor did not drain
+    /// held the loop there for minutes.
+    #[test]
+    fn a_digest_answer_does_not_wait_for_a_full_outbox() {
+        let (me, asker) = (nick("holder"), nick("asker"));
+        let mut state = fresh_state();
+        state.peers.insert(asker.clone());
+        for index in 0..100 {
+            state
+                .message_log
+                .push(chat_at(&format!("message {index}"), 1_700_000_000 + index));
+        }
+        // Nobody drains this outbox.
+        let (outbox, _undrained) = crate::transport::ResendOutbox::new(4);
+        state.resend_outbox = outbox;
+
+        super::handle_digest(&digest_of_an_empty_log(&asker), &mut state, &me);
+
+        assert_eq!(state.resend_outbox.queued(), 4, "the outbox is full");
+        assert_eq!(
+            state.resend_outbox.dropped(),
+            crate::util::tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
+            "the rest of the answer is dropped, and counted"
+        );
+    }
+
+    /// A broadcast resend is a new gossip message: the gossip layer names a message by the hash of
+    /// its payload and drops a payload it has seen, so the same bytes cannot repair a message that
+    /// the gossip layer delivered and the app did not read. Each resend carries its own nonce, the
+    /// trailer is outside the signature, and a reader that does not know it fails closed.
+    #[test]
+    fn each_broadcast_resend_has_a_payload_of_its_own() {
+        let mut state = fresh_state();
+        let (outbox, mut resends) = crate::transport::ResendOutbox::new(4);
+        state.resend_outbox = outbox;
+        // A real signature: the test parses the resend and checks it verifies.
+        let message = plain_chat_at("kept in the log", 1_700_000_000).sign(&Identity::generate());
+
+        assert!(super::resend_one(&message, &mut state));
+        assert!(super::resend_one(&message, &mut state));
+
+        let mut payloads = Vec::new();
+        while let Ok(crate::transport::Resend::Broadcast(bytes)) = resends.try_recv() {
+            payloads.push(bytes);
+        }
+        assert_eq!(payloads.len(), 2, "both resends are broadcasts");
+        let original = message.serialize().expect("serialize");
+        assert_ne!(payloads[0], payloads[1], "two resends, two names");
+        for payload in &payloads {
+            assert_ne!(payload.as_bytes(), original.as_bytes());
+            let (parsed, nonce) = Message::parse_wire(payload.as_bytes()).expect("a resend parses");
+            assert!(nonce.is_some());
+            assert_eq!(parsed.id, message.id);
+            assert!(parsed.verify_signature_with(&parsed.canonical_bytes()));
+            assert!(
+                Message::parse(payload.as_bytes()).is_err(),
+                "a reader that does not know the trailer must fail closed"
+            );
+        }
+    }
 
     /// A node whose only gossip neighbor is the rendezvous relay: linked to it,
     /// never to a real peer.
@@ -1269,7 +1507,7 @@ mod tests {
             .compose_wire_body(&change, None)
             .expect("compose the wire body");
         let frame =
-            Message::new_channel_event(mesh, author, wire, Channel::Meta).signed(&state.identity);
+            Message::new_channel_event(mesh, author, wire, Channel::Meta).sign(&state.identity);
         assert!(
             matches!(
                 state.doc_mut(Channel::Meta).ingest(&frame),
@@ -1410,8 +1648,8 @@ mod tests {
                     body: MessageBody::from(format!("m{index}").as_str()),
                 },
             );
-            message.timestamp = 1_700_000_000 + i64::try_from(index).unwrap();
-            log.push(message);
+            message.timestamp = UnixSecs::from_secs(1_700_000_000 + i64::try_from(index).unwrap());
+            log.push(message.sign(&Identity::generate()));
         }
         let newest = log.recent_window(ANTIENTROPY_DIGEST_WINDOW_IDS).unwrap();
         let older = log
@@ -1431,7 +1669,8 @@ mod tests {
         let mesh = MeshId::from(
             "6bLvZNPGxuqnsbaPVGwf277NyTp8cYPCMiBxXED8d6TyBZpDDzZADkKHL7tTB1EjFagbCXYZ",
         );
-        let digest = Message::new_digest(&mesh, &Nickname::from("a-fairly-long-nickname"), body);
+        let digest = Message::new_digest(&mesh, &Nickname::from("a-fairly-long-nickname"), body)
+            .sign(&Identity::generate());
         let wire = digest.serialize().expect("serialize digest");
         assert!(
             wire.len() <= crate::util::consts::MAX_MESSAGE_SIZE,
@@ -1445,15 +1684,26 @@ mod tests {
     /// would silently break cross-node reconciliation.
     #[test]
     fn wire_window_round_trips_ids() {
-        let ids: Vec<[u8; 16]> = (0..5u8).map(|seed| [seed; 16]).collect();
+        let ids: Vec<DedupKey> = (0..5u8)
+            .map(|seed| DedupKey::from_bytes([seed; 16]))
+            .collect();
         let window = DigestWindow {
-            lo: 1,
-            hi: i64::MAX,
+            lo: (UnixSecs::from_secs(1), DedupKey::MIN),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
             ids: ids.clone(),
+            from_start: false,
         };
         let wire = WireWindow::encode(&window);
         let decoded = wire.decode_ids().expect("valid window decodes");
         assert_eq!(decoded, ids.into_iter().collect::<HashSet<_>>());
+    }
+
+    /// The digest of the build before the window keys has no `lo_key` and
+    /// `hi_key`. It does not decode, and `handle_digest` reports its author once.
+    #[test]
+    fn a_digest_of_the_build_without_window_keys_does_not_decode() {
+        let old = r#"{"windows":[{"lo":1,"hi":2,"ids":""}]}"#;
+        assert!(serde_json::from_str::<DigestBody>(old).is_err());
     }
 
     /// A malformed digest body must decode to `None` (so `handle_digest`
@@ -1463,7 +1713,9 @@ mod tests {
         // Not valid Base58 (`0`, `O`, `I`, `l`, space are outside the alphabet).
         let bad_alphabet = WireWindow {
             lo: 0,
+            lo_key: String::new(),
             hi: 0,
+            hi_key: String::new(),
             ids: "0OIl not base58".to_string(),
         };
         assert!(bad_alphabet.decode_ids().is_none(), "bad Base58 ⇒ None");
@@ -1471,7 +1723,9 @@ mod tests {
         // Valid Base58 but not a whole number of 16-byte ids (5 bytes).
         let odd_length = WireWindow {
             lo: 0,
+            lo_key: String::new(),
             hi: 0,
+            hi_key: String::new(),
             ids: bs58::encode([1u8; 5]).into_string(),
         };
         assert!(odd_length.decode_ids().is_none(), "non-16-multiple ⇒ None");
@@ -1479,7 +1733,9 @@ mod tests {
         // Empty is well-formed: zero ids.
         let empty = WireWindow {
             lo: 0,
+            lo_key: String::new(),
             hi: 0,
+            hi_key: String::new(),
             ids: String::new(),
         };
         assert_eq!(empty.decode_ids().map(|set| set.len()), Some(0));
@@ -1506,7 +1762,7 @@ mod tests {
         assert_eq!(back.heads, heads);
 
         let body = MessageBody::new(json).expect("heads body has no control chars");
-        let digest = Message::new_state_digest(&mesh, &author, body);
+        let digest = Message::new_state_digest(&mesh, &author, body).sign(&Identity::generate());
         let wire = digest.serialize().expect("serialize state digest");
         assert!(
             wire.len() <= crate::util::consts::MAX_MESSAGE_SIZE,
@@ -1516,7 +1772,16 @@ mod tests {
         );
     }
 
-    fn chat_at(body: &str, timestamp: i64) -> Message {
+    /// One fixed author for every chat fixture, as the unsigned messages of these tests always had:
+    /// per-author eviction must see one author, or two logs of the same frames diverge.
+    fn chat_at(body: &str, timestamp: i64) -> Verified {
+        Verified::fixture_unchecked(
+            plain_chat_at(body, timestamp),
+            AuthorKey::from_bytes([0x11; 32]),
+        )
+    }
+
+    fn plain_chat_at(body: &str, timestamp: i64) -> Message {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &Nickname::from("author"),
@@ -1527,7 +1792,7 @@ mod tests {
                 body: MessageBody::from(body),
             },
         );
-        message.timestamp = timestamp;
+        message.timestamp = UnixSecs::from_secs(timestamp);
         message
     }
 
@@ -1535,7 +1800,7 @@ mod tests {
     /// computes it.
     fn answer(node: &mut EventLoopState, holder: &MessageLog) -> HashSet<String> {
         let windows = digest_windows(node).expect("a non-empty log advertises");
-        let have: HashSet<[u8; 16]> = windows
+        let have: HashSet<DedupKey> = windows
             .iter()
             .flat_map(|window| window.decode_ids().expect("our own encoding"))
             .collect();
@@ -1543,10 +1808,7 @@ mod tests {
             .iter()
             .flat_map(|window| {
                 holder.missing_in_window(MissingQuery {
-                    range: WindowRange {
-                        lo: window.lo,
-                        hi: window.hi,
-                    },
+                    range: window.range().expect("our own encoding"),
                     have: &have,
                     max: 100,
                     requester: &nick("node"),
@@ -1554,6 +1816,323 @@ mod tests {
             })
             .map(|message| message.body.as_str().to_string())
             .collect()
+    }
+
+    /// 300 messages in a scrambled order, over `seconds` seconds.
+    fn scrambled_messages(seconds: usize) -> Vec<Verified> {
+        (0..300usize)
+            .map(|index| {
+                let slot = (index * 7) % 300;
+                chat_at(
+                    &format!("m{slot}"),
+                    1_700_000_000 + i64::try_from(slot % seconds).expect("small"),
+                )
+            })
+            .collect()
+    }
+
+    /// A log of 300 messages in a scrambled arrival order over `seconds`
+    /// seconds, as two nodes that heard the same mesh would hold it.
+    fn same_log_on_two_nodes(seconds: usize) -> (EventLoopState, MessageLog) {
+        let mut node = fresh_state();
+        let mut holder = MessageLog::new(1000);
+        for message in scrambled_messages(seconds) {
+            node.message_log.push(message.clone());
+            holder.push(message);
+        }
+        (node, holder)
+    }
+
+    /// Two nodes that hold the same messages ask each other for nothing, however
+    /// many messages they hold and however few seconds those fall in. The log
+    /// is longer than the 140 ids a digest lists, so the older window sweeps
+    /// across rounds: every round must be clean.
+    #[test]
+    fn nodes_with_identical_logs_of_more_than_140_messages_ask_each_other_for_nothing() {
+        for seconds in [12, 1] {
+            let (mut node, holder) = same_log_on_two_nodes(seconds);
+            for round in 0..6 {
+                assert_eq!(
+                    answer(&mut node, &holder),
+                    HashSet::new(),
+                    "round {round}, {seconds} s"
+                );
+            }
+        }
+    }
+
+    /// What `holder` sends in answer to `node`'s digest, as `handle_digest`
+    /// sends it: the windows in order, one budget across them, and a message
+    /// that an earlier window already chose is not chosen again.
+    fn answer_within_budget(
+        node: &mut EventLoopState,
+        holder: &MessageLog,
+        mut budget: usize,
+    ) -> Vec<Verified> {
+        let windows = digest_windows(node).expect("a non-empty log advertises");
+        let mut have: HashSet<DedupKey> = windows
+            .iter()
+            .flat_map(|window| window.decode_ids().expect("our own encoding"))
+            .collect();
+        let mut sent = Vec::new();
+        for window in &windows {
+            if budget == 0 {
+                break;
+            }
+            for message in holder.missing_in_window(MissingQuery {
+                range: window.range().expect("our own encoding"),
+                have: &have,
+                max: budget,
+                requester: &nick("node"),
+            }) {
+                have.insert(message.dedup_key());
+                sent.push(message);
+                budget -= 1;
+            }
+        }
+        sent
+    }
+
+    /// A node that lost a quarter of the messages gets exactly those back, round
+    /// by round under the resend budget, and is sent nothing it already holds.
+    /// One second, the join burst, is the hard case: the lost messages sit among
+    /// hundreds with the same timestamp.
+    #[test]
+    fn a_node_that_lost_messages_recovers_them_and_only_them() {
+        let budget = crate::util::tuning::antientropy_max_resend();
+        for seconds in [12, 1] {
+            let all = scrambled_messages(seconds);
+            let mut holder = MessageLog::new(1000);
+            let mut node = fresh_state();
+            node.joined_at = UnixSecs::from_secs(1_699_999_999);
+            let mut lost = HashSet::new();
+            for (index, message) in all.iter().enumerate() {
+                holder.push(message.clone());
+                if index % 4 == 0 {
+                    lost.insert(message.dedup_key());
+                } else {
+                    node.message_log.push(message.clone());
+                }
+            }
+            let mut recovered = HashSet::new();
+            let mut last_round = 0;
+            for round in 0..12 {
+                for message in answer_within_budget(&mut node, &holder, budget) {
+                    assert!(
+                        lost.contains(&message.dedup_key()),
+                        "round {round}, {seconds} s: sent a message the node already holds"
+                    );
+                    if recovered.insert(message.dedup_key()) {
+                        last_round = round;
+                    }
+                    node.message_log.push(message);
+                }
+            }
+            assert!(
+                last_round <= 2,
+                "{seconds} s: the last lost message came back in round {last_round}"
+            );
+            assert_eq!(recovered, lost, "{seconds} s: every lost message came back");
+        }
+    }
+
+    /// The windows of a digest tile the log. A message that sorts between two
+    /// windows, and that the node lacks, is asked for within a few rounds even
+    /// when nothing else changes and no window moves.
+    #[test]
+    fn a_message_between_two_windows_is_asked_for() {
+        let mut all = scrambled_messages(12);
+        all.sort_by_key(|message| (message.timestamp, message.dedup_key()));
+        let mut holder = MessageLog::new(1000);
+        let mut node = fresh_state();
+        node.joined_at = UnixSecs::from_secs(1_699_999_999);
+        for (index, message) in all.iter().enumerate() {
+            holder.push(message.clone());
+            if index != ANTIENTROPY_DIGEST_WINDOW_IDS {
+                node.message_log.push(message.clone());
+            }
+        }
+        let lost = all[ANTIENTROPY_DIGEST_WINDOW_IDS].dedup_key();
+        let budget = crate::util::tuning::antientropy_max_resend();
+        let asked = (0..12).any(|_| {
+            answer_within_budget(&mut node, &holder, budget)
+                .iter()
+                .any(|message| message.dedup_key() == lost)
+        });
+        assert!(
+            asked,
+            "the message between the first two windows never came back"
+        );
+    }
+
+    /// A node that joined in the second of its first message asks for every message of that
+    /// second, whatever its id key: the window must not start at the key of that first message.
+    #[test]
+    fn a_message_of_the_second_a_node_joined_in_is_asked_for_whatever_its_key() {
+        let second = 1_700_000_000;
+        let mut pair = [chat_at("first", second), chat_at("second", second)];
+        pair.sort_by_key(|message| message.dedup_key());
+        let [smaller, larger] = pair;
+        let mut holder = MessageLog::new(1000);
+        holder.push(smaller.clone());
+        holder.push(larger.clone());
+        let mut node = fresh_state();
+        node.joined_at = UnixSecs::from_secs(second);
+        node.message_log.push(larger);
+        let budget = crate::util::tuning::antientropy_max_resend();
+
+        let answered = answer_within_budget(&mut node, &holder, budget);
+
+        assert!(
+            answered
+                .iter()
+                .any(|message| message.dedup_key() == smaller.dedup_key()),
+            "the holder never offered the message of the same second with the smaller key"
+        );
+    }
+
+    /// The first message of the log is from a peer and stamped before `joined_at` (a clock that
+    /// runs behind). Nothing sorts before it in the log, so a message of its second with a
+    /// smaller key is in the range that the window must reach back to.
+    #[test]
+    fn a_message_of_the_second_of_the_first_logged_message_is_asked_for_whatever_its_key() {
+        let second = 1_700_000_000;
+        let mut pair = [chat_at("first", second - 1), chat_at("second", second - 1)];
+        pair.sort_by_key(|message| message.dedup_key());
+        let [smaller, larger] = pair;
+        let mut holder = MessageLog::new(1000);
+        holder.push(smaller.clone());
+        holder.push(larger.clone());
+        let mut node = fresh_state();
+        node.joined_at = UnixSecs::from_secs(second);
+        node.message_log.push(larger);
+        let budget = crate::util::tuning::antientropy_max_resend();
+
+        let answered = answer_within_budget(&mut node, &holder, budget);
+
+        assert!(
+            answered
+                .iter()
+                .any(|message| message.dedup_key() == smaller.dedup_key()),
+            "the holder never offered the message of the same second with the smaller key"
+        );
+    }
+
+    /// A message is stamped by its sender, and nothing bounds how far ahead. One
+    /// author with a fast clock then sorts above every honest message. The newest
+    /// window must still be the newest messages up to the local clock, or the
+    /// fresh messages of everyone else wait for the sweep, as many rounds as
+    /// the log holds windows. The messages of the fast author are not lost:
+    /// the sweep brings them back.
+    #[test]
+    fn an_author_with_a_fast_clock_does_not_slow_the_newest_messages() {
+        let budget = crate::util::tuning::antientropy_max_resend();
+        let base = UnixSecs::now().as_secs() - 3600;
+        let ahead = 80;
+        let mut all: Vec<Verified> = Vec::new();
+        let (mut next_honest, mut next_fast) = (0usize, 0usize);
+        let mut honest_at = Vec::new();
+        let mut fast_at = Vec::new();
+        while all.len() < 1000 {
+            if all.len().is_multiple_of(12) && next_fast < ahead {
+                fast_at.push(all.len());
+                all.push(chat_at(&format!("f{next_fast}"), base + 100_000));
+                next_fast += 1;
+            } else {
+                honest_at.push(all.len());
+                let second = i64::try_from(next_honest / 20).expect("small");
+                all.push(chat_at(&format!("h{next_honest}"), base + second));
+                next_honest += 1;
+            }
+        }
+        let rounds_until_back = |lost_index: usize| {
+            let mut holder = MessageLog::new(1000);
+            let mut node = fresh_state();
+            node.joined_at = UnixSecs::from_secs(base - 1);
+            let lost = all[lost_index].dedup_key();
+            for (index, message) in all.iter().enumerate() {
+                holder.push(message.clone());
+                if index != lost_index {
+                    node.message_log.push(message.clone());
+                }
+            }
+            (1..=40).find(|_| {
+                answer_within_budget(&mut node, &holder, budget)
+                    .iter()
+                    .any(|message| message.dedup_key() == lost)
+            })
+        };
+        let newest_honest = honest_at.len() - 1;
+        for slot in [newest_honest, newest_honest - 30] {
+            let rounds = rounds_until_back(honest_at[slot]);
+            assert!(
+                rounds.is_some_and(|rounds| rounds <= 2),
+                "the honest message {} from the newest came back after {rounds:?} rounds",
+                newest_honest - slot
+            );
+        }
+        // The fast author's messages sort last. The one that sorts highest is
+        // above everything the node holds, so only an open end reaches it.
+        let mut by_bound = fast_at.clone();
+        by_bound.sort_by_key(|index| (all[*index].timestamp, all[*index].dedup_key()));
+        for index in [
+            by_bound[by_bound.len() - 1],
+            by_bound[by_bound.len() / 2],
+            by_bound[0],
+        ] {
+            let rounds = rounds_until_back(index);
+            assert!(
+                rounds.is_some_and(|rounds| rounds <= 20),
+                "a message of the fast author never came back: {rounds:?}"
+            );
+        }
+    }
+
+    /// Two nodes whose logs are over their capacity keep the newest messages
+    /// they saw. The one that joined earlier saw more, so their retained sets
+    /// differ at the old edge. Neither may keep asking the other for what it
+    /// evicted, or the other keeps sending it and it evicts it again.
+    #[test]
+    fn two_full_logs_with_different_history_ask_each_other_for_nothing() {
+        let budget = crate::util::tuning::antientropy_max_resend();
+        let base = 1_700_000_000;
+        let common: Vec<Verified> = (0..300)
+            .map(|index| chat_at(&format!("c{index}"), base + i64::from(index / 3)))
+            .collect();
+        let earlier: Vec<Verified> = (0..150)
+            .map(|index| chat_at(&format!("e{index}"), base + i64::from(index * 2 / 3)))
+            .collect();
+        let mut older = fresh_state();
+        older.joined_at = UnixSecs::from_secs(base - 1);
+        older.message_log = MessageLog::new(100);
+        let mut newer = fresh_state();
+        newer.joined_at = UnixSecs::from_secs(base + 1);
+        newer.message_log = MessageLog::new(100);
+        for message in earlier.iter().chain(&common) {
+            older.message_log.push(message.clone());
+        }
+        for message in &common {
+            newer.message_log.push(message.clone());
+        }
+
+        let mut sent_per_round = Vec::new();
+        for _ in 0..8 {
+            let mut sent = 0;
+            let to_newer = answer_within_budget(&mut newer, &older.message_log, budget);
+            let to_older = answer_within_budget(&mut older, &newer.message_log, budget);
+            sent += to_newer.len() + to_older.len();
+            for message in to_newer {
+                newer.message_log.push(message);
+            }
+            for message in to_older {
+                older.message_log.push(message);
+            }
+            sent_per_round.push(sent);
+        }
+        assert!(
+            sent_per_round[2..].iter().all(|sent| *sent == 0),
+            "messages sent per round between two full logs: {sent_per_round:?}"
+        );
     }
 
     /// A node gets back every message it missed after it joined, even one sent
@@ -1568,7 +2147,7 @@ mod tests {
         let joined_at = 1_700_000_000;
         let own_joined = chat_at("own joined", joined_at + 5);
         let mut node = fresh_state();
-        node.joined_at = joined_at;
+        node.joined_at = UnixSecs::from_secs(joined_at);
         node.message_log.push(own_joined.clone());
 
         let mut holder = MessageLog::new(10);
@@ -1597,12 +2176,16 @@ mod tests {
             windows: vec![
                 WireWindow {
                     lo: 100,
+                    lo_key: encode_key(&DedupKey::from_bytes([3; 16])),
                     hi: i64::MAX,
+                    hi_key: encode_key(&DedupKey::MAX),
                     ids: bs58::encode([7u8; 16]).into_string(),
                 },
                 WireWindow {
                     lo: 10,
+                    lo_key: encode_key(&DedupKey::from_bytes([1; 16])),
                     hi: 50,
+                    hi_key: encode_key(&DedupKey::from_bytes([2; 16])),
                     // Two *distinct* 16-byte ids (identical halves would
                     // dedup to one in the decoded set).
                     ids: {
@@ -1619,5 +2202,77 @@ mod tests {
         assert_eq!(back.windows[0].hi, i64::MAX, "open-ended bound preserved");
         assert_eq!(back.windows[0].decode_ids().unwrap().len(), 1);
         assert_eq!(back.windows[1].decode_ids().unwrap().len(), 2);
+    }
+
+    /// Golden: the whole digest body for a fixed pair of windows, as the wire carries it. The
+    /// newest window is open-ended (`i64::MAX` and the all-ones key), the older one is closed.
+    /// The literal was captured at the base commit.
+    #[test]
+    fn a_digest_body_keeps_its_wire_form() {
+        let newest = DigestWindow {
+            lo: (
+                UnixSecs::from_secs(1_700_000_100),
+                DedupKey::from_bytes([0x03; 16]),
+            ),
+            hi: (UnixSecs::MAX, DedupKey::MAX),
+            ids: vec![
+                DedupKey::from_bytes([0x11; 16]),
+                DedupKey::from_bytes([0x22; 16]),
+            ],
+            from_start: false,
+        };
+        let older = DigestWindow {
+            lo: (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN),
+            hi: (
+                UnixSecs::from_secs(1_700_000_099),
+                DedupKey::from_bytes([0x04; 16]),
+            ),
+            ids: vec![DedupKey::from_bytes([0x33; 16])],
+            from_start: true,
+        };
+        let body = crate::gossip::json_body(&DigestBody {
+            windows: vec![WireWindow::encode(&newest), WireWindow::encode(&older)],
+        })
+        .expect("a digest serializes");
+        let wire = concat!(
+            r#"{"windows":[{"lo":1700000100,"lo_key":"Na6EczbX5yvuS59hRb3JJ","#,
+            r#""hi":9223372036854775807,"hi_key":"YcVfxkQb6JRzqk5kF2tNLv","#,
+            r#""ids":"29d2S7vB453rNYFdR5YcwtA5PDEwQncRjCnc4eNvMtWM"},"#,
+            r#"{"lo":1700000000,"lo_key":"1111111111111111","#,
+            r#""hi":1700000099,"hi_key":"Vm7ypzTh7eEsaRsGET44j","#,
+            r#""ids":"7KhXzYt7pTgoNMDYrCyg4z"}]}"#,
+        );
+        assert_eq!(body.as_str(), wire);
+
+        let back: DigestBody = serde_json::from_str(wire).expect("the literal parses");
+        let open_end = back.windows[0].range().expect("the keys decode");
+        assert_eq!(
+            open_end.lo,
+            (
+                UnixSecs::from_secs(1_700_000_100),
+                DedupKey::from_bytes([0x03; 16])
+            )
+        );
+        assert_eq!(open_end.hi, (UnixSecs::MAX, DedupKey::MAX));
+        let ids = back.windows[0].decode_ids().expect("the ids decode");
+        assert_eq!(
+            ids,
+            HashSet::from([
+                DedupKey::from_bytes([0x11; 16]),
+                DedupKey::from_bytes([0x22; 16])
+            ])
+        );
+        let closed = back.windows[1].range().expect("the keys decode");
+        assert_eq!(
+            closed.lo,
+            (UnixSecs::from_secs(1_700_000_000), DedupKey::MIN)
+        );
+        assert_eq!(
+            closed.hi,
+            (
+                UnixSecs::from_secs(1_700_000_099),
+                DedupKey::from_bytes([0x04; 16])
+            )
+        );
     }
 }

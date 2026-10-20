@@ -8,6 +8,7 @@
 
 #![cfg(feature = "host")]
 
+use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,7 +29,7 @@ const BUDGET: Duration = Duration::from_secs(15);
 
 /// A frame stamped this far ahead stays inside a node's window even when the
 /// node joins after it was sent, so the only way to get it is to ask.
-const AHEAD_SECS: i64 = 30;
+const AHEAD: Duration = Duration::from_secs(30);
 
 /// Logs every chat frame and records the surfaceable ones it receives.
 #[derive(Clone, Default)]
@@ -39,7 +40,7 @@ struct Chat {
 
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: true,
             beat: false,
@@ -72,7 +73,7 @@ impl NodeDriver for Chat {
     type Http = ();
     type Ipc = serde_json::Value;
 
-    /// Broadcast one chat frame stamped [`AHEAD_SECS`] ahead.
+    /// Broadcast one chat frame stamped [`AHEAD`] ahead.
     async fn handle_session(
         &mut self,
         sent: Self::Session,
@@ -89,10 +90,10 @@ impl NodeDriver for Chat {
                 body: MessageBody::new("\"hello\"").expect("a JSON body"),
             },
         );
-        frame.timestamp += AHEAD_SECS;
-        let frame = frame.signed(ctx.identity);
-        let bytes = bytes::Bytes::from(frame.serialize().expect("serialize"));
-        habilis_network::ops::deliver(&frame, bytes, state, ctx.sender)
+        frame.timestamp = frame.timestamp + AHEAD;
+        let frame = frame.sign(ctx.identity);
+        let bytes = frame.serialize().expect("serialize");
+        let _ = habilis_network::ops::deliver(&frame, bytes.clone(), state, ctx.sender)
             .await
             .expect("a meshed node broadcasts");
         // The sender keeps its own frame, as a chat app does, so any peer late
@@ -128,7 +129,7 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg } = event
+        if let NodeEvent::Presence { msg, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
             } = msg.kind
@@ -160,7 +161,7 @@ impl Joined {
 
 fn pin_antientropy_tick() {
     habilis_network::runtime::tuning::init(habilis_network::runtime::tuning::Tuning {
-        antientropy_interval_secs: 3600,
+        antientropy_interval: Duration::from_hours(1),
         ..habilis_network::runtime::tuning::Tuning::DEFAULTS
     });
 }
@@ -181,13 +182,13 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
         SetupParams {
             author: nick(name),
             max_peers: 16,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),
             runtime_base: None,
             state_file: None,
             sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,

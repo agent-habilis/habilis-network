@@ -11,16 +11,16 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use futures_util::StreamExt;
-use iroh::{Endpoint, EndpointId, RelayUrl};
+use iroh::{Endpoint, EndpointId, RelayUrl, Watcher as _};
 use iroh_gossip::api::GossipReceiver;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 #[cfg(feature = "host")]
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::message::{Authored, Verified};
+use crate::protocol::{AuthorKey, MeshId, Nickname, UnixSecs};
 use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
@@ -28,17 +28,19 @@ use crate::util::clock::{Instant, millis_saturating};
 // `tokio::time::Instant`). Aliased rather than path-qualified, matching
 // `daemon::state` / `daemon::app`.
 use crate::util::tuning::{
-    ALIVE_INTERVAL_SECS, LINKSTATE_INTERVAL_SECS, RECLAIM_INTERVAL_MS, STATE_REFRESH_SECS,
-    antientropy_interval_secs, heal_interval_secs, sweep_interval_secs,
+    ALIVE_INTERVAL, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH, antientropy_interval,
+    heal_interval, sweep_interval,
 };
+use n0_future::StreamExt as _;
 use n0_future::time::Instant as TokioInstant;
 // Gated with `spawn_orphan_watch`, its only caller.
 use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::beacon_arm::{
-    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, probes_before_claim,
-    release_rendezvous, schedule_rival_recheck, shed_rival_beacon_if_due,
+    CohostArm, claims_at_startup, maybe_cohost, maybe_reclaim, note_rival_holds,
+    offer_to_the_new_holder, probes_before_claim, release_rendezvous, schedule_rival_recheck,
+    shed_rival_beacon_if_due, verdict_after_known_holders,
 };
 use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
 use super::ctx::HandlerCtx;
@@ -90,12 +92,16 @@ pub async fn run<A: NodeDriver>(
         cohost,
         runtime_base,
         state_file,
-        #[cfg(feature = "host")]
+        #[cfg(feature = "multihop")]
         multihop,
+        #[cfg(feature = "multihop")]
+        underlay_webrtc,
+        lan_contacts,
         webrtc,
         webrtc_enabled,
         local_udp_transport,
         webrtc_admission,
+        address_book,
         webrtc_ice,
         unicast_rx,
         live_count,
@@ -170,19 +176,28 @@ pub async fn run<A: NodeDriver>(
             // The *same* table the Router's signal acceptor holds, not a fresh
             // one: the cap only counts if both roles count against it together.
             webrtc_admission,
+            address_book,
             webrtc_ice,
         },
         started,
     );
     state.mint_mesh = mint_mesh; // creator-only: backs the `invite` command
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     {
-        state.multihop = multihop; // `--multihop`: the registered transport's handle
+        state.multihop = multihop; // the mesh policy's multihop: the registered transport's handle
+        state.underlay_webrtc = underlay_webrtc;
     }
     // The direct-path transport the session manager fills; `None` leaves
     // every pair to iroh's own paths.
     state.webrtc = webrtc_enabled.then_some(webrtc);
+    // The gossip transport of the member endpoint, when the mesh has gossip: the admission table
+    // made it with the endpoint and keeps it, to tell it which peers are established and which
+    // pairs a higher rung carries.
+    state.gossip_handle = state.webrtc_admission.gossip_handle();
     state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
+    state
+        .unicast_pool
+        .set_admission(state.webrtc_admission.clone());
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;
@@ -192,9 +207,16 @@ pub async fn run<A: NodeDriver>(
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();
     state.direct_proven = direct_tx;
+    state
+        .webrtc_admission
+        .set_proven_sink(state.direct_proven.clone());
     // Path watchers report here; the loop re-races or detaches on it.
     let (path_tx, path_rx) = mpsc::unbounded_channel();
+    state.webrtc_admission.set_path_sink(path_tx.clone());
     state.path_changes = path_tx;
+    // A flushed frame whose dial failed comes back here; the loop buffers it again.
+    let (flush_failed_tx, flush_failed_rx) = mpsc::unbounded_channel();
+    state.flush_failed = flush_failed_tx;
     state.rendezvous_id = Some(rendezvous_params.id);
     state.rendezvous_answers_jsep = rendezvous_params.answers_jsep();
     state.write_peer_count();
@@ -206,20 +228,26 @@ pub async fn run<A: NodeDriver>(
     // advertisers sharing one directory `rendezvous_id` don't bind
     // duplicate copies. Why: `EventLoopConfig::cohost`.
     let mut rendezvous: Option<beacon::Rendezvous> = None;
+    // The probe tasks of the private ladder report here; the loop notes the reading and walks.
+    let (rung_report_tx, rung_reports) = mpsc::unbounded_channel();
+    state.rungs = beacon::RungWatch::new(rung_report_tx);
     // The outstanding probe-before-claim, if any. Owned here beside the
     // beacon it decides, because a probe outlives the tick that started it:
-    // its verdict arrives on the loop's own arm, up to `HEAL_PROBE_SECS`
+    // its verdict arrives on the loop's own arm, up to `HEAL_PROBE`
     // later.
     let mut rival_probe: Option<beacon::RivalProbe> = None;
     if claims_at_startup(cohost) {
-        let claimed = beacon::ensure(
+        let claimed = beacon::walk_ladder(
             &rendezvous_params,
             &endpoint,
+            &state.address_book,
             &mut rendezvous,
             probes_before_claim(cohost),
             &mut rival_probe,
+            &mut state.rungs,
         )
-        .await;
+        .await
+            == beacon::Held::Claimed;
         if claimed {
             schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
         }
@@ -237,12 +265,25 @@ pub async fn run<A: NodeDriver>(
     // link to lose, and so arms nothing. Recovery then waited out the 15s
     // heal cadence — long enough that a two-peer mesh looks simply broken.
     // With the window open, `maybe_reclaim` re-grafts within
-    // `RECLAIM_INTERVAL_MS` instead, and stops as soon as the link is up.
+    // `RECLAIM_INTERVAL` instead, and stops as soon as the link is up.
     state.arm_reclaim(Instant::now());
 
     let (gossip_sender, receiver) = topic.split();
+    if let Some(handle) = &state.gossip_handle {
+        handle.attach_gossip(gossip_sender.clone());
+    }
+    let receiver = gossip::split::spawn_split(receiver, state.gossip_handle.clone());
 
     let sender = MeshSender::new(gossip_sender);
+    // The task that sends the digest answers, so that the loop never waits for
+    // the gossip actor to take them.
+    if let Some(resends) = state.resend_receiver.take() {
+        n0_future::task::spawn(crate::transport::outbox::drain(
+            resends,
+            sender.clone(),
+            state.unicast_pool.clone(),
+        ));
+    }
 
     #[cfg(feature = "host")]
     let ipc_rx = spawn_ipc_rx::<A::Ipc>(
@@ -340,6 +381,7 @@ pub async fn run<A: NodeDriver>(
         rendezvous_params,
         rung_rx,
         rung_probe,
+        rung_reports,
         cohost,
         started,
         external_quit_rx,
@@ -349,21 +391,28 @@ pub async fn run<A: NodeDriver>(
         exit_on_quit,
         http_rx,
         unicast_rx: Some(unicast_rx),
+        lan_contacts,
         direct_rx,
         path_rx,
+        flush_failed_rx,
     }))
     .await
 }
 
-/// The alive tick: note the gap, then broadcast the keepalive presence.
+/// The alive tick: note the gap, broadcast the keepalive presence, then pay a held-back `PeerInfo` flood.
 async fn alive_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     timers::note_tick_gap(
         "alive",
         &mut anchors.alive,
         &mut anchors.alive_wall,
-        Duration::from_secs(ALIVE_INTERVAL_SECS),
+        ALIVE_INTERVAL,
     );
     lifecycle::heartbeat::tick_alive(state, ctx.sender, ctx.mesh, ctx.author).await;
+    // A neighbor that came up inside the window of a flood is owed our address.
+    if state.take_deferred_peerinfo(Instant::now()) {
+        gossip::broadcast_peer_info(state, ctx).await;
+        state.last_sent_at = Instant::now();
+    }
 }
 
 /// The anti-entropy tick: note the gap, advertise the chat digest, then both
@@ -377,7 +426,7 @@ async fn antientropy_arm(
         "antientropy",
         &mut anchors.antientropy,
         &mut anchors.antientropy_wall,
-        Duration::from_secs(antientropy_interval_secs()),
+        antientropy_interval(),
     );
     gossip::antientropy::broadcast_digest(state, ctx.sender, ctx.mesh, ctx.author).await;
     gossip::antientropy::broadcast_state_digests(
@@ -390,57 +439,135 @@ async fn antientropy_arm(
     .await;
 }
 
-/// Default per-link routing cost we advertise for our own neighbours until live
-/// telemetry (RTT / delivery) is wired into the multihop metric.
-#[cfg(feature = "host")]
-const MULTIHOP_LINK_COST: u32 = 10;
-
 /// The multihop link-state tick: re-broadcast our own links (one per direct
-/// neighbour, carrying our underlay dial address) so every peer keeps a fresh
-/// routing graph for the multihop transport. No-op until meshed, or when the
-/// multihop transport is off — a vector with no consumer helps no one.
-/// Off a host the multihop transport does not exist, so the tick has nothing to
-/// broadcast. A no-op stub rather than a `cfg` at the `select!` arm, so the loop
-/// body reads the same on both targets.
-#[cfg(not(feature = "host"))]
+/// neighbour and one per member with a live underlay session, carrying our underlay dial address) so every peer keeps a fresh
+/// routing graph for the multihop transport. Each link carries the cost of the handle
+/// (`HandleConfig::link_cost`; a browser's is higher), until live telemetry (RTT, delivery) is
+/// wired into the metric. No-op until meshed, or when the multihop transport is off — a vector
+/// with no consumer helps no one — and while the underlay has no address a neighbor could dial.
+/// Without the `multihop` feature the transport does not exist, so the tick has nothing
+/// to broadcast. A no-op stub rather than a `cfg` at the `select!` arm, so the loop
+/// body reads the same with and without the feature.
+#[cfg(not(feature = "multihop"))]
 #[expect(
     clippy::unused_async,
-    reason = "the `host` body awaits; the signatures must match so the select! arm reads the same on both targets"
+    reason = "the `multihop` body awaits; the signatures must match so the select! arm reads the same with and without the feature"
 )]
 async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let _ = (state, ctx);
 }
 
-#[cfg(feature = "host")]
-async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+/// The edges that our link-vector advertises: one per gossip neighbour, and one per member
+/// whose underlay holds a live session with us (`held`), whether or not a gossip link to it is
+/// up. The relay watcher closes a gossip link on purpose, and a gossip dial that came before the
+/// session of its pair was refused, so a session that carries a route must not lose its edge
+/// with the link. A hop that the underlay holds stuck is still dropped by `link_vector`.
+#[cfg(feature = "multihop")]
+fn advertised_links(
+    linked: &std::collections::HashSet<EndpointId>,
+    held: &[EndpointId],
+    cost: u32,
+) -> Vec<(EndpointId, u32)> {
+    let mut members: std::collections::BTreeSet<EndpointId> = linked.iter().copied().collect();
+    members.extend(held.iter().copied());
+    members.into_iter().map(|member| (member, cost)).collect()
+}
+
+#[cfg(feature = "multihop")]
+pub(crate) async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    advertise_links(state, ctx, false).await;
+}
+
+/// Advertise the links of this node. The tick sends whatever the set is, as the vector is also
+/// what keeps our edges alive in the graph of the others; `only_if_changed` is for a link that
+/// came up (see [`linkstate_now`]).
+#[cfg(feature = "multihop")]
+async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_if_changed: bool) {
+    // Before the early return, and before our own vector goes in: a peer that has
+    // stopped advertising must not keep its edges in the graph, and a node that is
+    // not meshed yet keeps hearing vectors it will route over once it is.
+    if let Some(handle) = state.multihop.as_ref() {
+        handle.expire_stale();
+    }
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    {
+        if state.linkstate_held {
+            return;
+        }
+    }
     if !state.meshed || state.multihop.is_none() {
         return;
     }
-    state.link_state_seq += 1;
-    let seq = state.link_state_seq;
-    let links: Vec<_> = state
-        .linked_endpoints
-        .iter()
-        .map(|eid| (*eid, MULTIHOP_LINK_COST))
-        .collect();
     let handle = state.multihop.as_ref().expect("checked above");
-    let vector = handle.link_vector(seq, links);
+    // A vector names the address of our underlay, and a neighbor dials that address. An
+    // underlay with no IP and no relay yet has none: wait for the next tick.
+    if handle.underlay_addr().addrs.is_empty() {
+        return;
+    }
+    let held = state
+        .underlay_webrtc
+        .as_ref()
+        .map(|underlay| crate::transport::underlay_webrtc::held_members(state, underlay))
+        .unwrap_or_default();
+    let links = advertised_links(&state.linked_endpoints, &held, handle.link_cost());
+    if only_if_changed && !advertised_changed(state.last_advertised.as_deref(), &links) {
+        return;
+    }
+    state.last_advertised = Some(links.clone());
+    let vector = handle.link_vector(
+        links
+            .iter()
+            .map(|&(id, cost)| {
+                (
+                    habilis_network_iroh_multihop_transport::AppId::new(id),
+                    cost,
+                )
+            })
+            .collect(),
+    );
     // Fold our own vector into our own routing table: gossip never loops a
     // broadcast back, and without our outbound edges the local graph can't
     // source a route (`route_to(self, …)` would always be empty).
-    handle.feed_topology(vector.clone());
+    let updated = handle.feed_topology(vector.clone());
+    // Our own links changed the topology: a route may exist now that did not at the last tick.
+    if updated {
+        crate::transport::probe::nudge_climbing_pairs(state, ctx, true);
+    }
     let Some(body) = gossip::json_body(&vector) else {
         return;
     };
     state.idle.broadcasts += 1;
-    // Retained locally for the same reason the vector is fed into our own
-    // routing table above: gossip never loops a broadcast back. Every tick
-    // mints a fresh `seq`, so an unretained vector is one more message our
-    // peers re-send to us on every anti-entropy round for as long as the log
-    // holds it (see `gossip::recv::retain_own_broadcast`).
-    let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity);
+    // Not retained in the log, unlike a chat message: the next tick's vector
+    // replaces this one, and peers never log what they receive (see
+    // `is_loggable`), so a retained copy would be one that nobody else holds and
+    // that every digest asks us for again.
+    let vector_msg =
+        crate::protocol::Message::new_link_state(ctx.mesh, ctx.author, body).sign(&state.identity);
     gossip::broadcast_msg(ctx.sender, &vector_msg).await;
-    gossip::retain_own_broadcast(state, &vector_msg);
+    // The vector that this node just sent is what a peer that turned our offer away lacked: the
+    // wait that its turn-aways earned ends, and the underlay offers again at once. One offer per
+    // vector sent: a link event, or the tick.
+    if let Some(underlay) = state.underlay_webrtc.as_ref() {
+        underlay.admission.forget_not_a_neighbor();
+    }
+    crate::transport::underlay_webrtc::tick_now(state);
+}
+
+/// Whether the links of a vector are another set than the last one that went out. None went
+/// out yet: it is another one.
+#[cfg(feature = "multihop")]
+fn advertised_changed(last: Option<&[(EndpointId, u32)]>, links: &[(EndpointId, u32)]) -> bool {
+    last != Some(links)
+}
+
+/// [`linkstate_arm`] now, for a link that came up: the vector of this node is what lets a
+/// neighbor offer a session on the underlay and route over its edges, and the first tick is
+/// `LINKSTATE_INTERVAL` away. It sends only when the links are another set than the last
+/// vector had: a second link that comes up 100 ms after the first goes out at once, and a link
+/// that flaps back to the set that went out sends nothing.
+#[cfg(feature = "multihop")]
+pub(crate) async fn linkstate_now(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    advertise_links(state, ctx, true).await;
 }
 
 /// The sweep-tick arm: note the gap, then evict silent peers. The app's own
@@ -450,7 +577,7 @@ fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn N
         "sweep",
         &mut anchors.sweep,
         &mut anchors.sweep_wall,
-        Duration::from_secs(sweep_interval_secs()),
+        sweep_interval(),
     );
     lifecycle::heartbeat::tick_sweep(state, sink);
 }
@@ -462,7 +589,7 @@ fn sweep_arm(anchors: &mut TickAnchors, state: &mut EventLoopState, sink: &dyn N
 /// (clippy `too_many_lines`) without an `#[allow]`.
 struct EventLoop<A: NodeDriver> {
     sender: MeshSender,
-    receiver: GossipReceiver,
+    receiver: gossip::split::MeshReceiver<GossipReceiver>,
     /// The gossip frontend, kept so the loop can re-subscribe the topic
     /// after the stream terminally ends (see the heal arm) — without it
     /// a closed subscription (e.g. lag-evicted by the actor) would
@@ -495,6 +622,8 @@ struct EventLoop<A: NodeDriver> {
     rung_rx: watch::Receiver<Option<RelayUrl>>,
     /// The startup probe behind `rung_rx`, released with the rendezvous.
     rung_probe: Option<crate::lookup::StoppableTask>,
+    /// What the probe tasks of the private ladder found, and the walk that asked for it.
+    rung_reports: mpsc::UnboundedReceiver<beacon::RungReport>,
     /// When this member may serve the rendezvous (see [`CoHostPolicy`]).
     cohost: CoHostPolicy,
     /// Event-loop start, for the unmeshed-joiner co-host grace.
@@ -502,7 +631,7 @@ struct EventLoop<A: NodeDriver> {
     external_quit_rx: Option<mpsc::Receiver<()>>,
     /// The in-process typed session channel (in-process: library API or MCP); `None` on the CLI.
     external_req_rx: Option<mpsc::Receiver<A::Session>>,
-    external_msg_tx: Option<broadcast::Sender<Message>>,
+    external_msg_tx: Option<broadcast::Sender<Authored>>,
     quit_rx: mpsc::Receiver<()>,
     exit_on_quit: bool,
     /// The application's localhost HTTP binding request channel; `None` off.
@@ -511,12 +640,17 @@ struct EventLoop<A: NodeDriver> {
     /// `gossip::ingest` (same validation + dedup path as gossip). `Option` so
     /// the `select!` arm can disable itself if the channel ever closes.
     unicast_rx: Option<mpsc::Receiver<bytes::Bytes>>,
+    /// The members of this mesh that the LAN announces (`gossip::lan`). `Option` so the arm is
+    /// off without an mDNS handle and when the channel closes.
+    lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
     /// Direct-path probe verdicts (`transport::probe`). Never closes: `state`
     /// holds a sender for the loop's lifetime.
     direct_rx: mpsc::UnboundedReceiver<crate::transport::probe::DirectOutcome>,
     /// Path watcher reports (`transport::probe::on_path_change`). Never closes,
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<crate::transport::probe::PathChange>,
+    /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
+    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, crate::protocol::message::WireFrame)>,
 }
 
 /// The daemon's `select!` loop. Never returns normally on the CLI
@@ -560,6 +694,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mut rendezvous_params,
         mut rung_rx,
         mut rung_probe,
+        mut rung_reports,
         cohost,
         started,
         mut external_quit_rx,
@@ -569,11 +704,16 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         exit_on_quit,
         mut http_rx,
         mut unicast_rx,
+        mut lan_contacts,
         mut direct_rx,
         mut path_rx,
+        mut flush_failed_rx,
     } = loop_state;
 
     log_daemon_start(&author);
+    let slot_freed = state.webrtc_admission.slot_freed();
+    let underlay_slot_freed = underlay_slot_freed_of(&state);
+    let route_wake = route_wake_of(&state);
 
     // The surfaced-events ring (`poll`/`fetch` history) lives app-side, fed by
     // the tap the caller attached to `output` before handing it in (both this
@@ -586,8 +726,8 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
 
     // Owned Arc clone so the per-arm ctx can borrow it without colliding with `&mut state`.
     let identity = state.identity.clone();
-    // Our own pubkey hex, computed once for the per-message self-echo compare.
-    let our_pubkey = crate::protocol::identity::encode_pubkey(&identity.public());
+    // Our own author key, computed once for the per-message self-echo compare.
+    let our_pubkey = identity.author_key();
     // Everything a HandlerCtx needs *except* the sender. The ctx itself
     // is built per-arm (`parts.ctx(&sender)`) rather than once out here:
     // a loop-lifetime ctx would borrow `sender` forever, and the
@@ -598,7 +738,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         mesh: &mesh_str,
         author: &author,
         identity: identity.as_ref(),
-        our_pubkey: &our_pubkey,
+        our_pubkey,
         max_peers,
         rendezvous_id: rendezvous_params.id,
         external_msg_tx: external_msg_tx.as_ref(),
@@ -616,11 +756,44 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
         crate::transport::webrtc::offer_rendezvous_off_tick(&mut state, &ctx);
     }
 
+    // Our own address changes (the home relay arrives after the arrival flood, an
+    // interface changes): a `PeerInfo` that was flooded without it is repaired by
+    // the next flood, and the watcher keeps only the latest value.
+    let mut address_changes = endpoint.watch_addr().stream_updates_only();
+
     loop {
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        super::beacon_arm::shed_on_request(&mut state, &rendezvous_params, &mut rendezvous);
+        #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+        super::beacon_arm::stall_on_request(&mut state, rendezvous.as_ref());
+        // Whether this process hosts the beacon is read here, once per turn,
+        // from the one place that owns it, so that no path that claims or sheds
+        // the beacon has to remember to say so.
+        state.hosts_rendezvous = rendezvous.is_some();
+        // A member that links to our beacon and that we do not know is a sign of another group.
+        if let Some(held) = rendezvous.as_mut() {
+            for arrived in held.take_arrivals() {
+                if arrived != endpoint.id() && !state.known_endpoints.contains(&arrived) {
+                    state.note_second_group_sign(endpoint.id(), Instant::now());
+                }
+            }
+        }
+        // Said in our `PeerInfo` from here, for the same reason: no claim or shed path has to
+        // remember to send it again.
+        if state.hosts_rendezvous != state.beacon_flag_flooded {
+            state.beacon_flag_flooded = state.hosts_rendezvous;
+            let ctx = parts.ctx(&sender);
+            gossip::broadcast_peer_info(&mut state, &ctx).await;
+        }
         tokio::select! {
             () = sleep_until_opt(state.ping_round.as_ref().map(|round| round.deadline)) => {
                 state.idle.external += 1;
                 finalize_ping_round(&mut state, sink.as_ref());
+            }
+            () = sleep_until_opt(state.ping_round.as_ref().and_then(|round| round.second_probe_at())) => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                gossip::send_second_probe(&mut state, &ctx).await;
             }
             () = sleep_until_opt(app.earliest_poll_deadline()) => {
                 state.idle.external += 1;
@@ -664,10 +837,61 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 crate::transport::probe::on_outcome(outcome, &mut state, &ctx).await;
                 crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
             }
+            Some((msg, bytes)) = flush_failed_rx.recv() => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                gossip::requeue_failed(&mut state, &ctx, msg, bytes);
+            }
+            () = slot_freed.notified() => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                crate::transport::probe::top_up_lane_offers(&mut state, &ctx).await;
+            }
+            // A round of the multihop underlay ended, offered or answered: an offer that its
+            // answerer turned away, because our link vector had not reached it yet, is made again
+            // now, and not at the alive tick. A session that the round attached is an edge of this
+            // node: its vector goes out at once, and nothing goes out when the set did not change.
+            () = underlay_slot_freed.notified() => {
+                state.idle.external += 1;
+                #[cfg(feature = "multihop")]
+                {
+                    crate::transport::underlay_webrtc::tick_now(&state);
+                    let ctx = parts.ctx(&sender);
+                    linkstate_now(&mut state, &ctx).await;
+                }
+            }
+            // The gate of the multihop underlay began to refuse a hop, or admitted one that
+            // it refused: the best first hop to a pair on the relay can be another now, and
+            // waiting for the stuck deadline and a link-state tick would cost 20 s or more.
+            () = route_wake.notified() => {
+                state.idle.external += 1;
+                let ctx = parts.ctx(&sender);
+                route_wake_arm(&mut state, &ctx);
+            }
+            lan_event = recv_opt(&mut lan_contacts) => match lan_event {
+                None => lan_contacts = None,
+                Some(event) => {
+                    state.idle.external += 1;
+                    let ctx = parts.ctx(&sender);
+                    gossip::lan::on_lan_event(event, &mut state, &ctx).await;
+                }
+            },
+            Some(address) = address_changes.next() => {
+                state.idle.external += 1;
+                if state.address_flood_due(&address) {
+                    let ctx = parts.ctx(&sender);
+                    gossip::broadcast_peer_info(&mut state, &ctx).await;
+                    state.last_sent_at = Instant::now();
+                }
+            }
             Some(change) = path_rx.recv() => {
                 state.idle.external += 1;
                 let ctx = parts.ctx(&sender);
-                crate::transport::probe::on_path_change(change, &mut state, &ctx).await;
+                if Some(change.peer) == state.rendezvous_id {
+                    crate::transport::webrtc::offer_rendezvous_on_path_loss(&mut state, &ctx);
+                } else {
+                    crate::transport::probe::on_path_change(change, &mut state, &ctx).await;
+                }
             }
             // Inbound unicast rides the *same* validate + dedup path as gossip (`ingest`).
             frame = recv_opt(&mut unicast_rx) => match frame {
@@ -693,22 +917,29 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // hiccup) is never retried, and the pair stays relay-only for
                 // the life of the link. Observed exactly that, CLI↔browser.
                 crate::transport::webrtc::retry_sessions(&mut state, &ctx);
+                // The same for the sessions of the multihop underlay, which open
+                // only to a neighbor that has no IP path to us.
+                #[cfg(feature = "multihop")]
+                if let Some(underlay) = state.underlay_webrtc.clone() {
+                    crate::transport::underlay_webrtc::tick(&state, &underlay);
+                }
                 // Same cadence for the direct-path probes a lookup-only relay
                 // holds grafts on: a peer whose punch missed the deadline, or
                 // whose session attached since, gets another look.
                 crate::transport::probe::retry_direct(&mut state, &ctx, false).await;
                 crate::transport::probe::ensure_watchers(&mut state, ctx.endpoint.id(), ctx.rendezvous_id);
-                crate::transport::probe::nudge_webrtc_riders(&state, &ctx);
+                crate::transport::probe::nudge_webrtc_riders(&mut state, &ctx);
             }
             _ = intervals.sweep.tick() => {
                 state.idle.sweep += 1;
                 sweep_arm(&mut anchors, &mut state, sink.as_ref());
                 let ctx = parts.ctx(&sender);
+                crate::transport::probe::prove_routed_pairs(&mut state, &ctx).await;
                 app.on_tick(&mut state, &ctx).await;
             }
             _ = intervals.heal.tick() => {
                 state.idle.heal += 1;
-                let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, Duration::from_secs(heal_interval_secs()));
+                let (mono_gap, wall_gap) = timers::note_tick_gap("heal", &mut anchors.heal, &mut anchors.heal_wall, heal_interval());
                 if state.gossip_open {
                     let ctx = parts.ctx(&sender);
                     run_heal(TickGap { mono: mono_gap, wall: wall_gap }, &mut state, &ctx, &rendezvous_params).await;
@@ -740,15 +971,18 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
             // 0 when idle while `wakeups` stays equal to the column sum.
             Ok(()) = rung_rx.changed() => {
                 state.idle.external += 1;
-                apply_rung_change(&mut state, &mut rendezvous_params, &endpoint, &mut rendezvous, &rung_rx);
+                apply_rung_change(&mut state, &mut rendezvous_params, &mut rendezvous, &rung_rx);
             }
             // The off-loop probe-before-claim answered. Its own arm rather
             // than a poll at the next heal tick: the probe already cost up to
-            // `HEAL_PROBE_SECS`, and making a free rendezvous wait out another
+            // `HEAL_PROBE`, and making a free rendezvous wait out another
             // 15s interval before anyone binds it would hand back the claim
             // latency this change was meant to leave untouched.
             found_rival = beacon::probe_verdict(&mut rival_probe) => {
                 state.idle.external += 1;
+                let found_rival = verdict_after_known_holders(found_rival, &state);
+                let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
+                state.probe_backoff.note_verdict(found_rival, Instant::now(), spread);
                 // One free verdict is not enough to claim: a live beacon's
                 // rival re-check periodically releases the rendezvous to
                 // re-probe it, and a probe landing inside that window reads
@@ -761,7 +995,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     state.rendezvous_probe_read_free = true;
                 } else {
                     state.rendezvous_probe_read_free = false;
-                    let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &mut rendezvous, found_rival).await;
+                    let claimed = beacon::claim_after_probe(&rendezvous_params, &endpoint, &state.address_book, &mut rendezvous, found_rival, &mut state.rungs).await;
                     if claimed {
                         // Still from the brisk base: two joiners that start
                         // together both read free twice and claim in the same
@@ -770,13 +1004,34 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                         schedule_rival_recheck(&mut state, cohost, &rendezvous_params, &endpoint);
                         // The new rendezvous never dials us; the reclaim tick re-grafts it.
                         state.arm_reclaim(Instant::now());
+                        offer_to_the_new_holder(&mut state, &parts.ctx(&sender));
                     } else if found_rival {
                         // A rival holds the identity: this arbitration epoch is
                         // settled, so a later claim (the rival died) starts the
                         // re-check backoff from its brisk base again.
                         state.rival_recheck_rounds = 0;
+                        note_rival_holds(&mut state, &parts.ctx(&sender));
                     }
                 }
+            }
+            // A probe task of the private ladder answered. Its own arm, so that the walk that
+            // asked for it walks again at once and no tick has to wait.
+            Some(report) = rung_reports.recv() => {
+                state.idle.external += 1;
+                state.rungs.note(report, Instant::now());
+                let ctx = parts.ctx(&sender);
+                let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
+                maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
+                maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
+            }
+            () = closed_opt(&mut state.beacon_closing) => {
+                // The beacon that the re-check shed is closed: the id is free of our own corpse, so
+                // the re-probe starts now. The reclaim tick below stays as the net.
+                state.beacon_closing = None;
+                state.idle.reclaim += 1;
+                let ctx = parts.ctx(&sender);
+                let arm = CohostArm { policy: cohost, params: &rendezvous_params, started };
+                maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
             }
             _ = intervals.reclaim.tick() => {
                 state.idle.reclaim += 1;
@@ -789,11 +1044,13 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                 // one holder to catch the other still up (observed lockstep:
                 // both shed within 5ms, both probe into the gap, both re-bind,
                 // forever). At this cadence the offsets survive; the next tick
-                // (~RECLAIM_INTERVAL_MS later, after the dropped endpoint has
+                // (~RECLAIM_INTERVAL later, after the dropped endpoint has
                 // unmapped) runs the re-probe via `maybe_reclaim`.
-                if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous) {
+                if !shed_rival_beacon_if_due(&mut state, &arm, &mut rendezvous, ctx.endpoint.id()) {
                     maybe_reclaim(&mut state, &ctx, &arm, &mut rendezvous, &mut rival_probe).await;
                 }
+                crate::transport::probe::regraft_due(&mut state, &ctx).await;
+                crate::transport::webrtc::detach_sessions_under_udp(&mut state, &ctx).await;
                 gossip::antientropy::resume_fast_rounds(&mut state, &ctx).await;
             }
             _ = intervals.antientropy.tick() => {
@@ -900,6 +1157,45 @@ async fn sleep_until_opt(deadline: Option<TokioInstant>) {
     }
 }
 
+/// The route-wake arm: the gate of the multihop underlay began to refuse a hop, or admitted
+/// one that it refused, so the best first hop to a pair on the relay can be another now.
+/// The pass dials the pairs whose route changed.
+pub(crate) fn route_wake_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    crate::transport::probe::nudge_climbing_pairs(state, ctx, true);
+}
+
+/// The wake of the multihop handle, which rings when its relay rule starts to refuse a
+/// hop and when it admits one that it refused.
+#[cfg(feature = "multihop")]
+fn route_wake_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+    state.multihop.as_ref().map_or_else(
+        || std::sync::Arc::new(tokio::sync::Notify::new()),
+        habilis_network_iroh_multihop_transport::MultihopHandle::route_wake,
+    )
+}
+
+/// Without the `multihop` feature there is no multihop transport: the wake never rings.
+#[cfg(not(feature = "multihop"))]
+fn route_wake_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+    std::sync::Arc::new(tokio::sync::Notify::new())
+}
+
+/// The wake of the admission table of the multihop underlay, which rings when a round of the
+/// underlay ends, whatever its end. It is the table of the underlay, not `webrtc_admission`.
+#[cfg(feature = "multihop")]
+fn underlay_slot_freed_of(state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+    state.underlay_webrtc.as_ref().map_or_else(
+        || std::sync::Arc::new(tokio::sync::Notify::new()),
+        |underlay| underlay.admission.slot_freed(),
+    )
+}
+
+/// Without the `multihop` feature there is no underlay: the wake never rings.
+#[cfg(not(feature = "multihop"))]
+fn underlay_slot_freed_of(_state: &EventLoopState) -> std::sync::Arc<tokio::sync::Notify> {
+    std::sync::Arc::new(tokio::sync::Notify::new())
+}
+
 /// Build and emit the `ping_report` for the elapsed round, then clear
 /// it. RTT is each pong's local arrival minus the probe broadcast time.
 fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
@@ -913,8 +1209,8 @@ fn finalize_ping_round(state: &mut EventLoopState, sink: &dyn NodeSink) {
     let mut peers: Vec<(Nickname, u64)> = round
         .pongs
         .iter()
-        .map(|(nickname, arrival)| {
-            let rtt_ms = millis_saturating(arrival.duration_since(round.t1));
+        .map(|(nickname, rtt)| {
+            let rtt_ms = millis_saturating(*rtt);
             (nickname.clone(), rtt_ms)
         })
         .collect();
@@ -951,16 +1247,16 @@ struct TickAnchors {
     sweep: Instant,
     heal: Instant,
     antientropy: Instant,
-    alive_wall: i64,
-    sweep_wall: i64,
-    heal_wall: i64,
-    antientropy_wall: i64,
+    alive_wall: UnixSecs,
+    sweep_wall: UnixSecs,
+    heal_wall: UnixSecs,
+    antientropy_wall: UnixSecs,
 }
 
 impl TickAnchors {
     fn now() -> Self {
         let mono = Instant::now();
-        let wall = crate::util::clock::unix_secs();
+        let wall = UnixSecs::now();
         Self {
             alive: mono,
             sweep: mono,
@@ -983,10 +1279,10 @@ pub(super) struct CtxParts<'a> {
     pub(super) mesh: &'a MeshId,
     pub(super) author: &'a Nickname,
     pub(super) identity: &'a crate::protocol::identity::Identity,
-    pub(super) our_pubkey: &'a str,
+    pub(super) our_pubkey: AuthorKey,
     pub(super) max_peers: usize,
     pub(super) rendezvous_id: EndpointId,
-    pub(super) external_msg_tx: Option<&'a broadcast::Sender<Message>>,
+    pub(super) external_msg_tx: Option<&'a broadcast::Sender<Authored>>,
     pub(super) sink: &'a dyn NodeSink,
 }
 
@@ -1043,26 +1339,25 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
 
     let mut prune = n0_future::time::interval(Duration::from_mins(1));
     prune.set_missed_tick_behavior(Skip);
-    let mut alive = n0_future::time::interval(Duration::from_secs(ALIVE_INTERVAL_SECS));
+    let mut alive = n0_future::time::interval(ALIVE_INTERVAL);
     alive.set_missed_tick_behavior(Skip);
     alive.tick().await;
-    let mut sweep = n0_future::time::interval(Duration::from_secs(sweep_interval_secs()));
+    let mut sweep = n0_future::time::interval(sweep_interval());
     sweep.set_missed_tick_behavior(Skip);
     sweep.tick().await;
-    let mut heal = n0_future::time::interval(Duration::from_secs(heal_interval_secs()));
+    let mut heal = n0_future::time::interval(heal_interval());
     heal.set_missed_tick_behavior(Skip);
     heal.tick().await;
-    let mut reclaim = n0_future::time::interval(Duration::from_millis(RECLAIM_INTERVAL_MS));
+    let mut reclaim = n0_future::time::interval(RECLAIM_INTERVAL);
     reclaim.set_missed_tick_behavior(Skip);
     reclaim.tick().await;
-    let mut antientropy =
-        n0_future::time::interval(Duration::from_secs(antientropy_interval_secs()));
+    let mut antientropy = n0_future::time::interval(antientropy_interval());
     antientropy.set_missed_tick_behavior(Skip);
     antientropy.tick().await;
-    let mut state_refresh = n0_future::time::interval(Duration::from_secs(STATE_REFRESH_SECS));
+    let mut state_refresh = n0_future::time::interval(STATE_REFRESH);
     state_refresh.set_missed_tick_behavior(Skip);
     state_refresh.tick().await;
-    let mut linkstate = n0_future::time::interval(Duration::from_secs(LINKSTATE_INTERVAL_SECS));
+    let mut linkstate = n0_future::time::interval(LINKSTATE_INTERVAL);
     linkstate.set_missed_tick_behavior(Skip);
     linkstate.tick().await;
     MaintenanceIntervals {
@@ -1082,6 +1377,17 @@ async fn build_maintenance_intervals() -> MaintenanceIntervals {
 /// when the channel is absent so the arm stays inert for drivers that
 /// don't wire it (CLI/MCP). Shared by the ipc / external-quit /
 /// external-send arms so the idiom isn't written three ways.
+/// Pends while no shed runs; resolves once when the close of the shed beacon is done. A receiver
+/// whose sender was dropped also resolves, so a lost close task cannot hold the re-probe back.
+async fn closed_opt(rx: &mut Option<oneshot::Receiver<()>>) {
+    match rx.as_mut() {
+        Some(rx) => {
+            let _ = rx.await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     match rx.as_mut() {
         Some(rx) => rx.recv().await,
@@ -1090,4 +1396,287 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+
+    use super::closed_opt;
+
+    /// The wake for the close of a shed beacon: pending with no shed, ready when the close reports,
+    /// ready when the close task is lost.
+    async fn wakes_within_a_moment(closing: &mut Option<oneshot::Receiver<()>>) -> bool {
+        n0_future::time::timeout(Duration::from_millis(100), closed_opt(closing))
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn no_shed_does_not_wake_the_loop() {
+        assert!(!wakes_within_a_moment(&mut None).await);
+    }
+
+    #[tokio::test]
+    async fn the_close_of_the_shed_beacon_wakes_the_loop() {
+        let (done, closed) = oneshot::channel();
+        let mut closing = Some(closed);
+        assert!(
+            !wakes_within_a_moment(&mut closing).await,
+            "pends while it closes"
+        );
+
+        done.send(()).expect("the receiver is held");
+
+        assert!(wakes_within_a_moment(&mut closing).await);
+    }
+
+    #[tokio::test]
+    async fn a_lost_close_task_does_not_hold_the_re_probe_back() {
+        let (done, closed) = oneshot::channel::<()>();
+        let mut closing = Some(closed);
+
+        drop(done);
+
+        assert!(wakes_within_a_moment(&mut closing).await);
+    }
+}
+
+#[cfg(all(test, feature = "host"))]
+mod route_wake_tests {
+    use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
+    use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
+
+    use super::{linkstate_arm, route_wake_arm};
+    use crate::testing::{LaneNode, nick};
+    use crate::transport::probe::{PathKind, nudge_climbing_pairs};
+
+    async fn multihop_handle() -> MultihopHandle {
+        let secret = SecretKey::generate();
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(&secret))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay");
+        MultihopHandle::new(&secret, underlay, HandleConfig::default()).expect("a handle")
+    }
+
+    /// One link-state tick of a meshed node with one linked peer, on a handle with `underlay` and
+    /// `config`; what the node holds in its own routing view afterwards: the metric of each link
+    /// that leaves it.
+    async fn own_links_after_a_tick(
+        underlay: Endpoint,
+        secret: &SecretKey,
+        config: HandleConfig,
+    ) -> Vec<u32> {
+        let node = LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        let me = MultihopHandle::new(secret, underlay, config).expect("a handle");
+        state.multihop = Some(me.clone());
+        state.meshed = true;
+        state
+            .linked_endpoints
+            .insert(SecretKey::generate().public());
+        linkstate_arm(&mut state, &ctx).await;
+        let own = me.app_id().to_string();
+        let costs = me
+            .topology_view()
+            .edges
+            .iter()
+            .filter(|edge| edge.from == own)
+            .map(|edge| edge.metric)
+            .collect();
+        state.webrtc_admission.close();
+        node.endpoint.close().await;
+        costs
+    }
+
+    async fn loopback_underlay(secret: &SecretKey) -> Endpoint {
+        Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(secret))
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind an underlay")
+    }
+
+    /// The cost on the links that a node advertises is the one of its handle, so that a browser
+    /// (a handle made with `for_browser`) costs more as a hop in the middle of a route.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_link_state_arm_advertises_the_link_cost_of_its_handle() {
+        for (config, expected) in [
+            (HandleConfig::default(), 10),
+            (HandleConfig::for_browser(), 100),
+        ] {
+            let secret = SecretKey::generate();
+            let underlay = loopback_underlay(&secret).await;
+            assert_eq!(
+                own_links_after_a_tick(underlay, &secret, config).await,
+                vec![expected],
+                "{config:?}"
+            );
+        }
+    }
+
+    /// A vector names the address of the underlay, and a neighbor dials that address. An
+    /// underlay with no IP and no relay yet has none: a vector that names it points nowhere, so
+    /// the tick says nothing until the underlay has one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_link_state_arm_says_nothing_while_the_underlay_has_no_address() {
+        // A browser underlay: no IP socket, and a relay that it has not reached yet, so it
+        // binds and has no address. (An endpoint with neither does not bind at all.) The relay
+        // here is a listener that never answers.
+        let (_silent, relay) = crate::testing::silent_relay_rung();
+        let secret = SecretKey::generate();
+        let underlay = Endpoint::builder(presets::Minimal)
+            .secret_key(underlay_secret(&secret))
+            .relay_mode(iroh::RelayMode::custom([relay]))
+            .clear_ip_transports()
+            .bind()
+            .await
+            .expect("bind an underlay with no address yet");
+        assert!(underlay.addr().addrs.is_empty(), "the premise: no address");
+        assert!(
+            own_links_after_a_tick(underlay, &secret, HandleConfig::default())
+                .await
+                .is_empty(),
+            "no link of ours is advertised"
+        );
+    }
+
+    /// A pair on the relay has the direct route dialed. The gate then refuses the
+    /// destination as a first hop: the wake makes the pass dial the route through a
+    /// third member within the same turn, without waiting for the stuck deadline and a
+    /// link-state tick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_first_hop_moves_the_dial_of_a_pair_on_the_relay_to_a_route_through_a_third()
+    {
+        let node = LaneNode::start().await;
+        let ctx = node.ctx();
+        let mut state = node.state();
+        let (me, via, dst) = (
+            multihop_handle().await,
+            multihop_handle().await,
+            multihop_handle().await,
+        );
+        assert!(me.feed_topology(via.link_vector(vec![(dst.app_id(), 1)])));
+        assert!(me.feed_topology(dst.link_vector(vec![])));
+        assert!(me.feed_topology(me.link_vector(vec![(dst.app_id(), 1), (via.app_id(), 1)])));
+        state.multihop = Some(me.clone());
+        state.note_peer_endpoint(nick("dst"), EndpointAddr::new(dst.app_id().get()));
+        state.path_kinds.insert(dst.app_id().get(), PathKind::Relay);
+
+        nudge_climbing_pairs(&mut state, &ctx, true);
+        let direct = state
+            .route_dialed
+            .get(&dst.app_id().get())
+            .cloned()
+            .expect("the direct route is dialed");
+
+        me.refuse_hop_for_test(dst.app_id());
+        route_wake_arm(&mut state, &ctx);
+
+        let dialed = state
+            .route_dialed
+            .get(&dst.app_id().get())
+            .cloned()
+            .expect("a route is dialed");
+        assert_ne!(dialed, direct, "the route through the third is dialed");
+        assert_eq!(
+            Some(dialed),
+            me.route_addr(dst.app_id()).map(TransportAddr::Custom),
+            "and it is the route that the handle chooses now"
+        );
+        state.webrtc_admission.close();
+        node.endpoint.close().await;
+    }
+}
+
+#[cfg(all(test, feature = "multihop"))]
+mod advertised_changed_tests {
+    use std::collections::HashSet;
+
+    use iroh::{EndpointId, SecretKey};
+
+    use super::{advertised_changed, advertised_links};
+
+    fn id(seed: u8) -> EndpointId {
+        SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    #[test]
+    fn a_node_that_advertised_nothing_yet_has_a_new_set() {
+        assert!(advertised_changed(None, &[(id(1), 10)]));
+    }
+
+    /// The links of a node come up 0.1 to 0.4 s apart. The vector of the second one must go
+    /// out at once: held back to the tick, the route over its edge would wait 15 s.
+    #[test]
+    fn a_second_link_that_comes_up_is_a_new_set() {
+        let first = [(id(1), 10)];
+        let both = [(id(1), 10), (id(2), 10)];
+        assert!(advertised_changed(Some(&first), &both));
+    }
+
+    /// A round of the underlay that attached a session adds an edge without a gossip link: the
+    /// set changes, and the vector follows the end of the round. Without a change, nothing goes.
+    #[test]
+    fn a_session_that_attached_is_a_new_set() {
+        let linked = HashSet::from([id(1)]);
+        let before = advertised_links(&linked, &[], 10);
+        let after = advertised_links(&linked, &[id(2)], 10);
+        assert!(advertised_changed(Some(&before), &after));
+        assert!(!advertised_changed(Some(&after), &after));
+    }
+
+    /// A link that flaps and comes back leaves the set that went out: no second broadcast.
+    #[test]
+    fn a_link_that_comes_back_is_the_set_that_went_out() {
+        let both = [(id(1), 10), (id(2), 10)];
+        assert!(!advertised_changed(Some(&both), &both));
+    }
+}
+
+#[cfg(all(test, feature = "multihop"))]
+mod advertised_links_tests {
+    use std::collections::HashSet;
+
+    use iroh::{EndpointId, SecretKey};
+
+    use super::advertised_links;
+
+    fn id(seed: u8) -> EndpointId {
+        SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    fn sorted(mut links: Vec<(EndpointId, u32)>) -> Vec<(EndpointId, u32)> {
+        links.sort_unstable();
+        links
+    }
+
+    /// The route graph of every member is built from these links. A pair whose gossip dial
+    /// was refused before its session, or whose gossip link the relay watcher closed, still
+    /// has a session on the underlay that carries cells: without its edge, no route to the
+    /// member exists, and the pair is locked out until the gossip link comes back.
+    #[test]
+    fn a_member_with_a_held_session_and_no_gossip_link_is_an_edge() {
+        let linked = HashSet::from([id(1)]);
+        let links = advertised_links(&linked, &[id(2)], 10);
+        assert_eq!(sorted(links), sorted(vec![(id(1), 10), (id(2), 10)]));
+    }
+
+    #[test]
+    fn a_member_that_is_linked_and_held_is_one_edge() {
+        let linked = HashSet::from([id(1)]);
+        let links = advertised_links(&linked, &[id(1)], 10);
+        assert_eq!(links, vec![(id(1), 10)]);
+    }
+
+    #[test]
+    fn with_no_held_session_the_edges_are_the_gossip_links() {
+        let linked = HashSet::from([id(1), id(2)]);
+        let links = advertised_links(&linked, &[], 100);
+        assert_eq!(sorted(links), sorted(vec![(id(1), 100), (id(2), 100)]));
+    }
+}

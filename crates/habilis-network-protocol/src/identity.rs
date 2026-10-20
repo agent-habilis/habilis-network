@@ -17,10 +17,14 @@
 //! cross-restart identity (on-disk persistence) is a documented follow-up;
 //! see `docs/history-integrity.md`.
 
-use anyhow::{Context, Result};
+use std::fmt;
+
+use anyhow::Result;
 use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+
+use crate::{AuthorKey, DedupKey, SymmetricKey};
 
 /// A per-peer signing identity — just the secret key. The nickname
 /// it speaks under is carried by the message `author` field and bound to
@@ -47,6 +51,15 @@ impl Identity {
         self.secret.public()
     }
 
+    /// The public key as the author key of a message: what [`Message::sign`] puts in the
+    /// message, and what a peer reads back from `Message::author_key`.
+    ///
+    /// [`Message::sign`]: crate::Message::sign
+    #[must_use]
+    pub fn author_key(&self) -> AuthorKey {
+        AuthorKey::from_bytes(*self.public().as_bytes())
+    }
+
     /// Sign `bytes` (the message's canonical bytes) with our secret.
     #[must_use]
     pub(crate) fn sign(&self, bytes: &[u8]) -> Signature {
@@ -58,16 +71,18 @@ impl Identity {
     /// so the signing key and the encryption key never coincide (no key reuse).
     #[must_use]
     pub fn seal_secret(&self) -> x25519_dalek::StaticSecret {
-        x25519_dalek::StaticSecret::from(super::crypto::derive_secret(
-            &self.secret.to_bytes(),
-            SEAL_ENC_LABEL,
-        ))
+        // Two bare arrays on the stack are not wiped, and we do not control either: the one that
+        // iroh's `to_bytes()` returns, and the one that `StaticSecret::from` takes by value below.
+        // Between them the bytes sit in a buffer that wipes itself on drop.
+        let identity_seed =
+            SymmetricKey::from_zeroizing(zeroize::Zeroizing::new(self.secret.to_bytes()));
+        x25519_dalek::StaticSecret::from(*identity_seed.derive(SEAL_ENC_LABEL).as_bytes())
     }
 
     /// The X25519 public key peers seal to us with — published in our card.
     #[must_use]
-    pub fn seal_public(&self) -> [u8; 32] {
-        *x25519_dalek::PublicKey::from(&self.seal_secret()).as_bytes()
+    pub fn seal_public(&self) -> x25519_dalek::PublicKey {
+        x25519_dalek::PublicKey::from(&self.seal_secret())
     }
 }
 
@@ -82,15 +97,6 @@ pub(crate) fn verify(pubkey: &PublicKey, bytes: &[u8], signature: &Signature) ->
     pubkey.verify(bytes, signature).is_ok()
 }
 
-/// SHA-256 content hash of `bytes`, lowercase hex — the self-certifying
-/// message id used by the per-author backlink (`prev`) and (Phase 3) the
-/// cross-author DAG. Computed from a message's canonical bytes, so it is
-/// recomputable by any receiver and never has to be trusted off the wire.
-#[must_use]
-pub fn content_hash_hex(bytes: &[u8]) -> String {
-    to_hex(&Sha256::digest(bytes))
-}
-
 /// A 16-byte dedup / anti-entropy key binding an author's public key to a
 /// message id: `SHA-256(pubkey ‖ id)[..16]`. Dedup and the digest key on
 /// this, not the bare id, so a peer that signs its own message under a
@@ -100,14 +106,17 @@ pub fn content_hash_hex(bytes: &[u8]) -> String {
 /// the content) preserves the fresh-id re-announce path (a new id ⇒ a new
 /// key ⇒ not falsely deduped).
 #[must_use]
-pub(crate) fn dedup_key16(pubkey: &str, id_bytes: &[u8; 16]) -> [u8; 16] {
+pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> DedupKey {
     let mut hasher = Sha256::new();
-    hasher.update(pubkey.as_bytes());
+    // The hex text of the key, as the signed bytes carry it; nothing for an unsigned message.
+    if let Some(author) = author {
+        hasher.update(author.hex());
+    }
     hasher.update(id_bytes);
     let digest = hasher.finalize();
     let mut key = [0u8; 16];
     key.copy_from_slice(&digest[..16]);
-    key
+    DedupKey::from_bytes(key)
 }
 
 // ── wire encoding ──────────────────────────────────────────────────────
@@ -119,20 +128,6 @@ pub(crate) fn dedup_key16(pubkey: &str, id_bytes: &[u8; 16]) -> [u8; 16] {
 #[must_use]
 pub fn encode_pubkey(pubkey: &PublicKey) -> String {
     to_hex(pubkey.as_bytes())
-}
-
-/// Parse a hex public key from the wire. Errors on bad hex or length, or
-/// a point that is not a valid Ed25519 key.
-pub(crate) fn decode_pubkey(hex: &str) -> Result<PublicKey> {
-    let bytes: [u8; 32] = from_hex(hex)?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
-    PublicKey::from_bytes(&bytes).context("invalid Ed25519 public key")
-}
-
-#[must_use]
-pub(crate) fn encode_sig(signature: &Signature) -> String {
-    to_hex(&signature.to_bytes())
 }
 
 /// Parse a hex Ed25519 signature (64 bytes) from the wire.
@@ -147,6 +142,47 @@ pub(crate) fn decode_sig(hex: &str) -> Result<Signature> {
 #[must_use]
 pub fn encode_hex(bytes: &[u8]) -> String {
     to_hex(bytes)
+}
+
+/// Write `bytes` into `formatter` as lowercase hex, so that a `Display` for a byte-array newtype is
+/// one call.
+///
+/// # Errors
+/// The formatter fails.
+pub fn write_hex(formatter: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
+    for byte in bytes {
+        write!(formatter, "{byte:02x}")?;
+    }
+    Ok(())
+}
+
+/// The 32 bytes of a 64-character lowercase hex string, the one spelling the wire carries for a
+/// key or a hash. `None` for any other length, an uppercase digit, or a non-hex character.
+pub(crate) fn decode_lower_hex_32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let mut bytes = [0u8; 32];
+    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        *byte = (digit(pair[0])? << 4) | digit(pair[1])?;
+    }
+    Some(bytes)
+}
+
+/// The 64 ASCII bytes of the lowercase hex of `bytes`, on the stack.
+pub(crate) fn encode_lower_hex_32(bytes: &[u8; 32]) -> [u8; 64] {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = [0u8; 64];
+    for (pair, byte) in text.chunks_exact_mut(2).zip(bytes) {
+        pair[0] = DIGITS[usize::from(byte >> 4)];
+        pair[1] = DIGITS[usize::from(byte & 0x0f)];
+    }
+    text
 }
 
 /// The bytes of a hex string, either case; `None` for odd length or a non-hex
@@ -193,7 +229,8 @@ fn hex_nibble(byte: u8) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Identity, decode_pubkey, decode_sig, encode_pubkey, encode_sig, verify};
+    use super::{Identity, decode_sig, dedup_key16, encode_hex, encode_pubkey, verify};
+    use crate::AuthorKey;
 
     #[test]
     fn sign_verify_round_trip() {
@@ -224,22 +261,69 @@ mod tests {
         let identity = Identity::generate();
         let hex = encode_pubkey(&identity.public());
         assert_eq!(hex.len(), 64);
-        assert_eq!(decode_pubkey(&hex).unwrap(), identity.public());
+        let key = AuthorKey::from_hex(&hex).unwrap();
+        assert_eq!(key.public_key(), Some(identity.public()));
     }
 
     #[test]
     fn sig_hex_round_trip() {
         let identity = Identity::generate();
         let sig = identity.sign(b"x");
-        let hex = encode_sig(&sig);
+        let hex = encode_hex(&sig.to_bytes());
         assert_eq!(hex.len(), 128);
         assert!(verify(&identity.public(), b"x", &decode_sig(&hex).unwrap()));
     }
 
+    /// Golden: the key is `SHA-256(pubkey text ‖ id bytes)[..16]`. The unsigned form hashes an
+    /// empty pubkey text. The values were captured at the base commit.
+    #[test]
+    fn dedup_key16_is_pinned_for_a_fixed_pubkey_and_id() {
+        let pubkey = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+        let mut id = [0u8; 16];
+        id[15] = 1;
+        assert_eq!(
+            encode_hex(dedup_key16(AuthorKey::from_hex(pubkey).as_ref(), &id).as_bytes()),
+            "c7ba26a2ed0d21f0e8913dd8b4456086"
+        );
+        assert_eq!(
+            encode_hex(dedup_key16(None, &id).as_bytes()),
+            "7c3ccd10bb7ec37b46d37926ae627426"
+        );
+    }
+
+    /// The seal key is the same key as before the secret went through a wiped key: the
+    /// derivation of the plain bytes under the same label.
+    #[test]
+    fn the_seal_secret_is_the_derivation_of_the_identity_seed() {
+        let identity = Identity::generate();
+        let by_hand = x25519_dalek::StaticSecret::from(*crate::crypto::derive_secret(
+            &identity.secret.to_bytes(),
+            super::SEAL_ENC_LABEL,
+        ));
+        assert_eq!(identity.seal_secret().to_bytes(), by_hand.to_bytes());
+        assert_eq!(
+            identity.seal_public(),
+            x25519_dalek::PublicKey::from(&by_hand)
+        );
+    }
+
+    #[test]
+    fn write_hex_writes_the_same_text_as_encode_hex() {
+        struct Hex<'a>(&'a [u8]);
+        impl std::fmt::Display for Hex<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                super::write_hex(f, self.0)
+            }
+        }
+        let bytes = [0x00, 0x0f, 0xa5, 0xff];
+        assert_eq!(Hex(&bytes).to_string(), "000fa5ff");
+        assert_eq!(Hex(&bytes).to_string(), encode_hex(&bytes));
+    }
+
     #[test]
     fn decode_rejects_bad_hex() {
-        assert!(decode_pubkey("zz").is_err());
-        assert!(decode_pubkey("abc").is_err()); // odd length
+        assert!(AuthorKey::from_hex("zz").is_none());
+        assert!(AuthorKey::from_hex("abc").is_none()); // odd length
         assert!(decode_sig("00").is_err()); // wrong length
     }
 
@@ -250,9 +334,9 @@ mod tests {
         // 4 bytes) positioned so a 2-byte slice splits it used to panic on a
         // non-char-boundary slice — a one-message remote DoS reachable from
         // `verify_signature`. It must now decode byte-wise and return `Err`.
-        assert!(decode_pubkey("aéa").is_err());
+        assert!(AuthorKey::from_hex("aéa").is_none());
         assert!(decode_sig("aéa").is_err());
         // Pure multibyte input of even byte length, too.
-        assert!(decode_pubkey("€€").is_err()); // 6 bytes, all continuation/non-hex
+        assert!(AuthorKey::from_hex("€€").is_none()); // 6 bytes, all continuation/non-hex
     }
 }

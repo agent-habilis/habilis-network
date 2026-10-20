@@ -9,15 +9,31 @@ use std::sync::Arc;
 use iroh::{EndpointId, SecretKey};
 
 use crate::daemon::state::{EventLoopState, MeshSecrets, StateInit};
-use crate::protocol::Nickname;
 use crate::protocol::identity::Identity;
+use crate::protocol::{AuthorKey, Nickname};
 use crate::util::clock::Instant;
+
+/// The key of the test author `name`: its bytes, zero-padded to 32. Two names keep the order
+/// that their bytes have, and a test reads the name back in a failure message.
+pub(crate) fn author_of(name: &str) -> AuthorKey {
+    let mut bytes = [0u8; 32];
+    bytes[..name.len()].copy_from_slice(name.as_bytes());
+    AuthorKey::from_bytes(bytes)
+}
 
 /// A bare state with a fresh identity: no state file, no secrets, no per-peer
 /// gate. The starting point for a test that only cares about one field.
 pub(crate) fn fresh_state() -> EventLoopState {
+    fresh_state_with_book(iroh::address_lookup::memory::MemoryLookup::new())
+}
+
+/// [`fresh_state`] with the given address book.
+pub(crate) fn fresh_state_with_book(
+    address_book: iroh::address_lookup::memory::MemoryLookup,
+) -> EventLoopState {
     EventLoopState::new(
         StateInit {
+            #[cfg(feature = "host")]
             state_file: None,
             identity: Arc::new(Identity::generate()),
             secrets: MeshSecrets::default(),
@@ -25,6 +41,7 @@ pub(crate) fn fresh_state() -> EventLoopState {
             webrtc_admission: crate::transport::SignalAdmission::new(
                 crate::transport::MAX_DIRECT_PEERS,
             ),
+            address_book,
             webrtc_ice: crate::transport::IceProfile::default(),
         },
         Instant::now(),
@@ -56,40 +73,208 @@ pub(crate) fn silent_relay_rung() -> (std::net::TcpListener, iroh::RelayUrl) {
     (silent, rung)
 }
 
+/// The logs that a test captured from its own thread, see [`LogCapture::start`].
+#[cfg(feature = "multihop")]
+#[derive(Clone, Default)]
+pub(crate) struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+#[cfg(feature = "multihop")]
+impl LogCapture {
+    /// Capture every event up to `level` that the calling thread logs, until the guard drops.
+    pub(crate) fn start(level: tracing::Level) -> (Self, tracing::subscriber::DefaultGuard) {
+        // While one dispatcher is the only one registered, `tracing` answers the interest of a
+        // callsite from the default of the thread that hits it first. A parallel test thread
+        // with no default of its own then caches "never" on a callsite that this capture
+        // needs, and the event is dropped. A second dispatcher, kept for the whole process,
+        // makes `tracing` ask every registered dispatcher instead.
+        static SECOND_DISPATCHER: std::sync::OnceLock<tracing::Dispatch> =
+            std::sync::OnceLock::new();
+        SECOND_DISPATCHER
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+        let capture = Self::default();
+        let writer = capture.clone();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_max_level(level)
+                .finish(),
+        );
+        (capture, guard)
+    }
+
+    /// Everything that was captured so far.
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("log buffer")).into_owned()
+    }
+}
+
+#[cfg(feature = "multihop")]
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Run `body` on a fresh current-thread runtime, drop the runtime as
 /// returning from `main` does, and return every ERROR logged meanwhile. That
 /// drop is where iroh logs `Endpoint dropped without calling` for an endpoint
 /// a task still held open.
 #[cfg(feature = "host")]
 pub(crate) fn errors_through_runtime_drop(body: impl Future<Output = ()>) -> String {
-    #[derive(Clone, Default)]
-    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().expect("log buffer").extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let logs = Captured::default();
-    let writer = logs.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .with_max_level(tracing::Level::ERROR)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (logs, _guard) = LogCapture::start(tracing::Level::ERROR);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a runtime");
     runtime.block_on(body);
     drop(runtime);
-    let logs = logs.0.lock().expect("log buffer");
-    String::from_utf8_lossy(&logs).into_owned()
+    logs.text()
+}
+
+/// A real endpoint with a `WebRTC` handle, a gossip sender and everything a [`HandlerCtx`] borrows,
+/// for a test that goes through the code that offers a session. The peer `bob` is a lane peer: it
+/// has a relay address and no IP, so no frame can be sent to it before its session.
+///
+/// [`HandlerCtx`]: crate::daemon::ctx::HandlerCtx
+#[cfg(feature = "host")]
+pub(crate) struct LaneNode {
+    pub(crate) endpoint: iroh::Endpoint,
+    pub(crate) handle: habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    pub(crate) bob: EndpointId,
+    gossip: iroh_gossip::net::Gossip,
+    sender: crate::transport::MeshSender,
+    mesh: crate::protocol::MeshId,
+    identity: Identity,
+    our_pubkey: AuthorKey,
+    author: Nickname,
+    sink: crate::gossip::event::SilentSink,
+}
+
+#[cfg(feature = "host")]
+impl LaneNode {
+    pub(crate) async fn start() -> Self {
+        use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
+        use iroh::endpoint::presets;
+
+        let key = SecretKey::generate();
+        let handle = WebRtcHandle::new(WebRtcTransport::new(key.public()));
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
+            .secret_key(key)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .add_custom_transport(handle.transport())
+            .bind()
+            .await
+            .expect("bind a loopback endpoint");
+        let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
+        let topic = gossip
+            .subscribe(iroh_gossip::proto::TopicId::from_bytes([7u8; 32]), vec![])
+            .await
+            .expect("subscribe to a peerless topic");
+        let (gossip_sender, _receiver) = topic.split();
+        let identity = Identity::generate();
+        Self {
+            endpoint,
+            handle,
+            bob: endpoint_id(77),
+            gossip,
+            sender: crate::transport::MeshSender::new(gossip_sender),
+            mesh: crate::protocol::MeshId::from("test"),
+            our_pubkey: identity.author_key(),
+            identity,
+            author: nick("alice"),
+            sink: crate::gossip::event::SilentSink,
+        }
+    }
+
+    /// Stops the gossip actor: a request to the sender returns an error from here on.
+    pub(crate) async fn stop_gossip(&self) {
+        let _ = self.gossip.shutdown().await;
+    }
+
+    pub(crate) fn ctx(&self) -> crate::daemon::ctx::HandlerCtx<'_> {
+        crate::daemon::ctx::HandlerCtx {
+            sender: &self.sender,
+            endpoint: &self.endpoint,
+            mesh: &self.mesh,
+            author: &self.author,
+            identity: &self.identity,
+            our_pubkey: self.our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &self.sink,
+        }
+    }
+
+    /// A state that has this node's `WebRTC` handle and knows `bob` by a relay address.
+    pub(crate) fn state(&self) -> EventLoopState {
+        let mut state = fresh_state();
+        state.webrtc = Some(self.handle.clone());
+        state.local_udp_transport = false;
+        state.unicast_pool = crate::transport::UnicastPool::new(self.endpoint.clone(), false);
+        state.peer_endpoints.insert(
+            nick("bob"),
+            iroh::EndpointAddr::new(self.bob)
+                .with_relay_url("https://relay.invalid".parse().expect("relay url")),
+        );
+        state
+    }
+
+    pub(crate) fn frame_to_bob(&self) -> crate::protocol::message::Verified {
+        crate::protocol::Message::new_pong(
+            &self.mesh,
+            &self.author,
+            nick("bob"),
+            &crate::protocol::MessageId::random(),
+        )
+        .sign(&self.identity)
+    }
+}
+
+/// A capture must see an event even when a thread with no subscriber of its own hit the same
+/// callsite first. Run it alone in its process (`--exact`): then the capture is the only
+/// dispatcher there is, the case that `tracing` answers from the calling thread's default alone.
+#[cfg(feature = "multihop")]
+mod log_capture_tests {
+    use super::LogCapture;
+
+    fn first_event() {
+        tracing::debug!(target: "log-capture-test", "first event");
+    }
+
+    fn second_event() {
+        tracing::debug!(target: "log-capture-test", "second event");
+    }
+
+    fn third_event() {
+        tracing::debug!(target: "log-capture-test", "third event");
+    }
+
+    #[test]
+    fn an_event_that_a_thread_without_a_subscriber_hit_first_still_reaches_the_capture() {
+        let (logs, _guard) = LogCapture::start(tracing::Level::DEBUG);
+        std::thread::spawn(|| {
+            first_event();
+            second_event();
+            third_event();
+        })
+        .join()
+        .expect("the other thread runs");
+        first_event();
+        second_event();
+        third_event();
+        let text = logs.text();
+        let seen = ["first event", "second event", "third event"]
+            .iter()
+            .filter(|line| text.contains(**line))
+            .count();
+        assert_eq!(seen, 3, "the capture saw {seen} of 3 events: {text}");
+    }
 }

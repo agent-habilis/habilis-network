@@ -1,9 +1,15 @@
 //! The route carried inside a multihop [`CustomAddr`].
 //!
 //! A multihop address is not a location — it is a **source route**: the ordered
-//! hops from the sender to the destination, each carrying the underlay
-//! [`EndpointAddr`] needed to dial it. iroh treats the whole encoded route as an
-//! opaque path locator; we pack/unpack it here.
+//! hops from the sender to the destination, each named by two ids: the
+//! application endpoint and its underlay endpoint. iroh treats the whole encoded
+//! route as an opaque path locator; we pack/unpack it here.
+//!
+//! A hop carries no address. iroh maps an address to a path by its bytes, so an
+//! address in the route would make one route two paths as soon as the two ends
+//! hold different versions of it (a relay switch, a new IP). A forwarder looks up
+//! the address of its next hop in its own topology, from the vector that the hop
+//! signed.
 //!
 //! Reachability-first: the route is *reversible*. A terminal derives the return
 //! route from the forward route plus the sender's own hop, so a reply needs no
@@ -11,11 +17,11 @@
 //! are usable in both directions, which the bidirectional link-state graph
 //! already models.
 
-use iroh::{EndpointAddr, EndpointId};
 use iroh_base::CustomAddr;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::MULTIHOP_TRANSPORT_ID;
+use crate::role::{AppId, UnderlayId};
 
 /// Longest route this transport will build or relay. Routes come from Dijkstra
 /// over the link-state graph and multihop is a last-resort path, so real ones
@@ -23,12 +29,13 @@ use crate::MULTIHOP_TRANSPORT_ID;
 /// the amplification limit: a cell can be forwarded at most this many times.
 pub(crate) const MAX_ROUTE_HOPS: usize = 8;
 
-/// One hop in a source route: which node it is (its app-layer [`EndpointId`])
-/// and how to dial its multihop **underlay** endpoint.
+/// One hop in a source route: which node it is (its [`AppId`])
+/// and which multihop **underlay** endpoint carries its cells. Two ids, 64 bytes,
+/// and no address: see the module note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteHop {
-    pub(crate) app_id: EndpointId,
-    pub(crate) underlay: EndpointAddr,
+    pub(crate) app_id: AppId,
+    pub(crate) underlay_id: UnderlayId,
 }
 
 /// A source route: the ordered hops **after** the sender, ending at the
@@ -44,6 +51,16 @@ pub struct RouteHop {
 pub struct Route(Vec<RouteHop>);
 
 impl Route {
+    /// The hops as short ids for a log line: the application id of each, then the id
+    /// of its underlay, which differ because the underlay has a key of its own.
+    pub(crate) fn describe(&self) -> String {
+        self.0
+            .iter()
+            .map(|hop| format!("{}/{}", hop.app_id.fmt_short(), hop.underlay_id.fmt_short()))
+            .collect::<Vec<_>>()
+            .join(">")
+    }
+
     pub(crate) fn singleton(hop: RouteHop) -> Self {
         Self(vec![hop])
     }
@@ -76,7 +93,8 @@ impl Route {
     }
 
     /// Decode a multihop [`CustomAddr`] back into a route. Returns `None` for a
-    /// wrong transport id or malformed bytes.
+    /// wrong transport id or malformed bytes. The `underlay_id` of a decoded hop is an
+    /// id to resolve, not an address: the forwarder looks up the address in its topology.
     pub(crate) fn decode(addr: &CustomAddr) -> Option<Self> {
         if addr.id() != MULTIHOP_TRANSPORT_ID {
             return None;
@@ -90,7 +108,9 @@ impl Route {
     /// Forward `S → [R1, R2, B]` (source `S`) reverses to `B → [R2, R1, S]`:
     /// drop the destination (`B`, which is us), reverse the interior, then append
     /// the source. Applying this again at `S` reproduces the original forward
-    /// route, so the two ends agree on one stable path locator each.
+    /// route. A hop holds ids and no address, so the bytes of the route are the
+    /// same at both ends, whatever address either end holds for a hop: iroh sees
+    /// one path locator for the pair, not one per spelling.
     ///
     /// The caller must have established that `forward` ends at this node —
     /// [`Forwarder::handle_cell`](crate::underlay::Forwarder::handle_cell) does,
@@ -110,7 +130,7 @@ impl Route {
 }
 
 /// Whether any two hops name the same node. Both identities are checked, and
-/// separately: a repeated `underlay.id` is a bounce because that is the key the
+/// separately: a repeated `underlay_id` is a bounce because that is the key the
 /// forwarder dials on, and a repeated `app_id` is a bounce at the layer above.
 /// Comparing them pairwise rather than pooling them keeps a node whose two
 /// endpoints share a key from rejecting its own routes.
@@ -120,7 +140,7 @@ fn repeats_a_hop(hops: &[RouteHop]) -> bool {
     hops.iter().enumerate().any(|(index, hop)| {
         hops[..index]
             .iter()
-            .any(|earlier| earlier.underlay.id == hop.underlay.id || earlier.app_id == hop.app_id)
+            .any(|earlier| earlier.underlay_id == hop.underlay_id || earlier.app_id == hop.app_id)
     })
 }
 
@@ -137,13 +157,15 @@ impl<'de> Deserialize<'de> for Route {
 #[cfg(test)]
 mod tests {
     use super::{MAX_ROUTE_HOPS, Route, RouteHop};
-    use iroh::{EndpointAddr, EndpointId, SecretKey};
+    use crate::role::{AppId, UnderlayId};
+    use iroh::{EndpointId, SecretKey};
+    use std::fmt::Write as _;
 
     fn hop(seed: u8) -> RouteHop {
         let id: EndpointId = SecretKey::from_bytes(&[seed; 32]).public();
         RouteHop {
-            app_id: id,
-            underlay: EndpointAddr::new(id),
+            app_id: AppId::new(id),
+            underlay_id: UnderlayId::new(id),
         }
     }
 
@@ -152,6 +174,37 @@ mod tests {
         let route = Route::new(vec![hop(1), hop(2), hop(3)]).unwrap();
         let addr = route.encode();
         assert_eq!(Route::decode(&addr).expect("decodes"), route);
+    }
+
+    /// The route is a wire value: iroh dedupes a peer's path on these bytes, and a second
+    /// build must read what this one writes.
+    #[test]
+    fn a_route_encodes_to_fixed_bytes() {
+        let id = |seed: u8| -> EndpointId { SecretKey::from_bytes(&[seed; 32]).public() };
+        let route = Route::new(vec![
+            RouteHop {
+                app_id: AppId::new(id(1)),
+                underlay_id: UnderlayId::new(id(2)),
+            },
+            RouteHop {
+                app_id: AppId::new(id(3)),
+                underlay_id: UnderlayId::new(id(4)),
+            },
+        ])
+        .unwrap();
+        let mut data = String::new();
+        for byte in route.encode().data() {
+            write!(data, "{byte:02x}").unwrap();
+        }
+        assert_eq!(
+            data,
+            concat!(
+                "028a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+                "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394ed",
+                "4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1ca93",
+                "ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c"
+            )
+        );
     }
 
     #[test]

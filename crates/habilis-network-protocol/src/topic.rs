@@ -10,7 +10,7 @@
 //! which is the only place that needs the iroh-gossip type.
 
 /// A gossip topic: the 32 bytes derived from a mesh's seed, name and config by
-/// [`crypto::derive_topic_id`](crate::crypto::derive_topic_id).
+/// `crypto::derive_topic_id`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TopicId([u8; 32]);
 

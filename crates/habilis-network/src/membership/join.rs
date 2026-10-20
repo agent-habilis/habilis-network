@@ -44,9 +44,13 @@ pub struct Opts {
     /// any uses only those; naming none is a loopback mesh. Ignored with a
     /// `topic` (always all four) or a `mesh` id (which carries its own).
     pub lookup: Vec<Lookup>,
-    /// What may carry payload: any of `udp`, `webrtc`, `relay`, with `udp` or
-    /// `webrtc` among them. Empty ⇒ `udp,webrtc`, so all data is peer to peer
-    /// and the relay serves lookup only. `relay`, or a list without `udp`,
+    /// What may carry payload: any of `udp`, `webrtc`, `multihop`, `gossip`, `relay`, with
+    /// `udp` or `webrtc` among them, and `udp` with `multihop`. Empty ⇒
+    /// `udp,webrtc,multihop,gossip`, so all data is peer to peer (through other members
+    /// when no direct path exists, and through the mesh topic when no member routes) and the
+    /// relay serves lookup only. A list names what it carries: without `gossip` there is none.
+    /// `relay`, or
+    /// a list without `udp`,
     /// needs `relay` in `lookup`. Part of the mesh id, so a joiner inherits
     /// it; ignored when joining by id.
     pub transport: Vec<Transport>,
@@ -61,8 +65,10 @@ pub struct Opts {
     /// list, so it refuses this. Part of the mesh id. Empty ⇒ the default
     /// list. Ignored when joining by id.
     pub pkarr_urls: Vec<String>,
-    /// Active-view cap; `0` takes the engine default.
+    /// Active-view cap (G); `0` takes the engine default.
     pub max_peers: usize,
+    /// Ceiling of direct connections (C); `0` takes the engine default.
+    pub max_direct: usize,
 }
 
 /// The ladder these options name, or `None` for the default. Parsed as one
@@ -86,6 +92,19 @@ pub struct Membership {
     pub node: Node<MembershipApp>,
     /// Inbound `msg` frames in arrival order, bounded at [`INBOUND_CAP`].
     pub inbound: mpsc::Receiver<Inbound>,
+}
+
+/// Tests only: whether a member that is set up now has its rung probes blind from its first walk.
+/// [`Request::BlindRungProbes`] can only reach a member that is up, after its startup walk ran.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+static NEW_MEMBERS_ARE_BLIND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Tests only: make every member that [`join`] sets up from now on blind (`blind`), or not. The
+/// dial is process-wide, so a test turns it on around the opens that it means and off again.
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub fn blind_new_members(blind: bool) {
+    NEW_MEMBERS_ARE_BLIND.store(blind, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Resolve `opts`, stand the mesh up, and spawn the event loop.
@@ -138,6 +157,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
         SetupParams {
             author,
             max_peers,
+            max_direct: opts.max_direct,
             // An embedded library writes no files and binds no control
             // socket, so it claims no /tmp root of its own.
             runtime_base: None,
@@ -152,7 +172,6 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
             // Everything this target has; the mesh's transport list narrows
             // it in `setup_mesh`.
             transports: TransportOpts::default(),
-            multihop: false,
             // An embedded member publishes no per-peer identity, so `meta`
             // stays free-form.
             per_peer_gate: None,
@@ -162,6 +181,12 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
     )
     .await
     .context("setting up the mesh")?;
+
+    #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+    if NEW_MEMBERS_ARE_BLIND.load(std::sync::atomic::Ordering::SeqCst) {
+        // Before the loop is spawned, so that the startup walk is blind too.
+        crate::beacon::set_blind_rung_probes(config.endpoint.id(), true);
+    }
 
     // `handle_signals: false` — this is a library inside somebody else's
     // process, unlike a CLI that owns its own: installing process-wide ctrl-c /

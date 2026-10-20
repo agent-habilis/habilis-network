@@ -6,7 +6,7 @@
 //! one so the oldest confirmed frame is still reachable while the newest is
 //! being written.
 
-use crate::frame::{Frame, NULL_FRAME};
+use crate::frame::Frame;
 use crate::request::StateCell;
 
 pub(crate) struct SavedStates<S> {
@@ -50,7 +50,7 @@ impl<S> SavedStates<S> {
 
     /// The cell holding `frame`, if it is still inside the window.
     pub(crate) fn by_frame(&self, frame: Frame) -> Option<StateCell<S>> {
-        if frame == NULL_FRAME {
+        if frame == Frame::NULL {
             return None;
         }
         self.cells

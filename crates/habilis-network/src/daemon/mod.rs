@@ -47,6 +47,7 @@ mod beacon_arm;
 pub(crate) mod event_loop;
 /// Mesh healing and resubscribe, split out of `event_loop`.
 mod heal;
+mod probe_backoff;
 /// The graceful-exit path, split out of `event_loop`.
 mod shutdown;
 #[cfg(feature = "host")]

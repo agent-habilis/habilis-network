@@ -14,8 +14,8 @@
 //! ordinary gossip + relay/DHT/mDNS stack. Ads are plain gossip messages
 //! ([`Ad`] in the body) on that mesh's topic — there is no stored list,
 //! so an ad lives only while its publisher keeps re-broadcasting (see
-//! [`habilis_network_util::tuning`]'s `ADVERTISE_INTERVAL_SECS` /
-//! `DIRECTORY_EXPIRY_SECS`).
+//! [`habilis_network_util::tuning`]'s `ADVERTISE_INTERVAL` /
+//! `DIRECTORY_EXPIRY`).
 //!
 //! This module is **pure**: directory derivation, the [`Ad`] codec, and the
 //! [`Listings`] collector. The advertise *task* (a live session on the
@@ -27,10 +27,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::derive_secret;
-use crate::mesh::{LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
+use crate::crypto::{Seed, derive_secret};
+use crate::mesh::{LockedMesh, LookupOpts, Mesh, MeshConfig, MeshName, TransportPolicy};
 use crate::{MeshId, MessageBody};
-use habilis_network_util::clock::Instant;
+use habilis_network_util::clock::{Instant, UnixSecs};
 
 /// Domain-separation seed for every directory. The directory name is
 /// the `derive_secret` *label*; this is the *seed*, so a directory's
@@ -40,7 +40,7 @@ use habilis_network_util::clock::Instant;
 /// orphans every existing directory (a wire-incompatible directory change).
 /// The literal must be exactly 32 bytes to fit `[u8; 32]` (the `derive_secret`
 /// seed width) — keep any future rename to that length.
-const DIRECTORY_BASE_SEED: [u8; 32] = *b"habilis-mesh/directory/domain/v1";
+const DIRECTORY_BASE_SEED: Seed = Seed::from_bytes(*b"habilis-mesh/directory/domain/v1");
 
 /// The well-known [`Mesh`] for a directory, reached over `lookups`. Both
 /// The advertise and discover paths both call this; the
@@ -52,13 +52,21 @@ const DIRECTORY_BASE_SEED: [u8; 32] = *b"habilis-mesh/directory/domain/v1";
 /// only) and the discoverer's `--mdns/--dht/--relay` choice, and the two must
 /// align to see each other. A different name still yields a fully independent
 /// directory.
+///
+/// # Panics
+/// Never. The directory config carries no password or invite issuer, which
+/// [`Mesh::new`] refuses, so the constructor cannot fail here.
 #[must_use]
 pub fn directory_mesh(directory: &MeshName, lookups: LookupOpts) -> Mesh {
     Mesh::new(
-        derive_secret(&DIRECTORY_BASE_SEED, directory.as_bytes()),
+        Seed::from_bytes(*derive_secret(
+            DIRECTORY_BASE_SEED.as_bytes(),
+            directory.as_bytes(),
+        )),
         directory.clone(),
         directory_config(lookups),
     )
+    .expect("the directory config carries no secret")
 }
 
 /// The config a directory mesh uses for `lookups`: the caller's chosen
@@ -128,10 +136,10 @@ pub struct Listing {
     pub peers: usize,
     /// Local instant of the most recent ad; drives expiry.
     pub last_seen: Instant,
-    /// Unix seconds when this mesh was *first* seen in the directory
-    /// (preserved across re-ads). Carried on the `gossip_found` event so a
-    /// consumer can order or age the listing.
-    pub first_seen_unix: i64,
+    /// When this mesh was *first* seen in the directory (preserved across
+    /// re-ads). Read by the directory API of a consumer, to order or age the
+    /// listing.
+    pub first_seen_unix: UnixSecs,
 }
 
 /// The change one [`Listings::note`] made: a newly seen mesh or a
@@ -181,9 +189,9 @@ impl Listings {
     pub fn note(&mut self, body: &str, now: Instant) -> Option<ListingChange> {
         let ad = Ad::parse(body)?;
         // `ad.id` is a `MeshId` (shallow charset check only); the
-        // structural `Mesh` decode below is the real validity gate, so
+        // structural `LockedMesh` decode below is the real validity gate, so
         // an id that doesn't decode is dropped here.
-        let mesh: Mesh = ad.id.as_str().parse().ok()?;
+        let mesh: LockedMesh = ad.id.as_str().parse().ok()?;
         let mesh_id = ad.id;
 
         if let Some(listing) = self.entries.get_mut(&mesh_id) {
@@ -211,10 +219,10 @@ impl Listings {
                 mesh: mesh_id.clone(),
                 public: !mesh.is_loopback(),
                 password: mesh.requires_password(),
-                name: mesh.name,
+                name: mesh.name().clone(),
                 peers: ad.peers,
                 last_seen: now,
-                first_seen_unix: habilis_network_util::clock::unix_secs(),
+                first_seen_unix: UnixSecs::now(),
             },
         );
         Some(ListingChange::Found(mesh_id))
@@ -272,6 +280,38 @@ mod tests {
     fn advertised_id(name: &str) -> MeshId {
         MeshId::new(directory_mesh(&directory(name), LookupOpts::public_preset()).to_string())
             .expect("directory mesh id is valid")
+    }
+
+    // The golden id, topic and rendezvous of the `global` directory. They equal what the code
+    // before the newtype refactor (795c4f88) gives. The rendezvous holds for both lookups, and the
+    // topic differs, because only the topic mixes in the config.
+    #[test]
+    fn golden_global_directory_is_pinned() {
+        let name = directory("global");
+        let public = directory_mesh(&name, LookupOpts::public_preset());
+        let loopback = directory_mesh(&name, LookupOpts::loopback());
+        assert_eq!(
+            public.to_string(),
+            "6V2BWDBYyzZ2JSgSeNnSuaDLLyeWXYsCMx51Rrx6uAahPifGmAhw4oGrZfPZ6LS4m"
+        );
+        assert_eq!(
+            format!("{:?}", public.topic_id()),
+            "TopicId(7dbfe8ad6f6e2725013cbade8941cea1d3b2628458695d453f162f5d730c02e4)"
+        );
+        assert_eq!(
+            loopback.to_string(),
+            "6V2BWDBYyzZ2JSgSeNnSuaDLLyeWXYsCMx51Rrx6uAahPifGmAhw4oGrZ42xQmkfY"
+        );
+        assert_eq!(
+            format!("{:?}", loopback.topic_id()),
+            "TopicId(14a8001b57bb1cbcc7b94f936c71cb94c2ab39a8c9b0423dbad0da809f93db8f)"
+        );
+        for mesh in [&public, &loopback] {
+            assert_eq!(
+                mesh.rendezvous_id().to_string(),
+                "947e089a2d95674c53b0c9fd4b3a4abd2d58480bda7fd18e268438d4c56d7cbc"
+            );
+        }
     }
 
     #[test]

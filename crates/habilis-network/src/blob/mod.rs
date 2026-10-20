@@ -11,6 +11,11 @@
 //! consumer is the application's job (it is a short string, so a single
 //! [`crate::gossip::send_app`] frame carries it).
 //!
+//! A mesh with only the gossip rung does not carry blobs. The producer and the consumer each
+//! bind an endpoint of their own with no custom transport, and the gossip transport lives on
+//! the member endpoint alone, so a fetch needs an IP path (or the relay, when the mesh allows
+//! it for payload).
+//!
 //! Raw bytes, not text: unlike a frame body, nothing here is UTF-8-constrained or
 //! re-encoded, and the transfer streams in bounded chunks so memory stays flat
 //! regardless of size.
@@ -120,6 +125,37 @@ pub const SECRET_LEN: usize = 32;
 /// Length of the SHA-256 content hash that addresses a blob.
 pub const HASH_LEN: usize = 32;
 
+/// The SHA-256 of a blob's bytes: the name it is stored, ticketed and fetched
+/// under. Prints as lowercase hex, the same text as its spool file name.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlobDigest([u8; HASH_LEN]);
+
+impl BlobDigest {
+    /// Wrap the 32 bytes of a SHA-256.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; HASH_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes, borrowed.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for BlobDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        crate::protocol::identity::write_hex(formatter, &self.0)
+    }
+}
+
+impl std::fmt::Debug for BlobDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "BlobDigest({self})")
+    }
+}
+
 /// Fetch stream close code: the presented bearer secret matched no blob's secret.
 pub(crate) const BAD_SECRET: u32 = 1;
 
@@ -147,6 +183,21 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    /// A secret that is already in a wiped buffer (the blob salt, the token read off
+    /// the wire) moves into its type whole, through the constructor that takes the
+    /// buffer, with no plain `[u8; 32]` copy on the way. This does not compile
+    /// outside the protocol crate unless that constructor is public.
+    #[test]
+    fn a_secret_in_a_wiped_buffer_moves_into_its_type_whole() {
+        use crate::protocol::crypto::{SymmetricKey, TicketSecret};
+        use zeroize::Zeroizing;
+
+        let secret = TicketSecret::from_zeroizing(Zeroizing::new([5u8; super::SECRET_LEN]));
+        assert_eq!(secret.as_bytes(), &[5u8; super::SECRET_LEN]);
+        let key = SymmetricKey::from_zeroizing(Zeroizing::new([6u8; 32]));
+        assert_eq!(key.as_bytes(), &[6u8; 32]);
+    }
+
     /// A throwaway file under the OS temp dir holding `bytes`; the caller drops it.
     fn temp_file(bytes: &[u8]) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -162,6 +213,49 @@ mod tests {
             "habilis-network-blob-spool-{}",
             rand::rng().next_u64()
         ))
+    }
+
+    /// A tripwire on the source, not a test of the endpoint: `Endpoint::addr` does not list a
+    /// custom transport, so nothing here can read what an endpoint holds. The gossip transport
+    /// lives on the member endpoint, and `TransportHandles::default()` is what says that an
+    /// endpoint gets no handle. The blob server passes it to `build_endpoint`, and the consumer
+    /// goes through `build_peer_endpoint`, which passes the same. Neither can hold a gossip
+    /// handle, so a blob fetch cannot ride the gossip rung. A change to either call fails here
+    /// and asks for a new decision.
+    #[test]
+    fn a_blob_endpoint_is_built_with_no_custom_transport() {
+        let defaults = crate::lookup::TransportHandles::default();
+        assert!(defaults.gossip.is_none() && defaults.webrtc.is_none());
+
+        let server = include_str!("produce.rs");
+        let start = server
+            .find("async fn start_with_limits")
+            .expect("the server builder");
+        let built = &server[start..];
+        let call = &built[built.find("build_endpoint(").expect("the server builds")..];
+        let args: String = call[..call.find(".await?").expect("the call ends")]
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(
+            args.ends_with("crate::lookup::TransportHandles::default(),)"),
+            "the blob server must pass no transport handle: {args}"
+        );
+
+        let consumer = include_str!("consume.rs");
+        assert!(
+            consumer.contains("build_peer_endpoint(&ticket.lookups)"),
+            "the blob consumer must build its endpoint with the peer builder"
+        );
+        let lookup = include_str!("../lookup/mod.rs");
+        let peer = &lookup[lookup
+            .find("pub async fn build_peer_endpoint")
+            .expect("the peer builder")..];
+        assert!(
+            peer[..peer.find("\n}").expect("the builder ends")]
+                .contains("TransportHandles::default()"),
+            "the peer builder must pass no handle"
+        );
     }
 
     /// Start a loopback producer serving `payload`, fetch it back over a second
@@ -371,6 +465,36 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// The same bytes offloaded under two groups share one spool file, so
+    /// evicting one group must leave the other's ticket redeemable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
+        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
+            .await
+            .unwrap();
+        let src = temp_file(b"shared bytes");
+        let group_a = ContentId::new("blob-test-group-a");
+        let group_b = ContentId::new("blob-test-group-b");
+        server.register(&src, group_a.clone()).await.unwrap();
+        let ticket_b = server.register(&src, group_b.clone()).await.unwrap();
+
+        server.evict_content(&group_a).await;
+        let mut out = Vec::new();
+        fetch(&ticket_b, &mut out, None)
+            .await
+            .expect("group B still holds the blob");
+        assert_eq!(out, b"shared bytes");
+
+        server.evict_content(&group_b).await;
+        out.clear();
+        assert!(
+            fetch(&ticket_b, &mut out, None).await.is_err(),
+            "the blob goes once its last group is evicted"
+        );
+        fs::remove_file(&src).ok();
+        server.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bad_secret_is_refused() {
         let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
@@ -381,7 +505,7 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.secret = [0u8; super::SECRET_LEN]; // forge a wrong bearer secret
+        ticket.secret = crate::protocol::crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),
@@ -401,7 +525,7 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.sha256 = [0xabu8; super::HASH_LEN]; // a hash the store doesn't hold
+        ticket.sha256 = super::BlobDigest::from_bytes([0xabu8; super::HASH_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),

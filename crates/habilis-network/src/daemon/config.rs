@@ -12,7 +12,8 @@ use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::mesh::{Mesh, MeshName};
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::message::Authored;
+use crate::protocol::{MeshId, Nickname};
 
 use crate::beacon;
 
@@ -32,7 +33,7 @@ pub enum DriverMode {
     /// session, or an app that consumes every frame inside the loop). Never
     /// exits the process and binds no socket; shutdown on `quit_rx`.
     InProcess {
-        msg_tx: Option<broadcast::Sender<Message>>,
+        msg_tx: Option<broadcast::Sender<Authored>>,
         quit_rx: mpsc::Receiver<()>,
         /// Whether this session registers the process-wide
         /// ctrl-c/SIGTERM/SIGHUP/SIGQUIT listeners for a graceful leave.
@@ -92,9 +93,9 @@ pub struct EventLoopConfig {
     pub(crate) topic: GossipTopic,
     /// The gossip frontend the topic was subscribed on. Held by the
     /// event loop so it can **re-subscribe** after the topic stream
-    /// terminally ends — iroh-gossip closes a lagging subscriber and
-    /// its docs say to re-open it; without this handle the daemon
-    /// would stay permanently deaf (review finding H1).
+    /// terminally ends (for example when the actor drops the
+    /// subscription; a lag does not end it); without this handle the
+    /// daemon would stay permanently deaf (review finding H1).
     pub(crate) gossip: iroh_gossip::net::Gossip,
     pub(crate) author: Nickname,
     /// This member's signing identity (Ed25519), minted in `setup_mesh`.
@@ -116,11 +117,11 @@ pub struct EventLoopConfig {
     /// takes the raw password string, which cannot be recovered from
     /// `mesh_key`. `Password`'s `Debug`/`Display` redact to `***`.
     pub(crate) mesh_password: Option<crate::protocol::crypto::Password>,
-    /// The Argon2id-stretched mesh key (`Mesh::stretched_key`), retained to
+    /// The Argon2id-stretched mesh key (`Mesh::mesh_key`), retained to
     /// derive the per-channel keys that encrypt the `state`/`meta` docs and
     /// broadcast chat. `None` for a passwordless mesh — those stay plaintext.
     /// Wiped on drop.
-    pub(crate) mesh_key: Option<zeroize::Zeroizing<[u8; 32]>>,
+    pub(crate) mesh_key: Option<crate::protocol::SymmetricKey>,
     /// Per-loop generic event sink (the tapped `Output`, wrapped as a
     /// [`NodeSink`]). The engine emits `NodeEvent`s through it and hands a clone
     /// to every handler, so multiple in-process sessions each have their own and
@@ -163,7 +164,7 @@ pub struct EventLoopConfig {
     pub(crate) runtime_base: Option<PathBuf>,
     /// When set, the daemon writes peer count changes to this file.
     pub(crate) state_file: Option<PathBuf>,
-    /// The multi-hop transport handle when `--multihop` registered it on the
+    /// The multi-hop transport handle when the mesh policy registered it on the
     /// peer endpoint; `run()` moves it into `EventLoopState::multihop`.
     /// `None` when multihop is off. Built in `setup_mesh`.
     ///
@@ -171,8 +172,16 @@ pub struct EventLoopConfig {
     /// `MultihopHandle` is not in the wasm dependency table at all. The *field*
     /// has to disappear rather than just hold `None` — its type does not exist
     /// there.
-    #[cfg(feature = "host")]
+    #[cfg(feature = "multihop")]
     pub(crate) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
+    /// The `WebRTC` leg of the multihop underlay; `run()` moves it into
+    /// `EventLoopState::underlay_webrtc`. `None` when multihop is off, and on an
+    /// injected endpoint, whose underlay the caller built.
+    #[cfg(feature = "multihop")]
+    pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    /// The members of this mesh that the LAN announces, read by the event loop. `None` when the
+    /// endpoint has no mDNS handle: there is no LAN arm then.
+    pub(crate) lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
     /// This peer's `WebRTC` transport handle. Portable: it is the browser's
     /// only direct path onto the mesh, and an extra candidate path for a native
     /// peer. `run()` moves it into `EventLoopState::webrtc`.
@@ -187,6 +196,9 @@ pub struct EventLoopConfig {
     /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
     /// side and the answering side share one direct-peer ceiling.
     pub(crate) webrtc_admission: crate::transport::SignalAdmission,
+    /// The address book of the member endpoint. `run()` moves it into
+    /// `EventLoopState::address_book`, where the addresses of the peers are registered.
+    pub(crate) address_book: iroh::address_lookup::memory::MemoryLookup,
     /// How far ICE may reach when gathering — host-only on a loopback mesh.
     /// `run()` moves it into `EventLoopState::webrtc_ice`.
     pub(crate) webrtc_ice: crate::transport::IceProfile,
@@ -195,9 +207,9 @@ pub struct EventLoopConfig {
     /// transports share signature-verify + dedup. Built in `setup_mesh`.
     pub(crate) unicast_rx: mpsc::Receiver<bytes::Bytes>,
     /// When advertising (`create --advertise`), the shared counter the
-    /// directory re-broadcast task reads the live peer count
-    /// from. `setup_mesh` leaves this `None`; the advertise path sets
-    /// it before `run` (same late-assignment pattern as `driver`).
+    /// directory re-broadcast task reads the live peer count from. Supplied
+    /// up front through `SetupParams::live_count`, so the config is complete
+    /// when it is built; `run` stores it before the first advertisement.
     pub(crate) live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.

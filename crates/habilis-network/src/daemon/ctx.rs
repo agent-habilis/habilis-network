@@ -5,7 +5,8 @@ use tokio::sync::broadcast;
 
 use crate::gossip::event::NodeSink;
 use crate::protocol::identity::Identity;
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::message::Authored;
+use crate::protocol::{AuthorKey, MeshId, Nickname};
 use crate::transport::MeshSender;
 
 /// Immutable loop-level context threaded through every handler.
@@ -18,10 +19,10 @@ pub struct HandlerCtx<'a> {
     /// This member's signing identity (Ed25519). Messages we author are
     /// signed with it before broadcast; see [`Identity`].
     pub identity: &'a Identity,
-    /// Our own public key as lowercase hex — computed once at loop setup so
-    /// the per-message self-echo check is a string compare, not a fresh
-    /// key-derivation + allocation on every inbound message.
-    pub our_pubkey: &'a str,
+    /// Our own author key — taken once at loop setup so the per-message
+    /// self-echo check is a 32-byte compare, not a fresh key derivation on
+    /// every inbound message.
+    pub our_pubkey: AuthorKey,
     pub(crate) max_peers: usize,
     /// Well-known rendezvous endpoint id. Its co-hosted pseudo-node
     /// shows up as a gossip neighbor on peer endpoints; it is
@@ -31,7 +32,7 @@ pub struct HandlerCtx<'a> {
     /// (`DriverMode::InProcess::msg_tx`); every inbound message that survives
     /// the self-author filter is forwarded here before kind routing. `None` for
     /// the CLI, and for an in-process consumer that drains frames some other way.
-    pub(crate) external_msg_tx: Option<&'a broadcast::Sender<Message>>,
+    pub(crate) external_msg_tx: Option<&'a broadcast::Sender<Authored>>,
     /// Per-loop generic event sink: the engine emits
     /// [`NodeEvent`](crate::gossip::event::NodeEvent) through it and never names
     /// the app's concrete `Output`. Borrowed for the loop's lifetime; handlers

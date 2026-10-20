@@ -2,16 +2,13 @@
 //! that evicts peers we've stopped hearing from. Part of the
 //! lifecycle subsystem (it drives `peer_timeout` / the roster).
 
-use std::time::Duration;
-
 use crate::transport::MeshSender;
-use bytes::Bytes;
 
 use crate::daemon::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::{MeshId, Message, Nickname};
 use crate::util::clock::Instant;
-use crate::util::tuning::{ALIVE_INTERVAL_SECS, alive_timeout_secs};
+use crate::util::tuning::{ALIVE_INTERVAL, alive_timeout};
 
 /// Emit an `Alive` keepalive if we haven't broadcast anything
 /// recently. Chatty daemons pay zero heartbeat cost.
@@ -21,12 +18,12 @@ pub(crate) async fn tick_alive(
     mesh: &MeshId,
     author: &Nickname,
 ) {
-    if state.last_sent_at.elapsed() < Duration::from_secs(ALIVE_INTERVAL_SECS) {
+    if state.last_sent_at.elapsed() < ALIVE_INTERVAL {
         return;
     }
-    let msg = Message::new_alive(mesh, author).signed(&state.identity);
+    let msg = Message::new_alive(mesh, author).sign(&state.identity);
     if let Ok(bytes) = msg.serialize() {
-        let _ = sender.broadcast(Bytes::from(bytes)).await;
+        let _ = sender.broadcast(bytes).await;
     }
     state.idle.broadcasts += 1;
     state.last_sent_at = Instant::now();
@@ -42,7 +39,7 @@ pub(crate) async fn tick_alive(
 /// leaving) — keeps the join-horizon view symmetric.
 pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     let now = Instant::now();
-    let timeout = Duration::from_secs(alive_timeout_secs());
+    let timeout = alive_timeout();
     let expired: Vec<(Nickname, Instant, u64)> = state
         .last_seen
         .iter()
@@ -55,7 +52,20 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
         state.last_seen.remove(nick.as_str());
         if state.peers.remove(nick.as_str()) {
             state.write_peer_count();
+            // Remembered as a quiet peer, but no longer a holder: its flag was last said before it
+            // went silent, and a crashed holder never says it again.
+            if let Some(endpoint) = state.peer_endpoints.get(nick.as_str()).map(|addr| addr.id) {
+                state.forget_rival_holder(endpoint);
+            }
             if state.surfaced.remove(nick.as_str()) {
+                // A peer we knew went silent: a partition may have split the
+                // mesh, and the rendezvous is where its islands meet again. A
+                // node that let go of the rendezvous owes it one return. A node
+                // that still holds the link owes nothing: it would be owed
+                // after the next release, and make the node grab it again.
+                if !state.rendezvous_linked {
+                    state.owe_rendezvous_return(now);
+                }
                 state.quiet.insert(nick.clone());
                 // Retain the last-heard instant so the roster can still
                 // report this evictee's recency (its `last_seen` is gone).
@@ -105,15 +115,16 @@ mod tests {
     use crate::testing::{fresh_state, nick};
     use std::collections::HashSet;
 
-    use super::{Duration, Instant, Nickname, tick_sweep};
+    use super::{Instant, Nickname, tick_sweep};
     use crate::gossip::event::SilentSink;
-    use crate::util::tuning::alive_timeout_secs;
+    use crate::util::tuning::alive_timeout;
+    use std::time::Duration;
 
     #[test]
     fn sweep_evicts_surfaced_peer_into_quiet() {
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(Duration::from_secs(alive_timeout_secs() + 10))
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("swift-cedar"), expired_at);
         state.peers.insert(nick("swift-cedar"));
@@ -128,13 +139,113 @@ mod tests {
         assert!(!state.surfaced.contains("swift-cedar"));
     }
 
+    /// A node that let go of the rendezvous, whose silent neighbour is swept,
+    /// owes it one return: the silence may be a partition, and the rendezvous
+    /// is where the islands meet.
+    #[test]
+    fn sweeping_a_silent_known_peer_owes_a_return_to_the_rendezvous() {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state
+            .linked_endpoints
+            .insert(crate::testing::endpoint_id(1));
+        assert!(!state.rendezvous_wanted(), "enough links: it let go");
+        let expired_at = Instant::now()
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .unwrap();
+        state.last_seen.insert(nick("lost-heron"), expired_at);
+        state.peers.insert(nick("lost-heron"));
+        state.surfaced.insert(nick("lost-heron"));
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(state.rendezvous_wanted(), "one return is owed");
+    }
+
+    /// A node that still holds the rendezvous owes no return: it would be owed
+    /// after the next release, and make the node grab the link again.
+    #[test]
+    fn a_node_still_linked_to_the_rendezvous_owes_no_return() {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state
+            .linked_endpoints
+            .insert(crate::testing::endpoint_id(1));
+        state.rendezvous_linked = true;
+        let expired_at = Instant::now()
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .unwrap();
+        state.last_seen.insert(nick("lost-heron"), expired_at);
+        state.peers.insert(nick("lost-heron"));
+        state.surfaced.insert(nick("lost-heron"));
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(state.rendezvous_comeback_until.is_none());
+    }
+
+    /// A holder that crashed or was killed never sends a `PeerInfo` without the flag. The sweep
+    /// keeps its binding (a quiet peer returns), and must drop its claim to hold the rendezvous:
+    /// a flag that stays known shuts every debt to a new holder for as long as it lives.
+    #[test]
+    fn the_flag_of_an_evicted_holder_is_forgotten() {
+        let mut state = fresh_state();
+        let holder = crate::testing::endpoint_id(7);
+        state
+            .peer_endpoints
+            .insert(nick("lost-heron"), iroh::EndpointAddr::new(holder));
+        state
+            .rival_holders
+            .insert(crate::protocol::AuthorKey::from_bytes([4u8; 32]), holder);
+        assert!(state.rival_holder_known());
+        let expired_at = Instant::now()
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .unwrap();
+        state.last_seen.insert(nick("lost-heron"), expired_at);
+        state.peers.insert(nick("lost-heron"));
+        state.surfaced.insert(nick("lost-heron"));
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            state.quiet.contains("lost-heron"),
+            "it is remembered as quiet"
+        );
+        assert!(
+            state.peer_endpoints.contains_key("lost-heron"),
+            "its binding stays, a quiet peer returns"
+        );
+        assert!(!state.rival_holder_known(), "its claim to hold is void");
+    }
+
+    #[test]
+    fn sweeping_a_ghost_owes_nothing() {
+        let mut state = fresh_state();
+        state.rendezvous_release_links = 1;
+        state
+            .linked_endpoints
+            .insert(crate::testing::endpoint_id(1));
+        let expired_at = Instant::now()
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
+            .unwrap();
+        state.last_seen.insert(nick("ghost-oak"), expired_at);
+        state.peers.insert(nick("ghost-oak"));
+
+        tick_sweep(&mut state, &SilentSink);
+
+        assert!(
+            !state.rendezvous_wanted(),
+            "a ghost of the pre-join backlog says nothing about a partition"
+        );
+    }
+
     #[test]
     fn quiet_peer_reports_real_recency_in_roster() {
         // Regression: a quiet peer must still report how long ago it was
         // last heard (not `null`), even though eviction drops `last_seen`.
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(Duration::from_secs(alive_timeout_secs() + 10))
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("calm-otter"), expired_at);
         state.peers.insert(nick("calm-otter"));
@@ -153,7 +264,7 @@ mod tests {
             .last_seen_secs_ago
             .expect("quiet peer reports real recency, not null");
         assert!(
-            secs >= alive_timeout_secs(),
+            secs >= alive_timeout().as_secs(),
             "recency reflects the actual silence age, got {secs}s"
         );
     }
@@ -162,7 +273,7 @@ mod tests {
     fn sweep_keeps_a_quiet_peers_endpoint_for_its_return() {
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(Duration::from_secs(alive_timeout_secs() + 10))
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("swift-cedar"), expired_at);
         state.peers.insert(nick("swift-cedar"));
@@ -201,7 +312,7 @@ mod tests {
     fn sweep_evicts_unsurfaced_peer_silently() {
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(Duration::from_secs(alive_timeout_secs() + 10))
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("ghost-elm"), expired_at);
         state.peers.insert(nick("ghost-elm"));
@@ -241,7 +352,7 @@ mod tests {
     fn sweep_preserves_other_peers() {
         let mut state = fresh_state();
         let expired_at = Instant::now()
-            .checked_sub(Duration::from_secs(alive_timeout_secs() + 10))
+            .checked_sub(alive_timeout() + Duration::from_secs(10))
             .unwrap();
         state.last_seen.insert(nick("stale-nick"), expired_at);
         state.peers.insert(nick("stale-nick"));

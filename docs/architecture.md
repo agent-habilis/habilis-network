@@ -254,13 +254,65 @@ The split keeps bootstrap alive after the creator leaves: any member can take th
 | | Public mesh | Private (loopback) mesh |
 |---|---|---|
 | Port | Ephemeral | A deterministic port ladder from the seed |
-| Discovery | The relay rung, and the `dht` and `pkarr` lookups by endpoint id (last-writer-wins) | None. The ladder is the address. |
-| Co-hosts | Every member, permanently | Exactly one beacon |
+| Discovery | The relay rung, and the `dht`, `pkarr` lookups by endpoint id (last-writer-wins) | None. The ladder is the address. |
+| Co-hosts | Every member, permanently | One beacon: the holder of the lowest live rung |
 
 Two members can claim the beacon role inside each other's probe window.
 A periodic re-arbitration sheds the rival copy, so the single-beacon invariant holds eventually, not at claim time.
+A public holder that knows no member waits on the alone tier of the re-check (`RIVAL_RECHECK_ALONE`, 3600 s, plus up to the same again as jitter).
+A sign of a second group brings the next re-check back to the first-round delay and starts the rounds again from it.
+The first round waits `RIVAL_RECHECK_FIRST` (12 s) plus an offset of up to `RIVAL_RECHECK_OFFSET_SPAN` (8 s) from the endpoint id.
+Two things are a sign: a member that links to the beacon and that the holder does not know, and a LAN member that the holder is not linked to.
+A sign counts once per `RIVAL_RECHECK_MESHED` (300 s), so a burst of arrivals does not shed the beacon again and again.
+A node that nobody approaches keeps the long wait.
+A loopback mesh and the creator have no re-check armed, so a sign changes nothing for them.
+On a LAN, a member that sees a member of its mesh asks it to be a neighbor, at most 8 times a minute (`MAX_LAN_GRAFTS_PER_MINUTE` in `gossip/lan.rs`).
+The mDNS record does not change again, so no event comes for a request that was refused or lost.
+A member that was asked and is still not a neighbor is asked again from the heal tick: after `RETRY_FIRST` (60 s), then every `RETRY_STEADY` (300 s).
+A neighbor is not asked again, and a repeated request counts against the cap of 8.
 The rendezvous endpoint never authors application messages, and it is never a directed target.
 It accepts no unicast, so a member cannot probe it for a direct path; its accept gate is what keeps its link off the relay.
+A member holds the rendezvous link only while it needs it.
+Once it has three links to other members it tells gossip to leave the rendezvous.
+The beacon then learns that the member left on purpose, keeps no claim on it and does not dial it back.
+Gossip closes the link itself. Once the link is closed and the rendezvous is not wanted, the heal tick detaches the `WebRTC` session. A close from the member's side would reach the beacon as a lost connection.
+This frees a direct-peer slot and a place in the beacon's gossip view for the next joiner.
+It comes back in four cases:
+
+- It has fewer than three links (`RENDEZVOUS_RELEASE_LINKS`).
+- For two minutes (`RENDEZVOUS_COMEBACK`) after the sweep removed a silent roster peer, because a partition may have split the mesh and the rendezvous is where the islands meet again.
+- For the same two minutes after a ladder walk or a probe read a holder of the rendezvous that no member of its mesh is known to host.
+A member says that it hosts the rendezvous in its `PeerInfo`, and only a proven sender is believed.
+The flag is dropped when the member goes silent or leaves, because a holder that crashes never says it again.
+- When its periodic return falls due: `RENDEZVOUS_PERIODIC_RETURN` (600 s) after it let go, plus up to half of that from its endpoint id, so that n members do not come back together. The heal tick pays it like an owed return: it is wanted for `RENDEZVOUS_COMEBACK` (120 s) and no longer, and the next one is due a period later.
+The value is the Tuning field `rendezvous_periodic_return`.
+
+A node that came back for the second, third or fourth case stays `RENDEZVOUS_DWELL` (30 s), then lets go again.
+The member that hosts the beacon keeps its link, so that the beacon's view is never empty: a joiner is introduced to the mesh through that view, and without it the mesh splits into islands that never meet.
+
+### 5.5 The loopback ladder
+
+A private mesh has a ladder of eight loopback ports, derived from the seed.
+The lowest live rung wins: the beacon is the member that holds the first rung that no other mesh holds.
+The walk of a member reads the ladder from rung 0, and it never waits:
+
+- It tries to bind the rung. A rung that binds is the beacon.
+- A rung that does not bind is read from the verdict map of the member. A probe task dials the rung from a throwaway endpoint, with no lookups, and reports one of four answers: `Ours` (the beacon of this mesh), `Foreign` (the identity failed: the verifier of the dialer rejected the key of the listener, or iroh says that the identity differs), `Refused` (a listener answered and ended the dial without proving an identity: a close, a refusal, a reset, a version mismatch, or an alert that is not about the key; a holder of this mesh that is bound and not yet serving answers this way) or `NoAnswer` (a timeout, or nothing to dial).
+- `Ours` is a holder that is not this member. The member stays a peer.
+- `Foreign` binds the next rung at once.
+- `Refused` and `NoAnswer` bind nothing in that walk. A rung that has said nothing, or has refused, in two reports that are at least `RECLAIM_WINDOW` (6 s) apart is read as foreign. One report alone is not a window, however late the walk reads it.
+- A busy rung with no fresh reading gets one probe task, one attempt of `RENDEZVOUS_PROBE` (1 s). All busy rungs are probed in parallel, so eight silent rungs resolve in one window, and the event loop never waits for a probe.
+- A reading is fresh for one heal tick (`HEAL_INTERVAL`, 15 s). The time of the first silence is kept across probes, and it restarts after a gap of three heal ticks.
+- A joiner that starts on a silent rung passes it at the first walk after its second report of silence, which comes one heal tick after the first, and binds the next free rung. The reclaim ticks (`RECLAIM_INTERVAL`, 400 ms, for `RECLAIM_WINDOW`) end before that, so in practice it is the heal tick.
+- When every rung is read as foreign, or as silent for the whole window, no member can serve the rendezvous. The member logs a warning and gives its sink one `NodeEvent::Info` that names the number of ports. It repeats both after `NO_RUNG_REPEAT` (300 s) and not before.
+
+A holder checks the ladder at every heal tick:
+
+- A holder above rung 0 asks whether a lower rung answers as `Ours`. It sheds its beacon on that answer only. A rung that says nothing, refuses, or is free is not an answer. After the shed, its next walk reads that rung as the holder. If no member of its mesh is known to host the rendezvous, the member then owes a return to it (section 5.4).
+- A holder asks whether its own rung still answers as `Ours`. It sheds its beacon on the second consecutive reading that is not `Ours`, never on the first, and then claims again. The check does not see a beacon whose endpoint answers while its gossip is wedged.
+- The holder of rung 0 is never asked to yield: the lowest live rung wins.
+
+A loopback mesh has no timed rival re-check. The two checks above are its repair of a second beacon, which can stand up when a host is too loaded to answer.
 
 ## 6. The engine at run time
 
@@ -333,6 +385,9 @@ Peers then see an immediate neighbor-down event instead of an idle timeout.
 
 A message is compact one-line JSON.
 The envelope carries a version, an id, a kind, the mesh id, the author nickname, a timestamp, the body, the author public key, and a detached Ed25519 signature.
+On the wire these are two text fields, `pubkey` and `sig`.
+In memory they are one optional pair, `Message::signer`, so a message has both or neither.
+The parser rejects a key with no signature and a signature with no key.
 The signature covers the canonical form of the message with the key and signature fields empty.
 Unknown keys must be ignored, which leaves room for extension.
 
@@ -348,7 +403,7 @@ A silent domain change makes verification fail invisibly, and the exact gate tur
 | `Presence { joined \| left \| alive }` | Arrival, departure, keepalive. |
 | `PeerInfo` | A signed card with the self-advertised endpoint. |
 | `Digest` | Anti-entropy digest of the message log window. |
-| `Ping`, `Pong { to }` | Reachability rounds. |
+| `Ping`, `Pong { to, probe }` | Reachability rounds. A pong names the ping it answers. |
 | `State`, `StateDigest` | The free-form CRDT channel and its repair digest. |
 | `Meta`, `MetaDigest` | The gated CRDT channel and its repair digest. |
 | `LinkState` | The multihop link vector. Ephemeral, never logged. |
@@ -440,14 +495,15 @@ A payload lane (gossip graft, unicast, blob) sends to a peer only after iroh sel
 A gossip graft waits for that proof (`transport::probe`), so a pair never dials a link through the relay.
 The accept side holds too: every inbound gossip, unicast and blob connection is held, unread, until iroh selects a direct path on it, and closed with a coded reason if none arrives in `PROBE_DEADLINE` (`transport::path::refuse_unless_direct`).
 The rendezvous link is gated the same way on the beacon, so no gossip frame ever crosses the relay.
+The gate checks the path once, so every gossip connection is watched afterwards, the ones this node accepted and the ones iroh-gossip dials for it (the endpoint hook starts that watch): one whose selected path stays on the relay for `PROBE_DEADLINE`, the wait of the accept gate, is closed with the same coded reason.
 A pair that cannot hole-punch and has no WebRTC session stays unlinked for payload.
 `transport.relay_transport = true` lets payload fall back to the relay, as before the policy existed.
 The policy is in the id so that every member enforces the same rule; one relaying member would undo the saving for everyone it links.
-An id minted before the policy existed keeps its bytes and topic and reads as lookup only.
+An id of version 1, minted before the policy had its own byte, is refused with a request to upgrade: the mesh is created again.
 
 Every create surface names four mesh-wide choices apart, because they are four concepts.
 `lookup` (`--lookup mdns,dht,relay,pkarr` on a CLI, `lookup: ['relay']` in JSON and TypeScript) says how members find each other.
-`transport` (`--transport udp,webrtc,relay`, `transport: ['udp', 'webrtc', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, and `udp,webrtc` is the default.
+`transport` (`--transport udp,webrtc,multihop,gossip,relay`, `transport: ['udp', 'webrtc', 'multihop', 'gossip', 'relay']`) says what payload may ride; it needs `udp` or `webrtc`, `multihop` and `gossip` need one of the two next to them, and `udp,webrtc,multihop,gossip` is the default.
 `relay_urls` (`--relay-url`, `relayUrls`) says which relay, and nothing about its role.
 `pkarr_urls` (`--pkarr-url`, `pkarrUrls`) says which pkarr relays, and needs `pkarr` among the lookups.
 The default lookup preset names `pkarr`, so a topic mesh, a directory mesh and a bare stream producer use it, with the default list.
@@ -458,7 +514,7 @@ The list must have all of the relays, because the public relays form groups that
 The pkarr record holds the home relay of the member and no IP address, the same as the DHT record.
 Each pkarr request still shows the member's IP address and the ids it publishes and resolves to the operator of that relay.
 Pkarr is on by default, so this is the default for every topic mesh and every default public mesh.
-Every member sends its IP address, its endpoint id and the ids it resolves to n0's server and to the two Pubky relays.
+Every member sends its IP address, its endpoint id and the ids it resolves to n0's server and to the two Pubky relays. A multi-hop member also sends the id of its underlay, because a forwarder dials an underlay it has no address for by that id.
 A topic has no opt-out, because its lookups are fixed to the preset.
 A create can name its own relays in `pkarr_urls`, or leave `pkarr` out of `lookup`.
 The pinned public list is skipped when the relay choice is a custom, non-empty ladder and every rung is on this machine (`127.0.0.0/8`, `::1`, or `localhost`), so a mesh that stays local never writes to a public server.
@@ -521,7 +577,7 @@ sequenceDiagram
 Over the authenticated relay stream the receiver ignores the claimed endpoint id and trusts the TLS-proven remote id.
 The lower endpoint id offers, and one shared admission table caps in-flight sessions for both roles.
 TURN is refused by policy: the project relays through its own iroh relay instead.
-A custom path selector ranks direct IP first, then WebRTC, then relay.
+A custom path selector ranks direct IP first, then WebRTC, then multihop, then relay: one ladder (`Rung` in `habilis-network-iroh-transport-util`) that both selectors take, so the order does not depend on the transport list.
 The default iroh selector skips paths with no RTT sample, and a fresh WebRTC path always is one.
 Without the custom selector, the connection settles on the relay for its whole life.
 
@@ -531,6 +587,16 @@ Without the custom selector, the connection settles on the relay for its whole l
 Each node broadcasts a link vector, and every node folds the freshest vectors into one metric-weighted graph.
 Route computation is a local Dijkstra run.
 A route is a **source route**: the sender packs the full hop list into the address.
+
+Every node advertises one cost for the links that leave it, `HandleConfig::link_cost`: 10 for a native node.
+A browser advertises ten times more (`HandleConfig::for_browser`, 100), so a route avoids a browser as a hop.
+The graph is directed: the link into a node carries the cost of its neighbor, and the links out of it carry its own cost.
+A browser therefore costs once as a hop in the middle of a route, and nothing as the source or the destination of a route.
+A route has at most 8 hops, so the longest native route costs 80, and one browser hop costs at least 110 (10 into the browser, 100 out of it).
+A native route wins whenever one exists, and a route through a browser is used when no native route does.
+The cost is part of the signed vector, so another node cannot change it, but a node can advertise any cost for itself.
+The rule holds while all native links cost the same, and the test `a_route_through_a_browser_costs_more_than_any_native_route` fails when a constant breaks it.
+With measured costs that differ, the guard becomes a relation on the measured floor: one browser hop at its lowest measured cost must exceed a native route of 8 hops at its highest.
 
 ```mermaid
 flowchart LR
@@ -545,6 +611,10 @@ The only decision a relay makes is "forward to the next hop" or "deliver".
 QUIC runs end to end, so relays forward opaque, already-encrypted packets.
 The transport owns a dedicated underlay endpoint, because the application endpoint cannot recursively carry itself.
 The reverse route derives from the forward route, so a reply needs no fresh lookup.
+A hop in a route is two ids, the application endpoint and its underlay endpoint, and no address.
+A forwarder dials a hop only at the address of the vector that the hop signed.
+iroh names a path by the bytes of its address, so an address inside the route would make one route two paths as soon as the two ends hold different versions of it.
+A relay also never dials an address that a cell carries.
 
 ### 9.4 Byte streams
 
@@ -676,6 +746,7 @@ In this repository:
 - `crates/habilis-network/README.md` — the subsystem table, the seam traits, and the tracing-target rules.
 - `FORKED.md` — fork provenance and the pin contract.
 - `crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/README.md` — the browser-to-terminal chat and its two-endpoint workaround.
+- `AGENTS.md` — the concept glossary, the layer invariants, the logging pins, and the rules for newtypes.
 - Per-crate READMEs under `crates/*/README.md`.
 
-Referenced from code but kept upstream: `AGENTS.md` (concept glossary), `docs/mesh-hash.md`, and `docs/history-integrity.md`.
+Referenced from code but kept upstream: `docs/mesh-hash.md` and `docs/history-integrity.md`.

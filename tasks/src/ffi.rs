@@ -11,9 +11,10 @@ use std::collections::BTreeSet;
 use xshell::{Shell, cmd};
 
 use crate::TaskOutcome;
-use crate::util::{output, repo_root};
+use crate::util::{metadata, output, repo_root};
 
-const ARCHIVE: &str = "target/release/libhabilis_network_ffi.a";
+/// Relative to the target directory, which cargo owns.
+const ARCHIVE: &str = "release/libhabilis_network_ffi.a";
 const HEADER: &str = "crates/habilis-network-ffi/include/habilis_network.h";
 
 pub(crate) fn run(sh: &Shell) -> TaskOutcome {
@@ -22,9 +23,9 @@ pub(crate) fn run(sh: &Shell) -> TaskOutcome {
         .quiet()
         .run()?;
 
-    let archive = repo_root().join(ARCHIVE);
+    let archive = metadata(sh)?.target_directory.join(ARCHIVE);
     if !archive.exists() {
-        return Err(format!("{ARCHIVE} was not produced").into());
+        return Err(format!("{} was not produced", archive.display()).into());
     }
 
     let declared = declared(&std::fs::read_to_string(repo_root().join(HEADER))?);

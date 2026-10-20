@@ -25,7 +25,7 @@ use crate::TaskOutcome;
 use crate::util::cdp;
 use crate::util::page::{rand_token, wait_ready};
 use crate::util::webdriver;
-use crate::util::{output, repo_root, wait_for};
+use crate::util::{output, repo_root, target_dir, wait_for};
 
 use habilis_network::membership;
 use habilis_network::protocol::{Lookup, Transport};
@@ -35,8 +35,8 @@ use super::{Args, Skip, build};
 
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
-const LINK_TIMEOUT: Duration = Duration::from_mins(4);
-const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const LINK_TIMEOUT: Duration = Duration::from_mins(4);
+pub(super) const PAYLOAD_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Policy {
@@ -255,14 +255,14 @@ impl Native {
             .any(|msg| msg.directed == directed && msg.text == text)
     }
 
-    async fn request<T>(
+    pub(super) async fn request<T>(
         &self,
         build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> membership::Request,
     ) -> Result<T, String> {
         self.membership.request(build).await
     }
 
-    async fn roster_json(&self) -> String {
+    pub(super) async fn roster_json(&self) -> String {
         self.request(|reply| membership::Request::Peers { reply })
             .await
             .unwrap_or_default()
@@ -294,7 +294,7 @@ impl Native {
 /// measures the mesh's steady state, not that race. The receipt checks below
 /// keep their own deadline, so a send that only succeeds at the end of the
 /// window still fails the cell if the frame never lands.
-async fn native_send_with_retry(
+pub(super) async fn native_send_with_retry(
     native: &Native,
     to: Option<&str>,
     text: &str,
@@ -628,6 +628,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         return Ok(());
     }
 
+    let target = target_dir()?;
     build::ensure_bun("the mesh suite serves its harness with bun")?;
 
     // The suite owns its wasm: a stale glue silently tests the previous
@@ -645,9 +646,9 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // has the engine's own tests. In-process only — the browser side never
     // claims under the stagger, so its defaults stay untouched.
     habilis_network::util::tuning::init(habilis_network::util::tuning::Tuning {
-        rival_recheck_first_secs: 3600,
-        rival_recheck_secs: 3600,
-        rival_recheck_meshed_secs: 3600,
+        rival_recheck_first: Duration::from_hours(1),
+        rival_recheck: Duration::from_hours(1),
+        rival_recheck_meshed: Duration::from_hours(1),
         ..habilis_network::util::tuning::Tuning::DEFAULTS
     });
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -726,7 +727,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
                         page.evaluate(expr)
                     )
                 });
-                let dump = repo_root().join("target").join(format!(
+                let dump = target.join(format!(
                     "mesh-cell-{}.log",
                     cell.label().replace([' ', '/'], "_")
                 ));

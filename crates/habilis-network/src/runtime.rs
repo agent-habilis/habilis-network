@@ -19,6 +19,7 @@ pub use crate::daemon::setup::{
 };
 #[cfg(feature = "host")]
 pub use crate::daemon::validate_owner_pid;
+pub use crate::lookup::MdnsHandle;
 
 /// The session state file the daemon writes for external readers — its sole
 /// writer. Daemon-session state, not a generic filesystem helper.
@@ -51,8 +52,7 @@ pub mod ipc {
 /// every knob is a `const` default a consumer may override through this.
 pub mod tuning {
     pub use crate::util::tuning::{
-        NODE_INBOUND_CAP, POLL_LONG_MIN_CYCLE_MS, READY_FRESH_SECS, READY_MAX_SECS,
-        READY_POLL_INTERVAL_MS, Tuning, advertise_interval_secs, directory_expiry_secs,
-        directory_private_for_test, init, ping_window_secs,
+        NODE_INBOUND_CAP, POLL_LONG_MIN_CYCLE, READY_FRESH, READY_MAX, READY_POLL_INTERVAL, Tuning,
+        advertise_interval, directory_expiry, directory_private_for_test, init, ping_window,
     };
 }

@@ -1,14 +1,14 @@
 //! The engine-facing half: mailboxes, framing, and the only `send_app` call.
 
+use habilis_network::protocol::message::Authored;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
-use habilis_network::protocol::{
-    AppFrameParams, AppTag, Message as WireMessage, MessageBody, Nickname,
-};
+use habilis_network::protocol::message::Verified;
+use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody, Nickname};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -29,7 +29,7 @@ pub enum Outbound {
     /// A rollback packet for one peer, addressed by public key.
     Rollback {
         /// The recipient's public key.
-        to: String,
+        to: AuthorKey,
         /// Pre-serialized packet.
         payload: String,
     },
@@ -46,17 +46,17 @@ pub enum Outbound {
 /// one handle and each transport another.
 pub(crate) struct Mailboxes<T: Config> {
     /// Decoded rollback packets, tagged with the sender's public key.
-    pub(crate) inbound: Mutex<VecDeque<(String, Message<T::Input>)>>,
+    pub(crate) inbound: Mutex<VecDeque<(AuthorKey, Message<T::Input>)>>,
     /// Raw lobby packets, tagged with the sender's public key.
-    pub(crate) lobby: Mutex<Vec<(String, String)>>,
+    pub(crate) lobby: Mutex<Vec<(AuthorKey, String)>>,
     /// This peer's own public key, known only once the event loop starts.
-    pub(crate) local_pubkey: Mutex<Option<String>>,
+    pub(crate) local_pubkey: Mutex<Option<AuthorKey>>,
     /// public key -> nickname, learned from inbound frames.
     ///
     /// Needed because `send_app` addresses by `Nickname` while inputs are
     /// filed by public key — the protocol treats nicknames as cosmetic and
     /// explicitly non-unique, so they cannot be the identity.
-    pub(crate) directory: Mutex<HashMap<String, Nickname>>,
+    pub(crate) directory: Mutex<HashMap<AuthorKey, Nickname>>,
 }
 
 impl<T: Config> std::fmt::Debug for Mailboxes<T> {
@@ -115,11 +115,10 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
     ///
     /// `loggable: false` is a correctness requirement, not a preference:
     /// a `true` here would enter every input frame into the engine's message
-    /// log and its anti-entropy repair, and since `send_app` never logs our
-    /// *own* broadcasts, peers would re-send them to us forever with no way
-    /// to acknowledge. That runaway is the reason this crate never touches
-    /// gossip. It lives in the library so a consumer cannot get it wrong.
-    fn classify(&self, message: &WireMessage) -> AppClass {
+    /// log and its anti-entropy repair. A frame of this crate is also always
+    /// directed, and `send_app` keeps only a broadcast frame of its own.
+    /// It lives in the library so a consumer cannot get it wrong.
+    fn classify(&self, message: &Authored) -> AppClass {
         let tag = message.kind.app_tag().map(AppTag::as_str);
         let ours = matches!(tag, Some(ROLLBACK_TAG | LOBBY_TAG));
         AppClass {
@@ -142,13 +141,13 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
         let Some(tag) = frame.message.kind.app_tag().map(AppTag::as_str) else {
             return false;
         };
-        let pubkey = frame.message.pubkey.clone();
+        let pubkey = frame.message.key();
 
         // Learn the pubkey -> nickname pairing from any frame. The signed
         // pubkey is the identity; the nickname is only how `send_app`
         // addresses it.
         if let Ok(mut directory) = self.mailboxes.directory.lock() {
-            directory.insert(pubkey.clone(), frame.message.author.clone());
+            directory.insert(pubkey, frame.message.author.clone());
         }
 
         match tag {
@@ -182,7 +181,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
     /// it to the frame loop, which needs it to build a [`super::Lobby`].
     async fn on_startup(&mut self, _state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
         if let Ok(mut slot) = self.mailboxes.local_pubkey.lock() {
-            *slot = Some(ctx.our_pubkey.to_string());
+            *slot = Some(ctx.our_pubkey);
         }
     }
 
@@ -213,7 +212,11 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     );
                     return false;
                 };
-                send(state, ctx, ROLLBACK_TAG, Some(nickname), payload).await
+                let Some(frame) = frame_for(ctx, ROLLBACK_TAG, Some(nickname), payload) else {
+                    return false;
+                };
+                let class = self.classify(&frame.authored());
+                send(state, ctx, frame, class).await
             }
             Outbound::Lobby { payload } => {
                 // Addressed to every roster member individually — never a
@@ -228,12 +231,37 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     .collect();
                 let mut delivered = false;
                 for peer in peers {
-                    delivered |= send(state, ctx, LOBBY_TAG, Some(peer), payload.clone()).await;
+                    let Some(frame) = frame_for(ctx, LOBBY_TAG, Some(peer), payload.clone()) else {
+                        continue;
+                    };
+                    let class = self.classify(&frame.authored());
+                    delivered |= send(state, ctx, frame, class).await;
                 }
                 delivered
             }
         }
     }
+}
+
+/// The frame of one `send_app`, or `None` for a tag or a payload the wire refuses.
+fn frame_for(
+    ctx: &HandlerCtx<'_>,
+    tag: &str,
+    to: Option<Nickname>,
+    payload: String,
+) -> Option<Verified> {
+    let (Ok(tag), Ok(body)) = (AppTag::new(tag), MessageBody::new(payload)) else {
+        return None;
+    };
+    Some(habilis_network::ops::app_frame(
+        ctx,
+        AppFrameParams {
+            tag,
+            to,
+            corr: None,
+            body,
+        },
+    ))
 }
 
 /// One `send_app`, with the failure swallowed.
@@ -244,23 +272,10 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
 async fn send(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    tag: &str,
-    to: Option<Nickname>,
-    payload: String,
+    frame: Verified,
+    class: AppClass,
 ) -> bool {
-    let (Ok(tag), Ok(body)) = (AppTag::new(tag), MessageBody::new(payload)) else {
-        return false;
-    };
-    habilis_network::ops::send_app(
-        state,
-        ctx,
-        AppFrameParams {
-            tag,
-            to,
-            corr: None,
-            body,
-        },
-    )
-    .await
-    .is_ok()
+    habilis_network::ops::send_app(state, ctx, frame, class)
+        .await
+        .is_ok()
 }

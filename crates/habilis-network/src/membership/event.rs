@@ -30,7 +30,7 @@ pub enum MembershipEvent {
     Left {
         nick: String,
     },
-    /// Heartbeat-evicted past `ALIVE_TIMEOUT_SECS`. Deliberately **not** `left`:
+    /// Heartbeat-evicted past `ALIVE_TIMEOUT`. Deliberately **not** `left`:
     /// the peer is still in the roster with `quiet: true`, and folding the two
     /// together would desync a consumer's mirror from the roster it can read
     /// back.
@@ -77,7 +77,7 @@ fn classify(event: NodeEvent) -> Option<MembershipEvent> {
             name: name.as_str().to_owned(),
             nick: nickname.to_string(),
         }),
-        NodeEvent::Presence { msg } => {
+        NodeEvent::Presence { msg, .. } => {
             // The engine emits this for a peer's own `joined` frame, for a
             // `Left`, and — the reliable case — for the *first frame of any
             // kind* from a peer it has not surfaced yet, since a one-shot

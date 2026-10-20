@@ -11,20 +11,20 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use iroh::{EndpointId, SecretKey, Signature};
 
-use crate::protocol::MeshId;
 use crate::protocol::identity::{decode_hex, encode_hex};
+use crate::protocol::{AuthorKey, MeshId};
 
 const DOMAIN: &[u8] = b"habilis-network/peerinfo-endpoint-proof/1";
 
 /// The bytes a proof signs: the domain, the mesh, then the 32-byte signing
 /// key. The domain has a fixed length and the key is always the last 32
 /// bytes, so the layout has one reading.
-fn proof_bytes(mesh: &MeshId, signer: &[u8; 32]) -> Vec<u8> {
-    [DOMAIN, mesh.as_str().as_bytes(), signer].concat()
+fn proof_bytes(mesh: &MeshId, signer: &AuthorKey) -> Vec<u8> {
+    [DOMAIN, mesh.as_str().as_bytes(), signer.as_bytes()].concat()
 }
 
 /// The proof this endpoint's key gives for `signer` on `mesh`, as hex.
-pub(crate) fn sign(endpoint_key: &SecretKey, mesh: &MeshId, signer: &[u8; 32]) -> String {
+pub(crate) fn sign(endpoint_key: &SecretKey, mesh: &MeshId, signer: &AuthorKey) -> String {
     encode_hex(&endpoint_key.sign(&proof_bytes(mesh, signer)).to_bytes())
 }
 
@@ -32,7 +32,7 @@ pub(crate) fn sign(endpoint_key: &SecretKey, mesh: &MeshId, signer: &[u8; 32]) -
 pub(crate) fn verifies(
     endpoint: EndpointId,
     mesh: &MeshId,
-    signer: &[u8; 32],
+    signer: &AuthorKey,
     proof: &str,
 ) -> bool {
     let Some(bytes) = decode_hex(proof).and_then(|raw| <[u8; 64]>::try_from(raw).ok()) else {
@@ -41,11 +41,6 @@ pub(crate) fn verifies(
     endpoint
         .verify(&proof_bytes(mesh, signer), &Signature::from_bytes(&bytes))
         .is_ok()
-}
-
-/// A signing key's 32 bytes from the frame's hex `pubkey`, either case.
-pub(crate) fn signer_bytes(pubkey: &str) -> Option<[u8; 32]> {
-    decode_hex(pubkey).and_then(|raw| raw.try_into().ok())
 }
 
 /// The endpoint each signing key proved, bounded: a signer owns as many key
@@ -60,8 +55,8 @@ pub(crate) fn signer_bytes(pubkey: &str) -> Option<[u8; 32]> {
 /// next `PeerInfo`.
 #[derive(Debug)]
 pub(crate) struct ProvenEndpoints {
-    by_signer: HashMap<[u8; 32], EndpointId>,
-    order: VecDeque<[u8; 32]>,
+    by_signer: HashMap<AuthorKey, EndpointId>,
+    order: VecDeque<AuthorKey>,
     cap: usize,
 }
 
@@ -74,14 +69,14 @@ impl ProvenEndpoints {
         }
     }
 
-    pub(crate) fn get(&self, signer: &[u8; 32]) -> Option<EndpointId> {
+    pub(crate) fn get(&self, signer: &AuthorKey) -> Option<EndpointId> {
         self.by_signer.get(signer).copied()
     }
 
     /// Record that `signer` proved `endpoint`.
     pub(crate) fn insert(
         &mut self,
-        signer: [u8; 32],
+        signer: AuthorKey,
         endpoint: EndpointId,
         linked: &HashSet<EndpointId>,
     ) {
@@ -131,14 +126,18 @@ mod tests {
     use iroh::SecretKey;
 
     use super::{ProvenEndpoints, sign, verifies};
-    use crate::protocol::MeshId;
+    use crate::protocol::{AuthorKey, MeshId};
+
+    fn key(byte: u8) -> AuthorKey {
+        AuthorKey::from_bytes([byte; 32])
+    }
 
     #[test]
     fn a_proof_holds_only_for_its_signer_and_mesh() {
         let endpoint_key = SecretKey::generate();
         let endpoint = endpoint_key.public();
         let mesh = MeshId::from("mesh-a");
-        let (signer, other) = ([1u8; 32], [2u8; 32]);
+        let (signer, other) = (key(1), key(2));
         let proof = sign(&endpoint_key, &mesh, &signer);
 
         assert!(verifies(endpoint, &mesh, &signer, &proof));
@@ -160,20 +159,20 @@ mod tests {
         let mut proven = ProvenEndpoints::new(cap);
         let linked_one = SecretKey::generate().public();
         let linked: HashSet<_> = [linked_one].into_iter().collect();
-        proven.insert([0; 32], linked_one, &linked);
+        proven.insert(key(0), linked_one, &linked);
         for byte in 1..=u8::try_from(cap * 2).expect("small") {
-            proven.insert([byte; 32], SecretKey::generate().public(), &linked);
+            proven.insert(key(byte), SecretKey::generate().public(), &linked);
         }
         assert_eq!(proven.len(), cap);
         assert_eq!(
-            proven.get(&[0; 32]),
+            proven.get(&key(0)),
             Some(linked_one),
             "the linked pair stays"
         );
-        assert_eq!(proven.get(&[1; 32]), None, "the oldest unlinked pair went");
+        assert_eq!(proven.get(&key(1)), None, "the oldest unlinked pair went");
 
         proven.forget_endpoint(linked_one);
-        assert_eq!(proven.get(&[0; 32]), None, "gone with its peer");
+        assert_eq!(proven.get(&key(0)), None, "gone with its peer");
     }
 }
 
@@ -184,6 +183,7 @@ mod one_signer_tests {
     use iroh::SecretKey;
 
     use super::ProvenEndpoints;
+    use crate::protocol::AuthorKey;
 
     /// Many signers can prove one endpoint, since whoever holds that endpoint's
     /// key makes as many signing keys as it likes. Kept as separate pairs, a
@@ -195,17 +195,21 @@ mod one_signer_tests {
         let attacker = SecretKey::generate().public();
         let linked: HashSet<_> = [attacker].into_iter().collect();
         for byte in 1..=5u8 {
-            proven.insert([byte; 32], attacker, &linked);
+            proven.insert(AuthorKey::from_bytes([byte; 32]), attacker, &linked);
         }
         let honest = SecretKey::generate().public();
-        proven.insert([9; 32], honest, &linked);
+        proven.insert(AuthorKey::from_bytes([9; 32]), honest, &linked);
 
         assert_eq!(
-            proven.get(&[9; 32]),
+            proven.get(&AuthorKey::from_bytes([9; 32])),
             Some(honest),
             "the honest pair is kept"
         );
         assert_eq!(proven.len(), 2, "the linked endpoint has one signer");
-        assert_eq!(proven.get(&[5; 32]), Some(attacker), "its latest signer");
+        assert_eq!(
+            proven.get(&AuthorKey::from_bytes([5; 32])),
+            Some(attacker),
+            "its latest signer"
+        );
     }
 }

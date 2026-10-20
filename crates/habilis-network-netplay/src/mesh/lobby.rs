@@ -30,7 +30,105 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use habilis_network::protocol::{AuthorKey, Nickname};
 use serde::{Deserialize, Serialize};
+
+use crate::handle::PlayerHandle;
+
+/// Which match this is, counting from 1; `0` before the first.
+///
+/// Monotonic, so a rematch always supersedes the match before it and a
+/// straggler from that older match never resurrects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Epoch(u64);
+
+impl Epoch {
+    /// Before the first match.
+    pub const ZERO: Self = Self(0);
+
+    /// The match with number `number`.
+    #[must_use]
+    pub const fn new(number: u64) -> Self {
+        Self(number)
+    }
+
+    /// The match number.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The match after this one.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0 + 1)
+    }
+}
+
+impl std::fmt::Display for Epoch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// The id of one proposal for a match: the tie-breaker between two proposals
+/// for the same [`Epoch`], where the lower one wins, and the scope of one
+/// match's packets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(u64);
+
+impl SessionId {
+    /// The id with value `value`.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// The id as a number.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// A point in time, in the caller's own tick unit. The lobby reads no clock:
+/// the caller says what "now" is each time it hands a packet in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tick(u64);
+
+impl Tick {
+    /// The tick with number `number`.
+    #[must_use]
+    pub const fn new(number: u64) -> Self {
+        Self(number)
+    }
+
+    /// How long ago `earlier` was, `0` when it is not earlier.
+    #[must_use]
+    pub const fn since(self, earlier: Self) -> TickSpan {
+        TickSpan(self.0.saturating_sub(earlier.0))
+    }
+}
+
+/// A length of time, in the same tick unit as [`Tick`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TickSpan(u64);
+
+impl TickSpan {
+    /// A span of `ticks` ticks.
+    #[must_use]
+    pub const fn new(ticks: u64) -> Self {
+        Self(ticks)
+    }
+}
 
 /// A lobby packet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,20 +137,48 @@ pub enum LobbyMessage {
     Present {
         /// The sender's display name. Cosmetic, but it has to be unique
         /// within a match — see [`LobbyError::DuplicateNickname`].
-        nick: String,
+        nick: Nickname,
     },
     /// "Start now, with exactly these players."
     Start {
-        /// Which match this is, counting from 1. Monotonic, so a rematch
-        /// always supersedes the match before it and a straggler from
-        /// that older match never resurrects it.
-        epoch: u64,
+        /// Which match this is, counting from 1.
+        epoch: Epoch,
         /// Tie-breaker between two proposals for the *same* epoch; lower
         /// wins.
-        session_id: u64,
-        /// Every player's public key, sorted. Position is the handle.
-        players: Vec<String>,
+        session_id: SessionId,
+        /// Every player's public key, sorted. Position is the handle. On
+        /// the wire a key is its lowercase hex text.
+        #[serde(with = "key_list")]
+        players: Vec<AuthorKey>,
     },
+}
+
+/// A list of keys as a JSON array of their hex text, the form the lobby has
+/// always written. A text that is not a lowercase 64-character hex key
+/// refuses the whole message.
+mod key_list {
+    use habilis_network::protocol::AuthorKey;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        keys: &[AuthorKey],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(keys.iter().map(ToString::to_string))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<AuthorKey>, D::Error> {
+        Vec::<String>::deserialize(deserializer)?
+            .iter()
+            .map(|text| {
+                AuthorKey::from_hex(text)
+                    .ok_or_else(|| D::Error::custom(format!("{text:?} is not a lowercase hex key")))
+            })
+            .collect()
+    }
 }
 
 /// Why a match could not be started.
@@ -65,7 +191,7 @@ pub enum LobbyError {
     /// Fatal rather than cosmetic: `send_app` addresses peers by nickname,
     /// so two players sharing one are not separately reachable and one would
     /// silently never receive input.
-    DuplicateNickname(String),
+    DuplicateNickname(Nickname),
 }
 
 impl std::fmt::Display for LobbyError {
@@ -88,46 +214,46 @@ impl std::error::Error for LobbyError {}
 pub struct StartedMatch {
     /// Which match this is, counting from 1. Every peer agrees on it, so
     /// it doubles as a match number to show a player.
-    pub epoch: u64,
+    pub epoch: Epoch,
     /// Distinguishes this match's packets from a previous one's.
-    pub session_id: u64,
+    pub session_id: SessionId,
     /// Public keys in handle order. Identical on every peer.
-    pub players: Vec<String>,
+    pub players: Vec<AuthorKey>,
     /// This peer's own handle.
-    pub local_handle: usize,
+    pub local_handle: PlayerHandle,
 }
 
 /// One peer we have heard from.
 #[derive(Debug, Clone)]
 struct Presence {
-    nick: String,
-    /// When we last heard from them, in the caller's tick units.
-    last_seen: u64,
+    nick: Nickname,
+    /// When we last heard from them.
+    last_seen: Tick,
 }
 
 /// Tracks who is present and whether a match has started.
 #[derive(Debug)]
 pub struct Lobby {
-    my_pubkey: String,
-    my_nick: String,
+    my_pubkey: AuthorKey,
+    my_nick: Nickname,
     /// Public key -> presence, in sorted order so the roster is canonical.
-    present: BTreeMap<String, Presence>,
+    present: BTreeMap<AuthorKey, Presence>,
     started: Option<StartedMatch>,
-    /// The highest epoch adopted so far; `0` before the first match.
-    epoch: u64,
+    /// The highest epoch adopted so far; [`Epoch::ZERO`] before the first match.
+    epoch: Epoch,
 }
 
 impl Lobby {
     /// A lobby for this peer. `my_pubkey` is the signed identity from
     /// `HandlerCtx::our_pubkey`.
     #[must_use]
-    pub fn new(my_pubkey: String, my_nick: String) -> Self {
+    pub fn new(my_pubkey: AuthorKey, my_nick: Nickname) -> Self {
         let mut present = BTreeMap::new();
         present.insert(
-            my_pubkey.clone(),
+            my_pubkey,
             Presence {
                 nick: my_nick.clone(),
-                last_seen: 0,
+                last_seen: Tick::new(0),
             },
         );
         Self {
@@ -135,7 +261,7 @@ impl Lobby {
             my_nick,
             present,
             started: None,
-            epoch: 0,
+            epoch: Epoch::ZERO,
         }
     }
 
@@ -150,10 +276,10 @@ impl Lobby {
     /// Everyone currently present, as `(public key, nickname)`, in handle
     /// order.
     #[must_use]
-    pub fn present(&self) -> Vec<(String, String)> {
+    pub fn present(&self) -> Vec<(AuthorKey, Nickname)> {
         self.present
             .iter()
-            .map(|(pubkey, seen)| (pubkey.clone(), seen.nick.clone()))
+            .map(|(pubkey, seen)| (*pubkey, seen.nick.clone()))
             .collect()
     }
 
@@ -179,8 +305,7 @@ impl Lobby {
         None
     }
 
-    /// Drop peers we have not heard from within `ttl` of `now`, both in
-    /// whatever tick unit the caller counts in.
+    /// Drop peers we have not heard from within `ttl` of `now`.
     ///
     /// Without this the roster only ever grows, and a peer that restarts
     /// is not the peer that left: every launch mints a fresh public key,
@@ -197,10 +322,10 @@ impl Lobby {
     /// started ([`StartedMatch::players`]) precisely so it cannot shift
     /// under a running session; this only governs who the *next* proposal
     /// will include.
-    pub fn expire(&mut self, now: u64, ttl: u64) {
-        let mine = self.my_pubkey.clone();
+    pub fn expire(&mut self, now: Tick, ttl: TickSpan) {
+        let mine = self.my_pubkey;
         self.present
-            .retain(|pubkey, seen| *pubkey == mine || now.saturating_sub(seen.last_seen) <= ttl);
+            .retain(|pubkey, seen| *pubkey == mine || now.since(seen.last_seen) <= ttl);
     }
 
     /// The agreed match, once one has started.
@@ -229,19 +354,19 @@ impl Lobby {
         })
     }
 
-    /// Fold in a packet from `pubkey`, seen at `now` (the caller's tick
-    /// unit — see [`Self::expire`], which measures staleness against it).
+    /// Fold in a packet from `pubkey`, seen at `now` (see [`Self::expire`],
+    /// which measures staleness against it).
     ///
     /// Unparseable packets are ignored rather than reported: a peer running
     /// a different version is not something this peer can act on.
-    pub fn on_message(&mut self, pubkey: &str, raw: &str, now: u64) {
+    pub fn on_message(&mut self, pubkey: &AuthorKey, raw: &str, now: Tick) {
         let Ok(message) = serde_json::from_str::<LobbyMessage>(raw) else {
             return;
         };
         match message {
             LobbyMessage::Present { nick } => {
                 self.present.insert(
-                    pubkey.to_owned(),
+                    *pubkey,
                     Presence {
                         nick,
                         last_seen: now,
@@ -263,7 +388,7 @@ impl Lobby {
     /// its id may be higher; the id half breaks a tie between two peers
     /// proposing the same epoch at once. Every peer applies both rules to
     /// the same proposals, so they converge without a round trip.
-    fn adopt(&mut self, epoch: u64, session_id: u64, players: Vec<String>) {
+    fn adopt(&mut self, epoch: Epoch, session_id: SessionId, players: Vec<AuthorKey>) {
         if !players.contains(&self.my_pubkey) {
             // A match between other people.
             return;
@@ -277,7 +402,11 @@ impl Lobby {
         {
             return;
         }
-        let Some(local_handle) = players.iter().position(|key| *key == self.my_pubkey) else {
+        let Some(local_handle) = players
+            .iter()
+            .position(|key| *key == self.my_pubkey)
+            .map(PlayerHandle::new)
+        else {
             return;
         };
         // A replacement at the *same* epoch is the tie-break resolving a
@@ -285,9 +414,9 @@ impl Lobby {
         // it changes the agreed session id without changing the epoch, so a
         // consumer that only re-arms on a new epoch keeps the old match.
         tracing::debug!(
-            epoch,
-            session_id,
-            local_handle,
+            epoch = epoch.get(),
+            session_id = session_id.get(),
+            local_handle = local_handle.index(),
             players = players.len(),
             replaced = self
                 .started
@@ -327,8 +456,8 @@ impl Lobby {
         }
         // `BTreeMap` iterates sorted, so every peer proposing the same set
         // produces the same order and therefore the same handles.
-        let players: Vec<String> = self.present.keys().cloned().collect();
-        let epoch = self.epoch + 1;
+        let players: Vec<AuthorKey> = self.present.keys().copied().collect();
+        let epoch = self.epoch.next();
         let session_id = session_id_for(&players, &self.my_pubkey, epoch);
         self.adopt(epoch, session_id, players.clone());
         Ok(LobbyMessage::Start {
@@ -351,7 +480,7 @@ impl Lobby {
 /// Hand-rolled FNV-1a rather than `std`'s hasher, which is randomly seeded
 /// per process and would give every peer a different answer — the same
 /// portability constraint the determinism contract puts on consumers.
-fn session_id_for(players: &[String], proposer: &str, epoch: u64) -> u64 {
+fn session_id_for(players: &[AuthorKey], proposer: &AuthorKey, epoch: Epoch) -> SessionId {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |bytes: &[u8]| {
         for byte in bytes {
@@ -359,64 +488,151 @@ fn session_id_for(players: &[String], proposer: &str, epoch: u64) -> u64 {
             hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
         }
     };
+    // The hex text of each key, not its raw bytes: the id is a wire value.
     for player in players {
-        eat(player.as_bytes());
+        eat(&player.hex());
         eat(b":");
     }
     eat(b"@");
-    eat(proposer.as_bytes());
+    eat(&proposer.hex());
     eat(b"#");
-    eat(&epoch.to_le_bytes());
-    hash
+    eat(&epoch.get().to_le_bytes());
+    SessionId(hash)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Lobby, LobbyError, LobbyMessage};
+    use super::{
+        Epoch, Lobby, LobbyError, LobbyMessage, PlayerHandle, SessionId, Tick, TickSpan,
+        session_id_for,
+    };
+    use habilis_network::protocol::{AuthorKey, Nickname};
+
+    fn key(byte: u8) -> AuthorKey {
+        AuthorKey::from_bytes([byte; 32])
+    }
+
+    fn nick(text: &str) -> Nickname {
+        Nickname::new(text).expect("a valid nickname")
+    }
 
     fn raw(message: &LobbyMessage) -> String {
         serde_json::to_string(message).expect("a lobby message serializes")
     }
 
     #[test]
-    fn a_peer_is_present_in_its_own_lobby() {
-        let lobby = Lobby::new("aaa".into(), "alice".into());
+    fn start_message_json_matches_the_golden() {
+        let message = LobbyMessage::Start {
+            epoch: Epoch::new(2),
+            session_id: SessionId::new(12_345),
+            players: vec![key(0xaa), key(0xbb)],
+        };
         assert_eq!(
-            lobby.present(),
-            vec![("aaa".to_owned(), "alice".to_owned())]
+            raw(&message),
+            concat!(
+                r#"{"Start":{"epoch":2,"session_id":12345,"players":["#,
+                r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","#,
+                r#""bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}}"#,
+            )
         );
     }
 
     #[test]
+    fn session_id_matches_the_golden_for_fixed_players_and_proposer() {
+        let players = vec![key(0xaa), key(0xbb)];
+        assert_eq!(
+            session_id_for(&players, &key(0xaa), Epoch::new(2)),
+            SessionId::new(8_136_736_511_243_102_950)
+        );
+    }
+
+    /// The roster order is the handle order, and it was the order of the hex
+    /// text. Byte order of a key is the same order, so no handle moves.
+    #[test]
+    fn the_order_of_the_keys_is_the_order_of_their_hex_text() {
+        let mut keys = [0xff, 0x0a, 0xa0, 0x9f, 0x10].map(key);
+        keys.sort();
+        let by_text = {
+            let mut texts: Vec<String> = keys.iter().map(ToString::to_string).collect();
+            texts.sort();
+            texts
+        };
+        let sorted_text: Vec<String> = keys.iter().map(ToString::to_string).collect();
+        assert_eq!(sorted_text, by_text);
+    }
+
+    #[test]
+    fn a_start_with_a_key_that_is_not_lowercase_hex_is_ignored() {
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
+        let upper = "AA".repeat(32);
+        let raw = format!(
+            r#"{{"Start":{{"epoch":1,"session_id":1,"players":["{upper}","{}"]}}}}"#,
+            key(0xbb)
+        );
+        lobby.on_message(&key(0xbb), &raw, Tick::new(0));
+        assert!(lobby.started().is_none());
+    }
+
+    /// The literal that the lobby wrote before its players were keys. A new peer refuses
+    /// it, and the lobby does not adopt a match from it.
+    #[test]
+    fn the_old_start_literal_with_text_players_is_refused() {
+        let old = r#"{"Start":{"epoch":2,"session_id":12345,"players":["aaa","bbb"]}}"#;
+        let error =
+            serde_json::from_str::<LobbyMessage>(old).expect_err("players that are not keys");
+        assert!(
+            error.to_string().contains("is not a lowercase hex key"),
+            "{error}"
+        );
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
+        lobby.on_message(&key(0xbb), old, Tick::new(0));
+        assert!(lobby.started().is_none());
+    }
+
+    /// A nickname that `Nickname::new` refuses is not a presence.
+    #[test]
+    fn a_presence_with_a_nickname_the_wire_refuses_is_dropped() {
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
+        lobby.on_message(&key(0xbb), r#"{"Present":{"nick":""}}"#, Tick::new(0));
+        assert_eq!(lobby.present(), vec![(key(0xaa), nick("alice"))]);
+    }
+
+    #[test]
+    fn a_peer_is_present_in_its_own_lobby() {
+        let lobby = Lobby::new(key(0xaa), nick("alice"));
+        assert_eq!(lobby.present(), vec![(key(0xaa), nick("alice"))]);
+    }
+
+    #[test]
     fn presence_from_a_peer_is_recorded() {
-        let mut lobby = Lobby::new("aaa".into(), "alice".into());
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
-            "bbb",
-            &raw(&LobbyMessage::Present { nick: "bob".into() }),
-            0,
+            &key(0xbb),
+            &raw(&LobbyMessage::Present { nick: nick("bob") }),
+            Tick::new(0),
         );
         assert_eq!(lobby.present().len(), 2);
     }
 
     #[test]
     fn starting_alone_is_refused() {
-        let mut lobby = Lobby::new("aaa".into(), "alice".into());
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         assert_eq!(lobby.propose(), Err(LobbyError::NotEnoughPlayers));
     }
 
     #[test]
     fn two_peers_sharing_a_nickname_is_refused() {
-        let mut lobby = Lobby::new("aaa".into(), "alice".into());
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
-            "bbb",
+            &key(0xbb),
             &raw(&LobbyMessage::Present {
-                nick: "alice".into(),
+                nick: nick("alice"),
             }),
-            0,
+            Tick::new(0),
         );
         assert_eq!(
             lobby.propose(),
-            Err(LobbyError::DuplicateNickname("alice".to_owned())),
+            Err(LobbyError::DuplicateNickname(nick("alice"))),
             "unicast is addressed by nickname, so a duplicate is unreachable"
         );
     }
@@ -424,54 +640,58 @@ mod tests {
     /// The property the whole module exists for.
     #[test]
     fn both_peers_derive_the_same_handles() {
-        let mut alice = Lobby::new("aaa".into(), "alice".into());
-        let mut bob = Lobby::new("bbb".into(), "bob".into());
+        let mut alice = Lobby::new(key(0xaa), nick("alice"));
+        let mut bob = Lobby::new(key(0xbb), nick("bob"));
         alice.on_message(
-            "bbb",
-            &raw(&LobbyMessage::Present { nick: "bob".into() }),
-            0,
+            &key(0xbb),
+            &raw(&LobbyMessage::Present { nick: nick("bob") }),
+            Tick::new(0),
         );
         bob.on_message(
-            "aaa",
+            &key(0xaa),
             &raw(&LobbyMessage::Present {
-                nick: "alice".into(),
+                nick: nick("alice"),
             }),
-            0,
+            Tick::new(0),
         );
 
         let start = alice.propose().expect("two distinct players");
-        bob.on_message("aaa", &raw(&start), 0);
+        bob.on_message(&key(0xaa), &raw(&start), Tick::new(0));
 
         let alice_match = alice.started().expect("proposer joins its own match");
         let bob_match = bob.started().expect("bob adopted it");
         assert_eq!(alice_match.players, bob_match.players);
         assert_eq!(alice_match.session_id, bob_match.session_id);
-        assert_eq!(alice_match.local_handle, 0, "aaa sorts first");
-        assert_eq!(bob_match.local_handle, 1);
+        assert_eq!(
+            alice_match.local_handle,
+            PlayerHandle::new(0),
+            "aaa sorts first"
+        );
+        assert_eq!(bob_match.local_handle, PlayerHandle::new(1));
     }
 
     #[test]
     fn simultaneous_proposals_converge_on_the_lower_id() {
-        let mut alice = Lobby::new("aaa".into(), "alice".into());
-        let mut bob = Lobby::new("bbb".into(), "bob".into());
+        let mut alice = Lobby::new(key(0xaa), nick("alice"));
+        let mut bob = Lobby::new(key(0xbb), nick("bob"));
         alice.on_message(
-            "bbb",
-            &raw(&LobbyMessage::Present { nick: "bob".into() }),
-            0,
+            &key(0xbb),
+            &raw(&LobbyMessage::Present { nick: nick("bob") }),
+            Tick::new(0),
         );
         bob.on_message(
-            "aaa",
+            &key(0xaa),
             &raw(&LobbyMessage::Present {
-                nick: "alice".into(),
+                nick: nick("alice"),
             }),
-            0,
+            Tick::new(0),
         );
 
         // Both press start before hearing the other.
         let from_alice = alice.propose().expect("valid");
         let from_bob = bob.propose().expect("valid");
-        alice.on_message("bbb", &raw(&from_bob), 0);
-        bob.on_message("aaa", &raw(&from_alice), 0);
+        alice.on_message(&key(0xbb), &raw(&from_bob), Tick::new(0));
+        bob.on_message(&key(0xaa), &raw(&from_alice), Tick::new(0));
 
         let alice_match = alice.started().expect("started");
         let bob_match = bob.started().expect("started");
@@ -486,19 +706,19 @@ mod tests {
     /// be able to say it again.
     #[test]
     fn a_started_match_can_be_announced_again_and_a_peer_that_missed_it_catches_up() {
-        let mut alice = Lobby::new("aaa".into(), "alice".into());
-        let mut bob = Lobby::new("bbb".into(), "bob".into());
+        let mut alice = Lobby::new(key(0xaa), nick("alice"));
+        let mut bob = Lobby::new(key(0xbb), nick("bob"));
         alice.on_message(
-            "bbb",
-            &raw(&LobbyMessage::Present { nick: "bob".into() }),
-            0,
+            &key(0xbb),
+            &raw(&LobbyMessage::Present { nick: nick("bob") }),
+            Tick::new(0),
         );
         bob.on_message(
-            "aaa",
+            &key(0xaa),
             &raw(&LobbyMessage::Present {
-                nick: "alice".into(),
+                nick: nick("alice"),
             }),
-            0,
+            Tick::new(0),
         );
 
         // Alice starts, and the packet is dropped on the way to Bob.
@@ -506,7 +726,7 @@ mod tests {
         assert!(bob.started().is_none());
 
         let again = alice.announcement().expect("alice is in a match");
-        bob.on_message("aaa", &raw(&again), 0);
+        bob.on_message(&key(0xaa), &raw(&again), Tick::new(0));
         assert_eq!(
             bob.started().map(|current| current.session_id),
             alice.started().map(|current| current.session_id),
@@ -515,7 +735,7 @@ mod tests {
 
     #[test]
     fn a_lobby_with_no_match_has_nothing_to_announce() {
-        let lobby = Lobby::new("aaa".into(), "alice".into());
+        let lobby = Lobby::new(key(0xaa), nick("alice"));
         assert_eq!(lobby.announcement(), None);
     }
 
@@ -527,74 +747,71 @@ mod tests {
     /// lobby elected to propose.
     #[test]
     fn a_duplicate_nickname_is_reported_without_proposing() {
-        let mut lobby = Lobby::new("aaa".into(), "alice".into());
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         assert_eq!(lobby.blocker(), None, "alone is not blocked, just empty");
 
         lobby.on_message(
-            "bbb",
+            &key(0xbb),
             &raw(&LobbyMessage::Present {
-                nick: "alice".into(),
+                nick: nick("alice"),
             }),
-            0,
+            Tick::new(0),
         );
         assert_eq!(
             lobby.blocker(),
-            Some(LobbyError::DuplicateNickname("alice".to_owned()))
+            Some(LobbyError::DuplicateNickname(nick("alice")))
         );
     }
 
     #[test]
     fn a_peer_that_stops_announcing_is_dropped() {
-        let mut lobby = Lobby::new("aaa".into(), "alice".into());
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
-            "bbb",
-            &raw(&LobbyMessage::Present { nick: "bob".into() }),
-            100,
+            &key(0xbb),
+            &raw(&LobbyMessage::Present { nick: nick("bob") }),
+            Tick::new(100),
         );
         assert_eq!(lobby.present().len(), 2);
 
-        lobby.expire(160, 50);
+        lobby.expire(Tick::new(160), TickSpan::new(50));
         assert_eq!(
             lobby.present(),
-            vec![("aaa".to_owned(), "alice".to_owned())],
+            vec![(key(0xaa), nick("alice"))],
             "bob went quiet for longer than the ttl and must not be proposed into a match"
         );
     }
 
     #[test]
     fn a_peer_that_keeps_announcing_is_kept_and_we_never_expire_ourselves() {
-        let mut lobby = Lobby::new("aaa".into(), "alice".into());
-        for now in [100, 150, 200] {
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
+        for now in [Tick::new(100), Tick::new(150), Tick::new(200)] {
             lobby.on_message(
-                "bbb",
-                &raw(&LobbyMessage::Present { nick: "bob".into() }),
+                &key(0xbb),
+                &raw(&LobbyMessage::Present { nick: nick("bob") }),
                 now,
             );
-            lobby.expire(now, 50);
+            lobby.expire(now, TickSpan::new(50));
         }
         assert_eq!(lobby.present().len(), 2);
 
         // We never receive our own presence, so our stamp stays at 0 —
         // expiring on that would delete the one peer that is certainly here.
-        lobby.expire(10_000, 50);
-        assert_eq!(
-            lobby.present(),
-            vec![("aaa".to_owned(), "alice".to_owned())]
-        );
+        lobby.expire(Tick::new(10_000), TickSpan::new(50));
+        assert_eq!(lobby.present(), vec![(key(0xaa), nick("alice"))]);
     }
 
     #[test]
     fn expiry_does_not_disturb_a_match_already_agreed() {
-        let mut lobby = Lobby::new("aaa".into(), "alice".into());
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
-            "bbb",
-            &raw(&LobbyMessage::Present { nick: "bob".into() }),
-            10,
+            &key(0xbb),
+            &raw(&LobbyMessage::Present { nick: nick("bob") }),
+            Tick::new(10),
         );
         let started = lobby.propose().expect("two distinct players");
         let before = lobby.started().cloned();
 
-        lobby.expire(10_000, 50);
+        lobby.expire(Tick::new(10_000), TickSpan::new(50));
         assert_eq!(
             lobby.started().cloned(),
             before,
@@ -605,15 +822,15 @@ mod tests {
 
     #[test]
     fn a_match_between_other_people_is_ignored() {
-        let mut lobby = Lobby::new("aaa".into(), "alice".into());
+        let mut lobby = Lobby::new(key(0xaa), nick("alice"));
         lobby.on_message(
-            "bbb",
+            &key(0xbb),
             &raw(&LobbyMessage::Start {
-                epoch: 1,
-                session_id: 1,
-                players: vec!["bbb".into(), "ccc".into()],
+                epoch: Epoch::new(1),
+                session_id: SessionId::new(1),
+                players: vec![key(0xbb), key(0xcc)],
             }),
-            0,
+            Tick::new(0),
         );
         assert!(lobby.started().is_none());
     }
@@ -622,31 +839,31 @@ mod tests {
     /// *higher* than the first's, which the tie-break alone would refuse.
     #[test]
     fn a_second_proposal_supersedes_the_first_on_both_peers() {
-        let mut alice = Lobby::new("aaa".into(), "alice".into());
-        let mut bob = Lobby::new("bbb".into(), "bob".into());
+        let mut alice = Lobby::new(key(0xaa), nick("alice"));
+        let mut bob = Lobby::new(key(0xbb), nick("bob"));
         alice.on_message(
-            "bbb",
-            &raw(&LobbyMessage::Present { nick: "bob".into() }),
-            0,
+            &key(0xbb),
+            &raw(&LobbyMessage::Present { nick: nick("bob") }),
+            Tick::new(0),
         );
         bob.on_message(
-            "aaa",
+            &key(0xaa),
             &raw(&LobbyMessage::Present {
-                nick: "alice".into(),
+                nick: nick("alice"),
             }),
-            0,
+            Tick::new(0),
         );
 
         let first = alice.propose().expect("two distinct players");
-        bob.on_message("aaa", &raw(&first), 0);
+        bob.on_message(&key(0xaa), &raw(&first), Tick::new(0));
         let first_id = alice.started().expect("started").session_id;
 
         let second = bob.propose().expect("still two players");
-        alice.on_message("bbb", &raw(&second), 0);
+        alice.on_message(&key(0xbb), &raw(&second), Tick::new(0));
 
         for lobby in [&alice, &bob] {
             let current = lobby.started().expect("started");
-            assert_eq!(current.epoch, 2);
+            assert_eq!(current.epoch, Epoch::new(2));
             assert_ne!(
                 current.session_id, first_id,
                 "a rematch must not reuse the previous match's id, or its \
@@ -661,17 +878,17 @@ mod tests {
 
     #[test]
     fn a_straggler_from_the_previous_match_never_resurrects_it() {
-        let mut alice = Lobby::new("aaa".into(), "alice".into());
+        let mut alice = Lobby::new(key(0xaa), nick("alice"));
         alice.on_message(
-            "bbb",
-            &raw(&LobbyMessage::Present { nick: "bob".into() }),
-            0,
+            &key(0xbb),
+            &raw(&LobbyMessage::Present { nick: nick("bob") }),
+            Tick::new(0),
         );
         let stale = alice.propose().expect("two distinct players");
         alice.propose().expect("rematch");
         let current = alice.started().expect("started").clone();
 
-        alice.on_message("bbb", &raw(&stale), 0);
+        alice.on_message(&key(0xbb), &raw(&stale), Tick::new(0));
         assert_eq!(
             alice.started(),
             Some(&current),

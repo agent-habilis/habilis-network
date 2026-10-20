@@ -20,7 +20,7 @@ use habilis_network::iroh::{EndpointId, RelayUrl};
 use habilis_network::membership;
 use habilis_network::net::test_pkarr::{self, TestPkarr};
 use habilis_network::net::{DEFAULT_PKARR_URLS, probe_pkarr, probe_record};
-use habilis_network::protocol::{Lookup, Mesh, Url};
+use habilis_network::protocol::{LockedMesh, Lookup, Url};
 
 use super::mesh::{
     BunServer, Native, drain_logs, init_logging, launch_page, logs_contain, logs_snapshot,
@@ -257,8 +257,10 @@ async fn run_cell(
     }
 
     let rendezvous = id
-        .parse::<Mesh>()
+        .parse::<LockedMesh>()
         .map_err(|error| fail(format!("the mesh id does not parse: {error}")))?
+        .unlock(None)
+        .map_err(|error| fail(format!("the mesh id does not unlock: {error}")))?
         .rendezvous_id()
         .to_z32();
     let keys = [

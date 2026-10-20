@@ -10,7 +10,8 @@
 //! [`PeerState::Disconnected`] if the peer goes quiet past the timeout.
 
 use crate::config::Config;
-use crate::frame::{Frame, NULL_FRAME};
+use crate::frame::Frame;
+use crate::handle::PlayerHandle;
 use crate::time_sync::{TimeSync, frame_advantage};
 use crate::transport::{Body, InputPacket, Message};
 
@@ -78,7 +79,7 @@ pub(crate) enum PeerEvent {
 pub(crate) struct PeerProtocol<T: Config> {
     pub(crate) addr: T::Address,
     /// Which player handle this peer drives.
-    pub(crate) handle: usize,
+    pub(crate) handle: PlayerHandle,
     state: PeerState,
     /// Our session nonce, stamped on everything we send.
     magic: u32,
@@ -133,7 +134,7 @@ impl<T: Config> std::fmt::Debug for PeerProtocol<T> {
 }
 
 impl<T: Config> PeerProtocol<T> {
-    pub(crate) fn new(addr: T::Address, handle: usize, magic: u32) -> Self {
+    pub(crate) fn new(addr: T::Address, handle: PlayerHandle, magic: u32) -> Self {
         Self {
             addr,
             handle,
@@ -145,8 +146,8 @@ impl<T: Config> PeerProtocol<T> {
             // without any shared randomness.
             sync_token: magic ^ 0x5bf0_3635,
             since_sync_request: 0,
-            last_received_frame: NULL_FRAME,
-            last_acked_frame: NULL_FRAME,
+            last_received_frame: Frame::NULL,
+            last_acked_frame: Frame::NULL,
             pending: Vec::new(),
             silent_ticks: 0,
             since_quality_report: 0,
@@ -206,7 +207,7 @@ impl<T: Config> PeerProtocol<T> {
         self.silent_ticks = self.silent_ticks.saturating_add(1);
         if self.state != PeerState::Disconnected && self.silent_ticks > DISCONNECT_TIMEOUT_TICKS {
             tracing::debug!(
-                handle = self.handle,
+                handle = self.handle.index(),
                 silent_ticks = self.silent_ticks,
                 was = ?self.state,
                 "peer went silent past the disconnect timeout"
@@ -260,9 +261,14 @@ impl<T: Config> PeerProtocol<T> {
         let inputs: Vec<T::Input> = self.pending.iter().map(|(_, input)| *input).collect();
         Some(self.wrap(Body::Input(InputPacket {
             start_frame,
-            ack_frame: self.last_received_frame,
+            ack_frame: self.ack_frame(),
             inputs,
         })))
+    }
+
+    /// The highest frame received contiguously, or `None` before the first.
+    fn ack_frame(&self) -> Option<Frame> {
+        (self.last_received_frame != Frame::NULL).then_some(self.last_received_frame)
     }
 
     fn wrap(&self, body: Body<T::Input>) -> Message<T::Input> {
@@ -280,7 +286,7 @@ impl<T: Config> PeerProtocol<T> {
         self.stale_token_drops = self.stale_token_drops.saturating_add(1);
         if self.stale_token_drops.is_power_of_two() {
             tracing::debug!(
-                handle = self.handle,
+                handle = self.handle.index(),
                 expected = self.sync_token,
                 received = token,
                 roundtrips_left = self.roundtrips_left,
@@ -309,7 +315,7 @@ impl<T: Config> PeerProtocol<T> {
                 // wedged handshake produces thousands a second.
                 if self.foreign_magic_drops.is_power_of_two() {
                     tracing::debug!(
-                        handle = self.handle,
+                        handle = self.handle.index(),
                         expected = known,
                         received = message.magic,
                         drops = self.foreign_magic_drops,
@@ -324,7 +330,7 @@ impl<T: Config> PeerProtocol<T> {
                     if self.state == PeerState::Syncing && *token == self.sync_token =>
                 {
                     tracing::debug!(
-                        handle = self.handle,
+                        handle = self.handle.index(),
                         remote_magic = message.magic,
                         "latched the peer's session nonce"
                     );
@@ -352,7 +358,7 @@ impl<T: Config> PeerProtocol<T> {
                     self.unlatched_drops = self.unlatched_drops.saturating_add(1);
                     if self.unlatched_drops.is_power_of_two() {
                         tracing::debug!(
-                            handle = self.handle,
+                            handle = self.handle.index(),
                             received = message.magic,
                             drops = self.unlatched_drops,
                             "dropped a packet before the peer answered this session's handshake"
@@ -396,7 +402,7 @@ impl<T: Config> PeerProtocol<T> {
                     // time: this reply is the proof the last one arrived.
                     self.since_sync_request = 0;
                     tracing::debug!(
-                        handle = self.handle,
+                        handle = self.handle.index(),
                         roundtrips_left = self.roundtrips_left,
                         "sync round trip"
                     );
@@ -409,7 +415,9 @@ impl<T: Config> PeerProtocol<T> {
                 }
             }
             Body::Input(packet) => {
-                self.last_acked_frame = self.last_acked_frame.max(packet.ack_frame);
+                if let Some(ack_frame) = packet.ack_frame {
+                    self.last_acked_frame = self.last_acked_frame.max(ack_frame);
+                }
                 // A run that starts past the next frame we need would leave a
                 // hole, and the rollback engine requires contiguity. Drop it
                 // and wait — the sender resends everything unacked, so the
@@ -421,19 +429,19 @@ impl<T: Config> PeerProtocol<T> {
                 // packet legitimately starts above zero. That is not a hole:
                 // our own queue fills the same frames the same way through
                 // the same code path, so both sides agree on them.
-                if self.last_received_frame != NULL_FRAME
+                if self.last_received_frame != Frame::NULL
                     && packet.start_frame > self.last_received_frame + 1
                 {
                     tracing::trace!(
-                        handle = self.handle,
-                        start_frame = packet.start_frame,
-                        last_received_frame = self.last_received_frame,
+                        handle = self.handle.index(),
+                        start_frame = packet.start_frame.get(),
+                        last_received_frame = self.last_received_frame.get(),
                         "dropped an input packet that would leave a hole"
                     );
                     return (inputs, events);
                 }
                 for (offset, input) in packet.inputs.iter().enumerate() {
-                    let frame = packet.start_frame + Frame::try_from(offset).unwrap_or(Frame::MAX);
+                    let frame = packet.start_frame + i32::try_from(offset).unwrap_or(i32::MAX);
                     // Only what we have not already filed — resends are the
                     // norm, not an anomaly.
                     if frame > self.last_received_frame {
@@ -444,11 +452,13 @@ impl<T: Config> PeerProtocol<T> {
                     self.last_received_frame = *frame;
                 }
                 replies.push(self.wrap(Body::InputAck {
-                    ack_frame: self.last_received_frame,
+                    ack_frame: self.ack_frame(),
                 }));
             }
             Body::InputAck { ack_frame } => {
-                self.last_acked_frame = self.last_acked_frame.max(*ack_frame);
+                if let Some(ack_frame) = ack_frame {
+                    self.last_acked_frame = self.last_acked_frame.max(*ack_frame);
+                }
             }
             Body::QualityReport {
                 frame_advantage,
@@ -477,17 +487,67 @@ impl<T: Config> PeerProtocol<T> {
 #[cfg(test)]
 mod tests {
     use super::{Body, PeerProtocol, PeerState, SYNC_RESEND_EVERY_TICKS};
-    use crate::frame::NULL_FRAME;
+    use crate::frame::Frame;
+    use crate::handle::PlayerHandle;
     use crate::testutil::TestGame;
     use crate::transport::Message;
 
+    /// The JSON of an input packet with no ack yet. A change here is a wire
+    /// change: peers on the old bytes cannot play with peers on the new ones.
+    #[test]
+    fn input_packet_json_with_no_ack_frame_matches_the_golden() {
+        let message = Message {
+            magic: 0xabcd_1234,
+            body: Body::Input(crate::transport::InputPacket {
+                start_frame: Frame::new(5),
+                ack_frame: None,
+                inputs: vec![crate::testutil::TestInput(7)],
+            }),
+        };
+        assert_eq!(
+            serde_json::to_string(&message).expect("a packet serializes"),
+            r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"inputs":[7]}}}"#
+        );
+    }
+
+    /// The bytes an older peer sent for a packet with no ack. The `-1` is not
+    /// a frame, so a new peer refuses the packet; it does not read it as
+    /// [`Frame::NULL`] and play on.
+    #[test]
+    fn an_old_packet_with_the_minus_one_ack_frame_is_a_parse_error() {
+        let old = r#"{"magic":2882343476,"body":{"Input":{"start_frame":5,"ack_frame":-1,"inputs":[7]}}}"#;
+        let error = serde_json::from_str::<Message<crate::testutil::TestInput>>(old)
+            .expect_err("a negative frame is refused");
+        assert!(error.to_string().contains("negative"), "{error}");
+    }
+
+    #[test]
+    fn an_ack_frame_is_on_the_wire_only_when_there_is_one() {
+        let packet = |ack_frame| Message::<crate::testutil::TestInput> {
+            magic: 0xabcd_1234,
+            body: Body::InputAck { ack_frame },
+        };
+        let none = serde_json::to_string(&packet(None)).expect("serializes");
+        assert_eq!(none, r#"{"magic":2882343476,"body":{"InputAck":{}}}"#);
+        let some = serde_json::to_string(&packet(Some(Frame::new(4)))).expect("serializes");
+        assert_eq!(
+            some,
+            r#"{"magic":2882343476,"body":{"InputAck":{"ack_frame":4}}}"#
+        );
+        for json in [none, some] {
+            let back: Message<crate::testutil::TestInput> =
+                serde_json::from_str(&json).expect("round trips");
+            assert_eq!(serde_json::to_string(&back).expect("serializes"), json);
+        }
+    }
+
     fn syncing_peer() -> PeerProtocol<TestGame> {
-        PeerProtocol::<TestGame>::new("peer".to_owned(), 1, 0xabcd_1234)
+        PeerProtocol::<TestGame>::new("peer".to_owned(), PlayerHandle::new(1), 0xabcd_1234)
     }
 
     /// How many sync requests one tick produced.
     fn requests(peer: &mut PeerProtocol<TestGame>) -> usize {
-        let (out, _) = peer.tick(NULL_FRAME);
+        let (out, _) = peer.tick(Frame::NULL);
         out.iter()
             .filter(|message| matches!(message.body, Body::SyncRequest { .. }))
             .count()
@@ -517,7 +577,7 @@ mod tests {
     #[test]
     fn an_answered_round_trip_releases_the_next_request_at_once() {
         let mut peer = syncing_peer();
-        let (out, _) = peer.tick(NULL_FRAME);
+        let (out, _) = peer.tick(Frame::NULL);
         let Some(Body::SyncRequest { token }) = out.first().map(|message| message.body.clone())
         else {
             panic!("a syncing peer opens with a request")
@@ -555,8 +615,8 @@ mod tests {
             &Message {
                 magic: previous_match,
                 body: Body::Input(crate::transport::InputPacket {
-                    start_frame: 40,
-                    ack_frame: 39,
+                    start_frame: Frame::new(40),
+                    ack_frame: Some(Frame::new(39)),
                     inputs: vec![crate::testutil::TestInput(7)],
                 }),
             },
@@ -564,7 +624,7 @@ mod tests {
         );
 
         for _ in 0..super::SYNC_ROUNDTRIPS {
-            let (out, _) = peer.tick(NULL_FRAME);
+            let (out, _) = peer.tick(Frame::NULL);
             // An answered trip releases the next request at once, so a
             // missing one means the last reply was dropped.
             let Some(Body::SyncRequest { token }) = out.first().map(|message| message.body.clone())
@@ -595,7 +655,7 @@ mod tests {
     fn a_disconnected_peer_that_never_latched_stops_answering_requests() {
         let mut peer = syncing_peer();
         for _ in 0..=super::DISCONNECT_TIMEOUT_TICKS {
-            peer.tick(NULL_FRAME);
+            peer.tick(Frame::NULL);
         }
         assert_eq!(peer.state(), PeerState::Disconnected);
 

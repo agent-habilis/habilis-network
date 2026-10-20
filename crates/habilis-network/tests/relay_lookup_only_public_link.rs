@@ -10,6 +10,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -18,9 +19,7 @@ use habilis_network::embed::{
 };
 use habilis_network::iroh::RelayUrl;
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::{
-    LookupOpts, MeshConfig, Message, Nickname, RelayChoice, TransportPolicy,
-};
+use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, RelayChoice, TransportPolicy};
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
 };
@@ -30,7 +29,7 @@ struct Probe;
 
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: false,
             beat: true,
@@ -65,7 +64,7 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg } = event {
+        if let NodeEvent::Presence { msg, .. } = event {
             self.peers
                 .lock()
                 .expect("no poison")
@@ -183,13 +182,13 @@ async fn spawn_with(
         SetupParams {
             author,
             max_peers: 16,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports,
             runtime_base: None,
             state_file: None,
             sink,
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: None,
@@ -213,7 +212,7 @@ async fn two_ip_peers_link_through_the_gated_rendezvous() {
         udp: true,
         relay: true,
         webrtc: false,
-        multihop: false,
+        gossip: false,
     };
     let alice = spawn_with(&topic, "alice", &relay, Arc::clone(&alice_saw), ip_only).await;
     assert!(
@@ -259,7 +258,7 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
             udp: true,
             relay: true,
             webrtc: true,
-            multihop: false,
+            gossip: false,
         },
     )
     .await;
@@ -276,7 +275,7 @@ async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
             udp: false,
             relay: true,
             webrtc: true,
-            multihop: false,
+            gossip: false,
         },
     )
     .await;

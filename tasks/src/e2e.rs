@@ -25,6 +25,8 @@ mod loopback;
 #[cfg(feature = "mesh")]
 mod mesh;
 #[cfg(feature = "mesh")]
+mod multihop;
+#[cfg(feature = "mesh")]
 mod page;
 #[cfg(feature = "mesh")]
 mod pkarr;
@@ -149,6 +151,10 @@ enum Suite {
     /// tab: put a throwaway record, resolve it back, and CORS. It reaches the
     /// internet, so it is never run in CI.
     PkarrLive,
+    /// A tab reached through a native hop: two native peers and a tab on one mesh with
+    /// `multihop`, the tab and one native refused a direct session, so that their messages
+    /// have to cross the other native.
+    Multihop,
 }
 
 /// Which wasm build a cell runs.
@@ -300,6 +306,7 @@ fn run_engine_suite(args: &Args) -> TaskOutcome {
     }
     match args.suite {
         Suite::Mesh => mesh::run(args),
+        Suite::Multihop => multihop::run(args),
         Suite::Stream => stream::run(args),
         Suite::Pkarr => pkarr::run(args),
         Suite::PkarrLive => pkarr::run_live(args),
@@ -318,7 +325,12 @@ fn run_engine_suite(_: &Args) -> TaskOutcome {
 pub(crate) fn run(args: &Args) -> TaskOutcome {
     if matches!(
         args.suite,
-        Suite::Mesh | Suite::Chat | Suite::Stream | Suite::Pkarr | Suite::PkarrLive
+        Suite::Mesh
+            | Suite::Chat
+            | Suite::Stream
+            | Suite::Pkarr
+            | Suite::PkarrLive
+            | Suite::Multihop
     ) {
         return run_engine_suite(args);
     }

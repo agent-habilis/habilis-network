@@ -20,6 +20,7 @@
 //! take": a driver with two required methods and three associated types.
 //! Everything else on `NodeDriver` has a default.
 
+use habilis_network::protocol::message::Authored;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -28,7 +29,7 @@ use habilis_network::embed::{
 };
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
-    DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, Message, TransportPolicy,
+    DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, TransportPolicy,
 };
 use habilis_network::runtime::{CreateParams, JoinParams, Node, Resolved, SetupParams, setup_mesh};
 
@@ -38,7 +39,7 @@ struct Probe;
 
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: false,
             beat: true,
@@ -201,6 +202,7 @@ async fn run_peer(
         SetupParams {
             author: author.clone(),
             max_peers: 16,
+            max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),
@@ -209,7 +211,6 @@ async fn run_peer(
             runtime_base: None,
             state_file: None,
             sink: Arc::new(SilentSink),
-            multihop: false,
             per_peer_gate: None,
             cohost: None,
             live_count: Some(Arc::clone(&live)),

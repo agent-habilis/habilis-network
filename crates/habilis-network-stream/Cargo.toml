@@ -34,6 +34,7 @@ tokio = { workspace = true, default-features = false, features = ["sync"] }
 # The portable timer. Off wasm32 it is a re-export of `tokio::time`; in a browser
 # `tokio::time` panics for want of a driver.
 n0-future.workspace = true
+zeroize = "1"
 
 # Target-scoped, not plain: an unscoped `tokio` dev-dependency turns on `net`
 # -> `mio`, which breaks `cargo check --target wasm32-unknown-unknown` for this

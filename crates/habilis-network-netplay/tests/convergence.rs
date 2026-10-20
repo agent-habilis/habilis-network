@@ -10,7 +10,7 @@
 //! remote input delivered on time, once with delivery deferred by an
 //! arbitrary per-frame lag — and asserts the final states match exactly.
 
-use habilis_network_netplay::{Config, Frame, Request, SyncTestSession};
+use habilis_network_netplay::{Config, Frame, PlayerHandle, Request, SyncTestSession};
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -72,8 +72,12 @@ fn a_long_run_stays_stable() {
     let mut session = SyncTestSession::<Game>::new(2, 6);
     let mut runner = Runner::new();
     for (left, right) in &script {
-        session.add_input(0, Input(*left)).expect("valid handle");
-        session.add_input(1, Input(*right)).expect("valid handle");
+        session
+            .add_input(PlayerHandle::new(0), Input(*left))
+            .expect("valid handle");
+        session
+            .add_input(PlayerHandle::new(1), Input(*right))
+            .expect("valid handle");
         for request in session
             .advance_frame()
             .expect("a deterministic sim never desyncs")
@@ -81,7 +85,7 @@ fn a_long_run_stays_stable() {
             runner.handle(request);
         }
     }
-    assert_eq!(runner.state.frame, 400);
+    assert_eq!(runner.state.frame, Frame::new(400));
     let expected: i64 = script
         .iter()
         .map(|(left, right)| i64::from(*left) + i64::from(*right))
@@ -97,7 +101,9 @@ fn a_rollback_loads_then_re_saves_and_re_advances() {
     let mut runner = Runner::new();
     let mut seen = Vec::new();
     for frame in 0..6 {
-        session.add_input(0, Input(frame)).expect("valid handle");
+        session
+            .add_input(PlayerHandle::new(0), Input(frame))
+            .expect("valid handle");
         for request in session.advance_frame().expect("deterministic") {
             seen.push(match request {
                 Request::SaveState { .. } => 'S',

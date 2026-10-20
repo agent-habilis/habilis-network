@@ -22,7 +22,7 @@
 //! can gate on it rather than on the file's mere existence.
 //! `peer_count` is the total number of agents in the mesh,
 //! including self. `last_updated` is a unix timestamp the daemon
-//! refreshes on a fixed heartbeat (see `tuning::STATE_REFRESH_SECS`)
+//! refreshes on a fixed heartbeat (see `tuning::STATE_REFRESH`)
 //! even when membership is unchanged, so a reader can treat a fresh
 //! value as a liveness signal. `pid` is the daemon's own process id —
 //! what lets a consumer's `leave`/`session` map a state file back to a
@@ -191,7 +191,10 @@ impl StateFile {
         {
             obj.insert(key.clone(), value.clone());
         }
-        obj.insert("last_updated".into(), clock::unix_secs().into());
+        obj.insert(
+            "last_updated".into(),
+            clock::UnixSecs::now().as_secs().into(),
+        );
         let mut json = serde_json::to_vec(&obj).map_err(std::io::Error::other)?;
         json.push(b'\n');
 
@@ -416,47 +419,21 @@ mod tests {
             &Nickname::from("treat-empire"),
             &name("cool-team"),
         );
-        let logged = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(CapturedLog(std::sync::Arc::clone(&logged)))
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            state_file.write(1, true);
-            state_file.write(1, true);
-        });
+        let (logs, guard) = crate::testing::LogCapture::start(tracing::Level::INFO);
+        state_file.write(1, true);
+        state_file.write(1, true);
+        drop(guard);
         let tmp = super::tmp_sibling(&path);
         let leftover = tmp.exists();
         let _ = std::fs::remove_file(&tmp);
         std::fs::remove_dir_all(&path).unwrap();
         assert!(!leftover, "a failed write must not leave {}", tmp.display());
-        let logged = String::from_utf8(logged.lock().unwrap().clone()).unwrap();
+        let logged = logs.text();
         assert_eq!(
             logged.matches("state file write failed").count(),
             1,
             "two failed writes must warn once, got: {logged}"
         );
-    }
-
-    #[derive(Clone)]
-    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLog {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLog {
-        type Writer = Self;
-        fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
-        }
     }
 
     #[test]

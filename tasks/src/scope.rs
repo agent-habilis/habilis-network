@@ -5,9 +5,9 @@
 //! mean the same thing by construction.
 
 use clap::Args;
-use xshell::{Shell, cmd};
+use xshell::Shell;
 
-use crate::util::output;
+use crate::util::{metadata, output};
 
 #[derive(Args, Clone, Default)]
 pub(crate) struct Scope {
@@ -68,21 +68,11 @@ impl Scope {
 /// The workspace member names, from cargo rather than a list here that would
 /// drift the first time a crate is added.
 fn members(sh: &Shell) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    #[derive(serde::Deserialize)]
-    struct Metadata {
-        packages: Vec<Package>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Package {
-        name: String,
-    }
-
-    let json = cmd!(sh, "cargo metadata --no-deps --format-version 1")
-        .quiet()
-        .ignore_stderr()
-        .read()?;
-    let metadata: Metadata = serde_json::from_str(&json)?;
-    let mut names: Vec<String> = metadata.packages.into_iter().map(|pkg| pkg.name).collect();
+    let mut names: Vec<String> = metadata(sh)?
+        .packages
+        .into_iter()
+        .map(|pkg| pkg.name)
+        .collect();
     names.sort();
     Ok(names)
 }

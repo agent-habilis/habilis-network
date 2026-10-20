@@ -8,8 +8,11 @@
 //! into the engine's file layout, which then could not be rearranged without
 //! churning every one of them.
 
+mod author_key;
 pub mod base58check;
+mod content_hash;
 pub mod crypto;
+mod dedup_key;
 pub mod directory;
 mod ident;
 mod newtype;
@@ -45,18 +48,23 @@ mod wordlist;
 /// root and never inherits.
 pub use iroh_base;
 
-pub use crypto::{Password, TicketAuth, ct_eq};
+pub use author_key::AuthorKey;
+pub use content_hash::ContentHash;
+pub use crypto::{Password, Seed, SymmetricKey, TicketAuth, TicketSecret, ct_eq};
+pub use dedup_key::DedupKey;
+pub use habilis_network_util::clock::UnixSecs;
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
-    AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, Lookup,
-    LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError, OptFlag,
-    PkarrChoice, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
-    TransportPolicy, is_loopback, parse_pkarr_urls, resolve_lookups, validate_advertise,
-    validate_pkarr_urls,
+    AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, LockedMesh,
+    Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError,
+    OptFlag, PkarrChoice, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
+    TransportPolicy, UnlockError, is_loopback, parse_pkarr_urls, resolve_lookups,
+    validate_advertise, validate_pkarr_urls,
 };
 pub use message::{
-    AppFrameParams, AppTag, BodyError, Channel, CorrId, IdError, Message, MessageBody, MessageId,
-    MessageKind, PresenceSubtype, Shard, ShardGroup, sole_addressee,
+    AppFrameParams, AppTag, Authored, BodyError, Channel, CorrId, IdError, Message, MessageBody,
+    MessageId, MessageKind, PresenceSubtype, Proof, Shard, ShardGroup, Signer, Verified,
+    sole_addressee,
 };
 pub use nickname::{Nickname, NicknameError};
 pub use seal::seal_to_body;
