@@ -22,6 +22,10 @@ pub mod process;
 pub mod resident_memory;
 pub mod tuning;
 pub mod version;
+// The Windows security calls of the IPC named pipe: the user SID, the pipe
+// descriptor, the owner check and the identification-only client open.
+#[cfg(all(windows, feature = "host"))]
+pub mod win_security;
 
 /// The per-mesh folder name — the first 16 characters of the mesh
 /// identifier. The stem of every per-mesh file (socket / log / state), so it
