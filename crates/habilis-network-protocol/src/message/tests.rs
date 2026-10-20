@@ -858,7 +858,7 @@ fn a_key_with_no_signature_is_rejected_and_so_is_a_signature_with_no_key() {
 }
 
 mod verified {
-    use super::super::{Message, MessageKind};
+    use super::super::{Message, MessageKind, Verified};
     use super::SIGNED_WIRE;
     use crate::identity::Identity;
 
@@ -898,6 +898,31 @@ mod verified {
             .verify()
             .expect_err("a tampered body does not verify");
         assert_eq!(back.body.as_str(), "tampered");
+    }
+
+    #[test]
+    fn a_fixture_keeps_the_signature_as_parsed() {
+        let signed = msg("hello").sign(&Identity::generate());
+        let wire = signed.serialize().expect("serialize");
+        let parsed = Message::parse(wire.as_bytes()).expect("parses");
+
+        let unmodified = Verified::fixture_with_signature(parsed.clone());
+        assert_eq!(
+            unmodified.serialize().expect("serialize").as_bytes(),
+            wire.as_bytes(),
+            "the original signature is kept"
+        );
+        assert!(unmodified.into_message().verify().is_ok());
+
+        let mut tampered = parsed;
+        tampered.body = "tampered".into();
+        let forged = Verified::fixture_with_signature(tampered);
+        let replayed =
+            Message::parse(forged.serialize().expect("serialize").as_bytes()).expect("parses");
+        assert!(
+            replayed.verify().is_err(),
+            "a body edited after signing does not verify at the receiver"
+        );
     }
 
     #[test]

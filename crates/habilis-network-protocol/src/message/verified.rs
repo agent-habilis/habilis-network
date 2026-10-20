@@ -156,7 +156,8 @@ impl Verified {
 
     /// The one door around [`Message::verify`]: a `Verified` for a message whose signature was not
     /// checked, claiming `key` as its author. The message gets a signature that does not verify
-    /// (see [`Message::with_unverified_key`]).
+    /// (see [`Message::with_unverified_key`]). It does not carry a signature: see
+    /// [`Verified::fixture_with_signature`] for one that keeps the signature as parsed.
     ///
     /// It exists for the adversarial suite, and `test-fixtures` enables it. A non-test binary must
     /// never enable that feature, because the door would let it forge a proof.
@@ -164,6 +165,26 @@ impl Verified {
     #[must_use]
     pub fn fixture_unchecked(message: Message, key: AuthorKey) -> Self {
         Self::new(message.with_unverified_key(key), key)
+    }
+
+    /// The second door around [`Message::verify`], for tamper-after-sign and replay tests: a `Verified`
+    /// over a message that keeps the signer it was parsed with, key and signature both. Its `serialize`
+    /// keeps the original signature, so a body edited after signing fails `verify` at the receiver, and
+    /// captured bytes can be replayed unchanged.
+    ///
+    /// `test-fixtures` enables it, for the adversarial suite only. A non-test binary must never enable
+    /// that feature.
+    ///
+    /// # Panics
+    ///
+    /// If `message` is unsigned: there is no signature to keep.
+    #[cfg(any(test, feature = "test-fixtures"))]
+    #[must_use]
+    pub fn fixture_with_signature(message: Message) -> Self {
+        let key = message
+            .author_key()
+            .expect("a fixture with a signature needs a signed message");
+        Self::new(message, key)
     }
 }
 
