@@ -154,7 +154,7 @@ iroh-mainline-address-lookup = { version = "=0.4.0", git = "https://github.com/a
 # Neighbor ping-pong that two nodes could start (the peers a node answered are remembered), then the
 # fix of a join walk that died at the contact node (the renew arm of ForwardJoin goes on), then the
 # expiry of the answers a node remembered (a peer that shed its side and asks again is answered).
-iroh-gossip = { version = "=0.101.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "ab83e81d71b00f3f12cf53946ba48bebf25f5ebe", default-features = false, features = ["net"] }
+iroh-gossip = { version = "=0.102.0", git = "https://github.com/agent-habilis/iroh-gossip", rev = "136333e9240c0beb806be67362c52a2ec377b695", default-features = false, features = ["net"] }
 # Named directly by both custom transports: `RecvMeta` appears in the
 # `CustomEndpoint::poll_recv` signature. This is the quinn fork iroh runs on,
 # and it resolves to the same crates.io release iroh itself depends on.
