@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::protocol::message::Verified;
 use crate::protocol::message::sole_addressee;
-use crate::protocol::{AuthorKey, DedupKey, Message, Nickname, UnixSecs};
+use crate::protocol::{AuthorKey, DedupKey, Nickname, UnixSecs};
 
 /// Where a message sits in the log's total order: its timestamp, then its id
 /// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
@@ -72,17 +73,16 @@ pub(crate) struct MissingQuery<'a> {
 #[derive(Debug)]
 pub struct MessageLog {
     capacity: usize,
-    messages: VecDeque<Message>,
+    messages: VecDeque<Verified>,
     /// How many messages each author currently holds.
     ///
     /// Maintained on every push and eviction rather than rebuilt, because
     /// [`Self::eviction_index`] needs it on nearly every steady-state message:
     /// at capacity it was hashing a thousand base58 author keys to recount what two
     /// counter updates already know. The map is the *only* derived state here,
-    /// and both mutation sites are in [`Self::push`], so it cannot drift. An
-    /// unsigned message (no key) is held under `None`: a test or a fixture can
-    /// push one, and the log must not lose it.
-    per_author: HashMap<Option<AuthorKey>, usize>,
+    /// and both mutation sites are in [`Self::push`], so it cannot drift. Every held message is
+    /// a [`Verified`], so it has an author key: there is no unsigned entry to special-case.
+    per_author: HashMap<AuthorKey, usize>,
     /// The dedup key of every held message, so a frame that is pushed twice is held once.
     keys: HashSet<DedupKey>,
 }
@@ -107,13 +107,13 @@ impl MessageLog {
     /// union of divergent arrival-order windows. The returned eviction lets
     /// callers prune side indexes keyed by it (the DAG `by_hash`, fork map). A message whose
     /// dedup key is already held is not added, and nothing is evicted.
-    pub fn push(&mut self, msg: Message) -> Option<Message> {
+    pub fn push(&mut self, msg: Verified) -> Option<Verified> {
         // A frame that is already held is held once: two paths that retain the same frame
         // (an author that logs its own send and a consumer that pushes it too) cost a lookup.
         if !self.keys.insert(msg.dedup_key()) {
             return None;
         }
-        *self.per_author.entry(msg.author_key()).or_default() += 1;
+        *self.per_author.entry(msg.key()).or_default() += 1;
         self.messages.push_back(msg);
         if self.messages.len() <= self.capacity {
             return None;
@@ -124,13 +124,13 @@ impl MessageLog {
             self.keys.remove(&gone.dedup_key());
         }
         if let Some(gone) = &evicted
-            && let Some(held) = self.per_author.get_mut(&gone.author_key())
+            && let Some(held) = self.per_author.get_mut(&gone.key())
         {
             *held -= 1;
             // No zero entries: one would win the lowest-author-key tie-break in
             // `eviction_index` while holding nothing to evict.
             if *held == 0 {
-                self.per_author.remove(&gone.author_key());
+                self.per_author.remove(&gone.key());
             }
         }
         evicted
@@ -170,7 +170,7 @@ impl MessageLog {
         self.messages
             .iter()
             .enumerate()
-            .filter(|(_, msg)| msg.author_key() == fullest)
+            .filter(|(_, msg)| msg.key() == fullest)
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
             .expect("the fullest author holds at least one message")
@@ -194,13 +194,13 @@ impl MessageLog {
         group: &crate::protocol::ShardGroup,
         author: &AuthorKey,
         total: u32,
-    ) -> Vec<Option<&'a Message>> {
-        let mut slots: Vec<Option<&Message>> = vec![None; total as usize];
+    ) -> Vec<Option<&'a Verified>> {
+        let mut slots: Vec<Option<&Verified>> = vec![None; total as usize];
         for msg in &self.messages {
             let Some(shard) = &msg.shard else { continue };
             if shard.group == *group
                 && shard.total == total
-                && msg.author_key().as_ref() == Some(author)
+                && msg.key() == *author
                 && let Some(slot) = slots.get_mut(shard.idx as usize)
                 && slot.is_none()
             {
@@ -338,7 +338,7 @@ impl MessageLog {
     /// `requester` is entitled to — the in-window gap to re-send so a peer that
     /// advertised that window recovers what it missed. Out-of-window messages
     /// are never re-sent.
-    pub(crate) fn missing_in_window(&self, query: MissingQuery<'_>) -> Vec<Message> {
+    pub(crate) fn missing_in_window(&self, query: MissingQuery<'_>) -> Vec<Verified> {
         let MissingQuery {
             range,
             have,
@@ -380,7 +380,7 @@ impl MessageLog {
 /// does **not** filter: a directed frame the addressee holds must keep
 /// appearing in its digest ids, or the author would see it as perpetually
 /// missing and re-send it every round forever.
-fn resendable_to(msg: &Message, requester: &Nickname) -> bool {
+fn resendable_to(msg: &Verified, requester: &Nickname) -> bool {
     sole_addressee(&msg.kind).is_none_or(|to| to == requester)
 }
 
@@ -394,8 +394,8 @@ fn resendable_to(msg: &Message, requester: &Nickname) -> bool {
 /// Ranks *within* one author, not across them: because a sender picks these
 /// fields, ordering the whole log by them let one peer stamp its way to
 /// permanent residency. [`MessageLog::eviction_index`] picks the author first.
-fn eviction_key(msg: &Message) -> (UnixSecs, Option<AuthorKey>, Option<u64>, &str) {
-    (msg.timestamp, msg.author_key(), msg.seq, msg.id.as_str())
+fn eviction_key(msg: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) {
+    (msg.timestamp, msg.key(), msg.seq, msg.id.as_str())
 }
 
 #[cfg(test)]
@@ -404,8 +404,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        AuthorKey, DedupKey, Message, MessageLog, MissingQuery, Nickname, UnixSecs, WindowRange,
+        AuthorKey, DedupKey, MessageLog, MissingQuery, Nickname, UnixSecs, Verified, WindowRange,
     };
+    use crate::protocol::Message;
 
     /// A whole-log gap query for `requester` with nothing already held — the
     /// shape every gate test wants.
@@ -422,7 +423,17 @@ mod tests {
         }
     }
 
-    fn msg(id: &str) -> Message {
+    fn msg(id: &str) -> Verified {
+        signed(plain(id))
+    }
+
+    /// One fixed author for the plain fixtures, so that they share a victim pool the way the
+    /// unsigned messages of these tests always did. A signature is not what these tests check.
+    fn signed(message: Message) -> Verified {
+        Verified::fixture_unchecked(message, AuthorKey::from_bytes([0x11; 32]))
+    }
+
+    fn plain(id: &str) -> Message {
         Message::new_app(
             &crate::protocol::MeshId::from("test"),
             &Nickname::from("author"),
@@ -525,14 +536,22 @@ mod tests {
     }
 
     /// A message tagged with an explicit timestamp, for window tests.
-    fn msg_at(body: &str, ts: i64) -> Message {
-        let mut message = msg(body);
+    fn msg_at(body: &str, ts: i64) -> Verified {
+        signed(plain_at(body, ts))
+    }
+
+    fn plain_at(body: &str, ts: i64) -> Message {
+        let mut message = plain(body);
         message.timestamp = UnixSecs::from_secs(ts);
         message
     }
 
     /// A message directed at `to` — the frames that ride unicast only.
-    fn msg_to(body: &str, ts: i64, to: &str) -> Message {
+    fn msg_to(body: &str, ts: i64, to: &str) -> Verified {
+        signed(plain_to(body, ts, to))
+    }
+
+    fn plain_to(body: &str, ts: i64, to: &str) -> Message {
         let mut message = Message::new_app(
             &crate::protocol::MeshId::from("test"),
             &Nickname::from("author"),
@@ -584,7 +603,7 @@ mod tests {
         // One copy of each frame, so both logs share ids. The holder has all
         // four; at the advertiser a late-stamped frame arrived first, then
         // the older ones, and the one at ts=20 never arrived at all.
-        let frames: Vec<Message> = [10, 20, 30, 50]
+        let frames: Vec<Verified> = [10, 20, 30, 50]
             .into_iter()
             .map(|ts| msg_at(&ts.to_string(), ts))
             .collect();
@@ -773,12 +792,16 @@ mod tests {
     fn a_far_future_stamp_does_not_make_a_message_unevictable() {
         let mut log = MessageLog::new(4);
         for index in 0..4 {
-            let flood = msg_at(&format!("flood{index}"), i64::MAX)
-                .with_unverified_key(AuthorKey::from_bytes([0xff; 32]));
+            let flood = Verified::fixture_unchecked(
+                plain_at(&format!("flood{index}"), i64::MAX),
+                AuthorKey::from_bytes([0xff; 32]),
+            );
             log.push(flood);
         }
-        let honest =
-            msg_at("honest", 1_700_000_000).with_unverified_key(AuthorKey::from_bytes([0xaa; 32]));
+        let honest = Verified::fixture_unchecked(
+            plain_at("honest", 1_700_000_000),
+            AuthorKey::from_bytes([0xaa; 32]),
+        );
         let evicted = log.push(honest);
         assert!(
             evicted.is_some_and(|msg| msg.body.as_str() != "honest"),
@@ -800,13 +823,15 @@ mod tests {
         // fires repeatedly and each author is both added and dropped.
         for step in 0..60i64 {
             let author = ["aa", "bb", "cc"][usize::try_from(step).expect("fits") % 3];
-            let message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step)
-                .with_unverified_key(AuthorKey::from_hex(&author.repeat(32)).expect("hex"));
+            let message = Verified::fixture_unchecked(
+                plain_at(&format!("{author}-{step}"), 1_700_000_000 + step),
+                AuthorKey::from_hex(&author.repeat(32)).expect("hex"),
+            );
             log.push(message);
 
-            let mut recounted: HashMap<Option<AuthorKey>, usize> = HashMap::new();
+            let mut recounted: HashMap<AuthorKey, usize> = HashMap::new();
             for held in &log.messages {
-                *recounted.entry(held.author_key()).or_default() += 1;
+                *recounted.entry(held.key()).or_default() += 1;
             }
             assert_eq!(log.per_author, recounted, "counts drifted at step {step}");
         }
@@ -828,14 +853,16 @@ mod tests {
             let mut batch = Vec::new();
             for (index, author) in authors.iter().enumerate() {
                 for step in 0..4i64 {
-                    let mut message = msg_at(&format!("{author}-{step}"), 1_700_000_000 + step)
-                        .with_unverified_key(AuthorKey::from_hex(&author.repeat(32)).expect("hex"));
+                    let mut message = plain_at(&format!("{author}-{step}"), 1_700_000_000 + step);
                     // One author also stamps far ahead, the shape that used to
                     // buy immunity.
                     if index == 0 {
                         message.timestamp = UnixSecs::from_secs(i64::MAX - step);
                     }
-                    batch.push(message);
+                    batch.push(Verified::fixture_unchecked(
+                        message,
+                        AuthorKey::from_hex(&author.repeat(32)).expect("hex"),
+                    ));
                 }
             }
             batch

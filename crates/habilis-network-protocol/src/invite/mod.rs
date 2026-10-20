@@ -10,9 +10,10 @@ mod ticket;
 
 // `InviteTicket` rides the **public** `JoinTarget::Invite`, so it must be at
 // least as public as that enum (re-exported at the crate root in `lib.rs`); its
-// methods stay `pub(crate)`, so externally it is an opaque join token.
+// methods are `pub`, but the ticket exposes no field, so externally it is an
+// opaque join token.
 pub use ticket::InviteTicket;
 // `pub` so the application layer's `invite` command can mint from the retained
-// creator mesh (`EventLoopState::mint_mesh`); `decode`/`redeem` stay
-// `pub(crate)` — the engine's own `resolver`/`params` consume them.
+// creator mesh (`EventLoopState::mint_mesh`). `InviteTicket::decode` and
+// `redeem` are `pub` too; the engine's own `resolver`/`params` consume them.
 pub use ticket::mint;

@@ -52,7 +52,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use habilis_network::membership::{self, Membership, Request};
-use habilis_network::protocol::Mesh;
+use habilis_network::protocol::LockedMesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -777,9 +777,11 @@ async fn ladder_held_by_other_processes(
     wait_for_beacons(round, 1).await?;
     let mesh_id = creator.mesh_id();
     creator.leave().await;
-    let mesh: Mesh = mesh_id
-        .parse()
-        .map_err(|error| format!("the id of the room does not parse: {error}"))?;
+    let mesh = mesh_id
+        .parse::<LockedMesh>()
+        .map_err(|error| format!("the id of the room does not parse: {error}"))?
+        .unlock(None)
+        .map_err(|error| format!("the room does not unlock without a password: {error}"))?;
     let _held = hold_every_rung(&mesh.rendezvous_ports()).await?;
     let bound_before = round.beacons().len();
 

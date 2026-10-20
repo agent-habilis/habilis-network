@@ -666,7 +666,12 @@ impl LookupSet {
         })
     }
 
-    fn any(&self) -> bool {
+    /// Whether the set names at least one lookup. A set that names none
+    /// resolves to a loopback-only mesh in [`resolve_lookups`], so a consumer
+    /// that wants another default for that case asks this, not its own copy
+    /// of the rule.
+    #[must_use]
+    pub fn any(&self) -> bool {
         self.mdns || self.dht || self.relay_lookup.is_set()
     }
 }
@@ -1389,6 +1394,15 @@ mod choice_tests {
         let opts = resolve_lookups(set);
         assert!(opts.mdns && !opts.dht);
         assert_eq!(opts.relay_lookup, RelayChoice::Disabled);
+    }
+
+    #[test]
+    fn a_set_names_a_lookup_when_any_field_is_set() {
+        assert!(!LookupSet::default().any());
+        for lookup in [Lookup::Mdns, Lookup::Dht, Lookup::Relay] {
+            let set = LookupSet::from_lookups(&[lookup], None).unwrap();
+            assert!(set.any(), "{lookup:?} alone is a lookup");
+        }
     }
 
     #[test]

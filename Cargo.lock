@@ -1738,6 +1738,7 @@ dependencies = [
  "habilis-network-doc",
  "habilis-network-iroh-gossip-transport",
  "habilis-network-iroh-multihop-transport",
+ "habilis-network-iroh-transport-util",
  "habilis-network-iroh-webrtc-transport",
  "habilis-network-logging",
  "habilis-network-protocol",

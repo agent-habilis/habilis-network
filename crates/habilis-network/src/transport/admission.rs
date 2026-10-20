@@ -276,8 +276,6 @@ struct Inner {
     hub: Option<Arc<dyn Sessions>>,
     sampler_running: bool,
     closed: bool,
-    /// An endpoint hook reports to this table.
-    observing: bool,
     /// The direct connections of the node against the ceiling, see [`super::ceiling`].
     ceiling: super::ceiling::Ceiling,
     /// The peers that closed a connection of ours with the `EVICTED` code.
@@ -509,7 +507,6 @@ impl SignalAdmission {
                 hub: None,
                 sampler_running: false,
                 closed: false,
-                observing: false,
                 ceiling: super::ceiling::Ceiling::new(cap),
                 evicted_by: super::ceiling::EvictionBackoff::default(),
                 we_evicted: super::ceiling::EvictionBackoff::default(),
@@ -613,22 +610,10 @@ impl SignalAdmission {
         )
     }
 
-    /// Whether [`connection_hook`](Self::connection_hook) was called on this
-    /// table. Without a hook the table sees none of the endpoint's connections:
-    /// the relay policy is not kept on the gossip connections that the node
-    /// dials, and a slot whose connection is gone is never pruned. It does not
-    /// prove that the hook is installed on a given endpoint: an embedder that
-    /// calls the method and drops the hook passes this check.
-    #[must_use]
-    pub fn is_observed(&self) -> bool {
-        self.lock().observing
-    }
-
     /// The endpoint hook that reports every connection to this table. Install
     /// it on the endpoint builder, before bind.
     #[must_use]
     pub fn connection_hook(&self) -> ConnectionHook {
-        self.lock().observing = true;
         ConnectionHook {
             admission: self.clone(),
         }

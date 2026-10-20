@@ -9,8 +9,6 @@
 use std::fmt;
 
 use anyhow::{Context, Result, bail};
-#[cfg(any(test, feature = "test-fixtures"))]
-use bytes::Bytes;
 use iroh_base::Signature;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +23,11 @@ use crate::newtype::string_newtype;
 mod body;
 mod id;
 mod shard;
+mod verified;
+mod wire;
+
+pub use verified::{Authored, Proof, Verified};
+pub use wire::WireFrame;
 
 pub use body::{BodyError, MessageBody};
 pub use id::{IdError, MessageId};
@@ -445,7 +448,7 @@ pub struct Message {
     /// (the signature cannot cover itself). Real outbound traffic is always signed on the
     /// broadcast path, and the receive path drops anything that fails verification. See
     /// `docs/history-integrity.md`.
-    pub signer: Option<Signed>,
+    pub signer: Option<Signer>,
     /// Per-author hash-linked log (Phase 2), set on `Msg` only: `seq` is
     /// this author's monotonic counter and `prev` the content hash of their
     /// previous `Msg` (`None` at `seq 0`). Both are signed. Plumbing /
@@ -470,12 +473,12 @@ pub struct Message {
 /// The key that signed a message and its signature. The two are one value, so a message cannot
 /// carry a key with no signature, or a signature with no key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Signed {
+pub struct Signer {
     key: AuthorKey,
     sig: Signature,
 }
 
-impl Signed {
+impl Signer {
     /// Pair a key with the signature it made. Nothing checks it here: [`Message::verify_signature_with`]
     /// does.
     #[must_use]
@@ -569,25 +572,30 @@ impl Serialize for HexOut<'_> {
     }
 }
 
-impl Serialize for Message {
+/// The wire form of a message. The serde impl lives on this private wrapper, not on [`Message`], so a
+/// message that a caller holds through a `Deref` (an [`Authored`] view) has no public `Serialize`.
+struct Wire<'a>(&'a Message);
+
+impl Serialize for Wire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let signer = self.signer.as_ref();
+        let message = self.0;
+        let signer = message.signer.as_ref();
         let sig_bytes = signer.map(|signed| signed.sig.to_bytes());
         WireOut {
-            version: &self.version,
-            id: &self.id,
-            kind: &self.kind,
-            mesh: &self.mesh,
-            author: &self.author,
-            timestamp: self.timestamp.as_secs(),
-            body: &self.body,
+            version: &message.version,
+            id: &message.id,
+            kind: &message.kind,
+            mesh: &message.mesh,
+            author: &message.author,
+            timestamp: message.timestamp.as_secs(),
+            body: &message.body,
             pubkey: signer.map(|signed| HexOut(signed.key.as_bytes())),
             sig: sig_bytes.as_ref().map(|bytes| HexOut(bytes)),
-            seq: self.seq,
-            prev: &self.prev,
-            parents: &self.parents,
-            shard: &self.shard,
-            ext: &self.ext,
+            seq: message.seq,
+            prev: &message.prev,
+            parents: &message.parents,
+            shard: &message.shard,
+            ext: &message.ext,
         }
         .serialize(serializer)
     }
@@ -634,7 +642,7 @@ impl TryFrom<WireIn> for Message {
             (None, false) => return Err("signature without a pubkey"),
             (Some(key), false) => {
                 let sig = identity::decode_sig(&wire.sig).map_err(|_| "malformed signature")?;
-                Some(Signed::new(key, sig))
+                Some(Signer::new(key, sig))
             }
         };
         Ok(Message {
@@ -842,11 +850,12 @@ impl Message {
         Self::new(mesh, author, MessageKind::StateDigest, body)
     }
 
-    /// Serialize to compact JSON bytes for the gossip wire.
+    /// Serialize to compact JSON bytes for the gossip wire. Outside this crate only a [`Verified`]
+    /// serializes, through [`Verified::serialize`]: an unverified or an authored view has no wire form.
     /// # Errors
     /// Serialization of a field fails.
-    pub fn serialize(&self) -> Result<Vec<u8>> {
-        let bytes = serde_json::to_vec(self).context("failed to serialize message")?;
+    pub(crate) fn serialize(&self) -> Result<Vec<u8>> {
+        let bytes = serde_json::to_vec(&Wire(self)).context("failed to serialize message")?;
         if bytes.len() > MAX_MESSAGE_SIZE {
             bail!(
                 "message too large: {} bytes (max {})",
@@ -872,7 +881,7 @@ impl Message {
     }
 
     /// Parse a gossip payload that may end in the trailer of a resend (see
-    /// [`wire_with_resend_nonce`]). Returns the message and the nonce, if any. The trailer is
+    /// [`WireFrame::with_resend_nonce`](wire::WireFrame::with_resend_nonce)). Returns the message and the nonce, if any. The trailer is
     /// outside the signature: it changes the gossip message id and nothing else.
     ///
     /// # Errors
@@ -950,10 +959,11 @@ impl Message {
         ContentHash::of(&self.canonical_bytes())
     }
 
-    /// The key that signed this message, or `None` for an unsigned message. A message that
-    /// passed [`verify_signature_with`](Self::verify_signature_with) always has one.
+    /// The key that signed this message, or `None` for an unsigned message. Outside this module
+    /// a message that is not known to be signed has no proven key: a [`Verified`] or an
+    /// [`Authored`] gives it through `key()`, with no `Option`.
     #[must_use]
-    pub fn author_key(&self) -> Option<AuthorKey> {
+    pub(crate) fn author_key(&self) -> Option<AuthorKey> {
         self.signer.map(|signed| signed.key)
     }
 
@@ -969,7 +979,7 @@ impl Message {
     /// Stamp the per-author log fields before signing (`Msg` only). `seq`
     /// is the author's monotonic counter, `prev` the hash of their previous
     /// `Msg` (`None` at `seq 0`). Consuming-builder so it composes with
-    /// [`signed`](Self::signed): `Message::new_app(..).with_chain(..).signed(..)`.
+    /// [`sign`](Self::sign): `Message::new_app(..).with_chain(..).sign(..)`.
     #[must_use]
     pub fn with_chain(mut self, seq: u64, prev: Option<ContentHash>) -> Self {
         self.seq = Some(seq);
@@ -979,7 +989,7 @@ impl Message {
 
     /// Stamp the cross-author DAG `parents` (content hashes of the tips
     /// seen when authoring) before signing. Consuming-builder, composes
-    /// with [`with_chain`](Self::with_chain) and [`signed`](Self::signed).
+    /// with [`with_chain`](Self::with_chain) and [`sign`](Self::sign).
     #[must_use]
     pub fn with_parents(mut self, parents: Vec<ContentHash>) -> Self {
         self.parents = parents;
@@ -1008,19 +1018,81 @@ impl Message {
     /// deciding how to split a body. `serialize` is the gated counterpart.
     #[must_use]
     pub fn wire_len(&self) -> usize {
-        serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
+        serde_json::to_vec(&Wire(self)).map_or(usize::MAX, |bytes| bytes.len())
     }
 
-    /// Sign this message with `identity`, setting [`signer`](Self::signer).
-    /// The key is part of the signed bytes, so they are computed with the key
-    /// and before the signature exists; consuming-builder style so it composes in
-    /// the construction expression (`Message::new_app(..).signed(&id)`).
+    /// Sign this message with `identity` and return it as a [`Verified`], the proof that its
+    /// signature covers these exact bytes. The key is part of the signed bytes, so they are
+    /// computed with the key and before the signature exists; consuming-builder style so it composes
+    /// in the construction expression (`Message::new_app(..).sign(&id)`).
     #[must_use]
-    pub fn signed(mut self, identity: &Identity) -> Self {
+    pub fn sign(mut self, identity: &Identity) -> Verified {
         let key = identity.author_key();
         let sig = identity.sign(&self.canonical_with_key(Some(&key)));
-        self.signer = Some(Signed::new(key, sig));
-        self
+        self.signer = Some(Signer::new(key, sig));
+        Verified::new(self, key)
+    }
+
+    /// Check the signature of an untrusted message over its canonical bytes. `Ok` is the proof. `Err`
+    /// gives the message back unchanged, because it is unsigned or its signature does not verify.
+    ///
+    /// # Errors
+    ///
+    /// Returns the message itself when [`verify_signature_with`](Self::verify_signature_with) fails.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
+    )]
+    pub fn verify(self) -> Result<Verified, Message> {
+        self.verify_canonical().map(|(verified, _)| verified)
+    }
+
+    /// [`verify`](Self::verify), and also the canonical bytes that were checked, so the receive path
+    /// serializes each inbound frame once. The bytes are computed here from this message, never taken
+    /// from the caller, so they are always the bytes the signature covers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the message itself when its signature does not verify.
+    ///
+    /// Outside the crate the canonical bytes cannot be supplied by the caller: `verify_with` is
+    /// crate-private, so an edited clone cannot be checked against another message's bytes.
+    ///
+    /// ```compile_fail,E0624
+    /// use habilis_network_protocol::message::Message;
+    ///
+    /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+    ///
+    /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
+    /// let canonical = message.canonical_bytes();
+    /// let _ = message.verify_with(&canonical);
+    /// ```
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
+    )]
+    pub fn verify_canonical(self) -> Result<(Verified, Vec<u8>), Message> {
+        let canonical = self.canonical_bytes();
+        match self.verify_with(&canonical) {
+            Ok(verified) => Ok((verified, canonical)),
+            Err(message) => Err(message),
+        }
+    }
+
+    /// The check behind [`verify_canonical`](Self::verify_canonical), against canonical bytes that
+    /// the caller computed. Crate-private: outside the crate the bytes must come from the message.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
+    )]
+    pub(crate) fn verify_with(self, canonical: &[u8]) -> Result<Verified, Message> {
+        let Some(signed) = self.signer else {
+            return Err(self);
+        };
+        if !self.verify_signature_with(canonical) {
+            return Err(self);
+        }
+        Ok(Verified::new(self, signed.key()))
     }
 
     /// Verify the detached signature against the embedded key over the
@@ -1063,7 +1135,7 @@ impl Message {
 /// command, the library API send path, and interactive stdin.
 ///
 /// # Errors
-/// Propagates [`Message::serialize`] failure (oversized payload).
+/// Propagates `Message::serialize` failure (oversized payload).
 /// The per-author log + DAG position to stamp on an outbound `Msg`: the
 /// chain `seq`/`prev` (Phase 2) and the DAG `parents` (Phase 3). Bundled so
 /// [`build_msg_bytes`] stays within the argument budget. Test-only now that the
@@ -1109,7 +1181,7 @@ pub struct BuildMsgParams<'a> {
 pub fn build_msg_bytes(
     params: BuildMsgParams<'_>,
     identity: &Identity,
-) -> Result<(Bytes, Message)> {
+) -> Result<(WireFrame, Verified)> {
     let msg = Message::new_app(
         params.mesh,
         params.author,
@@ -1122,9 +1194,9 @@ pub fn build_msg_bytes(
     )
     .with_chain(params.chain.seq, params.chain.prev)
     .with_parents(params.chain.parents)
-    .signed(identity);
+    .sign(identity);
     let raw = msg.serialize()?;
-    Ok((Bytes::from(raw), msg))
+    Ok((raw, msg))
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -1133,7 +1205,7 @@ impl Message {
     /// test that needs a message with an author key and never checks the signature.
     #[must_use]
     pub fn with_unverified_key(mut self, key: AuthorKey) -> Self {
-        self.signer = Some(Signed::new(key, Signature::from_bytes(&[0u8; 64])));
+        self.signer = Some(Signer::new(key, Signature::from_bytes(&[0u8; 64])));
         self
     }
 
@@ -1166,14 +1238,14 @@ const RESEND_NONCE_LEN: usize = 8;
 /// headroom under the gossip limit that `MAX_MESSAGE_SIZE` leaves.
 pub const RESEND_TRAILER_LEN: usize = 1 + RESEND_NONCE_LEN;
 
-/// `frame` (the bytes of [`Message::serialize`]) with the trailer of a resend: a mark and a
+/// `frame` (the bytes of `Message::serialize`) with the trailer of a resend: a mark and a
 /// nonce. The gossip layer names a message by the hash of its payload and drops a payload it has
 /// seen for 90 s, so a resend of the same bytes cannot repair a message that the gossip layer
 /// delivered and the app did not read. The nonce gives each resend a new name. It sits outside
 /// the signature, so the receiver checks the frame as it checks any other, and a reader that
 /// does not know the trailer fails to parse the payload (closed, not silently).
 #[must_use]
-pub fn wire_with_resend_nonce(frame: &[u8], nonce: u64) -> Vec<u8> {
+pub(crate) fn wire_with_resend_nonce(frame: &[u8], nonce: u64) -> Vec<u8> {
     let mut wire = Vec::with_capacity(frame.len() + RESEND_TRAILER_LEN);
     wire.extend_from_slice(frame);
     wire.push(RESEND_TRAILER_MARK);

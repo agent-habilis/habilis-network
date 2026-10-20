@@ -56,16 +56,16 @@ pub mod protocol {
     // is how a surface nobody chose ends up needing a cross-repo grep to
     // shrink. Adding a name below is now a deliberate line.
     pub use habilis_network_protocol::{
-        AdvertiseRequiresReachable, AppFrameParams, AppTag, AuthorKey, BodyError, Channel,
-        ChoiceError, ContentHash, CorrId, DEFAULT_DIRECTORY, DedupKey, DirectorySelection, IdError,
-        Identity, InviteTicket, JoinTarget, JoinTargetError, Lookup, LookupOpts, LookupSet, Mesh,
-        MeshConfig, MeshId, MeshIdError, MeshName, Message, MessageBody, MessageId, MessageKind,
-        NameError, Nickname, NicknameError, OptFlag, Password, PresenceSubtype, RelayChoice,
-        RelayLadder, RelayLadderError, RelaySelection, Seed, Shard, ShardGroup, Signed,
-        SymmetricKey, TicketAuth, TicketSecret, TopicId, Transport, TransportPolicy, UnixSecs,
-        base58check, crypto, ct_eq, directory, encode_pubkey, identity, invite, iroh_base, mesh,
-        message, nickname, peer_addr, reassembly, resolve_lookups, resolver, seal, seal_to_body,
-        sole_addressee, validate_advertise,
+        AdvertiseRequiresReachable, AppFrameParams, AppTag, AuthorKey, Authored, BodyError,
+        Channel, ChoiceError, ContentHash, CorrId, DEFAULT_DIRECTORY, DedupKey, DirectorySelection,
+        IdError, Identity, InviteTicket, JoinTarget, JoinTargetError, LockedMesh, Lookup,
+        LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, Message,
+        MessageBody, MessageId, MessageKind, NameError, Nickname, NicknameError, OptFlag, Password,
+        PresenceSubtype, Proof, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Seed,
+        Shard, ShardGroup, Signer, SymmetricKey, TicketAuth, TicketSecret, TopicId, Transport,
+        TransportPolicy, UnixSecs, UnlockError, Verified, base58check, crypto, ct_eq, directory,
+        encode_pubkey, identity, invite, iroh_base, mesh, message, nickname, peer_addr, reassembly,
+        resolve_lookups, resolver, seal, seal_to_body, sole_addressee, validate_advertise,
     };
     #[cfg(any(test, feature = "test-fixtures"))]
     pub use habilis_network_protocol::{BuildMsgParams, ChainCtx, build_msg_bytes};

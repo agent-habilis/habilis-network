@@ -431,6 +431,29 @@ Divergences from upstream, in the order they were made.
     `Duration::from_millis`. A port **from** upstream must pass a `Duration` in each
     `Tuning` field. agent-gossip is carried on its branch `refactor-newtype-pattern`.
 
+30. **Typestate: a message is signed into a `Verified`, and only a `Verified` is sent or
+    logged.** `CHANGELOG.md` lists each break, and `AGENTS.md` holds the rule. The wire does
+    not change.
+
+    The call sites in agent-gossip (`build-habilis-typestate`) that stop compiling against this
+    fork, with the new form:
+
+    - `a2a/send.rs`, `a2a/node.rs`, `a2a/card.rs`, `a2a/task.rs`, `harness/adversarial.rs`:
+      `Message::signed(&identity)` is `Message::sign(&identity)`, and it returns a `Verified`.
+      A `Verified` is what `deliver`, `broadcast_msg` and the message log take.
+    - `output/json.rs`, `a2a/model/mod.rs`, `a2a/send.rs`: `Message::author_key()` and
+      `Message::serialize()` are crate-private. Read the key with `Verified::key()` or
+      `Authored::key()`, and the wire bytes with `Verified::serialize()`.
+    - `cli/mod.rs`, `cli/doctor.rs`, `a2a/send.rs`, `topic.rs`, `bridge/ticket.rs`:
+      `parse::<Mesh>()` is `parse::<LockedMesh>()`. Read the config with `config()`, and
+      derive with `LockedMesh::unlock(password)`, which returns `UnlockError`.
+    - `Mesh::new` and `Mesh::from_topic` return a `Result`.
+    - `a2a/node.rs`, `output/mod.rs`, `api/inproc.rs`, `api/session.rs`: `NodeApp::classify`,
+      `InboundApp::message`, `NodeEvent::Presence` and `NodeEvent::StateChanged`, and the
+      external message channel take an `Authored`.
+    - `Signed` is `Signer`, and an `InjectedEndpoint` is built only by `InjectedEndpoint::bind`.
+    - `crates/agent-gossip-wasm-client/src/driver.rs`: the same sign and `Authored` changes.
+
 ## Fork pins — where each one lives, and why
 
 Three forks are in play: `agent-habilis/{iroh, iroh-gossip, net-tools}`. They do

@@ -10,7 +10,8 @@ use tokio::sync::{broadcast, mpsc};
 use crate::daemon::app::NodeDriver;
 use crate::daemon::config::{DriverMode, EventLoopConfig};
 use crate::protocol::mesh::MeshName;
-use crate::protocol::{MeshId, Message, Nickname};
+use crate::protocol::message::Authored;
+use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 
 /// A live in-process membership over a background event loop, generic over the
@@ -74,7 +75,7 @@ impl<A: NodeDriver + 'static> Node<A> {
     pub fn spawn(
         mut cfg: EventLoopConfig,
         app: A,
-        push: Option<broadcast::Sender<Message>>,
+        push: Option<broadcast::Sender<Authored>>,
         handle_signals: bool,
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<A::Session>(SESSION_REQUEST_CAP);

@@ -2,8 +2,10 @@
 //!
 //! Folded in from its own crate for the same reason as [`crate::directory`].
 
+use crate::message::WireFrame;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+use crate::message::{Authored, Verified};
 use crate::{AuthorKey, Message, MessageBody, MessageId, MessageKind, Nickname, ShardGroup};
 use habilis_network_util::clock::Instant;
 use habilis_network_util::consts::{
@@ -32,7 +34,7 @@ pub enum ShardIngest {
     /// The shard completed its group: the synthesized logical message, with
     /// the group's budget already freed. Boxed — the completed arm is rare
     /// and the enum otherwise carries nothing (`large_enum_variant`).
-    Complete(Box<Message>),
+    Complete(Box<Authored>),
     /// Dropped — a duplicate slot, a header mismatch, or a budget breach
     /// (which drops the whole group, fail closed).
     Dropped,
@@ -53,7 +55,7 @@ struct PartialGroup {
     /// for this group is addressed.
     author: Nickname,
     slots: BTreeMap<u32, String>,
-    header: Option<Message>,
+    header: Option<Verified>,
     bytes: usize,
     /// Last **progress** (a new slot filled) — duplicates don't refresh it,
     /// so resends can't keepalive a dead group past the idle TTL.
@@ -92,15 +94,15 @@ impl ReassemblyStore {
     /// Buffer one shard; when it completes its group, synthesize and return
     /// the logical message and free the group's budget. The caller keys
     /// surfacing-once separately (`reassembled_groups`). A message with no shard header,
-    /// or with no author key, is dropped: a shard that passed the signature gate has both.
+    /// is dropped: a `Verified` shard always has its author key.
     ///
     /// # Panics
     /// Never: the group that just completed is by construction still stored.
-    pub fn ingest(&mut self, shard_msg: &Message, now: Instant) -> ShardIngest {
-        let (Some(shard), Some(author)) = (shard_msg.shard.as_ref(), shard_msg.author_key()) else {
+    pub fn ingest(&mut self, shard_msg: &Verified, now: Instant) -> ShardIngest {
+        let Some(shard) = shard_msg.shard.as_ref() else {
             return ShardIngest::Dropped;
         };
-        let key: GroupKey = (author, shard.group.clone());
+        let key: GroupKey = (shard_msg.key(), shard.group.clone());
         let charge = slot_charge(shard_msg.body.as_str().len());
 
         if let Some(group) = self.groups.get(&key) {
@@ -246,9 +248,9 @@ impl ReassemblyStore {
     /// its budget — the log-backed completion path calls this after finishing a group the
     /// store had only a fragment of (e.g. post-TTL, when dedup let just one healed shard
     /// re-ingest). A message with no shard header or no author key names no group.
-    pub fn forget(&mut self, shard_msg: &Message) {
-        if let (Some(shard), Some(author)) = (shard_msg.shard.as_ref(), shard_msg.author_key()) {
-            self.evict(&(author, shard.group.clone()));
+    pub fn forget(&mut self, shard_msg: &Verified) {
+        if let Some(shard) = shard_msg.shard.as_ref() {
+            self.evict(&(shard_msg.key(), shard.group.clone()));
         }
     }
 
@@ -304,7 +306,7 @@ impl ReassemblyStore {
 /// `id`, and no `shard`/chain (the view is neither a wire message nor a chain
 /// entry — the shards are). `None` only when the concatenated body fails
 /// validation — fail closed rather than surface a malformed body.
-fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Message> {
+fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Authored> {
     // Sized up front: this runs on every completed multipart body, and the
     // total is already known from the slots.
     let mut body = String::with_capacity(group.slots.values().map(String::len).sum());
@@ -312,7 +314,8 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Mess
         body.push_str(slot);
     }
     let body = MessageBody::new(body).ok()?;
-    Some(synthesize_from(group.header?, body, group_id))
+    let header = group.header?;
+    Some(synthesize_from(&header, body, group_id))
 }
 
 /// One stalled big group's repair ask: which author to query and which shard
@@ -339,20 +342,20 @@ pub struct ShardCache {
 #[derive(Debug)]
 struct CachedGroup {
     group: ShardGroup,
-    frames: Vec<bytes::Bytes>,
+    frames: Vec<WireFrame>,
 }
 
 impl ShardCache {
     /// Cache one just-sent group's frames (indexed by shard `idx`), evicting
     /// the oldest groups past the byte budget. The newest group always stays.
-    pub fn insert(&mut self, group: ShardGroup, frames: Vec<bytes::Bytes>) {
-        self.bytes += frames.iter().map(bytes::Bytes::len).sum::<usize>();
+    pub fn insert(&mut self, group: ShardGroup, frames: Vec<WireFrame>) {
+        self.bytes += frames.iter().map(WireFrame::len).sum::<usize>();
         self.groups.push_back(CachedGroup { group, frames });
         while self.groups.len() > 1 && self.bytes > SHARD_CACHE_BUDGET_BYTES {
             if let Some(evicted) = self.groups.pop_front() {
                 self.bytes = self
                     .bytes
-                    .saturating_sub(evicted.frames.iter().map(bytes::Bytes::len).sum::<usize>());
+                    .saturating_sub(evicted.frames.iter().map(WireFrame::len).sum::<usize>());
             }
         }
     }
@@ -360,7 +363,7 @@ impl ShardCache {
     /// The cached frames for `group` at the requested indexes (missing or
     /// out-of-range indexes are skipped; empty when the group was evicted).
     #[must_use]
-    pub fn frames(&self, group: &ShardGroup, idxs: &[u32]) -> Vec<bytes::Bytes> {
+    pub fn frames(&self, group: &ShardGroup, idxs: &[u32]) -> Vec<WireFrame> {
         let Some(cached) = self.groups.iter().find(|entry| entry.group == *group) else {
             return Vec::new();
         };
@@ -377,14 +380,15 @@ impl ShardCache {
 #[must_use]
 /// # Panics
 /// If the envelope carries no shard header; callers only pass shard messages.
-pub fn synthesize_from(mut envelope: Message, body: MessageBody, group_id: &ShardGroup) -> Message {
+pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGroup) -> Authored {
+    let mut envelope = Message::clone(header);
     envelope.id = MessageId::new(group_id.as_str()).expect("a shard group is a valid message id");
     envelope.body = body;
     envelope.shard = None;
     envelope.seq = None;
     envelope.prev = None;
     envelope.parents = Vec::new();
-    envelope
+    Authored::new(envelope, header.key())
 }
 
 #[cfg(test)]
@@ -394,6 +398,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{ReassemblyStore, ShardIngest};
+    use crate::message::Verified;
     use crate::{
         AppFrameParams, AuthorKey, MeshId, Message, MessageBody, Nickname, Shard, ShardGroup,
     };
@@ -418,7 +423,7 @@ mod tests {
     }
 
     /// A shard frame notionally signed by the author `name`.
-    fn shard_msg(body: &str, name: &str, shard: Shard) -> Message {
+    fn shard_msg(body: &str, name: &str, shard: Shard) -> Verified {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &Nickname::from("author"),
@@ -428,13 +433,12 @@ mod tests {
                 corr: None,
                 body: MessageBody::from(body),
             },
-        )
-        .with_unverified_key(author_of(name));
+        );
         message.shard = Some(shard);
-        message
+        Verified::fixture_unchecked(message, author_of(name))
     }
 
-    fn ingest(store: &mut ReassemblyStore, msg: &Message, now: Instant) -> ShardIngest {
+    fn ingest(store: &mut ReassemblyStore, msg: &Verified, now: Instant) -> ShardIngest {
         store.ingest(msg, now)
     }
 
@@ -592,10 +596,12 @@ mod tests {
                 idx: 1,
                 total: 3,
             },
-        );
+        )
+        .into_message();
         wrong_kind.kind = crate::MessageKind::Presence {
             subtype: crate::PresenceSubtype::Joined,
         };
+        let wrong_kind = Verified::fixture_unchecked(wrong_kind, author_of("a"));
         assert!(matches!(
             ingest(&mut store, &wrong_kind, now),
             ShardIngest::Dropped
@@ -1086,11 +1092,13 @@ mod tests {
         use habilis_network_util::consts::SHARD_CACHE_BUDGET_BYTES;
         let mut cache = super::ShardCache::default();
         let first = group("00000000-0000-4000-8000-0000000000c1");
-        let frame = |tag: u8, len: usize| bytes::Bytes::from(vec![tag; len]);
+        let frame = |tag: u8, len: usize| {
+            crate::message::WireFrame::new(bytes::Bytes::from(vec![tag; len]))
+        };
         cache.insert(first.clone(), vec![frame(1, 10), frame(2, 10)]);
         let served = cache.frames(&first, &[1, 7]);
         assert_eq!(served.len(), 1, "out-of-range idx skipped");
-        assert_eq!(served[0][0], 2);
+        assert_eq!(served[0].as_bytes()[0], 2);
 
         // A budget-filling newcomer evicts the oldest group whole.
         let second = group("00000000-0000-4000-8000-0000000000c2");

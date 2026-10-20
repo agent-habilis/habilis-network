@@ -79,7 +79,8 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
             fresh_seed(),
             MeshName::new("foreign-rung".to_owned()).expect("a name"),
             config.clone(),
-        );
+        )
+        .expect("a mesh");
         let ladder = mesh.rendezvous_ports();
         if ladder[0] < ladder[1] {
             break (mesh, ladder);

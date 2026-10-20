@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::MeshId;
 use crate::invite::InviteTicket;
-use crate::mesh::{Mesh, MeshIdError};
+use crate::mesh::{LockedMesh, MeshIdError};
 
 /// What a join accepts: a bare base58 mesh id, or a creator-minted bare
 /// base58 invite to an invite-only mesh. A shared *string* is not a join
@@ -78,17 +78,14 @@ impl FromStr for JoinTarget {
 
 /// # Errors
 /// The mesh id fails to decode, or the invite ticket fails to redeem.
-pub fn resolve(target: &JoinTarget) -> Result<Mesh> {
+pub fn resolve(target: &JoinTarget) -> Result<LockedMesh> {
     match target {
         JoinTarget::Mesh(id) => {
-            let mesh = id
-                .as_str()
-                .parse::<Mesh>()
-                .map_err(|error| anyhow!("invalid mesh id: {error}"))?;
-            if mesh.requires_invite() {
-                bail!("this mesh is invite-only — join with an invite ticket, not the bare hash");
-            }
-            Ok(mesh)
+            // Refusing an invite-only id is `LockedMesh::unlock`'s job, the one
+            // place a bare hash can become a joinable mesh.
+            id.as_str()
+                .parse::<LockedMesh>()
+                .map_err(|error| anyhow!("invalid mesh id: {error}"))
         }
         // An invite carries the join key and needs the password to unwrap it, so
         // it is redeemed in `JoinParams::resolve`; `resolve` never sees it alone.
@@ -127,6 +124,7 @@ mod tests {
             MeshName::new("test").unwrap(),
             MeshConfig::loopback(),
         )
+        .unwrap()
         .to_string()
     }
 
@@ -159,18 +157,23 @@ mod tests {
             crate::crypto::Seed::from_bytes([5u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
-        );
+        )
+        .unwrap();
         mesh.set_invite();
         mesh
     }
 
     #[test]
-    fn a_bare_invite_only_hash_is_refused_with_a_pointer() {
-        // The attack: skip the invite and join with the raw hash. `resolve` must
-        // refuse (and never derive the topic, which would panic without a root).
+    fn a_bare_invite_only_hash_is_refused_at_unlock_with_a_pointer() {
+        // The attack: skip the invite and join with the raw hash. `unlock` must
+        // refuse, so no mesh is ever derived without its root.
         let id = invite_only_mesh().to_string();
         let target: JoinTarget = id.parse().unwrap();
-        let error = resolve(&target).unwrap_err().to_string();
+        let error = resolve(&target)
+            .unwrap()
+            .unlock(None)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("invite-only"), "got: {error}");
     }
 

@@ -10,6 +10,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use habilis_network::protocol::message::Authored;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,9 +19,7 @@ use habilis_network::embed::{
 };
 use habilis_network::iroh::RelayUrl;
 use habilis_network::net::TransportOpts;
-use habilis_network::protocol::{
-    LookupOpts, MeshConfig, Message, Nickname, RelayChoice, TransportPolicy,
-};
+use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, RelayChoice, TransportPolicy};
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
 };
@@ -30,7 +29,7 @@ struct Probe;
 
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
-    fn classify(&self, _message: &Message) -> AppClass {
+    fn classify(&self, _message: &Authored) -> AppClass {
         AppClass {
             loggable: false,
             beat: true,
@@ -65,7 +64,7 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg } = event {
+        if let NodeEvent::Presence { msg, .. } = event {
             self.peers
                 .lock()
                 .expect("no poison")

@@ -46,7 +46,7 @@ Layer: identity. Optional, per mesh or per ticket.
 
 A password adds a knowledge factor to the bearer secret. For a mesh, the password is stretched with Argon2id into a `SymmetricKey` that replaces the seed in every derivation. The mesh id carries a one-way verifier of that key, so `join` checks a password before any network call. For a ticket, the consumer presents the stretch of the password in place of the raw secret.
 
-Code: `crypto::stretch_mesh_password`, `crypto::password_verifier`, `TicketAuth`, `Mesh::apply_password`.
+Code: `crypto::stretch_mesh_password`, `crypto::password_verifier`, `TicketAuth`, `LockedMesh::unlock`.
 
 ### invite
 
@@ -263,7 +263,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `TicketSecret` | `habilis-network-protocol/src/crypto.rs` | The bearer secret of a ticket, and the token that a consumer presents. Wiped on drop. |
 | `DedupKey` | `habilis-network-protocol/src/dedup_key.rs` | The 16-byte dedup and anti-entropy key of a message. |
 | `AuthorKey` | `habilis-network-protocol/src/author_key.rs` | The public key of the author of a message. |
-| `Signed` | `habilis-network-protocol/src/message/mod.rs` | The pair of an `AuthorKey` and its signature. A message holds both or neither. |
+| `Signer` | `habilis-network-protocol/src/message/mod.rs` | The pair of an `AuthorKey` and its signature. A message holds both or neither (`Message::signer`). |
 | `ContentHash` | `habilis-network-protocol/src/content_hash.rs` | The hash of a message that `prev` and `parents` link to. |
 | `BlobDigest` | `habilis-network/src/blob/mod.rs` | The SHA-256 of a blob. |
 | `StreamId`, `StreamSecret` | `habilis-network-stream/src/hash.rs` | The public id and the bearer secret of a stream. |
@@ -277,3 +277,43 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `Contest` | `habilis-network/src/beacon/mod.rs` | The two holders of one beacon, `own` and `rival`. |
 | `GraftTarget` | `habilis-network/src/transport/probe.rs` | The peer of a graft and the rendezvous it is told apart from. |
 | `RivalFlag` | `habilis-network/src/daemon/state.rs` | What a `PeerInfo` says about the rendezvous: `proven` says that the sender proved its endpoint, and `held` says that it carries the beacon flag. |
+
+## Typestate
+
+A typestate is a type per state of a value, where each operation exists only on the type of the state it is legal in. A transition consumes the value and returns the value of the next state, so the compiler rejects an operation in the wrong order. Use it where the order is a rule of the code, not a fact of the network.
+
+### When to use one
+
+- Use it when the state is known at compile time: the caller can name the state it holds.
+- Use it when one function drives the whole sequence, from the first state to the last.
+- Use it when a wrong order is guarded only by a runtime check or a comment today. Examples are an `ensure!` on the order of setup steps, or a `let Some(key) = … else { return }` fallback.
+
+### How to write one
+
+- Write one type per state, not one type with a state field. A state field brings back the runtime check.
+- Make each transition take `self` by value, so the old state cannot be used after it.
+- Make every field private. The constructor and the transitions are the only way in.
+- Make the constructor the only entry. A struct literal in another module must not compile.
+- Do not implement `DerefMut` on a proof type. A `Deref` to the data is fine, because it gives only read access.
+- Add a `compile_fail` doc test for each illegal transition, and a passing control next to it, so that the test fails for the reason it names.
+
+### Where an enum stays
+
+Runtime events drive these transitions, so their state is not known at compile time.
+
+| Place | Reason |
+|---|---|
+| `SessionState` (`habilis-network-netplay/src/session.rs`), `PeerState` (`habilis-network-netplay/src/protocol.rs`), `DirectState` (`habilis-network/src/daemon/state.rs`), `ConnectionPhase` (`habilis-network-iroh-webrtc-transport/src/liveness.rs`) | Network events, probes and timers drive their transitions, so the state is not known at compile time. |
+
+### Typestates that exist
+
+| Type | File | Holds |
+|---|---|---|
+| `LockedMesh` / `Mesh` | `habilis-network-protocol/src/mesh/mod.rs` | A decoded mesh with no secret. `unlock` turns it into a `Mesh`, or returns an `UnlockError` that says why not. Only `Mesh` derives a topic, a rendezvous or a port, and `Mesh::new` refuses a config that carries a secret. |
+| `Verified` / `Authored` | `habilis-network-protocol/src/message/verified.rs` | `Verified` is a message whose signature is checked, with its key. It is what the wire and the log take. `Authored` is a message whose author is proven: a read-only view with no `Serialize` of its own. `Deref` is a read door: `Message` has no public `Serialize`, so `&*authored` does not serialize, and only `Verified::serialize` makes a `WireFrame`, which every sender takes. Both share the message behind an `Arc`. `Proof` is the sealed trait both implement, so the gate and the app surface are generic over either. |
+| `WireFrame` | `habilis-network-protocol/src/message/wire.rs` | The bytes of one signed message as they go on a socket. Only `Verified::serialize` makes one, and its field is private, so the senders take a `WireFrame` and cannot be handed an unsigned frame. |
+| `InjectedEndpoint` | `habilis-network/src/daemon/setup.rs` | An endpoint that `InjectedEndpoint::bind` binds. `bind` checks the keys of the handles before it binds, and makes the admission table the hook reports to. The fields are private, so no other path builds one. |
+| `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |
+| `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/driver.rs` | A data channel that is open and ready to carry datagrams. Only the `complete` of a pending offer or answer produces one. |
+
+The test-only fixture doors are `Verified::fixture_unchecked`, `Verified::fixture_with_signature` and `WireFrame::fixture_raw`. Each one is behind `test-fixtures`: it exists in unit tests and in any build that enables `test-fixtures`, so a release binary must not enable that feature.

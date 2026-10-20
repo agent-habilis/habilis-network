@@ -227,13 +227,14 @@ impl LaneNode {
         state
     }
 
-    pub(crate) fn frame_to_bob(&self) -> crate::protocol::Message {
+    pub(crate) fn frame_to_bob(&self) -> crate::protocol::message::Verified {
         crate::protocol::Message::new_pong(
             &self.mesh,
             &self.author,
             nick("bob"),
             &crate::protocol::MessageId::random(),
         )
+        .sign(&self.identity)
     }
 }
 

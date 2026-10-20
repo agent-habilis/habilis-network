@@ -16,7 +16,7 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
-use crate::protocol::message::MessageBody;
+use crate::protocol::message::{Authored, MessageBody, Proof, Verified, WireFrame};
 use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -414,9 +414,9 @@ pub(crate) async fn flush_pending(
 /// be delivered yet: a failed dial never loses a buffered frame.
 fn watch_flush(
     handle: crate::transport::PendingSend,
-    msg: Message,
-    bytes: Bytes,
-    failed: tokio::sync::mpsc::UnboundedSender<(Message, Bytes)>,
+    msg: Verified,
+    bytes: WireFrame,
+    failed: tokio::sync::mpsc::UnboundedSender<(Verified, WireFrame)>,
 ) {
     n0_future::task::spawn(async move {
         match handle.await {
@@ -436,8 +436,8 @@ fn watch_flush(
 pub(crate) fn requeue_failed(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    msg: Message,
-    bytes: Bytes,
+    msg: Verified,
+    bytes: WireFrame,
 ) {
     if !requeue(state, ctx, msg, bytes) {
         tracing::warn!(target: "habilis_network::gossip", "buffered outbound message undeliverable and the buffer is full; dropped");
@@ -448,7 +448,12 @@ pub(crate) fn requeue_failed(
 /// peer asks for its session, at every flush: a frame that was parked before the peer was known has
 /// no other chance to ask, and without the session the lane pair never links. Returns whether the
 /// frame was kept.
-fn requeue(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, msg: Message, bytes: Bytes) -> bool {
+fn requeue(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    msg: Verified,
+    bytes: WireFrame,
+) -> bool {
     super::broadcast::park_and_offer(state, ctx, &msg, &bytes);
     state.pending_outbound.push((msg, bytes))
 }
@@ -456,7 +461,7 @@ fn requeue(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, msg: Message, bytes
 /// Tests only: whether the hook that names a frame asked the node to drop this one before the app
 /// reads it, as a full queue between the gossip layer and the loop does.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-fn dropped_by_test_hook(state: &mut EventLoopState, message: &Message) -> bool {
+fn dropped_by_test_hook(state: &mut EventLoopState, message: &Verified) -> bool {
     use crate::daemon::state::TestDrop;
     let drops = match &state.test_drop {
         Some(TestDrop::AppBody(body)) => {
@@ -474,7 +479,7 @@ fn dropped_by_test_hook(state: &mut EventLoopState, message: &Message) -> bool {
 }
 
 #[cfg(not(all(feature = "iroh-test-utils", not(target_arch = "wasm32"))))]
-fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Message) -> bool {
+fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Verified) -> bool {
     false
 }
 
@@ -482,50 +487,53 @@ fn dropped_by_test_hook(_state: &mut EventLoopState, _message: &Message) -> bool
 /// the gossip event pump (`handle_gossip_event`) and the unicast inbound arm
 /// (`daemon::event_loop`) funnel here, so signature-verify, the mesh gate, and
 /// `mark_seen` dedup are identical on both planes — a message delivered over
-/// both surfaces exactly once. `message` is mutable so a directed frame sealed
-/// to us can be decrypted in place before surfacing (see `gate_and_decrypt`).
+/// both surfaces exactly once. The frame is a [`Verified`] from the first check on: a directed frame
+/// sealed to us is decrypted on a plain copy before surfacing (see `gate_and_decrypt`), and the log
+/// keeps the verified ciphertext.
 pub(crate) async fn ingest(
     content: Bytes,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
     ctx: &HandlerCtx<'_>,
 ) {
-    let Ok((mut message, _resend_nonce)) = Message::parse_wire(&content) else {
+    let Ok((message, _resend_nonce)) = Message::parse_wire(&content) else {
         ctx.sink
             .emit(NodeEvent::Error("Failed to parse message".to_owned()));
         tracing::warn!(target: "habilis_network::gossip", "failed to parse inbound gossip message");
         return;
     };
+    // Authenticity gate, **before** the self-echo drop, dedup, and every other step: every inbound
+    // message must carry a valid signature over its canonical bytes. Verifying before `mark_seen`
+    // stops a forged/unsigned message from poisoning the dedup window with a replayed id and
+    // suppressing the genuine signed copy. Relayed and anti-entropy copies keep their original
+    // author's signature, so they verify here too. Canonical bytes are computed once and reused for
+    // the verify, the content hash at the log site, and the shard/retain steps below.
+    let (verified, canonical) = match message.verify_canonical() {
+        Ok(checked) => checked,
+        Err(message) => {
+            tracing::warn!(target: "habilis_network::gossip", author = %message.author, "dropping message with missing/invalid signature");
+            return;
+        }
+    };
     // Self-echo drop: keyed on our **public key**, not the nickname. With
     // non-unique display names a peer may legitimately share our nickname —
     // only our own signing key identifies our own echoed broadcasts. The
     // key is taken once at loop setup (`ctx.our_pubkey`), so this is a 32-byte
-    // compare, not a key derivation per message.
-    if message.author_key() == Some(ctx.our_pubkey) {
+    // compare, not a key derivation per message. It runs after verify: a forged
+    // copy that claims our key is counted as invalid above, not dropped here.
+    if verified.key() == ctx.our_pubkey {
         return;
     }
-    if dropped_by_test_hook(state, &message) {
+    if dropped_by_test_hook(state, &verified) {
         return;
     }
-    tracing::trace!(target: "habilis_network::gossip", author = %message.author, "gossip message received");
-    // Authenticity gate, **before** dedup: every inbound message must carry a
-    // valid signature over its canonical bytes. Verifying before `mark_seen`
-    // stops a forged/unsigned message from poisoning the dedup window with a
-    // replayed id and suppressing the genuine signed copy. Relayed and
-    // anti-entropy copies keep their original author's signature, so they
-    // verify here too. Canonical bytes are computed once and reused for the
-    // content hash at the log site, so a Msg is not re-serialized twice.
-    let canonical = message.canonical_bytes();
-    if !message.verify_signature_with(&canonical) {
-        tracing::warn!(target: "habilis_network::gossip", author = %message.author, "dropping message with missing/invalid signature");
-        return;
-    }
+    tracing::trace!(target: "habilis_network::gossip", author = %verified.author, "gossip message received");
     // Mesh gate: the gossip topic already isolates honest meshes, but a peer
     // crafted onto our topic could stamp an arbitrary (signed) `mesh` string
     // that would otherwise flow unchecked into the `--output json` agent API.
     // Drop anything not stamped with our own mesh id.
-    if message.mesh != *ctx.mesh {
-        tracing::warn!(target: "habilis_network::gossip", author = %message.author, "dropping message stamped with a foreign mesh id");
+    if verified.mesh != *ctx.mesh {
+        tracing::warn!(target: "habilis_network::gossip", author = %verified.author, "dropping message stamped with a foreign mesh id");
         return;
     }
     // Starvation watchdog signal, *before* dedup: even a duplicate
@@ -541,7 +549,7 @@ pub(crate) async fn ingest(
     // cannot suppress the victim's genuine message. Re-broadcasts of
     // `joined`/`Alive` mint fresh ids so they are never falsely suppressed
     // here. Only authenticated messages reach this gate.
-    if state.mark_seen(&message) {
+    if state.mark_seen(&verified) {
         return;
     }
     // Identity is the signing key, not the nickname (p2panda-style): the
@@ -556,19 +564,19 @@ pub(crate) async fn ingest(
     // Heartbeat + membership + surfacing + join horizon. The lifecycle
     // layer owns every roster/presentation side effect; the gossip
     // layer only routes by kind below.
-    crate::logging::messages::log_in(&message);
-    let observed = lifecycle::observe(&message, state, ctx);
+    crate::logging::messages::log_in(&verified);
+    let observed = lifecycle::observe(&verified, state, ctx);
     let surfaceable = observed.surfaceable;
     if observed.update.joined_new {
-        greet_new_peer(&message, state, ctx).await;
+        greet_new_peer(&verified, state, ctx).await;
     }
 
     // A shard of a split body never surfaces as a raw slice — see
     // `handle_shard` for the retain/reassemble/gate/surface sequence.
-    if message.shard.is_some() {
+    if verified.shard.is_some() {
         handle_shard(
             InboundFrame {
-                message: &message,
+                message: &verified,
                 canonical: &canonical,
                 surfaceable,
             },
@@ -586,19 +594,20 @@ pub(crate) async fn ingest(
     // the addressee). The **addressee** decrypts the body in place, then the
     // recovered plaintext passes the app boundary gate exactly as a broadcast
     // does. A frame sealed to us that fails to open (tampered / wrong key) is
-    // dropped.
-    // Classify the (now-decrypted) App payload **once** here — inside the gate,
-    // where the boundary check already parses it — and thread the result to the
-    // push and retain steps so neither re-parses the body. `None` for an infra
-    // frame (no app payload).
-    let (sealed_body, app_class) = match gate_and_decrypt(&mut message, state, ctx, &*app) {
-        Gated::Pass { sealed, class } => (sealed, class),
+    // dropped. Retention gets the original `verified` frame, so the log keeps
+    // the ciphertext the author signed.
+    //
+    // The gate hands back the view to surface, which holds the plaintext body. The
+    // classification is computed once there, so the push and retain steps never
+    // re-parse the payload. `None` for an infra frame (no app payload).
+    let (app_class, view) = match gate_and_decrypt(&verified, state, ctx, &*app) {
+        Gated::Pass { class, view } => (class, view),
         Gated::Drop => return,
     };
 
-    maybe_push_inbound(ctx, &message, surfaceable, app_class.as_ref());
+    maybe_push_inbound(ctx, &view, surfaceable, app_class.as_ref());
 
-    match &message.kind {
+    match &view.kind {
         MessageKind::App { .. } => {
             // The app-payload seam: dispatch RPC legs / chat / task frames.
             // `false` means the frame is plumbing or addressed elsewhere —
@@ -606,7 +615,7 @@ pub(crate) async fn ingest(
             if !app
                 .on_app_frame(
                     InboundApp {
-                        message: &message,
+                        message: &view,
                         surfaceable,
                     },
                     state,
@@ -630,30 +639,17 @@ pub(crate) async fn ingest(
         | MessageKind::Meta
         | MessageKind::MetaDigest
         | MessageKind::LinkState => {
-            if dispatch_infra(
-                &message,
-                content,
-                surfaceable,
-                &observed.update,
-                state,
-                app,
-                ctx,
-            )
-            .await
-            .is_break()
+            if dispatch_infra(&verified, surfaceable, &observed.update, state, app, ctx)
+                .await
+                .is_break()
             {
                 return;
             }
         }
     }
 
-    // Restore the sealed body (if we decrypted a directed frame for ourselves)
-    // so the message log + anti-entropy re-serve the exact signed wire frame.
-    if let Some(sealed) = sealed_body {
-        message.body = sealed;
-    }
     retain_and_index(
-        message,
+        verified,
         RetainMeta {
             canonical: &canonical,
             class: app_class.as_ref(),
@@ -672,8 +668,7 @@ pub(crate) async fn ingest(
 /// sat between that function's gate and its retention step, and only one of
 /// them was the app seam the gate exists for.
 async fn dispatch_infra(
-    message: &Message,
-    content: Bytes,
+    message: &Verified,
     surfaceable: bool,
     update: &lifecycle::membership::MembershipUpdate,
     state: &mut EventLoopState,
@@ -682,7 +677,7 @@ async fn dispatch_infra(
 ) -> ControlFlow<()> {
     match &message.kind {
         MessageKind::PeerInfo => {
-            handle_peer_info(message, content, state, ctx).await;
+            handle_peer_info(message, state, ctx).await;
             return ControlFlow::Break(());
         }
         MessageKind::Digest => {
@@ -860,7 +855,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
 /// tries again.
 async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
     let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone(), &message.id)
-        .signed(ctx.identity);
+        .sign(ctx.identity);
     crate::logging::messages::log_out(&pong);
     let warm_endpoint = state
         .peer_endpoints
@@ -869,7 +864,7 @@ async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'
         .filter(|eid| Some(*eid) != state.rendezvous_id);
     match (warm_endpoint, pong.serialize()) {
         (Some(eid), Ok(bytes)) => {
-            if !crate::transport::send_best_effort(eid, Bytes::from(bytes), state).await {
+            if !crate::transport::send_best_effort(eid, bytes, state).await {
                 tracing::debug!(target: "habilis_network::gossip", pinger = %message.author, "auto-pong skipped: no warm path");
             }
         }
@@ -880,7 +875,7 @@ async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'
 }
 
 struct InboundFrame<'a> {
-    message: &'a Message,
+    message: &'a Verified,
     canonical: &'a [u8],
     surfaceable: bool,
 }
@@ -909,7 +904,10 @@ async fn handle_shard(
     }
     // The raw shard's own per-tag policy (loggability/chain) — computed from its
     // fragment body, matching the pre-thread behavior of the internal classify.
-    let shard_class = message.kind.app_tag().map(|_| app.classify(message));
+    let shard_class = message
+        .kind
+        .app_tag()
+        .map(|_| app.classify(&message.authored()));
     // Only a small group's shards enter the message log (anti-entropy heals
     // them like any message — point-to-point when the shard is directed, so
     // the addressee still recovers); a big group would evict the mesh's whole
@@ -928,17 +926,17 @@ async fn handle_shard(
             ctx,
         );
     }
-    if let Some(mut logical) = state.reassemble(message) {
+    if let Some(logical) = state.reassemble(message) {
         // The same gate the single-frame path runs, now on the reassembled body:
         // unseal a directed frame sealed to us or a mesh-key-sealed broadcast,
         // then validate the payload. Shared rather than restated, so a change to
         // the gate cannot reach one path and silently miss the other. The
         // ciphertext it hands back is for `ingest`'s retention step — the shards
         // here were already retained above, as ciphertext.
-        let Gated::Pass { class, .. } = gate_and_decrypt(&mut logical, state, ctx, app) else {
+        let Gated::Pass { class, view } = gate_and_decrypt(&logical, state, ctx, app) else {
             return;
         };
-        maybe_push_inbound(ctx, &logical, surfaceable, class.as_ref());
+        maybe_push_inbound(ctx, &view, surfaceable, class.as_ref());
         // Dispatch the reassembled logical frame exactly like a single-frame one:
         // a directed RPC request/response (both shard now) reaches its handler,
         // and content surfaces. The shards were already retained above, so the
@@ -946,7 +944,7 @@ async fn handle_shard(
         let _ = app
             .on_app_frame(
                 InboundApp {
-                    message: &logical,
+                    message: &view,
                     surfaceable,
                 },
                 state,
@@ -973,7 +971,7 @@ struct RetainMeta<'a> {
 }
 
 fn retain_and_index(
-    message: Message,
+    message: Verified,
     meta: RetainMeta<'_>,
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
@@ -993,12 +991,11 @@ fn retain_and_index(
         // is cryptographic proof of equivocation — surface a `fork` once per
         // offending key (order-independent; we keep both).
         if let Some(seq) = message.seq
-            && let Some(author) = message.author_key()
-            && state.note_msg_seq(&author, seq, hash)
+            && state.note_msg_seq(&message.key(), seq, hash)
         {
             ctx.sink.emit(NodeEvent::Fork {
                 nickname: message.author.clone(),
-                pubkey: author.to_string(),
+                pubkey: message.key().to_string(),
                 seq,
             });
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, seq, "fork detected: conflicting messages at same seq");
@@ -1013,14 +1010,12 @@ fn retain_and_index(
 
 /// Push a retained message into the anti-entropy log, keeping the DAG + fork
 /// indexes bounded with the log window as the push evicts.
-pub(super) fn push_to_log(state: &mut EventLoopState, message: Message) {
+pub(super) fn push_to_log(state: &mut EventLoopState, message: Verified) {
     if let Some(evicted) = state.message_log.push(message) {
         let evicted_hash = evicted.content_hash();
         state.forget_hash(&evicted_hash);
-        if let Some(seq) = evicted.seq
-            && let Some(author) = evicted.author_key()
-        {
-            state.forget_msg_seq(&author, seq, &evicted_hash);
+        if let Some(seq) = evicted.seq {
+            state.forget_msg_seq(&evicted.key(), seq, &evicted_hash);
         }
     }
 }
@@ -1043,7 +1038,7 @@ pub(super) fn push_to_log(state: &mut EventLoopState, message: Message) {
 ///
 /// The state/meta channel already retains its own writes for exactly this
 /// reason; see [`super::broadcast_state_merge`].
-pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Message) {
+pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Verified) {
     if !is_loggable(&message.kind) {
         return;
     }
@@ -1062,7 +1057,7 @@ pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Message
 /// not kept: its body is sealed on the way out and only its addressee may be served.
 pub(crate) fn retain_own_app_broadcast(
     state: &mut EventLoopState,
-    message: &Message,
+    message: &Verified,
     class: &AppClass,
 ) {
     if !class.loggable || class.beat || !matches!(message.kind, MessageKind::App { to: None, .. }) {
@@ -1079,7 +1074,7 @@ pub(crate) fn retain_own_app_broadcast(
 #[derive(Clone, Copy)]
 struct ChannelEvent<'a> {
     channel: Channel,
-    message: &'a Message,
+    message: &'a Verified,
     surfaceable: bool,
 }
 
@@ -1111,16 +1106,13 @@ fn dispatch_channel(
 /// the wire body (a decrypted `enc` body), a clone with the body replaced; else
 /// the original borrowed unchanged. The output helpers read `event.body` for the
 /// `m` delta, so they must see plaintext.
-fn surface_view(message: &Message, plain: Option<String>) -> std::borrow::Cow<'_, Message> {
-    match plain {
-        Some(text) if text != message.body.as_str() => {
-            let mut clone = message.clone();
-            if let Ok(body) = MessageBody::new(text) {
-                clone.body = body;
-            }
-            std::borrow::Cow::Owned(clone)
-        }
-        _ => std::borrow::Cow::Borrowed(message),
+fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
+    let body = plain
+        .filter(|text| text != frame.body.as_str())
+        .and_then(|text| MessageBody::new(text).ok());
+    match body {
+        Some(body) => frame.with_body(body),
+        None => frame.authored(),
     }
 }
 
@@ -1156,7 +1148,7 @@ fn ingest_channel_event(
             let surfaced = surface_view(message, doc.surface_body(message));
             ctx.sink.emit(NodeEvent::StateChanged {
                 channel,
-                event: Box::new(surfaced.into_owned()),
+                event: Box::new(surfaced),
                 document: after,
                 is_self: false,
             });
@@ -1189,23 +1181,15 @@ fn is_directed_content(kind: &MessageKind) -> bool {
     matches!(kind, MessageKind::App { to: Some(_), .. })
 }
 
-/// If `message` is a directed payload sealed **to us**, decrypt its body in
-/// place so the surfacing pipeline sees plaintext. Returns `false` only when a
-/// frame sealed to us fails to open (tampered / wrong key), so the caller drops
-/// it. A relay (not the addressee), broadcast, and plumbing pass through
-/// untouched — the caller only invokes this on the addressee's path.
-/// Outcome of the inbound gate. `Pass` carries the original **sealed** body to
-/// restore before retention (`sealed`: `Some` when we decrypted a directed or
-/// mesh-key body addressed to us, so anti-entropy re-serves the wire frame not
-/// our decrypted view; `None` otherwise) plus the frame's [`AppClass`] (`class`:
-/// `Some` for an App frame, classified once here on the decrypted body; `None`
-/// for an infra frame with no app payload). Threading the class out means the
-/// push + retain steps never re-parse the payload.
+/// Outcome of the inbound gate. `Pass` carries the frame's [`AppClass`] (`class`:
+/// `Some` for an App frame, classified once on the opened body; `None` for an infra
+/// frame with no app payload) and the [`Authored`] view to surface, which holds the
+/// plaintext body the gate opened. The frame the caller retains is untouched.
 enum Gated {
     Drop,
     Pass {
-        sealed: Option<MessageBody>,
         class: Option<AppClass>,
+        view: Authored,
     },
 }
 
@@ -1213,13 +1197,13 @@ enum Gated {
 /// returns the [`AppClass`] on a valid payload, `None` (logging the drop) when
 /// the payload fails its frame's contract. Callers reuse the returned class
 /// rather than re-classifying.
-fn gate_app_payload(message: &Message, app: &dyn NodeApp) -> Option<AppClass> {
-    let class = app.classify(message);
+fn gate_app_payload(view: &Authored, app: &dyn NodeApp) -> Option<AppClass> {
+    let class = app.classify(view);
     if class.valid {
         Some(class)
     } else {
         tracing::warn!(target: "habilis_network::gossip",
-            author = %message.author,
+            author = %view.author,
             "dropping app frame with an invalid payload"
         );
         None
@@ -1227,103 +1211,99 @@ fn gate_app_payload(message: &Message, app: &dyn NodeApp) -> Option<AppClass> {
 }
 
 /// Validate + (for the addressee) decrypt an inbound **non-sharded** logical
-/// frame before surfacing, returning the once-computed [`AppClass`] alongside
-/// the sealed-body-to-restore.
-fn gate_and_decrypt(
-    message: &mut Message,
+/// frame before surfacing. The decrypted body lives only in the returned view, so
+/// retention keeps the frame the author signed.
+fn gate_and_decrypt<F: Proof>(
+    frame: &F,
     state: &EventLoopState,
     ctx: &HandlerCtx<'_>,
     app: &dyn NodeApp,
 ) -> Gated {
-    if is_directed_content(&message.kind) {
-        if !addressed_to_us(message, ctx.author) {
+    if is_directed_content(&frame.kind) {
+        if !addressed_to_us(frame, ctx.author) {
             // Relay: an opaque directed frame — forwarded + retained, never
             // validated or surfaced (the dispatch below is gated to the
             // addressee), so it needs no classification here.
             return Gated::Pass {
-                sealed: None,
                 class: None,
+                view: frame.authored(),
             };
         }
-        return gate_directed_to_us(message, state, ctx, app);
+        return gate_directed_to_us(frame, state, app);
     }
     // A broadcast app frame on a passworded mesh must arrive sealed with the
-    // mesh key: decrypt in place so validation + surfacing see plaintext,
-    // rejecting an unsealed or unopenable body (cleartext can't slip past the
-    // guarantee). Only broadcast MSG is ever mesh-key sealed — a structural
-    // `App{to:None}` gate is behavior-identical to the former `is_app(MSG)` one.
-    // The ciphertext is returned so `ingest` restores it before retention.
-    if matches!(&message.kind, MessageKind::App { to: None, .. }) && state.broadcast_key.is_some() {
-        let Some(sealed) = decrypt_broadcast(message, state) else {
+    // mesh key: decrypt it so validation + surfacing see plaintext, rejecting an
+    // unsealed or unopenable body (cleartext can't slip past the guarantee). Only
+    // broadcast MSG is ever mesh-key sealed — a structural `App{to:None}` gate is
+    // behavior-identical to the former `is_app(MSG)` one.
+    if matches!(&frame.kind, MessageKind::App { to: None, .. }) && state.broadcast_key.is_some() {
+        let Some(body) = decrypt_broadcast(frame, state) else {
             return Gated::Drop;
         };
-        let Some(class) = gate_app_payload(message, app) else {
+        let view = frame.with_body(body);
+        let Some(class) = gate_app_payload(&view, app) else {
             return Gated::Drop;
         };
         return Gated::Pass {
-            sealed: Some(sealed),
             class: Some(class),
+            view,
         };
     }
-    // Broadcast app / infra logical frames validate in place. An infra kind has
+    // Broadcast app / infra logical frames validate as they are. An infra kind has
     // no app payload — it passes with `class: None`.
-    match message.kind.app_tag() {
-        Some(_) => match gate_app_payload(message, app) {
+    let view = frame.authored();
+    match frame.kind.app_tag() {
+        Some(_) => match gate_app_payload(&view, app) {
             Some(class) => Gated::Pass {
-                sealed: None,
                 class: Some(class),
+                view,
             },
             None => Gated::Drop,
         },
-        None => Gated::Pass {
-            sealed: None,
-            class: None,
-        },
+        None => Gated::Pass { class: None, view },
     }
 }
 
 /// Validate + decrypt a directed frame that's addressed to us (as opposed to
 /// one we're only relaying).
-fn gate_directed_to_us(
-    message: &mut Message,
-    state: &EventLoopState,
-    ctx: &HandlerCtx<'_>,
-    app: &dyn NodeApp,
-) -> Gated {
+fn gate_directed_to_us<F: Proof>(frame: &F, state: &EventLoopState, app: &dyn NodeApp) -> Gated {
     // Whether the directed body is sealed is the app's call, not a
     // structural given: an app's directed tags may arrive encrypted, but a
     // consumer with its own data model may send plaintext directed bytes. The frame is
     // signature-authenticated either way; `sealed=false` only means "not
     // additionally encrypted".
-    if !app.classify(message).sealed {
-        // Plaintext directed body: the wire body is already the final body,
-        // so retain_and_index re-serves it unchanged (`sealed: None`).
-        let Some(class) = gate_app_payload(message, app) else {
+    let wire = frame.authored();
+    if !app.classify(&wire).sealed {
+        // Plaintext directed body: the wire body is already the final body.
+        let Some(class) = gate_app_payload(&wire, app) else {
             return Gated::Drop;
         };
         return Gated::Pass {
-            sealed: None,
             class: Some(class),
+            view: wire,
         };
     }
-    let sealed = message.body.clone();
-    if !decrypt_directed(message, state, ctx) {
+    let Some(body) = decrypt_directed(frame, state) else {
         return Gated::Drop;
-    }
-    let Some(class) = gate_app_payload(message, app) else {
+    };
+    let view = frame.with_body(body);
+    let Some(class) = gate_app_payload(&view, app) else {
         return Gated::Drop;
     };
     Gated::Pass {
-        sealed: Some(sealed),
         class: Some(class),
+        view,
     }
 }
 
-/// Decrypt a broadcast chat body sealed under the mesh key, **in place**.
-/// Returns the original (ciphertext) body to restore before retention, or `None`
-/// when there is no key or the body is not a decryptable `enc` envelope (on a
-/// passworded mesh that means an unsealed/tampered body — the caller drops it).
-fn decrypt_broadcast(message: &mut Message, state: &EventLoopState) -> Option<MessageBody> {
+/// Decrypt a broadcast chat body sealed under the mesh key. Returns the plaintext
+/// body, or `None` when there is no key or the body is not a decryptable `enc`
+/// envelope (on a passworded mesh that means an unsealed/tampered body — the caller
+/// drops it).
+fn decrypt_broadcast<F: std::ops::Deref<Target = Message>>(
+    message: &F,
+    state: &EventLoopState,
+) -> Option<MessageBody> {
     let key = state.broadcast_key.as_ref()?;
     // A key exists (passworded mesh), so a body that will not open is either
     // cleartext or tampered — drop it, but say so (mirroring the directed-drop
@@ -1336,25 +1316,21 @@ fn decrypt_broadcast(message: &mut Message, state: &EventLoopState) -> Option<Me
         );
         return None;
     };
-    let body = MessageBody::new(plain).ok()?;
-    Some(std::mem::replace(&mut message.body, body))
+    MessageBody::new(plain).ok()
 }
 
-fn decrypt_directed(message: &mut Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) -> bool {
-    if !is_directed_content(&message.kind) || !addressed_to_us(message, ctx.author) {
-        return true;
-    }
+/// Unseal a directed body sealed to us. Returns the plaintext body, or `None` when
+/// the frame fails to open (tampered / wrong key), so the caller drops it. The
+/// caller only calls this on the addressee's path.
+fn decrypt_directed<F: std::ops::Deref<Target = Message>>(
+    message: &F,
+    state: &EventLoopState,
+) -> Option<MessageBody> {
     match crate::protocol::seal::unseal_from_body(&state.identity.seal_secret(), &message.body) {
-        Ok(plaintext) => match MessageBody::new(plaintext) {
-            Ok(body) => {
-                message.body = body;
-                true
-            }
-            Err(_) => false,
-        },
+        Ok(plaintext) => MessageBody::new(plaintext).ok(),
         Err(error) => {
             tracing::warn!(target: "habilis_network::gossip", %error, author = %message.author, "dropping a directed frame sealed to us that failed to open");
-            false
+            None
         }
     }
 }
@@ -1389,7 +1365,7 @@ fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
 /// classification (`None` for an infra frame).
 fn maybe_push_inbound(
     ctx: &HandlerCtx<'_>,
-    message: &Message,
+    message: &Authored,
     surfaceable: bool,
     class: Option<&AppClass>,
 ) {
@@ -1434,7 +1410,7 @@ fn maybe_push_inbound(
 /// and which frame a peer sends first depends on its version and its links.
 /// If the newcomer has the lower endpoint id we wait for it to dial. A first
 /// frame that is its `joined` floods our address in `handle_presence` instead.
-async fn greet_new_peer(message: &Message, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+async fn greet_new_peer(message: &Verified, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     antientropy::broadcast_state_digests(
         state,
         ctx.sender,
@@ -1476,12 +1452,7 @@ fn peer_info_graft_below(max_peers: usize, members: usize) -> usize {
     }
 }
 
-async fn handle_peer_info(
-    message: &Message,
-    content: Bytes,
-    state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
-) {
+async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(message.body.as_str()) else {
         return;
     };
@@ -1509,7 +1480,8 @@ async fn handle_peer_info(
     // The only binding a digest's answer may follow: this signer proved it
     // owns `peer_id`. A `PeerInfo` arrives many times, so a known pair is not
     // checked again.
-    if let (Some(signer), Some(proof)) = (message.author_key(), parsed["proof"].as_str())
+    let signer = message.key();
+    if let Some(proof) = parsed["proof"].as_str()
         && state.proven_endpoints.get(&signer) != Some(peer_id)
         && crate::transport::endpoint_proof::verifies(peer_id, ctx.mesh, &signer, proof)
     {
@@ -1519,19 +1491,17 @@ async fn handle_peer_info(
     }
     // A holder of the rendezvous says so in its `PeerInfo`; only a sender that proved its
     // endpoint is believed.
-    if let Some(signer) = message.author_key() {
-        let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
-        state.note_rival_beacon_flag(
-            ctx.endpoint.id(),
-            signer,
-            peer_id,
-            RivalFlag {
-                proven,
-                held: parsed["beacon"].as_bool() == Some(true),
-            },
-            Instant::now(),
-        );
-    }
+    let proven = state.proven_endpoints.get(&signer) == Some(peer_id);
+    state.note_rival_beacon_flag(
+        ctx.endpoint.id(),
+        signer,
+        peer_id,
+        RivalFlag {
+            proven,
+            held: parsed["beacon"].as_bool() == Some(true),
+        },
+        Instant::now(),
+    );
     // Remember every advertised peer for the rendezvous-independent
     // re-bridge, and register its address once. Unconditional on link
     // state — a `PeerInfo` normally arrives over an already-formed link,
@@ -1639,7 +1609,9 @@ async fn handle_peer_info(
         } else {
             tracing::debug!(target: "habilis_network::gossip", endpoint_id = %peer_id, "graft held until a direct path is proven");
         }
-        let _ = ctx.sender.broadcast(content).await;
+        if let Ok(frame) = message.serialize() {
+            let _ = ctx.sender.broadcast(frame).await;
+        }
         state.last_sent_at = Instant::now();
         tracing::debug!(target: "habilis_network::gossip",
             endpoint_id = %peer_id,
@@ -1791,11 +1763,11 @@ mod retain_own_broadcast_tests {
     use super::retain_own_broadcast;
     use crate::daemon::message_log::{MissingQuery, WindowRange};
     use crate::daemon::state::EventLoopState;
+    use crate::protocol::message::Verified;
     use crate::protocol::{DedupKey, MeshId, Message, Nickname};
 
-    fn joined(state: &EventLoopState, author: &str) -> Message {
-        Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author))
-            .signed(&state.identity)
+    fn joined(state: &EventLoopState, author: &str) -> Verified {
+        Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author)).sign(&state.identity)
     }
 
     /// The invariant: our own `joined` is in our log, so the digest we
@@ -1821,7 +1793,7 @@ mod retain_own_broadcast_tests {
         let body = crate::protocol::MessageBody::new("{}".to_owned()).expect("valid body");
         let peer_info =
             Message::new_peer_info(&MeshId::from("💬test"), &Nickname::from("me"), body)
-                .signed(&state.identity);
+                .sign(&state.identity);
         retain_own_broadcast(&mut state, &peer_info);
         assert_eq!(
             state.message_log.len(),
@@ -1830,7 +1802,7 @@ mod retain_own_broadcast_tests {
         );
     }
 
-    fn app_frame(state: &EventLoopState, to: Option<&str>) -> Message {
+    fn app_frame(state: &EventLoopState, to: Option<&str>) -> Verified {
         Message::new_app(
             &MeshId::from("💬test"),
             &Nickname::from("me"),
@@ -1841,7 +1813,7 @@ mod retain_own_broadcast_tests {
                 body: crate::protocol::MessageBody::from("hello"),
             },
         )
-        .signed(&state.identity)
+        .sign(&state.identity)
     }
 
     fn class(loggable: bool) -> crate::gossip::app::AppClass {
@@ -1922,7 +1894,6 @@ mod retain_own_broadcast_tests {
 /// so it carries the dedup key the receive path recorded on first arrival.
 #[cfg(test)]
 mod evicted_orphan_tests {
-    use bytes::Bytes;
     use habilis_network_test_tracing::{expect_warn, test};
     use iroh::endpoint::presets;
     use iroh_gossip::net::Gossip;
@@ -1935,6 +1906,7 @@ mod evicted_orphan_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
+    use crate::protocol::message::{Authored, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -1945,7 +1917,7 @@ mod evicted_orphan_tests {
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
-        fn classify(&self, _message: &Message) -> AppClass {
+        fn classify(&self, _message: &Authored) -> AppClass {
             AppClass {
                 loggable: false,
                 beat: true,
@@ -1971,7 +1943,7 @@ mod evicted_orphan_tests {
         mesh: &MeshId,
         author: &Nickname,
         count: usize,
-    ) -> Vec<Message> {
+    ) -> Vec<Verified> {
         let seed = *writer.identity.public().as_bytes();
         (0..count)
             .map(|step| {
@@ -1985,7 +1957,7 @@ mod evicted_orphan_tests {
                     .compose_wire_body(&change, None)
                     .expect("compose the wire body");
                 let frame = Message::new_channel_event(mesh, author, wire, Channel::State)
-                    .signed(&writer.identity);
+                    .sign(&writer.identity);
                 assert!(matches!(
                     writer.doc_mut(Channel::State).ingest(&frame),
                     Ingested::Applied { .. }
@@ -2047,14 +2019,14 @@ mod evicted_orphan_tests {
         };
         let mut reader = fresh_state();
         let mut app = Inert;
-        let wire = |frame: &Message| Bytes::from(frame.serialize().expect("serialize"));
+        let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
 
         // Newest first: every frame but the root arrives as an orphan, so the
         // per-author ceiling evicts the stalest of them before the root lands.
         for frame in frames.iter().rev() {
             ingest(wire(frame), &mut reader, &mut app, &ctx).await;
         }
-        let missing: Vec<&Message> = (0..frames.len())
+        let missing: Vec<&Verified> = (0..frames.len())
             .filter(|&step| !holds(&reader, step))
             .map(|step| &frames[step])
             .collect();
@@ -2098,7 +2070,6 @@ mod evicted_orphan_tests {
 
 #[cfg(test)]
 mod first_contact_tests {
-    use bytes::Bytes;
     use habilis_network_test_tracing::test;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
@@ -2111,6 +2082,7 @@ mod first_contact_tests {
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
     use crate::protocol::message::MessageBody;
+    use crate::protocol::message::{Authored, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -2119,7 +2091,7 @@ mod first_contact_tests {
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
-        fn classify(&self, _message: &Message) -> AppClass {
+        fn classify(&self, _message: &Authored) -> AppClass {
             AppClass {
                 loggable: false,
                 beat: true,
@@ -2226,8 +2198,9 @@ mod first_contact_tests {
             &node.author,
             nick("bob"),
             &crate::protocol::MessageId::random(),
-        );
-        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        )
+        .sign(&Identity::generate());
+        let bytes = frame.serialize().expect("serialize");
         assert!(state.pending_outbound.push((frame.clone(), bytes)));
 
         let started = std::time::Instant::now();
@@ -2270,8 +2243,8 @@ mod first_contact_tests {
         feed(Event::NeighborUp(endpoint_id(1)), &mut state, &ctx).await;
         feed(Event::NeighborDown(endpoint_id(1)), &mut state, &ctx).await;
         assert!(state.meshed, "the gap does not clear meshed");
-        let frame = Message::new_joined(&node.mesh, &node.author);
-        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        let frame = Message::new_joined(&node.mesh, &node.author).sign(&Identity::generate());
+        let bytes = frame.serialize().expect("serialize");
         assert!(state.pending_outbound.push((frame, bytes)));
 
         feed(Event::NeighborUp(endpoint_id(2)), &mut state, &ctx).await;
@@ -2288,7 +2261,7 @@ mod first_contact_tests {
 
     #[async_trait::async_trait]
     impl NodeApp for Counting {
-        fn classify(&self, _message: &Message) -> AppClass {
+        fn classify(&self, _message: &Authored) -> AppClass {
             AppClass {
                 loggable: false,
                 beat: true,
@@ -2328,12 +2301,12 @@ mod first_contact_tests {
                 body: MessageBody::from("hello"),
             },
         )
-        .signed(&Identity::generate());
+        .sign(&Identity::generate());
         let original = frame.serialize().expect("serialize");
-        let resend = crate::protocol::message::wire_with_resend_nonce(&original, 42);
+        let resend = original.with_resend_nonce(42);
 
-        ingest(Bytes::from(original), &mut state, &mut app, &ctx).await;
-        ingest(Bytes::from(resend), &mut state, &mut app, &ctx).await;
+        ingest(original.into_bytes(), &mut state, &mut app, &ctx).await;
+        ingest(resend.into_bytes(), &mut state, &mut app, &ctx).await;
 
         assert_eq!(
             reads.load(std::sync::atomic::Ordering::Relaxed),
@@ -2356,9 +2329,9 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut state = fresh_state();
         let author = Identity::generate();
-        let frames: Vec<Message> = ["ann", "bob", "cat"]
+        let frames: Vec<Verified> = ["ann", "bob", "cat"]
             .into_iter()
-            .map(|name| Message::new_joined(&node.mesh, &nick(name)).signed(&author))
+            .map(|name| Message::new_joined(&node.mesh, &nick(name)).sign(&author))
             .collect();
         let (feed_topic, topic_rx) = tokio::sync::mpsc::unbounded_channel();
         let events = stream::unfold(topic_rx, |mut rx| async move {
@@ -2367,7 +2340,7 @@ mod first_contact_tests {
         .boxed();
         let mut receiver = crate::gossip::split::spawn_split(events, None);
         for frame in &frames {
-            let content = Bytes::from(frame.serialize().expect("serialize"));
+            let content = frame.serialize().expect("serialize").into_bytes();
             let delivered = GossipMessage {
                 content,
                 scope: DeliveryScope::Neighbors,
@@ -2424,8 +2397,9 @@ mod first_contact_tests {
         feed(Event::NeighborUp(bob.id()), &mut state, &ctx).await;
         feed(Event::NeighborDown(bob.id()), &mut state, &ctx).await;
         assert!(state.meshed, "the gap does not clear meshed");
-        let frame = Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random());
-        let bytes = Bytes::from(frame.serialize().expect("serialize"));
+        let frame = Message::new_pong(&node.mesh, &node.author, nick("bob"), &MessageId::random())
+            .sign(&Identity::generate());
+        let bytes = frame.serialize().expect("serialize");
         assert!(state.pending_outbound.push((frame, bytes.clone())));
 
         feed(Event::NeighborUp(bob.id()), &mut state, &ctx).await;
@@ -2434,7 +2408,7 @@ mod first_contact_tests {
             tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv()).await;
         assert_eq!(
             delivered.ok().flatten(),
-            Some(bytes),
+            Some(bytes.into_bytes()),
             "bob never got the parked frame"
         );
         assert!(state.pending_outbound.is_empty());
@@ -2640,18 +2614,12 @@ mod first_contact_tests {
                 json["proof"] = serde_json::Value::String(proof.to_owned());
             }
             let body = MessageBody::new(json.to_string()).expect("an address body");
-            Message::new_peer_info(&node.mesh, &nick("bob"), body).signed(signed_by)
+            Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(signed_by)
         };
         let bobs_proof = sign(&bob_endpoint_key, &node.mesh, &bob_signer);
 
         let mut state = fresh_state();
-        super::handle_peer_info(
-            &peer_info(Some(&bobs_proof), &stranger),
-            Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(Some(&bobs_proof), &stranger), &mut state, &ctx).await;
         let stranger_signer =
             AuthorKey::from_hex(&encode_pubkey(&stranger.public())).expect("a 32-byte key");
         assert_eq!(
@@ -2660,16 +2628,10 @@ mod first_contact_tests {
             "bob's proof, another signer"
         );
 
-        super::handle_peer_info(&peer_info(None, &bob), Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info(None, &bob), &mut state, &ctx).await;
         assert_eq!(state.proven_endpoints.get(&bob_signer), None, "no proof");
 
-        super::handle_peer_info(
-            &peer_info(Some(&bobs_proof), &bob),
-            Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(Some(&bobs_proof), &bob), &mut state, &ctx).await;
         assert_eq!(
             state.proven_endpoints.get(&bob_signer),
             Some(bob_endpoint),
@@ -2718,7 +2680,8 @@ mod first_contact_tests {
             10,
         )]))
         .expect("a vector serializes");
-        let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body);
+        let vector = Message::new_link_state(&node.mesh, &nick("alice-aa"), vector_body)
+            .sign(&Identity::generate());
         assert!(
             !super::handle_link_state(&vector, &mut state),
             "no binding yet: nothing is fed"
@@ -2728,8 +2691,8 @@ mod first_contact_tests {
         let address = endpoint_addr_to_json(&EndpointAddr::new(author_key.public()));
         let address_body = MessageBody::new(address.to_string()).expect("an address body");
         let peer_info = Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body)
-            .signed(&Identity::generate());
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+            .sign(&Identity::generate());
+        super::handle_peer_info(&peer_info, &mut state, &ctx).await;
         assert_eq!(
             ours.topology_view().edges.len(),
             1,
@@ -2752,7 +2715,7 @@ mod first_contact_tests {
         let peer = iroh::SecretKey::generate().public();
         let first = iroh::EndpointAddr::new(peer).with_ip_addr(test_ip());
 
-        super::handle_peer_info(&peer_info(&node, &first), Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info(&node, &first), &mut state, &ctx).await;
 
         assert!(
             eventually(|| async { node.endpoint.remote_info(peer).await.is_some() }).await,
@@ -2785,11 +2748,11 @@ mod first_contact_tests {
             .add_endpoint_addr(first.clone())
             .await
             .expect("the endpoint takes the first address");
-        super::handle_peer_info(&peer_info(&node, &first), Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info(&node, &first), &mut state, &ctx).await;
         assert!(!knows_relay().await, "no relay yet");
 
         let later = first.with_relay_url(relay.clone());
-        super::handle_peer_info(&peer_info(&node, &later), Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info(&node, &later), &mut state, &ctx).await;
 
         assert!(
             eventually(knows_relay).await,
@@ -2821,13 +2784,35 @@ mod first_contact_tests {
     }
 
     /// A `PeerInfo` of the author `bob` that carries `addr`.
-    fn peer_info(node: &Node, addr: &iroh::EndpointAddr) -> Message {
+    fn peer_info(node: &Node, addr: &iroh::EndpointAddr) -> Verified {
         use crate::protocol::message::MessageBody;
         use crate::protocol::peer_addr::endpoint_addr_to_json;
 
         let body =
             MessageBody::new(endpoint_addr_to_json(addr).to_string()).expect("an address body");
-        Message::new_peer_info(&node.mesh, &nick("bob"), body).signed(&Identity::generate())
+        Message::new_peer_info(&node.mesh, &nick("bob"), body).sign(&Identity::generate())
+    }
+
+    /// A relayed `PeerInfo` is re-serialized from its verified form, so the bytes that go out are the
+    /// bytes that came in: a `PeerInfo` carries no resend trailer, and the signed form round-trips.
+    #[test]
+    fn a_relayed_peer_info_is_the_inbound_bytes() {
+        let inbound = Message::new_peer_info(
+            &MeshId::from("test"),
+            &nick("alice"),
+            MessageBody::from("{}"),
+        )
+        .sign(&Identity::generate())
+        .serialize()
+        .expect("serialize");
+        let (parsed, nonce) = Message::parse_wire(inbound.as_bytes()).expect("parses");
+        assert!(nonce.is_none());
+        let relayed = parsed
+            .verify()
+            .expect("verifies")
+            .serialize()
+            .expect("serialize");
+        assert_eq!(relayed.as_bytes(), inbound.as_bytes());
     }
 
     /// The tie-break defers the first dial to the lower endpoint id. A second
@@ -2853,20 +2838,20 @@ mod first_contact_tests {
             MessageBody::new(endpoint_addr_to_json(&iroh::EndpointAddr::new(lower)).to_string())
                 .expect("an address body");
         let peer_info =
-            Message::new_peer_info(&node.mesh, &nick("lower"), body).signed(&Identity::generate());
+            Message::new_peer_info(&node.mesh, &nick("lower"), body).sign(&Identity::generate());
 
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut state, &ctx).await;
         assert!(
             !state.direct.contains_key(&lower),
             "the first sighting defers"
         );
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut state, &ctx).await;
         assert!(
             !state.direct.contains_key(&lower),
             "the copy right after must not dial"
         );
         state.relink.clear();
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut state, &ctx).await;
         assert!(
             state.direct.contains_key(&lower),
             "once the cooldown ends, this side dials after all"
@@ -2899,8 +2884,8 @@ mod first_contact_tests {
         let body =
             MessageBody::new(endpoint_addr_to_json(&iroh::EndpointAddr::new(newcomer)).to_string())
                 .expect("an address body");
-        let peer_info = Message::new_peer_info(&node.mesh, &nick("newcomer"), body)
-            .signed(&Identity::generate());
+        let peer_info =
+            Message::new_peer_info(&node.mesh, &nick("newcomer"), body).sign(&Identity::generate());
         let crowd = |state: &mut EventLoopState, members: usize| {
             for index in 0..members {
                 let id = iroh::SecretKey::generate().public();
@@ -2921,7 +2906,7 @@ mod first_contact_tests {
         let mut crowded = fresh_state();
         crowd(&mut crowded, max_peers + 2);
         fill_view(&mut crowded, max_peers - 1);
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut crowded, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut crowded, &ctx).await;
         assert!(
             !crowded.direct.contains_key(&newcomer),
             "a mesh larger than G + 1 leaves the last slot to the fill tick"
@@ -2931,7 +2916,7 @@ mod first_contact_tests {
         let mut small = fresh_state();
         crowd(&mut small, 3);
         fill_view(&mut small, 2);
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut small, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut small, &ctx).await;
         assert!(
             small.direct.contains_key(&newcomer),
             "a mesh that fits in the view grafts"
@@ -2996,13 +2981,13 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut app = Inert;
         let newcomer = Identity::generate();
-        let wire = |frame: &Message| Bytes::from(frame.serialize().expect("serialize"));
+        let wire = |frame: &Verified| frame.serialize().expect("serialize").into_bytes();
         let heads = || MessageBody::new(r#"{"heads":[]}"#.to_owned()).expect("a JSON body");
 
         let mut digest_first = fresh_state();
         let digest =
             Message::new_channel_digest(&node.mesh, &nick("late"), heads(), Channel::State)
-                .signed(&newcomer);
+                .sign(&newcomer);
         ingest(wire(&digest), &mut digest_first, &mut app, &ctx).await;
         assert!(
             digest_first.peerinfo_flooded_at.is_some(),
@@ -3011,7 +2996,7 @@ mod first_contact_tests {
 
         let mut change_first = fresh_state();
         let change = Message::new_channel_event(&node.mesh, &nick("late"), heads(), Channel::State)
-            .signed(&newcomer);
+            .sign(&newcomer);
         ingest(wire(&change), &mut change_first, &mut app, &ctx).await;
         assert!(
             change_first.peerinfo_flooded_at.is_none(),
@@ -3112,7 +3097,8 @@ mod link_state_tests {
         let handle = handle_for(&secret).await;
         let mut state = fresh_state();
         let body = crate::gossip::json_body(&handle.link_vector(Vec::new())).expect("serializes");
-        let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body);
+        let message = Message::new_link_state(&MeshId::from("test"), &nick("alice-aa"), body)
+            .sign(&crate::protocol::Identity::generate());
         super::retain_own_broadcast(&mut state, &message);
         assert_eq!(state.message_log.len(), 0, "nothing retains a link-state");
         handle.close().await;
@@ -3186,6 +3172,7 @@ mod left_tests {
     use crate::lookup::{TransportOpts, build_peer_multihop};
     use crate::protocol::identity::Identity;
     use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::message::Authored;
     use crate::protocol::{MeshId, Message, PresenceSubtype};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -3195,7 +3182,7 @@ mod left_tests {
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
-        fn classify(&self, _message: &Message) -> AppClass {
+        fn classify(&self, _message: &Authored) -> AppClass {
             AppClass {
                 loggable: false,
                 beat: true,
@@ -3271,7 +3258,7 @@ mod left_tests {
             external_msg_tx: None,
             sink: &sink,
         };
-        let message = Message::new_left(&mesh, &leaver);
+        let message = Message::new_left(&mesh, &leaver).sign(&Identity::generate());
         let update = MembershipUpdate {
             returned: false,
             joined_new: false,
@@ -3395,7 +3382,6 @@ mod left_tests {
 
 #[cfg(all(test, feature = "host"))]
 mod requeue_tests {
-    use bytes::Bytes;
     use habilis_network_test_tracing::test;
 
     use super::requeue;
@@ -3415,7 +3401,7 @@ mod requeue_tests {
             .remove(&nick("bob"))
             .expect("the fixture knows bob");
         let frame = node.frame_to_bob();
-        let bytes = Bytes::from_static(b"frame");
+        let bytes = frame.serialize().expect("serialize");
         let now = crate::util::clock::Instant::now();
         crate::transport::resolve(&frame, bytes.clone(), &state)
             .expect_err("no endpoint is known for bob yet");

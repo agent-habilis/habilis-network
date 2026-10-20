@@ -34,6 +34,7 @@ use automerge::{
 };
 use serde_json::{Map, Value};
 
+use habilis_network_protocol::message::Verified;
 use habilis_network_protocol::{AuthorKey, DedupKey, Message, Nickname, SymmetricKey};
 use habilis_network_util::consts::{DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX};
 
@@ -117,7 +118,7 @@ pub struct SelfWriteGate {
 /// *p×d* of them. Held once, the same check is a hash-set lookup.
 #[derive(Debug)]
 struct Pending {
-    frame: Message,
+    frame: Verified,
     change: Change,
     arrival: u64,
 }
@@ -136,7 +137,7 @@ pub struct MeshDoc {
     /// The signed frame that carried each applied change, keyed by change hash —
     /// the re-serve store (a peer forwards another author's change with its
     /// original signature intact). Replaces the old `StateLog`.
-    frames: HashMap<ChangeHash, Message>,
+    frames: HashMap<ChangeHash, Verified>,
     /// Orphan frames awaiting their change's deps, keyed by change hash.
     ///
     /// Bounded per author and overall: the frames arriving here have passed
@@ -339,7 +340,7 @@ impl MeshDoc {
     /// then over-serve, never under-serve). The genesis change has no frame and
     /// is never sent — every replica constructs it locally.
     #[must_use]
-    pub fn changes_since(&self, have: &[String], max: usize) -> Vec<Message> {
+    pub fn changes_since(&self, have: &[String], max: usize) -> Vec<Verified> {
         self.changes_since_not_by(have, None, max)
     }
 
@@ -354,7 +355,7 @@ impl MeshDoc {
         have: &[String],
         author: Option<&AuthorKey>,
         max: usize,
-    ) -> Vec<Message> {
+    ) -> Vec<Verified> {
         let have: Vec<ChangeHash> = have
             .iter()
             .filter_map(|encoded| decode_hash(encoded))
@@ -363,9 +364,7 @@ impl MeshDoc {
             .get_changes(&have)
             .into_iter()
             .filter_map(|change| self.frames.get(&change.hash()))
-            .filter(|frame| {
-                author.is_none_or(|skipped| frame.author_key().as_ref() != Some(skipped))
-            })
+            .filter(|frame| author.is_none_or(|skipped| &frame.key() != skipped))
             .take(max)
             .cloned()
             .collect()
@@ -418,24 +417,23 @@ impl MeshDoc {
         Ok(changes.pop().map(|change| change.raw_bytes().to_vec()))
     }
 
-    /// Ingest one signed frame carrying an automerge change. Verifies causal
+    /// Ingest one verified frame carrying an automerge change. Verifies causal
     /// readiness and card authorization before applying; buffers orphans (as
     /// frames, so re-serve and the gate both see the original signed frame). The
-    /// frame's signature is verified upstream by `gossip::ingest`.
-    pub fn ingest(&mut self, frame: &Message) -> Ingested {
+    /// `Verified` proof means the signature was checked before the frame got here,
+    /// so the signer is `frame.key()`, never a field of the body.
+    pub fn ingest(&mut self, frame: &Verified) -> Ingested {
         let Some(bytes) = self.change_bytes(frame) else {
             return Ingested::Ignored;
         };
         let Ok(change) = Change::from_bytes(bytes) else {
             return Ingested::Ignored;
         };
-        let Some(author) = frame
-            .author_key()
-            .filter(|author| change.actor_id().to_bytes() == author.as_bytes().as_slice())
-        else {
+        let author = frame.key();
+        if change.actor_id().to_bytes() != author.as_bytes().as_slice() {
             warn_refusal!(self, "dropping a channel change whose actor is not its signer's key", author = %frame.author,);
             return Ingested::Ignored;
-        };
+        }
         let hash = change.hash();
         if self.applied.contains(&hash) {
             return Ingested::Duplicate;
@@ -480,7 +478,7 @@ impl MeshDoc {
     /// comment here had both backwards and dropped the error on that basis.
     /// Two processes sharing a signing key reach it without any malice, since
     /// the actor id is derived from the key.
-    fn apply(&mut self, change: Change, hash: ChangeHash, frame: Message) -> bool {
+    fn apply(&mut self, change: Change, hash: ChangeHash, frame: Verified) -> bool {
         if let Err(error) = self.doc.apply_changes([change]) {
             warn_refusal!(self, "dropping a channel change automerge refused", %error, author = %frame.author,);
             return false;
@@ -508,7 +506,7 @@ impl MeshDoc {
         author: AuthorKey,
         hash: ChangeHash,
         change: Change,
-        frame: &Message,
+        frame: &Verified,
     ) -> Ingested {
         if self.pending.contains_key(&hash) {
             return Ingested::Buffered;
@@ -555,7 +553,7 @@ impl MeshDoc {
     fn pending_by(&self, author: &AuthorKey) -> usize {
         self.pending
             .values()
-            .filter(|entry| entry.frame.author_key().as_ref() == Some(author))
+            .filter(|entry| entry.frame.key() == *author)
             .count()
     }
 
@@ -565,7 +563,7 @@ impl MeshDoc {
     fn highest_of(&self, author: &AuthorKey) -> Option<(ChangeHash, u64)> {
         self.pending
             .iter()
-            .filter(|(_, entry)| entry.frame.author_key().as_ref() == Some(author))
+            .filter(|(_, entry)| entry.frame.key() == *author)
             .max_by_key(|(_, entry)| (entry.change.seq(), entry.arrival))
             .map(|(hash, entry)| (*hash, entry.change.seq()))
     }
@@ -589,9 +587,9 @@ impl MeshDoc {
     #[cfg(any(test, feature = "adversarial"))]
     #[must_use]
     pub fn pending_stats(&self) -> (usize, usize) {
-        let mut per_author: HashMap<Option<AuthorKey>, usize> = HashMap::new();
+        let mut per_author: HashMap<AuthorKey, usize> = HashMap::new();
         for entry in self.pending.values() {
-            *per_author.entry(entry.frame.author_key()).or_default() += 1;
+            *per_author.entry(entry.frame.key()).or_default() += 1;
         }
         (
             self.pending.len(),
@@ -862,6 +860,7 @@ mod tests {
         DOC_PENDING_AUTHOR_MAX, DOC_PENDING_TOTAL_MAX, Ingested, MeshDoc, SelfWriteGate, WARN_EVERY,
     };
     use automerge::Change;
+    use habilis_network_protocol::message::Verified;
     use habilis_network_protocol::{
         AuthorKey, Channel, DedupKey, MeshId, Message, Nickname, SymmetricKey,
     };
@@ -876,17 +875,25 @@ mod tests {
     /// Wrap change bytes in a signed-frame stand-in, signed by the change's
     /// actor. The doc layer reads `author`, `pubkey` and `body`; a valid
     /// signature is `gossip::ingest`'s job.
-    fn frame(who: &Nickname, bytes: &[u8]) -> Message {
+    fn frame(who: &Nickname, bytes: &[u8]) -> Verified {
         let change = Change::from_bytes(bytes.to_vec()).expect("a change");
         let actor = AuthorKey::from_hex(&change.actor_id().to_hex_string())
             .expect("a test actor is 32 bytes");
-        Message::new_channel_event(
-            &MeshId::from("test"),
-            who,
-            change_body(bytes, None).expect("body"),
-            Channel::State,
+        frame_as(who, bytes, actor)
+    }
+
+    /// [`frame`] claiming `key` as its signer, which need not be the change's actor.
+    fn frame_as(who: &Nickname, bytes: &[u8], key: AuthorKey) -> Verified {
+        Verified::fixture_unchecked(
+            Message::new_channel_event(
+                &MeshId::from("test"),
+                who,
+                change_body(bytes, None).expect("body"),
+                Channel::State,
+            )
+            .with_unverified_key(key),
+            key,
         )
-        .with_unverified_key(actor)
     }
 
     /// Author a merge on `doc` (build + ingest, as the daemon does) and return
@@ -964,7 +971,7 @@ mod tests {
         }
     }
 
-    fn author(doc: &mut MeshDoc, who: &Nickname, merge: &Value) -> Message {
+    fn author(doc: &mut MeshDoc, who: &Nickname, merge: &Value) -> Verified {
         author_as(doc, who, who.as_str().as_bytes(), merge)
     }
 
@@ -979,7 +986,7 @@ mod tests {
 
     /// [`author`] with an explicit per-session actor seed, as the daemon
     /// derives from its signing key.
-    fn author_as(doc: &mut MeshDoc, who: &Nickname, seed: &[u8], merge: &Value) -> Message {
+    fn author_as(doc: &mut MeshDoc, who: &Nickname, seed: &[u8], merge: &Value) -> Verified {
         let bytes = doc
             .build_change(merge, &pad_seed(seed))
             .expect("merge applies")
@@ -1118,7 +1125,7 @@ mod tests {
         );
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
-        let chain: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 32)
+        let chain: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 32)
             .map(|step| author(&mut source, &alice, &json!({ "k": step })))
             .collect();
 
@@ -1176,7 +1183,7 @@ mod tests {
     fn a_flood_of_refused_changes_logs_one_warn_per_window() {
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
-        let chain: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 200)
+        let chain: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 200)
             .map(|step| author(&mut source, &alice, &json!({ "k": step })))
             .collect();
         let mut sink = MeshDoc::new_ungated();
@@ -1267,7 +1274,7 @@ mod tests {
         assert!(
             sink.pending
                 .values()
-                .any(|entry| entry.frame.author_key() == Some(AuthorKey::from_bytes([0x11; 32]))),
+                .any(|entry| entry.frame.key() == AuthorKey::from_bytes([0x11; 32])),
             "the honest orphan survived: the newcomer is refused, not an incumbent evicted"
         );
     }
@@ -1322,7 +1329,7 @@ mod tests {
         assert!(matches!(sink.ingest(&alice_orphan), Ingested::Buffered));
 
         let mut mallorys = MeshDoc::new_ungated();
-        let flood: Vec<Message> = (0..DOC_PENDING_AUTHOR_MAX + 32)
+        let flood: Vec<Verified> = (0..DOC_PENDING_AUTHOR_MAX + 32)
             .map(|step| author_as(&mut mallorys, &mallory, &[0xbb; 32], &json!({ "m": step })))
             .collect();
         for frame in flood.iter().skip(1) {
@@ -1344,7 +1351,7 @@ mod tests {
     }
 
     /// A chain one change per key, `k0` first, authored by one actor.
-    fn keyed_chain(len: usize) -> Vec<Message> {
+    fn keyed_chain(len: usize) -> Vec<Verified> {
         let alice = nick("alice");
         let mut source = MeshDoc::new_ungated();
         (0..len)
@@ -1358,7 +1365,7 @@ mod tests {
     }
 
     /// Feed `order` into a fresh sink, then the root prefix `0..root_len`.
-    fn deliver(chain: &[Message], order: &[usize], root_len: usize) -> MeshDoc {
+    fn deliver(chain: &[Verified], order: &[usize], root_len: usize) -> MeshDoc {
         let mut sink = MeshDoc::new_ungated();
         for &step in order {
             sink.ingest(&chain[step]);
@@ -1430,7 +1437,7 @@ mod tests {
         let dropped: HashSet<DedupKey> = sink.take_dropped().into_iter().collect();
         let let_go: HashSet<DedupKey> = chain[100 + DOC_PENDING_AUTHOR_MAX..]
             .iter()
-            .map(Message::dedup_key)
+            .map(|frame| frame.dedup_key())
             .collect();
         assert_eq!(dropped, let_go);
     }
@@ -1480,8 +1487,7 @@ mod tests {
             .build_change(&json!({"a": "forged"}), &alice_key)
             .expect("merge applies")
             .expect("merge is not a no-op");
-        let forged =
-            frame(&mallory, &forged).with_unverified_key(AuthorKey::from_bytes([0xbb; 32]));
+        let forged = frame_as(&mallory, &forged, AuthorKey::from_bytes([0xbb; 32]));
         assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
         assert_eq!(sink.pending_stats().0, 0);
 
@@ -1505,8 +1511,7 @@ mod tests {
             .build_change(&json!({"a": "forged"}), &alice_key)
             .expect("merge applies")
             .expect("merge is not a no-op");
-        let forged =
-            frame(&nick("mallory"), &orphan).with_unverified_key(AuthorKey::from_bytes([0xbb; 32]));
+        let forged = frame_as(&nick("mallory"), &orphan, AuthorKey::from_bytes([0xbb; 32]));
 
         let mut sink = MeshDoc::new_ungated();
         assert!(matches!(sink.ingest(&forged), Ingested::Ignored));
@@ -1586,9 +1591,12 @@ mod tests {
         let (wire, _plain) = author_doc
             .compose_wire_body(&bytes, Some(&merge))
             .expect("compose");
-        let carrier =
+        let signer = AuthorKey::from_bytes(pad_seed(alice.as_str().as_bytes()));
+        let carrier = Verified::fixture_unchecked(
             Message::new_channel_event(&MeshId::from("test"), &alice, wire, Channel::State)
-                .with_unverified_key(AuthorKey::from_bytes(pad_seed(alice.as_str().as_bytes())));
+                .with_unverified_key(signer),
+            signer,
+        );
         assert!(
             !carrier.body.as_str().contains("value"),
             "the plaintext value must not appear on the wire"

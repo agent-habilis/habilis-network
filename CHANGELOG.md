@@ -10,6 +10,17 @@ published to a registry; pin it with
 
 ### Added
 
+- `WireFrame::fixture_raw`: a test-only door that puts exact bytes on the wire, including an
+  unsigned or malformed frame. It is behind `test-fixtures`, with the other fixture doors of
+  `Verified`; a release binary must not enable `test-fixtures`.
+- `habilis_network::net::{WEBRTC_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, GOSSIP_TRANSPORT_ID}`:
+  the ids of the custom transports, re-exported for every set of features, so a consumer that
+  names the path of a peer reads the engine's values and keeps no copy of its own (#9).
+  `habilis-network-iroh-multihop-transport` re-exports its id from
+  `habilis-network-iroh-transport-util` in place of a second `const`.
+- `LookupSet::any` is public: whether the set names at least one lookup. A set that names none
+  resolves to a loopback-only mesh, and a consumer with another default for that case asks this
+  in place of its own copy of the rule (#9).
 - `SymmetricKey::from_zeroizing`, `TicketSecret::from_zeroizing`, and
   `StreamSecret::from_zeroizing` take a `Zeroizing<[u8; 32]>` whole, so a consumer that holds a
   secret in a wiped buffer (a salt, a token read off a stream) moves it into its type without a
@@ -36,9 +47,10 @@ published to a registry; pin it with
   of its mesh in its mDNS record, and a member that sees that tag asks the other member to be a
   neighbor, at most 8 times per minute. The tag hashes the topic, so two meshes on one LAN do not
   meet. The engine reads the LAN through the mDNS handle of the member endpoint.
-  **Breaking:** `InjectedEndpoint` has a new field, `mdns: Option<MdnsHandle>`, so every
-  `InjectedEndpoint { .. }` literal must change. Pass the handle that the endpoint was built
-  with, or `None` for a node without this arm. `runtime::MdnsHandle` is the type.
+  **Breaking:** `InjectedEndpoint` has a field `mdns: Option<MdnsHandle>`, which
+  `InjectedEndpoint::bind` fills in from the endpoint it binds: `None` for a node without this
+  arm. The fields are private, so `bind` is the only way to make one. `runtime::MdnsHandle` is the
+  type.
 - `SignalAdmission::connection_hook` and the `ConnectionHook` it returns: an
   endpoint hook that records every connection of the endpoint, on any protocol,
   under its peer in the direct-peer slot table, so that the table can prune the
@@ -69,13 +81,12 @@ published to a registry; pin it with
   the relay for lookup alone, the underlay drops a cell unless the connection's
   selected path is not the relay, and a hop that stays on the relay past a
   deadline is not advertised as a link.
-- `net::install_transports`: the one wiring of multi-hop, `WebRTC` and the
-  connection hook onto an endpoint builder. `InjectedEndpoint` carries the
-  `MultihopHandle` and the `SignalAdmission` its endpoint was built with.
-  `check_injected_identity` checks the hop identity, refuses a handle that lets
-  the relay carry cells on a mesh whose list has no `relay`, and refuses an
-  admission table that no hook reports to (`SignalAdmission::is_observed`). A
-  handle on a mesh whose list has no `multihop`, or on a node with no UDP, is
+- `InjectedEndpoint::bind(lookups, secret, alpns, handles, max_direct)`: the one way to make an
+  injected endpoint. It binds the endpoint on `secret` with the transports that `handles` names
+  (multi-hop, `WebRTC` and gossip), and makes the `SignalAdmission` that its connection hook
+  reports to. It refuses a handle that was made from another key, and a table that the caller
+  passes, before anything is bound. The transport wiring and the mesh check are crate-private.
+  A handle on a mesh whose list has no `multihop`, or on a node with no UDP, is
   dropped. `net::multihop_handle_config` gives an embedder the engine's handle
   settings.
 - `EventLoopConfig::with_owner_pid`: a CLI daemon started detached lives for
@@ -166,6 +177,38 @@ published to a registry; pin it with
   rung. Both must run the new build. The mesh id, the topic and the rendezvous id do not change.
   The golden ladders in `crypto.rs` and `mesh/tests.rs` are new, and the old literals stay in
   tests that assert they are no longer derived.
+- **Breaking:** a decoded mesh is locked until its secret is applied. Parsing an id gives a
+  `LockedMesh`, and `LockedMesh::unlock(password)` gives the `Mesh`; it replaces
+  `Mesh::apply_password`, and returns `UnlockError` (`InviteOnly`, `PasswordRequired`,
+  `NoPassword`, `WrongPassword`). Only `Mesh` derives a topic, a rendezvous or a port.
+  `InviteTicket::redeem` returns a `Mesh`. Embedder: `Mesh::new` and `Mesh::from_topic` now
+  return a `Result` and refuse a config that carries a secret, so add `?`.
+- **Breaking:** `Message::signed` is gone. Embedder: sign with `Message::sign(&Identity)`, which
+  returns a `Verified`, and check a received message with `Message::verify()`, or with
+  `Message::verify_canonical()`, which also returns the canonical bytes it checked. Both return
+  `Result<Verified, Message>`. `Message::author_key` and
+  `Message::serialize` are crate-private: read the key with `Verified::key` or `Authored::key`,
+  and the wire bytes with `Verified::serialize`, which returns a `WireFrame`. The senders take a
+  `WireFrame`, not `Bytes`, so only a signed message reaches the wire by type. `Message` has no public
+  `Serialize`. `build_msg_bytes` returns `(WireFrame, Verified)`, and `ShardCache` stores and
+  returns `WireFrame`s, so neither hands out raw `Bytes` for a signed message.
+- **Breaking:** the send, receive and log APIs take a `Verified`: `send_app`, `broadcast_msg`,
+  `deliver`, `MeshDoc::ingest` and the message log. Embedder: an unsigned `Message` does not
+  compile there, so sign it before it is sent.
+- **Breaking:** the app surface takes an `Authored`: `NodeApp::classify`, `InboundApp.message`,
+  `NodeEvent::Presence`, `NodeEvent::StateChanged`, and the external message channel
+  (`broadcast::Sender<Authored>`). Embedder: read the message from the `Authored` view. It has no
+  `Serialize`, `Deserialize` or `DerefMut`, and a `Verified` has no `Deserialize` or
+  `DerefMut`. Both share the message behind an `Arc`, so a copy is a count bump.
+- **Added:** `Proof`, a sealed trait that `Verified` and `Authored` implement (`key`, `with_body`,
+  `authored`), so code can be generic over a proven author.
+  `NodeEvent::Presence` gains `peer` and `synthetic`: read the peer's identity from `peer`, not from
+  `msg`'s proof, which is this node's for a synthetic presence.
+- **Breaking:** `Signed` is renamed to `Signer`.
+- **Breaking:** `InjectedEndpoint` is built only by `InjectedEndpoint::bind`, which checks the
+  keys of the handles before it binds the endpoint with its transports. Its fields are private,
+  so an `InjectedEndpoint { .. }` literal no longer compiles. The transport wiring and the mesh
+  check are crate-private.
 - A secret key no longer passes through a plain array that the engine writes and nobody wipes.
   The stretched password key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the
   root of an invite, the salt and the token of a blob ticket, and the secret of a stream
@@ -280,16 +323,12 @@ published to a registry; pin it with
 - **Breaking, steps for the tools that embed the engine** (agent-share,
   agent-gossip). Both must move in the same release as the engine: a member of
   version 1 and a member of version 2 never share a mesh.
-  1. An injected endpoint (agent-share) must give the engine its admission table.
-     Make a `SignalAdmission`. Build the endpoint with `net::install_transports`
-     and handles that carry this table. Pass the table in
-     `InjectedEndpoint { endpoint, webrtc, multihop, admission }`: on a host,
-     `multihop` is the handle that the endpoint was built with, or `None`. The
-     `admission` field is required on every target, so every
-     `InjectedEndpoint { .. }` literal must change.
-  2. `net::check_injected_identity` has new arguments: the multihop identity, the
-     admission table, and whether the mesh list has `relay`. It refuses a table
-     that `connection_hook` was never called on.
+  1. An injected endpoint (agent-share) is built with
+     `InjectedEndpoint::bind(lookups, secret, alpns, handles, max_direct)`. Pass the
+     `max_direct` ceiling and no table: `bind` makes the admission table, and refuses one that
+     the caller passes. The `InjectedEndpoint { .. }` literal is gone.
+  2. The mesh check of an injected endpoint runs in setup and is crate-private. A handle whose
+     key is not the one `secret` derives is refused by `bind`, before anything is bound.
   3. `TransportHandles` has a new public field, `underlay`. A struct literal must
      name it, or end with `..TransportHandles::default()`.
   4. agent-gossip: multihop is now ON by default. Every native node of a default
@@ -388,8 +427,8 @@ published to a registry; pin it with
   doc sink hold it. `KEY_MIN` and `KEY_MAX` are `DedupKey::MIN` and `DedupKey::MAX`. The digest
   codec packs the same 16 bytes, so the wire does not change.
 - **Breaking:** `Message.pubkey` and `Message.sig`, two strings with an empty-string sentinel, are
-  one field, `Message::signer: Option<Signed>`. `Signed` pairs an `AuthorKey` with an
-  `iroh_base::Signature`, so a message has both or neither. `Message::author_key()` reads the key.
+  one field, `Message::signer: Option<Signer>`. `Signer` pairs an `AuthorKey` with an
+  `iroh_base::Signature`, so a message has both or neither. The key is read with `Verified::key()` or `Authored::key()`.
   `identity::decode_pubkey` and `identity::encode_sig` are removed, and `AuthorKey::public_key`
   replaces them. The per-author maps of the engine, the reassembly store and the doc sink are
   keyed by `AuthorKey`. `ReassemblyStore::ingest` and `forget` read the author key and the shard

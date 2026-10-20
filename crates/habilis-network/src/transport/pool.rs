@@ -415,8 +415,12 @@ impl UnicastPool {
     pub(crate) async fn send_batch_in_background(
         &self,
         eid: EndpointId,
-        frames: Vec<Bytes>,
+        frames: Vec<crate::protocol::message::WireFrame>,
     ) -> bool {
+        let frames: Vec<Bytes> = frames
+            .into_iter()
+            .map(crate::protocol::message::WireFrame::into_bytes)
+            .collect();
         if let Some(conn) = self.warm(eid).await {
             if !payload_allowed_on(&conn, self.inner.relay_transport) {
                 return false;

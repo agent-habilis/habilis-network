@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 77ffddc15e6e354431e7ad0e07b2fa870df8320bb8eb53f028e00a656e521559 # shrinks to seed = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], name = MeshName("a"), config = MeshConfig { lookups: LookupOpts { mdns: false, dht: false, relay_lookup: Disabled }, password: Some([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), issuer_pubkey: None, transport: TransportPolicy { udp: true, webrtc: true, multihop: true, gossip: true, relay_transport: false } }
+cc ce39a8cc8a8c32690d3200e9577e2c48e121731d2dde6b20fc551a259be15e57 # shrinks to seed = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], name = MeshName("a"), config = MeshConfig { lookups: LookupOpts { mdns: false, dht: false, relay_lookup: Disabled }, password: Some([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), issuer_pubkey: None, transport: TransportPolicy { udp: true, webrtc: true, multihop: true, gossip: true, relay_transport: false } }

@@ -1,14 +1,14 @@
 //! The engine-facing half: mailboxes, framing, and the only `send_app` call.
 
+use habilis_network::protocol::message::Authored;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver,
 };
-use habilis_network::protocol::{
-    AppFrameParams, AppTag, AuthorKey, Message as WireMessage, MessageBody, Nickname,
-};
+use habilis_network::protocol::message::Verified;
+use habilis_network::protocol::{AppFrameParams, AppTag, AuthorKey, MessageBody, Nickname};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -118,7 +118,7 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
     /// log and its anti-entropy repair. A frame of this crate is also always
     /// directed, and `send_app` keeps only a broadcast frame of its own.
     /// It lives in the library so a consumer cannot get it wrong.
-    fn classify(&self, message: &WireMessage) -> AppClass {
+    fn classify(&self, message: &Authored) -> AppClass {
         let tag = message.kind.app_tag().map(AppTag::as_str);
         let ours = matches!(tag, Some(ROLLBACK_TAG | LOBBY_TAG));
         AppClass {
@@ -141,11 +141,7 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
         let Some(tag) = frame.message.kind.app_tag().map(AppTag::as_str) else {
             return false;
         };
-        // A frame that reached the app passed the signature gate, so it has a
-        // key. One without it could be addressed to nobody.
-        let Some(pubkey) = frame.message.author_key() else {
-            return false;
-        };
+        let pubkey = frame.message.key();
 
         // Learn the pubkey -> nickname pairing from any frame. The signed
         // pubkey is the identity; the nickname is only how `send_app`
@@ -219,7 +215,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                 let Some(frame) = frame_for(ctx, ROLLBACK_TAG, Some(nickname), payload) else {
                     return false;
                 };
-                let class = self.classify(&frame);
+                let class = self.classify(&frame.authored());
                 send(state, ctx, frame, class).await
             }
             Outbound::Lobby { payload } => {
@@ -238,7 +234,7 @@ impl<T: Config> NodeDriver for RollbackDriver<T> {
                     let Some(frame) = frame_for(ctx, LOBBY_TAG, Some(peer), payload.clone()) else {
                         continue;
                     };
-                    let class = self.classify(&frame);
+                    let class = self.classify(&frame.authored());
                     delivered |= send(state, ctx, frame, class).await;
                 }
                 delivered
@@ -253,7 +249,7 @@ fn frame_for(
     tag: &str,
     to: Option<Nickname>,
     payload: String,
-) -> Option<WireMessage> {
+) -> Option<Verified> {
     let (Ok(tag), Ok(body)) = (AppTag::new(tag), MessageBody::new(payload)) else {
         return None;
     };
@@ -276,7 +272,7 @@ fn frame_for(
 async fn send(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    frame: WireMessage,
+    frame: Verified,
     class: AppClass,
 ) -> bool {
     habilis_network::ops::send_app(state, ctx, frame, class)

@@ -92,7 +92,9 @@ use crate::underlay::{ForwardAcceptor, Forwarder};
 
 /// Transport-type id for the multihop transport, tagging every multihop
 /// [`CustomAddr`](iroh_base::CustomAddr) (see iroh's `TRANSPORTS.md` registry).
-pub const MULTIHOP_TRANSPORT_ID: u64 = 0x6d68; // "mh"
+/// Declared once, in `habilis-network-iroh-transport-util`, next to the rung
+/// table that reads it.
+pub use habilis_network_iroh_transport_util::MULTIHOP_TRANSPORT_ID;
 
 /// The key of the underlay endpoint that belongs to the peer holding `app`.
 ///
@@ -119,7 +121,7 @@ pub const BROWSER_HOP_FACTOR: u32 = 10;
 
 /// How a [`MultihopHandle`] behaves. The mesh policy and the caller decide it;
 /// an endpoint that is injected into a mesh must be built with the values that
-/// mesh's policy implies (see `check_injected_identity` in the engine).
+/// mesh's policy implies (see `InjectedEndpoint::bind` in the engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HandleConfig {
     /// Whether the relay may carry cells (the mesh's `relay_transport`). Off, the

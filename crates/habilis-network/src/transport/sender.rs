@@ -1,8 +1,9 @@
 use std::sync::{Arc, RwLock};
 
-use bytes::Bytes;
 use iroh::EndpointId;
 use iroh_gossip::api::{ApiError, GossipSender};
+
+use crate::protocol::message::WireFrame;
 
 /// The mesh's outbound broadcast plane: a thin wrapper over the gossip sender
 /// that survives a topic resubscribe (`gossip::heal`) via `MeshSender::replace_gossip`,
@@ -33,8 +34,8 @@ impl MeshSender {
     /// call sites are unchanged.
     /// # Errors
     /// The gossip topic has been closed, or the send buffer is full.
-    pub async fn broadcast(&self, message: Bytes) -> Result<(), ApiError> {
-        self.current().broadcast(message).await
+    pub async fn broadcast(&self, message: WireFrame) -> Result<(), ApiError> {
+        self.current().broadcast(message.into_bytes()).await
     }
 
     pub(crate) async fn join_peers(&self, peers: Vec<EndpointId>) -> Result<(), ApiError> {

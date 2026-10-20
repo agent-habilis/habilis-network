@@ -19,7 +19,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::daemon::state_file::StateFile;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
-use crate::protocol::{AuthorKey, MeshId, Message, Nickname, UnixSecs};
+use crate::protocol::message::{Authored, Verified};
+use crate::protocol::{AuthorKey, MeshId, Nickname, UnixSecs};
 use crate::transport::IpcMessage;
 use crate::transport::MeshSender;
 use crate::util::clock::{Instant, millis_saturating};
@@ -549,7 +550,8 @@ async fn advertise_links(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, only_
     // replaces this one, and peers never log what they receive (see
     // `is_loggable`), so a retained copy would be one that nobody else holds and
     // that every digest asks us for again.
-    let vector_msg = Message::new_link_state(ctx.mesh, ctx.author, body).signed(&state.identity);
+    let vector_msg =
+        crate::protocol::Message::new_link_state(ctx.mesh, ctx.author, body).sign(&state.identity);
     gossip::broadcast_msg(ctx.sender, &vector_msg).await;
     // The vector that this node just sent is what a peer that turned our offer away lacked: the
     // wait that its turn-aways earned ends, and the underlay offers again at once. One offer per
@@ -638,7 +640,7 @@ struct EventLoop<A: NodeDriver> {
     external_quit_rx: Option<mpsc::Receiver<()>>,
     /// The in-process typed session channel (in-process: library API or MCP); `None` on the CLI.
     external_req_rx: Option<mpsc::Receiver<A::Session>>,
-    external_msg_tx: Option<broadcast::Sender<Message>>,
+    external_msg_tx: Option<broadcast::Sender<Authored>>,
     quit_rx: mpsc::Receiver<()>,
     exit_on_quit: bool,
     /// The application's localhost HTTP binding request channel; `None` off.
@@ -657,7 +659,7 @@ struct EventLoop<A: NodeDriver> {
     /// like `direct_rx`.
     path_rx: mpsc::UnboundedReceiver<crate::transport::probe::PathChange>,
     /// Flushed frames whose dial failed (`gossip::requeue_failed`). Never closes, like `direct_rx`.
-    flush_failed_rx: mpsc::UnboundedReceiver<(Message, bytes::Bytes)>,
+    flush_failed_rx: mpsc::UnboundedReceiver<(Verified, crate::protocol::message::WireFrame)>,
     /// Closed with the rendezvous as the loop ends.
     owned: OwnedEndpoints,
 }
@@ -1310,7 +1312,7 @@ pub(super) struct CtxParts<'a> {
     pub(super) our_pubkey: AuthorKey,
     pub(super) max_peers: usize,
     pub(super) rendezvous_id: EndpointId,
-    pub(super) external_msg_tx: Option<&'a broadcast::Sender<Message>>,
+    pub(super) external_msg_tx: Option<&'a broadcast::Sender<Authored>>,
     pub(super) sink: &'a dyn NodeSink,
 }
 

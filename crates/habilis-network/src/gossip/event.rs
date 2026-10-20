@@ -1,5 +1,6 @@
 use crate::protocol::mesh::MeshName;
-use crate::protocol::{Channel, MeshId, Message, Nickname};
+use crate::protocol::message::Authored;
+use crate::protocol::{AuthorKey, Channel, MeshId, Nickname};
 
 /// A generic surfacing the engine emits — the chat-agnostic subset of the app's
 /// `OutputEvent`. The app's [`NodeSink`] impl maps each variant onto the
@@ -30,8 +31,17 @@ pub enum NodeEvent {
     PeerReturn {
         nickname: Nickname,
     },
+    /// A peer's arrival, departure, or announcement. `msg` is the proof of the presence
+    /// frame, and for a `synthetic` presence it is the proof this node minted (its own
+    /// signature, the peer's nickname). `peer` is the key of the peer the presence is
+    /// about: the signer of the frame that triggered it. It is never read from `msg`, so
+    /// a synthetic presence cannot name the peer by a key it does not hold.
     Presence {
-        msg: Box<Message>,
+        msg: Box<Authored>,
+        peer: AuthorKey,
+        /// `true` when this node minted the presence for a peer's arrival, `false` when
+        /// it is the peer's own frame.
+        synthetic: bool,
     },
     PingReport {
         /// Each responder and its round-trip time in milliseconds, sorted by
@@ -43,7 +53,7 @@ pub enum NodeEvent {
     },
     StateChanged {
         channel: Channel,
-        event: Box<Message>,
+        event: Box<Authored>,
         document: serde_json::Value,
         is_self: bool,
     },

@@ -18,7 +18,7 @@ use iroh_base::{PublicKey, Signature};
 use crate::base58check::{self, take_array};
 use crate::crypto::{self, Password, SymmetricKey};
 use crate::identity;
-use crate::mesh::Mesh;
+use crate::mesh::{LockedMesh, Mesh};
 use crate::seal;
 use habilis_network_util::clock::UnixSecs;
 use zeroize::Zeroizing;
@@ -199,14 +199,14 @@ impl InviteTicket {
     /// A malformed embedded hash, a missing/wrong password, an invalid issuer
     /// signature (not creator-minted or tampered), or an expired invite.
     pub fn redeem(&self, password: Option<&Password>) -> Result<Mesh> {
-        let mut mesh: Mesh = self
+        let locked: LockedMesh = self
             .mesh_hash
             .parse()
             .context("invite carries an invalid mesh id")?;
-        let issuer_pubkey = *mesh
+        let issuer_pubkey = *locked
             .issuer_pubkey()
             .context("invite is for a non-invite-only mesh")?;
-        let root = self.unwrap_root(&mesh, password)?;
+        let root = self.unwrap_root(&locked, password)?;
         let pubkey = PublicKey::from_bytes(&issuer_pubkey).context("invalid issuer public key")?;
         let signature = Signature::from_bytes(&self.sig);
         if !identity::verify(
@@ -219,11 +219,10 @@ impl InviteTicket {
         if self.expiry != UnixSecs::ZERO && UnixSecs::now() >= self.expiry {
             bail!("this invite has expired");
         }
-        mesh.apply_invite(root);
-        Ok(mesh)
+        Ok(locked.redeem_with(root))
     }
 
-    fn unwrap_root(&self, mesh: &Mesh, password: Option<&Password>) -> Result<SymmetricKey> {
+    fn unwrap_root(&self, mesh: &LockedMesh, password: Option<&Password>) -> Result<SymmetricKey> {
         let raw = match (self.password, password) {
             (true, Some(password)) => {
                 let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
@@ -281,7 +280,8 @@ mod tests {
             Seed::from_bytes([1u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
-        );
+        )
+        .unwrap();
         mesh.set_invite();
         assert!(
             mesh.issuer_secret().is_some(),
@@ -413,7 +413,8 @@ mod tests {
             Seed::from_bytes([2u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
-        );
+        )
+        .unwrap();
         assert!(mint(&plain, Some(Duration::from_hours(1)), None).is_err());
     }
 
@@ -531,7 +532,8 @@ mod tests {
             Seed::from_bytes([3u8; 32]),
             MeshName::new("t").unwrap(),
             MeshConfig::loopback(),
-        );
+        )
+        .unwrap();
         assert!(InviteTicket::decode(&plain.to_string()).is_err());
     }
 
