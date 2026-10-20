@@ -248,7 +248,9 @@ pub fn handle_owner_is(handle: BorrowedHandle<'_>, expected: &Sid) -> bool {
 /// The DACL of the kernel object behind `handle`, as SDDL text such as
 /// `D:P(A;;FA;;;S-1-5-21-…)`. The access mask is the specific one: a generic
 /// right such as `GA` reads back as the right of the object type, `FA` for a
-/// pipe. For a check or a diagnosis of the IPC pipe.
+/// pipe. A well-known SID reads back as its SDDL alias, such as `LA` for the
+/// built-in Administrator, so compare a trustee with [`Sid::from_text`], not as
+/// text. For a check or a diagnosis of the IPC pipe.
 ///
 /// # Errors
 /// The handle has no `READ_CONTROL`, or the conversion fails.
@@ -461,6 +463,9 @@ mod tests {
         let system = Sid::from_text("S-1-5-18").expect("the SYSTEM SID");
         assert_ne!(user, system);
         assert!(Sid::from_text("not a sid").is_err());
+        // An SDDL alias parses too: `LA` is the built-in Administrator, RID 500.
+        let admin = Sid::from_text("LA").expect("the LA alias");
+        assert!(admin.to_text().expect("text").ends_with("-500"));
     }
 
     #[test]
@@ -485,10 +490,15 @@ mod tests {
         let system = Sid::from_text("S-1-5-18").expect("the SYSTEM SID");
         assert!(handle_owner_is(server.as_handle(), &user));
         assert!(!handle_owner_is(server.as_handle(), &system));
-        // The DACL has one entry, all access for the user.
+        // The DACL has one entry, all access for the user. The trustee can read
+        // back as an alias (`LA` when the test runs as the built-in
+        // Administrator), so the test compares the SID.
         let dacl = dacl_text(server.as_handle()).expect("the DACL");
-        let user_text = user.to_text().expect("text");
-        assert_eq!(dacl, format!("D:P(A;;FA;;;{user_text})"));
+        let trustee = dacl
+            .strip_prefix("D:P(A;;FA;;;")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("one entry with all access: {dacl}"));
+        assert_eq!(Sid::from_text(trustee).expect("a SID or an alias"), user);
     }
 
     #[test]
@@ -583,6 +593,27 @@ mod tests {
             "{error}"
         );
         assert!(!super::is_pipe_busy(&error));
+    }
+
+    // A well-known SID reads back from `dacl_text` as its SDDL alias, on every
+    // account: SYSTEM is `SY`. So a test compares a trustee as a `Sid`, never as
+    // text, and the alias parses back to the SID. The server handle reads the
+    // DACL, though the DACL leaves the user out, because the owner holds
+    // READ_CONTROL on its own object.
+    #[test]
+    fn a_well_known_trustee_reads_back_as_its_alias_and_parses_to_its_sid() {
+        let user = current_user_sid()
+            .expect("the user SID")
+            .to_text()
+            .expect("text");
+        let server = serve_pipe_with(
+            &pipe_name("alias"),
+            &wide_nul(&format!("O:{user}D:P(A;;GA;;;S-1-5-18)")),
+        );
+        let dacl = dacl_text(server.as_handle()).expect("the DACL");
+        assert_eq!(dacl, "D:P(A;;FA;;;SY)");
+        let system = Sid::from_text("S-1-5-18").expect("the SYSTEM SID");
+        assert_eq!(Sid::from_text("SY").expect("the SY alias"), system);
     }
 
     #[test]

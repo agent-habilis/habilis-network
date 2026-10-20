@@ -1009,18 +1009,24 @@ mod tests {
         assert_ne!(name, other_name);
         drop(other);
 
-        // The DACL of a client handle of the pipe: one entry, the user.
+        // The DACL of a client handle of the pipe: one entry, the user. The
+        // trustee can read back as an alias (`LA` when the test runs as the
+        // built-in Administrator), so the test compares the SID.
         let client =
             crate::util::win_security::open_pipe_identification(name.as_str()).expect("open");
-        let user = crate::util::win_security::current_user_sid()
-            .unwrap()
-            .to_text()
-            .unwrap();
+        let user = crate::util::win_security::current_user_sid().unwrap();
         let dacl = crate::util::win_security::dacl_text(std::os::windows::io::AsHandle::as_handle(
             &client,
         ))
         .expect("the DACL");
-        assert_eq!(dacl, format!("D:P(A;;FA;;;{user})"));
+        let trustee = dacl
+            .strip_prefix("D:P(A;;FA;;;")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("one entry with all access: {dacl}"));
+        assert_eq!(
+            crate::util::win_security::Sid::from_text(trustee).expect("a SID or an alias"),
+            user
+        );
         drop(bound);
     }
 
