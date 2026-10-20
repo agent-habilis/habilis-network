@@ -14,8 +14,9 @@ use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::EventLoopState;
 use crate::gossip::app::NodeApp;
 use crate::gossip::event::NodeEvent;
+use crate::protocol::identity::Identity;
 use crate::protocol::message::Verified;
-use crate::protocol::{Message, MessageKind, PresenceSubtype};
+use crate::protocol::{MeshId, Message, MessageKind, PresenceSubtype};
 
 use crate::gossip;
 use crate::util::clock::Instant;
@@ -110,18 +111,26 @@ pub(crate) fn observe(
         && !matches!(message.kind, MessageKind::Presence { .. })
     {
         state.surfaced.insert(message.author.clone());
-        // Engine-minted: the arrival is a fact this node surfaces, so this node signs
-        // the presence that reports it. The nickname stays the peer's.
-        let arrival = Message::new_joined(ctx.mesh, &message.author).sign(ctx.identity);
-        ctx.sink.emit(NodeEvent::Presence {
-            msg: Box::new(arrival.authored()),
-        });
+        ctx.sink
+            .emit(synthetic_arrival(ctx.mesh, ctx.identity, message));
         tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined");
     }
 
     Observed {
         surfaceable,
         update,
+    }
+}
+
+/// The presence this node surfaces for a peer's first arrival. This node signs the
+/// `joined` that reports it, so the proof names this node, and the nickname stays the
+/// peer's. `peer` is the key of the frame that triggered it, which is the peer's own.
+fn synthetic_arrival(mesh: &MeshId, identity: &Identity, triggering: &Verified) -> NodeEvent {
+    let arrival = Message::new_joined(mesh, &triggering.author).sign(identity);
+    NodeEvent::Presence {
+        msg: Box::new(arrival.authored()),
+        peer: triggering.key(),
+        synthetic: true,
     }
 }
 
@@ -177,6 +186,8 @@ pub(crate) async fn handle_presence(
         if state.surfaced.remove(message.author.as_str()) {
             ctx.sink.emit(NodeEvent::Presence {
                 msg: Box::new(message.authored()),
+                peer: message.key(),
+                synthetic: false,
             });
             tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer left");
         }
@@ -215,9 +226,37 @@ pub(crate) async fn handle_presence(
                 state.surfaced.insert(message.author.clone());
                 ctx.sink.emit(NodeEvent::Presence {
                     msg: Box::new(message.authored()),
+                    peer: message.key(),
+                    synthetic: false,
                 });
                 tracing::info!(target: "habilis_network::lifecycle", nickname = %message.author, "peer joined (announced)");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Identity, MeshId, Message, NodeEvent, synthetic_arrival};
+    use crate::testing::nick;
+
+    #[test]
+    fn a_synthetic_presence_names_the_peer_apart_from_its_signer() {
+        let mesh = MeshId::from("test");
+        let node = Identity::generate();
+        let peer = Identity::generate();
+        let joined = Message::new_joined(&mesh, &nick("bob")).sign(&peer);
+        let NodeEvent::Presence {
+            msg,
+            peer: key,
+            synthetic,
+        } = synthetic_arrival(&mesh, &node, &joined)
+        else {
+            panic!("a synthetic arrival is a presence");
+        };
+        assert!(synthetic, "this node minted it");
+        assert_eq!(key, peer.author_key(), "the peer is the triggering signer");
+        assert_eq!(msg.key(), node.author_key(), "the proof is this node's");
+        assert_eq!(msg.author.as_str(), "bob", "the nickname stays the peer's");
     }
 }

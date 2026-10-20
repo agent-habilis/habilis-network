@@ -64,7 +64,7 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg } = event {
+        if let NodeEvent::Presence { msg, .. } = event {
             self.peers
                 .lock()
                 .expect("no poison")

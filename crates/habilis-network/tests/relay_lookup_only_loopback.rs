@@ -61,7 +61,7 @@ struct Joined {
 
 impl NodeSink for Joined {
     fn emit(&self, event: NodeEvent) {
-        if let NodeEvent::Presence { msg } = event
+        if let NodeEvent::Presence { msg, .. } = event
             && let MessageKind::Presence {
                 subtype: PresenceSubtype::Joined,
             } = msg.kind
