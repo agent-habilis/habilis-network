@@ -503,9 +503,8 @@ pub(crate) async fn ingest(
     // suppressing the genuine signed copy. Relayed and anti-entropy copies keep their original
     // author's signature, so they verify here too. Canonical bytes are computed once and reused for
     // the verify, the content hash at the log site, and the shard/retain steps below.
-    let canonical = message.canonical_bytes();
-    let verified = match message.verify_with(&canonical) {
-        Ok(verified) => verified,
+    let (verified, canonical) = match message.verify_canonical() {
+        Ok(checked) => checked,
         Err(message) => {
             tracing::warn!(target: "habilis_network::gossip", author = %message.author, "dropping message with missing/invalid signature");
             return;

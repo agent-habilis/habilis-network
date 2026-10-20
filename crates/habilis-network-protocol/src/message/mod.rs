@@ -1039,22 +1039,48 @@ impl Message {
         reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
     )]
     pub fn verify(self) -> Result<Verified, Message> {
-        let canonical = self.canonical_bytes();
-        self.verify_with(&canonical)
+        self.verify_canonical().map(|(verified, _)| verified)
     }
 
-    /// [`verify`](Self::verify) against canonical bytes the caller already computed, so the
-    /// receive path serializes each inbound frame once. `canonical` MUST be
-    /// [`canonical_bytes`](Self::canonical_bytes) of this message.
+    /// [`verify`](Self::verify), and also the canonical bytes that were checked, so the receive path
+    /// serializes each inbound frame once. The bytes are computed here from this message, never taken
+    /// from the caller, so they are always the bytes the signature covers.
     ///
     /// # Errors
     ///
-    /// Returns the message itself when [`verify_signature_with`](Self::verify_signature_with) fails.
+    /// Returns the message itself when its signature does not verify.
+    ///
+    /// Outside the crate the canonical bytes cannot be supplied by the caller: `verify_with` is
+    /// crate-private, so an edited clone cannot be checked against another message's bytes.
+    ///
+    /// ```compile_fail,E0624
+    /// use habilis_network_protocol::message::Message;
+    ///
+    /// const SIGNED: &str = r#"{"v":"12.0","id":"00000000-0000-0000-0000-000000000001","type":"app","tag":"app_msg","mesh":"H5G8iUJfx5UprXFmpSGLTLpjKU5AGhjQd4pAacY3NSZ6wy72P9wvAdsu7kgwG6","author":"alice-bot","ts":1700000000,"body":"hello, golden","pubkey":"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c","sig":"eeea2aca75b3ef10bd592fe6a835e147def33b203c0bfcf26253edb7b7d06a450e383d6fdd3fb0ef153969d16df0e6d4b97f1a7ca434106378d8f772814ad50e","seq":3,"prev":"1111111111111111111111111111111111111111111111111111111111111111","parents":["2222222222222222222222222222222222222222222222222222222222222222"],"ext":{}}"#;
+    ///
+    /// let message = Message::parse(SIGNED.as_bytes()).unwrap();
+    /// let canonical = message.canonical_bytes();
+    /// let _ = message.verify_with(&canonical);
+    /// ```
     #[expect(
         clippy::result_large_err,
         reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
     )]
-    pub fn verify_with(self, canonical: &[u8]) -> Result<Verified, Message> {
+    pub fn verify_canonical(self) -> Result<(Verified, Vec<u8>), Message> {
+        let canonical = self.canonical_bytes();
+        match self.verify_with(&canonical) {
+            Ok(verified) => Ok((verified, canonical)),
+            Err(message) => Err(message),
+        }
+    }
+
+    /// The check behind [`verify_canonical`](Self::verify_canonical), against canonical bytes that
+    /// the caller computed. Crate-private: outside the crate the bytes must come from the message.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error is the message itself, handed back unchanged for the caller to drop or keep"
+    )]
+    pub(crate) fn verify_with(self, canonical: &[u8]) -> Result<Verified, Message> {
         let Some(signed) = self.signer else {
             return Err(self);
         };

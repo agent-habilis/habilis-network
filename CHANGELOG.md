@@ -165,8 +165,9 @@ published to a registry; pin it with
   `InviteTicket::redeem` returns a `Mesh`. Embedder: `Mesh::new` and `Mesh::from_topic` now
   return a `Result` and refuse a config that carries a secret, so add `?`.
 - **Breaking:** `Message::signed` is gone. Embedder: sign with `Message::sign(&Identity)`, which
-  returns a `Verified`, and check a received message with `Message::verify()` or
-  `verify_with(canonical)`, which return `Result<Verified, Message>`. `Message::author_key` and
+  returns a `Verified`, and check a received message with `Message::verify()`, or with
+  `Message::verify_canonical()`, which also returns the canonical bytes it checked. Both return
+  `Result<Verified, Message>`. `Message::author_key` and
   `Message::serialize` are crate-private: read the key with `Verified::key` or `Authored::key`,
   and the wire bytes with `Verified::serialize`.
 - **Breaking:** the send, receive and log APIs take a `Verified`: `send_app`, `broadcast_msg`,

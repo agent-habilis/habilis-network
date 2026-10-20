@@ -892,6 +892,24 @@ mod verified {
     }
 
     #[test]
+    fn verify_canonical_refuses_an_edited_clone() {
+        let original = msg("hello").sign(&Identity::generate()).into_message();
+        let (_, canonical) = original
+            .clone()
+            .verify_canonical()
+            .expect("the original verifies");
+        assert_eq!(canonical, original.canonical_bytes());
+
+        let mut edited = original.clone();
+        edited.body = "edited".into();
+        assert!(
+            edited.clone().verify_canonical().is_err(),
+            "an edited clone does not verify, so no proof is made over its bytes"
+        );
+        assert_ne!(edited.canonical_bytes(), canonical);
+    }
+
+    #[test]
     fn verified_serializes_to_the_same_bytes_as_its_message() {
         let parsed = Message::parse(SIGNED_WIRE.as_bytes()).expect("the signed literal parses");
         let verified = parsed.verify().expect("the golden signature verifies");
