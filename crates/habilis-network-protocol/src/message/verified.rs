@@ -293,7 +293,7 @@ impl Proof for Authored {
 }
 
 /// The JSON record of a verified message, for the places that echo or compare it: the IPC echo and
-/// the tests. It skips the `MAX_MESSAGE_SIZE` gate of [`Message::serialize`], and it is never a wire
+/// the tests. It skips the `MAX_MESSAGE_SIZE` gate of `Message::serialize`, and it is never a wire
 /// door: the wire takes a [`WireFrame`](super::WireFrame) from [`Verified::serialize`].
 impl Serialize for Verified {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
