@@ -339,11 +339,11 @@ pub fn parse_pkarr_urls(texts: &[String]) -> Result<Option<Vec<Url>>> {
     Ok(Some(urls))
 }
 
-/// The rules a pkarr list must meet: not empty, at most [`MAX_PKARR_URLS`]
+/// The rules a pkarr list must meet: not empty, at most `MAX_PKARR_URLS`
 /// entries, no entry twice, and each one a bare base iroh can append a key
 /// to: `https` (or `http` on a loopback host), no credentials, query or
 /// fragment, no trailing slash on a path, and at most
-/// [`MAX_RELAY_URL_BYTES`] long.
+/// `MAX_RELAY_URL_BYTES` long.
 ///
 /// # Errors
 /// The list breaks one of the rules above.
