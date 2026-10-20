@@ -354,8 +354,6 @@ async fn broadcast(sender: &MeshSender, bytes: WireFrame) -> Result<()> {
 mod tests {
     use crate::testing::{endpoint_id, fresh_state, nick};
 
-    use bytes::Bytes;
-
     use iroh::EndpointId;
 
     use super::{Lane, Route, lane_for, note_held, resolve, route};
@@ -1465,19 +1463,23 @@ mod tests {
             crate::transport::path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
             "loopback selects a direct path"
         );
-        let batch = |tag: &str| {
+        // Two batches of signed frames, each frame with its own id, so the reader sees four distinct
+        // frames in whatever order the batches land.
+        let batch = || -> Vec<WireFrame> {
             (0..2)
-                .map(|step| Bytes::from(format!("{tag}{step}")))
-                .collect::<Vec<_>>()
+                .map(|_| directed_msg().serialize().expect("serialize"))
+                .collect()
         };
+        let state_batch = batch();
+        let meta_batch = batch();
 
         let first = state
             .unicast_pool
-            .send_batch_in_background(bob, batch("state"))
+            .send_batch_in_background(bob, state_batch.clone())
             .await;
         let second = state
             .unicast_pool
-            .send_batch_in_background(bob, batch("meta"))
+            .send_batch_in_background(bob, meta_batch.clone())
             .await;
 
         assert!(first, "the first batch starts");
@@ -1488,15 +1490,13 @@ mod tests {
                 .expect("bob reads both batches in time")
                 .expect("reader task");
         got.sort();
-        assert_eq!(
-            got,
-            vec![
-                b"meta0".to_vec(),
-                b"meta1".to_vec(),
-                b"state0".to_vec(),
-                b"state1".to_vec()
-            ]
-        );
+        let mut expected: Vec<Vec<u8>> = state_batch
+            .iter()
+            .chain(&meta_batch)
+            .map(|frame| frame.as_bytes().to_vec())
+            .collect();
+        expected.sort();
+        assert_eq!(got, expected);
     }
 
     /// Bob's side of a loopback link: the next `count` frames he reads.

@@ -276,7 +276,7 @@ fn build_msg_bytes_message() {
     .unwrap();
     assert!(!built.id.as_str().is_empty());
     assert!(!bytes.is_empty());
-    let msg = Message::parse(&bytes).unwrap();
+    let msg = Message::parse(bytes.as_bytes()).unwrap();
     assert_eq!(msg.body.as_str(), "hello");
     assert_eq!(msg.author, alice);
 }

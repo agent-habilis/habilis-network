@@ -828,7 +828,7 @@ async fn ask(
     };
     if !state
         .unicast_pool
-        .send_batch_in_background(eid, vec![bytes.into_bytes()])
+        .send_batch_in_background(eid, vec![bytes])
         .await
     {
         return false;
@@ -922,15 +922,7 @@ pub(crate) async fn handle_state_digest(
         Some(eid)
             if state
                 .unicast_pool
-                .send_batch_in_background(
-                    eid,
-                    frames
-                        .iter()
-                        .cloned()
-                        .chain(our_heads)
-                        .map(WireFrame::into_bytes)
-                        .collect(),
-                )
+                .send_batch_in_background(eid, frames.iter().cloned().chain(our_heads).collect())
                 .await =>
         {
             None

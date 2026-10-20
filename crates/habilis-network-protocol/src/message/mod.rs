@@ -9,8 +9,6 @@
 use std::fmt;
 
 use anyhow::{Context, Result, bail};
-#[cfg(any(test, feature = "test-fixtures"))]
-use bytes::Bytes;
 use iroh_base::Signature;
 use serde::{Deserialize, Serialize};
 
@@ -1183,7 +1181,7 @@ pub struct BuildMsgParams<'a> {
 pub fn build_msg_bytes(
     params: BuildMsgParams<'_>,
     identity: &Identity,
-) -> Result<(Bytes, Verified)> {
+) -> Result<(WireFrame, Verified)> {
     let msg = Message::new_app(
         params.mesh,
         params.author,
@@ -1198,7 +1196,7 @@ pub fn build_msg_bytes(
     .with_parents(params.chain.parents)
     .sign(identity);
     let raw = msg.serialize()?;
-    Ok((raw.into_bytes(), msg))
+    Ok((raw, msg))
 }
 
 #[cfg(any(test, feature = "test-fixtures"))]
@@ -1247,7 +1245,7 @@ pub const RESEND_TRAILER_LEN: usize = 1 + RESEND_NONCE_LEN;
 /// the signature, so the receiver checks the frame as it checks any other, and a reader that
 /// does not know the trailer fails to parse the payload (closed, not silently).
 #[must_use]
-pub fn wire_with_resend_nonce(frame: &[u8], nonce: u64) -> Vec<u8> {
+pub(crate) fn wire_with_resend_nonce(frame: &[u8], nonce: u64) -> Vec<u8> {
     let mut wire = Vec::with_capacity(frame.len() + RESEND_TRAILER_LEN);
     wire.extend_from_slice(frame);
     wire.push(RESEND_TRAILER_MARK);

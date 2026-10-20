@@ -2,6 +2,7 @@
 //!
 //! Folded in from its own crate for the same reason as [`crate::directory`].
 
+use crate::message::WireFrame;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::message::{Authored, Verified};
@@ -341,20 +342,20 @@ pub struct ShardCache {
 #[derive(Debug)]
 struct CachedGroup {
     group: ShardGroup,
-    frames: Vec<bytes::Bytes>,
+    frames: Vec<WireFrame>,
 }
 
 impl ShardCache {
     /// Cache one just-sent group's frames (indexed by shard `idx`), evicting
     /// the oldest groups past the byte budget. The newest group always stays.
-    pub fn insert(&mut self, group: ShardGroup, frames: Vec<bytes::Bytes>) {
-        self.bytes += frames.iter().map(bytes::Bytes::len).sum::<usize>();
+    pub fn insert(&mut self, group: ShardGroup, frames: Vec<WireFrame>) {
+        self.bytes += frames.iter().map(WireFrame::len).sum::<usize>();
         self.groups.push_back(CachedGroup { group, frames });
         while self.groups.len() > 1 && self.bytes > SHARD_CACHE_BUDGET_BYTES {
             if let Some(evicted) = self.groups.pop_front() {
                 self.bytes = self
                     .bytes
-                    .saturating_sub(evicted.frames.iter().map(bytes::Bytes::len).sum::<usize>());
+                    .saturating_sub(evicted.frames.iter().map(WireFrame::len).sum::<usize>());
             }
         }
     }
@@ -362,7 +363,7 @@ impl ShardCache {
     /// The cached frames for `group` at the requested indexes (missing or
     /// out-of-range indexes are skipped; empty when the group was evicted).
     #[must_use]
-    pub fn frames(&self, group: &ShardGroup, idxs: &[u32]) -> Vec<bytes::Bytes> {
+    pub fn frames(&self, group: &ShardGroup, idxs: &[u32]) -> Vec<WireFrame> {
         let Some(cached) = self.groups.iter().find(|entry| entry.group == *group) else {
             return Vec::new();
         };
@@ -1074,11 +1075,13 @@ mod tests {
         use habilis_network_util::consts::SHARD_CACHE_BUDGET_BYTES;
         let mut cache = super::ShardCache::default();
         let first = group("00000000-0000-4000-8000-0000000000c1");
-        let frame = |tag: u8, len: usize| bytes::Bytes::from(vec![tag; len]);
+        let frame = |tag: u8, len: usize| {
+            crate::message::WireFrame::new(bytes::Bytes::from(vec![tag; len]))
+        };
         cache.insert(first.clone(), vec![frame(1, 10), frame(2, 10)]);
         let served = cache.frames(&first, &[1, 7]);
         assert_eq!(served.len(), 1, "out-of-range idx skipped");
-        assert_eq!(served[0][0], 2);
+        assert_eq!(served[0].as_bytes()[0], 2);
 
         // A budget-filling newcomer evicts the oldest group whole.
         let second = group("00000000-0000-4000-8000-0000000000c2");

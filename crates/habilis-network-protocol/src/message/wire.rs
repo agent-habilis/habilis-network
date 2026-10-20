@@ -37,14 +37,6 @@ impl WireFrame {
         Self(bytes)
     }
 
-    /// The frame to relay for a message a node verified off the wire: the bytes it received, kept
-    /// exactly, when they parse to that same signed message. `None` when they do not.
-    #[must_use]
-    pub fn relayed(received: Bytes, verified: &super::Verified) -> Option<WireFrame> {
-        let (parsed, _) = super::Message::parse_wire(&received).ok()?;
-        (parsed.canonical_bytes() == verified.canonical_bytes()).then_some(WireFrame(received))
-    }
-
     /// The number of bytes on the wire.
     #[must_use]
     pub fn len(&self) -> usize {

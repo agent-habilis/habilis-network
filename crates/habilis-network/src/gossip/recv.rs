@@ -639,17 +639,9 @@ pub(crate) async fn ingest(
         | MessageKind::Meta
         | MessageKind::MetaDigest
         | MessageKind::LinkState => {
-            if dispatch_infra(
-                &verified,
-                content,
-                surfaceable,
-                &observed.update,
-                state,
-                app,
-                ctx,
-            )
-            .await
-            .is_break()
+            if dispatch_infra(&verified, surfaceable, &observed.update, state, app, ctx)
+                .await
+                .is_break()
             {
                 return;
             }
@@ -677,7 +669,6 @@ pub(crate) async fn ingest(
 /// them was the app seam the gate exists for.
 async fn dispatch_infra(
     message: &Verified,
-    content: Bytes,
     surfaceable: bool,
     update: &lifecycle::membership::MembershipUpdate,
     state: &mut EventLoopState,
@@ -686,7 +677,7 @@ async fn dispatch_infra(
 ) -> ControlFlow<()> {
     match &message.kind {
         MessageKind::PeerInfo => {
-            handle_peer_info(message, content, state, ctx).await;
+            handle_peer_info(message, state, ctx).await;
             return ControlFlow::Break(());
         }
         MessageKind::Digest => {
@@ -1461,12 +1452,7 @@ fn peer_info_graft_below(max_peers: usize, members: usize) -> usize {
     }
 }
 
-async fn handle_peer_info(
-    message: &Verified,
-    content: Bytes,
-    state: &mut EventLoopState,
-    ctx: &HandlerCtx<'_>,
-) {
+async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(message.body.as_str()) else {
         return;
     };
@@ -1623,7 +1609,7 @@ async fn handle_peer_info(
         } else {
             tracing::debug!(target: "habilis_network::gossip", endpoint_id = %peer_id, "graft held until a direct path is proven");
         }
-        if let Some(frame) = WireFrame::relayed(content, message) {
+        if let Ok(frame) = message.serialize() {
             let _ = ctx.sender.broadcast(frame).await;
         }
         state.last_sent_at = Instant::now();
@@ -2076,7 +2062,6 @@ mod evicted_orphan_tests {
 
 #[cfg(test)]
 mod first_contact_tests {
-    use bytes::Bytes;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
     use iroh_gossip::net::Gossip;
@@ -2624,13 +2609,7 @@ mod first_contact_tests {
         let bobs_proof = sign(&bob_endpoint_key, &node.mesh, &bob_signer);
 
         let mut state = fresh_state();
-        super::handle_peer_info(
-            &peer_info(Some(&bobs_proof), &stranger),
-            Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(Some(&bobs_proof), &stranger), &mut state, &ctx).await;
         let stranger_signer =
             AuthorKey::from_hex(&encode_pubkey(&stranger.public())).expect("a 32-byte key");
         assert_eq!(
@@ -2639,16 +2618,10 @@ mod first_contact_tests {
             "bob's proof, another signer"
         );
 
-        super::handle_peer_info(&peer_info(None, &bob), Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info(None, &bob), &mut state, &ctx).await;
         assert_eq!(state.proven_endpoints.get(&bob_signer), None, "no proof");
 
-        super::handle_peer_info(
-            &peer_info(Some(&bobs_proof), &bob),
-            Bytes::new(),
-            &mut state,
-            &ctx,
-        )
-        .await;
+        super::handle_peer_info(&peer_info(Some(&bobs_proof), &bob), &mut state, &ctx).await;
         assert_eq!(
             state.proven_endpoints.get(&bob_signer),
             Some(bob_endpoint),
@@ -2709,7 +2682,7 @@ mod first_contact_tests {
         let address_body = MessageBody::new(address.to_string()).expect("an address body");
         let peer_info = Message::new_peer_info(&node.mesh, &nick("alice-aa"), address_body)
             .sign(&Identity::generate());
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut state, &ctx).await;
         assert_eq!(
             ours.topology_view().edges.len(),
             1,
@@ -2729,7 +2702,7 @@ mod first_contact_tests {
         let peer = iroh::SecretKey::generate().public();
         let first = iroh::EndpointAddr::new(peer).with_ip_addr(test_ip());
 
-        super::handle_peer_info(&peer_info(&node, &first), Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info(&node, &first), &mut state, &ctx).await;
 
         assert!(
             eventually(|| async { node.endpoint.remote_info(peer).await.is_some() }).await,
@@ -2762,11 +2735,11 @@ mod first_contact_tests {
             .add_endpoint_addr(first.clone())
             .await
             .expect("the endpoint takes the first address");
-        super::handle_peer_info(&peer_info(&node, &first), Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info(&node, &first), &mut state, &ctx).await;
         assert!(!knows_relay().await, "no relay yet");
 
         let later = first.with_relay_url(relay.clone());
-        super::handle_peer_info(&peer_info(&node, &later), Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info(&node, &later), &mut state, &ctx).await;
 
         assert!(
             eventually(knows_relay).await,
@@ -2832,18 +2805,18 @@ mod first_contact_tests {
         let peer_info =
             Message::new_peer_info(&node.mesh, &nick("lower"), body).sign(&Identity::generate());
 
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut state, &ctx).await;
         assert!(
             !state.direct.contains_key(&lower),
             "the first sighting defers"
         );
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut state, &ctx).await;
         assert!(
             !state.direct.contains_key(&lower),
             "the copy right after must not dial"
         );
         state.relink.clear();
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut state, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut state, &ctx).await;
         assert!(
             state.direct.contains_key(&lower),
             "once the cooldown ends, this side dials after all"
@@ -2898,7 +2871,7 @@ mod first_contact_tests {
         let mut crowded = fresh_state();
         crowd(&mut crowded, max_peers + 2);
         fill_view(&mut crowded, max_peers - 1);
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut crowded, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut crowded, &ctx).await;
         assert!(
             !crowded.direct.contains_key(&newcomer),
             "a mesh larger than G + 1 leaves the last slot to the fill tick"
@@ -2908,7 +2881,7 @@ mod first_contact_tests {
         let mut small = fresh_state();
         crowd(&mut small, 3);
         fill_view(&mut small, 2);
-        super::handle_peer_info(&peer_info, Bytes::new(), &mut small, &ctx).await;
+        super::handle_peer_info(&peer_info, &mut small, &ctx).await;
         assert!(
             small.direct.contains_key(&newcomer),
             "a mesh that fits in the view grafts"
