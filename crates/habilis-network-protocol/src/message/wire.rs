@@ -40,8 +40,9 @@ impl WireFrame {
     /// The door for a test that must put exact bytes on the wire: an unsigned frame, or a
     /// malformed one. No engine-made frame can be either, so the adversarial suite needs this.
     ///
-    /// `test-fixtures` enables it. A non-test binary must never enable that feature, because the
-    /// door would let it send bytes that no signed message produced.
+    /// It exists in unit tests and in any build that enables `test-fixtures`. A release binary must
+    /// not enable that feature, because the door would let it send bytes that no signed message
+    /// produced.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn fixture_raw(bytes: Bytes) -> Self {

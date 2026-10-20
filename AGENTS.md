@@ -316,4 +316,4 @@ Runtime events drive these transitions, so their state is not known at compile t
 | `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |
 | `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/driver.rs` | A data channel that is open and ready to carry datagrams. Only the `complete` of a pending offer or answer produces one. |
 
-The test-only fixture doors are `Verified::fixture_unchecked`, `Verified::fixture_with_signature` and `WireFrame::fixture_raw`. Each one is behind `test-fixtures`, so a non-test binary never has them.
+The test-only fixture doors are `Verified::fixture_unchecked`, `Verified::fixture_with_signature` and `WireFrame::fixture_raw`. Each one is behind `test-fixtures`: it exists in unit tests and in any build that enables `test-fixtures`, so a release binary must not enable that feature.

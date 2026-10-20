@@ -12,7 +12,7 @@ published to a registry; pin it with
 
 - `WireFrame::fixture_raw`: a test-only door that puts exact bytes on the wire, including an
   unsigned or malformed frame. It is behind `test-fixtures`, with the other fixture doors of
-  `Verified`.
+  `Verified`; a release binary must not enable `test-fixtures`.
 - `habilis_network::net::{WEBRTC_TRANSPORT_ID, MULTIHOP_TRANSPORT_ID, GOSSIP_TRANSPORT_ID}`:
   the ids of the custom transports, re-exported for every set of features, so a consumer that
   names the path of a peer reads the engine's values and keeps no copy of its own (#9).
