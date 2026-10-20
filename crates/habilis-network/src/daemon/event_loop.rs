@@ -114,7 +114,7 @@ pub async fn run<A: NodeDriver>(
     } = cfg;
 
     // Every driver-derived fact in one place. Only the CLI exits the
-    // process on quit and binds the unix socket; in-process drivers
+    // process on quit and binds the IPC endpoint; in-process drivers
     // (in-process: library API or MCP) take typed requests on `session_rx` instead.
     let (external_quit_rx, external_msg_tx, ipc_listener_disabled, exit_on_quit, handle_signals) =
         match driver {

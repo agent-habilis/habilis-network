@@ -10,7 +10,9 @@
 //! `std::process::exit`, which would end the test binary. The test aborts the
 //! task instead, and awaits it, so the loop is gone before the folder is
 //! removed. The tasks that the loop spawned (the IPC accept loop, the signal
-//! tasks, iroh) stay until the test runtime ends, which is harmless. Part 2 (`Quit` and the owner watch, R5 and R6) needs the node
+//! tasks, iroh) stay until the test runtime ends, which is harmless.
+//!
+//! Steps 3 and 4 of R11 (`Quit` and the owner watch, R5 and R6) need the node
 //! in a child process. This file holds one test, so no other test shares the
 //! process with a node that could exit it.
 

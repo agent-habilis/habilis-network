@@ -150,7 +150,7 @@ Done. The design changed from the first text of this section, after review. The 
 
 **Limits.**
 
-- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file did. Until R5, `terminate` has no stop on Windows but `TerminateProcess`, so a stale marker is the common case there.
+- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file did. Until R5, `terminate` on Windows returns `Unsupported`, and the only stop is a hard kill, so a stale marker is the common case there.
 - On Unix, two daemons with the same nickname on one mesh have the same socket path, and the second bind replaces the first. That is not new.
 - The DACL cannot be tested with a second user on CI. T4 tests it on the real machine.
 
