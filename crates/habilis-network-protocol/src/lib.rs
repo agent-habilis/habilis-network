@@ -62,7 +62,8 @@ pub use mesh::{
 };
 pub use message::{
     AppFrameParams, AppTag, Authored, BodyError, Channel, CorrId, IdError, Message, MessageBody,
-    MessageId, MessageKind, PresenceSubtype, Shard, ShardGroup, Signer, Verified, sole_addressee,
+    MessageId, MessageKind, PresenceSubtype, Proof, Shard, ShardGroup, Signer, Verified,
+    sole_addressee,
 };
 pub use nickname::{Nickname, NicknameError};
 pub use seal::seal_to_body;

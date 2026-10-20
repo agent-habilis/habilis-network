@@ -27,7 +27,7 @@ mod id;
 mod shard;
 mod verified;
 
-pub use verified::{Authored, Verified};
+pub use verified::{Authored, Proof, Verified};
 
 pub use body::{BodyError, MessageBody};
 pub use id::{IdError, MessageId};

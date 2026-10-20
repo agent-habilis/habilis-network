@@ -16,7 +16,7 @@ use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
 use crate::lookup::add_peer_addr;
-use crate::protocol::message::{Authored, MessageBody, Verified};
+use crate::protocol::message::{Authored, MessageBody, Proof, Verified};
 use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
 use crate::util::clock::Instant;
 // The timer-driver clock the ping round's deadlines are kept in — distinct from
@@ -1185,37 +1185,6 @@ fn is_directed_content(kind: &MessageKind) -> bool {
     matches!(kind, MessageKind::App { to: Some(_), .. })
 }
 
-/// A frame the inbound gate can open: a [`Verified`] wire frame, or the [`Authored`]
-/// logical view of a reassembled group. Both deref to the message, and both can hand
-/// back a proof whose body the gate derived.
-trait Opened: std::ops::Deref<Target = Message> {
-    /// This frame as a proof, with its wire body.
-    fn authored(&self) -> Authored;
-
-    /// This frame as a proof, with `body` in place of the wire body.
-    fn with_body(&self, body: MessageBody) -> Authored;
-}
-
-impl Opened for Verified {
-    fn authored(&self) -> Authored {
-        Verified::authored(self)
-    }
-
-    fn with_body(&self, body: MessageBody) -> Authored {
-        Verified::with_body(self, body)
-    }
-}
-
-impl Opened for Authored {
-    fn authored(&self) -> Authored {
-        self.clone()
-    }
-
-    fn with_body(&self, body: MessageBody) -> Authored {
-        Authored::with_body(self, body)
-    }
-}
-
 /// Outcome of the inbound gate. `Pass` carries the frame's [`AppClass`] (`class`:
 /// `Some` for an App frame, classified once on the opened body; `None` for an infra
 /// frame with no app payload) and the [`Authored`] view to surface, which holds the
@@ -1248,7 +1217,7 @@ fn gate_app_payload(view: &Authored, app: &dyn NodeApp) -> Option<AppClass> {
 /// Validate + (for the addressee) decrypt an inbound **non-sharded** logical
 /// frame before surfacing. The decrypted body lives only in the returned view, so
 /// retention keeps the frame the author signed.
-fn gate_and_decrypt<F: Opened>(
+fn gate_and_decrypt<F: Proof>(
     frame: &F,
     state: &EventLoopState,
     ctx: &HandlerCtx<'_>,
@@ -1301,7 +1270,7 @@ fn gate_and_decrypt<F: Opened>(
 
 /// Validate + decrypt a directed frame that's addressed to us (as opposed to
 /// one we're only relaying).
-fn gate_directed_to_us<F: Opened>(frame: &F, state: &EventLoopState, app: &dyn NodeApp) -> Gated {
+fn gate_directed_to_us<F: Proof>(frame: &F, state: &EventLoopState, app: &dyn NodeApp) -> Gated {
     // Whether the directed body is sealed is the app's call, not a
     // structural given: an app's directed tags may arrive encrypted, but a
     // consumer with its own data model may send plaintext directed bytes. The frame is

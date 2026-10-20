@@ -172,6 +172,102 @@ impl Deref for Verified {
     }
 }
 
+mod sealed {
+    /// Only the two proofs of this module implement [`super::Proof`], so no outside type can
+    /// claim an author key it was not given.
+    pub trait Sealed {}
+
+    impl Sealed for super::Verified {}
+    impl Sealed for super::Authored {}
+}
+
+/// A message whose author is proven: a [`Verified`] wire frame or the [`Authored`] view of one.
+/// The gate and the app surface are generic over it, so one function serves both.
+///
+/// It is sealed: [`Verified`] and [`Authored`] are the only implementors, so a proof can only
+/// come from [`Message::sign`] or [`Message::verify`].
+///
+/// # Examples
+///
+/// A signed message is a `Proof`, and so is its authored view:
+///
+/// ```
+/// use habilis_network_protocol::message::{Proof, Verified};
+///
+/// fn takes(_: &impl Proof) {}
+///
+/// fn check(verified: &Verified) {
+///     takes(verified);
+///     takes(&verified.authored());
+/// }
+/// ```
+///
+/// An outside type cannot implement it:
+///
+/// ```compile_fail,E0277
+/// use habilis_network_protocol::message::{Authored, Proof};
+/// use habilis_network_protocol::{AuthorKey, Message, MessageBody};
+///
+/// struct Outside(Message);
+///
+/// impl std::ops::Deref for Outside {
+///     type Target = Message;
+///     fn deref(&self) -> &Message {
+///         &self.0
+///     }
+/// }
+///
+/// impl Proof for Outside {
+///     fn key(&self) -> AuthorKey {
+///         unimplemented!()
+///     }
+///     fn with_body(&self, _body: MessageBody) -> Authored {
+///         unimplemented!()
+///     }
+///     fn authored(&self) -> Authored {
+///         unimplemented!()
+///     }
+/// }
+/// ```
+pub trait Proof: Deref<Target = Message> + sealed::Sealed {
+    /// The key that proved the author of the message.
+    fn key(&self) -> AuthorKey;
+
+    /// The proof with `body` in place of the wire body. It cannot fail.
+    fn with_body(&self, body: MessageBody) -> Authored;
+
+    /// The proof as an [`Authored`] view, with the wire body.
+    fn authored(&self) -> Authored;
+}
+
+impl Proof for Verified {
+    fn key(&self) -> AuthorKey {
+        Verified::key(self)
+    }
+
+    fn with_body(&self, body: MessageBody) -> Authored {
+        Verified::with_body(self, body)
+    }
+
+    fn authored(&self) -> Authored {
+        Verified::authored(self)
+    }
+}
+
+impl Proof for Authored {
+    fn key(&self) -> AuthorKey {
+        Authored::key(self)
+    }
+
+    fn with_body(&self, body: MessageBody) -> Authored {
+        Authored::with_body(self, body)
+    }
+
+    fn authored(&self) -> Authored {
+        self.clone()
+    }
+}
+
 impl Serialize for Verified {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         Serialize::serialize(&*self.message, serializer)
