@@ -3,10 +3,6 @@
 
 # A Drop that runs while a panic unwinds must not panic: a second panic aborts the process.
 poison|crates/habilis-network/src/transport/pool.rs|2|InFlightDial::drop clears the in-flight entry during unwinding. register_dial must read the same map.
-# The registry map is whole after a panic. Decision for the owner: replace with expect or keep.
-poison|crates/habilis-network-stream/src/produce.rs|1|Registry::entries: a panic while the lock is held leaves a whole map.
-# A sink slot or a queue end has no invariant to break. Decision for the owner: replace with expect or keep.
-poison|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|locked(): a poisoned lock holds data with no invariant.
 # The guard of a test must survive a test that panicked, or it hides the failure that matters.
 poison|crates/habilis-network-test-tracing/src/lib.rs|2|lock helper of the test guard: the import and the call.
 
@@ -28,3 +24,6 @@ catch_unwind|crates/habilis-network-test-tracing/tests/twice.rs|2|test of the gu
 catch_unwind|crates/habilis-network-test-tracing/tests/sync_workers.rs|2|test of the guard that checks a panic
 catch_unwind|crates/habilis-network-test-tracing/tests/allow_warn_guard.rs|2|test of the guard that checks a panic
 catch_unwind|crates/habilis-network-test-tracing/tests/saw_warn.rs|1|test of the guard that checks a panic
+
+# The test of the sink lock must catch the panic of the liveness check, to see that the lock is not poisoned.
+catch_unwind|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|test: a panic in the liveness check does not poison the sink lock

@@ -43,10 +43,7 @@ pub(crate) struct Registry(Mutex<HashMap<StreamId, Entry>>);
 
 impl Registry {
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<StreamId, Entry>> {
-        // A panic while holding the lock leaves a map that is still whole.
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0.lock().expect("the stream registry is poisoned")
     }
 
     fn open(&self, id: StreamId, secret: StreamSecret) -> oneshot::Receiver<Link> {

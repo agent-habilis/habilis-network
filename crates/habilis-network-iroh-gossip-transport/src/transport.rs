@@ -26,12 +26,10 @@ use crate::counters::{Counters, Stats};
 use crate::frame::{self, EncodeError, Frame};
 use crate::{gossip_addr, parse_gossip_addr};
 
-/// The guard of `mutex`. A poisoned lock holds data with no invariant to break
-/// (a sink slot, a queue end), so it is used as it is and not turned into a panic.
+/// The guard of `mutex`. A poisoned lock means a panic happened while it was held,
+/// so this function panics too.
 pub(crate) fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex.lock().expect("the lock is poisoned")
 }
 
 /// Packets waiting for iroh to read them.
@@ -88,10 +86,11 @@ pub(crate) struct Shared {
 impl Shared {
     /// A path is valid while a sink is attached and alive.
     pub(crate) fn path_is_valid(&self) -> bool {
-        self.attached.load(Ordering::SeqCst)
-            && locked(&self.sink)
-                .as_ref()
-                .is_some_and(|sink| sink.is_alive())
+        if !self.attached.load(Ordering::SeqCst) {
+            return false;
+        }
+        let sink = locked(&self.sink).clone();
+        sink.is_some_and(|sink| sink.is_alive())
     }
 
     /// One QUIC datagram to `dst`: framed and handed to the sink. A datagram that
@@ -458,6 +457,20 @@ mod tests {
         }
     }
 
+    /// A sink whose liveness check panics, as a foreign call may.
+    #[derive(Debug)]
+    struct Panicking;
+
+    impl FrameSink for Panicking {
+        fn try_send(&self, _frame: Bytes) -> bool {
+            true
+        }
+
+        fn is_alive(&self) -> bool {
+            panic!("the liveness check panics")
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct Echo;
 
@@ -553,6 +566,22 @@ mod tests {
         assert!(sender.is_valid_send_addr(&to_bob), "after attach");
         handle.detach();
         assert!(!sender.is_valid_send_addr(&to_bob), "after detach");
+    }
+
+    #[test]
+    fn a_panic_in_the_liveness_check_does_not_poison_the_sink_lock() {
+        let handle = GossipHandle::new(secret(1).public());
+        handle.attach(Arc::new(Panicking));
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle.shared.path_is_valid()
+        }));
+
+        assert!(outcome.is_err(), "the liveness check should panic");
+        assert!(
+            !handle.shared.sink.is_poisoned(),
+            "a panic in the liveness check poisoned the sink lock"
+        );
     }
 
     /// The guard is on the frame, and the frame holds 3774 bytes of datagram.
