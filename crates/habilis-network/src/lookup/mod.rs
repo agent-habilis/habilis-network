@@ -1346,6 +1346,7 @@ pub(crate) fn build_mesh(
 mod tests {
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
     use habilis_network_test_tracing::test;
+    use std::collections::HashSet;
 
     /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
     /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
@@ -1498,8 +1499,8 @@ mod tests {
         let stranger = member(other_topic).await;
         let ids = (first.endpoint.id(), second.endpoint.id());
         let mut stderr = std::io::stderr();
-        let mut seen_first = std::collections::HashSet::new();
-        let mut seen_second = std::collections::HashSet::new();
+        let mut seen_first = HashSet::new();
+        let mut seen_second = HashSet::new();
         let mut neighbors = (false, false);
 
         let deadline = tokio::time::sleep(Duration::from_secs(30));

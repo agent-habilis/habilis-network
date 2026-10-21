@@ -518,6 +518,7 @@ mod derive_secret_tests {
         rendezvous_secret, topic_seed,
     };
     use habilis_network_test_tracing::test;
+    use std::collections::HashSet;
 
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
@@ -665,7 +666,7 @@ mod derive_secret_tests {
     #[test]
     fn rendezvous_ports_rungs_are_near_certainly_distinct() {
         let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A)));
-        let unique: std::collections::HashSet<_> = ladder.iter().collect();
+        let unique: HashSet<_> = ladder.iter().collect();
         // A rare in-ladder dup is harmless, but the fixed test seed
         // must not regress into a degenerate all-same ladder.
         assert!(unique.len() >= RENDEZVOUS_LADDER - 1);

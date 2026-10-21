@@ -7,7 +7,7 @@
 //! (last-writer-wins per origin). Every node folds the freshest vector from each
 //! origin into one metric-weighted graph and runs Dijkstra locally.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iroh::{EndpointAddr, SecretKey};
 use iroh_base::Signature;
@@ -322,7 +322,7 @@ impl Topology {
     pub(crate) fn route_to_avoiding_first_hops(
         &self,
         leg: Leg,
-        refused: &std::collections::HashSet<AppId>,
+        refused: &HashSet<AppId>,
     ) -> Option<Route> {
         let path = self
             .graph()

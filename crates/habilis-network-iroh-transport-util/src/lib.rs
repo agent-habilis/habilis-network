@@ -10,6 +10,8 @@
 //! no other sharing point between two otherwise-independent crates. It adds no
 //! external dependency — `iroh` is already in both manifests.
 
+#[cfg(feature = "test-hooks")]
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use iroh::endpoint::transports::{Addr, PathSelectionData, Transmit};
@@ -210,21 +212,18 @@ pub fn is_blocked_to(
 static IP_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(feature = "test-hooks")]
-type PortBlocks = std::sync::Mutex<
-    Option<std::collections::HashMap<iroh::EndpointId, std::collections::HashSet<u16>>>,
->;
+type PortBlocks = std::sync::Mutex<Option<HashMap<iroh::EndpointId, HashSet<u16>>>>;
 
 #[cfg(feature = "test-hooks")]
 static IP_BLOCKED_TO: PortBlocks = std::sync::Mutex::new(None);
 
 #[cfg(feature = "test-hooks")]
-static RUNGS_BLOCKED: std::sync::Mutex<
-    Option<std::collections::HashSet<(iroh::EndpointId, Rung)>>,
-> = std::sync::Mutex::new(None);
+static RUNGS_BLOCKED: std::sync::Mutex<Option<HashSet<(iroh::EndpointId, Rung)>>> =
+    std::sync::Mutex::new(None);
 
 #[cfg(feature = "test-hooks")]
 static RUNGS_BLOCKED_TO: std::sync::Mutex<
-    Option<std::collections::HashSet<(iroh::EndpointId, Rung, iroh::EndpointId)>>,
+    Option<HashSet<(iroh::EndpointId, Rung, iroh::EndpointId)>>,
 > = std::sync::Mutex::new(None);
 
 /// The pure table behind [`blocked`]: whether `rung` is taken from `local`, for a
@@ -311,9 +310,9 @@ pub fn block_ip_paths(blocked: bool) {
 /// Panics if another thread panicked while it held the block table.
 #[cfg(feature = "test-hooks")]
 pub fn block_ip_to(local: iroh::EndpointId, remote_ports: impl IntoIterator<Item = u16>) {
-    let ports: std::collections::HashSet<u16> = remote_ports.into_iter().collect();
+    let ports: HashSet<u16> = remote_ports.into_iter().collect();
     let mut blocks = IP_BLOCKED_TO.lock().expect("ip blocks");
-    let blocks = blocks.get_or_insert_with(std::collections::HashMap::new);
+    let blocks = blocks.get_or_insert_with(HashMap::new);
     if ports.is_empty() {
         blocks.remove(&local);
     } else {
@@ -333,7 +332,7 @@ pub fn block_ip_to(local: iroh::EndpointId, remote_ports: impl IntoIterator<Item
 #[cfg(feature = "test-hooks")]
 pub fn block_rung(local: iroh::EndpointId, rung: Rung, blocked: bool) {
     let mut blocks = RUNGS_BLOCKED.lock().expect("rung blocks");
-    let blocks = blocks.get_or_insert_with(std::collections::HashSet::new);
+    let blocks = blocks.get_or_insert_with(HashSet::new);
     if blocked {
         blocks.insert((local, rung));
     } else {
@@ -354,7 +353,7 @@ pub fn block_rung(local: iroh::EndpointId, rung: Rung, blocked: bool) {
 #[cfg(feature = "test-hooks")]
 pub fn block_rung_to(local: iroh::EndpointId, rung: Rung, remote: iroh::EndpointId, blocked: bool) {
     let mut blocks = RUNGS_BLOCKED_TO.lock().expect("rung blocks to a remote");
-    let blocks = blocks.get_or_insert_with(std::collections::HashSet::new);
+    let blocks = blocks.get_or_insert_with(HashSet::new);
     if blocked {
         blocks.insert((local, rung, remote));
     } else {

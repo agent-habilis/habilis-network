@@ -125,6 +125,7 @@ pub(crate) mod close_code {
     mod tests {
         use super::*;
         use habilis_network_test_tracing::test;
+        use std::collections::HashSet;
 
         #[test]
         fn no_two_codes_share_a_number() {
@@ -139,7 +140,7 @@ pub(crate) mod close_code {
                 GOSSIP_ON_GOSSIP_PATH,
                 EVICTED,
             ];
-            let distinct: std::collections::HashSet<_> = all.into_iter().collect();
+            let distinct: HashSet<_> = all.into_iter().collect();
             assert_eq!(distinct.len(), all.len());
         }
     }

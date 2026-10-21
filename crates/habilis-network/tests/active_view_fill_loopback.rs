@@ -12,6 +12,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -84,7 +85,7 @@ impl Member {
     }
 
     /// The nicknames of the peers this member holds a live gossip link to.
-    async fn linked_set(&self) -> std::collections::BTreeSet<String> {
+    async fn linked_set(&self) -> BTreeSet<String> {
         let json = self
             .membership
             .request(|reply| Request::Peers { reply })
@@ -232,7 +233,7 @@ fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
         let mut link_total = 0_u32;
         let mut link_samples = 0_u32;
         let mut near_target = vec![0_u32; members.len()];
-        let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
+        let mut previous: Vec<BTreeSet<String>> = Vec::new();
         while started.elapsed() < settle + CHURN_WINDOW {
             let mut now = Vec::with_capacity(members.len());
             for (index, member) in members.iter().enumerate() {
@@ -305,7 +306,7 @@ fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported(
         let mut at_cap = 0_u32;
         let mut samples = 0_u32;
         let mut changes = 0_u32;
-        let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
+        let mut previous: Vec<BTreeSet<String>> = Vec::new();
         let started = Instant::now();
         let window = FILL_DEADLINE + STABLE_FOR;
         while started.elapsed() < window {

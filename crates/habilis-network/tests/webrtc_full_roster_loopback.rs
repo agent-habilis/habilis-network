@@ -9,6 +9,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -269,7 +270,7 @@ fn rendezvous_visits() -> usize {
 /// event after it is none of these: it did not come back.
 fn rendezvous_holders(log: &str) -> usize {
     let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
-    let mut last_is_up = std::collections::HashMap::new();
+    let mut last_is_up = HashMap::new();
     for line in after_the_crash
         .lines()
         .filter(|line| line.contains("is_rendezvous=true"))

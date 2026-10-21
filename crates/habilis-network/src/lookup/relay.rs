@@ -461,6 +461,7 @@ mod tests {
         select_first_reachable, should_evict_rung,
     };
     use habilis_network_test_tracing::test;
+    use std::collections::HashSet;
 
     /// Tripwire: the iroh fallback rungs of our pinned rendezvous ladder
     /// must stay equal to iroh's `defaults::prod` relay hosts, **in
@@ -618,8 +619,7 @@ mod tests {
     /// Run the ladder walk with a set of hosts treated as unreachable;
     /// returns `(selected, probed_in_order)`.
     async fn walk(ladder: &[RelayUrl], down: &[&str]) -> (Option<RelayUrl>, Vec<String>) {
-        let down: std::collections::HashSet<String> =
-            down.iter().map(|host| (*host).to_string()).collect();
+        let down: HashSet<String> = down.iter().map(|host| (*host).to_string()).collect();
         let probed = std::cell::RefCell::new(Vec::new());
         let selected = select_first_reachable(ladder, |rung| {
             let host = short_host(&rung);

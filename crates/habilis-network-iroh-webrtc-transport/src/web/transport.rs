@@ -4,6 +4,7 @@
 //! data channels, keyed by remote [`EndpointId`]. The consumer attaches one
 //! session after offering; the producer attaches each peer that signals in.
 
+use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -724,11 +725,8 @@ impl std::fmt::Debug for BrowserHubTransport {
 /// would be a plausible-looking lie.
 async fn selected_pair_from_stats(
     peer_connection: &RtcPeerConnection,
-) -> Option<(
-    std::collections::HashMap<String, js_sys::Object>,
-    js_sys::Object,
-)> {
-    let by_id: std::collections::HashMap<String, js_sys::Object> =
+) -> Option<(HashMap<String, js_sys::Object>, js_sys::Object)> {
+    let by_id: HashMap<String, js_sys::Object> =
         stats_rows(peer_connection).await?.into_iter().collect();
 
     let pair_id = selected_pair_id(&by_id)?;
@@ -782,7 +780,7 @@ async fn stats_rows(peer_connection: &RtcPeerConnection) -> Option<Vec<(String, 
 ///    browsers and by older Chrome.
 /// 3. A `succeeded` + `nominated` pair — what the other two are derived from,
 ///    for a browser that publishes neither.
-fn selected_pair_id(by_id: &std::collections::HashMap<String, js_sys::Object>) -> Option<String> {
+fn selected_pair_id(by_id: &HashMap<String, js_sys::Object>) -> Option<String> {
     let field = |stats: &js_sys::Object, key: &str| {
         Reflect::get(stats, &JsValue::from_str(key))
             .ok()

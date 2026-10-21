@@ -790,6 +790,7 @@ mod lookup_tests {
         Transport, TransportPolicy, resolve_lookups,
     };
     use habilis_network_test_tracing::test;
+    use std::collections::HashSet;
 
     fn lookups(mdns: bool, dht: bool, relay_lookup: RelaySelection) -> LookupSet {
         LookupSet {
@@ -1174,8 +1175,7 @@ mod lookup_tests {
                 .filter(|(_, transport)| list.contains(transport))
                 .fold(0u8, |mask, (bit, _)| mask | 1 << bit)
         };
-        let covered: std::collections::HashSet<u8> =
-            rows.iter().map(|(list, _)| mask(list)).collect();
+        let covered: HashSet<u8> = rows.iter().map(|(list, _)| mask(list)).collect();
         assert_eq!(covered.len(), 32, "the table names every subset once");
         for (list, expected) in rows {
             let got = MeshConfig::resolve(&[Lookup::Relay], None, list)

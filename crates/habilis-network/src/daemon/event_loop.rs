@@ -8,6 +8,8 @@
 //! the daemon-internal plumbing (`config`/`ctx`/`ipc`/`state`/`timers`/
 //! `setup`) are siblings under `super`.
 
+#[cfg(feature = "multihop")]
+use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -473,11 +475,11 @@ async fn linkstate_arm(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
 /// with the link. A hop that the underlay holds stuck is still dropped by `link_vector`.
 #[cfg(feature = "multihop")]
 fn advertised_links(
-    linked: &std::collections::HashSet<EndpointId>,
+    linked: &HashSet<EndpointId>,
     held: &[EndpointId],
     cost: u32,
 ) -> Vec<(EndpointId, u32)> {
-    let mut members: std::collections::BTreeSet<EndpointId> = linked.iter().copied().collect();
+    let mut members: BTreeSet<EndpointId> = linked.iter().copied().collect();
     members.extend(held.iter().copied());
     members.into_iter().map(|member| (member, cost)).collect()
 }
