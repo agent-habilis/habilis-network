@@ -211,6 +211,7 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
         tokio::spawn(watch_owner(owner, interval, quit_tx));
         return;
     }
+    // SAFETY: `getppid` takes no argument and always succeeds.
     let original_ppid = unsafe { libc::getppid() };
     if !orphan_watch_warranted(original_ppid) {
         return;
@@ -218,6 +219,7 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
     tokio::spawn(async move {
         loop {
             n0_future::time::sleep(interval).await;
+            // SAFETY: `getppid` takes no argument and always succeeds.
             let current_ppid = unsafe { libc::getppid() };
             if parent_lost(original_ppid, current_ppid) {
                 let _ = quit_tx.send(()).await;

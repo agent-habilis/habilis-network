@@ -699,7 +699,7 @@ fn fail<T>(cli: &mut Cli, page: Option<&Page>, reason: &str) -> Result<T, Failur
             page.console()
         );
     }
-    let dump = cli.transcript() + &browser;
+    let dump = format!("{}{browser}", cli.transcript());
     let path = repo_root().join("target/stream-e2e.log");
     let _ = std::fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));

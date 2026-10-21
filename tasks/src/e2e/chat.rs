@@ -337,7 +337,7 @@ fn fail(robot: &mut Robot, page: Option<&Page>, reason: &str) -> TaskOutcome {
             page.console()
         );
     }
-    let dump = robot.transcript() + &browser;
+    let dump = format!("{}{browser}", robot.transcript());
     let path = repo_root().join("target/chat-e2e.log");
     let _ = std::fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));

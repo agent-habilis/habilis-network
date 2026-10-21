@@ -7,8 +7,12 @@ const MAX_ANCESTRY_DEPTH: usize = 64;
 #[expect(unsafe_code, reason = "libc::proc_pidinfo FFI; no safe wrapper exists")]
 fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
     let pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte arrays, so all-zero bytes
+    // are a valid value.
     let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
     let size = i32::try_from(size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: `info` is a live, unique local of exactly `size` bytes, and `size` is the size that
+    // the call gets, so the kernel writes inside the buffer. The kernel checks `pid`.
     let written =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
     // A short read means the pid vanished mid-call or the struct layout
@@ -92,6 +96,8 @@ pub fn is_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
+    // SAFETY: signal 0 sends no signal. The call reads no memory of ours, and `pid` is a valid
+    // `pid_t`.
     let status = unsafe { libc::kill(pid, 0) };
     status == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
@@ -104,6 +110,8 @@ pub fn is_alive(pid: u32) -> bool {
 pub fn terminate(pid: u32) -> std::io::Result<()> {
     let pid = libc::pid_t::try_from(pid)
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: the call reads no memory of ours. `pid` is a valid `pid_t`, and the kernel checks
+    // the permission.
     let status = unsafe { libc::kill(pid, libc::SIGTERM) };
     if status == 0 {
         Ok(())
@@ -147,6 +155,7 @@ mod tests {
     #[test]
     fn parent_of_self_is_our_ppid() {
         #[expect(unsafe_code, reason = "libc::getppid FFI; always succeeds")]
+        // SAFETY: `getppid` takes no argument and always succeeds.
         let ppid = unsafe { libc::getppid() };
         assert_eq!(parent_of(self_pid()), u32::try_from(ppid).ok());
     }

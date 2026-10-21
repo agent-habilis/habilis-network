@@ -557,8 +557,8 @@ fn four_peers_converge(public: bool) {
         "expected every peer to see ≥3 others within 45s (public={public}); peer_counts={counts:?}"
     );
 
-    // SAFETY: each handle came from habilis_network_mesh_open and is not used after this.
     for handle in handles {
+        // SAFETY: each handle came from habilis_network_mesh_open and is not used after this.
         unsafe {
             assert_eq!(
                 habilis_network_mesh_close(handle),

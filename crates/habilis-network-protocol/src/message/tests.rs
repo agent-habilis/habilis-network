@@ -222,8 +222,8 @@ fn parse_rejects_malformed_integrity_fields() {
     };
     // Each malformed field comes with a well-formed partner, so that the pairing rule (a key
     // without a signature) cannot be the reason for the reject, and the error names the field.
-    let good_sig = r#","sig":""#.to_owned() + &"cd".repeat(64) + "\"";
-    let good_key = r#","pubkey":""#.to_owned() + &"ab".repeat(32) + "\"";
+    let good_sig = format!(r#","sig":"{}""#, "cd".repeat(64));
+    let good_key = format!(r#","pubkey":"{}""#, "ab".repeat(32));
     for (extra, reason) in [
         // 3KB garbage pubkey, and an uppercase one that is also too short.
         (

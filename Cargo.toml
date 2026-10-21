@@ -234,6 +234,10 @@ shadow_unrelated = "warn"
 semicolon_inside_block = "warn"
 allow_attributes_without_reason = "warn"
 excessive_nesting = "warn"
+# Google Rust Style Guide (issue #29): every `unsafe` block carries a `// SAFETY:` comment, and a
+# string is built with `format!`, not with `+`.
+undocumented_unsafe_blocks = "warn"
+string_add = "warn"
 # Force `#[expect(...)]` over `#[allow(...)]` where the lint still fires, so a
 # suppression that goes stale (lint no longer triggers) becomes a build error
 # instead of silently lingering.
