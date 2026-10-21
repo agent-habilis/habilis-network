@@ -15,7 +15,7 @@ use super::ctx::HandlerCtx;
 use super::state::EventLoopState;
 use crate::gossip::event::NodeEvent;
 use crate::protocol::{MeshName, Message};
-#[cfg(all(unix, feature = "host"))]
+#[cfg(feature = "host")]
 use crate::util::tuning::ppid_watch_interval;
 
 /// Graceful shutdown: remove the statusline state file first, then
@@ -98,9 +98,10 @@ pub(super) async fn announce_departure<A: NodeDriver>(
     quit.exit_on_quit && !cfg!(feature = "dhat-heap")
 }
 /// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix)
-/// listener tasks feeding a single internal quit channel. Returns both ends:
-/// the sender also goes to the IPC accept loop, whose `quit` feeds the same
-/// channel.
+/// listener tasks, and for the CLI daemon the owner or parent watch
+/// ([`spawn_orphan_watch`]), all feeding a single internal quit channel.
+/// Returns both ends: the sender also goes to the IPC accept loop, whose
+/// `quit` feeds the same channel.
 /// `tokio::signal::ctrl_c()` inside a `select!` branch doesn't reliably
 /// interrupt a blocking stdin read, so we offload signal listening to
 /// dedicated tasks.
@@ -139,15 +140,12 @@ pub(super) fn spawn_quit_signal_tasks(
     // Only the CLI daemon owns a process to exit; the in-process driver runs
     // in-process with no parent of its own to lose, so it must never self-quit
     // on a host reparent.
-    #[cfg(unix)]
     if exit_on_quit {
         spawn_orphan_watch(quit_tx.clone(), owner);
     }
-    // Windows has neither of them yet: the owner watch is R6 and the console
-    // events (`ctrl_break`, `ctrl_close`, `ctrl_logoff`, `ctrl_shutdown`) are R7
-    // of `docs/windows.md`. Only ctrl-c reaches the quit channel until then.
-    #[cfg(not(unix))]
-    let _ = (exit_on_quit, owner);
+    // Windows has no console events here yet: `ctrl_break`, `ctrl_close`,
+    // `ctrl_logoff` and `ctrl_shutdown` are R7 of `docs/windows.md`. Of the
+    // signals, only ctrl-c reaches the quit channel until then.
     (quit_tx, quit_rx)
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
@@ -156,7 +154,8 @@ pub(super) fn spawn_quit_signal_tasks(
 ///
 /// # Errors
 /// `pid` is 0 or 1, the calling process's own pid, or no live process has it
-/// (a zombie counts as dead). The message is one line.
+/// (a zombie counts as dead), or this process cannot read it (on Windows, an
+/// owner of another account). The message is one line.
 #[cfg(feature = "host")]
 pub fn validate_owner_pid(pid: u32) -> anyhow::Result<()> {
     owner_start(pid).map(drop)
@@ -173,7 +172,7 @@ fn owner_start(pid: u32) -> anyhow::Result<u64> {
         "owner pid {pid} is this process itself"
     );
     crate::util::process::live_start_time(pid)
-        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running or cannot be read"))
 }
 /// The process a detached daemon lives for, in place of its parent. The pid
 /// alone cannot tell the owner from a later process that reuses the pid, so
@@ -200,15 +199,9 @@ impl Owner {
         self.pid
     }
 
-    // Called by the Unix `watch_owner`. The Windows twin is R6 of
-    // `docs/windows.md`, not built yet.
-    #[cfg_attr(
-        not(unix),
-        expect(
-            dead_code,
-            reason = "called by the owner watch, which is R6 on Windows"
-        )
-    )]
+    /// The owner exited, or its pid now names another process. On Windows
+    /// `live_start_time` gives `None` also for an owner that this process can no
+    /// longer read, which counts as lost: the watch fails closed.
     fn lost(self) -> bool {
         crate::util::process::live_start_time(self.pid) != Some(self.start)
     }
@@ -216,23 +209,36 @@ impl Owner {
 /// Detect orphaning by the spawning agent and route it through the same quit
 /// channel as a signal. A hard-killed parent (`kill -9`, a reinstall, an IDE
 /// restart) can't run any cleanup, so the spawned daemon is reparented instead
-/// of terminated and would otherwise linger in the mesh forever. The daemon
-/// watches its *own* parent — the only mechanism that survives SIGKILL and is
-/// identical on macOS and Linux (`PR_SET_PDEATHSIG` and kqueue `NOTE_EXIT` are
-/// each platform-specific). When the parent vanishes we feed `quit_tx`, reusing
-/// the SIGTERM path that broadcasts `left` and exits cleanly.
-// `unix` alone is not enough: `libc` arrives with the `host` feature.
-#[cfg(all(unix, feature = "host"))]
-#[expect(
-    unsafe_code,
-    reason = "libc::getppid FFI; no safe wrapper, always succeeds"
-)]
+/// of terminated and would otherwise linger in the mesh forever. When the
+/// owner or the parent vanishes we feed `quit_tx`, reusing the SIGTERM path
+/// that broadcasts `left` and exits cleanly.
+///
+/// With an [`Owner`], every OS watches the owner. Without one, Unix watches
+/// the parent ([`spawn_parent_watch`]), and Windows watches nothing: it does
+/// not reparent an orphan, and the pid of a dead parent can be reused, so
+/// there is nothing to compare. A Windows launcher passes `--owner-pid`.
+#[cfg(feature = "host")]
 fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
     let interval = ppid_watch_interval();
     if let Some(owner) = owner {
         tokio::spawn(watch_owner(owner, interval, quit_tx));
         return;
     }
+    #[cfg(unix)]
+    spawn_parent_watch(quit_tx, interval);
+    #[cfg(not(unix))]
+    drop(quit_tx);
+}
+/// The watch of a daemon with no [`Owner`]: its *own* parent — the only
+/// mechanism that survives SIGKILL and is identical on macOS and Linux
+/// (`PR_SET_PDEATHSIG` and kqueue `NOTE_EXIT` are each platform-specific).
+// `unix` alone is not enough: `libc` arrives with the `host` feature.
+#[cfg(all(unix, feature = "host"))]
+#[expect(
+    unsafe_code,
+    reason = "libc::getppid FFI; no safe wrapper, always succeeds"
+)]
+fn spawn_parent_watch(quit_tx: mpsc::Sender<()>, interval: Duration) {
     let original_ppid = unsafe { libc::getppid() };
     if !orphan_watch_warranted(original_ppid) {
         return;
@@ -242,19 +248,31 @@ fn spawn_orphan_watch(quit_tx: mpsc::Sender<()>, owner: Option<Owner>) {
             n0_future::time::sleep(interval).await;
             let current_ppid = unsafe { libc::getppid() };
             if parent_lost(original_ppid, current_ppid) {
+                tracing::info!(
+                    target: "habilis_network::lifecycle",
+                    original_ppid,
+                    current_ppid,
+                    "parent changed; leaving"
+                );
                 let _ = quit_tx.send(()).await;
                 return;
             }
         }
     });
 }
-/// The orphan watch of a daemon with an [`Owner`]: its parent is init, so the
-/// owner's exit is the one event that ends it.
-#[cfg(all(unix, feature = "host"))]
+/// The orphan watch of a daemon with an [`Owner`], on every OS: its parent is
+/// init (or, on Windows, of no use), so the owner's exit is the one event that
+/// ends it. The start time of [`Owner::lost`] guards against pid reuse.
+#[cfg(feature = "host")]
 async fn watch_owner(owner: Owner, interval: Duration, quit_tx: mpsc::Sender<()>) {
     loop {
         n0_future::time::sleep(interval).await;
         if owner.lost() {
+            tracing::info!(
+                target: "habilis_network::lifecycle",
+                owner_pid = owner.pid(),
+                "owner exited; leaving"
+            );
             let _ = quit_tx.send(()).await;
             return;
         }
@@ -340,24 +358,39 @@ impl OwnedEndpoints {
     }
 }
 
-#[cfg(all(unix, feature = "host"))]
-#[cfg(test)]
+#[cfg(all(test, feature = "host"))]
 mod tests {
     use habilis_network_test_tracing::test;
-    use std::process::{Child, Command};
+    use std::process::{Child, Command, Stdio};
     use std::time::Duration;
 
     use tokio::sync::mpsc;
 
-    use super::{Owner, orphan_watch_warranted, parent_lost, validate_owner_pid, watch_owner};
+    use super::{Owner, validate_owner_pid, watch_owner};
 
     const TICK: Duration = Duration::from_millis(10);
 
+    /// A process that lives for about 30 s. Each OS has its own idle command,
+    /// as in the `idle_child` of the util crate.
     fn spawn_owner() -> Child {
-        Command::new("sleep")
-            .arg("30")
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
-            .expect("spawn sleep")
+            .expect("spawn an idle owner")
     }
 
     /// Run the owner watch; `true` when it quit within `within`.
@@ -387,6 +420,8 @@ mod tests {
         assert!(watch_quits(owner, Duration::from_secs(2)).await);
     }
 
+    /// On Windows the killed child is held open by its `Child`, which is the
+    /// case "exited, but still open" of `live_start_time`.
     #[test]
     async fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
         let mut child = spawn_owner();
@@ -447,6 +482,12 @@ mod tests {
         child.wait().unwrap();
         assert!(Owner::new(pid).is_err());
     }
+}
+
+/// The watch of the parent pid, which only Unix has.
+#[cfg(all(test, unix, feature = "host"))]
+mod parent_watch_tests {
+    use super::{orphan_watch_warranted, parent_lost};
 
     #[test]
     fn orphan_watch_fires_only_on_a_parent_change() {

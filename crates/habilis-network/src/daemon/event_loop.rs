@@ -31,10 +31,9 @@ use crate::util::tuning::{
     ALIVE_INTERVAL, LINKSTATE_INTERVAL, RECLAIM_INTERVAL, STATE_REFRESH, antientropy_interval,
     heal_interval, sweep_interval,
 };
+use crate::{beacon, gossip, lifecycle};
 use n0_future::StreamExt as _;
 use n0_future::time::Instant as TokioInstant;
-// Gated with `spawn_orphan_watch`, its only caller.
-use crate::{beacon, gossip, lifecycle};
 
 use super::app::NodeDriver;
 use super::beacon_arm::{

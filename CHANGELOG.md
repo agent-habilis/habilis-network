@@ -47,6 +47,15 @@ published to a registry; pin it with
   sends `SIGTERM` to `pid` when the quit was not heard or the daemon is too old to know it.
   `util::process::terminate` does not change: it signals a pid, and on Windows it stays
   `Unsupported`.
+- On Windows, a daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) stops when its
+  owner exits, by the same watch as on Unix: every `PPID_WATCH_INTERVAL` (1.5 s) it compares the
+  start time of the owner with the one it read at startup, so a reused pid does not fool it. The
+  daemon then takes the path of `SIGTERM`. A daemon with no `--owner-pid` has no watch on Windows:
+  Windows does not reparent an orphan, and the pid of a dead parent can be reused, so the watch of
+  the parent pid stays Unix only. On every OS the watch now writes an `info` line with the target
+  `habilis_network::lifecycle` when it stops the daemon. The error of an owner refused at startup
+  now says "is not running or cannot be read", and an owner that cannot be read later counts as
+  gone.
 - On Windows, a local nickname that is no valid Windows file stem stops the setup with the
   reason: one of `: * ? " |`, a trailing dot, or a device name such as `con` or `com1`, also
   with an extension. The wire rule of `Nickname` does not change.

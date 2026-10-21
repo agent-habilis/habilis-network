@@ -237,7 +237,8 @@ pub struct EventLoopConfig {
     /// channel free-form.
     pub(crate) per_peer_gate: Option<crate::doc::SelfWriteGate>,
     /// The process a CLI daemon lives for, set by
-    /// [`with_owner_pid`](Self::with_owner_pid). `None` keeps the parent watch.
+    /// [`with_owner_pid`](Self::with_owner_pid). `None` keeps the parent watch on
+    /// Unix, and no watch on Windows.
     #[cfg(feature = "host")]
     pub(crate) owner: Option<super::shutdown::Owner>,
 }
@@ -249,7 +250,8 @@ impl EventLoopConfig {
     /// in-process driver has no process to exit and ignores it.
     ///
     /// # Errors
-    /// `pid` is 0 or 1, the daemon's own pid, or no live process has it. The
+    /// `pid` is 0 or 1, the daemon's own pid, or no live process has it, or this
+    /// process cannot read it (on Windows, an owner of another account). The
     /// message is one line.
     #[cfg(feature = "host")]
     pub fn with_owner_pid(mut self, pid: u32) -> anyhow::Result<Self> {

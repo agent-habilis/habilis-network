@@ -188,9 +188,10 @@ pub fn ping_window() -> Duration {
     current().ping_window
 }
 
-/// How often the CLI daemon re-reads its parent pid to detect orphaning.
-/// Hidden flag `--ppid-watch-interval-ms` so the subprocess test sees the
-/// self-exit in milliseconds instead of the production seconds.
+/// How often the CLI daemon re-reads its owner (every OS) or its parent pid
+/// (Unix, with no owner) to detect orphaning. Hidden flag
+/// `--ppid-watch-interval-ms` so the subprocess test sees the self-exit in
+/// milliseconds instead of the production seconds.
 ///
 /// Ungated, unlike its accessor: [`Tuning::DEFAULTS`] is one `const` for every
 /// target and cannot name a field that disappears off a host.
@@ -198,9 +199,9 @@ pub const PPID_WATCH_INTERVAL: Duration = Duration::from_millis(1500);
 
 /// The live value, after any CLI override of [`PPID_WATCH_INTERVAL`].
 ///
-/// Gated with its only caller (`daemon::event_loop::spawn_orphan_watch`): the
-/// orphan watch is `libc::getppid`, which arrives with `host`.
-#[cfg(all(unix, feature = "host"))]
+/// Gated with its only caller (`daemon::shutdown::spawn_orphan_watch`), which
+/// reads processes, and that arrives with `host`.
+#[cfg(feature = "host")]
 #[must_use]
 pub fn ppid_watch_interval() -> Duration {
     current().ppid_watch_interval.max(Duration::from_millis(1))
