@@ -177,9 +177,47 @@ pub(crate) use super::IpcMessage;
 /// from the mesh id in [`send`]; `None` means the command is addressed by
 /// endpoint directly (via [`send_to_endpoint`]) and carries no mesh — the
 /// concrete command type is defined app-side, the engine only needs the address.
+///
+/// One command name is the engine's own: a JSON object whose `command` is
+/// `"quit"` and whose `mesh` is a valid mesh id is answered by the engine
+/// ([`quit`]) and never reaches the app.
 pub trait Addressed {
     fn mesh_id(&self) -> Option<&MeshId>;
 }
+
+/// The commands that the engine answers itself, before the app sees a line.
+/// A line that does not parse as one of them goes to the app as before.
+#[derive(Debug, Serialize, serde::Deserialize)]
+#[serde(tag = "command")]
+enum EngineCommand {
+    /// Stop the daemon by the path of a signal: `Left`, then the state file and
+    /// the marker are removed, then the process exits. `mesh` must be the mesh
+    /// of the daemon, so a stale marker cannot stop another session.
+    #[serde(rename = "quit")]
+    Quit { mesh: MeshId },
+}
+
+impl Addressed for EngineCommand {
+    fn mesh_id(&self) -> Option<&MeshId> {
+        match self {
+            Self::Quit { mesh } => Some(mesh),
+        }
+    }
+}
+
+/// What the accept loop needs to answer the engine's own commands: the mesh of
+/// this session, and the sender of the quit channel that the signals feed.
+pub(crate) struct EngineControl {
+    pub(crate) mesh: MeshId,
+    pub(crate) quit_tx: mpsc::Sender<()>,
+}
+
+/// The start of the error text when a command line does not parse. A daemon
+/// that does not know [`EngineCommand::Quit`] answers a quit with it.
+const PARSE_ERROR: &str = "parse error";
+
+/// The error text when a quit names another mesh.
+const QUIT_OF_ANOTHER_MESH: &str = "command mesh id does not match this daemon";
 
 /// Richer `ok` response for the `msg` IPC that also echoes back
 /// the authoritative message record. The echo has the same shape
@@ -341,15 +379,18 @@ fn listen(
 }
 
 /// Server-side accept loop over an already-[`bind`]-ed socket: forward
-/// each connection's command to the event loop. Spawned after `bind`
-/// returns, so by the time this runs the socket is already accepting.
+/// each connection's command to the event loop, or answer an engine command
+/// with `control`. Spawned after `bind` returns, so by the time this runs the
+/// socket is already accepting.
 pub(crate) async fn serve<C>(
     listener: Listener,
     tx: mpsc::Sender<IpcMessage<C>>,
+    control: EngineControl,
     sink: std::sync::Arc<dyn crate::gossip::event::NodeSink>,
 ) where
     C: DeserializeOwned + Send + 'static,
 {
+    let control = std::sync::Arc::new(control);
     // Accept errors are retried forever: they are almost always
     // transient (fd exhaustion under load, an aborted handshake), and
     // the old `break` permanently killed msg/poll for the process
@@ -365,7 +406,8 @@ pub(crate) async fn serve<C>(
                 backoff = IPC_ACCEPT_BACKOFF_MIN;
                 failing = false;
                 let tx = tx.clone();
-                tokio::spawn(handle_connection::<C>(stream, tx));
+                let control = std::sync::Arc::clone(&control);
+                tokio::spawn(handle_connection::<C>(stream, tx, control));
             }
             Err(error) => {
                 if !failing {
@@ -392,8 +434,11 @@ fn next_accept_backoff(current: Duration) -> Duration {
     current.saturating_mul(2).min(IPC_ACCEPT_BACKOFF_MAX)
 }
 
-async fn handle_connection<C>(stream: Stream, tx: mpsc::Sender<IpcMessage<C>>)
-where
+async fn handle_connection<C>(
+    stream: Stream,
+    tx: mpsc::Sender<IpcMessage<C>>,
+    control: std::sync::Arc<EngineControl>,
+) where
     C: DeserializeOwned + Send + 'static,
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
@@ -429,8 +474,15 @@ where
         }
     };
 
+    // An engine command first. Any other line, also one that is no JSON
+    // object, goes to the app's own parse, unchanged.
+    if let Ok(EngineCommand::Quit { mesh }) = serde_json::from_str::<EngineCommand>(line.trim()) {
+        answer_quit(&mesh, &control, &mut write_half).await;
+        return;
+    }
+
     let response = match serde_json::from_str::<C>(line.trim()) {
-        Err(error) => json_error(&format!("parse error: {error}")),
+        Err(error) => json_error(&format!("{PARSE_ERROR}: {error}")),
         Ok(cmd) => {
             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
             if tx.send((cmd, resp_tx)).await.is_err() {
@@ -449,6 +501,39 @@ where
         write_half.write_all(format!("{response}\n").as_bytes()),
     )
     .await;
+}
+
+/// Answer a quit, then feed the quit channel. The answer goes first, so the
+/// client has it before the process exits: the shutdown still waits for the
+/// `Left` broadcast before the exit. The channel is fed whatever the write
+/// gave, so a client that does not read cannot keep the daemon up. A full
+/// channel holds a quit already, and a closed one belongs to a loop that has
+/// ended; the answer is right in both cases.
+async fn answer_quit(
+    mesh: &MeshId,
+    control: &EngineControl,
+    write_half: &mut tokio::io::WriteHalf<Stream>,
+) {
+    if *mesh != control.mesh {
+        let error = json_error(QUIT_OF_ANOTHER_MESH);
+        let _ = tokio::time::timeout(
+            IPC_IO_TIMEOUT,
+            write_half.write_all(format!("{error}\n").as_bytes()),
+        )
+        .await;
+        return;
+    }
+    // No mesh id in the line: without an invite, the id is the secret of the mesh.
+    tracing::info!(
+        target: "habilis_network::lifecycle",
+        "IPC: quit requested"
+    );
+    let _ = tokio::time::timeout(
+        IPC_IO_TIMEOUT,
+        write_half.write_all(format!("{}\n", json_ack()).as_bytes()),
+    )
+    .await;
+    let _ = control.quit_tx.try_send(());
 }
 
 /// Nothing is listening on `nickname`'s control socket. Typed rather than a
@@ -669,6 +754,135 @@ async fn send_to_endpoint_owned_by<C: Serialize>(
     }
 }
 
+/// The daemon of one session, at the address that [`send`] takes: the runtime
+/// base, the mesh, and the nickname.
+#[derive(Debug, Clone, Copy)]
+pub struct QuitTarget<'a> {
+    pub base: &'a std::path::Path,
+    pub mesh: &'a MeshId,
+    pub nickname: &'a Nickname,
+}
+
+/// Why [`quit`] did not stop a daemon.
+#[derive(Debug)]
+pub enum QuitError {
+    /// The quit was not heard: no marker, nothing accepts on the endpoint, an
+    /// endpoint of another account, a failed exchange, or no answer.
+    Unreached(anyhow::Error),
+    /// The daemon answered that it cannot parse the quit: it is of a version
+    /// from before the command. Holds the answer. An app error that starts
+    /// with the same text (`parse error`) reads the same.
+    OldDaemon(String),
+    /// The daemon heard the quit and refused it, for example because the mesh
+    /// is not its own, or answered with something that is no JSON. Holds the
+    /// answer.
+    Refused(String),
+}
+
+impl std::fmt::Display for QuitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreached(error) => write!(formatter, "the quit was not heard: {error}"),
+            Self::OldDaemon(reply) => write!(
+                formatter,
+                "the daemon does not know the quit command: {reply}"
+            ),
+            Self::Refused(reply) => write!(formatter, "the daemon refused the quit: {reply}"),
+        }
+    }
+}
+
+impl std::error::Error for QuitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreached(error) => Some(error.as_ref()),
+            Self::OldDaemon(_) | Self::Refused(_) => None,
+        }
+    }
+}
+
+/// Stop a daemon through its IPC endpoint: the engine's `quit` command. The
+/// daemon answers, then takes the path of a signal: it broadcasts `Left`,
+/// removes its state file and its marker, and exits. `Ok` means that the daemon
+/// accepted the quit, not that it is gone already.
+///
+/// This works on every OS. See [`terminate`] for the version with a signal as
+/// the fallback.
+///
+/// # Errors
+/// [`QuitError`]: the quit was not heard, the daemon is too old to know it, or
+/// the daemon refused it.
+pub async fn quit(target: &QuitTarget<'_>) -> std::result::Result<(), QuitError> {
+    let cmd = EngineCommand::Quit {
+        mesh: target.mesh.clone(),
+    };
+    let reply = send(target.base, &cmd, target.nickname)
+        .await
+        .map_err(QuitError::Unreached)?;
+    quit_outcome(&reply)
+}
+
+/// What the answer to a quit means.
+fn quit_outcome(reply: &str) -> std::result::Result<(), QuitError> {
+    if reply.is_empty() {
+        return Err(QuitError::Unreached(anyhow::anyhow!(
+            "the daemon closed the connection with no answer"
+        )));
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(reply) else {
+        return Err(QuitError::Refused(reply.to_owned()));
+    };
+    if value["ok"] == true {
+        return Ok(());
+    }
+    let old = value["error"]
+        .as_str()
+        .is_some_and(|error| error.starts_with(PARSE_ERROR));
+    if old {
+        Err(QuitError::OldDaemon(reply.to_owned()))
+    } else {
+        Err(QuitError::Refused(reply.to_owned()))
+    }
+}
+
+/// Stop the daemon of `target`: [`quit`] on every OS. On Unix, when the quit
+/// was not heard or the daemon is too old to know it, send `SIGTERM` to `pid`
+/// instead ([`crate::util::process::terminate`]), which takes the same path in
+/// the daemon. A daemon that refused the quit gets no signal.
+///
+/// Not the same function as `util::process::terminate`: that one only signals
+/// a pid, and on Windows it can do nothing. This one stops a daemon.
+///
+/// The caller must know that `pid` is the daemon of `target`, for example from
+/// the `pid` of its `Info` answer. Otherwise the fallback can signal a process
+/// that took over the pid. `pid` is not used on Windows.
+///
+/// # Errors
+/// The [`QuitError`] of the quit; on Unix, the error of the signal when the
+/// fallback ran.
+pub async fn terminate(target: &QuitTarget<'_>, pid: u32) -> Result<()> {
+    match quit(target).await {
+        Ok(()) => Ok(()),
+        #[cfg(unix)]
+        Err(error @ (QuitError::Unreached(_) | QuitError::OldDaemon(_))) => {
+            tracing::info!(
+                target: "habilis_network::lifecycle",
+                %error,
+                pid,
+                "IPC: the quit did not stop the daemon; sending SIGTERM"
+            );
+            crate::util::process::terminate(pid).map_err(|signal| {
+                anyhow::Error::from(signal).context(format!("SIGTERM to pid {pid}, after: {error}"))
+            })
+        }
+        Err(error) => {
+            #[cfg(not(unix))]
+            let _ = pid;
+            Err(error.into())
+        }
+    }
+}
+
 /// Write `cmd`, half-close, and read back the single-line JSON response.
 /// The shared body of [`send`] and [`send_to_endpoint`].
 async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
@@ -729,8 +943,10 @@ mod tests {
     #[cfg(unix)]
     use super::new_endpoint_name;
     use super::{
-        Addressed, IpcMarker, IpcMessage, IpcName, MeshId, Nickname, NoDaemon, active_endpoints,
-        bind, json_error, json_ok, marker_path, mpsc, pipe_busy_retry, read_marker, send, serve,
+        Addressed, EngineCommand, EngineControl, IpcMarker, IpcMessage, IpcName, MeshId, Nickname,
+        NoDaemon, QUIT_OF_ANOTHER_MESH, QuitError, QuitTarget, active_endpoints, bind, json_ack,
+        json_error, json_ok, marker_path, mpsc, pipe_busy_retry, quit, quit_outcome, read_marker,
+        send, send_to_endpoint, serve, terminate,
     };
     use crate::util::mesh_runtime_dir;
 
@@ -1158,9 +1374,11 @@ mod tests {
         // exists the moment `bind` returns, too.
         let bound = bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
         assert!(marker_path(base.path(), &mesh, &nickname).is_file());
+        let (control, mut quit_rx) = test_control(&mesh);
         let listener_handle = tokio::spawn(serve(
             bound.listener,
             tx,
+            control,
             std::sync::Arc::new(crate::gossip::event::SilentSink),
         ));
 
@@ -1176,6 +1394,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["ok"], true);
         assert_eq!(parsed["id"], "got: test message");
+        assert!(quit_rx.try_recv().is_err(), "an app command is no quit");
 
         handler.await.unwrap();
         listener_handle.abort();
@@ -1220,9 +1439,11 @@ mod tests {
         let nickname = Nickname::from("idle-nick");
         let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
         let bound = bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
+        let (control, _quit_rx) = test_control(&mesh);
         let listener_handle = tokio::spawn(serve(
             bound.listener,
             tx,
+            control,
             std::sync::Arc::new(crate::gossip::event::SilentSink),
         ));
         // Echo handler so a healthy command still round-trips while the
@@ -1258,5 +1479,328 @@ mod tests {
 
         handler.abort();
         listener_handle.abort();
+    }
+
+    // ── the engine's quit ──────────────────────────────────────────
+
+    /// An engine control for `mesh`, and the receiver of its quit channel. The
+    /// channel holds one quit, as the real one does.
+    fn test_control(mesh: &MeshId) -> (EngineControl, mpsc::Receiver<()>) {
+        let (quit_tx, quit_rx) = mpsc::channel(1);
+        (
+            EngineControl {
+                mesh: mesh.clone(),
+                quit_tx,
+            },
+            quit_rx,
+        )
+    }
+
+    /// Whether the quit channel stays empty for a short time.
+    async fn no_quit_within(quit_rx: &mut mpsc::Receiver<()>) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(200), quit_rx.recv())
+            .await
+            .is_err()
+    }
+
+    /// A bound test daemon whose engine control holds `session`, the mesh of
+    /// the session; by default the mesh that it is bound under.
+    struct TestServer<C> {
+        base: TestBase,
+        mesh: MeshId,
+        nickname: Nickname,
+        app_rx: mpsc::Receiver<IpcMessage<C>>,
+        quit_rx: mpsc::Receiver<()>,
+        accept: tokio::task::JoinHandle<()>,
+    }
+
+    impl<C: serde::de::DeserializeOwned + Send + 'static> TestServer<C> {
+        fn start(tag: &str, session: Option<&MeshId>) -> Self {
+            let base = TestBase::new(tag);
+            let mesh = test_mesh(tag);
+            let nickname = Nickname::from("quit-nick");
+            let (tx, app_rx) = mpsc::channel::<IpcMessage<C>>(8);
+            let bound = bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
+            let (control, quit_rx) = test_control(session.unwrap_or(&mesh));
+            let accept = tokio::spawn(serve(
+                bound.listener,
+                tx,
+                control,
+                std::sync::Arc::new(crate::gossip::event::SilentSink),
+            ));
+            Self {
+                base,
+                mesh,
+                nickname,
+                app_rx,
+                quit_rx,
+                accept,
+            }
+        }
+
+        fn target(&self) -> QuitTarget<'_> {
+            QuitTarget {
+                base: self.base.path(),
+                mesh: &self.mesh,
+                nickname: &self.nickname,
+            }
+        }
+
+        fn name(&self) -> IpcName {
+            read_marker(&marker_path(self.base.path(), &self.mesh, &self.nickname))
+                .unwrap()
+                .expect("a marker")
+        }
+    }
+
+    impl<C> Drop for TestServer<C> {
+        fn drop(&mut self) {
+            self.accept.abort();
+        }
+    }
+
+    #[test]
+    fn the_quit_command_and_its_answer_have_a_fixed_form() {
+        let mesh = test_mesh("golden");
+        let line = serde_json::to_string(&EngineCommand::Quit { mesh: mesh.clone() }).unwrap();
+        assert_eq!(
+            line,
+            format!(r#"{{"command":"quit","mesh":"{}"}}"#, mesh.as_str())
+        );
+        assert_eq!(json_ack(), r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn the_answer_to_a_quit_reads_as_its_outcome() {
+        assert!(quit_outcome(&json_ack()).is_ok());
+        assert!(matches!(
+            quit_outcome(&json_error("parse error: unknown variant `quit`")),
+            Err(QuitError::OldDaemon(_))
+        ));
+        assert!(matches!(
+            quit_outcome(&json_error(QUIT_OF_ANOTHER_MESH)),
+            Err(QuitError::Refused(_))
+        ));
+        assert!(matches!(
+            quit_outcome("not json"),
+            Err(QuitError::Refused(_))
+        ));
+        assert!(matches!(quit_outcome(""), Err(QuitError::Unreached(_))));
+    }
+
+    #[tokio::test]
+    async fn a_quit_for_this_mesh_is_answered_then_fed_to_the_quit_channel() {
+        let mut server = TestServer::<TestCommand>::start("quit", None);
+        quit(&server.target()).await.expect("the quit is accepted");
+        let fed = tokio::time::timeout(std::time::Duration::from_secs(5), server.quit_rx.recv())
+            .await
+            .expect("the quit channel is fed");
+        assert_eq!(fed, Some(()));
+        assert!(server.app_rx.try_recv().is_err(), "the app sees no quit");
+    }
+
+    #[tokio::test]
+    async fn a_quit_for_another_mesh_is_refused_and_feeds_nothing() {
+        let mut server = TestServer::<TestCommand>::start("quitother", Some(&test_mesh("other")));
+        let error = quit(&server.target()).await.expect_err("refused");
+        assert!(matches!(error, QuitError::Refused(_)), "{error}");
+        assert!(no_quit_within(&mut server.quit_rx).await);
+        assert!(server.app_rx.try_recv().is_err(), "the app sees no quit");
+    }
+
+    #[tokio::test]
+    async fn a_line_that_is_no_valid_quit_reaches_the_app() {
+        let mut server = TestServer::<serde_json::Value>::start("quitapp", None);
+        let name = server.name();
+        let lines = [
+            serde_json::json!({ "command": "quit" }),
+            serde_json::json!({ "command": "quit", "mesh": "no mesh id" }),
+            serde_json::json!("quit"),
+        ];
+        let mut app_rx = std::mem::replace(&mut server.app_rx, mpsc::channel(1).1);
+        let count = lines.len();
+        let app = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while seen.len() < count {
+                let Some((cmd, resp)) = app_rx.recv().await else {
+                    break;
+                };
+                let _ = resp.send(json_ok("app"));
+                seen.push(cmd);
+            }
+            seen
+        });
+        for line in &lines {
+            let reply = send_to_endpoint(&name, line).await.unwrap();
+            assert!(reply.contains(r#""id":"app""#), "{line}: {reply}");
+        }
+        assert_eq!(app.await.unwrap(), lines);
+        assert!(no_quit_within(&mut server.quit_rx).await);
+    }
+
+    #[tokio::test]
+    async fn a_quit_with_no_marker_is_not_heard() {
+        let base = TestBase::new("quitnone");
+        let mesh = test_mesh("quitnone");
+        let nickname = Nickname::from("nobody");
+        let target = QuitTarget {
+            base: base.path(),
+            mesh: &mesh,
+            nickname: &nickname,
+        };
+        let error = quit(&target).await.expect_err("no daemon");
+        assert!(matches!(error, QuitError::Unreached(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_line_that_is_no_json_gets_the_parse_error_and_feeds_nothing() {
+        use interprocess::local_socket::{tokio::Stream, tokio::prelude::*};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut server = TestServer::<TestCommand>::start("quitraw", None);
+        let mut client = Stream::connect(server.name().to_name().unwrap())
+            .await
+            .unwrap();
+        client.write_all(b"not json\n").await.unwrap();
+        let mut reply = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.read_to_string(&mut reply),
+        )
+        .await
+        .expect("an answer")
+        .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(reply.trim()).unwrap();
+        assert!(
+            reply["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("parse error")),
+            "{reply}"
+        );
+        assert!(no_quit_within(&mut server.quit_rx).await);
+    }
+
+    #[tokio::test]
+    async fn an_app_that_cannot_parse_a_quit_reads_as_an_old_daemon() {
+        let mut server = TestServer::<TestCommand>::start("quitold", None);
+        // Not an engine quit, so the app parses it, as a daemon from before the
+        // command does with a real quit.
+        let reply = send_to_endpoint(&server.name(), &serde_json::json!({ "command": "quit" }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(quit_outcome(&reply), Err(QuitError::OldDaemon(_))),
+            "{reply}"
+        );
+        assert!(no_quit_within(&mut server.quit_rx).await);
+    }
+
+    #[tokio::test]
+    async fn a_second_quit_is_answered_and_the_channel_holds_one() {
+        let mut server = TestServer::<TestCommand>::start("quittwice", None);
+        quit(&server.target()).await.expect("the first quit");
+        quit(&server.target()).await.expect("the second quit");
+        // The server feeds the channel after its answer, so give both feeds a moment.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(server.quit_rx.try_recv(), Ok(()));
+        assert!(no_quit_within(&mut server.quit_rx).await);
+    }
+
+    #[tokio::test]
+    async fn a_quit_feeds_the_channel_also_when_the_client_does_not_read() {
+        use interprocess::local_socket::{tokio::Stream, tokio::prelude::*};
+        use tokio::io::AsyncWriteExt;
+
+        let mut server = TestServer::<TestCommand>::start("quitdeaf", None);
+        // The plain `interprocess` connect, as in the idle test: this test is
+        // about the server.
+        let mut client = Stream::connect(server.name().to_name().unwrap())
+            .await
+            .unwrap();
+        let line = serde_json::to_string(&EngineCommand::Quit {
+            mesh: server.mesh.clone(),
+        })
+        .unwrap();
+        client
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .unwrap();
+        let fed = tokio::time::timeout(std::time::Duration::from_secs(5), server.quit_rx.recv())
+            .await
+            .expect("the quit channel is fed while the answer is unread");
+        assert_eq!(fed, Some(()));
+        drop(client);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_signals_the_pid_when_the_quit_is_not_heard() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let base = TestBase::new("termunheard");
+        let mesh = test_mesh("termunheard");
+        let nickname = Nickname::from("nobody");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let target = QuitTarget {
+            base: base.path(),
+            mesh: &mesh,
+            nickname: &nickname,
+        };
+        terminate(&target, child.id())
+            .await
+            .expect("the fallback signals");
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_sends_no_signal_when_the_daemon_refuses() {
+        let server = TestServer::<TestCommand>::start("termrefused", Some(&test_mesh("other")));
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let error = terminate(&server.target(), child.id())
+            .await
+            .expect_err("refused");
+        assert!(
+            matches!(
+                error.downcast_ref::<QuitError>(),
+                Some(QuitError::Refused(_))
+            ),
+            "{error}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(child.try_wait().unwrap().is_none(), "no signal was sent");
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn on_windows_terminate_is_the_quit_alone() {
+        let base = TestBase::new("termwin");
+        let mesh = test_mesh("termwin");
+        let nickname = Nickname::from("nobody");
+        let target = QuitTarget {
+            base: base.path(),
+            mesh: &mesh,
+            nickname: &nickname,
+        };
+        // The pid is not used on Windows, so our own is safe here.
+        let error = terminate(&target, std::process::id())
+            .await
+            .expect_err("no daemon");
+        assert!(
+            matches!(
+                error.downcast_ref::<QuitError>(),
+                Some(QuitError::Unreached(_))
+            ),
+            "{error}"
+        );
     }
 }

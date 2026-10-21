@@ -335,6 +335,10 @@ pub fn is_alive(pid: u32) -> bool {
 
 /// Ask a process to terminate (SIGTERM) — the graceful path: a mesh daemon
 /// catches it, broadcasts `left`, and removes its state file.
+///
+/// This only signals a pid. To stop a daemon, use `runtime::ipc::terminate` of
+/// `habilis-network`: it sends the IPC `quit` command on every OS, and this
+/// signal on Unix as its fallback.
 #[cfg(unix)]
 #[expect(unsafe_code, reason = "libc::kill FFI; no safe wrapper")]
 /// # Errors
@@ -351,11 +355,12 @@ pub fn terminate(pid: u32) -> std::io::Result<()> {
 }
 
 /// Windows has no polite signal, and `TerminateProcess` is a hard kill that
-/// skips the `left` broadcast. The graceful stop is an IPC `Quit` command: R5
-/// of `docs/windows.md`, not built yet, so this returns an error.
+/// skips the `left` broadcast. This crate sits below the IPC and holds only the
+/// pid, so it cannot stop a daemon here. `runtime::ipc::terminate` of
+/// `habilis-network` does, with the IPC `quit` command.
 ///
 /// # Errors
-/// Always [`std::io::ErrorKind::Unsupported`], until R5 lands.
+/// Always [`std::io::ErrorKind::Unsupported`].
 #[cfg(windows)]
 pub fn terminate(_pid: u32) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())

@@ -293,11 +293,36 @@ pub async fn run<A: NodeDriver>(
         ));
     }
 
+    // A session inside a foreground command that owns its own lifetime
+    // (a `--advertise` transfer, a directory browse) must not register
+    // process-wide signal handlers — doing so suppresses the OS
+    // default-terminate forever and the host command stops dying on
+    // ctrl-c. Give the loop a quit channel that no signal feeds instead;
+    // shutdown comes from `external_quit_rx` / drop. A browser is always this
+    // case: there are no process signals to listen for.
+    //
+    // Made before the IPC endpoint binds: the IPC `quit` feeds the same
+    // channel as the signals, so its sender goes to the accept loop.
+    #[cfg(feature = "host")]
+    let (quit_tx, quit_rx) = if handle_signals {
+        spawn_quit_signal_tasks(exit_on_quit, owner)
+    } else {
+        never_quit()
+    };
+    #[cfg(not(feature = "host"))]
+    let (_, quit_rx) = {
+        let _ = handle_signals;
+        never_quit()
+    };
+
     #[cfg(feature = "host")]
     let ipc_rx = spawn_ipc_rx::<A::Ipc>(
         ipc_listener_disabled,
         runtime_base.as_deref(),
-        &mesh_str,
+        crate::transport::ipc::EngineControl {
+            mesh: mesh_str.clone(),
+            quit_tx,
+        },
         &author,
         &sink,
     )
@@ -318,24 +343,6 @@ pub async fn run<A: NodeDriver>(
     // `gossip::handle_gossip_event`.
 
     let intervals = build_maintenance_intervals().await;
-    // A session inside a foreground command that owns its own lifetime
-    // (a `--advertise` transfer, a directory browse) must not register
-    // process-wide signal handlers — doing so suppresses the OS
-    // default-terminate forever and the host command stops dying on
-    // ctrl-c. Give the loop a quit channel that never fires instead;
-    // shutdown comes from `external_quit_rx` / drop. A browser is always this
-    // case: there are no process signals to listen for.
-    #[cfg(feature = "host")]
-    let quit_rx = if handle_signals {
-        spawn_quit_signal_tasks(exit_on_quit, owner)
-    } else {
-        never_quit()
-    };
-    #[cfg(not(feature = "host"))]
-    let quit_rx = {
-        let _ = handle_signals;
-        never_quit()
-    };
 
     // Flip `ready` to `true` only once the daemon can actually serve, then
     // re-write the state file (the earlier write reported `ready: false`) and
@@ -1110,6 +1117,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
                     }
                 }
             },
+            // The signals, the owner watch, and the IPC `quit` all land here.
             _ = quit_rx.recv() => {
                 let ctx = parts.ctx(&sender);
                 exit_after_release = announce_departure(&mut state, &mut app, &ctx, QuitParams { name: &mesh_name, leave_label: &leave_label, exit_on_quit }).await;
@@ -1144,7 +1152,7 @@ async fn event_loop<A: NodeDriver>(loop_state: EventLoop<A>) -> Result<()> {
 fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
     disabled: bool,
     runtime_base: Option<&std::path::Path>,
-    mesh: &MeshId,
+    control: crate::transport::ipc::EngineControl,
     author: &Nickname,
     sink: &std::sync::Arc<dyn NodeSink>,
 ) -> Option<(
@@ -1167,7 +1175,7 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
     // failure is non-fatal — the daemon still gossips; it just can't take
     // IPC — matching the prior best-effort behavior, only now observed
     // before readiness rather than racing it.
-    let bound = match crate::transport::ipc::bind(base, mesh, author) {
+    let bound = match crate::transport::ipc::bind(base, &control.mesh, author) {
         Ok(bound) => bound,
         Err(error) => {
             sink.emit(NodeEvent::Error(format!("IPC: {error}")));
@@ -1183,6 +1191,7 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
     tokio::spawn(crate::transport::ipc::serve::<C>(
         bound.listener,
         ipc_tx,
+        control,
         std::sync::Arc::clone(sink),
     ));
     Some((rx, bound.marker))

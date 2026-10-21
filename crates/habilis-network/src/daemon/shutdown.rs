@@ -20,8 +20,8 @@ use crate::util::tuning::ppid_watch_interval;
 
 /// Graceful shutdown: remove the statusline state file first, then
 /// announce `Left` and give the broadcast a moment to reach peers.
-/// Shared by both the external-quit and ctrl-c/SIGTERM/SIGHUP paths so
-/// they can't drift apart.
+/// Shared by the external-quit path and the quit channel (ctrl-c, SIGTERM,
+/// SIGHUP, the owner watch, the IPC `quit`) so they can't drift apart.
 ///
 /// The state-file removal is the time-critical step: an external reader
 /// (the shell statusline) shows the mesh pill while the file is fresh,
@@ -98,7 +98,9 @@ pub(super) async fn announce_departure<A: NodeDriver>(
     quit.exit_on_quit && !cfg!(feature = "dhat-heap")
 }
 /// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix)
-/// listener tasks feeding a single internal quit channel.
+/// listener tasks feeding a single internal quit channel. Returns both ends:
+/// the sender also goes to the IPC accept loop, whose `quit` feeds the same
+/// channel.
 /// `tokio::signal::ctrl_c()` inside a `select!` branch doesn't reliably
 /// interrupt a blocking stdin read, so we offload signal listening to
 /// dedicated tasks.
@@ -113,7 +115,7 @@ pub(super) async fn announce_departure<A: NodeDriver>(
 pub(super) fn spawn_quit_signal_tasks(
     exit_on_quit: bool,
     owner: Option<Owner>,
-) -> mpsc::Receiver<()> {
+) -> (mpsc::Sender<()>, mpsc::Receiver<()>) {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
     let ctrl_c_tx = quit_tx.clone();
     tokio::spawn(async move {
@@ -139,14 +141,14 @@ pub(super) fn spawn_quit_signal_tasks(
     // on a host reparent.
     #[cfg(unix)]
     if exit_on_quit {
-        spawn_orphan_watch(quit_tx, owner);
+        spawn_orphan_watch(quit_tx.clone(), owner);
     }
     // Windows has neither of them yet: the owner watch is R6 and the console
     // events (`ctrl_break`, `ctrl_close`, `ctrl_logoff`, `ctrl_shutdown`) are R7
     // of `docs/windows.md`. Only ctrl-c reaches the quit channel until then.
     #[cfg(not(unix))]
     let _ = (exit_on_quit, owner);
-    quit_rx
+    (quit_tx, quit_rx)
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
 /// `EventLoopConfig::with_owner_pid`. For a launcher that must refuse a bad
@@ -274,12 +276,32 @@ pub(super) fn orphan_watch_warranted(original_ppid: i32) -> bool {
 pub(super) fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
     original_ppid != current_ppid
 }
-/// A quit channel whose sender is deliberately leaked, so the receiver parks
-/// forever. The loop's quit arm then only ever fires from `external_quit_rx`.
-pub(super) fn never_quit() -> mpsc::Receiver<()> {
+/// A quit channel that no signal feeds. A clone of its sender is deliberately
+/// leaked, so the receiver never reads `None` (the loop's quit arm fires on
+/// one), whatever the caller does with the sender that it gets back. The
+/// loop's quit arm then fires only from `external_quit_rx`, or from an IPC
+/// `quit`, and only a CLI session binds an IPC endpoint, which always has its
+/// signals.
+pub(super) fn never_quit() -> (mpsc::Sender<()>, mpsc::Receiver<()>) {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-    std::mem::forget(quit_tx);
-    quit_rx
+    std::mem::forget(quit_tx.clone());
+    (quit_tx, quit_rx)
+}
+
+#[cfg(test)]
+mod never_quit_tests {
+    use std::time::Duration;
+
+    use super::never_quit;
+
+    #[tokio::test]
+    async fn a_never_quit_channel_stays_open_when_its_sender_drops() {
+        let (quit_tx, mut quit_rx) = never_quit();
+        drop(quit_tx);
+        // A closed channel would give `None` at once, and the quit arm fires on it.
+        let read = tokio::time::timeout(Duration::from_millis(100), quit_rx.recv()).await;
+        assert!(read.is_err(), "the channel closed: {read:?}");
+    }
 }
 
 /// What the loop closes as it ends: the router with its endpoint, and the multi-hop

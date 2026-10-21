@@ -278,6 +278,7 @@ A newtype is a struct with one field that gives a primitive a domain meaning. Th
 | `Leg` | `habilis-network-iroh-multihop-transport/src/graph.rs` | The two ends of a route, `src` and `dst`, both `AppId`. |
 | `Contest` | `habilis-network/src/beacon/mod.rs` | The two holders of one beacon, `own` and `rival`. |
 | `GraftTarget` | `habilis-network/src/transport/probe.rs` | The peer of a graft and the rendezvous it is told apart from. |
+| `QuitTarget` | `habilis-network/src/transport/ipc.rs` | The daemon of one session, at the address of `send`: the runtime base, the mesh, and the nickname. |
 | `RivalFlag` | `habilis-network/src/daemon/state.rs` | What a `PeerInfo` says about the rendezvous: `proven` says that the sender proved its endpoint, and `held` says that it carries the beacon flag. |
 
 ## Typestate
