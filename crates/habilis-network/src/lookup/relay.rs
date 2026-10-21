@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use iroh::{
-    Endpoint, RelayMode, RelayUrl,
+    Endpoint, RelayConfig, RelayMode, RelayUrl,
     endpoint::{default_relay_mode, presets},
 };
 use n0_future::task::JoinHandle;
@@ -93,6 +93,17 @@ pub fn relay_ladder(choice: &RelayChoice) -> Vec<RelayUrl> {
     }
 }
 
+/// The relay config of one rung. A rung over plain `http://` has no TLS, and QUIC needs TLS, so
+/// it cannot serve QUIC address discovery. Probing its default QUIC port holds the first net
+/// report until the 3 s probe timeout of iroh, and the endpoint has no home relay until then.
+fn rung_config(url: &RelayUrl) -> RelayConfig {
+    let mut config = RelayConfig::from(url.clone());
+    if url.scheme() == "http" {
+        config.quic = None;
+    }
+    config
+}
+
 /// Map a [`RelayChoice`] to the iroh [`RelayMode`] for an endpoint.
 ///
 /// - **Beacon** homes on exactly **one** rung — the deterministic relay
@@ -116,7 +127,7 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
         }
         RelayChoice::Custom(ladder) => {
             tracing::debug!(rungs = ladder.len(), "endpoint pinned to relay ladder");
-            RelayMode::custom(ladder.iter().cloned())
+            RelayMode::Custom(ladder.iter().map(rung_config).collect())
         }
         RelayChoice::Pinned => {
             tracing::debug!("peer on iroh resilient multi-relay default");
@@ -683,6 +694,30 @@ mod tests {
     fn refresh_no_op_when_current_rung_still_first_reachable() {
         let action = plan_rung_refresh(Some(rung("a")).as_ref(), Some(rung("a")));
         assert_eq!(action, RungRefresh::NoChange);
+    }
+
+    /// A rung over plain `http://` has no TLS, and QUIC needs TLS, so it cannot serve QUIC
+    /// address discovery. An endpoint that probes the default QUIC port of such a rung waits for
+    /// the 3 s probe timeout of iroh before its first net report, and has no home relay until
+    /// then: a peer that dials it through the relay in that time meets a relay that drops the
+    /// packet.
+    #[tokio::test]
+    async fn an_endpoint_on_a_plain_http_rung_is_online_without_the_probe_timeout() {
+        let (url, _server) = crate::lookup::test_relay::spawn_plain()
+            .await
+            .expect("a plain local relay");
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![url])))
+            .bind()
+            .await
+            .expect("bind an endpoint on the rung");
+
+        let online = tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.online())
+            .await
+            .is_ok();
+        endpoint.close().await;
+
+        assert!(online, "no home relay after 2 s");
     }
 
     #[test]
