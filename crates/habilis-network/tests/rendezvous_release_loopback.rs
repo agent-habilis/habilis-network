@@ -388,6 +388,14 @@ fn the_beacon_holder_leaving_is_replaced_though_every_other_member_let_go_of_it(
         let mut members = group_that_let_go(&relay).await;
         let before = count("beacon role active");
 
+        // The members that remain all claim the rendezvous after the `Left` of the holder. Two of
+        // them can claim it a few milliseconds apart: a holder that is bound and not serving yet
+        // answers the probe with a refusal, which the probe reads as silence. The rival check
+        // resolves that overlap by design, and the relay logs the connection that it replaced.
+        habilis_network_test_tracing::allow_warn(
+            "iroh::socket::transports::relay::actor",
+            "Another endpoint connected with the same endpoint id",
+        );
         let holder = members.remove(0);
         let _ = holder.membership.node.leave().await;
         let replaced = eventually(Duration::from_secs(45), || {
