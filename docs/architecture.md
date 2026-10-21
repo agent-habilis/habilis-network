@@ -330,7 +330,7 @@ Topic setup makes the first peer claim the beacon eagerly, because a topic mesh 
 
 `DriverMode` is the single branch between the two ways to drive a node.
 `Cli` binds the IPC endpoint and exits the process on quit.
-A quit comes from a signal, the owner watch, or the IPC `quit` command, and all of them take one path: the state file and the marker are removed, then `Left` goes out, then the process exits.
+A quit comes from a signal, a console event on Windows, the owner watch, or the IPC `quit` command, and all of them take one path: the state file and the marker are removed, then `Left` goes out, then the process exits.
 `InProcess` takes typed requests over channels and returns cleanly.
 A browser node and an embedded node are always `InProcess`.
 

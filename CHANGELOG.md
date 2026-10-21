@@ -56,6 +56,18 @@ published to a registry; pin it with
   `habilis_network::lifecycle` when it stops the daemon. The error of an owner refused at startup
   now says "is not running or cannot be read", and an owner that cannot be read later counts as
   gone.
+- On Windows, ctrl-break and the close of the console take the graceful path of a daemon, as
+  ctrl-c does: the five console events of `tokio::signal::windows` (ctrl-c, ctrl-break, close,
+  logoff and shutdown) feed the quit channel, and the daemon takes the path of `SIGTERM`. Each
+  writes `console event; leaving` with the target `habilis_network::lifecycle`. The listeners are
+  made before the node is ready, so an event that comes just after it is not lost. A logoff and a
+  shutdown do not reach a node today: Windows does not give them to the console handler of a
+  process that loaded `user32.dll`, and a node loads it (iroh's `netwatch` through COM, and the
+  runtime base through `SHGetKnownFolderPath`). A process with no console gets no console event.
+- `habilis-network-util`, with `test-fixtures` on Windows: `win_console::send_console_event`
+  sends ctrl-c or ctrl-break to another process through its console, and
+  `win_console::allow_ctrl_c` turns off the flag that makes a process ignore ctrl-c. They exist
+  for tests: the sender changes the console of the calling process.
 - On Windows, a local nickname that is no valid Windows file stem stops the setup with the
   reason: one of `: * ? " |`, a trailing dot, or a device name such as `con` or `com1`, also
   with an extension. The wire rule of `Nickname` does not change.

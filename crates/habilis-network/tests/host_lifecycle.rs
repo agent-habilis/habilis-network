@@ -15,6 +15,13 @@
 //! node exits with 0, and its state file and its marker are gone, so the watch
 //! took the graceful path.
 //!
+//! Part 4, the console events (R7), on Windows only: a node in a child process,
+//! in a console of its own, stops on ctrl-break and on ctrl-c. The node exits
+//! with 0, and its state file and its marker are gone. A third process, the
+//! test binary with only `console_sender` selected, attaches to the console of
+//! the node and raises the event there, so the test does not depend on the
+//! console of the runner.
+//!
 //! In CLI mode a quit ends the process with `std::process::exit`, so no node of
 //! the test process is ever sent a quit. Part 1 aborts the task of its node
 //! instead, and awaits it, so the loop is gone before the folder is removed.
@@ -58,6 +65,16 @@ const CHILD_ENV: &str = "HABILIS_HOST_LIFECYCLE_CHILD";
 
 /// The variable that makes [`owner_process`] wait.
 const OWNER_ENV: &str = "HABILIS_HOST_LIFECYCLE_OWNER";
+
+/// The variable that makes [`child_node`] turn ctrl-c on before it starts the
+/// node, for part 4: a parent that ignores ctrl-c gives the flag to its child.
+#[cfg(windows)]
+const CTRL_C_ENV: &str = "HABILIS_HOST_LIFECYCLE_CTRL_C";
+
+/// The variable that makes [`console_sender`] send an event: the pid of the
+/// node and `c` or `break`.
+#[cfg(windows)]
+const SENDER_ENV: &str = "HABILIS_HOST_LIFECYCLE_SENDER";
 
 /// An app with no frames of its own that answers every IPC command with its
 /// nickname and its mesh, as the `Info` command of a real consumer does.
@@ -239,18 +256,22 @@ async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
     let _ = node.await;
 }
 
-/// The node of parts 2 and 3, in the child process that [`ChildNode`] starts.
+/// The node of parts 2 to 4, in the child process that [`ChildNode`] starts.
 /// With no [`CHILD_ENV`] it does nothing, so a run with `--include-ignored`
 /// passes it at once.
 ///
 /// A quit, or the exit of its owner, ends this process with 0. It does not
 /// remove the base: the parent owns it.
 #[test]
-#[ignore = "the child process of parts 2 and 3"]
+#[ignore = "the child process of parts 2 to 4"]
 fn child_node() {
     let Ok(spec) = std::env::var(CHILD_ENV) else {
         return;
     };
+    #[cfg(windows)]
+    if std::env::var_os(CTRL_C_ENV).is_some() {
+        habilis_network_util::win_console::allow_ctrl_c().expect("ctrl-c on");
+    }
     let mut lines = spec.splitn(3, '\n');
     let base = lines.next().expect("the base");
     let topic = lines.next().expect("the topic");
@@ -288,6 +309,27 @@ fn owner_process() {
     std::thread::sleep(Duration::from_mins(2));
 }
 
+/// The sender of part 4, in its own child process, because it leaves its
+/// console. It panics, and so exits with an error, when the send fails. With
+/// no [`SENDER_ENV`] it does nothing.
+#[cfg(windows)]
+#[test]
+#[ignore = "the sender process of part 4"]
+fn console_sender() {
+    use habilis_network_util::win_console::{ConsoleEvent, send_console_event};
+
+    let Ok(spec) = std::env::var(SENDER_ENV) else {
+        return;
+    };
+    let (pid, event) = spec.split_once(' ').expect("a pid and an event");
+    let event = match event {
+        "c" => ConsoleEvent::CtrlC,
+        "break" => ConsoleEvent::CtrlBreak,
+        other => panic!("unknown event {other}"),
+    };
+    send_console_event(pid.parse().expect("a pid"), event).expect("the console event");
+}
+
 /// Start the test binary with only `entry` selected. The process is killed on
 /// drop, so a test that fails leaves no child behind.
 fn spawn_entry(entry: &str, env: (&str, &str), stdout: Stdio) -> tokio::process::Command {
@@ -302,7 +344,7 @@ fn spawn_entry(entry: &str, env: (&str, &str), stdout: Stdio) -> tokio::process:
     command
 }
 
-/// The child process of parts 2 and 3, with its output read from the start, so
+/// The child process of parts 2 to 4, with its output read from the start, so
 /// a child that writes much never blocks on a full pipe.
 struct ChildNode {
     process: tokio::process::Child,
@@ -312,11 +354,34 @@ struct ChildNode {
 
 impl ChildNode {
     fn spawn(base: &Path, topic: &str, owner: Option<u32>) -> Self {
+        Self::start(Self::command(base, topic, owner))
+    }
+
+    /// The command of the child, before its stderr is piped.
+    fn command(base: &Path, topic: &str, owner: Option<u32>) -> tokio::process::Command {
         let spec = match owner {
             Some(owner) => format!("{}\n{topic}\n{owner}", base.display()),
             None => format!("{}\n{topic}", base.display()),
         };
-        let mut process = spawn_entry("child_node", (CHILD_ENV, &spec), Stdio::piped())
+        spawn_entry("child_node", (CHILD_ENV, &spec), Stdio::piped())
+    }
+
+    /// The child of part 4, in a console of its own (`CREATE_NO_WINDOW`), with
+    /// the other creation `flags`. With `ctrl_c` it turns ctrl-c on first.
+    #[cfg(windows)]
+    fn spawn_in_console(base: &Path, topic: &str, flags: u32, ctrl_c: bool) -> Self {
+        use habilis_network_util::win_console::CREATE_NO_WINDOW;
+
+        let mut command = Self::command(base, topic, None);
+        command.creation_flags(CREATE_NO_WINDOW | flags);
+        if ctrl_c {
+            command.env(CTRL_C_ENV, "1");
+        }
+        Self::start(command)
+    }
+
+    fn start(mut command: tokio::process::Command) -> Self {
+        let mut process = command
             .stderr(Stdio::piped())
             .spawn()
             .expect("the child starts");
@@ -450,4 +515,64 @@ async fn the_owner_watch_stops_a_cli_node_when_its_owner_dies() {
         child.fail(&what).await;
     }
     assert_left_cleanly(&base.0, &name).await;
+}
+
+/// Part 4: start a node in a console of its own, send it `event` from a third
+/// process, and check that it left by the graceful path.
+#[cfg(windows)]
+async fn assert_console_event_stops_a_cli_node(tag: &str, event: &str, flags: u32, ctrl_c: bool) {
+    let base = TempBase::new(tag);
+    let topic = format!("host-lifecycle-{tag}-{}", std::process::id());
+    let mut child = ChildNode::spawn_in_console(&base.0, &topic, flags, ctrl_c);
+    let name = match child.endpoint(&base.0).await {
+        Ok((name, _)) => name,
+        Err(what) => child.fail(&what).await,
+    };
+    let pid = child.process.id().expect("the child runs");
+    // `CREATE_NO_WINDOW` shows no window on a runner with no console; the
+    // sender leaves that console at once.
+    let sent = spawn_entry(
+        "console_sender",
+        (SENDER_ENV, &format!("{pid} {event}")),
+        Stdio::piped(),
+    )
+    .stderr(Stdio::piped())
+    .creation_flags(habilis_network_util::win_console::CREATE_NO_WINDOW)
+    .output()
+    .await
+    .expect("the sender runs");
+    if !sent.status.success() {
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&sent.stdout),
+            String::from_utf8_lossy(&sent.stderr)
+        );
+        child
+            .fail(&format!("the sender failed: {}\n{output}", sent.status))
+            .await;
+    }
+    if let Err(what) = child.exits_with_zero().await {
+        child.fail(&what).await;
+    }
+    assert_left_cleanly(&base.0, &name).await;
+}
+
+/// Without the listener of R7, the default handler ends the node with
+/// `STATUS_CONTROL_C_EXIT`, and this test fails.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ctrl_break_stops_a_cli_node() {
+    use habilis_network_util::win_console::CREATE_NEW_PROCESS_GROUP;
+
+    // Ctrl-break goes to a process group, so the node is the root of its own.
+    assert_console_event_stops_a_cli_node("ctrl-break", "break", CREATE_NEW_PROCESS_GROUP, false)
+        .await;
+}
+
+/// A regression test: ctrl-c took the graceful path before R7 too.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ctrl_c_stops_a_cli_node() {
+    // Not in a new process group: a node in one ignores ctrl-c.
+    assert_console_event_stops_a_cli_node("ctrl-c", "c", 0, true).await;
 }

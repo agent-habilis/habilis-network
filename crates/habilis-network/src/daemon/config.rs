@@ -36,7 +36,8 @@ pub enum DriverMode {
         msg_tx: Option<broadcast::Sender<Authored>>,
         quit_rx: mpsc::Receiver<()>,
         /// Whether this session registers the process-wide
-        /// ctrl-c/SIGTERM/SIGHUP/SIGQUIT listeners for a graceful leave.
+        /// ctrl-c/SIGTERM/SIGHUP/SIGQUIT listeners (the console events on
+        /// Windows) for a graceful leave.
         /// Registering any tokio signal handler suppresses the OS
         /// default-terminate for the *whole process, permanently* — so a
         /// session living inside a foreground command that owns its own

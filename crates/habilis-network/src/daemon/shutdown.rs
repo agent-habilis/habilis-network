@@ -21,7 +21,8 @@ use crate::util::tuning::ppid_watch_interval;
 /// Graceful shutdown: remove the statusline state file first, then
 /// announce `Left` and give the broadcast a moment to reach peers.
 /// Shared by the external-quit path and the quit channel (ctrl-c, SIGTERM,
-/// SIGHUP, the owner watch, the IPC `quit`) so they can't drift apart.
+/// SIGHUP, the console events of Windows, the owner watch, the IPC `quit`) so
+/// they can't drift apart.
 ///
 /// The state-file removal is the time-critical step: an external reader
 /// (the shell statusline) shows the mesh pill while the file is fresh,
@@ -97,8 +98,9 @@ pub(super) async fn announce_departure<A: NodeDriver>(
     shutdown(state, app, ctx, &quit).await;
     quit.exit_on_quit && !cfg!(feature = "dhat-heap")
 }
-/// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix)
-/// listener tasks, and for the CLI daemon the owner or parent watch
+/// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix) or the
+/// console events (Windows, [`spawn_console_event_tasks`]) listener tasks,
+/// and for the CLI daemon the owner or parent watch
 /// ([`spawn_orphan_watch`]), all feeding a single internal quit channel.
 /// Returns both ends: the sender also goes to the IPC accept loop, whose
 /// `quit` feeds the same channel.
@@ -118,11 +120,16 @@ pub(super) fn spawn_quit_signal_tasks(
     owner: Option<Owner>,
 ) -> (mpsc::Sender<()>, mpsc::Receiver<()>) {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-    let ctrl_c_tx = quit_tx.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = ctrl_c_tx.send(()).await;
-    });
+    #[cfg(not(windows))]
+    {
+        let ctrl_c_tx = quit_tx.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = ctrl_c_tx.send(()).await;
+        });
+    }
+    #[cfg(windows)]
+    spawn_console_event_tasks(&quit_tx);
     #[cfg(unix)]
     for kind in [
         tokio::signal::unix::SignalKind::terminate(),
@@ -143,10 +150,69 @@ pub(super) fn spawn_quit_signal_tasks(
     if exit_on_quit {
         spawn_orphan_watch(quit_tx.clone(), owner);
     }
-    // Windows has no console events here yet: `ctrl_break`, `ctrl_close`,
-    // `ctrl_logoff` and `ctrl_shutdown` are R7 of `docs/windows.md`. Of the
-    // signals, only ctrl-c reaches the quit channel until then.
     (quit_tx, quit_rx)
+}
+/// The console events of Windows (R7 of `docs/windows.md`): ctrl-c,
+/// ctrl-break, the close of the console, a logoff and a shutdown all feed the
+/// quit channel, so they take the path of SIGTERM.
+///
+/// The listeners are made here, before the `tokio::spawn`, so the handler of
+/// tokio and its receivers exist when the node is ready. An event with no live
+/// receiver goes to the default handler, which ends the process with no
+/// `Left`. On a close, a logoff or a shutdown the handler of tokio never
+/// returns, because Windows ends the process when it does; the process lives
+/// until the `std::process::exit` of the quit path, or until the deadline of
+/// Windows (about 5 s).
+///
+/// A logoff and a shutdown do not reach a node today. Windows does not give
+/// them to the console handler of a process that loaded `user32.dll`, and a
+/// node loads it: iroh's `netwatch` uses COM through `wmi`, and the runtime
+/// base uses `SHGetKnownFolderPath`. The listeners stay, at no cost, for a
+/// build that does not load it. A process with no console gets no console
+/// event at all, and a process in a new process group ignores ctrl-c.
+#[cfg(all(windows, feature = "host"))]
+fn spawn_console_event_tasks(quit_tx: &mpsc::Sender<()>) {
+    use tokio::signal::windows;
+
+    let register = "failed to register a console event handler";
+    let mut ctrl_c = windows::ctrl_c().expect(register);
+    let mut ctrl_break = windows::ctrl_break().expect(register);
+    let mut ctrl_close = windows::ctrl_close().expect(register);
+    let mut ctrl_logoff = windows::ctrl_logoff().expect(register);
+    let mut ctrl_shutdown = windows::ctrl_shutdown().expect(register);
+    spawn_console_event(quit_tx, "ctrl_c", async move {
+        ctrl_c.recv().await;
+    });
+    spawn_console_event(quit_tx, "ctrl_break", async move {
+        ctrl_break.recv().await;
+    });
+    spawn_console_event(quit_tx, "ctrl_close", async move {
+        ctrl_close.recv().await;
+    });
+    spawn_console_event(quit_tx, "ctrl_logoff", async move {
+        ctrl_logoff.recv().await;
+    });
+    spawn_console_event(quit_tx, "ctrl_shutdown", async move {
+        ctrl_shutdown.recv().await;
+    });
+}
+/// Wait for one console event, log it, and feed the quit channel.
+#[cfg(all(windows, feature = "host"))]
+fn spawn_console_event(
+    quit_tx: &mpsc::Sender<()>,
+    event: &'static str,
+    received: impl Future<Output = ()> + Send + 'static,
+) {
+    let quit_tx = quit_tx.clone();
+    tokio::spawn(async move {
+        received.await;
+        tracing::info!(
+            target: "habilis_network::lifecycle",
+            event,
+            "console event; leaving"
+        );
+        let _ = quit_tx.send(()).await;
+    });
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
 /// `EventLoopConfig::with_owner_pid`. For a launcher that must refuse a bad
