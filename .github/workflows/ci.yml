@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The style scripts under scripts/ are TypeScript.
+      - uses: oven-sh/setup-bun@v2
+
       # Reads rust-toolchain.toml — do not duplicate the version here.
       # The extra target is for `habilis-network-chunks`, whose IndexedDB backend
       # only exists on wasm32 and would otherwise compile nowhere.
@@ -42,12 +45,12 @@ jobs:
           sh scripts/style-check-test.sh
           sh scripts/style-check.sh
 
-      # Four lints still have old findings (issue #29). A ratchet refuses a new one. Lower the
-      # baseline with `python3 scripts/lint-ratchet.py --update` when you fix one.
+      # Three lints still have old findings (issue #29). A ratchet refuses a new one. Lower the
+      # baseline with `bun scripts/lint-ratchet/lint-ratchet.ts --update` when you fix one.
       - name: Lint ratchet
         run: |
-          sh scripts/lint-ratchet-test.sh
-          python3 scripts/lint-ratchet.py
+          bun test scripts/lint-ratchet/lint-ratchet.test.ts
+          bun scripts/lint-ratchet/lint-ratchet.ts
 
       # `blob` is off by default (only agent-gossip enables it), so the line
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
