@@ -178,7 +178,6 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
             rosters.iter().all(|len| *len == MEMBERS - 1),
             "the mesh never formed: {rosters:?}"
         );
-        let released_before = logs().matches("released the rendezvous").count();
         let visits_before = rendezvous_visits();
 
         // A crash, as a dead process leaves things: no `Left`, and its sessions
@@ -195,12 +194,13 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
 
         // The sweep sends the members that let go of the rendezvous back to it. A
         // member at its own 16 sessions has no slot for the visit, so some come
-        // back and some do not. Every one that came back must let go again.
+        // back and some do not. Every one that came back must let go again, by its
+        // own release or because the beacon dropped it from a full view.
         let started = Instant::now();
         loop {
             let visits = rendezvous_visits() - visits_before;
-            let releases = logs().matches("released the rendezvous").count() - released_before;
-            if visits >= 1 && releases >= visits {
+            let holders = rendezvous_holders(&logs());
+            if visits >= 1 && holders == 0 {
                 break;
             }
             if started.elapsed() >= Duration::from_mins(3) {
@@ -208,8 +208,8 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
             }
             assert!(
                 started.elapsed() < Duration::from_mins(3),
-                "{visits} members came back to the rendezvous after the crash and {releases} let go \
-             again\n{}",
+                "{visits} members came back to the rendezvous after the crash and {holders} still \
+             hold it\n{}",
                 come_back_trace()
             );
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -253,6 +253,50 @@ fn rendezvous_visits() -> usize {
         .lines()
         .filter(|line| line.contains("gossip neighbor up") && line.contains("is_rendezvous=true"))
         .count()
+}
+
+/// How many members hold a link to the rendezvous in `log`: those whose last rendezvous event
+/// is a `neighbor up`. A member lets go of the link by its own release, or because the beacon
+/// drops it from a full view. Both end in a `neighbor down`, and only the first logs a release.
+fn rendezvous_holders(log: &str) -> usize {
+    let mut last_is_up = std::collections::HashMap::new();
+    for line in log
+        .lines()
+        .filter(|line| line.contains("is_rendezvous=true"))
+    {
+        let up = line.contains("gossip neighbor up");
+        if !up && !line.contains("gossip neighbor down") {
+            continue;
+        }
+        let Some(local) = line
+            .split("local=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+        else {
+            continue;
+        };
+        last_is_up.insert(local, up);
+    }
+    last_is_up.values().filter(|up| **up).count()
+}
+
+/// A member that the beacon dropped is gone from the rendezvous, though it logged no release: it
+/// is no holder, and a member that came back after its drop is one.
+#[test]
+fn a_member_that_the_beacon_dropped_holds_no_link() {
+    let rendezvous = "endpoint_id=aa is_rendezvous=true";
+    let log = [
+        format!("gossip neighbor up local=one {rendezvous}"),
+        format!("gossip neighbor up local=two {rendezvous}"),
+        format!("gossip neighbor down local=two {rendezvous}"),
+        format!("gossip neighbor up local=three {rendezvous}"),
+        "enough links to members: released the rendezvous local=three links=3".to_owned(),
+        format!("gossip neighbor down local=three {rendezvous}"),
+        format!("gossip neighbor up local=three {rendezvous}"),
+        "gossip neighbor up local=four endpoint_id=bb is_rendezvous=false".to_owned(),
+    ]
+    .join("\n");
+    assert_eq!(rendezvous_holders(&log), 2, "one and the returned three");
 }
 
 /// The lines that say how the rendezvous was released and visited again.
