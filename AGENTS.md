@@ -209,6 +209,10 @@ Three lints still have old findings: `missing_docs`, `clippy::exhaustive_enums` 
 
 Ownership and borrowing, types, traits, and part of code organization are still under audit. Follow the guide for them until issue #29 records a decision.
 
+## Scripts
+
+Write every script in TypeScript, and run it with Bun (`bun scripts/<name>.ts`). Do not write a new shell script or Python script. A test for a script is a `bun test` file next to it. A script in another language is a fault to port, not a model to copy.
+
 ## Newtypes
 
 A newtype is a struct with one field that gives a primitive a domain meaning. This section holds the rules for newtypes on this branch.
