@@ -1133,14 +1133,21 @@ mod tests {
         drop(runtime);
 
         let still_in_flight = pool.inner.dialing.lock().expect("lock").contains_key(&bob);
-        // The dropped runtime also held the driver of the connection that the dial had started, so
-        // no close can drain that connection: `Endpoint::close` waits for it for good (1 run in
-        // 10 under load), and a drop without a close logs an ERROR. The drop of the runtime of the
-        // endpoint logs a WARN of the network monitor. So the endpoint and its runtime stay as
-        // they are until the process ends.
-        std::mem::forget(pool);
-        std::mem::forget(endpoint);
-        std::mem::forget(endpoint_runtime);
+        // The dropped runtime also held the driver of the connection that the dial had started. In
+        // 1 run of 10 under load no close can drain that connection, and `Endpoint::close` waits
+        // for it for good. A drop without a close logs an ERROR, and the drop of the runtime of
+        // the endpoint logs a WARN of the network monitor. So when the close does not end, the
+        // endpoint and its runtime stay as they are until the process ends.
+        let closed = endpoint_runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), endpoint.close())
+                .await
+                .is_ok()
+        });
+        if !closed {
+            std::mem::forget(pool);
+            std::mem::forget(endpoint);
+            std::mem::forget(endpoint_runtime);
+        }
         assert!(
             !still_in_flight,
             "the dropped dial left {bob} marked in flight"
