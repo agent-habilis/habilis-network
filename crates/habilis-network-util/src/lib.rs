@@ -26,6 +26,10 @@ pub mod version;
 // descriptor, the owner check and the identification-only client open.
 #[cfg(all(windows, feature = "host"))]
 pub mod win_security;
+// A console event sent to another process, for the tests of the console events
+// of a daemon. Only for tests, so the library that ships does not have it.
+#[cfg(all(windows, feature = "host", feature = "test-fixtures"))]
+pub mod win_console;
 
 /// The per-mesh folder name — the first 16 characters of the mesh
 /// identifier. The stem of every per-mesh file (socket / log / state), so it

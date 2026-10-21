@@ -20,8 +20,9 @@ default = ["host"]
 # listener, which is itself host-only.
 host = ["dep:libc", "dep:windows-sys", "async-io"]
 # Exposes helpers that exist only for assertions (clock::unix_nanos,
-# Cooldown::len). habilis-network turns it on through dev-dependencies.
-test-fixtures = []
+# Cooldown::len, and on Windows the console events of `win_console`).
+# habilis-network turns it on through dev-dependencies.
+test-fixtures = ["windows-sys?/Win32_System_Console"]
 # `bounded_read` is the crate's only async code, and its only consumer is the
 # engine's IPC listener. Gating it keeps tokio out of the wire crates
 # (habilis-network-protocol, -doc, -logging), which then have no async runtime at
@@ -61,7 +62,8 @@ libc = { workspace = true, optional = true }
 # the reparse-point attribute; `win_security.rs` uses it for `CreateFileW` and
 # the SQOS flags. `win_security.rs` adds `Win32_Security` for the token, the SID
 # calls and the owner flag, and `Win32_Security_Authorization` for the SID text
-# and `GetSecurityInfo`.
+# and `GetSecurityInfo`. `test-fixtures` adds `Win32_System_Console` for the
+# console calls of `win_console.rs`.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, optional = true, features = [
     "Win32_Foundation",
