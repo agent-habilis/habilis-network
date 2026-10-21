@@ -204,7 +204,7 @@ iroh = { workspace = true, features = [
 iroh-gossip.workspace = true
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "74c649fa2e7bce96a9ba7748c5fee261af6af959", default-features = false, optional = true }
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "bde882b3342514b98ac160301f2c259179ecb0ea", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:
 # iroh's defaults (portmapper, fast-apple-datapath, metrics) are host-only and
@@ -222,7 +222,7 @@ iroh-gossip.workspace = true
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 # The unit tests of the daemon setup bind on a relay of this machine (`test_relay::spawn_plain`)
 # with no `iroh-test-utils`: a test must not reach the real relay and its DNS.
-iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "74c649fa2e7bce96a9ba7748c5fee261af6af959", default-features = false, features = ["server"] }
+iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "bde882b3342514b98ac160301f2c259179ecb0ea", default-features = false, features = ["server"] }
 proptest.workspace = true
 insta.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
