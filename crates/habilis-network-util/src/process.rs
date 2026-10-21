@@ -106,8 +106,13 @@ pub fn is_alive(pid: u32) -> bool {
 /// catches it, broadcasts `left`, and removes its state file.
 #[expect(unsafe_code, reason = "libc::kill FFI; no safe wrapper")]
 /// # Errors
-/// Propagates the `kill(2)` failure — no such process, or no permission.
+/// `InvalidInput` for pid 0, which `kill(2)` reads as our own process group, and for a pid that
+/// does not fit a `pid_t`. Otherwise it propagates the `kill(2)` failure — no such process, or
+/// no permission.
 pub fn terminate(pid: u32) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
     let pid = libc::pid_t::try_from(pid)
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
     // SAFETY: the call reads no memory of ours. `pid` is a valid `pid_t`, and the kernel checks
@@ -150,6 +155,13 @@ mod tests {
 
     fn self_pid() -> u32 {
         std::process::id()
+    }
+
+    #[test]
+    fn terminate_refuses_pid_zero() {
+        // `kill(0, SIGTERM)` would signal every process of our own group, the test run included.
+        let error = terminate(0).expect_err("pid 0 must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
