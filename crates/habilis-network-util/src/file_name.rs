@@ -49,6 +49,8 @@ pub fn windows_file_stem_problem(stem: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
+
     use super::windows_file_stem_problem;
 
     #[test]

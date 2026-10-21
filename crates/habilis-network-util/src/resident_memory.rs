@@ -139,6 +139,8 @@ mod tests {
     // Linux only and names its own import.
     #[cfg(all(unix, feature = "host"))]
     use super::peak_resident_memory_bytes;
+    // Both tests are Unix only.
+    #[cfg(all(unix, feature = "host"))]
     use habilis_network_test_tracing::test;
 
     /// The current reading falls when memory is given back, which the peak never

@@ -1329,7 +1329,7 @@ mod tests {
     // On Windows a local nickname that is no valid file stem stops the setup
     // with a message that names the reason, before any endpoint binds.
     #[cfg(windows)]
-    #[tokio::test]
+    #[test]
     async fn a_windows_device_name_is_refused_as_the_local_nickname() {
         let nickname = crate::protocol::Nickname::new("con").expect("a valid nickname");
         let (kind, author) =

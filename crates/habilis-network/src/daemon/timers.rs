@@ -244,7 +244,10 @@ pub(crate) fn note_tick_gap(
 #[cfg(test)]
 mod tests {
     use crate::testing::fresh_state;
-    use habilis_network_test_tracing::{expect_warn, test};
+    // Its one caller is the Unix test of the resident memory warn.
+    #[cfg(all(unix, feature = "host"))]
+    use habilis_network_test_tracing::expect_warn;
+    use habilis_network_test_tracing::test;
 
     use super::warn_on_high_resident_memory;
 

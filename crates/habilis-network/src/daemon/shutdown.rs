@@ -374,11 +374,12 @@ pub(super) fn never_quit() -> (mpsc::Sender<()>, mpsc::Receiver<()>) {
 
 #[cfg(test)]
 mod never_quit_tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::never_quit;
 
-    #[tokio::test]
+    #[test]
     async fn a_never_quit_channel_stays_open_when_its_sender_drops() {
         let (quit_tx, mut quit_rx) = never_quit();
         drop(quit_tx);
@@ -548,32 +549,9 @@ mod tests {
         child.wait().unwrap();
         assert!(Owner::new(pid).is_err());
     }
-}
-
-/// The watch of the parent pid, which only Unix has.
-#[cfg(all(test, unix, feature = "host"))]
-mod parent_watch_tests {
-    use super::{orphan_watch_warranted, parent_lost};
-
-    #[test]
-    fn orphan_watch_fires_only_on_a_parent_change() {
-        // The agent that spawned us is alive ⇒ same ppid ⇒ stay running.
-        assert!(!parent_lost(4242, 4242));
-        // The agent died ⇒ reparented to launchd (1) ⇒ orphaned, quit.
-        assert!(parent_lost(4242, 1));
-        // …or, under a systemd subreaper, to some other pid ⇒ still orphaned.
-        assert!(parent_lost(4242, 990));
-    }
-
-    #[test]
-    fn orphan_watch_skips_an_already_detached_daemon() {
-        // Spawned by a normal agent ⇒ worth watching.
-        assert!(orphan_watch_warranted(4242));
-        // Launched detached straight from init/launchd ⇒ no parent to lose.
-        assert!(!orphan_watch_warranted(1));
-    }
 
     /// The test binary runs this test again, in a process of its own, with this variable set.
+    #[cfg(unix)]
     const QUIT_CHILD: &str = "HABILIS_TEST_CLI_QUIT_CHILD";
 
     /// A CLI quit announces the departure and asks the loop to exit the process, which it does
@@ -581,6 +559,7 @@ mod parent_watch_tests {
     /// that exits inside the announcement skips both: the peers of the beacon wait for its idle
     /// timeout, and its endpoints are never closed. The check runs in a child process, because
     /// an exit inside the announcement ends the process.
+    #[cfg(unix)]
     #[test]
     async fn a_cli_quit_leaves_the_exit_to_the_loop() {
         use super::{QuitParams, announce_departure};
@@ -626,5 +605,29 @@ mod parent_watch_tests {
             stdout.contains(&format!("QUIT_ANNOUNCED exit={exit}")),
             "the process exited inside the quit, before the loop released its endpoints: {stdout}"
         );
+    }
+}
+
+/// The watch of the parent pid, which only Unix has.
+#[cfg(all(test, unix, feature = "host"))]
+mod parent_watch_tests {
+    use super::{orphan_watch_warranted, parent_lost};
+
+    #[test]
+    fn orphan_watch_fires_only_on_a_parent_change() {
+        // The agent that spawned us is alive ⇒ same ppid ⇒ stay running.
+        assert!(!parent_lost(4242, 4242));
+        // The agent died ⇒ reparented to launchd (1) ⇒ orphaned, quit.
+        assert!(parent_lost(4242, 1));
+        // …or, under a systemd subreaper, to some other pid ⇒ still orphaned.
+        assert!(parent_lost(4242, 990));
+    }
+
+    #[test]
+    fn orphan_watch_skips_an_already_detached_daemon() {
+        // Spawned by a normal agent ⇒ worth watching.
+        assert!(orphan_watch_warranted(4242));
+        // Launched detached straight from init/launchd ⇒ no parent to lose.
+        assert!(!orphan_watch_warranted(1));
     }
 }

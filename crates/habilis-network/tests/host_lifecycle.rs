@@ -1,10 +1,11 @@
 //! The life of a CLI daemon on the host, on every OS (R11 of `docs/windows.md`).
 //!
-//! Part 1, the runtime base and the IPC: a node in CLI mode with a runtime base
-//! in a temporary folder binds its endpoint and writes its marker before it is
-//! ready, `active_endpoints` finds it, an `Info` command answers, and the state
-//! file is in the mesh folder. On Windows the endpoint is the named pipe of R3,
-//! on Unix the socket.
+//! Part 1, the runtime base and the IPC: a node in CLI mode, in a child
+//! process, with a runtime base in a temporary folder, binds its endpoint and
+//! writes its marker before it is ready, `active_endpoints` finds it, an `Info`
+//! command answers, and the state file is in the mesh folder. On Windows the
+//! endpoint is the named pipe of R3, on Unix the socket. The child itself
+//! checks that the marker is there when it reports ready.
 //!
 //! Part 2, the quit (R5): a node in a child process stops on an IPC `quit`.
 //! The child exits with 0, and its state file, its marker and its endpoint are
@@ -22,13 +23,11 @@
 //! the node and raises the event there, so the test does not depend on the
 //! console of the runner.
 //!
-//! In CLI mode a quit ends the process with `std::process::exit`, so no node of
-//! the test process is ever sent a quit. Part 1 aborts the task of its node
-//! instead, and awaits it, so the loop is gone before the folder is removed.
-//! The tasks that the loop spawned (the IPC accept loop, the signal tasks,
-//! iroh) stay until the test runtime ends, which is harmless. Parts 2 and 3
-//! run their node in a child process: the test binary itself, with only
-//! `child_node` selected. The owner of part 3 is the test binary too, with only
+//! In CLI mode a quit ends the process with `std::process::exit`, and a node
+//! whose task is aborted drops its endpoint with no `Endpoint::close`, which
+//! iroh logs as an ERROR that fails the test. So every part runs its node in a
+//! child process: the test binary itself, with only `child_node` selected.
+//! Part 1 kills its child at the end. The owner of part 3 is the test binary too, with only
 //! `owner_process` selected, so the test needs no `sleep` or `ping` of the OS.
 //! (The unit tests of the owner watch in `daemon/shutdown.rs` use them, because
 //! a lib test binary is too large to start as an idle process.)
@@ -53,6 +52,7 @@ use habilis_network::runtime::ipc::{
 use habilis_network::runtime::{
     EventLoopConfig, SetupKind, SetupParams, derive_topic_mesh_with, run, setup_mesh,
 };
+use habilis_network_test_tracing::test;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Notify;
 
@@ -219,29 +219,20 @@ fn files_ending_with(base: &Path, suffix: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
     let base = TempBase::new("host");
     let topic = format!("host-lifecycle-{}", std::process::id());
-    let sink = Arc::new(ReadySink::default());
-    let config = cli_config(&base.0, &topic, Arc::clone(&sink) as Arc<dyn NodeSink>).await;
+    // The child exits with 3 when it reports ready before its marker exists.
+    let mut child = ChildNode::spawn(&base.0, &topic, None);
+    let name = match child.endpoint(&base.0).await {
+        Ok((name, _)) => name,
+        Err(what) => child.fail(&what).await,
+    };
 
-    // `setup_mesh` gives a CLI config. `Node::spawn` would make it in-process,
-    // which binds no endpoint, so the test runs the loop itself.
-    let ready = sink.ready.notified();
-    let node = tokio::spawn(Box::pin(run(config, InfoApp, None, None)));
-    if tokio::time::timeout(Duration::from_secs(30), ready)
-        .await
-        .is_err()
-    {
-        let errors = sink.errors.lock().expect("no poison").clone();
-        panic!("the node did not report ready within 30 s; its errors: {errors:?}");
-    }
-
-    // Ready implies the marker: the endpoint is found at once, with no wait.
     let names = active_endpoints(&base.0);
-    assert_eq!(names.len(), 1, "one endpoint under the base: {names:?}");
-    let reply = send_to_endpoint(&names[0], &serde_json::json!({ "command": "info" }))
+    assert_eq!(names, vec![name.clone()], "one endpoint under the base");
+    let reply = send_to_endpoint(&name, &serde_json::json!({ "command": "info" }))
         .await
         .expect("the Info command answers");
     let reply: serde_json::Value = serde_json::from_str(&reply).expect("JSON");
@@ -252,18 +243,22 @@ async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
     let state_files = files_ending_with(&base.0, &format!("{NICKNAME}.state.json"));
     assert_eq!(state_files.len(), 1, "one state file: {state_files:?}");
 
-    node.abort();
-    let _ = node.await;
+    if let Ok(Some(status)) = child.process.try_wait() {
+        child
+            .fail(&format!("the child exited during the checks: {status}"))
+            .await;
+    }
+    let _ = child.process.kill().await;
 }
 
-/// The node of parts 2 to 4, in the child process that [`ChildNode`] starts.
+/// The node of every part, in the child process that [`ChildNode`] starts.
 /// With no [`CHILD_ENV`] it does nothing, so a run with `--include-ignored`
 /// passes it at once.
 ///
 /// A quit, or the exit of its owner, ends this process with 0. It does not
 /// remove the base: the parent owns it.
 #[test]
-#[ignore = "the child process of parts 2 to 4"]
+#[ignore = "the child process of every part"]
 fn child_node() {
     let Ok(spec) = std::env::var(CHILD_ENV) else {
         return;
@@ -284,8 +279,19 @@ fn child_node() {
         .build()
         .expect("a runtime");
     runtime.block_on(async {
-        let sink = Arc::new(ReadySink::default()) as Arc<dyn NodeSink>;
-        let mut config = cli_config(Path::new(base), topic, sink).await;
+        let sink = Arc::new(ReadySink::default());
+        // Ready implies the marker (part 1): the endpoint is there when the
+        // node reports ready, with no wait.
+        let watched = Arc::clone(&sink);
+        let marker_base = PathBuf::from(base);
+        tokio::spawn(async move {
+            watched.ready.notified().await;
+            if active_endpoints(&marker_base).is_empty() {
+                eprintln!("the node reported ready before its marker existed");
+                std::process::exit(3);
+            }
+        });
+        let mut config = cli_config(Path::new(base), topic, sink as Arc<dyn NodeSink>).await;
         if let Some(owner) = owner {
             config = config.with_owner_pid(owner).expect("a live owner");
         }
@@ -344,7 +350,7 @@ fn spawn_entry(entry: &str, env: (&str, &str), stdout: Stdio) -> tokio::process:
     command
 }
 
-/// The child process of parts 2 to 4, with its output read from the start, so
+/// The child process of every part, with its output read from the start, so
 /// a child that writes much never blocks on a full pipe.
 struct ChildNode {
     process: tokio::process::Child,
@@ -465,7 +471,7 @@ async fn assert_left_cleanly(base: &Path, name: &IpcName) {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test(flavor = "multi_thread", worker_threads = 4)]
 async fn quit_stops_a_cli_node_in_a_child_process() {
     let base = TempBase::new("quit");
     let topic = format!("host-lifecycle-quit-{}", std::process::id());
@@ -492,7 +498,7 @@ async fn quit_stops_a_cli_node_in_a_child_process() {
     assert_left_cleanly(&base.0, &name).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_owner_watch_stops_a_cli_node_when_its_owner_dies() {
     let base = TempBase::new("owner");
     let topic = format!("host-lifecycle-owner-{}", std::process::id());
@@ -560,7 +566,7 @@ async fn assert_console_event_stops_a_cli_node(tag: &str, event: &str, flags: u3
 /// Without the listener of R7, the default handler ends the node with
 /// `STATUS_CONTROL_C_EXIT`, and this test fails.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test(flavor = "multi_thread", worker_threads = 4)]
 async fn ctrl_break_stops_a_cli_node() {
     use habilis_network_util::win_console::CREATE_NEW_PROCESS_GROUP;
 
@@ -571,7 +577,7 @@ async fn ctrl_break_stops_a_cli_node() {
 
 /// A regression test: ctrl-c took the graceful path before R7 too.
 #[cfg(windows)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test(flavor = "multi_thread", worker_threads = 4)]
 async fn ctrl_c_stops_a_cli_node() {
     // Not in a new process group: a node in one ignores ctrl-c.
     assert_console_event_stops_a_cli_node("ctrl-c", "c", 0, true).await;

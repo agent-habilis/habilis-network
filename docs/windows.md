@@ -201,7 +201,7 @@ Done.
 
 **The listeners.** `spawn_console_event_tasks` in `crates/habilis-network/src/daemon/shutdown.rs` makes the five listeners of `tokio::signal::windows`. Each feeds the quit channel, so the daemon takes the path of `SIGTERM`, and writes `console event; leaving` (target `habilis_network::lifecycle`). The listeners are made before the node is ready: an event with no live receiver goes to the default handler, which ends the process with `STATUS_CONTROL_C_EXIT` and no `Left`.
 
-**The deadline.** On a close, a logoff or a shutdown, Windows ends the process when the handler returns. So the handler of tokio never returns, and the process lives until the `std::process::exit` of the quit path, or until the deadline of Windows: about 5 s for a close, and `WaitToKillAppTimeout` (5 s by default) for a logoff or a shutdown. The quit path removes the state file and the marker first, then sends the `Left` and waits 500 ms, so it ends in time.
+**The deadline.** On a close, a logoff or a shutdown, Windows ends the process when the handler returns. So the handler of tokio never returns, and the process lives until the `std::process::exit` of the quit path, or until the deadline of Windows: about 5 s for a close, and `WaitToKillAppTimeout` (5 s by default) for a logoff or a shutdown. The quit path removes the state file and the marker first, then sends the `Left` and waits 500 ms. Then the loop releases the rendezvous and closes the endpoints that it owns (`Router::shutdown`, then `Endpoint::close`), which iroh says can take up to about 3 s with bad connectivity, and only then exits. About 3.5 s in the worst case is still inside the deadline of a close, and the state file and the marker are already gone before it.
 
 **Limits.**
 
@@ -287,7 +287,7 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval plus the `Left` delay.
 5. On Windows, start a node in a console of its own. Ctrl-break and ctrl-c stop it by the graceful path.
 
-The five steps are done. In `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. So steps 3 to 5 run the node in a child process: the test binary itself, with only its `child_node` entry selected. In step 4 the owner is a second child process, the test binary with only its `owner_process` entry selected. In step 5 the sender of the event is a second child process, with only its `console_sender` entry selected. Part 1 stops its node with an abort of its task.
+The five steps are done. In `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. So every step runs the node in a child process: the test binary itself, with only its `child_node` entry selected. In step 4 the owner is a second child process, the test binary with only its `owner_process` entry selected. In step 5 the sender of the event is a second child process, with only its `console_sender` entry selected. Step 1 kills its child at the end. An abort of an in-process node would drop its endpoint with no `Endpoint::close`, and iroh logs that as an ERROR, which fails a test since #22.
 
 **Nightly and e2e.**
 

@@ -86,6 +86,7 @@ pub fn is_shared_file_error(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::io;
     use std::path::PathBuf;
     use std::time::Duration;

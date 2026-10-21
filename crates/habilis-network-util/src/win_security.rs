@@ -369,6 +369,7 @@ fn wide_nul(text: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::os::windows::io::{AsHandle as _, FromRawHandle as _, OwnedHandle};
 
     use windows_sys::Win32::Foundation::{

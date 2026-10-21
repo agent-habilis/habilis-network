@@ -1102,7 +1102,7 @@ mod tests {
         assert_eq!(read_marker(&path).unwrap(), None);
     }
 
-    #[tokio::test]
+    #[test]
     async fn send_without_a_marker_is_no_daemon() {
         let base = TestBase::new("nomarker");
         let mesh = test_mesh("nomarker");
@@ -1114,7 +1114,7 @@ mod tests {
         assert!(error.downcast_ref::<NoDaemon>().is_some(), "{error}");
     }
 
-    #[tokio::test]
+    #[test]
     async fn send_to_a_stale_marker_is_no_daemon() {
         let base = TestBase::new("stale");
         let mesh = test_mesh("stale");
@@ -1134,6 +1134,11 @@ mod tests {
 
     #[test]
     fn active_endpoints_reads_the_markers_sorted_and_skips_the_rest() {
+        // The marker with an invalid line is skipped with a warn.
+        habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "IPC: skip a marker",
+        );
         let base = TestBase::new("discover");
         assert!(active_endpoints(base.path()).is_empty(), "an absent base");
         let first = base.path().join("meshaaaaaaaaaaaa");
@@ -1208,7 +1213,7 @@ mod tests {
     // endpoint that no client can find is no use. A tokio test, because the
     // unix listener registers with the reactor, as it does inside the daemon.
     #[cfg(unix)]
-    #[tokio::test]
+    #[test]
     async fn a_failed_marker_write_fails_the_bind_and_leaves_no_socket() {
         let base = TestBase::new("nowrite");
         let mesh = test_mesh("nowrite");
@@ -1233,7 +1238,7 @@ mod tests {
     /// On Windows the endpoint is a pipe with a random name, no mesh prefix and
     /// no nickname in it, and a DACL of the user alone.
     #[cfg(windows)]
-    #[tokio::test]
+    #[test]
     async fn the_windows_endpoint_is_a_random_pipe_of_the_user() {
         let base = TestBase::new("pipe");
         let mesh = test_mesh("pipe");
@@ -1286,8 +1291,12 @@ mod tests {
     // nothing. One user on CI cannot make such a pipe, so the test expects
     // SYSTEM to own our own pipe, and gets the refusal.
     #[cfg(windows)]
-    #[tokio::test]
+    #[test]
     async fn a_pipe_of_another_owner_is_refused_as_foreign() {
+        habilis_network_test_tracing::expect_warn(
+            "habilis_network::lifecycle",
+            "IPC: the pipe is not owned by this user",
+        );
         let base = TestBase::new("foreign");
         let mesh = test_mesh("foreign");
         let nickname = Nickname::from("owner");
@@ -1624,7 +1633,7 @@ mod tests {
         assert!(matches!(quit_outcome(""), Err(QuitError::Unreached(_))));
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_quit_for_this_mesh_is_answered_then_fed_to_the_quit_channel() {
         let mut server = TestServer::<TestCommand>::start("quit", None);
         quit(&server.target()).await.expect("the quit is accepted");
@@ -1635,7 +1644,7 @@ mod tests {
         assert!(server.app_rx.try_recv().is_err(), "the app sees no quit");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_quit_for_another_mesh_is_refused_and_feeds_nothing() {
         let mut server = TestServer::<TestCommand>::start("quitother", Some(&test_mesh("other")));
         let error = quit(&server.target()).await.expect_err("refused");
@@ -1644,7 +1653,7 @@ mod tests {
         assert!(server.app_rx.try_recv().is_err(), "the app sees no quit");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_line_that_is_no_valid_quit_reaches_the_app() {
         let mut server = TestServer::<serde_json::Value>::start("quitapp", None);
         let name = server.name();
@@ -1674,7 +1683,7 @@ mod tests {
         assert!(no_quit_within(&mut server.quit_rx).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_quit_with_no_marker_is_not_heard() {
         let base = TestBase::new("quitnone");
         let mesh = test_mesh("quitnone");
@@ -1688,7 +1697,7 @@ mod tests {
         assert!(matches!(error, QuitError::Unreached(_)), "{error}");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_line_that_is_no_json_gets_the_parse_error_and_feeds_nothing() {
         use interprocess::local_socket::{tokio::Stream, tokio::prelude::*};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1716,7 +1725,7 @@ mod tests {
         assert!(no_quit_within(&mut server.quit_rx).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn an_app_that_cannot_parse_a_quit_reads_as_an_old_daemon() {
         let mut server = TestServer::<TestCommand>::start("quitold", None);
         // Not an engine quit, so the app parses it, as a daemon from before the
@@ -1731,7 +1740,7 @@ mod tests {
         assert!(no_quit_within(&mut server.quit_rx).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_second_quit_is_answered_and_the_channel_holds_one() {
         let mut server = TestServer::<TestCommand>::start("quittwice", None);
         quit(&server.target()).await.expect("the first quit");
@@ -1742,7 +1751,7 @@ mod tests {
         assert!(no_quit_within(&mut server.quit_rx).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_quit_feeds_the_channel_also_when_the_client_does_not_read() {
         use interprocess::local_socket::{tokio::Stream, tokio::prelude::*};
         use tokio::io::AsyncWriteExt;
@@ -1769,7 +1778,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[test]
     async fn terminate_signals_the_pid_when_the_quit_is_not_heard() {
         use std::os::unix::process::ExitStatusExt as _;
 
@@ -1793,7 +1802,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[test]
     async fn terminate_sends_no_signal_when_the_daemon_refuses() {
         let server = TestServer::<TestCommand>::start("termrefused", Some(&test_mesh("other")));
         let mut child = std::process::Command::new("sleep")
@@ -1817,7 +1826,7 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[tokio::test]
+    #[test]
     async fn on_windows_terminate_is_the_quit_alone() {
         let base = TestBase::new("termwin");
         let mesh = test_mesh("termwin");

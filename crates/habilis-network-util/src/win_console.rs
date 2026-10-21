@@ -100,6 +100,7 @@ pub fn allow_ctrl_c() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::io::{BufRead as _, BufReader};
     use std::os::windows::process::CommandExt as _;
     use std::process::{Child, Command, ExitStatus, Stdio};
