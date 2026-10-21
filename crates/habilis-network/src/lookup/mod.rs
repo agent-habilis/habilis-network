@@ -1235,6 +1235,12 @@ fn answer_of_connection_error(error: &iroh::endpoint::ConnectionError) -> ProbeA
     }
 }
 
+/// How many events of a topic the gossip keeps for a task that is not scheduled yet: sixteen full
+/// answers to an anti-entropy digest. A late joiner meets the answers of its peers in one burst,
+/// and every change is a message of the topic. The default of 256 overflowed on a loaded host
+/// (the reader got `Lagged`, and the node logged "gossip event stream lagged").
+const TOPIC_EVENT_CAPACITY: usize = 16 * crate::util::tuning::ANTIENTROPY_MAX_RESEND;
+
 /// Build an iroh-gossip instance and a Router that accepts incoming gossip connections.
 ///
 /// The Router spawns an accept loop that routes incoming QUIC connections
@@ -1272,6 +1278,7 @@ pub(crate) fn build_mesh(
     };
     let gossip = Gossip::builder()
         .membership_config(membership)
+        .topic_event_capacity(TOPIC_EVENT_CAPACITY)
         .spawn(endpoint.clone());
     let local = endpoint.id();
     // The address book of the endpoint, made where the endpoint is wrapped. The caller keeps it,
