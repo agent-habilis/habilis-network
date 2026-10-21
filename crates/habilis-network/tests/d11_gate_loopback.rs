@@ -131,14 +131,6 @@ impl Member {
     }
 }
 
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
-}
-
 async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> bool {
     let started = Instant::now();
     loop {
@@ -172,105 +164,109 @@ async fn delivered(from: &Member, to: &mut Member, to_nick: &str, text: &str) ->
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "runs real members; run alone in the host slot"]
-async fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let alice = Member::create("alice", &relay, vec![Transport::Udp], 2).await;
-    let mut bob = Member::join("bob", &alice).await;
-    let mut carol = Member::join("carol", &alice).await;
-    let mut dave = Member::join("dave", &alice).await;
-    assert!(
-        rosters_hold(&[&alice, &bob, &carol, &dave], 3, ROSTER_DEADLINE).await,
-        "the four members never formed a mesh"
-    );
-
-    for round in 0..3 {
-        for (nick, member) in [
-            ("bob", &mut bob),
-            ("carol", &mut carol),
-            ("dave", &mut dave),
-        ] {
-            let text = format!("rotation {round} to {nick}");
-            assert!(
-                delivered(&alice, member, nick, &text).await,
-                "{text:?} never arrived"
-            );
-            let (units, _) = alice.direct_units().await;
-            eprintln!("DIAG after {text:?}: alice counts {units} direct units");
-        }
-    }
-
-    // Busy units can put the count over the ceiling for a moment; once the sends end, it settles.
-    let started = Instant::now();
-    loop {
-        let (units, over) = alice.direct_units().await;
-        if units <= 2 && over == 0 {
-            break;
-        }
+fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay, vec![Transport::Udp], 2).await;
+        let mut bob = Member::join("bob", &alice).await;
+        let mut carol = Member::join("carol", &alice).await;
+        let mut dave = Member::join("dave", &alice).await;
         assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "alice still counts {units} units ({over} over) 30 s after the last send"
+            rosters_hold(&[&alice, &bob, &carol, &dave], 3, ROSTER_DEADLINE).await,
+            "the four members never formed a mesh"
         );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
 
-    for member in [alice, bob, carol, dave] {
-        member.leave().await;
-    }
+        for round in 0..3 {
+            for (nick, member) in [
+                ("bob", &mut bob),
+                ("carol", &mut carol),
+                ("dave", &mut dave),
+            ] {
+                let text = format!("rotation {round} to {nick}");
+                assert!(
+                    delivered(&alice, member, nick, &text).await,
+                    "{text:?} never arrived"
+                );
+                let (units, _) = alice.direct_units().await;
+                eprintln!("DIAG after {text:?}: alice counts {units} direct units");
+            }
+        }
+
+        // Busy units can put the count over the ceiling for a moment; once the sends end, it settles.
+        let started = Instant::now();
+        loop {
+            let (units, over) = alice.direct_units().await;
+            if units <= 2 && over == 0 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "alice still counts {units} units ({over} over) 30 s after the last send"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        for member in [alice, bob, carol, dave] {
+            member.leave().await;
+        }
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "runs real members; run alone in the host slot"]
-async fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let mut alice = Member::create("alice", &relay, vec![Transport::WebRtc], 0).await;
-    let mut bob = Member::join("bob", &alice).await;
-    assert!(
-        rosters_hold(&[&alice, &bob], 1, ROSTER_DEADLINE).await,
-        "the two members never formed a mesh"
-    );
+fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let mut alice = Member::create("alice", &relay, vec![Transport::WebRtc], 0).await;
+        let mut bob = Member::join("bob", &alice).await;
+        assert!(
+            rosters_hold(&[&alice, &bob], 1, ROSTER_DEADLINE).await,
+            "the two members never formed a mesh"
+        );
 
-    // How long a lane pair waits for its first session after the roster formed. About the probe
-    // deadline (15 s) would be a gap: a pair with no path but a session must not wait for a probe.
-    let formed = Instant::now();
-    let mut first_arrival = None;
-    let mut first_session = None;
-    // One of the two ids is the higher: the frame is held on it in one direction, and on the lower
-    // id in the other.
-    assert!(
-        delivered(&alice, &mut bob, "bob", "lane frame alice to bob").await,
-        "alice to bob never arrived"
-    );
-    assert!(
-        delivered(&bob, &mut alice, "alice", "lane frame bob to alice").await,
-        "bob to alice never arrived"
-    );
+        // How long a lane pair waits for its first session after the roster formed. About the probe
+        // deadline (15 s) would be a gap: a pair with no path but a session must not wait for a probe.
+        let formed = Instant::now();
+        let mut first_arrival = None;
+        let mut first_session = None;
+        // One of the two ids is the higher: the frame is held on it in one direction, and on the lower
+        // id in the other.
+        assert!(
+            delivered(&alice, &mut bob, "bob", "lane frame alice to bob").await,
+            "alice to bob never arrived"
+        );
+        assert!(
+            delivered(&bob, &mut alice, "alice", "lane frame bob to alice").await,
+            "bob to alice never arrived"
+        );
 
-    first_arrival.get_or_insert(formed.elapsed());
-    assert!(
-        formed.elapsed() < LANE_DEADLINE,
-        "the frames of both directions took {:?} after the roster, more than {LANE_DEADLINE:?}",
-        formed.elapsed()
-    );
-    while first_session.is_none() && formed.elapsed() < Duration::from_mins(1) {
-        if alice.rung_to("bob").await == Some("webrtc") {
-            first_session = Some(formed.elapsed());
-        } else {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        first_arrival.get_or_insert(formed.elapsed());
+        assert!(
+            formed.elapsed() < LANE_DEADLINE,
+            "the frames of both directions took {:?} after the roster, more than {LANE_DEADLINE:?}",
+            formed.elapsed()
+        );
+        while first_session.is_none() && formed.elapsed() < Duration::from_mins(1) {
+            if alice.rung_to("bob").await == Some("webrtc") {
+                first_session = Some(formed.elapsed());
+            } else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
         }
-    }
-    eprintln!(
-        "LANE TIMING: roster formed to the frames of both directions: {first_arrival:?}; \
+        eprintln!(
+            "LANE TIMING: roster formed to the frames of both directions: {first_arrival:?}; \
          to the first webrtc rung of alice to bob: {first_session:?}"
-    );
+        );
 
-    alice.leave().await;
-    bob.leave().await;
+        alice.leave().await;
+        bob.leave().await;
+    });
 }

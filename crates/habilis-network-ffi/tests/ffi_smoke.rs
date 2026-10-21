@@ -576,6 +576,7 @@ fn four_peers_converge_on_loopback() {
 }
 
 #[test]
+#[ignore = "needs the public relay ladder and the mainline DHT; run with --ignored"]
 fn four_peers_converge_on_public() {
     four_peers_converge(true);
 }

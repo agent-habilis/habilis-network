@@ -97,7 +97,7 @@ pub(super) async fn run_heal(
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
-        setup::register_rendezvous(&state.address_book, params);
+        setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
         if crate::transport::webrtc::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
         }
@@ -159,12 +159,11 @@ pub(super) enum Resubscribe {
 /// The resubscribe attempt's read-only environment: the gossip frontend to
 /// re-subscribe through, the rendezvous params to bootstrap from, the shared
 /// ctx-building parts (for its `sink` and to rebuild a [`HandlerCtx`] once the
-/// sender is swapped), and the CLI hard-exit flag for the `Fatal` path.
+/// sender is swapped).
 pub(super) struct ResubscribeEnv<'a> {
     pub(super) gossip: &'a iroh_gossip::net::Gossip,
     pub(super) params: &'a beacon::RendezvousParams,
     pub(super) parts: &'a CtxParts<'a>,
-    pub(super) exit_on_quit: bool,
 }
 /// The live gossip link a resubscribe mutates: the sender/receiver pair
 /// swapped in on success, and the consecutive-failure counter it resets or
@@ -183,8 +182,8 @@ pub(super) struct GossipLink<'a> {
 /// primitive (degraded mesh, throttles cleared, known peers re-dialed,
 /// arrival re-announced). On `Fatal` (the actor itself is gone) the
 /// daemon stops posing as a live member: statusline state file cleared
-/// (a `Left` broadcast is pointless on a dead topic), `exit(1)` on the
-/// CLI path, `Err` for in-process drivers.
+/// (a `Left` broadcast is pointless on a dead topic), then `Err`: the loop releases the beacon
+/// and the endpoints it owns, and on the CLI path exits with code 1 after that.
 pub(super) async fn resubscribe_tick(
     env: &ResubscribeEnv<'_>,
     state: &mut EventLoopState,
@@ -219,12 +218,6 @@ pub(super) async fn resubscribe_tick(
             env.parts.sink.emit(NodeEvent::Error(
                 "gossip subscription unrecoverable; shutting down".to_owned(),
             ));
-            #[cfg(not(feature = "dhat-heap"))]
-            if env.exit_on_quit {
-                std::process::exit(1);
-            }
-            #[cfg(feature = "dhat-heap")]
-            let _ = env.exit_on_quit;
             anyhow::bail!("gossip subscription unrecoverable after repeated resubscribe attempts");
         }
     }
@@ -249,7 +242,9 @@ pub(super) async fn try_resubscribe(
         bootstrap.push(env.params.id);
     }
     bootstrap.extend(state.known_endpoints.iter().copied());
-    match gossip::split::subscribe_mesh(env.gossip, env.params.topic_id, bootstrap).await {
+    match gossip::split::subscribe_mesh(env.gossip, env.params.topic_id, env.params.id, bootstrap)
+        .await
+    {
         Ok(topic) => {
             *attempts = 0;
             tracing::warn!(
@@ -303,7 +298,7 @@ pub(super) fn apply_rung_change(
             "bootstrap relay rung changed; re-registering rendezvous and re-homing the beacon"
         );
         params.bootstrap_relay = new;
-        setup::register_rendezvous(&state.address_book, params);
+        setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
         // Release the beacon so `maybe_cohost` → `beacon::ensure` rebuilds it
         // homed on the new rung at the next heal/reclaim tick — `shed`, not a
         // plain drop. The old endpoint is still open and still homed on the
@@ -330,7 +325,106 @@ pub(super) fn apply_rung_change(
 #[cfg(test)]
 mod tests {
     use super::{is_resume, is_wall_resume};
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
+
+    /// The test binary runs the test below again, in a process of its own, with this variable set.
+    #[cfg(feature = "host")]
+    const FATAL_CHILD: &str = "HABILIS_TEST_FATAL_RESUBSCRIBE_CHILD";
+
+    /// A gossip actor that is gone ends the daemon, and the loop exits the process only after it
+    /// has released the beacon and closed the endpoints that it owns, on its error path. An exit
+    /// inside the resubscribe skips both. The check runs in a child process, because an exit
+    /// inside the resubscribe ends the process.
+    #[cfg(feature = "host")]
+    #[test]
+    async fn a_fatal_resubscribe_leaves_the_exit_to_the_loop() {
+        use super::{GossipLink, ResubscribeEnv, resubscribe_tick};
+        use crate::daemon::event_loop::CtxParts;
+        use crate::testing::LaneNode;
+        use crate::util::tuning::RESUBSCRIBE_MAX_ATTEMPTS;
+
+        if std::env::var_os(FATAL_CHILD).is_some() {
+            let node = LaneNode::start().await;
+            let topic_id = iroh_gossip::proto::TopicId::from_bytes([8u8; 32]);
+            let topic = crate::gossip::split::subscribe_mesh(
+                &node.gossip,
+                topic_id,
+                iroh::SecretKey::generate().public(),
+                [],
+            )
+            .await
+            .expect("subscribe while the actor lives");
+            let (gossip_sender, gossip_receiver) = topic.split();
+            let mut sender = crate::transport::MeshSender::new(gossip_sender);
+            let mut receiver = crate::gossip::split::spawn_split(gossip_receiver, None);
+            node.stop_gossip().await;
+
+            let secret = iroh::SecretKey::generate();
+            let params = crate::beacon::RendezvousParams {
+                topic_id,
+                id: secret.public(),
+                secret,
+                bind_ports: Vec::new(),
+                lookups: crate::protocol::mesh::LookupOpts::loopback(),
+                relay_transport: false,
+                bootstrap_relay: None,
+                rung_tx: tokio::sync::watch::channel(None).0,
+            };
+            let parts = CtxParts {
+                endpoint: &node.endpoint,
+                mesh: &node.mesh,
+                author: &node.author,
+                identity: &node.identity,
+                our_pubkey: node.our_pubkey,
+                max_peers: 16,
+                rendezvous_id: crate::testing::endpoint_id(9),
+                external_msg_tx: None,
+                sink: &node.sink,
+            };
+            let env = ResubscribeEnv {
+                gossip: &node.gossip,
+                params: &params,
+                parts: &parts,
+            };
+            let mut state = node.state();
+            let (inbound, _unread) = tokio::sync::mpsc::channel(1);
+            let mut app = crate::membership::MembershipApp::new(inbound);
+            let mut attempts = 0;
+            let mut outcome = Ok(());
+            for _ in 0..RESUBSCRIBE_MAX_ATTEMPTS {
+                outcome = resubscribe_tick(
+                    &env,
+                    &mut state,
+                    &mut app,
+                    GossipLink {
+                        sender: &mut sender,
+                        receiver: &mut receiver,
+                        attempts: &mut attempts,
+                    },
+                )
+                .await;
+            }
+            println!("FATAL_RETURNED err={}", outcome.is_err());
+            node.endpoint.close().await;
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args([
+                "--exact",
+                "daemon::heal::tests::a_fatal_resubscribe_leaves_the_exit_to_the_loop",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(FATAL_CHILD, "1")
+            .output()
+            .expect("run the test binary");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("FATAL_RETURNED err=true"),
+            "the process exited inside the resubscribe, before the loop released its endpoints: {stdout}"
+        );
+    }
 
     #[test]
     fn is_resume_only_past_threshold() {

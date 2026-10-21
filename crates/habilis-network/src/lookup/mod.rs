@@ -34,7 +34,14 @@ use crate::util::clock::millis_saturating;
 /// override (`iroh::test_utils::run_relay_server` is https-only). No QUIC
 /// address discovery: a tab has no UDP, and the tests that use this force
 /// the relay to be the only path anyway.
-#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+#[cfg(all(any(test, feature = "iroh-test-utils"), not(target_arch = "wasm32")))]
+#[cfg_attr(
+    not(feature = "iroh-test-utils"),
+    expect(
+        unreachable_pub,
+        reason = "`net` re-exports it only with `iroh-test-utils`"
+    )
+)]
 pub mod test_relay {
     use anyhow::Context as _;
 
@@ -43,6 +50,13 @@ pub mod test_relay {
     ///
     /// # Errors
     /// Binding or spawning the relay server fails.
+    #[cfg_attr(
+        not(feature = "iroh-test-utils"),
+        expect(
+            unreachable_pub,
+            reason = "`net` re-exports it only with `iroh-test-utils`"
+        )
+    )]
     pub async fn spawn_plain() -> anyhow::Result<(iroh::RelayUrl, iroh_relay::server::Server)> {
         let mut config = iroh_relay::server::ServerConfig::default();
         config.relay = Some(iroh_relay::server::RelayConfig::new((
@@ -76,7 +90,7 @@ pub(crate) use relay::{
 /// - `lookups`: which address-lookups (mDNS / DHT) and relay to wire.
 ///   When any lookup is on, the builder is composed from
 ///   `presets::Minimal` plus the selected lookups; the relay maps via
-///   [`relay::relay_mode`]. An all-off (loopback-only) set wires none of
+///   `relay::relay_mode`. An all-off (loopback-only) set wires none of
 ///   them.
 /// - `secret_key`: `Some` pins a deterministic identity (used for the
 ///   shared rendezvous endpoint); `None` lets iroh generate a fresh
@@ -885,7 +899,7 @@ pub(crate) async fn build_peer_multihop(
 #[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
 static UNDERLAY_LEG_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Tests only: see [`UNDERLAY_LEG_OFF`].
+/// Tests only: see `UNDERLAY_LEG_OFF`.
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
 pub fn set_underlay_leg_off(off: bool) {
     UNDERLAY_LEG_OFF.store(off, std::sync::atomic::Ordering::SeqCst);
@@ -1221,6 +1235,12 @@ fn answer_of_connection_error(error: &iroh::endpoint::ConnectionError) -> ProbeA
     }
 }
 
+/// How many events of a topic the gossip keeps for a task that is not scheduled yet: sixteen full
+/// answers to an anti-entropy digest. A late joiner meets the answers of its peers in one burst,
+/// and every change is a message of the topic. The default of 256 overflowed on a loaded host
+/// (the reader got `Lagged`, and the node logged "gossip event stream lagged").
+const TOPIC_EVENT_CAPACITY: usize = 16 * crate::util::tuning::ANTIENTROPY_MAX_RESEND;
+
 /// Build an iroh-gossip instance and a Router that accepts incoming gossip connections.
 ///
 /// The Router spawns an accept loop that routes incoming QUIC connections
@@ -1258,6 +1278,7 @@ pub(crate) fn build_mesh(
     };
     let gossip = Gossip::builder()
         .membership_config(membership)
+        .topic_event_capacity(TOPIC_EVENT_CAPACITY)
         .spawn(endpoint.clone());
     let local = endpoint.id();
     // The address book of the endpoint, made where the endpoint is wrapped. The caller keeps it,
@@ -1272,19 +1293,21 @@ pub(crate) fn build_mesh(
         .as_ref()
         .filter(|_| needs_session)
         .map(|(handle, admission, _)| (handle.clone(), admission.clone(), local));
-    let mut builder = Router::builder(endpoint).accept(
-        GOSSIP_ALPN,
-        crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport, session_gate),
-    );
+    // Every router serves the nudge, the beacon's too: a session that attaches to the rendezvous
+    // is followed by a nudge, and it does its work only when the connect completes.
+    let mut builder = Router::builder(endpoint)
+        .accept(
+            GOSSIP_ALPN,
+            crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport, session_gate),
+        )
+        .accept(
+            crate::transport::webrtc::NUDGE_ALPN,
+            crate::transport::webrtc::NudgeAcceptor,
+        );
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {
-        builder = builder
-            .accept(crate::transport::UNICAST_ALPN, acceptor)
-            .accept(
-                crate::transport::webrtc::NUDGE_ALPN,
-                crate::transport::webrtc::NudgeAcceptor,
-            );
+        builder = builder.accept(crate::transport::UNICAST_ALPN, acceptor);
     }
     // …and answers JSEP offers, so a peer that cannot reach us over IP can
     // still open a direct data channel. Answering is unconditional: the role
@@ -1322,6 +1345,7 @@ pub(crate) fn build_mesh(
 #[cfg(test)]
 mod tests {
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+    use habilis_network_test_tracing::test;
 
     /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
     /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
@@ -1401,7 +1425,7 @@ mod tests {
     /// multicast; where it cannot, nothing is discovered and the test fails on the deadline, which
     /// the slot reports as VOID for fix C, never as green.
     #[cfg(all(feature = "host", feature = "mdns"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "needs a host that sends mDNS multicast: run with --ignored --nocapture"]
     async fn two_members_on_the_lan_link_with_no_beacon() {
         use std::io::Write as _;
@@ -1602,7 +1626,7 @@ mod tests {
     /// more than that ahead of what the receiver has taken in, so the bytes that its writes
     /// accept, less its own buffer, are what the receiver granted. Nobody reads at the receiver.
     #[cfg(feature = "host")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_receiver_that_never_reads_grants_the_whole_window_to_one_stream() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1680,7 +1704,7 @@ mod tests {
     /// at the sender, as in
     /// `a_receiver_that_never_reads_grants_the_whole_window_to_one_stream`.
     #[cfg(feature = "host")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn streams_that_nobody_reads_fit_in_the_connection_window() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1758,7 +1782,7 @@ mod tests {
     // An address that changes is told again, so addresses are registered again and again for one
     // endpoint. The endpoint has one lookup service for them, made once by `address_book`, not one
     // per registration.
-    #[tokio::test]
+    #[test]
     async fn the_addresses_of_one_endpoint_go_to_one_lookup_service() {
         let peer = iroh::SecretKey::generate().public();
         let at =
@@ -1793,7 +1817,7 @@ mod tests {
         second.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn loopback_all_off_binds() {
         let endpoint = build_peer_endpoint(&LookupOpts::loopback())
             .await
@@ -1842,7 +1866,7 @@ mod tests {
     // underlay's does not. The member of a mesh without gossip has none. A beacon is built from
     // `TransportHandles::default()`, which has no gossip, and from opts that never name it.
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn only_the_member_endpoint_has_the_gossip_handle() {
         let build = |gossip: bool| async move {
             let opts = TransportOpts {
@@ -1850,7 +1874,7 @@ mod tests {
                 ..TransportOpts::default()
             };
             let table = crate::transport::SignalAdmission::new(8);
-            let (_endpoint, _handle, _webrtc, leg, _mdns) = super::build_peer_multihop_with(
+            let (endpoint, handle, _webrtc, leg, _mdns) = super::build_peer_multihop_with(
                 &LookupOpts::loopback(),
                 opts,
                 Some(&table),
@@ -1859,6 +1883,8 @@ mod tests {
             )
             .await
             .expect("a multihop peer binds");
+            handle.close().await;
+            endpoint.close().await;
             (table, leg.expect("a leg when a cap is given"))
         };
 
@@ -1883,7 +1909,7 @@ mod tests {
     // member still gets the gossip handle (the admission table keeps it), the gossip address,
     // and the ladder of the gossip handle, which keeps IP above gossip.
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn the_member_of_a_udp_and_gossip_list_keeps_ip_above_gossip() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
         use std::time::Duration;
@@ -1922,7 +1948,7 @@ mod tests {
             members.push(endpoint);
         }
         let (alice, bob) = (members.remove(0), members.remove(0));
-        let _router = iroh::protocol::Router::builder(bob.clone())
+        let router = iroh::protocol::Router::builder(bob.clone())
             .accept(ALPN, Hold)
             .spawn();
         let both = bob
@@ -1954,6 +1980,8 @@ mod tests {
             crate::transport::path::selected_is_ip(&connection),
             "IP is above gossip: the ladder of the gossip handle is the selector"
         );
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     // The underlay gets a `WebRTC` leg only when it is asked for, and only when
@@ -1976,7 +2004,7 @@ mod tests {
     }
 
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn the_underlay_leg_takes_the_cap_it_is_given_and_needs_webrtc_on() {
         let build = |opts: TransportOpts, cap: Option<usize>| async move {
             super::build_peer_multihop_with(
@@ -1990,7 +2018,7 @@ mod tests {
             .expect("a multihop peer binds")
         };
 
-        let (_endpoint, handle, _webrtc, leg, _mdns) =
+        let (endpoint, handle, _webrtc, leg, _mdns) =
             build(TransportOpts::default(), Some(5)).await;
         let leg = leg.expect("a leg when a cap is given");
         assert_eq!(leg.admission.cap(), 5, "the table has the cap of G");
@@ -2000,14 +2028,21 @@ mod tests {
             "the leg is on the underlay"
         );
         assert_eq!(leg.handle.session_count(), 0);
+        handle.close().await;
+        endpoint.close().await;
 
-        let (_, _, _, without_cap, _) = build(TransportOpts::default(), None).await;
+        let (capless_endpoint, capless_handle, _, without_cap, _) =
+            build(TransportOpts::default(), None).await;
+        capless_handle.close().await;
+        capless_endpoint.close().await;
         assert!(without_cap.is_none(), "no cap, no leg");
         let off = TransportOpts {
             webrtc: false,
             ..TransportOpts::default()
         };
-        let (_, _, _, webrtc_off, _) = build(off, Some(5)).await;
+        let (off_endpoint, off_handle, _, webrtc_off, _) = build(off, Some(5)).await;
+        off_handle.close().await;
+        off_endpoint.close().await;
         assert!(webrtc_off.is_none(), "WebRTC off, no leg");
     }
 
@@ -2027,7 +2062,7 @@ mod tests {
     // WebRTC address and the multihop hop identity share one key. The underlay
     // has a key of its own (see `build_peer_multihop`).
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn one_key_serves_udp_webrtc_and_multihop() {
         let (endpoint, handle, webrtc) = super::build_peer_multihop(
             &LookupOpts::loopback(),
@@ -2048,12 +2083,13 @@ mod tests {
             endpoint.id(),
             "a relay hands an id's packets to one endpoint only"
         );
+        handle.close().await;
         endpoint.close().await;
     }
 
     // An injected endpoint's multihop handle must obey the mesh's relay rule. Its
     // keys are checked when it is bound: see `InjectedEndpoint::bind`.
-    #[tokio::test]
+    #[test]
     async fn an_injected_multihop_handle_must_obey_the_mesh_relay_rule() {
         let lookups = LookupOpts::loopback();
         let (endpoint, _webrtc) = super::build_peer_webrtc(&lookups, TransportOpts::default())
@@ -2074,7 +2110,7 @@ mod tests {
     /// `Router::spawn`). A dial on `GOSSIP_ALPN` then fails on the ALPN, which a listener sends
     /// before any certificate: it proves nothing about the identity, so the probe must not
     /// answer `Foreign`, which makes a walk bind a second rung.
-    #[tokio::test]
+    #[test]
     async fn a_holder_of_our_identity_that_serves_no_alpn_yet_is_not_a_foreign_mesh() {
         use std::net::SocketAddr;
 
@@ -2137,7 +2173,7 @@ mod tests {
     /// A listener of the identity that was asked for, which refuses every connection (a beacon that
     /// is saturated or going down does the same), is not another mesh: its refusal proves nothing
     /// about the identity, so the probe must not answer `Foreign`, which makes a walk bind a rung.
-    #[tokio::test]
+    #[test]
     async fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
         use std::net::SocketAddr;
 
@@ -2193,6 +2229,63 @@ mod tests {
         assert_ne!(answer, ProbeAnswer::Ours, "a refused dial did not open");
     }
 
+    /// A session that attaches to the rendezvous is followed by a nudge: a dial on the nudge ALPN
+    /// that does its work only when it completes. The router of the beacon is built with no
+    /// unicast acceptor, so it has to serve the nudge ALPN all the same, or the handshake fails
+    /// with `no_application_protocol` and the nudge does nothing.
+    #[test]
+    async fn a_router_that_carries_no_unicast_completes_a_nudge() {
+        use std::net::SocketAddr;
+
+        use iroh::EndpointAddr;
+        use iroh::SecretKey;
+        use iroh_gossip::net::GOSSIP_ALPN;
+
+        use super::{TransportHandles, build_endpoint, build_mesh};
+
+        let secret = SecretKey::generate();
+        let id = secret.public();
+        let port = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .and_then(|socket| socket.local_addr())
+            .expect("a free loopback port")
+            .port();
+        let beacon = build_endpoint(
+            &LookupOpts::loopback(),
+            Some(secret),
+            Some(port),
+            vec![GOSSIP_ALPN.to_vec()],
+            TransportHandles::default(),
+        )
+        .await
+        .expect("a beacon endpoint");
+        let (_gossip, router, _book) = build_mesh(beacon, 5, None, None, Vec::new(), true, false);
+        let dialer = build_endpoint(
+            &LookupOpts::loopback(),
+            None,
+            None,
+            Vec::new(),
+            TransportHandles::default(),
+        )
+        .await
+        .expect("a dialer");
+        let addr = EndpointAddr::new(id)
+            .with_ip_addr(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)));
+
+        let nudge = n0_future::time::timeout(
+            std::time::Duration::from_secs(5),
+            dialer.connect(addr, crate::transport::webrtc::NUDGE_ALPN),
+        )
+        .await
+        .map(|dialed| dialed.map(|_| ()));
+
+        dialer.close().await;
+        let _ = router.shutdown().await;
+        assert!(
+            matches!(nudge, Ok(Ok(()))),
+            "the nudge did not complete: {nudge:?}"
+        );
+    }
+
     /// What each way a dial can end proves: only the verdict of our verifier on the key is another
     /// mesh. An alert that is sent before a certificate (`no_application_protocol`, from a holder
     /// of our own mesh whose router has not set its ALPN yet), a close, a reset and a version
@@ -2242,7 +2335,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
+    #[ignore = "needs the public relay ladder; run with --ignored"]
     async fn public_default_relay_binds() {
         // No lookup wired: exercises the `Minimal` + pinned-ladder
         // composition. `bind()` is non-blocking wrt the relay, so this

@@ -133,20 +133,56 @@ struct Flood {
     readers: Vec<ReceiveLoop>,
 }
 
-/// Bind the three endpoints, join the topic and attach every handle to it.
+impl Flood {
+    /// Stop the readers, shut the routers down, which stops the gossip of each member and closes
+    /// its endpoint, then close the endpoints that no router holds. A dropped endpoint makes iroh
+    /// log an error and abort its connections, in a bench run as in a test.
+    async fn close(self) {
+        for reader in self.readers {
+            reader.abort();
+        }
+        for router in self.routers {
+            drop(router.shutdown().await);
+        }
+        for endpoint in &self.endpoints {
+            endpoint.close().await;
+        }
+    }
+}
+
+/// Bind the three endpoints, join the topic and attach every handle to it. What was opened is
+/// closed again when a step fails.
 async fn start_flood() -> Result<Flood, String> {
-    let topic = TopicId::from_bytes([42u8; 32]);
     let keys: Vec<SecretKey> = (0..3).map(|_| SecretKey::generate()).collect();
-    let handles: Vec<GossipHandle> = keys
-        .iter()
-        .map(|key| GossipHandle::new(key.public()))
-        .collect();
+    let mut flood = Flood {
+        handles: keys
+            .iter()
+            .map(|key| GossipHandle::new(key.public()))
+            .collect(),
+        endpoints: Vec::new(),
+        tap: Tap {
+            inner: Bench,
+            served: Arc::default(),
+        },
+        routers: Vec::new(),
+        readers: Vec::new(),
+    };
+    match fill_flood(&mut flood, &keys).await {
+        Ok(()) => Ok(flood),
+        Err(error) => {
+            flood.close().await;
+            Err(error)
+        }
+    }
+}
+
+async fn fill_flood(flood: &mut Flood, keys: &[SecretKey]) -> Result<(), String> {
+    let topic = TopicId::from_bytes([42u8; 32]);
     let lookups = [
         MemoryLookup::new(),
         MemoryLookup::new(),
         MemoryLookup::new(),
     ];
-    let mut endpoints = Vec::new();
     for (index, key) in keys.iter().enumerate() {
         let binds: &[&str] = match index {
             0 => &["[::1]:0"],
@@ -157,7 +193,7 @@ async fn start_flood() -> Result<Flood, String> {
             .secret_key(key.clone())
             .relay_mode(RelayMode::Disabled)
             .clear_ip_transports()
-            .add_custom_transport(handles[index].custom_transport())
+            .add_custom_transport(flood.handles[index].custom_transport())
             // The endpoint carries the cells and no multihop node sits above it, so
             // its key is the underlay id, not an application id.
             .path_selector(underlay_path_selector(UnderlayId::new(key.public())))
@@ -170,36 +206,31 @@ async fn start_flood() -> Result<Flood, String> {
                 )
                 .map_err(|error| format!("bind address refused: {error:#}"))?;
         }
-        endpoints.push(
+        flood.endpoints.push(
             builder
                 .bind()
                 .await
                 .map_err(|error| format!("bind failed: {error:#}"))?,
         );
     }
+    let endpoints = flood.endpoints.clone();
     // The gossip links: A and C each know B, and B knows both.
     lookups[0].add_endpoint_info(endpoints[1].addr());
     lookups[2].add_endpoint_info(endpoints[1].addr());
     lookups[1].add_endpoint_info(endpoints[0].addr());
     lookups[1].add_endpoint_info(endpoints[2].addr());
 
-    let tap = Tap {
-        inner: Bench,
-        served: Arc::default(),
-    };
     let mut gossips = Vec::new();
-    let mut routers = Vec::new();
     for (index, endpoint) in endpoints.iter().enumerate() {
         let gossip = Gossip::builder().spawn(endpoint.clone());
         let mut router = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
         if index == 2 {
-            router = router.accept(BENCH_ALPN, tap.clone());
+            router = router.accept(BENCH_ALPN, flood.tap.clone());
         }
-        routers.push(router.spawn());
+        flood.routers.push(router.spawn());
         gossips.push(gossip);
     }
     // B joins first: A and C bootstrap on it, and wait for it to be there.
-    let mut readers = Vec::new();
     for index in [1usize, 0, 2] {
         let joined = if index == 1 {
             gossips[1].subscribe(topic, vec![]).await
@@ -214,26 +245,23 @@ async fn start_flood() -> Result<Flood, String> {
         let (sender, receiver) = joined
             .map_err(|error| format!("joining the topic failed: {error:#}"))?
             .split();
-        handles[index].attach_gossip(sender);
-        readers.push(spawn_receive_loop(receiver, handles[index].clone()));
+        flood.handles[index].attach_gossip(sender);
+        flood
+            .readers
+            .push(spawn_receive_loop(receiver, flood.handles[index].clone()));
     }
-    Ok(Flood {
-        handles,
-        endpoints,
-        tap,
-        routers,
-        readers,
-    })
+    Ok(())
 }
 
 async fn three_member_flood(args: &Args) -> Result<Measured, String> {
-    let Flood {
-        handles,
-        endpoints,
-        tap,
-        routers: _routers,
-        readers,
-    } = start_flood().await?;
+    let flood = start_flood().await?;
+    let measured = measure_flood(&flood, args).await;
+    flood.close().await;
+    measured
+}
+
+async fn measure_flood(flood: &Flood, args: &Args) -> Result<Measured, String> {
+    let (handles, endpoints, tap) = (&flood.handles, &flood.endpoints, &flood.tap);
     let to_carol = EndpointAddr::from_parts(
         endpoints[2].id(),
         [TransportAddr::Custom(gossip_addr(endpoints[2].id()))],
@@ -248,7 +276,7 @@ async fn three_member_flood(args: &Args) -> Result<Measured, String> {
 
     let all =
         |list: &[GossipHandle]| -> Vec<Stats> { list.iter().map(GossipHandle::stats).collect() };
-    let before = all(&handles);
+    let before = all(handles);
     let client_lost_before = connection.stats().lost_packets;
     let server_lost_before = tap.lost_packets();
     let samples = rounds_on(&connection, args, selected_path).await?;
@@ -259,16 +287,13 @@ async fn three_member_flood(args: &Args) -> Result<Measured, String> {
     .await
     .map_err(|_| format!("the round trips stalled past {TRANSFER_TIMEOUT:?}"))?
     .map_err(|error| format!("round trips failed: {error:#}"))?;
-    let after = all(&handles);
+    let after = all(handles);
     let lost_packets_a = connection
         .stats()
         .lost_packets
         .saturating_sub(client_lost_before);
     let lost_packets_c = tap.lost_packets().saturating_sub(server_lost_before);
     connection.close(0u32.into(), b"done");
-    for reader in readers {
-        reader.abort();
-    }
 
     let originated = sum_frames_out(&after) - sum_frames_out(&before);
     let received: u64 = after
@@ -402,14 +427,37 @@ async fn run_group(
         hub.join(handle);
     }
     let alice = endpoint(&keys[0], &handles[0]).await?;
-    let bob = endpoint(&keys[1], &handles[1]).await?;
+    let bob = match endpoint(&keys[1], &handles[1]).await {
+        Ok(bob) => bob,
+        Err(error) => {
+            alice.close().await;
+            return Err(error);
+        }
+    };
     let tap = Tap {
         inner: Bench,
         served: Arc::default(),
     };
-    let _router = Router::builder(bob.clone())
+    let router = Router::builder(bob.clone())
         .accept(BENCH_ALPN, tap.clone())
         .spawn();
+    let measured = measure_group(&alice, &bob, &handles, &tap, with_gossip_path, args).await;
+    // Both endpoints close whatever the measurement returned: a dropped endpoint makes iroh log an
+    // error and abort its connections. The router closes the endpoint of bob.
+    alice.close().await;
+    drop(router.shutdown().await);
+    measured
+}
+
+/// The measurement of one run, over a connection from `alice` to `bob`.
+async fn measure_group(
+    alice: &Endpoint,
+    bob: &Endpoint,
+    handles: &[GossipHandle],
+    tap: &Tap,
+    with_gossip_path: bool,
+    args: &Args,
+) -> Result<(Value, Vec<Sample>), String> {
     let socket = bob
         .bound_sockets()
         .into_iter()
@@ -427,16 +475,16 @@ async fn run_group(
 
     let all =
         |list: &[GossipHandle]| -> Vec<Stats> { list.iter().map(GossipHandle::stats).collect() };
-    let (idle_before, path_before) = (all(&handles), gossip_path(&connection));
+    let (idle_before, path_before) = (all(handles), gossip_path(&connection));
     tokio::time::sleep(idle()).await;
-    let (idle_after, path_after) = (all(&handles), gossip_path(&connection));
+    let (idle_after, path_after) = (all(handles), gossip_path(&connection));
     let secs = idle().as_secs_f64();
     let selected_idle = selected_path(&connection);
 
     let client_lost_before = connection.stats().lost_packets;
     let server_lost_before = tap.lost_packets();
     let samples = rounds_on(&connection, args, selected_path).await?;
-    let bulk_after = all(&handles);
+    let bulk_after = all(handles);
     let client_lost = connection
         .stats()
         .lost_packets
@@ -475,6 +523,7 @@ async fn run_group(
 mod tests {
     use super::{Args, Outcome, ladder_gossip, ladder_gossip_backup};
     use crate::bench::Direction;
+    use habilis_network_test_tracing::test;
 
     fn small_args() -> Args {
         Args {
@@ -489,7 +538,7 @@ mod tests {
 
     /// The cell keeps IP selected, reports the flood of both runs, and the run with
     /// no gossip address puts nothing on the topic.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_backup_path_cell_reports_the_flood_under_ip_and_a_control_with_none() {
         let Outcome::Ok(measured) = ladder_gossip_backup(&small_args()).await else {
             panic!("the backup-path cell did not measure");
@@ -515,7 +564,7 @@ mod tests {
     /// The gossip cell: a transfer and the round trips over the real flood, on the
     /// gossip path, and the cost of the flood at the member between the two ends.
     /// Skipped, with a log line, where the `IPv6` loopback cannot bind.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_gossip_cell_measures_a_quic_transfer_over_the_real_flood() {
         let measured = match ladder_gossip(&small_args()).await {
             Outcome::Ok(measured) => measured,

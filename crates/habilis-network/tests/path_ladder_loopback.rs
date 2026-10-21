@@ -190,15 +190,6 @@ impl Member {
     }
 }
 
-/// With `RUST_LOG` set, a failing run prints the engine's log.
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
-}
-
 async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> bool {
     let started = Instant::now();
     loop {
@@ -216,57 +207,59 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_node_steps_down_the_ladder_and_climbs_back() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let alice = Member::create("alice", &relay).await;
-    let bob = Member::join("bob", &alice).await;
-    let carol = Member::join("carol", &alice).await;
-    assert!(
-        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
-        "the three members never formed a mesh"
-    );
+#[test]
+fn a_node_steps_down_the_ladder_and_climbs_back() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
+        assert!(
+            rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+            "the three members never formed a mesh"
+        );
 
-    // Carol is a third member that keeps every rung to both. The multihop rung
-    // between alice and bob needs her only as a possible hop: the shortest route
-    // is the direct link between their multihop underlays, an endpoint of its
-    // own, which the blocks on the application endpoint do not cut. In the runs
-    // that I measured no hop forwarded a cell.
-    alice.expect_rung("bob", "ip", "nothing blocked").await;
+        // Carol is a third member that keeps every rung to both. The multihop rung
+        // between alice and bob needs her only as a possible hop: the shortest route
+        // is the direct link between their multihop underlays, an endpoint of its
+        // own, which the blocks on the application endpoint do not cut. In the runs
+        // that I measured no hop forwarded a cell.
+        alice.expect_rung("bob", "ip", "nothing blocked").await;
 
-    // Both ends lose IP to each other: a WebRTC session that attaches while
-    // the far side still has UDP is dropped by the far side.
-    alice.block_ip_to(bob.ports()).await;
-    bob.block_ip_to(alice.ports()).await;
-    alice.expect_rung("bob", "webrtc", "IP blocked").await;
+        // Both ends lose IP to each other: a WebRTC session that attaches while
+        // the far side still has UDP is dropped by the far side.
+        alice.block_ip_to(bob.ports()).await;
+        bob.block_ip_to(alice.ports()).await;
+        alice.expect_rung("bob", "webrtc", "IP blocked").await;
 
-    alice.block_rung(Rung::WebRtc, true).await;
-    alice
-        .expect_rung("bob", "multihop", "IP and WebRTC blocked")
-        .await;
+        alice.block_rung(Rung::WebRtc, true).await;
+        alice
+            .expect_rung("bob", "multihop", "IP and WebRTC blocked")
+            .await;
 
-    alice.block_rung(Rung::Multihop, true).await;
-    alice
-        .expect_rung("bob", "relay", "IP, WebRTC and multihop blocked")
-        .await;
+        alice.block_rung(Rung::Multihop, true).await;
+        alice
+            .expect_rung("bob", "relay", "IP, WebRTC and multihop blocked")
+            .await;
 
-    // Back up, in the reverse order.
-    alice.block_rung(Rung::Multihop, false).await;
-    alice
-        .expect_rung("bob", "multihop", "multihop returned")
-        .await;
-    alice.block_rung(Rung::WebRtc, false).await;
-    alice.expect_rung("bob", "webrtc", "WebRTC returned").await;
-    alice.block_ip_to(Vec::new()).await;
-    bob.block_ip_to(Vec::new()).await;
-    alice.expect_rung("bob", "ip", "IP returned").await;
+        // Back up, in the reverse order.
+        alice.block_rung(Rung::Multihop, false).await;
+        alice
+            .expect_rung("bob", "multihop", "multihop returned")
+            .await;
+        alice.block_rung(Rung::WebRtc, false).await;
+        alice.expect_rung("bob", "webrtc", "WebRTC returned").await;
+        alice.block_ip_to(Vec::new()).await;
+        bob.block_ip_to(Vec::new()).await;
+        alice.expect_rung("bob", "ip", "IP returned").await;
 
-    for member in [alice, bob, carol] {
-        let _ = member.membership.node.leave().await;
-    }
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }
 
 /// A pair whose `WebRTC` session ends before any member has advertised a route
@@ -284,68 +277,70 @@ async fn a_node_steps_down_the_ladder_and_climbs_back() {
 /// `Request::OfferSession`, blocks `WebRTC`, and lets the vector go only after the loss
 /// is observed. The two asserts that no route exists hold by construction: a failure of
 /// either is a fault of the hook, not a reason to skip.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let alice = Member::create("alice", &relay).await;
-    let bob = Member::join("bob", &alice).await;
-    let carol = Member::join("carol", &alice).await;
-    assert!(
-        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
-        "the three members never formed a mesh"
-    );
-    alice.expect_rung("bob", "ip", "nothing blocked").await;
-
-    alice.hold_link_state(true).await;
-    assert!(
-        !alice.has_route("bob").await,
-        "alice has a route to bob although her link-vector is withdrawn"
-    );
-    alice.block_ip_to(bob.ports()).await;
-    bob.block_ip_to(alice.ports()).await;
-    // The offer decision reads the selected path, which is still IP for a moment
-    // after the block: ask only once the pair has left IP. The engine offers a session by
-    // itself as soon as its watcher reports the relay, so the relay lasts a few hundred ms and
-    // a poll can see WebRTC next: offer only when the relay was seen, and never again to a pair
-    // that is already on WebRTC (an offer resets its proof and offers a second time).
-    let left_ip = alice
-        .expect_rung_in("bob", &["relay", "webrtc"], "IP blocked, before the offer")
-        .await;
-    if left_ip == "relay" {
-        // Only the lower id offers; each side asks, so the right one does.
-        alice.offer_session("bob").await;
-        bob.offer_session("alice").await;
-    }
-    alice
-        .expect_rung("bob", "webrtc", "IP blocked, session offered")
-        .await;
-
-    alice.block_rung(Rung::WebRtc, true).await;
-    let lost_at = Instant::now();
-    while !matches!(alice.rung_to("bob").await, Some("relay" | "multihop")) {
+#[test]
+fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
         assert!(
-            lost_at.elapsed() < STEP_DEADLINE,
-            "the pair never left WebRTC after the block"
+            rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+            "the three members never formed a mesh"
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(
-        !alice.has_route("bob").await,
-        "alice has a route to bob after the loss although her link-vector is withdrawn"
-    );
-    // The first link-vector comes now, after the loss: the order that failed one run in twenty.
-    alice.hold_link_state(false).await;
-    alice
-        .expect_rung("bob", "multihop", "WebRTC lost before any route")
-        .await;
+        alice.expect_rung("bob", "ip", "nothing blocked").await;
 
-    for member in [alice, bob, carol] {
-        let _ = member.membership.node.leave().await;
-    }
+        alice.hold_link_state(true).await;
+        assert!(
+            !alice.has_route("bob").await,
+            "alice has a route to bob although her link-vector is withdrawn"
+        );
+        alice.block_ip_to(bob.ports()).await;
+        bob.block_ip_to(alice.ports()).await;
+        // The offer decision reads the selected path, which is still IP for a moment
+        // after the block: ask only once the pair has left IP. The engine offers a session by
+        // itself as soon as its watcher reports the relay, so the relay lasts a few hundred ms and
+        // a poll can see WebRTC next: offer only when the relay was seen, and never again to a pair
+        // that is already on WebRTC (an offer resets its proof and offers a second time).
+        let left_ip = alice
+            .expect_rung_in("bob", &["relay", "webrtc"], "IP blocked, before the offer")
+            .await;
+        if left_ip == "relay" {
+            // Only the lower id offers; each side asks, so the right one does.
+            alice.offer_session("bob").await;
+            bob.offer_session("alice").await;
+        }
+        alice
+            .expect_rung("bob", "webrtc", "IP blocked, session offered")
+            .await;
+
+        alice.block_rung(Rung::WebRtc, true).await;
+        let lost_at = Instant::now();
+        while !matches!(alice.rung_to("bob").await, Some("relay" | "multihop")) {
+            assert!(
+                lost_at.elapsed() < STEP_DEADLINE,
+                "the pair never left WebRTC after the block"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            !alice.has_route("bob").await,
+            "alice has a route to bob after the loss although her link-vector is withdrawn"
+        );
+        // The first link-vector comes now, after the loss: the order that failed one run in twenty.
+        alice.hold_link_state(false).await;
+        alice
+            .expect_rung("bob", "multihop", "WebRTC lost before any route")
+            .await;
+
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }
 
 /// Take every IP path between `first` and `second` away from both, on the application
@@ -391,55 +386,57 @@ async fn cut_webrtc_between(first: &Member, second: &Member) {
 /// gate keeps cells off the relay and the only way left is the hop. The edge
 /// between alice and bob ages out of the topology after the stuck time of 20 s
 /// plus one link-state of 15 s, which is why the waits are long.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_multihop_rung_forwards_through_a_third_member() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
-    let alice = Member::create_with("alice", &relay, list).await;
-    let bob = Member::join("bob", &alice).await;
-    let carol = Member::join("carol", &alice).await;
-    assert!(
-        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
-        "the three members never formed a mesh"
-    );
-    alice.expect_rung("bob", "ip", "nothing blocked").await;
-
-    // The lower underlay id offers an underlay session to its neighbor, so which
-    // of alice and bob has it decides a draw: the line says which one it was.
-    let (alice_underlay, bob_underlay) = (
-        alice.membership.node.underlay_id().expect("multihop is on"),
-        bob.membership.node.underlay_id().expect("multihop is on"),
-    );
-    eprintln!(
-        "UNDERLAY IDS alice={} bob={} lower={}",
-        alice_underlay.fmt_short(),
-        bob_underlay.fmt_short(),
-        if alice_underlay < bob_underlay {
-            "alice"
-        } else {
-            "bob"
-        }
-    );
-    cut_ip_between(&alice, &bob).await;
-    cut_webrtc_between(&alice, &bob).await;
-    alice
-        .expect_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
-        .await;
-
-    let started = Instant::now();
-    while carol.forwarded_cells().await == 0 {
+#[test]
+fn the_multihop_rung_forwards_through_a_third_member() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
+        let alice = Member::create_with("alice", &relay, list).await;
+        let bob = Member::join("bob", &alice).await;
+        let carol = Member::join("carol", &alice).await;
         assert!(
-            started.elapsed() < STEP_DEADLINE,
-            "alice reached bob on the multihop rung, but carol forwarded no cell: \
-             the pair used a link that is not a hop"
+            rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+            "the three members never formed a mesh"
         );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+        alice.expect_rung("bob", "ip", "nothing blocked").await;
 
-    for member in [alice, bob, carol] {
-        let _ = member.membership.node.leave().await;
-    }
+        // The lower underlay id offers an underlay session to its neighbor, so which
+        // of alice and bob has it decides a draw: the line says which one it was.
+        let (alice_underlay, bob_underlay) = (
+            alice.membership.node.underlay_id().expect("multihop is on"),
+            bob.membership.node.underlay_id().expect("multihop is on"),
+        );
+        eprintln!(
+            "UNDERLAY IDS alice={} bob={} lower={}",
+            alice_underlay.fmt_short(),
+            bob_underlay.fmt_short(),
+            if alice_underlay < bob_underlay {
+                "alice"
+            } else {
+                "bob"
+            }
+        );
+        cut_ip_between(&alice, &bob).await;
+        cut_webrtc_between(&alice, &bob).await;
+        alice
+            .expect_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
+            .await;
+
+        let started = Instant::now();
+        while carol.forwarded_cells().await == 0 {
+            assert!(
+                started.elapsed() < STEP_DEADLINE,
+                "alice reached bob on the multihop rung, but carol forwarded no cell: \
+             the pair used a link that is not a hop"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }

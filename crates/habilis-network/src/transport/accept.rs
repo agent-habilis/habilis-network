@@ -124,6 +124,7 @@ impl ProtocolHandler for UnicastAcceptor {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::endpoint::{Connection, ConnectionError};
@@ -189,7 +190,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[test]
     async fn an_accepted_connection_that_gets_no_stream_is_closed_after_the_idle_timeout() {
         let (conn, router, client, _frames) = connected(Duration::from_secs(8)).await;
         tokio::time::pause();
@@ -206,7 +207,7 @@ mod tests {
         client.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_stream_restarts_the_accept_side_idle_timeout() {
         let (conn, router, client, mut frames) = connected(Duration::from_secs(8)).await;
         tokio::time::pause();

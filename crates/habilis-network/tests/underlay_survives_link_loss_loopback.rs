@@ -13,7 +13,6 @@
 
 mod until_known;
 
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::EndpointId;
@@ -26,46 +25,14 @@ const STEP_DEADLINE: Duration = Duration::from_mins(3);
 /// How long both ends tick after the close.
 const SETTLE: Duration = Duration::from_secs(5);
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("habilis_network=info,habilis_network::transport=debug")
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-}
-
 fn log_len() -> usize {
-    log_buffer().lock().expect("no poison").lines().count()
+    habilis_network_test_tracing::captured_logs()
+        .lines()
+        .count()
 }
 
 fn logs_since(since: usize) -> String {
-    log_buffer()
-        .lock()
-        .expect("no poison")
+    habilis_network_test_tracing::captured_logs()
         .lines()
         .skip(since)
         .collect::<Vec<_>>()
@@ -99,111 +66,116 @@ async fn roster_len(member: &Membership) -> usize {
         .unwrap_or(0)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+#[test]
+fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug",
+    );
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let (sink_a, _events_a) = membership::json_sink();
+        let alice = membership::join(
+            &membership::Opts {
+                nick: Some("alice".to_owned()),
+                lookup: vec![Lookup::Relay],
+                transport: vec![Transport::WebRtc, Transport::Multihop, Transport::Relay],
+                relay_urls: vec![relay.to_string()],
+                ..membership::Opts::default()
+            },
+            sink_a,
+        )
         .await
-        .expect("local relay");
-    let (sink_a, _events_a) = membership::json_sink();
-    let alice = membership::join(
-        &membership::Opts {
-            nick: Some("alice".to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::WebRtc, Transport::Multihop, Transport::Relay],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        },
-        sink_a,
-    )
-    .await
-    .expect("open alice");
-    let (sink_b, _events_b) = membership::json_sink();
-    let bob = membership::join(
-        &membership::Opts {
-            nick: Some("bob".to_owned()),
-            mesh: Some(alice.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        },
-        sink_b,
-    )
-    .await
-    .expect("open bob");
-
-    let meshing = Instant::now();
-    while roster_len(&alice).await != 1 || roster_len(&bob).await != 1 {
-        assert!(
-            meshing.elapsed() < STEP_DEADLINE,
-            "the two never formed a mesh"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    let started = Instant::now();
-    while underlay_sessions(&alice).await == 0 || underlay_sessions(&bob).await == 0 {
-        assert!(
-            started.elapsed() < STEP_DEADLINE,
-            "the underlay never opened a session"
-        );
-        let to = membership::parse_to(Some("bob")).expect("a nickname");
-        let body = membership::msg_body("probe").expect("fits one frame");
-        let _ = alice
-            .request(|reply| Request::Send { to, body, reply })
-            .await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    let alice_id = alice
-        .request(|reply| Request::EndpointId { reply })
+        .expect("open alice");
+        let (sink_b, _events_b) = membership::json_sink();
+        let bob = membership::join(
+            &membership::Opts {
+                nick: Some("bob".to_owned()),
+                mesh: Some(alice.node.mesh_id().to_string()),
+                ..membership::Opts::default()
+            },
+            sink_b,
+        )
         .await
-        .expect("the loop answers");
-    let bob_id = bob
-        .request(|reply| Request::EndpointId { reply })
-        .await
-        .expect("the loop answers");
+        .expect("open bob");
 
-    // One close of the connection; the engine runs its own `NeighborDown` on both ends.
-    let since = log_len();
-    until_peer_known(&alice, "bob", |reply| Request::CloseLink {
-        peer: "bob".to_owned(),
-        reply,
-    })
-    .await;
-    // A tick has to run while the link is down, or the test proves nothing: the pair grafts again
-    // within seconds. So both ends tick every 50 ms through the window.
-    let window = Instant::now();
-    while window.elapsed() < SETTLE {
-        for member in [&alice, &bob] {
-            member
-                .request(|reply| Request::UnderlayTick { reply })
-                .await
-                .expect("the loop answers");
+        let meshing = Instant::now();
+        while roster_len(&alice).await != 1 || roster_len(&bob).await != 1 {
+            assert!(
+                meshing.elapsed() < STEP_DEADLINE,
+                "the two never formed a mesh"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert!(
-        neighbor_down(since, &alice_id, &bob_id) && neighbor_down(since, &bob_id, &alice_id),
-        "the close never reached the engine of both ends as a neighbor down"
-    );
-    assert!(
-        logs_since(since)
+        let started = Instant::now();
+        while underlay_sessions(&alice).await == 0 || underlay_sessions(&bob).await == 0 {
+            assert!(
+                started.elapsed() < STEP_DEADLINE,
+                "the underlay never opened a session"
+            );
+            let to = membership::parse_to(Some("bob")).expect("a nickname");
+            let body = membership::msg_body("probe").expect("fits one frame");
+            let _ = alice
+                .request(|reply| Request::Send { to, body, reply })
+                .await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        let alice_id = alice
+            .request(|reply| Request::EndpointId { reply })
+            .await
+            .expect("the loop answers");
+        let bob_id = bob
+            .request(|reply| Request::EndpointId { reply })
+            .await
+            .expect("the loop answers");
+
+        // One close of the connection; the engine runs its own `NeighborDown` on both ends.
+        let since = log_len();
+        until_peer_known(&alice, "bob", |reply| Request::CloseLink {
+            peer: "bob".to_owned(),
+            reply,
+        })
+        .await;
+        // A tick has to run while the link is down, or the test proves nothing: the pair grafts again
+        // within tens of milliseconds (28 ms in a run that failed). So both ends tick every 5 ms
+        // through the window.
+        let window = Instant::now();
+        while window.elapsed() < SETTLE {
+            for member in [&alice, &bob] {
+                member
+                    .request(|reply| Request::UnderlayTick { reply })
+                    .await
+                    .expect("the loop answers");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            neighbor_down(since, &alice_id, &bob_id) && neighbor_down(since, &bob_id, &alice_id),
+            "the close never reached the engine of both ends as a neighbor down"
+        );
+        assert!(
+            logs_since(since)
+                .lines()
+                .any(|line| line.contains("underlay tick") && line.contains("linked=0 ")),
+            "no underlay tick ran while a member had no gossip link"
+        );
+
+        let detached = logs_since(since)
             .lines()
-            .any(|line| line.contains("underlay tick") && line.contains("linked=0 ")),
-        "no underlay tick ran while a member had no gossip link"
-    );
+            .filter(|line| line.contains("underlay session detached"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            detached.is_empty(),
+            "a session was detached after the gossip link closed:\n{detached}"
+        );
+        assert_eq!(underlay_sessions(&alice).await, 1, "alice kept the session");
+        assert_eq!(underlay_sessions(&bob).await, 1, "bob kept the session");
 
-    let detached = logs_since(since)
-        .lines()
-        .filter(|line| line.contains("underlay session detached"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        detached.is_empty(),
-        "a session was detached after the gossip link closed:\n{detached}"
-    );
-    assert_eq!(underlay_sessions(&alice).await, 1, "alice kept the session");
-    assert_eq!(underlay_sessions(&bob).await, 1, "bob kept the session");
-
-    for member in [alice, bob] {
-        let _ = member.node.leave().await;
-    }
+        for member in [alice, bob] {
+            let _ = member.node.leave().await;
+        }
+    });
 }

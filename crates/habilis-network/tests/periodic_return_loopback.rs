@@ -7,7 +7,6 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use habilis_network::iroh::RelayUrl;
@@ -23,44 +22,8 @@ const GROUP: usize = 4;
 /// The period of a return. A node adds up to half of it from its id.
 const PERIOD: Duration = Duration::from_secs(20);
 
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(
-            "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info,\
-             habilis_ladder=trace",
-        )
-    });
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-    log_buffer().lock().expect("no poison").clear();
-}
-
 fn logs() -> String {
-    log_buffer().lock().expect("no poison").clone()
+    habilis_network_test_tracing::captured_logs()
 }
 
 fn count(needle: &str) -> usize {
@@ -152,60 +115,67 @@ impl Member {
 /// Every joiner lets go of the rendezvous once the group is formed, and each of them wants it
 /// again a period later. The second release is the proof that the visit came, and that it ended
 /// after its dwell time: a node cannot release twice without a link in between.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_member_that_let_go_of_the_rendezvous_comes_back_and_lets_go_again() {
-    init(Tuning {
-        rendezvous_periodic_return: PERIOD,
-        ..Tuning::DEFAULTS
-    });
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-
-    let creator = Member::create("member-0", &relay).await;
-    assert!(
-        eventually(Duration::from_mins(1), || logs()
-            .contains("beacon role active"))
-        .await,
-        "the creator never claimed the beacon"
+fn a_member_that_let_go_of_the_rendezvous_comes_back_and_lets_go_again() {
+    let guard = habilis_network_test_tracing::init_capturing(
+        "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info,\
+         habilis_ladder=trace",
     );
-    let mut members = vec![creator];
-    for index in 1..GROUP {
-        let member = Member::join(&format!("member-{index}"), &members[0]).await;
-        members.push(member);
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    let joiners = GROUP - 1;
-    let formed = eventually(Duration::from_mins(1), || {
-        count("released the rendezvous") >= joiners
-    })
-    .await;
-    let first = count("released the rendezvous");
-    let started = Instant::now();
+    habilis_network_test_tracing::clear_captured_logs();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        init(Tuning {
+            rendezvous_periodic_return: PERIOD,
+            ..Tuning::DEFAULTS
+        });
 
-    // The worst case is 30 s (the period with its full share), 15 s (the heal tick that grafts),
-    // 30 s (the dwell of the visit) and 15 s (the heal tick that releases), plus the link time.
-    let again = eventually(Duration::from_mins(2), || {
-        count("released the rendezvous") >= 2 * joiners
-    })
-    .await;
-    let waited = started.elapsed();
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
 
-    let trace = rendezvous_trace();
-    dump_logs();
-    for member in members {
-        let _ = member.membership.node.leave().await;
-    }
-    assert!(
-        formed,
-        "not every joiner let go of the rendezvous: {first} of {joiners}\n{trace}"
-    );
-    assert!(
-        again,
-        "a joiner never came back to the rendezvous and let go again: {} releases after {waited:?}, \
+        let creator = Member::create("member-0", &relay).await;
+        assert!(
+            eventually(Duration::from_mins(1), || logs()
+                .contains("beacon role active"))
+            .await,
+            "the creator never claimed the beacon"
+        );
+        let mut members = vec![creator];
+        for index in 1..GROUP {
+            let member = Member::join(&format!("member-{index}"), &members[0]).await;
+            members.push(member);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let joiners = GROUP - 1;
+        let formed = eventually(Duration::from_mins(1), || {
+            count("released the rendezvous") >= joiners
+        })
+        .await;
+        let first = count("released the rendezvous");
+        let started = Instant::now();
+
+        // The worst case is 30 s (the period with its full share), 15 s (the heal tick that grafts),
+        // 30 s (the dwell of the visit) and 15 s (the heal tick that releases), plus the link time.
+        let again = eventually(Duration::from_mins(2), || {
+            count("released the rendezvous") >= 2 * joiners
+        })
+        .await;
+        let waited = started.elapsed();
+
+        let trace = rendezvous_trace();
+        dump_logs();
+        for member in members {
+            let _ = member.membership.node.leave().await;
+        }
+        assert!(
+            formed,
+            "not every joiner let go of the rendezvous: {first} of {joiners}\n{trace}"
+        );
+        assert!(
+            again,
+            "a joiner never came back to the rendezvous and let go again: {} releases after {waited:?}, \
          {first} after the group formed\n{trace}",
-        count("released the rendezvous"),
-    );
+            count("released the rendezvous"),
+        );
+    });
 }

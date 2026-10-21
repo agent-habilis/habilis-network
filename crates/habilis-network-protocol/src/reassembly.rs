@@ -393,6 +393,7 @@ pub fn synthesize_from(header: &Verified, body: MessageBody, group_id: &ShardGro
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::{expect_warn, test};
     use habilis_network_util::clock::Instant;
     use std::time::Duration;
 
@@ -660,6 +661,10 @@ mod tests {
 
     #[test]
     fn group_budget_breach_drops_the_group() {
+        expect_warn(
+            "habilis_network::gossip",
+            "partial shard group exceeded its byte budget; dropped",
+        );
         let now = Instant::now();
         let mut store = ReassemblyStore::default();
         let big = "x".repeat(REASSEMBLY_GROUP_MAX_BYTES / 2 + 1);
@@ -700,6 +705,10 @@ mod tests {
 
     #[test]
     fn author_budget_evicts_the_stalest_group() {
+        expect_warn(
+            "habilis_network::gossip",
+            "author reassembly budget breached; stalest partial group evicted",
+        );
         let start = Instant::now();
         let mut store = ReassemblyStore::default();
         // Sized so two groups fit the author budget but three overflow it.
@@ -761,6 +770,10 @@ mod tests {
 
     #[test]
     fn global_budget_refuses_the_newcomer() {
+        expect_warn(
+            "habilis_network::gossip",
+            "global reassembly budget breached; incoming shard group dropped",
+        );
         let now = Instant::now();
         let mut store = ReassemblyStore::default();
         let chunk = "x".repeat(REASSEMBLY_GROUP_MAX_BYTES / 2);
@@ -804,6 +817,10 @@ mod tests {
     /// states the same rule over the other store.
     #[test]
     fn a_floods_groups_do_not_evict_another_authors() {
+        expect_warn(
+            "habilis_network::gossip",
+            "author reassembly budget breached; stalest partial group evicted",
+        );
         let now = Instant::now();
         let mut store = ReassemblyStore::default();
         let chunk = "x".repeat(REASSEMBLY_GROUP_MAX_BYTES / 2 + 64);

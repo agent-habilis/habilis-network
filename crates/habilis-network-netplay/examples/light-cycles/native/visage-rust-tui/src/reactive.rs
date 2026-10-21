@@ -287,6 +287,7 @@ mod tests {
         Signal, close_tracking, next_subscriber_id, open_tracking, resubscribe, schedule_update,
         take_queue,
     };
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     #[test]

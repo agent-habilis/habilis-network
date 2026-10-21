@@ -116,7 +116,7 @@ impl JoinParams {
     ///
     /// # Errors
     /// The id cannot be decoded into a [`Mesh`]; the id requires a password
-    /// and none was given ([`PasswordRequired`], typed for the frontends);
+    /// and none was given (`PasswordRequired`, typed for the frontends);
     /// the password is wrong; or a password was given for a passwordless id.
     ///
     /// [`Mesh`]: crate::protocol::mesh::Mesh
@@ -277,6 +277,7 @@ impl TopicParams {
 #[cfg(test)]
 mod topic_derivation_tests {
     use super::*;
+    use habilis_network_test_tracing::test;
 
     /// The no-argument form must stay exactly what it always was, because the
     /// `--topic` id it derives is public API for every frontend that calls it.

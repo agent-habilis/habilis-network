@@ -63,6 +63,7 @@ impl std::fmt::Display for DedupKey {
 #[cfg(test)]
 mod tests {
     use super::DedupKey;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn the_bounds_take_in_every_key() {

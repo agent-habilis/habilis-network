@@ -99,6 +99,7 @@ impl From<&str> for MeshId {
 #[cfg(test)]
 mod mesh_id_tests {
     use super::{LockedMesh, MeshId, MeshIdError};
+    use habilis_network_test_tracing::test;
 
     fn valid_id() -> String {
         use super::super::{Mesh, MeshConfig, MeshName};

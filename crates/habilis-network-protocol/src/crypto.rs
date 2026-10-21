@@ -219,24 +219,26 @@ pub(crate) fn rendezvous_id(source: Keying<'_>) -> EndpointId {
 pub(crate) const RENDEZVOUS_LADDER: usize = 8;
 
 /// The deterministic loopback port ladder for a private mesh, in
-/// preference order. Mapped into the unprivileged range
-/// `1024..=65535`. Derived from one `derive_secret` digest (2 bytes per
-/// rung); rungs are near-certainly distinct, and a rare in-ladder dup
-/// merely wastes a rung (harmless).
+/// preference order. Mapped into `1024..=32767`: above the privileged
+/// ports, and below the ephemeral ranges of Linux (32768-60999), macOS
+/// and Windows (49152-65535), so the ephemeral bind of another endpoint
+/// never lands on a rung. Derived from one `derive_secret` digest (2
+/// bytes per rung); rungs are near-certainly distinct, and a rare
+/// in-ladder dup merely wastes a rung (harmless).
 ///
 /// # Panics
 /// Never in practice: the derived port stays within `u16` by construction.
 #[must_use]
 pub(crate) fn rendezvous_ports(source: Keying<'_>) -> [u16; RENDEZVOUS_LADDER] {
     const LOW: u32 = 1024;
-    const SPAN: u32 = 65535 - LOW + 1; // 64512
+    const SPAN: u32 = 32767 - LOW + 1; // 31744
     let digest = derive_secret(source.bytes(), b"port");
     std::array::from_fn(|index| {
         let raw = u32::from(u16::from_le_bytes([
             digest[2 * index],
             digest[2 * index + 1],
         ]));
-        u16::try_from(LOW + (raw % SPAN)).expect("LOW + (_ % SPAN) <= 65535")
+        u16::try_from(LOW + (raw % SPAN)).expect("LOW + (_ % SPAN) <= 32767")
     })
 }
 
@@ -515,6 +517,7 @@ mod derive_secret_tests {
         Keying, RENDEZVOUS_LADDER, Seed, derive_secret, rendezvous_id, rendezvous_ports,
         rendezvous_secret, topic_seed,
     };
+    use habilis_network_test_tracing::test;
 
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
@@ -617,6 +620,19 @@ mod derive_secret_tests {
     }
 
     #[test]
+    fn rendezvous_ports_stay_below_every_ephemeral_range() {
+        for seed in 0..2000_u32 {
+            let mut bytes = [0_u8; 32];
+            bytes[..4].copy_from_slice(&seed.to_le_bytes());
+            let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(bytes)));
+            assert!(
+                ladder.iter().all(|port| (1024..32768).contains(port)),
+                "seed {seed} gave {ladder:?}"
+            );
+        }
+    }
+
+    #[test]
     fn topic_seed_is_deterministic() {
         assert_eq!(topic_seed("agent-habilis"), topic_seed("agent-habilis"));
     }
@@ -659,6 +675,7 @@ mod derive_secret_tests {
 #[cfg(test)]
 mod password_tests {
     use super::{Password, Seed, derive_secret, password_verifier, stretch_mesh_password};
+    use habilis_network_test_tracing::test;
 
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
@@ -806,6 +823,7 @@ mod password_tests {
 #[cfg(test)]
 mod topic_tests {
     use super::{Keying, MeshName, Seed, derive_topic_id};
+    use habilis_network_test_tracing::test;
 
     fn name(text: &str) -> MeshName {
         MeshName::new(text).unwrap()
@@ -871,6 +889,7 @@ mod golden_tests {
         rendezvous_id, rendezvous_ports, stretch_mesh_password,
     };
     use crate::mesh::MeshName;
+    use habilis_network_test_tracing::test;
 
     const SEED: [u8; 32] = [7u8; 32];
     const ROOT: [u8; 32] = [5u8; 32];
@@ -892,7 +911,7 @@ mod golden_tests {
         );
         assert_eq!(
             rendezvous_ports(Keying::Wire(&seed)),
-            [5931, 48242, 42909, 64096, 38056, 45299, 54555, 32776]
+            [5931, 16498, 11165, 32352, 6312, 13555, 22811, 1032]
         );
     }
 
@@ -932,7 +951,18 @@ mod golden_tests {
         );
         assert_eq!(
             rendezvous_ports(Keying::Secret(&root)),
-            [64619, 51235, 41400, 1621, 17345, 37799, 35331, 60865]
+            [1131, 19491, 9656, 2645, 17345, 6055, 3587, 29121]
         );
+    }
+
+    #[test]
+    fn the_ladders_of_the_old_range_are_no_longer_derived() {
+        let old_wire = [5931, 48242, 42909, 64096, 38056, 45299, 54555, 32776];
+        let old_secret = [64619, 51235, 41400, 1621, 17345, 37799, 35331, 60865];
+        let wire = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED)));
+        let secret = rendezvous_ports(Keying::Secret(&SymmetricKey::from_bytes(ROOT)));
+        assert_ne!(wire, old_wire);
+        assert_ne!(secret, old_secret);
+        assert!(old_wire.iter().chain(&old_secret).any(|&port| port > 32767));
     }
 }

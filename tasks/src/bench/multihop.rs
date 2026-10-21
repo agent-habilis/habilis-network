@@ -16,7 +16,7 @@ use habilis_network_iroh_webrtc_transport::iroh::{
 
 use super::Args;
 use super::native::ladder_measure;
-use super::run::Outcome;
+use super::run::{Measured, Outcome};
 
 /// Uniform link cost. With one route the value does not matter.
 const COST: u32 = 10;
@@ -27,6 +27,32 @@ struct Node {
     app: Endpoint,
     handle: MultihopHandle,
     id: EndpointId,
+}
+
+/// What a multihop cell has opened so far. The cell closes it all at its end, whatever the
+/// outcome: a dropped endpoint makes iroh log an error and abort its connections, in a bench run
+/// as in a test.
+#[derive(Default)]
+struct Open {
+    routers: Vec<Router>,
+    handles: Vec<MultihopHandle>,
+    endpoints: Vec<Endpoint>,
+}
+
+impl Open {
+    /// The router of the bench server first, which closes the endpoint that it serves on, then the
+    /// multihop handles, then the application endpoints that are left.
+    async fn close(self) {
+        for router in self.routers {
+            drop(router.shutdown().await);
+        }
+        for handle in &self.handles {
+            handle.close().await;
+        }
+        for endpoint in &self.endpoints {
+            endpoint.close().await;
+        }
+    }
 }
 
 /// The loopback underlay of a node, on the key derived from the node's own.
@@ -42,8 +68,8 @@ async fn underlay(secret: &SecretKey) -> Result<Endpoint, String> {
         .map_err(|error| format!("underlay bind failed: {error:#}"))
 }
 
-async fn node(secret: SecretKey) -> Result<Node, String> {
-    let handle = hop(&secret).await?;
+async fn node(open: &mut Open, secret: SecretKey) -> Result<Node, String> {
+    let handle = hop(open, &secret).await?;
     let app = Endpoint::builder(presets::Minimal)
         .secret_key(secret.clone())
         .relay_mode(RelayMode::Disabled)
@@ -53,6 +79,7 @@ async fn node(secret: SecretKey) -> Result<Node, String> {
         .bind()
         .await
         .map_err(|error| format!("app bind failed: {error:#}"))?;
+    open.endpoints.push(app.clone());
     Ok(Node {
         app,
         handle,
@@ -62,9 +89,18 @@ async fn node(secret: SecretKey) -> Result<Node, String> {
 
 /// A member that only forwards: an underlay and a routing handle, with no
 /// application endpoint.
-async fn hop(secret: &SecretKey) -> Result<MultihopHandle, String> {
-    MultihopHandle::new(secret, underlay(secret).await?, HandleConfig::default())
-        .map_err(|error| format!("multihop handle failed: {error:#}"))
+async fn hop(open: &mut Open, secret: &SecretKey) -> Result<MultihopHandle, String> {
+    let underlay = underlay(secret).await?;
+    match MultihopHandle::new(secret, underlay.clone(), HandleConfig::default()) {
+        Ok(handle) => {
+            open.handles.push(handle.clone());
+            Ok(handle)
+        }
+        Err(error) => {
+            underlay.close().await;
+            Err(format!("multihop handle failed: {error:#}"))
+        }
+    }
 }
 
 fn secret(seed: u8) -> SecretKey {
@@ -82,30 +118,46 @@ fn require_forwarded(cells: u64) -> Result<(), String> {
 
 /// Two nodes with a direct underlay link between them.
 pub(crate) async fn ladder_multihop_direct(args: &Args) -> Outcome {
+    let mut open = Open::default();
+    let outcome = Box::pin(direct(args, &mut open)).await.into();
+    open.close().await;
+    outcome
+}
+
+async fn direct(args: &Args, open: &mut Open) -> Result<Measured, String> {
     let run = async {
-        let alice = node(secret(1)).await?;
-        let bob = node(secret(2)).await?;
+        let alice = node(open, secret(1)).await?;
+        let bob = node(open, secret(2)).await?;
         alice
             .handle
             .feed_topology(alice.handle.link_vector(vec![(AppId::new(bob.id), COST)]));
         alice
             .handle
             .feed_topology(bob.handle.link_vector(vec![(AppId::new(alice.id), COST)]));
-        let _router = Router::builder(bob.app.clone())
-            .accept(BENCH_ALPN, Bench)
-            .spawn();
+        open.routers.push(
+            Router::builder(bob.app.clone())
+                .accept(BENCH_ALPN, Bench)
+                .spawn(),
+        );
         ladder_measure(&alice.app, EndpointAddr::from(bob.id), args, 0.0).await
     };
-    Box::pin(run).await.into()
+    run.await
 }
 
 /// Two nodes with a third member between them: every cell crosses the third.
 pub(crate) async fn ladder_multihop_third(args: &Args) -> Outcome {
+    let mut open = Open::default();
+    let outcome = Box::pin(third(args, &mut open)).await.into();
+    open.close().await;
+    outcome
+}
+
+async fn third(args: &Args, open: &mut Open) -> Result<Measured, String> {
     let run = async {
-        let alice = node(secret(11)).await?;
-        let third = hop(&secret(12)).await?;
+        let alice = node(open, secret(11)).await?;
+        let third = hop(open, &secret(12)).await?;
         let third_id = secret(12).public();
-        let bob = node(secret(13)).await?;
+        let bob = node(open, secret(13)).await?;
         // Every member learns the vector of every other, as gossip does in a mesh: a hop resolves
         // the next hop's address from the vector that hop signed.
         let vectors = [
@@ -121,20 +173,23 @@ pub(crate) async fn ladder_multihop_third(args: &Args) -> Outcome {
                 handle.feed_topology(vector.clone());
             }
         }
-        let _router = Router::builder(bob.app.clone())
-            .accept(BENCH_ALPN, Bench)
-            .spawn();
+        open.routers.push(
+            Router::builder(bob.app.clone())
+                .accept(BENCH_ALPN, Bench)
+                .spawn(),
+        );
         let measured = ladder_measure(&alice.app, EndpointAddr::from(bob.id), args, 0.0).await?;
         require_forwarded(third.forwarded_cells())?;
         Ok(measured)
     };
-    Box::pin(run).await.into()
+    run.await
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Args, Outcome, ladder_multihop_direct, ladder_multihop_third, require_forwarded};
     use crate::bench::Direction;
+    use habilis_network_test_tracing::test;
 
     fn small_args() -> Args {
         Args {
@@ -147,7 +202,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_direct_multihop_cell_is_on_the_multihop_path_with_round_trips() {
         let Outcome::Ok(measured) = ladder_multihop_direct(&small_args()).await else {
             panic!("the direct multihop cell did not measure");
@@ -157,7 +212,7 @@ mod tests {
         assert!(measured.rtt.is_some());
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_third_member_cell_is_on_the_multihop_path_through_the_third() {
         let Outcome::Ok(measured) = ladder_multihop_third(&small_args()).await else {
             panic!("the third-member multihop cell did not measure");

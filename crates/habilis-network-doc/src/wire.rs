@@ -122,6 +122,7 @@ pub fn decrypt_body(body: &str, key: Option<&SymmetricKey>) -> Option<String> {
 mod tests {
     use super::{change_body, decrypt_body, encrypt_body, merge_body, parse_change_body};
     use habilis_network_protocol::SymmetricKey;
+    use habilis_network_test_tracing::test;
 
     fn key(byte: u8) -> SymmetricKey {
         SymmetricKey::from_bytes([byte; 32])

@@ -222,30 +222,33 @@ async fn held_after_first_answer(node: &Node<Store>) -> usize {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
-    pin_antientropy_tick();
-    let topic = format!("late-joiner-pair-{}", rand::random::<u64>());
-    let (alice, _) = spawn(&topic, "alice").await;
-    write_log(&alice, WRITES).await;
+#[test]
+fn a_late_joiner_backfills_on_meeting_its_only_peer() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        pin_antientropy_tick();
+        let topic = format!("late-joiner-pair-{}", rand::random::<u64>());
+        let (alice, _) = spawn(&topic, "alice").await;
+        write_log(&alice, WRITES).await;
 
-    let (bob, bob_saw) = spawn(&topic, "bob").await;
-    assert!(
-        bob_saw
-            .wait_for(&nick("alice"), Duration::from_secs(45))
-            .await,
-        "bob never saw alice join"
-    );
+        let (bob, bob_saw) = spawn(&topic, "bob").await;
+        assert!(
+            bob_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
+                .await,
+            "bob never saw alice join"
+        );
 
-    let held = held_after_first_answer(&bob).await;
-    assert!(
-        held >= ONE_ANSWER,
-        "bob held {held} of alice's {WRITES} changes {BUDGET:?} after seeing her join; \
+        let held = held_after_first_answer(&bob).await;
+        assert!(
+            held >= ONE_ANSWER,
+            "bob held {held} of alice's {WRITES} changes {BUDGET:?} after seeing her join; \
          the first digest answer carries {ONE_ANSWER}"
-    );
+        );
 
-    alice.leave().await.expect("alice leaves");
-    bob.leave().await.expect("bob leaves");
+        alice.leave().await.expect("alice leaves");
+        bob.leave().await.expect("bob leaves");
+    });
 }
 
 /// The agent-gossip shape: the late joiner meets two peers that already hold
@@ -261,106 +264,106 @@ async fn a_late_joiner_backfills_on_meeting_its_only_peer() {
 /// first dial to it. The joiner now asks again on its first real-peer link,
 /// and a new peer's first frame of any kind floods our address. The test waits
 /// for the first answer only; it does not show that all 160 changes arrive.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer()
-        .try_init();
-    pin_antientropy_tick();
-    let topic = format!("late-joiner-trio-{}", rand::random::<u64>());
-    let (alice, _) = spawn(&topic, "alice").await;
-    write_log(&alice, WRITES).await;
-    let (early, early_saw) = spawn(&topic, "early").await;
-    assert!(
-        early_saw
-            .wait_for(&nick("alice"), Duration::from_secs(45))
-            .await,
-        "early never saw alice join"
-    );
+#[test]
+fn a_late_joiner_backfills_on_meeting_a_meshed_pair() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        pin_antientropy_tick();
+        let topic = format!("late-joiner-trio-{}", rand::random::<u64>());
 
-    let (late, late_saw) = spawn(&topic, "late").await;
-    for peer in ["alice", "early"] {
+        let (alice, _) = spawn(&topic, "alice").await;
+        write_log(&alice, WRITES).await;
+        let (early, early_saw) = spawn(&topic, "early").await;
         assert!(
-            late_saw
-                .wait_for(&nick(peer), Duration::from_secs(45))
+            early_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
                 .await,
-            "late never saw {peer} join"
+            "early never saw alice join"
         );
-    }
 
-    let held = held_after_first_answer(&late).await;
-    assert!(
-        held >= ONE_ANSWER,
-        "late held {held} of alice's {WRITES} changes {BUDGET:?} after meeting the pair; \
+        let (late, late_saw) = spawn(&topic, "late").await;
+        for peer in ["alice", "early"] {
+            assert!(
+                late_saw
+                    .wait_for(&nick(peer), Duration::from_secs(45))
+                    .await,
+                "late never saw {peer} join"
+            );
+        }
+
+        let held = held_after_first_answer(&late).await;
+        assert!(
+            held >= ONE_ANSWER,
+            "late held {held} of alice's {WRITES} changes {BUDGET:?} after meeting the pair; \
          the first digest answer carries {ONE_ANSWER}"
-    );
+        );
 
-    alice.leave().await.expect("alice leaves");
-    early.leave().await.expect("early leaves");
-    late.leave().await.expect("late leaves");
+        alice.leave().await.expect("alice leaves");
+        early.leave().await.expect("early leaves");
+        late.leave().await.expect("late leaves");
+    });
 }
 
 /// A long history reaches a late joiner in rounds of one answer budget each.
 /// With the anti-entropy tick pinned far away, only the joiner's own fast
 /// rounds can pull more than the first answer: it asks again, point-to-point,
 /// each time it applied a full answer or still holds orphans.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
-    const LONG: usize = 300;
-    const FAST: Duration = Duration::from_secs(5);
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer()
-        .try_init();
-    pin_antientropy_tick();
-    let topic = format!("late-joiner-long-{}", rand::random::<u64>());
-    let (alice, _) = spawn(&topic, "alice").await;
-    write_log(&alice, LONG).await;
-    let (early, early_saw) = spawn(&topic, "early").await;
-    assert!(
-        early_saw
-            .wait_for(&nick("alice"), Duration::from_secs(45))
-            .await,
-        "early never saw alice join"
-    );
-    let (late, late_saw) = spawn(&topic, "late").await;
-    for peer in ["alice", "early"] {
+#[test]
+fn a_late_joiner_pulls_a_long_history_in_fast_rounds() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        const LONG: usize = 300;
+        const FAST: Duration = Duration::from_secs(5);
+        pin_antientropy_tick();
+        let topic = format!("late-joiner-long-{}", rand::random::<u64>());
+
+        let (alice, _) = spawn(&topic, "alice").await;
+        write_log(&alice, LONG).await;
+        let (early, early_saw) = spawn(&topic, "early").await;
         assert!(
-            late_saw
-                .wait_for(&nick(peer), Duration::from_secs(45))
+            early_saw
+                .wait_for(&nick("alice"), Duration::from_secs(45))
                 .await,
-            "late never saw {peer} join"
+            "early never saw alice join"
         );
-    }
-
-    // FAST is the time that the fast rounds take on a quiet host, and it is reported. The claim is
-    // that they pull the whole history, and a shared runner can be ten times slower and still be
-    // right: the test fails only when the history is not held after BUDGET, as its siblings do.
-    let started = tokio::time::Instant::now();
-    let mut held = 0;
-    let mut held_at_fast = None;
-    while started.elapsed() < BUDGET {
-        held = key_count(&read(&late).await);
-        if held_at_fast.is_none() && started.elapsed() >= FAST {
-            held_at_fast = Some(held);
+        let (late, late_saw) = spawn(&topic, "late").await;
+        for peer in ["alice", "early"] {
+            assert!(
+                late_saw
+                    .wait_for(&nick(peer), Duration::from_secs(45))
+                    .await,
+                "late never saw {peer} join"
+            );
         }
-        if held >= LONG {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    eprintln!(
-        "late held {} of alice's {LONG} changes {FAST:?} after meeting the pair, {held} after {:?}",
-        held_at_fast.unwrap_or(held),
-        started.elapsed()
-    );
-    assert_eq!(
-        held, LONG,
-        "late held {held} of alice's {LONG} changes {BUDGET:?} after meeting the pair"
-    );
 
-    alice.leave().await.expect("alice leaves");
-    early.leave().await.expect("early leaves");
-    late.leave().await.expect("late leaves");
+        // FAST is the time that the fast rounds take on a quiet host, and it is reported. The claim is
+        // that they pull the whole history, and a shared runner can be ten times slower and still be
+        // right: the test fails only when the history is not held after BUDGET, as its siblings do.
+        let started = tokio::time::Instant::now();
+        let mut held = 0;
+        let mut held_at_fast = None;
+        while started.elapsed() < BUDGET {
+            held = key_count(&read(&late).await);
+            if held_at_fast.is_none() && started.elapsed() >= FAST {
+                held_at_fast = Some(held);
+            }
+            if held >= LONG {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        eprintln!(
+            "late held {} of alice's {LONG} changes {FAST:?} after meeting the pair, {held} after {:?}",
+            held_at_fast.unwrap_or(held),
+            started.elapsed()
+        );
+        assert_eq!(
+            held, LONG,
+            "late held {held} of alice's {LONG} changes {BUDGET:?} after meeting the pair"
+        );
+
+        alice.leave().await.expect("alice leaves");
+        early.leave().await.expect("early leaves");
+        late.leave().await.expect("late leaves");
+    });
 }

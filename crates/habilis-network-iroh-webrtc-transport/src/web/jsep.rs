@@ -794,6 +794,7 @@ pub(super) async fn sleep_ms(millis: i32) {
 #[cfg(test)]
 mod tests {
     use super::{ICE_QUIET_MS, PreAttachBacklog, count_candidates, gathering_settled};
+    use habilis_network_test_tracing::test;
 
     const QUIET: f64 = ICE_QUIET_MS;
 

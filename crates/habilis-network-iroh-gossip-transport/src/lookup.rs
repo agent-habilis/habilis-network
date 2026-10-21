@@ -44,6 +44,7 @@ impl AddressLookup for GossipLookup {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use iroh::{SecretKey, TransportAddr};
     use n0_future::StreamExt;
 
@@ -62,7 +63,7 @@ mod tests {
     }
 
     /// The first dial of a peer gets the gossip address, once a sink is attached.
-    #[tokio::test]
+    #[test]
     async fn the_lookup_answers_a_peer_with_its_gossip_address_once_attached() {
         let handle = GossipHandle::new(id(1));
         assert_eq!(answer(&handle, id(2)).await, None, "before attach");
@@ -75,7 +76,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_lookup_does_not_answer_for_the_node_itself() {
         let handle = GossipHandle::new(id(1));
         MemoryHub::new().join(&handle);

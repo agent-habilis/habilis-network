@@ -154,6 +154,7 @@ pub const fn millis_saturating(duration: Duration) -> u64 {
 
 #[cfg(test)]
 mod unix_secs_tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::UnixSecs;
@@ -258,6 +259,7 @@ mod unix_secs_tests {
 
 #[cfg(test)]
 mod millis_saturating_tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::millis_saturating;

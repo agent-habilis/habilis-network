@@ -105,6 +105,7 @@ pub(crate) fn frame_advantage(current_frame: Frame, last_received_frame: Frame) 
 #[cfg(test)]
 mod tests {
     use super::TimeSync;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_steady_state_recommends_no_correction() {

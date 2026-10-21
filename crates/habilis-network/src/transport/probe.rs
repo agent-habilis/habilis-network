@@ -1048,6 +1048,45 @@ async fn fill_active_view(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
     let Some(addr) = next_fill(state, ctx.max_peers, ctx.rendezvous_id, now, pick) else {
         return;
     };
+    graft_one(state, ctx, addr, now).await;
+}
+
+/// The member that a reclaim tick asks for a link when this node lost every one: the member
+/// that the fill tick would pick, and none while the node holds a link or the window is closed.
+fn isolated_candidate(
+    state: &EventLoopState,
+    max_peers: usize,
+    rendezvous_id: EndpointId,
+    now: Instant,
+    pick: usize,
+) -> Option<iroh::EndpointAddr> {
+    if !state.isolated_refill_due(now) {
+        return None;
+    }
+    next_fill(state, max_peers, rendezvous_id, now, pick)
+}
+
+/// A node that lost every link asks one other known peer per reclaim tick (400 ms) while the
+/// fast window is open, with a low priority request that evicts nobody. The lost peers are
+/// asked by the regraft, and they are full; the heal tick, 15 s later, was the first attempt to
+/// reach a peer with a free slot. The relink cooldown sends each tick to another peer.
+pub(crate) async fn refill_isolated(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
+    let now = Instant::now();
+    let pick = rand::Rng::random_range(&mut rand::rng(), 0..usize::MAX);
+    let Some(addr) = isolated_candidate(state, ctx.max_peers, ctx.rendezvous_id, now, pick) else {
+        return;
+    };
+    tracing::info!(target: super::LOG_TARGET, peer = %addr.id, "no link left: asking another known peer");
+    graft_one(state, ctx, addr, now).await;
+}
+
+/// Ask `addr` for a link now, and start its relink cooldown.
+async fn graft_one(
+    state: &mut EventLoopState,
+    ctx: &HandlerCtx<'_>,
+    addr: iroh::EndpointAddr,
+    now: Instant,
+) {
     state.note_relink(addr.id, now);
     crate::lookup::add_peer_addr(&state.address_book, addr.clone());
     state.unicast_pool.note_addr(&addr);
@@ -1108,11 +1147,12 @@ fn retry_candidates_at(
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use iroh::EndpointAddr;
 
     use super::{
-        GraftRequest, GraftTarget, PathKind, StepInput, ensure_watchers, graft_request, may_graft,
-        retry_candidates, retry_candidates_at, webrtc_riders,
+        GraftRequest, GraftTarget, PathKind, StepInput, ensure_watchers, graft_request,
+        isolated_candidate, may_graft, retry_candidates, retry_candidates_at, webrtc_riders,
     };
     use crate::daemon::state::EventLoopState;
     use crate::testing::{endpoint_id, fresh_state, nick};
@@ -2099,7 +2139,7 @@ mod tests {
     }
 
     // The real `selected_kind`, on a real connection whose only transport is gossip.
-    #[tokio::test]
+    #[test]
     async fn a_connection_on_the_gossip_path_reads_as_the_gossip_kind() {
         use habilis_network_iroh_gossip_transport::memory::MemoryHub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
@@ -2142,7 +2182,7 @@ mod tests {
             bind(alice_key, alice_handle).await,
             bind(bob_key, bob_handle).await,
         );
-        let _router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
+        let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
 
         let connection = alice
             .connect(
@@ -2153,6 +2193,8 @@ mod tests {
             .expect("connect over the gossip path");
 
         assert_eq!(super::selected_kind(&connection), PathKind::Gossip);
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     // The watcher is dropped when the pool idles a connection out, but the gossip
@@ -2380,7 +2422,7 @@ mod tests {
     // Direct connections are on demand (decision D4): the watcher follows a
     // pooled connection that a send opened, and dials none of its own. A pair
     // that was never sent to has nothing to watch, and stays where it is.
-    #[tokio::test]
+    #[test]
     async fn a_peer_nothing_was_sent_to_is_not_dialed_to_be_watched() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
         use iroh::TransportAddr;
@@ -2406,7 +2448,7 @@ mod tests {
 
     // The rendezvous serves no unicast: it is never watched, even when a
     // connection to it exists. A peer with a pooled connection is watched.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_rendezvous_is_not_watched() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
         use iroh::endpoint::Connection;
@@ -2477,6 +2519,74 @@ mod tests {
         client.close().await;
     }
 
+    // A node that lost every link asks one other known peer per reclaim tick while the fast
+    // window is open: the one the fill tick would pick. Not while it holds a link, not once the
+    // window is closed, and not a node that never held a link.
+    #[test]
+    fn an_isolated_node_asks_the_peer_the_fill_tick_would_pick_while_the_window_is_open() {
+        use iroh::TransportAddr;
+        use std::time::Duration;
+        let rendezvous = endpoint_id(1);
+        let ids: Vec<_> = (2u8..=5).map(endpoint_id).collect();
+        let native = |id| {
+            EndpointAddr::from_parts(
+                id,
+                [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
+            )
+        };
+        let now = crate::util::clock::Instant::now();
+        let lost = ids[0];
+        let isolated = || {
+            let mut state = fresh_state();
+            state
+                .peer_endpoints
+                .insert(nick("beacon"), native(rendezvous));
+            state.peer_endpoints.insert(nick("lost"), native(lost));
+            state.peer_endpoints.insert(nick("cooling"), native(ids[1]));
+            state.peer_endpoints.insert(nick("free"), native(ids[2]));
+            state.note_relink(ids[1], now);
+            state.arm_reclaim(now);
+            state
+        };
+        let pick = |state: &EventLoopState, at| {
+            isolated_candidate(state, 2, rendezvous, at, 0).map(|addr| addr.id)
+        };
+
+        let mut state = isolated();
+        state.link(lost);
+        state.unlink(lost);
+        let mut candidates = [lost, ids[2]];
+        candidates.sort_unstable();
+        assert_eq!(
+            pick(&state, now),
+            Some(candidates[0]),
+            "a node with no link asks a free member, not the cooling one or the rendezvous"
+        );
+        state.note_relink(candidates[0], now);
+        assert_eq!(
+            pick(&state, now),
+            Some(candidates[1]),
+            "the next tick asks another member"
+        );
+
+        assert_eq!(
+            pick(
+                &state,
+                now + crate::util::tuning::RECLAIM_WINDOW + Duration::from_secs(1)
+            ),
+            None,
+            "the window is closed"
+        );
+
+        let mut linked = isolated();
+        linked.link(lost);
+        linked.link(ids[3]);
+        linked.unlink(lost);
+        assert_eq!(pick(&linked, now), None, "it holds a link");
+
+        assert_eq!(pick(&isolated(), now), None, "it never held a link");
+    }
+
     // G is a target, not only a cap: while the active view is below G, one
     // member is grafted per tick. Native members come before browsers, and
     // within each group the order is fixed.
@@ -2530,7 +2640,7 @@ mod tests {
     // On a mesh whose relay may carry payload there is no probe to hold a graft,
     // and a `PeerInfo` is not repeated: the alive tick fills the view, one member
     // per tick, and a member that was just tried waits out its cooldown.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_alive_tick_fills_one_member_per_tick_on_a_relay_transport_mesh() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -2593,6 +2703,7 @@ mod tests {
         assert_eq!(tried(&state), 1, "one member per tick");
         super::retry_direct(&mut state, &ctx, false).await;
         assert_eq!(tried(&state), 2, "the next tick takes the next member");
+        gossip.shutdown().await.expect("shut the gossip down");
         endpoint.close().await;
     }
 

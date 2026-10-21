@@ -37,7 +37,7 @@ use super::LOG_TARGET;
 use super::admission::{Refusal, SignalAdmission};
 
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
-/// [`super::UNICAST_ALPN`] is: both ends must agree, so it moves only with a
+/// `super::UNICAST_ALPN` is: both ends must agree, so it moves only with a
 /// deliberate protocol break.
 pub const MESH_WEBRTC_SIGNAL_ALPN: &[u8] = b"habilis-mesh/webrtc-signal/1";
 
@@ -124,6 +124,7 @@ pub(crate) mod close_code {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use habilis_network_test_tracing::test;
 
         #[test]
         fn no_two_codes_share_a_number() {
@@ -464,6 +465,7 @@ impl ProtocolHandler for WebRtcSignalAcceptor {
                     admission.note_success(remote);
                     admission.report_answered(remote);
                     register_session_addr(&book, remote);
+                    admission.sync_gossip();
                     conn.close(0u32.into(), b"jsep done");
                     // A connection that we dialed before the attach moves onto the
                     // session only after a path event of our own endpoint, and the
@@ -668,7 +670,7 @@ async fn dial_signal_round(
 /// sizes the gossip overlay and is fixed when the mesh is built. Each direct connection costs
 /// memory and, in a browser, up to a full ICE gathering budget — so the ceiling is real, not
 /// notional. A newcomer past C evicts the least valuable peer, see
-/// [`super::ceiling`]; no offer is refused for it.
+/// `super::ceiling`; no offer is refused for it.
 ///
 /// Public so the CLI and the browser can render a denominator. A node with its
 /// own ceiling reports it with [`super::admission::SignalAdmission::cap`], because
@@ -829,6 +831,17 @@ fn proof_is_stale(kind: Option<super::probe::PathKind>, proven: bool) -> bool {
         )
 }
 
+/// Whether a proven pair reads as a path that a session replaces and that no peer-to-peer
+/// transport carries: the relay, or the gossip rung (the recursion rule closes a gossip link on
+/// it).
+fn reads_below_a_session(kind: Option<super::probe::PathKind>, proven: bool) -> bool {
+    proof_is_stale(kind, proven)
+        && matches!(
+            kind,
+            Some(super::probe::PathKind::Relay | super::probe::PathKind::Gossip)
+        )
+}
+
 /// Whether this node leaves the offer of a session to its peer. The higher id waits to be
 /// dialled, so that one offer crosses per pair, unless a frame is held for the peer or the
 /// proof of a direct path is stale.
@@ -914,8 +927,7 @@ pub(crate) fn negotiate_session(
     // is attached: a session carries the pair whatever one connection reads (a connection opened
     // before the attach reads the relay until a path event moves it), so the connection that reads
     // as relay is nudged onto the session, and the proof stands.
-    let reads_as_relay =
-        proof_is_stale(kind, proven) && kind == Some(super::probe::PathKind::Relay);
+    let reads_as_relay = reads_below_a_session(kind, proven);
     let has_session = handle.has_session(&peer);
     if reads_as_relay && has_session {
         let endpoint = ctx.endpoint.clone();
@@ -964,11 +976,12 @@ pub(crate) fn negotiate_session(
 /// session's path or back to UDP. A connect that fails does neither. Not the
 /// signal ALPN (its acceptor detaches a session on a fresh connection) nor
 /// unicast (its acceptor holds a connection).
-pub(crate) const NUDGE_ALPN: &[u8] = b"habilis-mesh/nudge/0";
+pub const NUDGE_ALPN: &[u8] = b"habilis-mesh/nudge/0";
 
-/// Closes every nudge at once. See [`NUDGE_ALPN`].
+/// Closes every nudge at once. See [`NUDGE_ALPN`]. An endpoint that runs the `WebRTC` signal
+/// acceptor must serve this too: its answerer dials the nudge when a session attaches.
 #[derive(Debug, Clone)]
-pub(crate) struct NudgeAcceptor;
+pub struct NudgeAcceptor;
 
 impl ProtocolHandler for NudgeAcceptor {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
@@ -1098,6 +1111,7 @@ fn spawn_offer_round(
         tracing::debug!(target: LOG_TARGET, node = %node.fmt_short(), %peer, age_ms = started.elapsed().as_millis(), "offer round ended: signalled");
         // The peer took the round: it is not refusing us, so its wait starts over.
         admission.note_success(peer);
+        admission.sync_gossip();
         // A connection opened before the attach rides the session only after a connect.
         if matches!(
             offer,
@@ -1673,6 +1687,7 @@ fn detach_idle_sessions_at(
 // *share's* signal ALPN, not this one.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use habilis_network_iroh_webrtc_transport::WebRtcTransport;
@@ -1779,6 +1794,19 @@ mod tests {
             !waits_for_the_offer(false, false, Some(PathKind::Ip), true),
             "the lower id never waits"
         );
+    }
+
+    // The recursion rule closes a gossip link on the gossip rung, so a pair that reads as the
+    // gossip rung is raced as one that reads as the relay: its proof is taken back and the
+    // session round reports at once, not after it judges the connection for UDP.
+    #[test]
+    fn a_proven_pair_on_gossip_is_demoted_as_one_on_the_relay() {
+        assert!(reads_below_a_session(Some(PathKind::Relay), true));
+        assert!(reads_below_a_session(Some(PathKind::Gossip), true));
+        assert!(!reads_below_a_session(Some(PathKind::Gossip), false));
+        for kind in [Some(PathKind::Ip), Some(PathKind::WebRtc), None] {
+            assert!(!reads_below_a_session(kind, true), "{kind:?}");
+        }
     }
 
     // A pair on gossip is below a session as a pair on multihop is: its proof of a direct path is
@@ -1937,6 +1965,7 @@ mod tests {
 
     fn serve(endpoint: &Endpoint, handle: &WebRtcHandle, admission: &SignalAdmission) -> Router {
         Router::builder(endpoint.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -1973,7 +2002,7 @@ mod tests {
     /// forever — the peer's QUIC keep-alives meant the connection never idled
     /// out — and the task was detached from the Router's `JoinSet`, so nothing
     /// reaped it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connection_that_never_opens_a_stream_is_released() {
         let (server, server_hub) = endpoint().await;
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
@@ -2007,7 +2036,7 @@ mod tests {
     /// spawn, so a peer cannot multiply our task count by reconnecting. It used
     /// to be able to: every connection spawned its own detached task holding
     /// its own `Connection`, with nothing bounding either.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn many_connections_from_one_peer_yield_one_task() {
         let (server, server_hub) = endpoint().await;
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
@@ -2046,7 +2075,7 @@ mod tests {
     /// The ceiling is the setting of the node (C). No offer is refused for it. The session
     /// that was used least recently is detached when the third attaches, so the node keeps
     /// two sessions.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_node_with_a_ceiling_of_two_answers_a_third_offer_and_detaches_the_oldest() {
         let (server, server_hub) = endpoint().await;
         let admission = SignalAdmission::new(2);
@@ -2086,7 +2115,7 @@ mod tests {
     /// **The evicted peer reads code 11 on its offer.** At a ceiling of one, the second session
     /// evicts the first. The first peer offers again at once, and the dialer reads the refusal as the
     /// `EVICTED` code, so it can wait instead of taking the place back.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_peer_whose_session_was_evicted_reads_the_evicted_code_on_its_next_offer() {
         let (server, server_hub) = endpoint().await;
         let admission = SignalAdmission::new(1);
@@ -2164,7 +2193,7 @@ mod tests {
     /// resolve to the custom-transport path and connect over the data
     /// channel. No relay and no IP address exist in this test, so a success
     /// here is that resolution working and nothing else.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bare_id_dial_resolves_to_the_attached_session() {
         let (server, server_hub) = endpoint_with_lookup().await;
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
@@ -2207,7 +2236,7 @@ mod tests {
     /// so this dial must ride the session exactly like the forward one. In the
     /// matrix, every conn dialed in this direction sat on the relay until the
     /// accept gate refused it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bare_id_dial_rides_the_session_from_the_answerer_too() {
         let (server, server_hub) = endpoint_with_lookup().await;
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
@@ -2257,7 +2286,7 @@ mod tests {
     /// accept gate. This is the layer above [`a_bare_id_dial_resolves_to_the_attached_session`]:
     /// the gossip actor does its own dialing, and it is the actor's dial —
     /// not ours — that the rendezvous link depends on.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_graft_by_bare_id_rides_the_attached_session() {
         use futures_util::StreamExt as _;
         use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
@@ -2268,6 +2297,7 @@ mod tests {
         // One Router for both ALPNs: `Router::spawn` overrides the endpoint's
         // ALPN list, so a second Router silently unregisters the first's.
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2345,7 +2375,7 @@ mod tests {
     /// failing; everything below the relay's presence is covered by
     /// [`a_gossip_graft_by_bare_id_rides_the_attached_session`].
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_graft_prefers_the_session_over_the_relay() {
         use futures_util::StreamExt as _;
         use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
@@ -2389,6 +2419,7 @@ mod tests {
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2467,7 +2498,7 @@ mod tests {
     /// the answerer must nudge once after its attach. Without it the accepted
     /// connection stays on the relay and the relay policy closes it.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_connection_dialed_by_the_answerer_leaves_the_relay_when_the_session_attaches() {
         use iroh::protocol::{AcceptError, ProtocolHandler};
 
@@ -2514,10 +2545,12 @@ mod tests {
 
         let (held_tx, mut held_rx) = tokio::sync::mpsc::channel(1);
         let low_router = Router::builder(low.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(HOLD_ALPN, Hold(held_tx))
             .spawn();
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let high_router = Router::builder(high.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2574,7 +2607,7 @@ mod tests {
     /// alone left every later bare-id dial on the relay. Observed as a
     /// browser-first mesh cell that never linked.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bare_id_dial_rides_the_session_past_a_held_relay_link() {
         use iroh::endpoint::Connection;
         use iroh::protocol::{AcceptError, ProtocolHandler};
@@ -2613,6 +2646,7 @@ mod tests {
 
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2669,7 +2703,7 @@ mod tests {
     /// the refusal must still link; if a refused connection poisons later
     /// dials to the same peer, this is the test that says so.
     #[cfg(feature = "iroh-test-utils")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_graft_recovers_after_a_refused_relay_attempt() {
         use futures_util::StreamExt as _;
         use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
@@ -2713,6 +2747,7 @@ mod tests {
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
         let server_gossip = Gossip::builder().spawn(server.clone());
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(
                 MESH_WEBRTC_SIGNAL_ALPN,
                 WebRtcSignalAcceptor::new(
@@ -2803,7 +2838,7 @@ mod tests {
         client.close().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn router_shutdown_cancels_rounds_in_flight() {
         let (server, server_hub) = endpoint().await;
         let admission = SignalAdmission::new(MAX_DIRECT_PEERS);
@@ -2841,7 +2876,7 @@ mod tests {
     /// in `dial_signal` was bounded — `JSEP_DEADLINE` wrapped only `complete()`,
     /// which runs after the answer arrives — so the in-flight marker was never
     /// cleared and every later retry skipped that peer.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_dial_gives_up_when_the_answer_never_comes() {
         /// Reads the offer and then says nothing, keeping the connection alive.
         #[derive(Debug, Clone)]
@@ -2859,6 +2894,7 @@ mod tests {
 
         let (server, _server_hub) = endpoint().await;
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(MESH_WEBRTC_SIGNAL_ALPN, BlackHole)
             .spawn();
 
@@ -2931,7 +2967,7 @@ mod tests {
     /// An id that nobody serves never answers the connect, and the connect had no bound of its own:
     /// the round held the slot of the peer for the whole round deadline, and every later offer was
     /// refused `InFlight`. The connect now ends at the exchange deadline.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_dial_to_an_id_that_nobody_serves_ends_at_the_exchange_deadline() {
         // Bound, and never read: packets to it vanish, and nothing answers.
         let silent =
@@ -3094,7 +3130,7 @@ mod tests {
 
     /// A session nothing uses is detached once the idle window has passed, and
     /// the pair then waits for a send.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_session_nothing_uses_is_detached_and_its_pair_waits_for_a_send() {
         idle_session_detaches(|id| {
             EndpointAddr::new(id).with_ip_addr("127.0.0.1:4000".parse().expect("addr"))
@@ -3104,7 +3140,7 @@ mod tests {
 
     /// The same for a lane peer: its session is no longer kept for ever. It goes at the backstop
     /// like any other, and the pair waits for a held frame to be offered one again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_lane_session_nothing_uses_is_detached_at_the_backstop() {
         idle_session_detaches(|id| {
             EndpointAddr::new(id)
@@ -3179,7 +3215,7 @@ mod tests {
 
     /// The retry pass offers a session to a cold pair with an IP path only after
     /// a send: while no pooled connection exists, the pair is left alone.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_retry_pass_offers_a_session_only_to_a_pair_that_sent() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -3214,6 +3250,7 @@ mod tests {
             .await
             .expect("bind a loopback server");
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
@@ -3285,7 +3322,7 @@ mod tests {
     /// offers by itself and takes the proof back, so that a frame is parked for the session
     /// instead of being refused on the relay. A pair that reads as UDP keeps its proof and gets
     /// no offer.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_higher_id_offers_and_demotes_a_proven_pair_that_reads_as_relay() {
         use crate::daemon::state::DirectState;
         use crate::protocol::MeshId;
@@ -3321,6 +3358,7 @@ mod tests {
             .await
             .expect("bind a loopback server");
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
@@ -3398,7 +3436,7 @@ mod tests {
 
     /// The retry pass offers a session to an idle lane peer only when a frame is held for it
     /// (decision D11): without one, the pair is left alone.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_retry_pass_offers_a_session_to_an_idle_lane_peer_only_for_a_held_frame() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -3433,6 +3471,7 @@ mod tests {
             .await
             .expect("bind a loopback server");
         let router = Router::builder(server.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
             .accept(crate::transport::UNICAST_ALPN, Hold)
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&endpoint), server.addr());
@@ -3500,7 +3539,7 @@ mod tests {
     /// pair needs the lane and nothing is sent, no frame is held. The graft of a member is the
     /// reason for its session: without it the pair stays `Pending` for ever and no member links
     /// to another member.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_graft_of_a_cold_lane_peer_opens_its_session() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -3570,13 +3609,14 @@ mod tests {
 
         // The dial to a closed signal port would hold its slot for a long deadline.
         state.webrtc_admission.close();
+        server.close().await;
         endpoint.close().await;
     }
 
     /// **A frame held on the higher-id node opens the session.** The lower id has no reason to
     /// offer, so the higher id offers when a frame is held for the peer, and the session attaches
     /// on both nodes.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_frame_held_on_the_higher_id_node_opens_the_session() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -3651,7 +3691,7 @@ mod tests {
     /// A session carries the pair whatever one connection reads: a connection opened before the
     /// attach reads `Relay` until a path event moves it. With a session attached the proof stands:
     /// no demotion, no offer.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_keeps_its_proof_when_a_connection_reads_as_relay() {
         use crate::daemon::state::DirectState;
         use crate::protocol::MeshId;
@@ -3659,6 +3699,10 @@ mod tests {
         use crate::transport::probe::PathKind;
 
         let (endpoint, handle) = endpoint().await;
+        // The answerer of the session nudges this endpoint, the offerer, on the nudge ALPN.
+        let nudge_router = Router::builder(endpoint.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
+            .spawn();
         // The peer's key must be below ours: we are the higher id, so a session is offered here
         // only for a held frame, which the test uses to attach one.
         let key = (1u16..=u16::MAX)
@@ -3711,6 +3755,9 @@ mod tests {
         state.want_lane_session(bob, crate::util::clock::Instant::now());
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
+        // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
+        // from winning the race, without the WARN of a refused ALPN.
+        state.unicast_pool.note_dial_failure(bob).await;
         retry_sessions(&mut state, &ctx);
         assert!(
             until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
@@ -3729,15 +3776,27 @@ mod tests {
             "a session carries the pair: the reading of one connection does not take the proof back"
         );
 
+        // The same for a connection that reads the gossip rung: the graft is not skipped, as the
+        // gossip link will ride the session and not the rung.
+        state.path_kinds.insert(bob, PathKind::Gossip);
+        assert!(
+            !state.rides_gossip_rung(bob),
+            "a session carries the pair: a connection on the gossip rung does not stop the graft"
+        );
+
         router.shutdown().await.expect("shutdown");
         server.close().await;
+        nudge_router
+            .shutdown()
+            .await
+            .expect("shutdown the nudge router");
         endpoint.close().await;
     }
 
     /// **UDP returns on a pair that only gossips.** Such a pair has no path watcher, so the session
     /// that the race attached would stay until the backstop. The reading of the admission table
     /// detaches it, on the fast ticker: a relay reading keeps it, an IP reading drops it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_session_is_detached_once_udp_is_selected_again() {
         use crate::daemon::state::DirectState;
         use crate::protocol::MeshId;
@@ -3745,6 +3804,10 @@ mod tests {
         use crate::transport::probe::PathKind;
 
         let (endpoint, handle) = endpoint().await;
+        // The answerer of the session nudges this endpoint, the offerer, on the nudge ALPN.
+        let nudge_router = Router::builder(endpoint.clone())
+            .accept(NUDGE_ALPN, NudgeAcceptor)
+            .spawn();
         let key = (1u16..=u16::MAX)
             .map(|seed| {
                 let mut bytes = [0u8; 32];
@@ -3794,6 +3857,9 @@ mod tests {
         state.want_lane_session(bob, crate::util::clock::Instant::now());
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
+        // The server serves no unicast ALPN: a cooldown stands for the failed dial that keeps UDP
+        // from winning the race, without the WARN of a refused ALPN.
+        state.unicast_pool.note_dial_failure(bob).await;
         retry_sessions(&mut state, &ctx);
         assert!(
             until(|| handle.has_session(&bob) && server_hub.has_session(&endpoint.id())).await,
@@ -3818,13 +3884,17 @@ mod tests {
 
         router.shutdown().await.expect("shutdown");
         server.close().await;
+        nudge_router
+            .shutdown()
+            .await
+            .expect("shutdown the nudge router");
         endpoint.close().await;
     }
 
     /// **A pass paces the lane offers.** Six lane members, none linked: the pass offers a session
     /// to `LANE_OFFERS_IN_FLIGHT` of them. The others are not touched: no `Pending` mark, so the
     /// next pass picks them.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_retry_pass_offers_to_the_budget_of_lane_members_and_leaves_the_others_alone() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -3892,7 +3962,7 @@ mod tests {
 
     /// **A freed slot is filled.** With the budget spent, the top-up offers nothing. When one
     /// round ends, it offers to exactly one more of the members that were left out.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_top_up_fills_the_slot_that_a_round_freed() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
@@ -3981,7 +4051,7 @@ mod tests {
     /// **Glare.** Both nodes of a pair offer at once. The lower id wins: the higher id gives its
     /// offer up when the offer of the lower id arrives, and answers it. The pair ends with exactly
     /// one session, and the offer that was given up is cancelled.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_crossed_pair_ends_with_one_session_and_the_lower_id_wins() {
         let (first, first_hub) = endpoint().await;
         let (second, second_hub) = endpoint().await;
@@ -4041,7 +4111,7 @@ mod tests {
     /// **The answering side reports the attach.** A frame parked on the higher id of a crossed pair
     /// is flushed when the session attaches, although the node answered and did not offer: the
     /// answerer tells the event loop, through the table, which flushes what is held for the peer.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_answering_side_reports_the_attach_to_the_event_loop() {
         let (first, first_hub) = endpoint().await;
         let (second, second_hub) = endpoint().await;
@@ -4113,7 +4183,7 @@ mod tests {
 
     /// The offer of the lower id is refused as before when the round that runs is an answer, not
     /// an offer of the higher id.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_lower_id_still_refuses_a_crossed_offer() {
         let (first, first_hub) = endpoint().await;
         let (second, second_hub) = endpoint().await;

@@ -67,13 +67,17 @@ pub(crate) fn close_gossip_links_to(remote: iroh::EndpointId) -> usize {
 
 /// Close `conn` with [`GOSSIP_RECURSION_REFUSED_CODE`] once its selected path is the gossip
 /// rung, now or after a path change. Unconditional: it reads no mesh policy.
-pub(crate) fn watch_gossip_recursion(conn: &Connection) {
+pub(crate) fn watch_gossip_recursion(
+    conn: &Connection,
+    admission: super::admission::SignalAdmission,
+) {
     let remote = conn.remote_id();
     habilis_network_iroh_gossip_transport::watch_recursion(
         conn,
         GOSSIP_RECURSION_REFUSED_CODE,
         move || {
             GOSSIP_RECURSION_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            admission.note_closed_on_rung(remote);
             tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is the gossip rung");
         },
     );
@@ -249,6 +253,7 @@ pub(crate) async fn refuse_relayed(
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::{Endpoint, RelayMode, endpoint::presets};
@@ -300,9 +305,9 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_dialer_that_closes_while_the_wait_runs_is_not_a_timeout() {
-        let (_client, _server, dialed, accepted) = connected().await;
+        let (client, server, dialed, accepted) = connected().await;
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             dialed.close(0u32.into(), b"gave up");
@@ -311,23 +316,29 @@ mod tests {
         let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| false).await;
 
         assert_eq!(outcome, PathWait::Closed);
+        client.close().await;
+        server.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_wait_with_no_path_and_no_close_times_out() {
-        let (_client, _server, _dialed, accepted) = connected().await;
+        let (client, server, _dialed, accepted) = connected().await;
 
         let outcome = wait_selected_outcome(&accepted, Duration::from_millis(300), |_| false).await;
 
         assert_eq!(outcome, PathWait::TimedOut);
+        client.close().await;
+        server.close().await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_selected_path_ends_the_wait_at_once() {
-        let (_client, _server, _dialed, accepted) = connected().await;
+        let (client, server, _dialed, accepted) = connected().await;
 
         let outcome = wait_selected_outcome(&accepted, Duration::from_secs(5), |_| true).await;
 
         assert_eq!(outcome, PathWait::Selected);
+        client.close().await;
+        server.close().await;
     }
 }

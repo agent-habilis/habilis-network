@@ -62,7 +62,7 @@ pub struct SessionCounters {
     /// pump had not been scheduled since the queue drained. QUIC is told the
     /// send succeeded, so these are invisible above.
     pub dropped_queue_full: AtomicU64,
-    /// Dropped by the pump: `bufferedAmount` was at or over [`BUFFER_CAP`].
+    /// Dropped by the pump: `bufferedAmount` was at or over `BUFFER_CAP`.
     pub dropped_congested: AtomicU64,
     /// Dropped by the pump: `send` threw. A non-zero count here means the
     /// channel is refusing traffic, not merely slow.
@@ -422,12 +422,12 @@ impl BrowserHubTransport {
                     if data_channel.buffered_amount() >= BUFFER_CAP {
                         congested += 1;
                         counters.dropped_congested.fetch_add(1, Ordering::Relaxed);
-                        if crate::should_log_drop(congested) {
-                            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                        console_drop(congested, || {
+                            format!(
                                 "[habilis-network webrtc] dropping outbound datagrams \
                                  (bufferedAmount over cap); total {congested} for {remote}"
-                            )));
-                        }
+                            )
+                        });
                         continue;
                     }
                     // `send` throws, and this used to swallow it. Chrome raises
@@ -440,15 +440,15 @@ impl BrowserHubTransport {
                     if let Err(error) = data_channel.send_with_u8_array(&datagram) {
                         refused += 1;
                         counters.dropped_refused.fetch_add(1, Ordering::Relaxed);
-                        if crate::should_log_drop(refused) {
-                            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                        console_drop(refused, || {
+                            format!(
                                 "[habilis-network webrtc] data channel refused a send for \
                                  {remote} (ready_state={:?}, bufferedAmount={}); \
                                  total {refused}: {error:?}",
                                 data_channel.ready_state(),
                                 data_channel.buffered_amount(),
-                            )));
-                        }
+                            )
+                        });
                     } else {
                         counters.sent.fetch_add(1, Ordering::Relaxed);
                     }
@@ -1016,3 +1016,17 @@ impl CustomSender for BrowserHubSender {
 
 /// Backward-compatible name used by the consume path and older docs.
 pub type BrowserRtcTransport = BrowserHubTransport;
+
+/// The console line for a drop counter that is worth logging: a warning once the drops are
+/// sustained, a debug line before (see `drops_are_sustained`).
+fn console_drop(total: u64, line: impl FnOnce() -> String) {
+    if !crate::should_log_drop(total) {
+        return;
+    }
+    let line = JsValue::from_str(&line());
+    if crate::drops_are_sustained(total) {
+        web_sys::console::warn_1(&line);
+    } else {
+        web_sys::console::debug_1(&line);
+    }
+}

@@ -62,40 +62,34 @@ pub(super) async fn shutdown<A: NodeDriver>(
 /// The mesh name (for the departure log line), the user-facing departure
 /// label (the raw topic string for a topic gossip, `#name` otherwise), and
 /// whether this quit should hard-exit the process — the plain values
-/// [`announce_and_maybe_exit`] needs beyond the loop state and the shared
+/// [`announce_departure`] needs beyond the loop state and the shared
 /// handler context.
 pub(super) struct QuitParams<'a> {
     pub(super) name: &'a MeshName,
     pub(super) leave_label: &'a str,
     pub(super) exit_on_quit: bool,
 }
-/// Announce departure, then decide whether to hard-exit the process.
+/// Announce departure, and say whether the loop must hard-exit the process once it has ended.
 ///
-/// `exit_on_quit` is the CLI hard-exit: the CLI process exits immediately on
-/// quit rather than tearing down its background tasks (advertiser,
-/// localhost HTTP server, iroh) and unwinding. In-process quits pass `false`
-/// and unwind cleanly instead. Under the `dhat-heap` profiling build we
-/// *never* `process::exit` regardless — it skips destructors, so the heap
-/// profiler would never flush `dhat-heap.json`; we fall through so `main`
-/// unwinds and the profiler drops.
-pub(super) async fn announce_and_maybe_exit<A: NodeDriver>(
+/// `exit_on_quit` is the CLI hard-exit: the CLI process exits on quit rather than tearing down
+/// its background tasks (advertiser, localhost HTTP server, iroh) and unwinding. In-process
+/// quits pass `false` and unwind cleanly instead. The exit is the loop's to make, after
+/// `release_rendezvous` has shed the beacon and closed the endpoints that the loop owns: an exit
+/// from here skips both, and the peers of the beacon wait for its idle timeout. Under the
+/// `dhat-heap` profiling build we *never* hard-exit regardless: it skips destructors, so the
+/// heap profiler would never flush `dhat-heap.json`; `main` unwinds and the profiler drops.
+pub(super) async fn announce_departure<A: NodeDriver>(
     state: &mut EventLoopState,
     app: &mut A,
     ctx: &HandlerCtx<'_>,
     quit: QuitParams<'_>,
-) {
+) -> bool {
     // Empty out any parked long-poll waiters first, so a held call returns a
-    // clean timeout (empty) rather than a dropped-channel error — and before
-    // the `exit_on_quit` path below may `std::process::exit`. Other app-owned
+    // clean timeout (empty) rather than a dropped-channel error. Other app-owned
     // waiters (app RPC calls) are failed in `on_shutdown` (inside `shutdown`).
     app.close_poll_waiters();
     shutdown(state, app, ctx, &quit).await;
-    #[cfg(not(feature = "dhat-heap"))]
-    if quit.exit_on_quit {
-        std::process::exit(0);
-    }
-    #[cfg(feature = "dhat-heap")]
-    let _ = quit.exit_on_quit;
+    quit.exit_on_quit && !cfg!(feature = "dhat-heap")
 }
 /// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix)
 /// listener tasks feeding a single internal quit channel.
@@ -268,9 +262,46 @@ pub(super) fn never_quit() -> mpsc::Receiver<()> {
     quit_rx
 }
 
+/// What the loop closes as it ends: the router with its endpoint, and the multi-hop
+/// underlay, when the engine bound them. An injected endpoint is the caller's and stays
+/// open, though the router is still held to the end so its accept loop outlives the loop.
+pub(super) struct OwnedEndpoints {
+    pub(super) router: iroh::protocol::Router,
+    pub(super) owner: super::config::EndpointOwner,
+    #[cfg(feature = "multihop")]
+    pub(super) multihop: Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
+}
+
+impl OwnedEndpoints {
+    /// Dropping an endpoint that was never closed makes iroh log an ERROR and abort its
+    /// connections. `Router::shutdown` closes the router and its endpoint; the two
+    /// closes run together, as each can wait on peers that are already gone.
+    pub(super) async fn close(self) {
+        if self.owner != super::config::EndpointOwner::Engine {
+            return;
+        }
+        tokio::join!(
+            async {
+                // It fails only when a protocol handler panicked, which the task has
+                // already reported; the loop is ending either way.
+                if let Err(error) = self.router.shutdown().await {
+                    tracing::debug!(%error, "the router failed while it shut down");
+                }
+            },
+            async {
+                #[cfg(feature = "multihop")]
+                if let Some(handle) = self.multihop.as_ref() {
+                    handle.close().await;
+                }
+            },
+        );
+    }
+}
+
 #[cfg(all(unix, feature = "host"))]
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::process::{Child, Command};
     use std::time::Duration;
 
@@ -296,7 +327,7 @@ mod tests {
         quit
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_stays_while_the_owner_lives() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -305,7 +336,7 @@ mod tests {
         child.wait().unwrap();
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_owner_exits() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -314,7 +345,7 @@ mod tests {
         assert!(watch_quits(owner, Duration::from_secs(2)).await);
     }
 
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_owner_is_an_unreaped_zombie() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -325,7 +356,7 @@ mod tests {
 
     /// Simulates reuse with `start + 1`: that a real reissue changes the start
     /// time is a property of the OS, not something this test can show.
-    #[tokio::test]
+    #[test]
     async fn owner_watch_quits_when_the_pid_is_reissued() {
         let mut child = spawn_owner();
         let owner = Owner::new(child.id()).expect("live owner accepted");
@@ -391,5 +422,60 @@ mod tests {
         assert!(orphan_watch_warranted(4242));
         // Launched detached straight from init/launchd ⇒ no parent to lose.
         assert!(!orphan_watch_warranted(1));
+    }
+
+    /// The test binary runs this test again, in a process of its own, with this variable set.
+    const QUIT_CHILD: &str = "HABILIS_TEST_CLI_QUIT_CHILD";
+
+    /// A CLI quit announces the departure and asks the loop to exit the process, which it does
+    /// only after it has released the beacon and closed the endpoints that it owns. A process
+    /// that exits inside the announcement skips both: the peers of the beacon wait for its idle
+    /// timeout, and its endpoints are never closed. The check runs in a child process, because
+    /// an exit inside the announcement ends the process.
+    #[test]
+    async fn a_cli_quit_leaves_the_exit_to_the_loop() {
+        use super::{QuitParams, announce_departure};
+        use crate::testing::LaneNode;
+
+        if std::env::var_os(QUIT_CHILD).is_some() {
+            let node = LaneNode::start().await;
+            let ctx = node.ctx();
+            let mut state = node.state();
+            let (inbound, _unread) = mpsc::channel(1);
+            let mut app = crate::membership::MembershipApp::new(inbound);
+            let name = crate::protocol::MeshName::new("test".to_owned()).expect("a name");
+            let exit = announce_departure(
+                &mut state,
+                &mut app,
+                &ctx,
+                QuitParams {
+                    name: &name,
+                    leave_label: "#test",
+                    exit_on_quit: true,
+                },
+            )
+            .await;
+            println!("QUIT_ANNOUNCED exit={exit}");
+            node.endpoint.close().await;
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("the test binary"))
+            .args([
+                "--exact",
+                "daemon::shutdown::tests::a_cli_quit_leaves_the_exit_to_the_loop",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(QUIT_CHILD, "1")
+            .output()
+            .expect("run the test binary");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // A `dhat-heap` build does not exit the process on a quit, so that dhat can write its
+        // profile: the loop then gets `false`.
+        let exit = !cfg!(feature = "dhat-heap");
+        assert!(
+            stdout.contains(&format!("QUIT_ANNOUNCED exit={exit}")),
+            "the process exited inside the quit, before the loop released its endpoints: {stdout}"
+        );
     }
 }

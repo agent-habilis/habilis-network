@@ -246,6 +246,7 @@ impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogSink {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;

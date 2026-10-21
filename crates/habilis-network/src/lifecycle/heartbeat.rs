@@ -98,6 +98,9 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
     state
         .quiet_since
         .retain(|nick, _| quiet.contains(nick.as_str()));
+    // The same for the goodbyes: a mark of a peer that fell off the bounded `left` FIFO goes.
+    let left = &state.left;
+    state.left_at.retain(|nick, _| left.contains(nick.as_str()));
     // Same bound for the endpoint dial hints: an entry lives as long as its
     // nick is an active peer or a returnable quiet evictee, so the map
     // is capped at |peers| + QUIET_CAP even under nickname churn.
@@ -113,6 +116,7 @@ pub(crate) fn tick_sweep(state: &mut EventLoopState, sink: &dyn NodeSink) {
 #[cfg(test)]
 mod tests {
     use crate::testing::{fresh_state, nick};
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{Instant, Nickname, tick_sweep};

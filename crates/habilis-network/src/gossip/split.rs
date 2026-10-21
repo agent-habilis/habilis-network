@@ -22,12 +22,21 @@ use tokio::sync::{mpsc, oneshot};
 use crate::util::tuning::MESH_TOPIC_EVENTS_CAP;
 
 /// Join the mesh topic with a queue that outlasts a stall of the splitter.
+///
+/// The rendezvous takes no slot of the active view. It serves to let others in, and the node that
+/// hosts it keeps its link for that (the view of the beacon is never empty), so a link that took
+/// one of the G places would leave that node at G - 1 peers forever. A resubscribe names it
+/// again, as the fresh topic knows nothing of the last one. Every member names it, so a joiner
+/// that is linked to it holds G + 1 links until `release_rendezvous_if_due` lets the link go.
 pub(crate) async fn subscribe_mesh(
     gossip: &Gossip,
     topic_id: TopicId,
+    rendezvous: EndpointId,
     bootstrap: impl IntoIterator<Item = EndpointId>,
 ) -> Result<GossipTopic, ApiError> {
-    subscribe_mesh_capped(gossip, topic_id, bootstrap, MESH_TOPIC_EVENTS_CAP).await
+    let topic = subscribe_mesh_capped(gossip, topic_id, bootstrap, MESH_TOPIC_EVENTS_CAP).await?;
+    topic.uncounted_peers(vec![rendezvous]).await?;
+    Ok(topic)
 }
 
 /// [`subscribe_mesh`] with the capacity given: the load run of the split sweeps it.
@@ -223,6 +232,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::{expect_warn, test};
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -297,7 +307,7 @@ mod tests {
     /// A frame goes to the handle and no further. A mesh message goes to the loop and not to the
     /// handle: the seen set, the log and the digests never see a frame, because `ingest` is not
     /// called for it.
-    #[tokio::test]
+    #[test]
     async fn a_frame_goes_to_the_handle_and_a_mesh_message_to_the_loop() {
         let handle = GossipHandle::new(endpoint_id(1));
         let (tx, events) = topic();
@@ -321,7 +331,7 @@ mod tests {
     }
 
     /// `Lagged` raises `topic_lagged` and is still forwarded, so that the loop logs it.
-    #[tokio::test]
+    #[test]
     async fn a_lagged_event_raises_topic_lagged_and_is_forwarded() {
         let handle = GossipHandle::new(endpoint_id(1));
         let (tx, events) = topic();
@@ -338,7 +348,7 @@ mod tests {
 
     /// The end of the topic reaches the loop as `None`, and the receiver is handed back for the
     /// drain of what it buffered.
-    #[tokio::test]
+    #[test]
     async fn the_end_of_the_topic_is_forwarded_and_the_receiver_comes_back() {
         let (tx, events) = topic();
         let mut mesh = spawn_split(events, None);
@@ -357,7 +367,7 @@ mod tests {
 
     /// A loop that is busy does not make the topic lag: the splitter reads at once, and the mesh
     /// messages wait in order for the loop.
-    #[tokio::test]
+    #[test]
     async fn a_busy_loop_does_not_stop_the_splitter_reading() {
         let handle = GossipHandle::new(endpoint_id(1));
         let (tx, events) = topic();
@@ -393,9 +403,14 @@ mod tests {
     /// A storm of mesh messages beyond the queue: the splitter keeps reading, the frames still
     /// reach the transport, the newest mesh messages are dropped and counted, and the control
     /// events (a `NeighborDown`) are never dropped and come first.
-    #[tokio::test]
+    #[test]
     async fn a_storm_of_mesh_messages_drops_the_newest_and_keeps_the_frames_and_control_events() {
         use crate::util::tuning::MESH_TOPIC_EVENTS_CAP;
+
+        expect_warn(
+            "habilis_network::gossip",
+            "mesh message dropped: the queue to the event loop is full",
+        );
 
         let handle = GossipHandle::new(endpoint_id(1));
         let (tx, events) = topic();
@@ -442,7 +457,7 @@ mod tests {
 
     /// The end of the topic reaches the loop only after the mesh messages that were queued
     /// before it: none is lost behind the control channel.
-    #[tokio::test]
+    #[test]
     async fn the_end_of_the_topic_comes_after_the_queued_mesh_messages() {
         let (tx, events) = topic();
         let mut mesh = spawn_split(events, None);
@@ -465,7 +480,7 @@ mod tests {
 
     /// The heal arm asks for the dead receiver without waiting: a subscription that has not ended
     /// yields none, at once.
-    #[tokio::test]
+    #[test]
     async fn into_dead_does_not_wait_for_a_subscription_that_has_not_ended() {
         let (_tx, events) = topic();
         let mesh = spawn_split(events, None);
@@ -512,6 +527,7 @@ mod tests {
 /// `MESH` is the number of mesh messages that A sends beside the frames.
 #[cfg(test)]
 mod real_gossip {
+    use habilis_network_test_tracing::{at_end, expect_warn, test};
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
@@ -563,7 +579,7 @@ mod real_gossip {
     }
 
     #[ignore = "a load run for the host; see the doc of the module"]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[test(flavor = "multi_thread", worker_threads = 4)]
     async fn real_gossip_split_run() {
         let capacity: usize = setting("SPLIT_PROOF_CAP", MESH_TOPIC_EVENTS_CAP);
         let secs: u64 = setting("SPLIT_PROOF_SECS", 30);
@@ -574,9 +590,21 @@ mod real_gossip {
         let rate_fps =
             rate_mib * 1_048_576.0 / u64_to_f64(u64::try_from(frame::MAX_FRAME_LEN).unwrap_or(1));
 
+        // The flood is meant to overflow the send queue of the connection. A run at a set rate is
+        // not: a drop there is the finding of the sweep, so the guard fails it.
+        if rate_fps <= 0.0 {
+            expect_warn(
+                "iroh_gossip::net",
+                "dropped a data message: the send queue of the connection is full",
+            );
+        }
+
         let lookup = MemoryLookup::new();
-        let (a_endpoint, a_gossip, _a_router) = member(1, &lookup).await;
-        let (b_endpoint, b_gossip, _b_router) = member(2, &lookup).await;
+        let (a_endpoint, a_gossip, a_router) = member(1, &lookup).await;
+        let (b_endpoint, b_gossip, b_router) = member(2, &lookup).await;
+        // A dropped endpoint that was not closed logs an ERROR.
+        at_end(async move { a_router.shutdown().await.expect("a shuts down") });
+        at_end(async move { b_router.shutdown().await.expect("b shuts down") });
         let topic_id = TopicId::from_bytes([42u8; 32]);
         let b_handle = GossipHandle::new(b_endpoint.id());
 

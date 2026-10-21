@@ -136,6 +136,9 @@ impl<A: NodeDriver + 'static> Node<A> {
     pub async fn crash(mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
+            // `abort` only marks the task. On a multi-thread runtime the loop can run once more
+            // and read the end of its gossip stream, which the close below causes, as a fault.
+            let _ = task.await;
         }
         let (webrtc, endpoint) = &self.crash_handles;
         let _ = webrtc.abort_sessions();
@@ -232,6 +235,11 @@ impl<A: NodeDriver + 'static> Node<A> {
     /// Ask the loop to broadcast `Left` and wind down, waiting up to
     /// [`NODE_LEAVE`]. On
     /// timeout returns `Ok(())` and the task detaches.
+    ///
+    /// The loop closes the endpoint that setup bound for this node, with its
+    /// router and multi-hop underlay. It does not close an endpoint that the
+    /// caller injected (`SetupParams::endpoint`); that one stays open for the
+    /// caller's own protocols, and the caller closes it.
     ///
     /// # Errors
     /// Returns an error if the event-loop task panicked or returned an error.

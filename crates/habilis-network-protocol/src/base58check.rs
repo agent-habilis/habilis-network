@@ -69,6 +69,7 @@ pub fn take_array<const N: usize>(bytes: &[u8], pos: &mut usize) -> Option<[u8; 
 #[cfg(test)]
 mod tests {
     use super::{decode, encode, take_array};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn round_trips_a_payload() {

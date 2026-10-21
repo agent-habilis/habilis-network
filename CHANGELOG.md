@@ -169,6 +169,14 @@ published to a registry; pin it with
 
 ### Changed
 
+- **Wire change:** the loopback port ladder of a private mesh now maps into `1024..=32767`, not
+  `1024..=65535`. The ephemeral bind of another endpoint (Linux 32768-60999, macOS and Windows
+  49152-65535) can no longer land on a rung, which caused the rare "stranger on a rung" warnings
+  (`error 120` on accept, `UnknownIssuer` on dial) under load. **Breaking:** an old node and a
+  new node derive different ladders from the same seed, so they cannot meet on a loopback or LAN
+  rung. Both must run the new build. The mesh id, the topic and the rendezvous id do not change.
+  The golden ladders in `crypto.rs` and `mesh/tests.rs` are new, and the old literals stay in
+  tests that assert they are no longer derived.
 - **Breaking:** a decoded mesh is locked until its secret is applied. Parsing an id gives a
   `LockedMesh`, and `LockedMesh::unlock(password)` gives the `Mesh`; it replaces
   `Mesh::apply_password`, and returns `UnlockError` (`InviteOnly`, `PasswordRequired`,

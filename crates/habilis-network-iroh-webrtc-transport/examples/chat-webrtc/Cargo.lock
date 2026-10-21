@@ -409,6 +409,7 @@ dependencies = [
  "chat-proto",
  "clap",
  "habilis-network-iroh-webrtc-transport",
+ "habilis-network-test-tracing",
  "serde",
  "serde_json",
  "tokio",
@@ -423,6 +424,7 @@ dependencies = [
  "anyhow",
  "bs58",
  "habilis-network-iroh-webrtc-transport",
+ "habilis-network-test-tracing",
  "serde",
  "serde_json",
 ]
@@ -986,7 +988,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1276,6 +1278,7 @@ dependencies = [
  "if-addrs",
  "iroh",
  "iroh-base",
+ "n0-future",
  "n0-watcher",
  "noq-udp",
  "rand 0.9.5",
@@ -1284,6 +1287,26 @@ dependencies = [
  "str0m-aws-lc-rs",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "habilis-network-test-tracing"
+version = "0.6.0"
+dependencies = [
+ "habilis-network-test-tracing-macros",
+ "libc",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "habilis-network-test-tracing-macros"
+version = "0.6.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1680,7 +1703,7 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=0e7cdb4cd73952c49699cd7ae971a1fc2982b866#0e7cdb4cd73952c49699cd7ae971a1fc2982b866"
+source = "git+https://github.com/agent-habilis/iroh?rev=a8c1c205ae9f2ad7999dd6180d6ad3f1bc0e52f8#a8c1c205ae9f2ad7999dd6180d6ad3f1bc0e52f8"
 dependencies = [
  "backon",
  "blake3",
@@ -1729,7 +1752,7 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=0e7cdb4cd73952c49699cd7ae971a1fc2982b866#0e7cdb4cd73952c49699cd7ae971a1fc2982b866"
+source = "git+https://github.com/agent-habilis/iroh?rev=a8c1c205ae9f2ad7999dd6180d6ad3f1bc0e52f8#a8c1c205ae9f2ad7999dd6180d6ad3f1bc0e52f8"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -1747,7 +1770,7 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=0e7cdb4cd73952c49699cd7ae971a1fc2982b866#0e7cdb4cd73952c49699cd7ae971a1fc2982b866"
+source = "git+https://github.com/agent-habilis/iroh?rev=a8c1c205ae9f2ad7999dd6180d6ad3f1bc0e52f8#a8c1c205ae9f2ad7999dd6180d6ad3f1bc0e52f8"
 dependencies = [
  "arc-swap",
  "cfg_aliases",
@@ -1797,7 +1820,7 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.0.3"
-source = "git+https://github.com/agent-habilis/iroh?rev=0e7cdb4cd73952c49699cd7ae971a1fc2982b866#0e7cdb4cd73952c49699cd7ae971a1fc2982b866"
+source = "git+https://github.com/agent-habilis/iroh?rev=a8c1c205ae9f2ad7999dd6180d6ad3f1bc0e52f8#a8c1c205ae9f2ad7999dd6180d6ad3f1bc0e52f8"
 dependencies = [
  "blake3",
  "bytes",
@@ -2267,8 +2290,7 @@ dependencies = [
 [[package]]
 name = "noq"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11803df44ac03a30988d61585ea50885d5428e42da944fe1e498799da7886a2"
+source = "git+https://github.com/agent-habilis/noq?rev=2b2252ce483cd9a5f88296fa7989bc54324a0bdf#2b2252ce483cd9a5f88296fa7989bc54324a0bdf"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -2288,9 +2310,8 @@ dependencies = [
 
 [[package]]
 name = "noq-proto"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
+version = "1.1.0"
+source = "git+https://github.com/agent-habilis/noq?rev=2b2252ce483cd9a5f88296fa7989bc54324a0bdf#2b2252ce483cd9a5f88296fa7989bc54324a0bdf"
 dependencies = [
  "aes-gcm",
  "bytes",
@@ -2332,7 +2353,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2967,9 +2988,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -3020,7 +3041,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3031,9 +3052,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -3139,7 +3160,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4127,7 +4148,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

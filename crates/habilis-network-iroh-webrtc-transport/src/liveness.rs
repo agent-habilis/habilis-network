@@ -55,6 +55,7 @@ pub(crate) fn judge_state(phase: ConnectionPhase, disconnected_for_ms: Option<f6
 #[cfg(test)]
 mod tests {
     use super::{ConnectionPhase, DISCONNECT_GRACE_MS, Verdict, judge_state};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_dead_connection_is_removed_at_once() {

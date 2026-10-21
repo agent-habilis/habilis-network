@@ -186,28 +186,27 @@ async fn pair_links(relay: &RelayUrl, relay_transport: bool, deadline: Duration)
     linked
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn relay_only_pair_links_only_when_the_relay_may_carry_payload() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer()
-        .try_init();
-    // Plain HTTP, the same relay flavour the browser matrix uses.
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay server");
+#[test]
+fn relay_only_pair_links_only_when_the_relay_may_carry_payload() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        // Plain HTTP, the same relay flavour the browser matrix uses.
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay server");
 
-    // The control first: the pair *can* meet through this relay.
-    assert!(
-        pair_links(&relay, true, Duration::from_mins(1)).await,
-        "with the relay as a transport the pair must link through it"
-    );
+        // The control first: the pair *can* meet through this relay.
+        assert!(
+            pair_links(&relay, true, Duration::from_mins(1)).await,
+            "with the relay as a transport the pair must link through it"
+        );
 
-    // The gate holds each inbound gossip connection for `PROBE_DEADLINE`
-    // (15 s) and then closes it; the deadline here outlasts that plus one
-    // heal-tick retry, so a link would have had every chance to form.
-    assert!(
-        !pair_links(&relay, false, Duration::from_secs(40)).await,
-        "with the relay lookup only a relay-only pair must never link"
-    );
+        // The gate holds each inbound gossip connection for `PROBE_DEADLINE`
+        // (15 s) and then closes it; the deadline here outlasts that plus one
+        // heal-tick retry, so a link would have had every chance to form.
+        assert!(
+            !pair_links(&relay, false, Duration::from_secs(40)).await,
+            "with the relay lookup only a relay-only pair must never link"
+        );
+    });
 }

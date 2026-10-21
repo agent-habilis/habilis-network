@@ -138,6 +138,7 @@ pub fn ancestry_contains(pid: u32, ancestor: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{ancestry_contains, comm_of, is_alive, live_start_time, parent_of, terminate};
+    use habilis_network_test_tracing::test;
 
     fn self_pid() -> u32 {
         std::process::id()

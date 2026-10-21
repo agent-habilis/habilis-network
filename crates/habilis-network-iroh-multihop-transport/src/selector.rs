@@ -57,6 +57,7 @@ impl PathSelector for MultihopLadder {
 #[cfg(test)]
 mod tests {
     use habilis_network_iroh_transport_util::{block_ip_to, block_rung, block_rung_to};
+    use habilis_network_test_tracing::test;
 
     use super::*;
 

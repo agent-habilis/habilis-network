@@ -95,117 +95,122 @@ async fn drive(
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[test]
 #[ignore = "needs the public relay ladder and a hole-punchable network; run with --ignored"]
-async fn public_path_probe() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-    let topic = format!("light-cycles-two-bots-test-{}", std::process::id());
-    let mut bots = vec![
-        spawn_bot(&topic, "alice").await,
-        spawn_bot(&topic, "bob").await,
-    ];
+fn public_path_probe() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(
+        guard,
+        std::thread::available_parallelism().map_or(1, usize::from),
+        async {
+            let topic = format!("light-cycles-two-bots-test-{}", std::process::id());
 
-    // The mesh forms, the lobby agrees a match, and both bots build a
-    // session for it. Nobody negotiates the roster: the lobby fixes it.
-    // Both bots claim the beacon after two probe rounds (~23s), and the first
-    // rival re-check (~12s later) is what merges the two halves.
-    let started = drive(&mut bots, Duration::from_secs(60), |bots| {
-        bots.iter().all(|bot| bot.game.snapshot().roster.len() == 2)
-    })
-    .await;
-    assert!(started, "the two bots never started a match together");
+            let mut bots = vec![
+                spawn_bot(&topic, "alice").await,
+                spawn_bot(&topic, "bob").await,
+            ];
 
-    let rosters: Vec<Vec<String>> = bots
-        .iter()
-        .map(|bot| {
-            bot.game
-                .snapshot()
-                .roster
-                .into_iter()
-                .map(|(pubkey, _)| pubkey)
-                .collect()
-        })
-        .collect();
-    assert_eq!(
-        rosters[0], rosters[1],
-        "handles are positional, so a roster that differs by order is a \
+            // The mesh forms, the lobby agrees a match, and both bots build a
+            // session for it. Nobody negotiates the roster: the lobby fixes it.
+            // Both bots claim the beacon after two probe rounds (~23s), and the first
+            // rival re-check (~12s later) is what merges the two halves.
+            let started = drive(&mut bots, Duration::from_secs(60), |bots| {
+                bots.iter().all(|bot| bot.game.snapshot().roster.len() == 2)
+            })
+            .await;
+            assert!(started, "the two bots never started a match together");
+
+            let rosters: Vec<Vec<String>> = bots
+                .iter()
+                .map(|bot| {
+                    bot.game
+                        .snapshot()
+                        .roster
+                        .into_iter()
+                        .map(|(pubkey, _)| pubkey)
+                        .collect()
+                })
+                .collect();
+            assert_eq!(
+                rosters[0], rosters[1],
+                "handles are positional, so a roster that differs by order is a \
          silent desync waiting to happen"
-    );
+            );
 
-    // They play it out. Two cycles turning across a small arena decide
-    // well inside the tick cap. Wait for agreement, not the first decided
-    // frame: a bot can reach an ending on a predicted input, and the
-    // rollback that corrects it waits for the real input to arrive.
-    let agreed = drive(&mut bots, Duration::from_secs(60), |bots| {
-        let first = bots[0].game.outcome();
-        first != Outcome::InProgress && bots.iter().all(|bot| bot.game.outcome() == first)
-    })
-    .await;
-    assert!(
-        agreed,
-        "the two bots never agreed on who won: {:?}",
-        bots.iter()
-            .map(|bot| (bot.game.outcome(), bot.game.snapshot().world.tick))
-            .collect::<Vec<_>>()
-    );
+            // They play it out. Two cycles turning across a small arena decide
+            // well inside the tick cap. Wait for agreement, not the first decided
+            // frame: a bot can reach an ending on a predicted input, and the
+            // rollback that corrects it waits for the real input to arrive.
+            let agreed = drive(&mut bots, Duration::from_secs(60), |bots| {
+                let first = bots[0].game.outcome();
+                first != Outcome::InProgress && bots.iter().all(|bot| bot.game.outcome() == first)
+            })
+            .await;
+            assert!(
+                agreed,
+                "the two bots never agreed on who won: {:?}",
+                bots.iter()
+                    .map(|bot| (bot.game.outcome(), bot.game.snapshot().world.tick))
+                    .collect::<Vec<_>>()
+            );
 
-    // A match that ends before it starts would satisfy every assertion
-    // above vacuously, so pin down that one was actually simulated.
-    for bot in &bots {
-        let snapshot = bot.game.snapshot();
-        assert!(
-            snapshot.world.tick > 5,
-            "the match decided at tick {} — too early to have been played",
-            snapshot.world.tick
-        );
-        assert_eq!(snapshot.match_number, 1);
-    }
+            // A match that ends before it starts would satisfy every assertion
+            // above vacuously, so pin down that one was actually simulated.
+            for bot in &bots {
+                let snapshot = bot.game.snapshot();
+                assert!(
+                    snapshot.world.tick > 5,
+                    "the match decided at tick {} — too early to have been played",
+                    snapshot.world.tick
+                );
+                assert_eq!(snapshot.match_number, 1);
+            }
 
-    assert!(
-        bots.iter().all(|bot| !bot.game.snapshot().desynced),
-        "a bot reported a state checksum that disagreed with its peer's"
-    );
+            assert!(
+                bots.iter().all(|bot| !bot.game.snapshot().desynced),
+                "a bot reported a state checksum that disagreed with its peer's"
+            );
 
-    // And then they play another one. This is the lobby's epoch doing its
-    // job: the second match's id is not ordered below the first's, so the
-    // tie-break alone would have refused it and the two would have sat on
-    // a finished game forever.
-    let spawns = |bots: &[Bot]| -> Vec<(i16, i16)> {
-        bots[0]
-            .game
-            .snapshot()
-            .world
-            .cycles
-            .iter()
-            .map(|cycle| (cycle.x, cycle.y))
-            .collect()
-    };
-    let first_arena = spawns(&bots);
+            // And then they play another one. This is the lobby's epoch doing its
+            // job: the second match's id is not ordered below the first's, so the
+            // tie-break alone would have refused it and the two would have sat on
+            // a finished game forever.
+            let spawns = |bots: &[Bot]| -> Vec<(i16, i16)> {
+                bots[0]
+                    .game
+                    .snapshot()
+                    .world
+                    .cycles
+                    .iter()
+                    .map(|cycle| (cycle.x, cycle.y))
+                    .collect()
+            };
+            let first_arena = spawns(&bots);
 
-    let rematched = drive(&mut bots, Duration::from_secs(30), |bots| {
-        bots.iter().all(|bot| bot.game.snapshot().match_number == 2)
-    })
-    .await;
-    assert!(
-        rematched,
-        "no rematch was agreed: {:?}",
-        bots.iter()
-            .map(|bot| bot.game.snapshot().match_number)
-            .collect::<Vec<_>>()
-    );
-    assert_ne!(
-        spawns(&bots),
-        first_arena,
-        "a rematch reusing the previous arena means the session id was \
+            let rematched = drive(&mut bots, Duration::from_secs(30), |bots| {
+                bots.iter().all(|bot| bot.game.snapshot().match_number == 2)
+            })
+            .await;
+            assert!(
+                rematched,
+                "no rematch was agreed: {:?}",
+                bots.iter()
+                    .map(|bot| bot.game.snapshot().match_number)
+                    .collect::<Vec<_>>()
+            );
+            assert_ne!(
+                spawns(&bots),
+                first_arena,
+                "a rematch reusing the previous arena means the session id was \
          reused, and with it the magic that rejects stale packets"
-    );
+            );
 
-    // Leave, rather than letting the runtime drop these mid-flight.
-    // `iroh-gossip`'s actor loop `expect`s on its `JoinSet`, so a task
-    // cancelled by runtime shutdown panics and fails a passing test.
-    for bot in bots {
-        bot.node.leave().await.expect("leave the mesh cleanly");
-    }
+            // Leave, rather than letting the runtime drop these mid-flight.
+            // `iroh-gossip`'s actor loop `expect`s on its `JoinSet`, so a task
+            // cancelled by runtime shutdown panics and fails a passing test.
+            for bot in bots {
+                bot.node.leave().await.expect("leave the mesh cleanly");
+            }
+        },
+    );
 }

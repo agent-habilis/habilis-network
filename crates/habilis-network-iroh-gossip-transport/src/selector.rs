@@ -44,6 +44,7 @@ impl PathSelector for GossipLadder {
 #[cfg(test)]
 mod tests {
     use habilis_network_iroh_transport_util::Rung;
+    use habilis_network_test_tracing::test;
 
     use super::*;
 
@@ -103,7 +104,7 @@ mod tests {
     /// Dial `bob` with both of his addresses, wait until the connection has both paths, and
     /// say whether the selected one is IP.
     async fn selects_ip(alice: &Endpoint, bob: &Endpoint) -> bool {
-        let _router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
+        let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
         let both = bob
             .addr()
             .addrs
@@ -119,32 +120,36 @@ mod tests {
         }
         assert!(connection.paths().len() >= 2, "both paths opened");
         tokio::time::sleep(Duration::from_millis(500)).await;
-        connection
+        let selected_ip = connection
             .paths()
             .iter()
             .find(iroh::endpoint::Path::is_selected)
-            .is_some_and(|path| path.is_ip())
+            .is_some_and(|path| path.is_ip());
+        router.shutdown().await.expect("shutdown");
+        selected_ip
     }
 
     /// The default selector of iroh treats a custom transport as primary: with IP and gossip
     /// both open, the mesh topic would carry the bytes. This is what the ladder prevents.
-    #[tokio::test]
+    #[test]
     async fn an_endpoint_with_ip_and_gossip_selects_ip() {
         let hub = MemoryHub::new();
         let (alice, bob) = (node(31, &hub, true).await, node(32, &hub, true).await);
         assert!(selects_ip(&alice, &bob).await);
+        alice.close().await;
     }
 
     /// The same endpoints without the ladder: the guard that the test above can fail.
-    #[tokio::test]
+    #[test]
     async fn without_the_ladder_an_endpoint_with_ip_and_gossip_selects_gossip() {
         let hub = MemoryHub::new();
         let (alice, bob) = (node(33, &hub, false).await, node(34, &hub, false).await);
         assert!(!selects_ip(&alice, &bob).await);
+        alice.close().await;
     }
 
     /// The ladder hides nothing: with no other path, gossip is the one that is selected.
-    #[tokio::test]
+    #[test]
     async fn the_ladder_selects_gossip_when_it_is_the_only_path() {
         let hub = MemoryHub::new();
         let key = |seed: u8| SecretKey::from_bytes(&[seed; 32]);
@@ -165,7 +170,7 @@ mod tests {
             }
         };
         let (alice, bob) = (bind(35).await, bind(36).await);
-        let _router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
+        let router = Router::builder(bob.clone()).accept(ALPN, Hold).spawn();
         let connection = alice
             .connect(
                 EndpointAddr::from_parts(bob.id(), [TransportAddr::Custom(gossip_addr(bob.id()))]),
@@ -174,5 +179,7 @@ mod tests {
             .await
             .expect("connect");
         assert!(crate::selected_is_gossip(&connection));
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 }

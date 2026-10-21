@@ -163,6 +163,7 @@ impl SplitMix64 {
 #[cfg(test)]
 mod tests {
     use super::RoundDescriptor;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn deriving_twice_with_the_same_inputs_is_byte_identical() {

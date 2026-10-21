@@ -180,6 +180,7 @@ fn break_at_words(line: &str, cells: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{Truncate, Wrap, char_width, graphemes, string_width, truncate, wrap_text};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn ascii_graphemes_are_one_cell_each() {

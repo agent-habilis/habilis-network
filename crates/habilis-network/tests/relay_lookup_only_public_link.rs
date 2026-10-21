@@ -11,7 +11,7 @@
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
 use habilis_network::protocol::message::Authored;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use habilis_network::embed::{
@@ -90,46 +90,10 @@ impl Joined {
     }
 }
 
-/// Both tests must start their second peer only after the first has claimed
-/// the beacon. Two peers spawned back-to-back probe the same (deterministic)
-/// beacon key on the same cadence, both find it free, and both claim it in
-/// the same tick — two rival rendezvous, roster stuck at zero. The mesh e2e
-/// matrix staggers on the same log line; this buffer is how a test sees it.
-fn log_buffer() -> &'static Mutex<String> {
-    static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(String::new()))
-}
-
-struct BufferWriter;
-
-impl std::io::Write for BufferWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        log_buffer()
-            .lock()
-            .expect("no poison")
-            .push_str(&String::from_utf8_lossy(bytes));
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("habilis_network=info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(|| BufferWriter)
-        .with_ansi(false)
-        .try_init();
-}
-
 async fn wait_for_log(needle: &str, deadline: Duration) -> bool {
     let started = std::time::Instant::now();
     loop {
-        if log_buffer().lock().expect("no poison").contains(needle) {
+        if habilis_network_test_tracing::captured_logs().contains(needle) {
             return true;
         }
         if started.elapsed() >= deadline {
@@ -140,7 +104,7 @@ async fn wait_for_log(needle: &str, deadline: Duration) -> bool {
 }
 
 fn dump_log_tail() {
-    let logs = log_buffer().lock().expect("no poison").clone();
+    let logs = habilis_network_test_tracing::captured_logs();
     let tail: Vec<&str> = logs.lines().rev().take(60).collect();
     eprintln!("--- engine log tail ---");
     for line in tail.into_iter().rev() {
@@ -198,96 +162,100 @@ async fn spawn_with(
     Node::spawn(config, Probe, None, false)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_ip_peers_link_through_the_gated_rendezvous() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let topic = format!("scratch-link-{}", rand::random::<u64>());
-    let alice_saw = Arc::new(Joined::default());
-    let bob_saw = Arc::new(Joined::default());
-    let ip_only = TransportOpts {
-        udp: true,
-        relay: true,
-        webrtc: false,
-        gossip: false,
-    };
-    let alice = spawn_with(&topic, "alice", &relay, Arc::clone(&alice_saw), ip_only).await;
-    assert!(
-        wait_for_log("beacon role active", Duration::from_mins(1)).await,
-        "alice never claimed the beacon; nothing for bob to find"
-    );
-    let bob = spawn_with(&topic, "bob", &relay, Arc::clone(&bob_saw), ip_only).await;
+#[test]
+fn two_ip_peers_link_through_the_gated_rendezvous() {
+    let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let topic = format!("scratch-link-{}", rand::random::<u64>());
+        let alice_saw = Arc::new(Joined::default());
+        let bob_saw = Arc::new(Joined::default());
+        let ip_only = TransportOpts {
+            udp: true,
+            relay: true,
+            webrtc: false,
+            gossip: false,
+        };
+        let alice = spawn_with(&topic, "alice", &relay, Arc::clone(&alice_saw), ip_only).await;
+        assert!(
+            wait_for_log("beacon role active", Duration::from_mins(1)).await,
+            "alice never claimed the beacon; nothing for bob to find"
+        );
+        let bob = spawn_with(&topic, "bob", &relay, Arc::clone(&bob_saw), ip_only).await;
 
-    let deadline = Duration::from_secs(75);
-    let alice_nick = Nickname::new("alice").expect("valid");
-    let bob_nick = Nickname::new("bob").expect("valid");
-    let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
-    let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
-    let _ = alice.leave().await;
-    let _ = bob.leave().await;
-    if !(alice_ok && bob_ok) {
-        dump_log_tail();
-    }
-    assert!(
-        alice_ok && bob_ok,
-        "two IP peers must link through the gated rendezvous (alice saw bob: {alice_ok}, bob saw alice: {bob_ok})"
-    );
+        let deadline = Duration::from_secs(75);
+        let alice_nick = Nickname::new("alice").expect("valid");
+        let bob_nick = Nickname::new("bob").expect("valid");
+        let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
+        let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
+        let _ = alice.leave().await;
+        let _ = bob.leave().await;
+        if !(alice_ok && bob_ok) {
+            dump_log_tail();
+        }
+        assert!(
+            alice_ok && bob_ok,
+            "two IP peers must link through the gated rendezvous (alice saw bob: {alice_ok}, bob saw alice: {bob_ok})"
+        );
+    });
 }
 
 /// The browser-shaped case, natively: a peer with no IP transports must
 /// still link — its rendezvous link rides the beacon's `WebRTC` lane.
 #[ignore = "timing-sensitive: a JSEP round per beacon shed; run solo with --ignored"]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_webrtc_only_peer_links_through_the_beacon_lane() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let topic = format!("scratch-lane-{}", rand::random::<u64>());
-    let alice_saw = Arc::new(Joined::default());
-    let bob_saw = Arc::new(Joined::default());
-    let alice = spawn_with(
-        &topic,
-        "alice",
-        &relay,
-        Arc::clone(&alice_saw),
-        TransportOpts {
-            udp: true,
-            relay: true,
-            webrtc: true,
-            gossip: false,
-        },
-    )
-    .await;
-    // Stagger like a real join: the first node claims the beacon, the second
-    // finds it held. Simultaneous starts race both into the claim and leave
-    // two same-id rendezvous copies shedding each other for the whole test.
-    tokio::time::sleep(Duration::from_secs(10)).await;
-    let bob = spawn_with(
-        &topic,
-        "bob",
-        &relay,
-        Arc::clone(&bob_saw),
-        TransportOpts {
-            udp: false,
-            relay: true,
-            webrtc: true,
-            gossip: false,
-        },
-    )
-    .await;
+#[test]
+fn a_webrtc_only_peer_links_through_the_beacon_lane() {
+    let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let topic = format!("scratch-lane-{}", rand::random::<u64>());
+        let alice_saw = Arc::new(Joined::default());
+        let bob_saw = Arc::new(Joined::default());
+        let alice = spawn_with(
+            &topic,
+            "alice",
+            &relay,
+            Arc::clone(&alice_saw),
+            TransportOpts {
+                udp: true,
+                relay: true,
+                webrtc: true,
+                gossip: false,
+            },
+        )
+        .await;
+        // Stagger like a real join: the first node claims the beacon, the second
+        // finds it held. Simultaneous starts race both into the claim and leave
+        // two same-id rendezvous copies shedding each other for the whole test.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let bob = spawn_with(
+            &topic,
+            "bob",
+            &relay,
+            Arc::clone(&bob_saw),
+            TransportOpts {
+                udp: false,
+                relay: true,
+                webrtc: true,
+                gossip: false,
+            },
+        )
+        .await;
 
-    let deadline = Duration::from_secs(75);
-    let alice_nick = Nickname::new("alice").expect("valid");
-    let bob_nick = Nickname::new("bob").expect("valid");
-    let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
-    let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
-    let _ = alice.leave().await;
-    let _ = bob.leave().await;
-    assert!(
-        alice_ok && bob_ok,
-        "a webrtc-only peer must link through the beacon lane (alice saw bob: {alice_ok}, bob saw alice: {bob_ok})"
-    );
+        let deadline = Duration::from_secs(75);
+        let alice_nick = Nickname::new("alice").expect("valid");
+        let bob_nick = Nickname::new("bob").expect("valid");
+        let alice_ok = alice_saw.wait_for(&bob_nick, deadline).await;
+        let bob_ok = bob_saw.wait_for(&alice_nick, deadline).await;
+        let _ = alice.leave().await;
+        let _ = bob.leave().await;
+        assert!(
+            alice_ok && bob_ok,
+            "a webrtc-only peer must link through the beacon lane (alice saw bob: {alice_ok}, bob saw alice: {bob_ok})"
+        );
+    });
 }

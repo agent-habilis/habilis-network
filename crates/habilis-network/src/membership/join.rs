@@ -315,6 +315,7 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
 mod tests {
     use crate::protocol::{LookupOpts, RelayChoice};
     use crate::runtime::derive_topic_mesh_with;
+    use habilis_network_test_tracing::test;
 
     use super::*;
 
@@ -639,6 +640,7 @@ mod tests {
 mod resolve_tests {
     use super::*;
     use crate::runtime::TopicParams;
+    use habilis_network_test_tracing::test;
 
     /// The collapse of the bare-topic early return rests on this identity: a
     /// tab and a terminal meet only if the no-override arm keeps deriving the

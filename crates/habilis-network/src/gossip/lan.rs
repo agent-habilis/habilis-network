@@ -157,6 +157,7 @@ async fn ask(addr: EndpointAddr, state: &mut EventLoopState, ctx: &HandlerCtx<'_
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use iroh::{EndpointAddr, SecretKey};
@@ -267,7 +268,7 @@ mod tests {
     /// A request that returned an error is asked again once its wait is over. The error only
     /// logs: the record stays, and the tick of the heal arm asks the member again.
     #[cfg(all(feature = "host", feature = "multihop"))]
-    #[tokio::test]
+    #[test]
     async fn a_request_that_returned_an_error_is_asked_again_after_the_wait() {
         use crate::lookup::LanEvent;
         use crate::testing::{LaneNode, LogCapture};
@@ -314,7 +315,7 @@ mod tests {
     /// A member of this mesh that the LAN names and that is not a neighbor is a sign that
     /// another group of the mesh may exist: the re-check of a holder comes back to its fast base.
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn a_member_of_the_lan_that_is_not_a_neighbor_is_a_sign_of_a_second_group() {
         use crate::lookup::LanEvent;
         use crate::testing::LaneNode;
@@ -332,10 +333,12 @@ mod tests {
             state.next_rival_recheck.is_some_and(|next| next < far),
             "the re-check came back from an hour out"
         );
+        node.stop_gossip().await;
+        node.endpoint.close().await;
     }
 
     #[cfg(feature = "host")]
-    #[tokio::test]
+    #[test]
     async fn a_member_of_the_lan_that_is_a_neighbor_is_no_sign() {
         use crate::lookup::LanEvent;
         use crate::testing::LaneNode;
@@ -352,6 +355,8 @@ mod tests {
         super::on_lan_event(LanEvent::Seen(addr), &mut state, &ctx).await;
 
         assert_eq!(state.next_rival_recheck, Some(far));
+        node.stop_gossip().await;
+        node.endpoint.close().await;
     }
 
     #[test]

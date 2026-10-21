@@ -337,7 +337,7 @@ impl Lobby {
     /// The current match as a packet to re-announce, if there is one.
     ///
     /// Broadcast this on the same cadence as [`Self::presence`]. Sending
-    /// [`LobbyMessage::Start`] once is not enough: it crosses the same
+    /// `LobbyMessage::Start` once is not enough: it crosses the same
     /// fire-and-forget path as everything else here, and a peer that
     /// misses the single copy waits forever for a match the others are
     /// already playing — with no symptom beyond a lobby that never starts.
@@ -507,6 +507,7 @@ mod tests {
         session_id_for,
     };
     use habilis_network::protocol::{AuthorKey, Nickname};
+    use habilis_network_test_tracing::test;
 
     fn key(byte: u8) -> AuthorKey {
         AuthorKey::from_bytes([byte; 32])

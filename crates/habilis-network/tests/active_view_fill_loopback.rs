@@ -118,15 +118,6 @@ impl Member {
     }
 }
 
-/// With `RUST_LOG` set, a failing run prints the engine's log.
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
-}
-
 /// `count` members on a local relay, each with the active view cap `max_peers`.
 async fn mesh(count: usize, max_peers: usize) -> (Vec<Member>, tokio::task::JoinHandle<()>) {
     let (relay, server) = habilis_network::net::test_relay::spawn_plain()
@@ -172,22 +163,48 @@ async fn until_every_view_holds(
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_mesh_of_ten_links_every_member_to_every_other() {
-    init_logging();
-    let (members, keep) = mesh(10, 32).await;
+#[test]
+fn a_mesh_of_ten_links_every_member_to_every_other() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (members, keep) = mesh(10, 32).await;
 
-    let result = until_every_view_holds(&members, 9, FILL_DEADLINE).await;
-    assert!(
-        result.is_ok(),
-        "every member must hold 9 links; (roster, linked) per member: {:?}",
-        result.unwrap_err()
-    );
+        let result = until_every_view_holds(&members, 9, FILL_DEADLINE).await;
+        assert!(
+            result.is_ok(),
+            "every member must hold 9 links; (roster, linked) per member: {:?}",
+            result.unwrap_err()
+        );
 
-    for member in members {
-        let _ = member.membership.node.leave().await;
-    }
-    keep.abort();
+        for member in members {
+            let _ = member.membership.node.leave().await;
+        }
+        keep.abort();
+    });
+}
+
+/// G + 1 members form a full mesh, so every member holds G links: the holder of the beacon too.
+/// Its link to its own rendezvous is no link to a peer, and it must not take one of its G slots,
+/// or the holder stays at G - 1 peers forever and, by parity, so does one member more.
+#[test]
+fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (members, keep) = mesh(VIEW_CAP + 1, VIEW_CAP).await;
+
+        let result = until_every_view_holds(&members, VIEW_CAP, FILL_DEADLINE).await;
+        assert!(
+            result.is_ok(),
+            "every member must hold {VIEW_CAP} links, the holder of the beacon too; \
+             (roster, linked) per member: {:?}",
+            result.unwrap_err()
+        );
+
+        for member in members {
+            let _ = member.membership.node.leave().await;
+        }
+        keep.abort();
+    });
 }
 
 /// Twelve members with G = 4. A graft is a join, and a full view cannot refuse a
@@ -202,72 +219,74 @@ async fn a_mesh_of_ten_links_every_member_to_every_other() {
 /// refuses gets a link only from the fallback of a starved node (`STARVED`), so the
 /// window starts after two of them.
 /// Takes eighteen minutes, so it only runs when asked for: `-- --ignored`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "eighteen minutes: the views are sampled"]
-async fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
-    init_logging();
-    let (members, keep) = mesh(12, VIEW_CAP).await;
+fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (members, keep) = mesh(12, VIEW_CAP).await;
 
-    let started = Instant::now();
-    let settle = FILL_DEADLINE + STARVED.saturating_mul(2);
-    let mut link_ups = 0_u32;
-    let mut link_total = 0_u32;
-    let mut link_samples = 0_u32;
-    let mut near_target = vec![0_u32; members.len()];
-    let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
-    while started.elapsed() < settle + CHURN_WINDOW {
-        let mut now = Vec::with_capacity(members.len());
-        for (index, member) in members.iter().enumerate() {
-            let links = member.linked_set().await;
-            if let Some(before) = previous.get(index) {
-                link_ups += u32::try_from(links.difference(before).count()).unwrap_or(u32::MAX);
+        let started = Instant::now();
+        let settle = FILL_DEADLINE + STARVED.saturating_mul(2);
+        let mut link_ups = 0_u32;
+        let mut link_total = 0_u32;
+        let mut link_samples = 0_u32;
+        let mut near_target = vec![0_u32; members.len()];
+        let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
+        while started.elapsed() < settle + CHURN_WINDOW {
+            let mut now = Vec::with_capacity(members.len());
+            for (index, member) in members.iter().enumerate() {
+                let links = member.linked_set().await;
+                if let Some(before) = previous.get(index) {
+                    link_ups += u32::try_from(links.difference(before).count()).unwrap_or(u32::MAX);
+                }
+                if started.elapsed() >= settle {
+                    link_total += u32::try_from(links.len()).unwrap_or(u32::MAX);
+                    link_samples += 1;
+                    near_target[index] += u32::from(links.len() + 1 >= VIEW_CAP);
+                }
+                now.push(links);
             }
+            // Only the window after the settling counts.
             if started.elapsed() >= settle {
-                link_total += u32::try_from(links.len()).unwrap_or(u32::MAX);
-                link_samples += 1;
-                near_target[index] += u32::from(links.len() + 1 >= VIEW_CAP);
+                previous = now;
             }
-            now.push(links);
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
-        // Only the window after the settling counts.
-        if started.elapsed() >= settle {
-            previous = now;
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
-    let minutes = CHURN_WINDOW.as_secs_f64() / 60.0;
-    let per_member_per_minute =
-        f64::from(link_ups) / f64::from(u32::try_from(members.len()).unwrap_or(1)) / minutes;
-    let samples_per_member = link_samples / u32::try_from(members.len()).unwrap_or(1);
-    let mean_links = f64::from(link_total) / f64::from(link_samples.max(1));
-    let view_cap = f64::from(u32::try_from(VIEW_CAP).unwrap_or(0));
-    eprintln!(
-        "link ups in {minutes} min: {link_ups}, {per_member_per_minute:.1} per member per min; \
+        let minutes = CHURN_WINDOW.as_secs_f64() / 60.0;
+        let per_member_per_minute =
+            f64::from(link_ups) / f64::from(u32::try_from(members.len()).unwrap_or(1)) / minutes;
+        let samples_per_member = link_samples / u32::try_from(members.len()).unwrap_or(1);
+        let mean_links = f64::from(link_total) / f64::from(link_samples.max(1));
+        let view_cap = f64::from(u32::try_from(VIEW_CAP).unwrap_or(0));
+        eprintln!(
+            "link ups in {minutes} min: {link_ups}, {per_member_per_minute:.1} per member per min; \
          mean links per member {mean_links:.2} of {VIEW_CAP}"
-    );
-    eprintln!("samples at G - 1 or more, per member: {near_target:?} of {samples_per_member}");
-    assert!(
-        near_target
-            .iter()
-            .all(|count| count * 2 >= samples_per_member),
-        "a member held fewer than G - 1 links in more than half of the samples: \
+        );
+        eprintln!("samples at G - 1 or more, per member: {near_target:?} of {samples_per_member}");
+        assert!(
+            near_target
+                .iter()
+                .all(|count| count * 2 >= samples_per_member),
+            "a member held fewer than G - 1 links in more than half of the samples: \
          {near_target:?} of {samples_per_member}"
-    );
-    assert!(
-        mean_links >= MIN_MEAN_LINKS_OF_G * view_cap,
-        "a frozen overlay: {mean_links:.2} links per member on average, at least \
+        );
+        assert!(
+            mean_links >= MIN_MEAN_LINKS_OF_G * view_cap,
+            "a frozen overlay: {mean_links:.2} links per member on average, at least \
          {MIN_MEAN_LINKS_OF_G} of {VIEW_CAP} wanted"
-    );
-    assert!(
-        per_member_per_minute <= MAX_LINK_UPS_PER_MEMBER_PER_MINUTE,
-        "{per_member_per_minute:.1} link ups per member per minute after the formation, \
+        );
+        assert!(
+            per_member_per_minute <= MAX_LINK_UPS_PER_MEMBER_PER_MINUTE,
+            "{per_member_per_minute:.1} link ups per member per minute after the formation, \
          at most {MAX_LINK_UPS_PER_MEMBER_PER_MINUTE} allowed"
-    );
+        );
 
-    for member in members {
-        let _ = member.membership.node.leave().await;
-    }
-    keep.abort();
+        for member in members {
+            let _ = member.membership.node.leave().await;
+        }
+        keep.abort();
+    });
 }
 
 /// Eight members with G = 4. The overlay is a hot potato: a graft at a full peer
@@ -275,57 +294,59 @@ async fn a_mesh_of_twelve_with_g_four_has_a_bounded_churn_after_formation() {
 /// every member reaches G at least once, and the fraction of samples at G and the
 /// rate of link changes are printed as numbers, with a floor on the first only.
 /// Takes five minutes, so it only runs when asked for: `-- --ignored`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "five minutes: the views are sampled"]
-async fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported() {
-    init_logging();
-    let (members, keep) = mesh(8, VIEW_CAP).await;
+fn a_mesh_larger_than_g_plus_one_reaches_g_everywhere_and_the_churn_is_reported() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (members, keep) = mesh(8, VIEW_CAP).await;
 
-    let mut reached = vec![false; members.len()];
-    let mut at_cap = 0_u32;
-    let mut samples = 0_u32;
-    let mut changes = 0_u32;
-    let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
-    let started = Instant::now();
-    let window = FILL_DEADLINE + STABLE_FOR;
-    while started.elapsed() < window {
-        let mut now = Vec::with_capacity(members.len());
-        for (index, member) in members.iter().enumerate() {
-            let links = member.linked_set().await;
-            reached[index] |= links.len() == VIEW_CAP;
-            // Only after the fill deadline do samples count toward the fraction.
-            if started.elapsed() >= FILL_DEADLINE {
-                samples += 1;
-                at_cap += u32::from(links.len() == VIEW_CAP);
-                if let Some(before) = previous.get(index) {
-                    changes += u32::try_from(links.symmetric_difference(before).count())
-                        .unwrap_or(u32::MAX);
+        let mut reached = vec![false; members.len()];
+        let mut at_cap = 0_u32;
+        let mut samples = 0_u32;
+        let mut changes = 0_u32;
+        let mut previous: Vec<std::collections::BTreeSet<String>> = Vec::new();
+        let started = Instant::now();
+        let window = FILL_DEADLINE + STABLE_FOR;
+        while started.elapsed() < window {
+            let mut now = Vec::with_capacity(members.len());
+            for (index, member) in members.iter().enumerate() {
+                let links = member.linked_set().await;
+                reached[index] |= links.len() == VIEW_CAP;
+                // Only after the fill deadline do samples count toward the fraction.
+                if started.elapsed() >= FILL_DEADLINE {
+                    samples += 1;
+                    at_cap += u32::from(links.len() == VIEW_CAP);
+                    if let Some(before) = previous.get(index) {
+                        changes += u32::try_from(links.symmetric_difference(before).count())
+                            .unwrap_or(u32::MAX);
+                    }
                 }
+                now.push(links);
             }
-            now.push(links);
+            if started.elapsed() >= FILL_DEADLINE {
+                previous = now;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
-        if started.elapsed() >= FILL_DEADLINE {
-            previous = now;
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
-    let minutes = STABLE_FOR.as_secs_f64() / 60.0;
-    eprintln!(
-        "reached G at least once: {reached:?}; samples at G: {at_cap} of {samples}; \
+        let minutes = STABLE_FOR.as_secs_f64() / 60.0;
+        eprintln!(
+            "reached G at least once: {reached:?}; samples at G: {at_cap} of {samples}; \
          link changes: {changes} in {minutes} min, {:.1} per member per min",
-        f64::from(changes) / f64::from(u32::try_from(members.len()).unwrap_or(1)) / minutes
-    );
-    assert!(
-        reached.iter().all(|reached| *reached),
-        "every member must hold {VIEW_CAP} links at least once: {reached:?}"
-    );
-    assert!(
-        at_cap * 2 >= samples,
-        "fewer than half of the samples had a view at G: {at_cap} of {samples}"
-    );
+            f64::from(changes) / f64::from(u32::try_from(members.len()).unwrap_or(1)) / minutes
+        );
+        assert!(
+            reached.iter().all(|reached| *reached),
+            "every member must hold {VIEW_CAP} links at least once: {reached:?}"
+        );
+        assert!(
+            at_cap * 2 >= samples,
+            "fewer than half of the samples had a view at G: {at_cap} of {samples}"
+        );
 
-    for member in members {
-        let _ = member.membership.node.leave().await;
-    }
-    keep.abort();
+        for member in members {
+            let _ = member.membership.node.leave().await;
+        }
+        keep.abort();
+    });
 }

@@ -110,6 +110,7 @@ pub(crate) fn rand_token() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{Evaluate, call_page_within, shown};

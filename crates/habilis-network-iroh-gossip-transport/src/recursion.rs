@@ -59,6 +59,7 @@ pub fn watch_recursion(
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -106,7 +107,7 @@ mod tests {
 
     /// A connection on the gossip path is closed with the code, at both ends, and the
     /// callback runs once.
-    #[tokio::test]
+    #[test]
     async fn a_connection_on_the_gossip_path_is_closed_with_the_code() {
         let hub = MemoryHub::new();
         let (alice_handle, bob_handle) = (
@@ -118,7 +119,7 @@ mod tests {
         let alice = gossip_only_endpoint(secret(1), &alice_handle).await;
         let bob = gossip_only_endpoint(secret(2), &bob_handle).await;
         let (tx, rx) = oneshot::channel();
-        let _router = Router::builder(bob.clone())
+        let router = Router::builder(bob.clone())
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice
@@ -150,11 +151,13 @@ mod tests {
             .await
             .expect("the callback did not run")
             .expect("the callback ran");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// The watch holds the connection weakly: when the gossip layer drops the last handle,
     /// the task ends and releases its callback, and nothing is closed.
-    #[tokio::test]
+    #[test]
     async fn the_watch_ends_when_the_last_handle_of_the_connection_is_dropped() {
         let loopback = |key: SecretKey| async move {
             Endpoint::builder(presets::Minimal)
@@ -172,7 +175,7 @@ mod tests {
         };
         let (alice, bob) = (loopback(secret(5)).await, loopback(secret(6)).await);
         let (tx, _rx) = oneshot::channel();
-        let _router = Router::builder(bob.clone())
+        let router = Router::builder(bob.clone())
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
@@ -189,10 +192,12 @@ mod tests {
             .await
             .expect("the watch task did not end");
         assert!(ended.is_err(), "the callback ran: {ended:?}");
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 
     /// A connection on IP is left alone.
-    #[tokio::test]
+    #[test]
     async fn a_connection_on_ip_is_left_open() {
         let loopback = |key: SecretKey| async move {
             Endpoint::builder(presets::Minimal)
@@ -210,7 +215,7 @@ mod tests {
         };
         let (alice, bob) = (loopback(secret(3)).await, loopback(secret(4)).await);
         let (tx, _rx) = oneshot::channel();
-        let _router = Router::builder(bob.clone())
+        let router = Router::builder(bob.clone())
             .accept(ALPN, CloseProbe(Arc::new(Mutex::new(Some(tx)))))
             .spawn();
         let connection = alice.connect(bob.addr(), ALPN).await.expect("connect");
@@ -223,5 +228,7 @@ mod tests {
             connection.close_reason().is_none(),
             "the IP connection was closed"
         );
+        router.shutdown().await.expect("shutdown");
+        alice.close().await;
     }
 }

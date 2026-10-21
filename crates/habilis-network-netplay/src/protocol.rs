@@ -491,6 +491,7 @@ mod tests {
     use crate::handle::PlayerHandle;
     use crate::testutil::TestGame;
     use crate::transport::Message;
+    use habilis_network_test_tracing::test;
 
     /// The JSON of an input packet with no ack yet. A change here is a wire
     /// change: peers on the old bytes cannot play with peers on the new ones.

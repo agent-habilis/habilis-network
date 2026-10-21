@@ -400,6 +400,7 @@ fn eviction_key(msg: &Verified) -> (UnixSecs, AuthorKey, Option<u64>, &str) {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{
@@ -908,6 +909,7 @@ mod tests {
     }
 
     mod prop {
+        use habilis_network_test_tracing::test;
         use proptest::{prop_assert, proptest};
 
         use super::{MessageLog, msg};

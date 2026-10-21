@@ -131,7 +131,7 @@ pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
 }
 
 /// Start an RTT round: arm it and broadcast the first probe. The event loop sends the second probe
-/// at the middle of the window ([`send_second_probe`]); the round ends at its deadline and reports
+/// at the middle of the window (`send_second_probe`); the round ends at its deadline and reports
 /// the first pong of each peer. This is the one place that starts a round.
 pub async fn start_ping_round(
     state: &mut EventLoopState,
@@ -420,6 +420,7 @@ fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Ve
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
 
     use super::{mark_parked, peer_info_json};
     use crate::protocol::{MeshId, Message};
@@ -512,7 +513,7 @@ mod tests {
     /// The offer goes out at once for a peer that is wanted, and a second call does not start a
     /// second one: the admission table keeps one round per peer.
     #[cfg(feature = "host")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn offering_for_a_parked_frame_starts_one_round_and_no_more() {
         let node = crate::testing::LaneNode::start().await;
         let ctx = node.ctx();
@@ -532,7 +533,7 @@ mod tests {
 
     /// A peer that nobody asked for is not offered a session.
     #[cfg(feature = "host")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn nothing_is_offered_for_a_peer_that_is_not_wanted() {
         let node = crate::testing::LaneNode::start().await;
         let ctx = node.ctx();

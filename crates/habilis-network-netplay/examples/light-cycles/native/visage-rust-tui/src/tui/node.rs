@@ -261,6 +261,7 @@ impl Arena {
 #[cfg(test)]
 mod tests {
     use super::{Arena, Tag};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn append_builds_order_front_to_back() {

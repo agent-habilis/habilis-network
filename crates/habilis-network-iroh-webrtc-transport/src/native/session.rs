@@ -17,7 +17,11 @@ pub(crate) struct InboundPacket {
 /// *after* the increment.
 pub(crate) fn note_dropped(remote: &EndpointId, total: u64, context: &str) {
     if crate::should_log_drop(total) {
-        tracing::warn!(%remote, total, "webrtc lane dropping datagrams ({context})");
+        if crate::drops_are_sustained(total) {
+            tracing::warn!(%remote, total, "webrtc lane dropping datagrams ({context})");
+        } else {
+            tracing::debug!(%remote, total, "webrtc lane dropping datagrams ({context})");
+        }
     }
 }
 
@@ -80,6 +84,7 @@ pub(crate) type SessionRegistry = Registry<SessionHandle>;
 #[cfg(test)]
 mod tests {
     use super::{SessionHandle, SessionRegistry};
+    use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -97,7 +102,7 @@ mod tests {
     /// lands on top, and the entry is permanent: `has_session` stays true,
     /// every send reports `NotConnected`, and re-attach is refused because a
     /// live session supposedly already exists.
-    #[tokio::test]
+    #[test]
     async fn a_driver_that_dies_before_its_insert_leaves_no_phantom() {
         let registry = SessionRegistry::new();
         let remote = eid(1);
@@ -130,7 +135,7 @@ mod tests {
 
     /// The ordinary path must still work: reserve, insert, and the session is
     /// live until something removes it.
-    #[tokio::test]
+    #[test]
     async fn a_session_that_attaches_normally_is_live() {
         let registry = SessionRegistry::new();
         let remote = eid(2);

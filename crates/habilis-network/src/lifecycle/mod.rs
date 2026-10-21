@@ -72,7 +72,7 @@ pub(crate) fn observe(
         }
     }
 
-    let update = membership::compute(&message.kind, &message.author, state);
+    let update = membership::compute(&message.kind, &message.author, message.timestamp, state);
     membership::apply(&update, &message.author, state);
 
     // Join horizon: the node still relays/logs everything (anti-entropy
@@ -107,6 +107,7 @@ pub(crate) fn observe(
     // this exactly-once instead.
     if surfaceable
         && !update.returned
+        && !update.stale
         && !state.surfaced.contains(message.author.as_str())
         && !matches!(message.kind, MessageKind::Presence { .. })
     {
@@ -161,6 +162,7 @@ pub(crate) async fn handle_presence(
         return;
     }
     if subtype == PresenceSubtype::Left {
+        state.note_left(&message.author, message.timestamp);
         if state.peers.remove(message.author.as_str()) {
             state.write_peer_count();
         }
@@ -197,7 +199,7 @@ pub(crate) async fn handle_presence(
         if surfaceable {
             app.on_peer_left(&message.author, state, ctx).await;
         }
-    } else if subtype == PresenceSubtype::Joined {
+    } else if subtype == PresenceSubtype::Joined && !update.stale {
         // Every `joined` re-floods our `PeerInfo`, newcomer and rejoin
         // alike. A newcomer linked to the *rendezvous*, so no `NeighborUp`
         // fires on this loop to re-send it and our arrival flood predates

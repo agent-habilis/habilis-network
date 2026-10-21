@@ -227,15 +227,6 @@ impl Member {
     }
 }
 
-/// With `RUST_LOG` set, a failing run prints the engine's log.
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
-}
-
 async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> bool {
     let started = Instant::now();
     loop {
@@ -253,38 +244,40 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_underlay_opens_a_webrtc_session_to_a_neighbor_that_has_no_ip_path() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let alice = Member::create("alice", &relay).await;
-    let bob = Member::join("bob", &alice).await;
-    assert!(
-        rosters_hold(&[&alice, &bob], 1, Duration::from_mins(1)).await,
-        "the two members never formed a mesh"
-    );
+#[test]
+fn the_underlay_opens_a_webrtc_session_to_a_neighbor_that_has_no_ip_path() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let alice = Member::create("alice", &relay).await;
+        let bob = Member::join("bob", &alice).await;
+        assert!(
+            rosters_hold(&[&alice, &bob], 1, Duration::from_mins(1)).await,
+            "the two members never formed a mesh"
+        );
 
-    // IP works: the underlay reaches the neighbor over IP, so it holds no session.
-    alice.wait_for_rung("bob", "ip", "nothing blocked").await;
-    assert_eq!(alice.underlay_sessions().await, 0, "IP works, no session");
-    assert_eq!(bob.underlay_sessions().await, 0, "IP works, no session");
+        // IP works: the underlay reaches the neighbor over IP, so it holds no session.
+        alice.wait_for_rung("bob", "ip", "nothing blocked").await;
+        assert_eq!(alice.underlay_sessions().await, 0, "IP works, no session");
+        assert_eq!(bob.underlay_sessions().await, 0, "IP works, no session");
 
-    // Both ends lose IP to each other: the application pair rides WebRTC, and the
-    // underlay opens a session to the same neighbor.
-    alice.block_ip_to(bob.ports()).await;
-    bob.block_ip_to(alice.ports()).await;
-    alice.wait_for_rung("bob", "webrtc", "IP blocked").await;
-    alice
-        .wait_for_underlay_session("bob", "alice, IP blocked")
-        .await;
-    bob.wait_for_underlay_session("alice", "bob, IP blocked")
-        .await;
+        // Both ends lose IP to each other: the application pair rides WebRTC, and the
+        // underlay opens a session to the same neighbor.
+        alice.block_ip_to(bob.ports()).await;
+        bob.block_ip_to(alice.ports()).await;
+        alice.wait_for_rung("bob", "webrtc", "IP blocked").await;
+        alice
+            .wait_for_underlay_session("bob", "alice, IP blocked")
+            .await;
+        bob.wait_for_underlay_session("alice", "bob, IP blocked")
+            .await;
 
-    for member in [alice, bob] {
-        let _ = member.membership.node.leave().await;
-    }
+        for member in [alice, bob] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }
 
 /// The proof of the leg of the underlay: a cell is forwarded over a `WebRTC` edge
@@ -362,106 +355,128 @@ async fn cut_webrtc_between_alice_and_bob(alice: &Member, bob: &Member) {
 /// The same mesh of three, with IP cut on the application endpoints only: the
 /// underlays keep IP to each other. It tells a session that the cut of the
 /// underlay stops from a session that three members stop.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_underlay_opens_a_session_to_carol_when_only_the_application_ip_is_cut() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let (alice, bob, carol) = three_members(&relay).await;
-    cut_application_ip_from_alice(&alice, &bob, &carol).await;
-    alice
-        .wait_for_rung("carol", "webrtc", "alice to carol")
-        .await;
-    alice
-        .wait_for_underlay_session("carol", "application IP cut")
-        .await;
-    for member in [alice, bob, carol] {
-        let _ = member.membership.node.leave().await;
-    }
+#[test]
+fn the_underlay_opens_a_session_to_carol_when_only_the_application_ip_is_cut() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let (alice, bob, carol) = three_members(&relay).await;
+        cut_application_ip_from_alice(&alice, &bob, &carol).await;
+        alice
+            .wait_for_rung("carol", "webrtc", "alice to carol")
+            .await;
+        alice
+            .wait_for_underlay_session("carol", "application IP cut")
+            .await;
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let (alice, mut bob, carol) = three_members(&relay).await;
-    let run_started = Instant::now();
+/// The WARN of the cut alice-bob pair: its target and a part of its text.
+const STAYS_ON_RELAY: (&str, &str) = (
+    "habilis_network_iroh_multihop_transport::underlay",
+    "multihop underlay stays on the relay: this hop is not advertised as a link",
+);
 
-    // The direct link of alice and bob is impossible from the start: no IP between
-    // their application endpoints or their underlays, and no WebRTC between them
-    // on either. Alice and carol lose IP on the application endpoints only: their
-    // pair rides WebRTC, with the underlays still on IP, so that sessions open
-    // (on demand, from a send that a payload path carries; a pair with no such
-    // path would never be offered one).
-    cut_webrtc_between_alice_and_bob(&alice, &bob).await;
-    cut_underlay_ip_from_alice(&alice, &bob, &carol, false);
-    cut_application_ip_from_alice(&alice, &bob, &carol).await;
-    alice
-        .wait_for_rung("carol", "webrtc", "alice to carol")
-        .await;
-    eprintln!(
-        "TIMING alice to carol on webrtc after {:?}",
-        run_started.elapsed()
-    );
-    alice
-        .wait_for_underlay_session("carol", "alice, IP blocked to carol")
-        .await;
-    eprintln!(
-        "TIMING underlay session of alice after {:?}",
-        run_started.elapsed()
-    );
+#[test]
+fn a_cell_is_forwarded_over_a_webrtc_underlay_edge_through_a_third_member() {
+    let guard = habilis_network_test_tracing::init();
+    guard.expect_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1);
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let (alice, mut bob, carol) = three_members(&relay).await;
+        let run_started = Instant::now();
 
-    // Then the underlay of alice and carol loses IP too: the edge between them is
-    // the WebRTC session, and the only way from alice to bob is carol.
-    cut_underlay_ip_from_alice(&alice, &bob, &carol, true);
-    alice
-        .wait_for_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
-        .await;
-    eprintln!(
-        "TIMING alice to bob on multihop after {:?}",
-        run_started.elapsed()
-    );
+        // The direct link of alice and bob is impossible from the start: no IP between
+        // their application endpoints or their underlays, and no WebRTC between them
+        // on either. Alice and carol lose IP on the application endpoints only: their
+        // pair rides WebRTC, with the underlays still on IP, so that sessions open
+        // (on demand, from a send that a payload path carries; a pair with no such
+        // path would never be offered one).
+        cut_webrtc_between_alice_and_bob(&alice, &bob).await;
+        cut_underlay_ip_from_alice(&alice, &bob, &carol, false);
+        cut_application_ip_from_alice(&alice, &bob, &carol).await;
+        alice
+            .wait_for_rung("carol", "webrtc", "alice to carol")
+            .await;
+        eprintln!(
+            "TIMING alice to carol on webrtc after {:?}",
+            run_started.elapsed()
+        );
+        alice
+            .wait_for_underlay_session("carol", "alice, IP blocked to carol")
+            .await;
+        eprintln!(
+            "TIMING underlay session of alice after {:?}",
+            run_started.elapsed()
+        );
 
-    // The multihop rung can be selected while the route is still stale. Traffic
-    // goes on, so that cells take the route through carol.
-    let started = Instant::now();
-    let mut probes = 0_u32;
-    while carol.forwarded_cells().await == 0 {
-        assert!(
-            started.elapsed() < STEP_DEADLINE,
-            "alice reached bob on the multihop rung, but carol forwarded no cell \
+        // Then the underlay of alice and carol loses IP too: the edge between them is
+        // the WebRTC session, and the only way from alice to bob is carol.
+        cut_underlay_ip_from_alice(&alice, &bob, &carol, true);
+        alice
+            .wait_for_rung("bob", "multihop", "IP and WebRTC cut between alice and bob")
+            .await;
+        eprintln!(
+            "TIMING alice to bob on multihop after {:?}",
+            run_started.elapsed()
+        );
+
+        // The multihop rung can be selected while the route is still stale. Traffic
+        // goes on, so that cells take the route through carol.
+        let started = Instant::now();
+        let mut probes = 0_u32;
+        while carol.forwarded_cells().await == 0 {
+            assert!(
+                started.elapsed() < STEP_DEADLINE,
+                "alice reached bob on the multihop rung, but carol forwarded no cell \
              after {probes} probes"
-        );
-        probes += 1;
-        let _ = alice.send("bob", &format!("forward probe {probes}")).await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+            );
+            probes += 1;
+            let _ = alice.send("bob", &format!("forward probe {probes}")).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
 
-    // A payload cell goes from alice to bob over the hop: the message arrives, and
-    // carol has forwarded more cells than before it was sent.
-    let before = carol.forwarded_cells().await;
-    let text = "payload over the hop";
-    alice
-        .send("bob", text)
-        .await
-        .unwrap_or_else(|error| panic!("the send over the hop was refused: {error}"));
-    let sent_at = Instant::now();
-    while !bob.saw_msg(text) {
+        // A payload cell goes from alice to bob over the hop: the message arrives, and
+        // carol has forwarded more cells than before it was sent.
+        let before = carol.forwarded_cells().await;
+        let text = "payload over the hop";
+        alice
+            .send("bob", text)
+            .await
+            .unwrap_or_else(|error| panic!("the send over the hop was refused: {error}"));
+        let sent_at = Instant::now();
+        while !bob.saw_msg(text) {
+            assert!(
+                sent_at.elapsed() < PAYLOAD_DEADLINE,
+                "the message never reached bob over the hop"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         assert!(
-            sent_at.elapsed() < PAYLOAD_DEADLINE,
-            "the message never reached bob over the hop"
+            carol.forwarded_cells().await > before,
+            "the message reached bob, but carol forwarded no cell for it"
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    assert!(
-        carol.forwarded_cells().await > before,
-        "the message reached bob, but carol forwarded no cell for it"
-    );
 
-    for member in [alice, bob, carol] {
-        let _ = member.membership.node.leave().await;
-    }
+        // The underlay logs that it stays on the relay 20 s after its first refusal of the cut
+        // pair, which can be later than the payload checks end.
+        let warned_after = Instant::now();
+        while !habilis_network_test_tracing::saw_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1) {
+            assert!(
+                warned_after.elapsed() < Duration::from_secs(45),
+                "the underlay never logged that it stays on the relay"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }

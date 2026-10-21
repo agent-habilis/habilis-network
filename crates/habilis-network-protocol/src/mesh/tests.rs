@@ -4,6 +4,7 @@ use super::{
 };
 use crate::crypto::{Password, Seed};
 use crate::mesh::lookup::MAX_RELAY_URL_BYTES;
+use habilis_network_test_tracing::test;
 
 fn dummy_seed() -> Seed {
     Seed::from_bytes([7u8; SEED_LEN])
@@ -328,7 +329,12 @@ fn golden_passworded_mesh_id_topic_and_rendezvous_are_pinned() {
     );
     assert_eq!(
         mesh.rendezvous_ports(),
-        [9654, 21191, 64941, 55185, 63449, 5703, 10814, 29199]
+        [9654, 21191, 1453, 23441, 31705, 5703, 10814, 29199]
+    );
+    assert_ne!(
+        mesh.rendezvous_ports(),
+        [9654, 21191, 64941, 55185, 63449, 5703, 10814, 29199],
+        "the ladder of the range 1024..=65535 is no longer derived"
     );
 }
 
@@ -503,6 +509,7 @@ fn mesh_id_round_trips_max_byte_name() {
 
 mod prop {
     use super::LockedMesh;
+    use habilis_network_test_tracing::test;
     use proptest::{
         array::{uniform16, uniform32},
         prelude::any,

@@ -412,6 +412,15 @@ impl Member {
             .expect("the loop answers")
     }
 
+    /// Cells that this member refused to write on a hop that stays on the relay.
+    async fn refused_on_relay(&self) -> u64 {
+        self.membership
+            .request(|reply| Request::MultihopCounters { reply })
+            .await
+            .expect("the loop answers")
+            .refused_on_relay
+    }
+
     async fn forwarded_cells(&self) -> u64 {
         self.membership
             .request(|reply| Request::ForwardedCells { reply })
@@ -508,15 +517,6 @@ impl Member {
     async fn leave(self) {
         let _ = self.membership.node.leave().await;
     }
-}
-
-/// With `RUST_LOG` set, a failing run prints the engine's log.
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
 }
 
 /// Wait until every member holds a live gossip link to each of the other two, read
@@ -720,8 +720,36 @@ async fn probe_until_forwarded(name: &str, alice: &Member, carol: &Member) {
     }
 }
 
+/// The WARN of a cell whose cut pair stays on the relay: the target and a part of its text.
+const STAYS_ON_RELAY: (&str, &str) = (
+    "habilis_network_iroh_multihop_transport::underlay",
+    "multihop underlay stays on the relay: this hop is not advertised as a link",
+);
+
+/// The cell whose WARN depends on a cell tried on the cut hop: it is logged only if some member
+/// refused a cell on the relay.
+const STAYS_ON_RELAY_IF_REFUSED: &str = "udp_multihop_gossip_ip_webrtc_via_third";
+
+/// The cells that always log the WARN for the pair that the cuts leave without a direct hop.
+fn stays_on_relay(name: &str) -> bool {
+    matches!(
+        name,
+        "udp_webrtc_multihop_ip_webrtc_via_third"
+            | "udp_multihop_ip_webrtc_via_third"
+            | "webrtc_multihop_ip_webrtc_via_third"
+    )
+}
+
+/// Runs a cell on a runtime that drops before the guard of the test.
+fn run_cell(cell: Cell, name: &str, sender_id: SenderId) {
+    let guard = habilis_network_test_tracing::init();
+    if stays_on_relay(name) {
+        guard.expect_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1);
+    }
+    habilis_network_test_tracing::run_multi_thread(guard, 4, run(cell, name, sender_id));
+}
+
 async fn run(cell: Cell, name: &str, sender_id: SenderId) {
-    init_logging();
     if cell.has(Transport::Gossip) && !GOSSIP_INSTALLED {
         eprintln!("SKIPPED {name}: the engine does not install the gossip transport yet");
         return;
@@ -818,6 +846,30 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
         }
     }
 
+    let refused = if name == STAYS_ON_RELAY_IF_REFUSED {
+        alice.refused_on_relay().await
+            + bob.refused_on_relay().await
+            + carol.refused_on_relay().await
+    } else {
+        0
+    };
+    if refused > 0 {
+        // A cell was refused on the relay, so a hop was refused and the WARN is due.
+        habilis_network_test_tracing::expect_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1);
+    }
+    if stays_on_relay(name) || refused > 0 {
+        // The underlay logs the WARN 20 s after its first refusal of the cut pair, which can be
+        // later than the checks of the cell end.
+        let warned_after = Instant::now();
+        while !habilis_network_test_tracing::saw_warn(STAYS_ON_RELAY.0, STAYS_ON_RELAY.1) {
+            assert!(
+                warned_after.elapsed() < Duration::from_mins(1),
+                "{name}: the underlay never logged that it stays on the relay"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     for member in [alice, bob, carol] {
         member.leave().await;
     }
@@ -839,14 +891,14 @@ macro_rules! cells {
         )),*];
 
         $(
-            #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+            #[test]
             $(#[$meta])*
-            async fn $name() {
+            fn $name() {
                 let (_, cell) = CELLS
                     .iter()
                     .find(|(name, _)| *name == stringify!($name))
                     .expect("the cell is in the table");
-                run(*cell, stringify!($name), SenderId::Any).await;
+                run_cell(*cell, stringify!($name), SenderId::Any);
             }
         )*
     };
@@ -857,130 +909,131 @@ macro_rules! cells {
 /// back, the frames are parked (the roster reads `relay-only`), and the session carries them
 /// when it attaches. Every probe that was sent while the lane read `relay-only` must reach bob,
 /// and the run prints how long after the rung changed the last one arrived.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
-    const NAME: &str = "udp_webrtc_ip_direct_parks_a_frame";
-    const AFTER_THE_RUNG: Duration = Duration::from_secs(3);
-    init_logging();
-    let (_, cell) = CELLS
-        .iter()
-        .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
-        .expect("the cell is in the table");
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Higher).await;
-    assert!(
-        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
-        "{NAME}: the three members never formed a mesh"
-    );
-    alice.expect_rung("bob", "ip", NAME).await;
-    for cut in cell.cuts() {
-        apply(cut, &alice, &bob, &carol).await;
-    }
+fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        const NAME: &str = "udp_webrtc_ip_direct_parks_a_frame";
+        const AFTER_THE_RUNG: Duration = Duration::from_secs(3);
+        let (_, cell) = CELLS
+            .iter()
+            .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
+            .expect("the cell is in the table");
 
-    // (text, the lane read before the send, when it went)
-    let mut sent: Vec<(String, bool, Instant)> = Vec::new();
-    let started = Instant::now();
-    let mut on_the_rung_since: Option<Instant> = None;
-    let mut next_probe = Instant::now();
-    let mut last_parked_send: Option<Instant> = None;
-    // The lane reads `relay-only` only between the moment the proof is taken back and the
-    // attach, well under a second: so the lane is read every 20 ms, and a frame goes at once
-    // while it reads so (at most one every 100 ms), besides the probe of every second.
-    while started.elapsed() < STEP_DEADLINE {
-        let parked = alice.lane_to("bob").await.as_deref() == Some("relay-only");
-        let due = Instant::now() >= next_probe;
-        let extra = parked
-            && last_parked_send
-                .is_none_or(|sent_at| sent_at.elapsed() >= Duration::from_millis(100));
-        if due || extra {
-            let text = format!("parked {NAME} {}", sent.len());
-            let _ = alice.send("bob", &text).await;
-            sent.push((text, parked, Instant::now()));
-            if parked {
-                last_parked_send = Some(Instant::now());
-            }
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Higher).await;
+        assert!(
+            rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+            "{NAME}: the three members never formed a mesh"
+        );
+        alice.expect_rung("bob", "ip", NAME).await;
+        for cut in cell.cuts() {
+            apply(cut, &alice, &bob, &carol).await;
         }
-        if due {
-            next_probe = Instant::now() + Duration::from_secs(1);
-            if alice.rung_to("bob").await == Some("webrtc") {
-                let since = *on_the_rung_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= AFTER_THE_RUNG {
-                    break;
+
+        // (text, the lane read before the send, when it went)
+        let mut sent: Vec<(String, bool, Instant)> = Vec::new();
+        let started = Instant::now();
+        let mut on_the_rung_since: Option<Instant> = None;
+        let mut next_probe = Instant::now();
+        let mut last_parked_send: Option<Instant> = None;
+        // The lane reads `relay-only` only between the moment the proof is taken back and the
+        // attach, well under a second: so the lane is read every 20 ms, and a frame goes at once
+        // while it reads so (at most one every 100 ms), besides the probe of every second.
+        while started.elapsed() < STEP_DEADLINE {
+            let parked = alice.lane_to("bob").await.as_deref() == Some("relay-only");
+            let due = Instant::now() >= next_probe;
+            let extra = parked
+                && last_parked_send
+                    .is_none_or(|sent_at| sent_at.elapsed() >= Duration::from_millis(100));
+            if due || extra {
+                let text = format!("parked {NAME} {}", sent.len());
+                let _ = alice.send("bob", &text).await;
+                sent.push((text, parked, Instant::now()));
+                if parked {
+                    last_parked_send = Some(Instant::now());
                 }
-            } else {
-                on_the_rung_since = None;
             }
+            if due {
+                next_probe = Instant::now() + Duration::from_secs(1);
+                if alice.rung_to("bob").await == Some("webrtc") {
+                    let since = *on_the_rung_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= AFTER_THE_RUNG {
+                        break;
+                    }
+                } else {
+                    on_the_rung_since = None;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let on_the_rung = on_the_rung_since.unwrap_or_else(|| {
-        panic!(
-            "{NAME}: the rung never became webrtc after {} probes",
-            sent.len()
-        )
-    });
+        let on_the_rung = on_the_rung_since.unwrap_or_else(|| {
+            panic!(
+                "{NAME}: the rung never became webrtc after {} probes",
+                sent.len()
+            )
+        });
 
-    let parked: Vec<&(String, bool, Instant)> = sent.iter().filter(|probe| probe.1).collect();
-    assert!(
-        !parked.is_empty(),
-        "{NAME}: no probe went while the lane read relay-only, so the test proved nothing"
-    );
-    let waiting = Instant::now();
-    let mut late = Duration::ZERO;
-    for (text, _, _) in &parked {
-        while !bob.saw_msg(text) {
-            assert!(
-                waiting.elapsed() < PAYLOAD_DEADLINE,
-                "{NAME}: the frame {text:?} was parked and never reached bob"
-            );
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        let parked: Vec<&(String, bool, Instant)> = sent.iter().filter(|probe| probe.1).collect();
+        assert!(
+            !parked.is_empty(),
+            "{NAME}: no probe went while the lane read relay-only, so the test proved nothing"
+        );
+        let waiting = Instant::now();
+        let mut late = Duration::ZERO;
+        for (text, _, _) in &parked {
+            while !bob.saw_msg(text) {
+                assert!(
+                    waiting.elapsed() < PAYLOAD_DEADLINE,
+                    "{NAME}: the frame {text:?} was parked and never reached bob"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            late = late.max(on_the_rung.elapsed());
         }
-        late = late.max(on_the_rung.elapsed());
-    }
-    eprintln!(
-        "DIAG {NAME}: {} probes, {} sent while the lane read relay-only (first after {:?}), \
+        eprintln!(
+            "DIAG {NAME}: {} probes, {} sent while the lane read relay-only (first after {:?}), \
          the last one reached bob {:?} after the rung was first read",
-        sent.len(),
-        parked.len(),
-        parked.first().map(|probe| probe.2.duration_since(started)),
-        late,
-    );
-    for member in [alice, bob, carol] {
-        member.leave().await;
-    }
+            sent.len(),
+            parked.len(),
+            parked.first().map(|probe| probe.2.duration_since(started)),
+            late,
+        );
+        for member in [alice, bob, carol] {
+            member.leave().await;
+        }
+    });
 }
 
 /// `udp_webrtc_ip_direct` with the order of the ids fixed: only the lower id offers a session,
 /// and a pair that loses IP while the higher id sends needs the higher id to offer by itself.
-async fn udp_webrtc_ip_direct_with(sender_id: SenderId, name: &str) {
+fn udp_webrtc_ip_direct_with(sender_id: SenderId, name: &str) {
     let (_, cell) = CELLS
         .iter()
         .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
         .expect("the cell is in the table");
-    run(*cell, name, sender_id).await;
+    run_cell(*cell, name, sender_id);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn udp_webrtc_ip_direct_sender_has_the_higher_id() {
+fn udp_webrtc_ip_direct_sender_has_the_higher_id() {
     udp_webrtc_ip_direct_with(
         SenderId::Higher,
         "udp_webrtc_ip_direct_sender_has_the_higher_id",
-    )
-    .await;
+    );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn udp_webrtc_ip_direct_sender_has_the_lower_id() {
+fn udp_webrtc_ip_direct_sender_has_the_lower_id() {
     udp_webrtc_ip_direct_with(
         SenderId::Lower,
         "udp_webrtc_ip_direct_sender_has_the_lower_id",
-    )
-    .await;
+    );
 }
 
 cells! {
@@ -1114,51 +1167,54 @@ const LOOKUP_ONLY: &str = "lookup only on this mesh";
 
 /// With `gossip` off in the list, a pair that has no direct path is refused with a clear error:
 /// no silence, no delivery. The pair is alice and bob with IP between them cut, on `udp` alone.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
-    const NAME: &str = "udp_ip_direct_clear_error";
-    init_logging();
-    let (_, cell) = CELLS
-        .iter()
-        .find(|(cell, _)| *cell == "udp_ip_direct")
-        .expect("the cell is in the table");
-    assert!(!cell.has(Transport::Gossip) && cell.expected().is_none());
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Any).await;
-    assert!(
-        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
-        "{NAME}: the three members never formed a mesh"
-    );
-    alice.expect_rung("bob", "ip", NAME).await;
-    for cut in cell.cuts() {
-        apply(cut, &alice, &bob, &carol).await;
-    }
-    let waiting = Instant::now();
-    while alice.rung_to("bob").await == Some("ip") {
-        assert!(
-            waiting.elapsed() < LEAVE_DIRECT_DEADLINE,
-            "{NAME}: the pair never left IP after the cut"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        const NAME: &str = "udp_ip_direct_clear_error";
+        let (_, cell) = CELLS
+            .iter()
+            .find(|(cell, _)| *cell == "udp_ip_direct")
+            .expect("the cell is in the table");
 
-    let text = format!("matrix {NAME}");
-    let refusal = alice
-        .send("bob", &text)
-        .await
-        .expect_err("the send must fail, with either refusal");
-    assert!(
-        refusal.contains(LOOKUP_ONLY),
-        "{NAME}: the error must give the reason, got: {refusal}"
-    );
-    tokio::time::sleep(REFUSAL_WINDOW).await;
-    assert!(!bob.saw_msg(&text), "{NAME}: the refused message arrived");
-    for member in [alice, bob, carol] {
-        member.leave().await;
-    }
+        assert!(!cell.has(Transport::Gossip) && cell.expected().is_none());
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Any).await;
+        assert!(
+            rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+            "{NAME}: the three members never formed a mesh"
+        );
+        alice.expect_rung("bob", "ip", NAME).await;
+        for cut in cell.cuts() {
+            apply(cut, &alice, &bob, &carol).await;
+        }
+        let waiting = Instant::now();
+        while alice.rung_to("bob").await == Some("ip") {
+            assert!(
+                waiting.elapsed() < LEAVE_DIRECT_DEADLINE,
+                "{NAME}: the pair never left IP after the cut"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        let text = format!("matrix {NAME}");
+        let refusal = alice
+            .send("bob", &text)
+            .await
+            .expect_err("the send must fail, with either refusal");
+        assert!(
+            refusal.contains(LOOKUP_ONLY),
+            "{NAME}: the error must give the reason, got: {refusal}"
+        );
+        tokio::time::sleep(REFUSAL_WINDOW).await;
+        assert!(!bob.saw_msg(&text), "{NAME}: the refused message arrived");
+        for member in [alice, bob, carol] {
+            member.leave().await;
+        }
+    });
 }
 
 /// The gossip cells use lists that the protocol accepts, each with a direct path next to gossip,

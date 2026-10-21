@@ -147,13 +147,13 @@ pub(crate) struct LaneNode {
     pub(crate) endpoint: iroh::Endpoint,
     pub(crate) handle: habilis_network_iroh_webrtc_transport::WebRtcHandle,
     pub(crate) bob: EndpointId,
-    gossip: iroh_gossip::net::Gossip,
-    sender: crate::transport::MeshSender,
-    mesh: crate::protocol::MeshId,
-    identity: Identity,
-    our_pubkey: AuthorKey,
-    author: Nickname,
-    sink: crate::gossip::event::SilentSink,
+    pub(crate) gossip: iroh_gossip::net::Gossip,
+    pub(crate) sender: crate::transport::MeshSender,
+    pub(crate) mesh: crate::protocol::MeshId,
+    pub(crate) identity: Identity,
+    pub(crate) our_pubkey: AuthorKey,
+    pub(crate) author: Nickname,
+    pub(crate) sink: crate::gossip::event::SilentSink,
 }
 
 #[cfg(feature = "host")]
@@ -244,6 +244,7 @@ impl LaneNode {
 #[cfg(feature = "multihop")]
 mod log_capture_tests {
     use super::LogCapture;
+    use habilis_network_test_tracing::test;
 
     fn first_event() {
         tracing::debug!(target: "log-capture-test", "first event");

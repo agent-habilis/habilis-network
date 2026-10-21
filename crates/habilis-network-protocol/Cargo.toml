@@ -58,6 +58,7 @@ chacha20poly1305 = "0.10"
 zeroize = "1"
 
 [dev-dependencies]
+habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 proptest.workspace = true
 insta.workspace = true
 

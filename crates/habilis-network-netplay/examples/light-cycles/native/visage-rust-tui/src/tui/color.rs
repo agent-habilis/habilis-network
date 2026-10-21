@@ -103,6 +103,7 @@ mod tests {
     use super::{
         DEFAULT_COLOR, INVERSE, UNDERLINE, palette, push_attrs, push_bg, push_fg, truecolor,
     };
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn default_color_pushes_the_reset_code() {

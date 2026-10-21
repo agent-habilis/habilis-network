@@ -135,14 +135,6 @@ impl Member {
     }
 }
 
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
-}
-
 /// One broadcast, and when each observer got it, counted from its send.
 struct Probe {
     text: String,
@@ -536,7 +528,7 @@ async fn measure_race<P: Peer>(
 /// Three members of the membership app on a local relay. `cut` takes IP away between the two
 /// joiners, so that neither is a neighbor of the other and each has the creator as its only real
 /// peer. `transport: Vec::new()` is the default list.
-async fn membership_race(
+fn membership_race(
     name: &str,
     transport: Vec<Transport>,
     cut: bool,
@@ -544,33 +536,38 @@ async fn membership_race(
     expected: Duration,
     settle: bool,
 ) {
-    init_logging();
-    let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let creator = Member::create("creator", &relay_url, transport).await;
-    let j1 = Member::join("joiner-one", &creator).await;
-    let j2 = Member::join("joiner-two", &creator).await;
-    if cut {
-        j1.block_ip_to(j2.ports()).await;
-        j2.block_ip_to(j1.ports()).await;
-    }
-    run_race(name, delay, expected, settle, [creator, j1, j2]).await;
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let creator = Member::create("creator", &relay_url, transport).await;
+        let j1 = Member::join("joiner-one", &creator).await;
+        let j2 = Member::join("joiner-two", &creator).await;
+        if cut {
+            j1.block_ip_to(j2.ports()).await;
+            j2.block_ip_to(j1.ports()).await;
+        }
+        run_race(name, delay, expected, settle, [creator, j1, j2]).await;
+    });
 }
 
 /// Three members of the logging chat app on a loopback topic mesh.
-async fn logging_race(name: &str, delay: Duration, expected: Duration, settle: bool) {
-    init_logging();
-    let topic = format!("first-broadcast-{}", rand::random::<u64>());
-    let creator = LoggingMember::start(&topic, "creator").await;
-    let j1 = LoggingMember::start(&topic, "joiner-one").await;
-    let j2 = LoggingMember::start(&topic, "joiner-two").await;
-    run_race(name, delay, expected, settle, [creator, j1, j2]).await;
+fn logging_race(name: &str, delay: Duration, expected: Duration, settle: bool) {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let topic = format!("first-broadcast-{}", rand::random::<u64>());
+
+        let creator = LoggingMember::start(&topic, "creator").await;
+        let j1 = LoggingMember::start(&topic, "joiner-one").await;
+        let j2 = LoggingMember::start(&topic, "joiner-two").await;
+        run_race(name, delay, expected, settle, [creator, j1, j2]).await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_broadcast_sent_right_after_join_reaches_the_creator() {
+fn a_broadcast_sent_right_after_join_reaches_the_creator() {
     membership_race(
         "default list, at once",
         Vec::new(),
@@ -578,13 +575,12 @@ async fn a_broadcast_sent_right_after_join_reaches_the_creator() {
         Duration::ZERO,
         EXPECTED,
         false,
-    )
-    .await;
+    );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_broadcast_sent_a_second_after_join_reaches_the_creator() {
+fn a_broadcast_sent_a_second_after_join_reaches_the_creator() {
     membership_race(
         "default list, after 1 s",
         Vec::new(),
@@ -592,15 +588,14 @@ async fn a_broadcast_sent_a_second_after_join_reaches_the_creator() {
         Duration::from_secs(1),
         EXPECTED,
         false,
-    )
-    .await;
+    );
 }
 
 /// UDP only, with the joiners cut from each other: each joiner has the creator as its only
 /// real peer, so the flood has one hop to make.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_broadcast_right_after_join_reaches_the_creator_when_the_joiners_are_not_neighbors() {
+fn a_broadcast_right_after_join_reaches_the_creator_when_the_joiners_are_not_neighbors() {
     membership_race(
         "udp, joiners cut, at once",
         vec![Transport::Udp],
@@ -608,15 +603,14 @@ async fn a_broadcast_right_after_join_reaches_the_creator_when_the_joiners_are_n
         Duration::ZERO,
         EXPECTED,
         false,
-    )
-    .await;
+    );
 }
 
 /// Control: 20 s pass before the send, so the path is proven, and the broadcast must arrive at
 /// once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
+fn a_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
     membership_race(
         "default list, 20 s after join",
         Vec::new(),
@@ -624,40 +618,37 @@ async fn a_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
         Duration::from_secs(20),
         Duration::from_secs(5),
         true,
-    )
-    .await;
+    );
 }
 
 /// The reporter's case: an app that logs chat, so that anti-entropy can resend it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_logged_broadcast_sent_right_after_join_reaches_the_creator() {
-    logging_race("logging app, at once", Duration::ZERO, EXPECTED, false).await;
+fn a_logged_broadcast_sent_right_after_join_reaches_the_creator() {
+    logging_race("logging app, at once", Duration::ZERO, EXPECTED, false);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_logged_broadcast_sent_a_second_after_join_reaches_the_creator() {
+fn a_logged_broadcast_sent_a_second_after_join_reaches_the_creator() {
     logging_race(
         "logging app, after 1 s",
         Duration::from_secs(1),
         EXPECTED,
         false,
-    )
-    .await;
+    );
 }
 
 /// Control for the logging app.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn a_logged_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
+fn a_logged_broadcast_sent_after_the_mesh_settled_reaches_the_creator() {
     logging_race(
         "logging app, 20 s after join",
         Duration::from_secs(20),
         Duration::from_secs(5),
         true,
-    )
-    .await;
+    );
 }
 
 /// How many races run at once in the load test: the monitor contract of agent-gossip runs 30
@@ -667,40 +658,42 @@ const PARALLEL_RACES: usize = 24;
 /// The reporter's shape: many meshes of the logging app at once, so that the host is loaded and
 /// the joiners mesh with each other before the creator has its first link. Each joiner sends at
 /// once. The test reports how many races lost a broadcast.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "run by cargo task matrix"]
-async fn broadcasts_sent_right_after_join_reach_the_creator_under_load() {
-    init_logging();
-    let races: Vec<_> = (0..PARALLEL_RACES)
-        .map(|index| {
-            tokio::spawn(async move {
-                let topic = format!("first-broadcast-load-{index}-{}", rand::random::<u64>());
-                let creator = LoggingMember::start(&topic, "creator").await;
-                let j1 = LoggingMember::start(&topic, "joiner-one").await;
-                let j2 = LoggingMember::start(&topic, "joiner-two").await;
-                measure_race(
-                    &format!("logging app, load race {index}"),
-                    Duration::ZERO,
-                    EXPECTED,
-                    false,
-                    [creator, j1, j2],
-                )
-                .await
+fn broadcasts_sent_right_after_join_reach_the_creator_under_load() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let races: Vec<_> = (0..PARALLEL_RACES)
+            .map(|index| {
+                tokio::spawn(async move {
+                    let topic = format!("first-broadcast-load-{index}-{}", rand::random::<u64>());
+                    let creator = LoggingMember::start(&topic, "creator").await;
+                    let j1 = LoggingMember::start(&topic, "joiner-one").await;
+                    let j2 = LoggingMember::start(&topic, "joiner-two").await;
+                    measure_race(
+                        &format!("logging app, load race {index}"),
+                        Duration::ZERO,
+                        EXPECTED,
+                        false,
+                        [creator, j1, j2],
+                    )
+                    .await
+                })
             })
-        })
-        .collect();
-    let mut lost = Vec::new();
-    for race in races {
-        if let Err(line) = race.await.expect("the race task ends") {
-            lost.push(line);
+            .collect();
+        let mut lost = Vec::new();
+        for race in races {
+            if let Err(line) = race.await.expect("the race task ends") {
+                lost.push(line);
+            }
         }
-    }
-    for line in &lost {
-        eprintln!("{line}");
-    }
-    assert!(
-        lost.is_empty(),
-        "{} of {PARALLEL_RACES} races lost a broadcast to the creator",
-        lost.len()
-    );
+        for line in &lost {
+            eprintln!("{line}");
+        }
+        assert!(
+            lost.is_empty(),
+            "{} of {PARALLEL_RACES} races lost a broadcast to the creator",
+            lost.len()
+        );
+    });
 }

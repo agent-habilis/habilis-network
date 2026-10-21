@@ -98,6 +98,7 @@ pub fn resolve(target: &JoinTarget) -> Result<LockedMesh> {
 #[cfg(test)]
 mod tests {
     use super::{JoinTarget, JoinTargetError, resolve};
+    use habilis_network_test_tracing::test;
 
     // The consumer builds its own "use the topic command instead" hint off this
     // variant, so the trimmed input has to survive classification verbatim.

@@ -272,6 +272,7 @@ impl<T> Drop for SessionGuard<T> {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::cell::Cell;
     use std::rc::Rc;
 

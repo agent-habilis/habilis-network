@@ -14,7 +14,7 @@
 //! only after the cell proves it belongs here, since `FORWARD_ALPN` accepts a
 //! connection from anyone and an unchecked relay is an amplifying reflector.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -52,9 +52,21 @@ const MAX_WRITERS: usize = 64;
 /// the only bound, and it multiplies by the writer count instead of capping it.
 const FORWARD_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 
-/// Hops without a vector that get a warning of their own. The ids come off the wire, so the set
+/// Hops of delivered cells that the forwarder remembers, so that a reply along a reversed route
+/// can tell its first hop. The ids come off the wire, so the set has a ceiling.
+const HEARD_HOPS_CAP: usize = 1024;
+
+/// Hops without a vector that get a log line of their own. The ids come off the wire, so the map
 /// that remembers them has a ceiling.
 const UNRESOLVED_SEEN_CAP: usize = 128;
+
+/// The hops that named a cell this node delivered, newest last. Past [`HEARD_HOPS_CAP`] hops
+/// the oldest is forgotten.
+#[derive(Debug, Default)]
+struct HeardHops {
+    order: VecDeque<UnderlayId>,
+    set: HashSet<UnderlayId>,
+}
 
 /// Dial attempts before a writer task gives up on an unreachable next hop.
 const DIAL_ATTEMPTS: usize = 4;
@@ -69,7 +81,7 @@ pub(crate) struct Delivered {
     pub(crate) packet: Vec<u8>,
 }
 
-/// How long a reading of a connection's selected path stands. The path moves
+/// How long a reading of a connection's paths stands. The path moves
 /// rarely, and asking for it on every cell would cost more than the cell.
 const PATH_RECHECK: Duration = Duration::from_millis(250);
 
@@ -85,9 +97,9 @@ fn paths_of(connection: &Connection) -> Vec<(TransportAddr, bool)> {
 /// Whether a writer sends on a selected path that is not the relay.
 /// Nothing selected is not trusted: the engine's own rule for payload
 /// (`payload_allowed_on`) refuses until a path is selected.
-fn direct_for_writer(paths: &[(TransportAddr, bool)]) -> bool {
+fn direct_for_writer<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, bool)>) -> bool {
     paths
-        .iter()
+        .into_iter()
         .any(|(addr, selected)| *selected && !matches!(addr, TransportAddr::Relay(_)))
 }
 
@@ -99,9 +111,9 @@ fn direct_for_writer(paths: &[(TransportAddr, bool)]) -> bool {
 /// so the selected path here says nothing about them. The cost: a cell that really
 /// came over the relay is admitted while an IP path is also open. The dialler's
 /// writer gate refuses relay cells, and iroh shows no path per datagram.
-fn direct_for_inbound(paths: &[(TransportAddr, bool)]) -> bool {
+fn direct_for_inbound<'a>(paths: impl IntoIterator<Item = &'a (TransportAddr, bool)>) -> bool {
     paths
-        .iter()
+        .into_iter()
         .any(|(addr, _)| !matches!(addr, TransportAddr::Relay(_)))
 }
 
@@ -112,13 +124,10 @@ fn direct_for_inbound(paths: &[(TransportAddr, bool)]) -> bool {
 /// the gate would read a direct path for ever: the cut would not reach a live writer. So the
 /// gate leaves the blocked paths out of what it reads.
 fn unblocked(
-    paths: Vec<(TransportAddr, bool)>,
+    paths: &[(TransportAddr, bool)],
     blocked: impl Fn(&TransportAddr) -> bool,
-) -> Vec<(TransportAddr, bool)> {
-    paths
-        .into_iter()
-        .filter(|(path, _)| !blocked(path))
-        .collect()
+) -> impl Iterator<Item = &(TransportAddr, bool)> {
+    paths.iter().filter(move |entry| !blocked(&entry.0))
 }
 
 /// Whether a test took `path` away from the endpoint `local`: the question that the selector
@@ -175,7 +184,10 @@ struct RelayGate {
     /// The underlay endpoint that the gate stands on: the node whose blocks a test may set.
     local: EndpointId,
     role: GateRole,
-    reading: Option<(Instant, bool)>,
+    /// The paths at the last reading. A test cut is applied to them on every call.
+    reading: Option<(Instant, Vec<(TransportAddr, bool)>)>,
+    /// The verdict of the last call, so that the log text is built when it changes.
+    last_admitted: Option<bool>,
     /// The path list at the last refusal, so that the log says it once per change.
     last_refused_paths: Option<String>,
 }
@@ -187,45 +199,56 @@ impl RelayGate {
             local,
             role,
             reading: None,
+            last_admitted: None,
             last_refused_paths: None,
         }
     }
 
     /// Whether a cell may cross `connection` now.
     fn admits(&mut self, connection: &Connection) -> bool {
+        self.admits_paths(|| paths_of(connection))
+    }
+
+    /// `admits`, with the paths of the connection read by `read_paths`, which runs only when
+    /// the last reading is old.
+    fn admits_paths(&mut self, read_paths: impl FnOnce() -> Vec<(TransportAddr, bool)>) -> bool {
         if self.allow_relay {
             return true;
         }
         let now = Instant::now();
-        match self.reading {
-            Some((at, admitted)) if now.duration_since(at) < PATH_RECHECK => admitted,
-            _ => {
-                let paths = paths_of(connection);
-                let direct = unblocked(paths.clone(), |path| blocked_by_test(self.local, path));
-                let admitted = match self.role {
-                    GateRole::Writer => direct_for_writer(&direct),
-                    GateRole::Inbound => direct_for_inbound(&direct),
-                };
-                self.reading = Some((now, admitted));
-                if !admitted {
-                    let paths = path_list(paths);
-                    if self.last_refused_paths.as_deref() != Some(paths.as_str()) {
-                        match self.role {
-                            GateRole::Writer => tracing::debug!(
-                                %paths,
-                                "multihop underlay: no direct path is selected"
-                            ),
-                            GateRole::Inbound => tracing::debug!(
-                                %paths,
-                                "multihop underlay: no open path is not the relay"
-                            ),
-                        }
-                        self.last_refused_paths = Some(paths);
+        let fresh =
+            matches!(&self.reading, Some((at, _)) if now.duration_since(*at) < PATH_RECHECK);
+        if !fresh {
+            self.reading = Some((now, read_paths()));
+        }
+        let paths = self
+            .reading
+            .as_ref()
+            .map_or(&[][..], |(_, paths)| paths.as_slice());
+        let direct = unblocked(paths, |path| blocked_by_test(self.local, path));
+        let admitted = match self.role {
+            GateRole::Writer => direct_for_writer(direct),
+            GateRole::Inbound => direct_for_inbound(direct),
+        };
+        // The cell path allocates nothing: the text of the paths is built only when the
+        // reading is new or the verdict changed.
+        let changed = !fresh || self.last_admitted != Some(admitted);
+        self.last_admitted = Some(admitted);
+        if !admitted && changed {
+            let paths = path_list(paths.iter().cloned());
+            if self.last_refused_paths.as_deref() != Some(paths.as_str()) {
+                match self.role {
+                    GateRole::Writer => {
+                        tracing::debug!(%paths, "multihop underlay: no direct path is selected");
+                    }
+                    GateRole::Inbound => {
+                        tracing::debug!(%paths, "multihop underlay: no open path is not the relay");
                     }
                 }
-                admitted
+                self.last_refused_paths = Some(paths);
             }
         }
+        admitted
     }
 }
 
@@ -400,8 +423,12 @@ pub(crate) struct Forwarder {
     topology: Arc<RwLock<Topology>>,
     /// Hops that a writer was spawned for with no vector in the topology: a hop without a vector.
     unresolved_hops: AtomicU64,
-    /// The hops that were warned about, one line each: see [`UNRESOLVED_SEEN_CAP`].
-    unresolved_seen: Mutex<HashSet<UnderlayId>>,
+    /// The hops that got a log line, and whether it was a warning: see [`UNRESOLVED_SEEN_CAP`].
+    unresolved_seen: Mutex<HashMap<UnderlayId, bool>>,
+    /// The hops that named a cell this node delivered: the sender and the hops of its route. A
+    /// reply goes back along that route reversed, so these are the hops that can lack a vector
+    /// for a normal reason: see [`HEARD_HOPS_CAP`].
+    heard_hops: Mutex<HeardHops>,
 }
 
 impl Forwarder {
@@ -429,7 +456,8 @@ impl Forwarder {
             },
             topology,
             unresolved_hops: AtomicU64::new(0),
-            unresolved_seen: Mutex::new(HashSet::new()),
+            unresolved_seen: Mutex::new(HashMap::new()),
+            heard_hops: Mutex::new(HeardHops::default()),
         }
     }
 
@@ -443,40 +471,108 @@ impl Forwarder {
     /// vector names the same underlay endpoint as the hop. A hop without a vector is dialed
     /// by its id alone, never at an address that a cell carries, and counted: it may still be reachable by what iroh
     /// knows of the id, and if it is not, the cells are lost like any other.
+    ///
+    /// Logged at debug when the hop is explained. A cell that this node delivered named it: a
+    /// reply goes back along the reversed route of a cell, and the sender's first link-vector
+    /// arrives some 15 s after it starts. Or it is a link of this node: the origin of a route
+    /// saw the vector of a new neighbor before this node did, and the link reaches it. Or this
+    /// node held the vector and removed it, because the peer left or the vector expired: the
+    /// cells in flight to the peer still name it, and the origin of the route is behind. Any
+    /// other hop without a vector is a warning.
     fn dial_addr(&self, hop: &RouteHop) -> EndpointAddr {
-        let known = self
-            .topology
-            .read()
-            .expect("topology lock poisoned")
-            .underlay_of(hop.app_id)
-            .filter(|addr| UnderlayId::new(addr.id) == hop.underlay_id);
+        let (known, gone) = {
+            let topology = self.topology.read().expect("topology lock poisoned");
+            let known = topology
+                .underlay_of(hop.app_id)
+                .filter(|addr| UnderlayId::new(addr.id) == hop.underlay_id);
+            (known, topology.is_gone(hop.app_id))
+        };
         known.unwrap_or_else(|| {
             let total = self.unresolved_hops.fetch_add(1, Ordering::Relaxed) + 1;
-            if self.first_without_vector(hop.underlay_id, total) {
-                tracing::warn!(
-                    total,
-                    hop = %hop.underlay_id.fmt_short(),
-                    app_id = %hop.app_id.fmt_short(),
-                    "multihop forwarder: hop without a vector, dialing it by id"
-                );
+            let explained =
+                gone || self.heard_hop(hop.underlay_id) || self.is_link_of_ours(hop.app_id);
+            if self.line_is_due(hop.underlay_id, total, explained) {
+                if gone {
+                    tracing::debug!(
+                        total,
+                        hop = %hop.underlay_id.fmt_short(),
+                        app_id = %hop.app_id.fmt_short(),
+                        "multihop forwarder: hop whose vector is gone, dialing it by id"
+                    );
+                } else if explained {
+                    tracing::debug!(
+                        total,
+                        hop = %hop.underlay_id.fmt_short(),
+                        app_id = %hop.app_id.fmt_short(),
+                        "multihop forwarder: hop without a vector, dialing it by id"
+                    );
+                } else {
+                    tracing::warn!(
+                        total,
+                        hop = %hop.underlay_id.fmt_short(),
+                        app_id = %hop.app_id.fmt_short(),
+                        "multihop forwarder: hop without a vector that no delivered cell named, dialing it by id"
+                    );
+                }
             }
             EndpointAddr::new(hop.underlay_id.get())
         })
     }
 
-    /// Whether a warning is due for the hop `underlay_id`, found without a vector for the
-    /// `total`-th time: one per distinct hop. The ids come off the wire, so the set that
-    /// remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`] hops the rule is one warning in 256.
-    fn first_without_vector(&self, underlay_id: UnderlayId, total: u64) -> bool {
+    /// Whether `app_id` is a link in the vector that this node published of itself.
+    fn is_link_of_ours(&self, app_id: AppId) -> bool {
+        self.topology
+            .read()
+            .expect("topology lock poisoned")
+            .links_of(self.self_app_id)
+            .is_some_and(|links| links.contains(&app_id))
+    }
+
+    /// Whether a cell that this node delivered named the hop `underlay_id`.
+    fn heard_hop(&self, underlay_id: UnderlayId) -> bool {
+        self.heard_hops
+            .lock()
+            .expect("heard hops poisoned")
+            .set
+            .contains(&underlay_id)
+    }
+
+    /// Remember the hops of the reply route of a delivered cell. Past [`HEARD_HOPS_CAP`] hops
+    /// the oldest is forgotten.
+    fn note_heard(&self, reply_route: &Route) {
+        let mut heard = self.heard_hops.lock().expect("heard hops poisoned");
+        for hop in reply_route.hops() {
+            if !heard.set.insert(hop.underlay_id) {
+                continue;
+            }
+            heard.order.push_back(hop.underlay_id);
+            if heard.order.len() > HEARD_HOPS_CAP
+                && let Some(oldest) = heard.order.pop_front()
+            {
+                heard.set.remove(&oldest);
+            }
+        }
+    }
+
+    /// Whether a log line is due for the hop `underlay_id`, found without a vector for the
+    /// `total`-th time, `explained` or not: one line per distinct hop, and one warning per hop,
+    /// which a hop that was explained the first time still gets when it is not any more. The ids
+    /// come off the wire, so the map that remembers them is bounded; past [`UNRESOLVED_SEEN_CAP`]
+    /// hops the rule is one line in 256.
+    fn line_is_due(&self, underlay_id: UnderlayId, total: u64, explained: bool) -> bool {
         let mut seen = self
             .unresolved_seen
             .lock()
             .expect("unresolved set poisoned");
-        if seen.contains(&underlay_id) {
-            return false;
+        if let Some(warned) = seen.get_mut(&underlay_id) {
+            if *warned || explained {
+                return false;
+            }
+            *warned = true;
+            return true;
         }
         if seen.len() < UNRESOLVED_SEEN_CAP {
-            seen.insert(underlay_id);
+            seen.insert(underlay_id, !explained);
             return true;
         }
         total.is_multiple_of(256)
@@ -610,6 +706,7 @@ impl Forwarder {
             self.note_drop("return route is not a legal route");
             return;
         };
+        self.note_heard(&route);
         let delivered = Delivered {
             remote: route.encode(),
             packet: cell.packet,
@@ -877,14 +974,15 @@ impl ProtocolHandler for ForwardAcceptor {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, RwLock, TransportAddr,
-        UNRESOLVED_SEEN_CAP,
+        Arc, AtomicUsize, Delivered, Duration, Forwarder, MAX_WRITERS, Ordering, RwLock,
+        TransportAddr, UNRESOLVED_SEEN_CAP,
     };
     use crate::addr::{Route, RouteHop};
     use crate::role::{AppId, UnderlayId};
     use crate::test_support::relay_server;
     use crate::topology::{LinkVector, Topology};
     use crate::wire::Cell;
+    use habilis_network_test_tracing::{expect_warn, test};
     use iroh::endpoint::presets;
     use iroh::endpoint::transports::{PathSelection, PathSelectionContext, PathSelector};
     use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
@@ -899,6 +997,12 @@ mod tests {
         }
     }
 
+    /// Closes the endpoint at the end of the test, so that it does not drop open.
+    fn close_at_end(endpoint: &Endpoint) {
+        let endpoint = endpoint.clone();
+        habilis_network_test_tracing::at_end(async move { endpoint.close().await });
+    }
+
     /// A forwarder over a real loopback underlay, plus the delivery receiver the
     /// local transport would hold. `app_id` is a distinct key from the underlay's,
     /// as it is in production.
@@ -911,6 +1015,7 @@ mod tests {
             .bind()
             .await
             .expect("bind underlay endpoint");
+        close_at_end(&underlay);
         let app_id = AppId::new(SecretKey::from_bytes(&[99; 32]).public());
         let (inbound, received) = mpsc::channel(4);
         (
@@ -953,7 +1058,7 @@ mod tests {
             .len()
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_that_ends_at_us_is_delivered_locally() {
         // The happy path the refusals below are measured against.
         let (forwarder, _app, mut received) = forwarder().await;
@@ -968,7 +1073,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_that_ends_at_us_is_counted_as_delivered() {
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
@@ -981,8 +1086,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_full_inbox_drops_the_cell_and_counts_it() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"inbox of the local transport is full\"",
+        );
         // The inbox of the fixture holds 4 cells and nothing drains it, as on a transport
         // that is never polled: the fifth and sixth cell are lost, and the counters say so.
         let (forwarder, _app, _received) = forwarder().await;
@@ -995,15 +1104,23 @@ mod tests {
         assert_eq!((counters.delivered, counters.dropped), (4, 2));
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_packet_that_does_not_fit_the_buffer_is_counted_as_dropped() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop transport dropping packets",
+        );
         let (forwarder, _app, _received) = forwarder().await;
         forwarder.note_oversized(2000, 1500);
         assert_eq!(forwarder.counters().dropped, 1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_naming_another_node_is_neither_delivered_nor_forwarded() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"position does not name this node\"",
+        );
         // The reflector proper: we are nowhere on this route, so relaying it
         // would spend our bandwidth on a stranger's behalf.
         let (forwarder, _app, mut received) = forwarder().await;
@@ -1014,8 +1131,12 @@ mod tests {
         assert_eq!(live_writers(&forwarder), 0, "no writer, no dial, no bytes");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_from_the_wrong_upstream_is_refused() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"cell did not arrive from its preceding hop\"",
+        );
         // A hostile downstream hop bouncing a structurally valid cell back at
         // us. Every hop on this route is real and we genuinely occupy `pos`, so
         // only the authenticated sender id catches it.
@@ -1032,8 +1153,12 @@ mod tests {
         assert_eq!(live_writers(&forwarder), 0);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_positioned_past_the_end_is_not_delivered() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"position past the end of the route\"",
+        );
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
         let subject = cell(vec![self_hop(&forwarder)], 7, source.clone());
@@ -1041,8 +1166,12 @@ mod tests {
         assert!(received.try_recv().is_err());
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_passing_through_us_is_queued_for_the_next_hop() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
         let (forwarder, _app, mut received) = forwarder().await;
         let source = stranger(1);
         let next = stranger(5);
@@ -1053,8 +1182,12 @@ mod tests {
         assert_eq!(forwarder.forwarded_cells(), 1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_refused_cell_is_not_counted_as_forwarded() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"position does not name this node\"",
+        );
         let (forwarder, _app, _received) = forwarder().await;
         let source = stranger(1);
         let subject = cell(vec![stranger(2), stranger(3)], 0, source.clone());
@@ -1102,6 +1235,7 @@ mod tests {
             .bind()
             .await
             .expect("bind a relay-only underlay");
+        close_at_end(&underlay);
         tokio::time::timeout(Duration::from_secs(10), underlay.online())
             .await
             .expect("the underlay reaches the relay");
@@ -1159,7 +1293,7 @@ mod tests {
         false
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_relay_carries_cells_when_the_mesh_lets_it() {
         let (url, _server) = relay_server().await;
         let from = relay_node(1, &url, true).await;
@@ -1170,8 +1304,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_is_not_sent_on_a_relay_selected_path() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop underlay stays on the relay: this hop is not advertised as a link",
+        );
         let (url, _server) = relay_server().await;
         let from = relay_node(3, &url, false).await;
         let mut to = relay_node(4, &url, true).await;
@@ -1185,8 +1323,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_that_arrives_on_a_relay_selected_path_is_dropped() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"cell arrived over the relay\"",
+        );
         let (url, _server) = relay_server().await;
         let from = relay_node(5, &url, true).await;
         let mut to = relay_node(6, &url, false).await;
@@ -1197,8 +1339,12 @@ mod tests {
         assert!(to.forwarder.dropped.load(Ordering::Relaxed) > 0);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_hop_that_stays_on_the_relay_becomes_stuck() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop underlay stays on the relay: this hop is not advertised as a link",
+        );
         let (url, _server) = relay_server().await;
         let from = relay_node(7, &url, false).await;
         let mut to = relay_node(8, &url, true).await;
@@ -1252,7 +1398,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_hop_is_dialed_at_the_address_that_its_vector_signed() {
         let (forwarder, _app, _received) = forwarder().await;
         let underlay_id = SecretKey::from_bytes(&[121; 32]).public();
@@ -1263,8 +1409,12 @@ mod tests {
         assert_eq!(forwarder.unresolved_hops(), 0);
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_hop_that_the_topology_does_not_know_is_dialed_by_id_and_counted() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
         let (forwarder, _app, _received) = forwarder().await;
         let hop = stranger(122);
         assert_eq!(
@@ -1275,31 +1425,237 @@ mod tests {
         assert_eq!(forwarder.unresolved_hops(), 1);
     }
 
-    #[tokio::test]
-    async fn a_hop_without_a_vector_is_warned_about_once_each() {
-        let (forwarder, _app, _received) = forwarder().await;
-        let (one, other) = (stranger(130).underlay_id, stranger(131).underlay_id);
-        assert!(forwarder.first_without_vector(one, 1), "the first hop");
-        assert!(
-            !forwarder.first_without_vector(one, 2),
-            "the same hop again"
-        );
-        assert!(forwarder.first_without_vector(other, 3), "another hop");
-        // Past the ceiling the rule is one warning in 256.
-        for seed in 0..u8::try_from(UNRESOLVED_SEEN_CAP).expect("fits") {
-            let id = SecretKey::from_bytes(&[seed.wrapping_add(1); 32]).public();
-            forwarder.first_without_vector(UnderlayId::new(id), 4);
+    /// Counts the WARN and ERROR events of the thread that installs it. The tests of this module
+    /// run in parallel, and many of them drop an endpoint without a close, so a subscriber that
+    /// is global to the binary would see the events of the other tests.
+    struct CountsWarnings(Arc<AtomicUsize>);
+
+    impl tracing::Subscriber for CountsWarnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
         }
-        let beyond = stranger(200).underlay_id;
-        assert!(
-            !forwarder.first_without_vector(beyond, 5),
-            "past the ceiling"
-        );
-        assert!(forwarder.first_without_vector(beyond, 256), "one in 256");
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() <= tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    #[tokio::test]
+    /// A reply goes back along the reversed route of a cell that this node delivered, so its first
+    /// hop is the sender, whose link-vector may not have arrived yet: that case is normal.
+    #[test]
+    async fn a_hop_without_a_vector_is_not_a_warning() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let sender = stranger(140);
+        let delivered = cell(vec![self_hop(&forwarder)], 0, sender.clone());
+        forwarder.handle_cell(delivered, sender.underlay_id);
+        assert_eq!(forwarder.counters().delivered, 1, "the cell was delivered");
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&sender);
+        });
+        assert_eq!(warnings.load(Ordering::Relaxed), 0);
+        assert_eq!(forwarder.unresolved_hops(), 1, "the hop was counted");
+        forwarder.underlay.close().await;
+    }
+
+    /// A neighbor that this node links to is a hop whose own vector has not arrived yet: the
+    /// origin of a route saw it first. This node reaches the neighbor by the link it holds.
+    #[test]
+    async fn a_hop_without_a_vector_that_is_a_link_of_ours_is_not_a_warning() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let neighbor = stranger(142);
+        let own_key = SecretKey::from_bytes(&[99; 32]);
+        let own_vector = LinkVector::signed(
+            &own_key,
+            crate::topology::wall_clock_ms(),
+            EndpointAddr::new(forwarder.underlay.id()),
+            vec![(neighbor.app_id, 1)],
+        );
+        assert!(
+            forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .ingest(own_vector),
+            "the vector of this node is accepted"
+        );
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&neighbor);
+            forwarder.dial_addr(&stranger(143));
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "the hop that is no link of ours is the only warning"
+        );
+        forwarder.underlay.close().await;
+    }
+
+    /// A hop that no delivered cell named, and that has no vector, is not explained by a reply on
+    /// a reversed route: it is a warning, once.
+    #[test]
+    async fn a_hop_without_a_vector_that_no_delivered_cell_named_is_a_warning() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&stranger(141));
+            forwarder.dial_addr(&stranger(141));
+        });
+        assert_eq!(warnings.load(Ordering::Relaxed), 1, "one line per hop");
+        assert_eq!(forwarder.unresolved_hops(), 2, "both lookups were counted");
+        forwarder.underlay.close().await;
+    }
+
+    #[test]
+    async fn a_hop_without_a_vector_is_logged_once_each() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let (one, other) = (stranger(130).underlay_id, stranger(131).underlay_id);
+        assert!(forwarder.line_is_due(one, 1, false), "the first hop");
+        assert!(!forwarder.line_is_due(one, 2, false), "the same hop again");
+        assert!(forwarder.line_is_due(other, 3, false), "another hop");
+        // Past the ceiling the rule is one line in 256.
+        for seed in 0..u8::try_from(UNRESOLVED_SEEN_CAP).expect("fits") {
+            let id = SecretKey::from_bytes(&[seed.wrapping_add(1); 32]).public();
+            forwarder.line_is_due(UnderlayId::new(id), 4, false);
+        }
+        let beyond = stranger(200).underlay_id;
+        assert!(!forwarder.line_is_due(beyond, 5, false), "past the ceiling");
+        assert!(forwarder.line_is_due(beyond, 256, false), "one in 256");
+    }
+
+    /// A hop that was explained once, by a link of this node, is warned about when the link is
+    /// gone and nothing else explains it: the line at debug does not spend the warning of the hop.
+    #[test]
+    async fn a_hop_explained_by_a_link_that_is_gone_is_warned_about() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let neighbor = stranger(144);
+        let own_key = SecretKey::from_bytes(&[99; 32]);
+        let own_vector = LinkVector::signed(
+            &own_key,
+            crate::topology::wall_clock_ms(),
+            EndpointAddr::new(forwarder.underlay.id()),
+            vec![(neighbor.app_id, 1)],
+        );
+        assert!(
+            forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .ingest(own_vector),
+            "the vector of this node is accepted"
+        );
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&neighbor);
+        });
+        assert_eq!(warnings.load(Ordering::Relaxed), 0, "a link of ours");
+
+        assert!(
+            forwarder
+                .topology
+                .write()
+                .expect("topology lock poisoned")
+                .remove(forwarder.self_app_id),
+            "the vector of this node is removed"
+        );
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&neighbor);
+            forwarder.dial_addr(&neighbor);
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "warned once, after the link is gone"
+        );
+        forwarder.underlay.close().await;
+    }
+
+    /// A hop whose vector this node held and removed, because the peer left or its vector
+    /// expired, is still named by the cells in flight to it: the origin of the route is behind,
+    /// and the hop is no warning. A hop that this node never knew stays one.
+    #[test]
+    async fn a_hop_whose_vector_is_gone_is_not_a_warning() {
+        let (forwarder, _app, _received) = forwarder().await;
+        let gone_key = SecretKey::from_bytes(&[145; 32]);
+        let gone = RouteHop {
+            app_id: AppId::new(gone_key.public()),
+            underlay_id: UnderlayId::new(gone_key.public()),
+        };
+        let vector = LinkVector::signed(
+            &gone_key,
+            crate::topology::wall_clock_ms(),
+            EndpointAddr::new(gone.underlay_id.get()),
+            vec![],
+        );
+        {
+            let mut topology = forwarder.topology.write().expect("topology lock poisoned");
+            assert!(topology.ingest(vector), "the vector is accepted");
+            assert!(topology.remove(gone.app_id), "the vector is removed");
+        }
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&gone);
+            forwarder.dial_addr(&stranger(146));
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "the hop that was never known is the only warning"
+        );
+        assert_eq!(forwarder.unresolved_hops(), 2, "both hops were counted");
+        forwarder.underlay.close().await;
+    }
+
+    /// The hops that delivered cells named are remembered past [`HEARD_HOPS_CAP`]: the oldest
+    /// hop is forgotten, and a reply to the newest cell is explained.
+    #[test]
+    async fn a_hop_named_by_a_cell_past_the_heard_cap_is_not_a_warning() {
+        let (forwarder, _app, mut received) = forwarder().await;
+        let hop = |seed: u16| {
+            let mut bytes = [0u8; 32];
+            bytes[..2].copy_from_slice(&seed.to_be_bytes());
+            bytes[2] = 7;
+            let id = SecretKey::from_bytes(&bytes).public();
+            RouteHop {
+                app_id: AppId::new(id),
+                underlay_id: UnderlayId::new(id),
+            }
+        };
+        let cap = u16::try_from(super::HEARD_HOPS_CAP).expect("fits");
+        for seed in 0..=cap {
+            let sender = hop(seed);
+            let delivered = cell(vec![self_hop(&forwarder)], 0, sender.clone());
+            forwarder.handle_cell(delivered, sender.underlay_id);
+            received.try_recv().expect("delivered");
+        }
+        let newest = hop(cap);
+        let warnings = Arc::new(AtomicUsize::new(0));
+        tracing::subscriber::with_default(CountsWarnings(Arc::clone(&warnings)), || {
+            forwarder.dial_addr(&newest);
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            0,
+            "the newest delivered cell named the hop"
+        );
+        forwarder.underlay.close().await;
+    }
+
+    #[test]
     async fn a_vector_that_names_another_underlay_does_not_resolve_the_hop() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
         // The route says the underlay of this node is `named`; the node signed another.
         // The address of the vector is not the address of the hop.
         let (forwarder, _app, _received) = forwarder().await;
@@ -1311,7 +1667,7 @@ mod tests {
         assert_eq!(forwarder.unresolved_hops(), 1);
     }
 
-    #[tokio::test]
+    #[test]
     async fn the_pool_wakes_at_the_first_refusal_of_a_hop_and_at_its_recovery() {
         let (hop, app) = (stranger(13).underlay_id, stranger(14).app_id);
         let pool = super::WriterPool::default();
@@ -1335,6 +1691,10 @@ mod tests {
 
     #[test]
     fn a_stuck_hop_is_a_link_again_once_it_is_admitted() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop underlay stays on the relay: this hop is not advertised as a link",
+        );
         let (hop, app) = (stranger(11).underlay_id, stranger(12).app_id);
         let pool = super::WriterPool::default();
         pool.track(hop, app);
@@ -1371,6 +1731,7 @@ mod tests {
             builder = builder.path_selector(selector);
         }
         let underlay = builder.bind().await.expect("bind a loopback underlay");
+        close_at_end(&underlay);
         let app_secret = SecretKey::from_bytes(&[seed.wrapping_add(100); 32]);
         let app_id = AppId::new(app_secret.public());
         let (inbound, received) = mpsc::channel(8);
@@ -1454,13 +1815,12 @@ mod tests {
             direct_for_writer(&paths),
             "before the cut the writer is admitted"
         );
-        let open = unblocked(paths, |path| *path == ip(9));
         assert!(
-            !direct_for_writer(&open),
+            !direct_for_writer(unblocked(&paths, |path| *path == ip(9))),
             "the blocked path is gone, and nothing direct is selected"
         );
         assert!(
-            open.iter().any(|(path, _)| *path == relay()),
+            unblocked(&paths, |path| *path == ip(9)).any(|(path, _)| *path == relay()),
             "the relay stays in the list"
         );
     }
@@ -1470,9 +1830,11 @@ mod tests {
         use super::{direct_for_inbound, unblocked};
         let paths = vec![(ip(9), false), (relay(), false)];
         assert!(direct_for_inbound(&paths));
-        let open = unblocked(paths, |path| matches!(path, TransportAddr::Ip(_)));
         assert!(
-            !direct_for_inbound(&open),
+            !direct_for_inbound(unblocked(&paths, |path| matches!(
+                path,
+                TransportAddr::Ip(_)
+            ))),
             "only the relay is left, and it is not direct"
         );
     }
@@ -1481,7 +1843,10 @@ mod tests {
     fn a_path_that_no_test_blocked_is_kept() {
         use super::unblocked;
         let paths = vec![(ip(9), true), (relay(), false)];
-        assert_eq!(unblocked(paths.clone(), |_| false), paths);
+        assert_eq!(
+            unblocked(&paths, |_| false).cloned().collect::<Vec<_>>(),
+            paths
+        );
     }
 
     #[test]
@@ -1521,7 +1886,7 @@ mod tests {
         assert!(!blocked_by_test(local, &webrtc(cut)), "cleared");
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_cell_arrives_when_the_accepting_end_selected_no_path() {
         // The dialling end sends on a selected IP path. The accepting end opened no
         // path of its own and selects none, but its connection has the IP path open.
@@ -1540,7 +1905,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_writer_retires_when_its_connection_closes_under_it() {
         // A direct hop, then the far underlay goes away while no cell is in
         // flight. The writer must see the close: a dead connection read as one
@@ -1569,8 +1934,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_writer_retires_itself_and_releases_its_bytes_when_it_gives_up() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
         // The unpruned-map leak: every next-hop id a peer ever names used to
         // leave an entry behind, and its queued bytes charged, for the life of
         // the process. The hop here is unreachable, so the writer gives up after
@@ -1596,8 +1965,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn writer_spawns_stop_at_the_ceiling() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "multihop forwarder: hop without a vector that no delivered cell named",
+        );
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::underlay",
+            "reason=\"next-hop writer ceiling reached\"",
+        );
         // Each cell names a fresh next hop, which is how a remote peer turns an
         // unpruned writer map into unbounded tasks and dials.
         let (forwarder, _app, _received) = forwarder().await;
@@ -1610,5 +1987,35 @@ mod tests {
             forwarder.enqueue(&next, cell(vec![next.clone()], 0, source.clone()));
         }
         assert!(live_writers(&forwarder) <= MAX_WRITERS);
+    }
+
+    /// A test cut reaches a gate at once. The reading of the paths stands for `PATH_RECHECK`,
+    /// but a cut made inside that span must not: the cell would leave on the relay, and the
+    /// forwarder at the other end would refuse it.
+    #[test]
+    fn a_writer_gate_refuses_at_once_when_a_test_cuts_the_selected_path() {
+        use super::{GateRole, RelayGate};
+        use habilis_network_iroh_transport_util::{Rung, block_rung};
+
+        let local: EndpointId = SecretKey::from_bytes(&[41; 32]).public();
+        let relay: iroh::RelayUrl = "http://127.0.0.1:1".parse().expect("relay url");
+        let ip: SocketAddr = "127.0.0.1:2".parse().expect("ip addr");
+        let paths = || {
+            vec![
+                (TransportAddr::Relay(relay.clone()), false),
+                (TransportAddr::Ip(ip), true),
+            ]
+        };
+        let mut gate = RelayGate::new(false, local, GateRole::Writer);
+        assert!(gate.admits_paths(paths), "a selected IP path admits");
+
+        block_rung(local, Rung::Ip, true);
+        let admitted = gate.admits_paths(paths);
+        block_rung(local, Rung::Ip, false);
+
+        assert!(
+            !admitted,
+            "a cut IP path must not admit, even inside the recheck span"
+        );
     }
 }

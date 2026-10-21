@@ -306,6 +306,7 @@ mod tests {
     use super::{Mounted, mount, patch};
     use crate::tui::host_impl::TuiHost;
     use crate::view::{BoxProps, View};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn mounting_a_text_view_creates_one_text_node() {

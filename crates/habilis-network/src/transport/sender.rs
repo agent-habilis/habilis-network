@@ -6,12 +6,12 @@ use iroh_gossip::api::{ApiError, GossipSender};
 use crate::protocol::message::WireFrame;
 
 /// The mesh's outbound broadcast plane: a thin wrapper over the gossip sender
-/// that survives a topic resubscribe (`gossip::heal`) via [`MeshSender::replace_gossip`],
+/// that survives a topic resubscribe (`gossip::heal`) via `MeshSender::replace_gossip`,
 /// so the ~ten existing `.broadcast()` call sites hold a stable handle across
 /// the swap.
 ///
 /// A clone shares the handle, so the task that sends the digest answers (see
-/// [`ResendOutbox`](super::ResendOutbox)) follows a resubscribe too.
+/// `ResendOutbox`) follows a resubscribe too.
 #[derive(Debug, Clone)]
 pub struct MeshSender {
     gossip: Arc<RwLock<GossipSender>>,

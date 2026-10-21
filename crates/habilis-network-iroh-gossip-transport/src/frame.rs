@@ -120,6 +120,7 @@ pub fn decode(bytes: &[u8]) -> Result<Frame<'_>, DecodeError> {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use iroh_base::SecretKey;
 
     use super::*;

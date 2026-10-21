@@ -34,6 +34,10 @@ use until_known::until_peer_known;
 
 /// Long enough for the climb to multihop and for the topology to hold the route.
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
+/// The WARN that the underlay logs for a hop that stays on the relay for longer than the stuck limit.
+const STUCK_TARGET: &str = "habilis_network_iroh_multihop_transport::underlay";
+const STUCK_TEXT: &str =
+    "multihop underlay stays on the relay: this hop is not advertised as a link";
 
 /// How long a message may take over a route that is already up.
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(30);
@@ -167,15 +171,6 @@ impl Member {
     }
 }
 
-/// With `RUST_LOG` set, a failing run prints the engine's log.
-fn init_logging() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .try_init();
-}
-
 async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> bool {
     let started = Instant::now();
     loop {
@@ -212,89 +207,106 @@ async fn cut_ip_between(first: &Member, second: &Member) {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pair_that_denied_each_other_still_gets_a_message_through_a_third_member() {
-    init_logging();
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
-    let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
-    let alice = Member::create("alice", &relay, list).await;
-    let bob = Member::join("bob", &alice).await;
-    let mut carol = Member::join("carol", &alice).await;
-    assert!(
-        rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
-        "the three members never formed a mesh"
-    );
+#[test]
+fn a_pair_that_denied_each_other_still_gets_a_message_through_a_third_member() {
+    let guard = habilis_network_test_tracing::init();
+    habilis_network_test_tracing::run_multi_thread(guard, 4, async {
+        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
+            .await
+            .expect("local relay");
+        let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
+        let alice = Member::create("alice", &relay, list).await;
+        let bob = Member::join("bob", &alice).await;
+        let mut carol = Member::join("carol", &alice).await;
+        assert!(
+            rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
+            "the three members never formed a mesh"
+        );
 
-    // Bob and carol deny each other at both ends, then lose IP to each other: the only way
-    // between them is alice.
-    bob.deny_peer("carol").await;
-    carol.deny_peer("bob").await;
-    cut_ip_between(&bob, &carol).await;
+        // Bob and carol deny each other at both ends, then lose IP to each other: the only way
+        // between them is alice.
+        bob.deny_peer("carol").await;
+        carol.deny_peer("bob").await;
+        cut_ip_between(&bob, &carol).await;
+        // Their hop to each other stays on the relay, which carries no cell. After
+        // `MULTIHOP_RELAY_STUCK` (20 s) the underlay says once that the hop is not advertised as a
+        // link. The test lasts about as long, so on a slow host the WARN came and on a fast host it
+        // did not. It is part of the scenario, so the test expects it and waits for it.
+        habilis_network_test_tracing::expect_warn(STUCK_TARGET, STUCK_TEXT);
 
-    // The rung is read on bob's pooled connection to carol. A probe goes out each second,
-    // because it is traffic that makes the engine try a better path.
-    let started = Instant::now();
-    let mut probes = 0_u32;
-    let mut rung = None;
-    while started.elapsed() < STEP_DEADLINE {
-        probes += 1;
-        let _ = bob.send("carol", &format!("probe {probes}")).await;
-        rung = bob.rung_to("carol").await;
-        if rung == Some("multihop") {
-            break;
+        // The rung is read on bob's pooled connection to carol. A probe goes out each second,
+        // because it is traffic that makes the engine try a better path.
+        let started = Instant::now();
+        let mut probes = 0_u32;
+        let mut rung = None;
+        while started.elapsed() < STEP_DEADLINE {
+            probes += 1;
+            let _ = bob.send("carol", &format!("probe {probes}")).await;
+            rung = bob.rung_to("carol").await;
+            if rung == Some("multihop") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    assert_eq!(
-        rung,
-        Some("multihop"),
-        "bob never reached carol on the multihop rung after {probes} probes: {}",
-        counters_of(&alice, &bob, &carol).await
-    );
-
-    // The rung can be selected while the route is still stale: traffic goes on, until
-    // alice has forwarded a cell.
-    let forward_started = Instant::now();
-    while alice.forwarded_cells().await == 0 {
-        assert!(
-            forward_started.elapsed() < STEP_DEADLINE,
-            "bob reached carol on the multihop rung, but alice forwarded no cell: {}",
+        assert_eq!(
+            rung,
+            Some("multihop"),
+            "bob never reached carol on the multihop rung after {probes} probes: {}",
             counters_of(&alice, &bob, &carol).await
         );
-        probes += 1;
-        let _ = bob.send("carol", &format!("forward probe {probes}")).await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
 
-    // A payload goes from bob to carol over the hop: the message arrives, and alice has
-    // forwarded more cells than before it was sent.
-    let before = alice.forwarded_cells().await;
-    let text = "payload over the hop";
-    bob.send("carol", text)
-        .await
-        .unwrap_or_else(|error| panic!("the send over the hop was refused: {error}"));
-    let sent_at = Instant::now();
-    while !carol.saw_msg(text) {
+        // The rung can be selected while the route is still stale: traffic goes on, until
+        // alice has forwarded a cell.
+        let forward_started = Instant::now();
+        while alice.forwarded_cells().await == 0 {
+            assert!(
+                forward_started.elapsed() < STEP_DEADLINE,
+                "bob reached carol on the multihop rung, but alice forwarded no cell: {}",
+                counters_of(&alice, &bob, &carol).await
+            );
+            probes += 1;
+            let _ = bob.send("carol", &format!("forward probe {probes}")).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        // A payload goes from bob to carol over the hop: the message arrives, and alice has
+        // forwarded more cells than before it was sent.
+        let before = alice.forwarded_cells().await;
+        let text = "payload over the hop";
+        bob.send("carol", text)
+            .await
+            .unwrap_or_else(|error| panic!("the send over the hop was refused: {error}"));
+        let sent_at = Instant::now();
+        while !carol.saw_msg(text) {
+            assert!(
+                sent_at.elapsed() < PAYLOAD_DEADLINE,
+                "the message never reached carol over the hop: {}",
+                counters_of(&alice, &bob, &carol).await
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         assert!(
-            sent_at.elapsed() < PAYLOAD_DEADLINE,
-            "the message never reached carol over the hop: {}",
+            alice.forwarded_cells().await > before,
+            "the message reached carol, but alice forwarded no cell for it: {}",
             counters_of(&alice, &bob, &carol).await
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    assert!(
-        alice.forwarded_cells().await > before,
-        "the message reached carol, but alice forwarded no cell for it: {}",
-        counters_of(&alice, &bob, &carol).await
-    );
 
-    eprintln!(
-        "COUNTERS after the payload: {}",
-        counters_of(&alice, &bob, &carol).await
-    );
-    for member in [alice, bob, carol] {
-        let _ = member.membership.node.leave().await;
-    }
+        let stuck_started = Instant::now();
+        while !habilis_network_test_tracing::saw_warn(STUCK_TARGET, STUCK_TEXT) {
+            assert!(
+                stuck_started.elapsed() < STEP_DEADLINE,
+                "the hop between bob and carol stayed on the relay but was never reported as stuck: {}",
+                counters_of(&alice, &bob, &carol).await
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        eprintln!(
+            "COUNTERS after the payload: {}",
+            counters_of(&alice, &bob, &carol).await
+        );
+        for member in [alice, bob, carol] {
+            let _ = member.membership.node.leave().await;
+        }
+    });
 }

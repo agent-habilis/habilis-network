@@ -985,6 +985,7 @@ fn missing_frames(channel: Channel, digest: &Verified, state: &EventLoopState) -
 
 #[cfg(test)]
 mod budget_tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{FastRounds, Plane, ServeBudget};
@@ -1105,7 +1106,7 @@ mod budget_tests {
     /// While a fast round runs, a digest an event sends waits, but the tick's
     /// goes out: when the round's peers never answer, the tick is the only
     /// thing left that asks the whole mesh.
-    #[tokio::test]
+    #[test]
     async fn the_tick_digest_goes_out_while_a_fast_round_runs() {
         use super::{DigestTrigger, broadcast_state_digests};
         use crate::protocol::MeshId;
@@ -1148,7 +1149,7 @@ mod budget_tests {
     /// A node that just got a change has a holder serving it, so a digest an
     /// event sends then waits: sent while the first answer arrives, it drew
     /// a second answer that overlapped the first. The tick still goes out.
-    #[tokio::test]
+    #[test]
     async fn an_event_digest_waits_while_changes_arrive() {
         use super::{DigestTrigger, broadcast_state_digests};
         use crate::protocol::MeshId;
@@ -1335,6 +1336,7 @@ mod budget_tests {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use super::{

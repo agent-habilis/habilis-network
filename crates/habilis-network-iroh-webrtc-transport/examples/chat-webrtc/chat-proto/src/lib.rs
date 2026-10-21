@@ -257,6 +257,7 @@ impl Ticket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use habilis_network_test_tracing::test;
 
     /// Generated rather than a hardcoded array: an endpoint id is a point on a
     /// curve, and most 32-byte patterns are not one.

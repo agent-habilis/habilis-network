@@ -687,6 +687,7 @@ mod tests {
         CHUNK_BYTES, CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkMapBuilder, Coverage, FileId,
         Root, chunk_count, chunk_hash,
     };
+    use habilis_network_test_tracing::test;
 
     /// Bytes that differ per position and per seed, so a chunk taken from one
     /// place cannot accidentally equal a chunk taken from another.

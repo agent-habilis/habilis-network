@@ -38,6 +38,7 @@ publish = false
 # crate can only be one of those things.
 habilis-network-iroh-webrtc-transport = { path = "../.." }
 chat-proto = { path = "chat-proto" }
+habilis-network-test-tracing = { path = "../../../habilis-network-test-tracing" }
 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -48,6 +49,8 @@ serde_json = "1"
 bs58 = { version = "0.5", features = ["check"] }
 
 [workspace.lints.rust]
+# A warning is a test failure: the output of a build and of a test stays clean.
+warnings = "deny"
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
 

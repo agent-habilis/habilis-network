@@ -127,7 +127,7 @@ impl Default for ParkedLinkStates {
 /// peer heartbeat-evicted past `ALIVE_TIMEOUT` (still returnable);
 /// `reach` is `direct` only while we hold a live link to it; `transport`
 /// is the lane a directed frame to this peer would take right now (the
-/// live [`crate::transport`] send decision — distinct from `reach`, which
+/// live `crate::transport` send decision — distinct from `reach`, which
 /// is a gossip-overlay link fact). Serialized directly into the
 /// consumer's roster surfaces.
 #[derive(Debug, Clone, Serialize)]
@@ -223,6 +223,10 @@ pub struct EventLoopState {
     /// Distinct from `peers` — links are asymmetric and node-id
     /// keyed; the roster is symmetric and nickname keyed.
     pub(crate) linked_endpoints: HashSet<EndpointId>,
+    /// When `linked_endpoints` last became empty, `None` while it holds a link. The census warns
+    /// of a silent partition only when this gap outlasts a heal: see
+    /// [`Self::silent_partition_due`].
+    zero_links_since: Option<Instant>,
     /// Whether each known peer's data path is direct or relay-only: the
     /// `conn_path` snapshot `NeighborUp` logs, or a probe verdict. Keyed like
     /// `peer_endpoints` and pruned with it (`forget_peer_endpoint`), not on
@@ -372,6 +376,14 @@ pub struct EventLoopState {
     /// it stays bounded by `QUIET_CAP`; `roster_snapshot` only reads it for
     /// peers currently in `quiet`, so a stale entry never surfaces.
     pub(crate) quiet_since: HashMap<Nickname, Instant>,
+    /// Peers that said goodbye, with the timestamp of their `left`. A message of such a peer
+    /// that is stamped no later was sent before the goodbye and reached us after it (a
+    /// re-announce still in flight, a replayed message): it is no proof of presence and brings
+    /// the peer back into neither the roster nor the surfaced arrivals. A message stamped later is
+    /// a real return. Bounded like `quiet`; pruned to the same FIFO on every sweep.
+    pub(crate) left: BoundedFifoSet<Nickname>,
+    /// The timestamps of [`Self::left`], pruned to its membership.
+    pub(crate) left_at: HashMap<Nickname, UnixSecs>,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
     /// `peer_return`). Gates departure surfacing so a peer whose
@@ -914,6 +926,7 @@ impl EventLoopState {
         let broadcast_key = mesh_key.as_ref().map(|key| key.derive(b"broadcast"));
         Self {
             linked_endpoints: HashSet::new(),
+            zero_links_since: None,
             direct: HashMap::new(),
             relay_transport: false,
             direct_proven: tokio::sync::mpsc::unbounded_channel().0,
@@ -955,6 +968,8 @@ impl EventLoopState {
             rendezvous_id: None,
             quiet: BoundedFifoSet::new(QUIET_CAP),
             quiet_since: HashMap::new(),
+            left: BoundedFifoSet::new(QUIET_CAP),
+            left_at: HashMap::new(),
             surfaced: HashSet::new(),
             last_sent_at: now,
             joined_at: UnixSecs::now(),
@@ -1163,8 +1178,9 @@ impl EventLoopState {
             .is_some_and(|since| now.saturating_duration_since(*since) < LANE_WANTED)
     }
 
-    /// A proven pair lost its gossip link while its path reads as the relay. Returns the
-    /// address to offer a session to, now, and marks the session wanted.
+    /// A proven pair lost its gossip link while its path reads as the relay or as the gossip
+    /// rung (the recursion rule closes a link on that rung). Returns the address to offer a
+    /// session to, now, and marks the session wanted.
     ///
     /// The path comes from [`Self::pair_path_kind`]: the watcher's report if there is one, else
     /// the admission table, which is the source for a pair that only gossips. A loss that nobody
@@ -1174,8 +1190,12 @@ impl EventLoopState {
         peer: EndpointId,
         now: Instant,
     ) -> Option<EndpointAddr> {
+        use crate::transport::probe::PathKind;
         if self.direct.get(&peer) != Some(&DirectState::Direct)
-            || self.pair_path_kind(peer) != Some(crate::transport::probe::PathKind::Relay)
+            || !matches!(
+                self.pair_path_kind(peer),
+                Some(PathKind::Relay | PathKind::Gossip)
+            )
         {
             return None;
         }
@@ -1350,14 +1370,55 @@ impl EventLoopState {
     /// stays. It describes the pooled unicast connection, which outlives the
     /// link; erasing it parked every directed frame on a link flap until the
     /// alive tick re-probed (about 40 s with the relink cooldown).
+    /// Remember that `nick` said goodbye at `at`. A later `left` of the same peer moves the mark
+    /// forward, and an older one (a delayed copy) leaves it where it is.
+    pub(crate) fn note_left(&mut self, nick: &Nickname, at: UnixSecs) {
+        self.left.insert(nick.clone());
+        let mark = self.left_at.entry(nick.clone()).or_insert(at);
+        *mark = (*mark).max(at);
+    }
+
+    /// Whether a message of `nick` stamped `at` was sent no later than the goodbye of `nick`.
+    pub(crate) fn sent_before_goodbye(&self, nick: &Nickname, at: UnixSecs) -> bool {
+        self.left_at.get(nick).is_some_and(|left| at <= *left)
+    }
+
     pub(crate) fn unlink(&mut self, peer: EndpointId) {
         self.linked_endpoints.remove(&peer);
+        if self.linked_endpoints.is_empty() {
+            self.zero_links_since.get_or_insert_with(Instant::now);
+        }
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
+    }
+
+    /// Whether the census calls the state a silent partition: a meshed member that knows
+    /// `roster_len` peers has held no link for longer than
+    /// [`silent_partition_after`](crate::util::tuning::silent_partition_after). A shorter gap is
+    /// a heal on its way, or a link closed on purpose.
+    pub(crate) fn silent_partition_due(&self, roster_len: usize, now: Instant) -> bool {
+        self.meshed
+            && roster_len > 0
+            && self.linked_endpoints.is_empty()
+            && self.zero_links_since.is_some_and(|since| {
+                now.saturating_duration_since(since)
+                    >= crate::util::tuning::silent_partition_after()
+            })
+    }
+
+    /// Whether a reclaim tick asks another known peer for a link: the fast reclaim window is
+    /// open and this member held links and lost every one. A low priority request is refused by
+    /// a peer whose view is full, and the peers that were lost are full first; waiting for the
+    /// heal tick would leave the member alone for up to a heal interval.
+    pub(crate) fn isolated_refill_due(&self, now: Instant) -> bool {
+        self.linked_endpoints.is_empty()
+            && self.zero_links_since.is_some()
+            && self.reclaim_until.is_some_and(|until| now < until)
     }
 
     /// A gossip link to `peer` is up.
     pub(crate) fn link(&mut self, peer: EndpointId) {
         self.linked_endpoints.insert(peer);
+        self.zero_links_since = None;
         self.regraft_at.remove(&peer);
         self.graft_backoff.reset(peer);
         self.webrtc_admission.set_neighbors(&self.linked_endpoints);
@@ -1746,6 +1807,11 @@ impl EventLoopState {
         if self.degraded {
             self.degraded = false;
             self.meshed = true;
+            // A node that held no link has had no unlink to start the gap that the census counts.
+            // A gap that already runs keeps its start.
+            if self.linked_endpoints.is_empty() {
+                self.zero_links_since.get_or_insert(now);
+            }
             return true;
         }
         false
@@ -1798,7 +1864,7 @@ impl EventLoopState {
     }
 
     /// The `parents` to stamp on the next `Msg` we author: the current DAG
-    /// tips, sorted (deterministic) and capped to [`MAX_DAG_PARENTS`] to
+    /// tips, sorted (deterministic) and capped to `MAX_DAG_PARENTS` to
     /// bound message size. Usually a single head on a quiet mesh.
     #[must_use]
     pub fn dag_parents(&self) -> Vec<ContentHash> {
@@ -2030,8 +2096,14 @@ impl EventLoopState {
 
     /// Whether the selected path of `peer` is the gossip rung. The recursion rule closes a gossip
     /// link on that path, so a graft only makes the gossip layer dial a link that dies at once.
+    /// Not while a session is attached: it carries the pair whatever one connection reads, and the
+    /// link rides it once iroh moves the connection.
     pub(crate) fn rides_gossip_rung(&self, peer: EndpointId) -> bool {
         self.pair_path_kind(peer) == Some(crate::transport::probe::PathKind::Gossip)
+            && !self
+                .webrtc
+                .as_ref()
+                .is_some_and(|handle| handle.has_session(&peer))
     }
 
     /// Whether to report that this author's digest could not be read: once per
@@ -2161,6 +2233,7 @@ mod tests {
     use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
     use crate::protocol::{AuthorKey, ContentHash, UnixSecs};
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
+    use habilis_network_test_tracing::test;
 
     fn lower_and_higher() -> (EndpointId, EndpointId) {
         let first = endpoint_id(1);
@@ -2694,6 +2767,27 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    /// The recursion rule closes a gossip link on the gossip rung, and no re-graft follows (see
+    /// `a_pair_that_rides_the_gossip_rung_is_not_regrafted`). The pair must be raced again then,
+    /// or nothing brings a link back while the IP path is gone.
+    #[test]
+    fn a_proven_pair_on_the_gossip_rung_is_raced_again_when_its_link_goes_down() {
+        use crate::transport::probe::PathKind;
+        let (bob, now) = (endpoint_id(1), Instant::now());
+        let addr = iroh::EndpointAddr::new(bob)
+            .with_relay_url("https://relay.invalid".parse().expect("relay url"));
+        let mut node = fresh_state();
+        node.peer_endpoints.insert(nick("bob"), addr.clone());
+        node.direct.insert(bob, DirectState::Direct);
+        node.path_kinds.insert(bob, PathKind::Gossip);
+
+        assert_eq!(node.relay_race_on_link_loss(bob, now), Some(addr));
+        assert!(
+            node.lane_session_wanted(bob, now),
+            "the offer is not held back"
+        );
     }
 
     /// A proven pair that loses its link is re-grafted in about a second, whatever the other links
@@ -3758,6 +3852,98 @@ mod tests {
 
         state.unlink(bob);
         assert_eq!(state.webrtc_admission.direct_units(), 1, "no longer one");
+    }
+
+    /// A meshed member that lost every link is a silent partition once the gap outlasts a heal,
+    /// not before: a link closed on purpose, or a heal on its way, shows the same zero.
+    #[test]
+    fn a_meshed_member_without_links_is_a_silent_partition_only_after_a_heal() {
+        let (bob, roster) = (endpoint_id(1), 3);
+        let after = crate::util::tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.meshed = true;
+
+        state.link(bob);
+        let far = Instant::now() + after + Duration::from_secs(1);
+        assert!(!state.silent_partition_due(roster, far), "a link is up");
+
+        state.unlink(bob);
+        assert!(
+            !state.silent_partition_due(roster, Instant::now()),
+            "the gap is young"
+        );
+        assert!(
+            state.silent_partition_due(roster, far),
+            "the gap outlasted a heal"
+        );
+        assert!(
+            !state.silent_partition_due(0, far),
+            "there is nobody to be apart from"
+        );
+        state.meshed = false;
+        assert!(!state.silent_partition_due(roster, far), "never meshed");
+        state.meshed = true;
+
+        // An unlink of a peer that was not linked leaves the clock where it was.
+        state.unlink(endpoint_id(2));
+        assert!(
+            state.silent_partition_due(roster, far),
+            "the clock did not restart"
+        );
+
+        // A link clears the gap, and the next loss starts a new one.
+        state.link(bob);
+        state.unlink(bob);
+        assert!(
+            !state.silent_partition_due(roster, Instant::now()),
+            "a new gap is young"
+        );
+    }
+
+    /// A degraded node that a relayed frame heals while it holds no link is meshed with zero links.
+    /// It never lost a link, so no unlink started the gap: the heal starts it, and the census calls
+    /// the state a silent partition once the gap outlasts a heal.
+    #[test]
+    fn a_degraded_node_that_heals_without_a_link_starts_counting_the_gap() {
+        let roster = 3;
+        let after = crate::util::tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.note_degraded();
+        let healed_at = Instant::now();
+
+        assert!(state.note_inbound(healed_at), "the first inbound heals it");
+
+        assert!(
+            !state.silent_partition_due(roster, healed_at),
+            "the gap is young"
+        );
+        assert!(
+            state.silent_partition_due(roster, healed_at + after + Duration::from_secs(1)),
+            "meshed with no link for longer than a heal"
+        );
+    }
+
+    /// A heal does not restart a gap that already runs: the unlink that began it is the start.
+    #[test]
+    fn a_heal_does_not_restart_a_gap_that_already_runs() {
+        let (bob, roster) = (endpoint_id(1), 3);
+        let after = crate::util::tuning::silent_partition_after();
+        let mut state = fresh_state();
+        state.meshed = true;
+        state.link(bob);
+        state.unlink(bob);
+        let began = Instant::now();
+        state.note_degraded();
+
+        assert!(
+            state.note_inbound(began + after / 2),
+            "the first inbound heals it"
+        );
+
+        assert!(
+            state.silent_partition_due(roster, began + after + Duration::from_secs(1)),
+            "the heal restarted the clock"
+        );
     }
 
     #[test]

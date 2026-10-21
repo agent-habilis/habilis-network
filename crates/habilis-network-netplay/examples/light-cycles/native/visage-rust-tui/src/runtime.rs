@@ -112,6 +112,7 @@ mod tests {
     use crate::runtime::Runtime;
     use crate::tui::layout::LayoutState;
     use crate::view::{BoxProps, View};
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_running_app_repaints_only_after_a_signal_changes() {

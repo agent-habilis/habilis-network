@@ -270,6 +270,20 @@ impl Topology {
         expired.len()
     }
 
+    /// Whether a vector of `origin` was held and removed inside the last max age: the peer
+    /// left, or its vector expired.
+    #[must_use]
+    pub fn is_gone(&self, origin: AppId) -> bool {
+        self.tombstones.contains_key(&origin)
+    }
+
+    /// The application ids that `origin` linked to in the vector that we hold of it.
+    pub(crate) fn links_of(&self, origin: AppId) -> Option<Vec<AppId>> {
+        self.vectors
+            .get(&origin)
+            .map(|held| held.vector.links.iter().map(|(id, _)| *id).collect())
+    }
+
     /// The underlay address an origin advertised, for dialing a hop through it.
     pub(crate) fn underlay_of(&self, origin: AppId) -> Option<EndpointAddr> {
         self.vectors
@@ -391,6 +405,7 @@ pub struct TopologyEdge {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::{expect_warn, test};
     use n0_future::time::{Duration, Instant};
 
     use super::{Leg, LinkVector, Topology};
@@ -568,6 +583,10 @@ mod tests {
 
     #[test]
     fn a_vector_older_than_the_max_age_is_refused() {
+        expect_warn(
+            "habilis_network_iroh_multihop_transport::topology",
+            "link-state refused: the sender's clock is behind ours",
+        );
         // The replay a member with old vectors can try after a restart, or
         // against a late joiner.
         let (na, nb) = (eid(1), eid(2));

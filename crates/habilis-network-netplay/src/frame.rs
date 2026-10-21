@@ -140,6 +140,7 @@ pub enum InputStatus {
 #[cfg(test)]
 mod tests {
     use super::Frame;
+    use habilis_network_test_tracing::test;
 
     #[test]
     fn a_frame_that_is_a_real_frame_serializes_as_its_number() {

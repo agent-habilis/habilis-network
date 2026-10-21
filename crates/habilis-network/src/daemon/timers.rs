@@ -94,7 +94,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
     let idle = state.idle.take();
     let links = state.direct_counts();
 
-    if state.meshed && link_len == 0 && roster_len > 0 {
+    if state.silent_partition_due(roster_len, Instant::now()) {
         tracing::warn!(
             target: "habilis_network::lifecycle",
             roster_len,
@@ -244,6 +244,7 @@ pub(crate) fn note_tick_gap(
 #[cfg(test)]
 mod tests {
     use crate::testing::fresh_state;
+    use habilis_network_test_tracing::{expect_warn, test};
 
     use super::warn_on_high_resident_memory;
 
@@ -254,6 +255,10 @@ mod tests {
     // mutate anything else. A `0` threshold disables it entirely.
     #[test]
     fn resident_memory_warn_fires_once_then_latches() {
+        expect_warn(
+            "habilis_network::lifecycle",
+            "resident memory crossed the warn threshold",
+        );
         let sink = CountingSink::new();
         let mut state = fresh_state();
 

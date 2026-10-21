@@ -104,6 +104,7 @@ pub fn log_raw() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::path::PathBuf;
 
     use super::resolve_log_dir;

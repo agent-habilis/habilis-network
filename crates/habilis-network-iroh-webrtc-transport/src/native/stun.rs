@@ -404,6 +404,7 @@ mod tests {
         HEADER_LEN, IceConfig, MAGIC_COOKIE, TRANSACTION_ID_LEN, binding_request, gather_reflexive,
         parse_binding_response,
     };
+    use habilis_network_test_tracing::test;
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::net::UdpSocket;
@@ -584,7 +585,7 @@ mod tests {
         (addr, task)
     }
 
-    #[tokio::test]
+    #[test]
     async fn gather_probes_servers_concurrently() {
         // The silent server comes first: the old sequential gather burned its
         // whole per-server timeout on it before even asking the live one.
@@ -614,7 +615,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_hung_resolver_does_not_delay_a_live_answer() {
         // One name hangs in resolution forever, the other resolves at once
         // and its server answers within a millisecond. The answer must be
@@ -644,7 +645,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_late_resolution_still_gets_probed_within_the_budget() {
         // The name resolves after half the budget — past the old drain
         // deadline. The probe must still go out: forfeiting with unused
@@ -703,7 +704,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
     async fn an_error_burst_does_not_abort_a_gather_with_a_live_probe() {
         // A burst of receive errors must not discard a live server's pending
         // answer: the deadline already bounds the loop, so giving up early
@@ -750,7 +751,7 @@ mod tests {
         (addr, task)
     }
 
-    #[tokio::test]
+    #[test]
     async fn a_reply_from_a_rewritten_source_address_still_counts() {
         let (addr, server) = sideways_server().await;
         let client = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
@@ -767,7 +768,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     async fn gather_returns_none_when_no_server_answers() {
         let silent = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let silent_addr = silent.local_addr().expect("local addr");

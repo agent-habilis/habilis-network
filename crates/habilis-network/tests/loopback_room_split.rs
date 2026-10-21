@@ -56,6 +56,9 @@ use habilis_network::protocol::LockedMesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+/// How long the setup of a split waits for the rosters of its two groups to settle.
+const COUNTS_DEADLINE: Duration = Duration::from_secs(10);
+
 /// The gap between two joiners of the one-by-one flow.
 const SPACING: Duration = Duration::from_secs(2);
 
@@ -103,7 +106,7 @@ impl std::io::Write for RoundLogWriter {
 
 /// One global subscriber that writes to the file of the running round. A per-round
 /// `set_default` would lose the events of the worker threads.
-fn init_process() {
+fn init_process() -> habilis_network_test_tracing::Guard {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         init(Tuning {
@@ -111,14 +114,8 @@ fn init_process() {
             cohost_grace: Duration::from_secs(2),
             ..Tuning::DEFAULTS
         });
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("habilis_network=info"));
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(|| RoundLogWriter)
-            .with_ansi(false)
-            .try_init();
     });
+    habilis_network_test_tracing::init_with_writer("habilis_network=info", || RoundLogWriter)
 }
 
 /// One round: its log, kept when the round fails. `HABILIS_TEST_LOG_DUMP` names the prefix
@@ -126,11 +123,18 @@ fn init_process() {
 struct Round {
     name: &'static str,
     path: PathBuf,
+    // Last field: it drops last and sees the events of the round.
+    log: habilis_network_test_tracing::Guard,
 }
 
 impl Round {
+    /// The round must log this WARN, because the case is about it. See `Guard::expect_warn`.
+    fn expect_warn(&self, target: &str, text: &str) {
+        self.log.expect_warn(target, text);
+    }
+
     fn begin(name: &'static str) -> Self {
-        init_process();
+        let log = init_process();
         let prefix = std::env::var("HABILIS_TEST_LOG_DUMP").unwrap_or_else(|_| {
             std::env::temp_dir()
                 .join("loopback-room-split")
@@ -140,7 +144,7 @@ impl Round {
         let path: PathBuf = format!("{prefix}.{name}.{}", std::process::id()).into();
         *ROUND_LOG.lock().expect("no poison") =
             Some(std::fs::File::create(&path).expect("create the log file of the round"));
-        Self { name, path }
+        Self { name, path, log }
     }
 
     fn log(&self) -> String {
@@ -500,6 +504,20 @@ async fn four_joiners_together_after_a_long_run(
     become_one_mesh(&all, MERGE_DEADLINE).await
 }
 
+/// The roster counts of two members once both read `count`, or what they read when the deadline
+/// ends. The last joiner of a group releases the rendezvous before it has learned its last peer,
+/// so a read at the instant of the last release can fall a peer short.
+async fn wait_for_counts(first: &Member, second: &Member, count: usize) -> (usize, usize) {
+    let started = Instant::now();
+    loop {
+        let counts = (first.peers().await, second.peers().await);
+        if counts == (count, count) || started.elapsed() >= COUNTS_DEADLINE {
+            return counts;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Two meshes of one room, each with a holder, and every member released: E's setup, then one
 /// old member that binds the next rung because its probe reads "not ours". The old members hold
 /// their claims back but that one, so that the only second holder is the one that the test
@@ -521,8 +539,7 @@ async fn two_released_holders(round: &Round, members: &mut Vec<Member>) -> Resul
     open_joiners(members, &mesh, &nicks("late-after", 4)).await;
     // The five old members, and the new holder with four joiners that released: nine releases.
     wait_for_releases(round, 9).await?;
-    let old = members[0].peers().await;
-    let new = members[members.len() - 1].peers().await;
+    let (old, new) = wait_for_counts(&members[0], &members[members.len() - 1], 4).await;
     if old != 4 || new != 4 {
         return Err(format!(
             "precondition: the two meshes are not apart, an old member counts {old} peers and a new one {new}, each should count 4"
@@ -942,6 +959,9 @@ async fn a_start_burst_on_a_host_that_answers_late_binds_no_second_rung() {
 async fn a_holder_whose_beacon_stops_answering_serves_again_and_a_joiner_finds_it() {
     let _serial = SERIAL.lock().await;
     let round = Round::begin("holder-stalled");
+    // The test wedges the beacon: it serves no ALPN, so the dials of the members fail the handshake,
+    // and the router of the beacon logs each one.
+    round.expect_warn("iroh::protocol", "error 120");
     let mut members = Vec::new();
     let verdict = holder_whose_beacon_stops_answering(&round, &mut members).await;
     finish(round, members, verdict).await;
@@ -952,6 +972,7 @@ async fn a_holder_whose_beacon_stops_answering_serves_again_and_a_joiner_finds_i
 async fn a_member_says_so_when_other_processes_hold_every_port_of_its_room() {
     let _serial = SERIAL.lock().await;
     let round = Round::begin("ladder-taken");
+    round.expect_warn("habilis_network::beacon", "no rendezvous port is free");
     let mut members = Vec::new();
     let verdict = ladder_held_by_other_processes(&round, &mut members).await;
     finish(round, members, verdict).await;

@@ -178,6 +178,7 @@ async fn wait_online(endpoint: &Endpoint) {
 mod tests {
     use super::{BlobServer, ContentId, fetch};
     use crate::protocol::mesh::LookupOpts;
+    use habilis_network_test_tracing::test;
     use rand::RngCore;
     use std::fs;
     use std::path::PathBuf;
@@ -279,7 +280,7 @@ mod tests {
     /// A loopback fetch runs on a direct path, so a producer whose mesh keeps
     /// the relay for lookup only (the default) serves it — and the ticket
     /// carries the policy to the consumer.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn relay_lookup_only_still_serves_a_direct_fetch() {
         let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, false)
             .await
@@ -309,7 +310,7 @@ mod tests {
     /// inside the request being awaited. So a connection that never sends parks
     /// a task, and nothing bounded how many could park at once or freed the
     /// ones that had.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_peer_that_never_sends_does_not_pin_serve_tasks() {
         use super::produce::ServeLimits;
 
@@ -323,6 +324,7 @@ mod tests {
                 .expect("start producer");
 
         // Connect and then do nothing at all — never open a stream, never send.
+        let mut clients = Vec::new();
         let mut idle = Vec::new();
         for _ in 0..12u8 {
             let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -331,8 +333,9 @@ mod tests {
                 .await
                 .expect("bind client");
             if let Ok(conn) = client.connect(server.addr(), super::BLOB_ALPN).await {
-                idle.push((client, conn));
+                idle.push(conn);
             }
+            clients.push(client);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(
@@ -351,16 +354,22 @@ mod tests {
             "a silent peer still holds serve tasks after the pre-auth deadline"
         );
 
+        for conn in idle {
+            conn.close(0u32.into(), b"done");
+        }
+        for client in clients {
+            client.close().await;
+        }
         server.shutdown().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn round_trips_a_blob_byte_for_byte() {
         let payload = vec![7u8; 200_000];
         assert_eq!(round_trip(&payload).await, payload);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn round_trips_an_empty_blob() {
         assert_eq!(round_trip(b"").await, b"");
     }
@@ -370,7 +379,7 @@ mod tests {
     /// string an application would ship over gossip, and [`fetch`] streams the
     /// bytes back. Nothing here names an application type, which is the point —
     /// this is the shape any consumer writes, whatever its data model.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn offload_to_fetch_needs_no_application_type() {
         let payload: Vec<u8> = (0..40_000_u32).map(|byte| byte.to_le_bytes()[0]).collect();
         let src = temp_file(&payload);
@@ -422,7 +431,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn passworded_blob_requires_the_password() {
         use crate::protocol::crypto::Password;
         let password = Password::new("hunter2".to_owned());
@@ -467,7 +476,7 @@ mod tests {
 
     /// The same bytes offloaded under two groups share one spool file, so
     /// evicting one group must leave the other's ticket redeemable.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
         let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
             .await
@@ -495,7 +504,7 @@ mod tests {
         server.shutdown().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bad_secret_is_refused() {
         let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
             .await
@@ -515,7 +524,7 @@ mod tests {
         server.shutdown().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unknown_hash_is_refused() {
         let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
             .await
@@ -535,7 +544,7 @@ mod tests {
         server.shutdown().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_size_disagreement_is_rejected() {
         let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
             .await

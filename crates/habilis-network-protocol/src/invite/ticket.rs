@@ -247,6 +247,7 @@ impl InviteTicket {
 /// slice is too short.
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::time::Duration;
 
     use super::{InviteTicket, mint, signing_bytes};

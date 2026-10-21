@@ -121,6 +121,7 @@ impl ProvenEndpoints {
 
 #[cfg(test)]
 mod tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::SecretKey;
@@ -178,6 +179,7 @@ mod tests {
 
 #[cfg(test)]
 mod one_signer_tests {
+    use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
     use iroh::SecretKey;
