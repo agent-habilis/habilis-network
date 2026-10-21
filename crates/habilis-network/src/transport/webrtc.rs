@@ -1699,7 +1699,7 @@ mod tests {
     use crate::transport::probe::PathKind;
 
     fn relay_addr() -> iroh::TransportAddr {
-        iroh::TransportAddr::Relay("https://relay.example".parse().unwrap())
+        iroh::TransportAddr::Relay("https://relay.example".parse().expect("a relay url"))
     }
 
     /// A browser: relay only, because wasm has no IP stack.
@@ -1712,7 +1712,7 @@ mod tests {
         EndpointAddr::from_parts(
             id,
             [
-                iroh::TransportAddr::Ip("127.0.0.1:4433".parse().unwrap()),
+                iroh::TransportAddr::Ip("127.0.0.1:4433".parse().expect("a socket address")),
                 relay_addr(),
             ],
         )

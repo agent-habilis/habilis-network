@@ -64,6 +64,5 @@ disallowed-methods = [
 ]
 
 # Google Rust Style Guide (issue #29): a test may call `unwrap`, because a failed `unwrap` fails the
-# test with a line number. The ratchet of scripts/lint-ratchet.py counts `clippy::unwrap_used`
-# outside tests only.
+# test with a line number. `clippy::unwrap_used` is on for all other code (Cargo.toml).
 allow-unwrap-in-tests = true

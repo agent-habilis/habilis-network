@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Ratchet for the lints that still have old findings.
 
-The lints are missing_docs, clippy::exhaustive_enums, clippy::exhaustive_structs and
-clippy::unwrap_used. A count above the baseline fails, because it is a new finding. A
-count below the baseline fails too, so the baseline only tightens. Standard library only.
+The lints are missing_docs, clippy::exhaustive_enums and clippy::exhaustive_structs. A count
+above the baseline fails, because it is a new finding. A count below the baseline fails too, so
+the baseline only tightens. Standard library only.
 """
 
 import argparse
@@ -18,7 +18,6 @@ LINTS = (
     "missing_docs",
     "clippy::exhaustive_enums",
     "clippy::exhaustive_structs",
-    "clippy::unwrap_used",
 )
 
 # Struct fields and variants may stay without docs. The Google Rust Style Guide says that a
@@ -46,8 +45,6 @@ CLIPPY = [
     "clippy::exhaustive_enums",
     "-W",
     "clippy::exhaustive_structs",
-    "-W",
-    "clippy::unwrap_used",
 ]
 
 # Only library source counts. Tests, examples and benches are not in crates/<crate>/src/.
