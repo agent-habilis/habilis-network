@@ -6,18 +6,24 @@
 //! file is in the mesh folder. On Windows the endpoint is the named pipe of R3,
 //! on Unix the socket.
 //!
-//! The node is never sent `Quit`: in CLI mode a quit ends the process with
-//! `std::process::exit`, which would end the test binary. The test aborts the
-//! task instead, and awaits it, so the loop is gone before the folder is
-//! removed. The tasks that the loop spawned (the IPC accept loop, the signal
-//! tasks, iroh) stay until the test runtime ends, which is harmless.
+//! Part 2, the quit (R5): a node in a child process stops on an IPC `quit`.
+//! The child exits with 0, and its state file, its marker and its endpoint are
+//! gone.
 //!
-//! Steps 3 and 4 of R11 (`Quit` and the owner watch, R5 and R6) need the node
-//! in a child process. This file holds one test, so no other test shares the
-//! process with a node that could exit it.
+//! In CLI mode a quit ends the process with `std::process::exit`, so no node of
+//! the test process is ever sent a quit. Part 1 aborts the task of its node
+//! instead, and awaits it, so the loop is gone before the folder is removed.
+//! The tasks that the loop spawned (the IPC accept loop, the signal tasks,
+//! iroh) stay until the test runtime ends, which is harmless. Part 2 runs its
+//! node in a child process: the test binary itself, with only `child_node`
+//! selected.
+//!
+//! Step 4 of R11 (the owner watch, R6) is not here yet.
 
 #![cfg(feature = "host")]
 
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,16 +33,23 @@ use habilis_network::embed::{
 };
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::message::Authored;
-use habilis_network::protocol::{LookupOpts, Nickname};
-use habilis_network::runtime::ipc::{active_endpoints, send_to_endpoint};
-use habilis_network::runtime::{SetupKind, SetupParams, derive_topic_mesh_with, run, setup_mesh};
+use habilis_network::protocol::{LookupOpts, MeshId, Nickname};
+use habilis_network::runtime::ipc::{QuitTarget, active_endpoints, quit, send_to_endpoint};
+use habilis_network::runtime::{
+    EventLoopConfig, SetupKind, SetupParams, derive_topic_mesh_with, run, setup_mesh,
+};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::Notify;
 
 /// The nickname of the test node. A valid Windows file stem too.
 const NICKNAME: &str = "host-test";
 
+/// The variable that makes [`child_node`] run a node: the runtime base and the
+/// topic, one per line.
+const CHILD_ENV: &str = "HABILIS_HOST_LIFECYCLE_CHILD";
+
 /// An app with no frames of its own that answers every IPC command with its
-/// nickname, as the `Info` command of a real consumer does.
+/// nickname and its mesh, as the `Info` command of a real consumer does.
 struct InfoApp;
 
 #[habilis_network::async_trait]
@@ -71,10 +84,10 @@ impl NodeDriver for InfoApp {
         &mut self,
         req: IpcRequest<'_, Self::Ipc>,
         _state: &mut EventLoopState,
-        _ctx: &HandlerCtx<'_>,
+        ctx: &HandlerCtx<'_>,
     ) -> bool {
         let answer = if req.cmd["command"] == "info" {
-            serde_json::json!({ "ok": true, "nickname": NICKNAME })
+            serde_json::json!({ "ok": true, "nickname": NICKNAME, "mesh": ctx.mesh.as_str() })
         } else {
             serde_json::json!({ "ok": false, "error": "unknown command" })
         };
@@ -85,7 +98,8 @@ impl NodeDriver for InfoApp {
 
 /// A sink that wakes the test when the node reports ready, and keeps the
 /// error texts: a failed bind gives an error and never `Ready`, and the test
-/// shows the error instead of a bare timeout.
+/// shows the error instead of a bare timeout. The child also writes each error
+/// to stderr, which the parent shows when it fails.
 #[derive(Default)]
 struct ReadySink {
     ready: Notify,
@@ -95,6 +109,7 @@ struct ReadySink {
 impl NodeSink for ReadySink {
     fn emit(&self, event: NodeEvent) {
         if let NodeEvent::Error(text) = event {
+            eprintln!("node error: {text}");
             self.errors.lock().expect("no poison").push(text);
         } else if matches!(event, NodeEvent::Ready { .. }) {
             self.ready.notify_one();
@@ -104,14 +119,15 @@ impl NodeSink for ReadySink {
 
 /// A runtime base of this run alone, removed at the end, also when an assert
 /// fails. On Unix it is under `/tmp`: a socket path must stay inside the
-/// `sun_path` limit, and the macOS temp directory is long.
-struct TempBase(std::path::PathBuf);
+/// `sun_path` limit, and the macOS temp directory is long. `tag` keeps the
+/// bases of the two parts apart, because they run at the same time.
+struct TempBase(PathBuf);
 
 impl TempBase {
-    fn new() -> Self {
-        let name = format!("hn-host-{}", std::process::id());
+    fn new(tag: &str) -> Self {
+        let name = format!("hn-{tag}-{}", std::process::id());
         #[cfg(unix)]
-        let path = std::path::Path::new("/tmp").join(name);
+        let path = Path::new("/tmp").join(name);
         #[cfg(not(unix))]
         let path = std::env::temp_dir().join(name);
         let _ = std::fs::remove_dir_all(&path);
@@ -125,16 +141,15 @@ impl Drop for TempBase {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
-    let base = TempBase::new();
-    let topic = format!("host-lifecycle-{}", std::process::id());
-    let mesh = derive_topic_mesh_with(&topic, LookupOpts::loopback()).expect("a loopback mesh");
-    let sink = Arc::new(ReadySink::default());
-    let config = setup_mesh(
+/// The CLI config of a test node on a loopback topic mesh, with its runtime
+/// base at `base` and no state file of its own: in CLI mode it writes one into
+/// the mesh folder.
+async fn cli_config(base: &Path, topic: &str, sink: Arc<dyn NodeSink>) -> EventLoopConfig {
+    let mesh = derive_topic_mesh_with(topic, LookupOpts::loopback()).expect("a loopback mesh");
+    setup_mesh(
         SetupKind::Topic {
             mesh,
-            topic_string: topic,
+            topic_string: topic.to_owned(),
         },
         SetupParams {
             author: Nickname::new(NICKNAME).expect("a valid nickname"),
@@ -143,16 +158,45 @@ async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
             endpoint: None,
             protocols: Vec::new(),
             transports: TransportOpts::default(),
-            runtime_base: Some(base.0.clone()),
+            runtime_base: Some(base.to_path_buf()),
             state_file: None,
-            sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
+            sink,
             per_peer_gate: None,
             cohost: None,
             live_count: None,
         },
     )
     .await
-    .expect("setup_mesh on a loopback mesh must not touch the network");
+    .expect("setup_mesh on a loopback mesh must not touch the network")
+}
+
+/// Each file under `base`, one mesh folder deep, whose name ends with `suffix`.
+fn files_ending_with(base: &Path, suffix: &str) -> Vec<PathBuf> {
+    let Ok(mesh_dirs) = std::fs::read_dir(base) else {
+        return Vec::new();
+    };
+    mesh_dirs
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(suffix))
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
+    let base = TempBase::new("host");
+    let topic = format!("host-lifecycle-{}", std::process::id());
+    let sink = Arc::new(ReadySink::default());
+    let config = cli_config(&base.0, &topic, Arc::clone(&sink) as Arc<dyn NodeSink>).await;
 
     // `setup_mesh` gives a CLI config. `Node::spawn` would make it in-process,
     // which binds no endpoint, so the test runs the loop itself.
@@ -177,15 +221,155 @@ async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
     assert_eq!(reply["nickname"], NICKNAME, "{reply}");
 
     // In CLI mode the node also writes its state file into the mesh folder.
-    let state_files: Vec<_> = std::fs::read_dir(&base.0)
-        .expect("the base exists")
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.path().join(format!("{NICKNAME}.state.json")))
-        .filter(|path| path.is_file())
-        .collect();
+    let state_files = files_ending_with(&base.0, &format!("{NICKNAME}.state.json"));
     assert_eq!(state_files.len(), 1, "one state file: {state_files:?}");
 
     node.abort();
     let _ = node.await;
+}
+
+/// The node of part 2, in the child process that
+/// [`quit_stops_a_cli_node_in_a_child_process`] starts. With no [`CHILD_ENV`]
+/// it does nothing, so a run with `--include-ignored` passes it at once.
+///
+/// The quit ends this process with 0. It does not remove the base: the parent
+/// owns it.
+#[test]
+#[ignore = "the child process of quit_stops_a_cli_node_in_a_child_process"]
+fn child_node() {
+    let Ok(spec) = std::env::var(CHILD_ENV) else {
+        return;
+    };
+    let (base, topic) = spec.split_once('\n').expect("the base and the topic");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    runtime.block_on(async {
+        let sink = Arc::new(ReadySink::default()) as Arc<dyn NodeSink>;
+        let config = cli_config(Path::new(base), topic, sink).await;
+        let ran = tokio::time::timeout(
+            Duration::from_mins(1),
+            Box::pin(run(config, InfoApp, None, None)),
+        )
+        .await;
+        panic!("the node did not exit on a quit within 60 s: {ran:?}");
+    });
+}
+
+/// The child process of part 2, with its output read from the start, so a child
+/// that writes much never blocks on a full pipe.
+struct ChildNode {
+    process: tokio::process::Child,
+    stdout: tokio::task::JoinHandle<String>,
+    stderr: tokio::task::JoinHandle<String>,
+}
+
+impl ChildNode {
+    fn spawn(base: &Path, topic: &str) -> Self {
+        let mut process = tokio::process::Command::new(
+            std::env::current_exe().expect("the path of the test binary"),
+        )
+        .args(["child_node", "--exact", "--ignored", "--nocapture"])
+        .env(CHILD_ENV, format!("{}\n{topic}", base.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("the child starts");
+        let stdout = tokio::spawn(read_all(process.stdout.take().expect("piped")));
+        let stderr = tokio::spawn(read_all(process.stderr.take().expect("piped")));
+        Self {
+            process,
+            stdout,
+            stderr,
+        }
+    }
+
+    /// Kill the child, and panic with `what` and the output of the child.
+    async fn fail(mut self, what: &str) -> ! {
+        let _ = self.process.kill().await;
+        let stdout = self.stdout.await.unwrap_or_default();
+        let stderr = self.stderr.await.unwrap_or_default();
+        panic!("{what}\n--- child stdout ---\n{stdout}\n--- child stderr ---\n{stderr}");
+    }
+}
+
+async fn read_all(mut pipe: impl AsyncRead + Unpin) -> String {
+    let mut bytes = Vec::new();
+    let _ = pipe.read_to_end(&mut bytes).await;
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quit_stops_a_cli_node_in_a_child_process() {
+    let base = TempBase::new("quit");
+    let topic = format!("host-lifecycle-quit-{}", std::process::id());
+    let mut child = ChildNode::spawn(&base.0, &topic);
+
+    // The marker shows that the endpoint accepts. A slow first start (an
+    // antivirus scan of the binary on Windows) is covered by the 30 s.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let name = loop {
+        if let Some(name) = active_endpoints(&base.0).into_iter().next() {
+            break name;
+        }
+        if let Ok(Some(status)) = child.process.try_wait() {
+            child
+                .fail(&format!("the child exited before its endpoint: {status}"))
+                .await;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            child.fail("the child wrote no marker within 30 s").await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let reply = match send_to_endpoint(&name, &serde_json::json!({ "command": "info" })).await {
+        Ok(reply) => reply,
+        Err(error) => child.fail(&format!("the Info command: {error}")).await,
+    };
+    let reply: serde_json::Value = serde_json::from_str(&reply).expect("JSON");
+    let mesh = MeshId::new(reply["mesh"].as_str().expect("the mesh in the answer"))
+        .expect("a valid mesh id");
+    let nickname = Nickname::new(NICKNAME).expect("a valid nickname");
+
+    // `quit` and not `terminate`: on Unix the fallback signal of `terminate`
+    // would hide a quit that failed.
+    let target = QuitTarget {
+        base: &base.0,
+        mesh: &mesh,
+        nickname: &nickname,
+    };
+    if let Err(error) = quit(&target).await {
+        child.fail(&format!("the quit: {error}")).await;
+    }
+    let status = match tokio::time::timeout(Duration::from_secs(10), child.process.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => child.fail(&format!("wait for the child: {error}")).await,
+        Err(_) => child.fail("the child did not exit within 10 s").await,
+    };
+    if !status.success() {
+        child
+            .fail(&format!("the child exited with {status}, not 0"))
+            .await;
+    }
+
+    // The shutdown removed the state file and the marker. On Unix the socket
+    // file stays, as after a SIGTERM, and nothing accepts on it.
+    let state_files = files_ending_with(&base.0, ".state.json");
+    assert!(
+        state_files.is_empty(),
+        "the state file stays: {state_files:?}"
+    );
+    let markers = files_ending_with(&base.0, ".ipc");
+    assert!(markers.is_empty(), "the marker stays: {markers:?}");
+    assert!(active_endpoints(&base.0).is_empty());
+    assert!(
+        send_to_endpoint(&name, &serde_json::json!({ "command": "info" }))
+            .await
+            .is_err(),
+        "the old endpoint still answers"
+    );
 }

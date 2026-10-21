@@ -39,7 +39,7 @@ published to a registry; pin it with
   there, and the remedy "start a daemon" does not fit.
 - A daemon stops on an IPC `quit`, on every OS: `{"command":"quit","mesh":"<mesh id>"}`. The
   engine answers it before the app sees the line. The daemon answers `{"ok":true}`, then takes
-  the path of `SIGTERM`: it broadcasts `Left`, removes its state file and its marker, and exits.
+  the path of `SIGTERM`: it removes its state file and its marker, broadcasts `Left`, and exits.
   A quit for another mesh is refused, so a stale marker cannot stop another session. On Windows
   this is the only graceful stop. `runtime::ipc::quit(&QuitTarget)` sends it, at the address that
   `send` takes (base, mesh, nickname), and returns a `QuitError` (`Unreached`, `OldDaemon`,

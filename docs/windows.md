@@ -19,7 +19,7 @@ Ids, wire formats, the IPC protocol and the C ABI can change.
 ## 2. Current state
 
 The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy and the tests there.
-The IPC of a daemon works on Windows, over a named pipe. The graceful stop does not work yet, and the state file can fail to update.
+The IPC of a daemon works on Windows, over a named pipe, and a daemon stops gracefully on an IPC `quit`. The owner watch and the console events do not work yet, and the state file can fail to update.
 
 | Requirement | State |
 |---|---|
@@ -27,13 +27,13 @@ The IPC of a daemon works on Windows, over a named pipe. The graceful stop does 
 | R2. Runtime base | Done. `runtime_base` returns `<LocalAppData>\<product>\run`, and `ensure_runtime_base` rejects a reparse point at the base (`crates/habilis-network-util/src/lib.rs`). |
 | R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. Discovery reads a `<nick>.ipc` marker on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
-| R5. Graceful stop | Open. There is no IPC `Quit`. `terminate` on Windows returns `Unsupported`. |
+| R5. Graceful stop | Done. The engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::quit` and `runtime::ipc::terminate` send it on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
 | R6. Owner watch | Open. `spawn_orphan_watch` is `cfg(unix)` only. |
 | R7. Console events | Open. Only ctrl-c reaches the quit channel. |
 | R8. State file | Open. `state_file.rs` still replaces the file with `std::fs::rename`. |
 | R9. FFI | Open. `ffi.rs` and `habilis_network.h` still use `c_long` / `long`. `dlopen/node.ts` and `abi.ts` are not changed. `tasks/src/ffi.rs` still reads `libhabilis_network_ffi.a`. |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
-| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and part 1 of `host_lifecycle.rs` (steps 1 and 2) run. Open: `cargo task ffi` (with R9), steps 3 and 4 of `host_lifecycle.rs` (with R5 and R6), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
+| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and steps 1 to 3 of `host_lifecycle.rs` run. Open: `cargo task ffi` (with R9), step 4 of `host_lifecycle.rs` (with R6), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
 | R12. Runtime base of a Unix client | Open. A Unix client does not check the base before it reads a marker. |
 
 The descriptions of [§2.2](#22-runtime-breaks) and the open lines of [§2.3](#23-tooling-and-tests) are still true. Their line numbers can be out of date.
@@ -65,9 +65,8 @@ These parts were already correct on Windows:
 
 ### 2.2 Runtime breaks
 
-These problems occur after the workspace compiles. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3.
+These problems occur after the workspace compiles. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5.
 
-- **Stop.** `terminate` sends `SIGTERM`. Windows has no polite signal. `TerminateProcess` is a hard kill, so the `Left` broadcast does not go out and the state file stays. Until R5, `terminate` on Windows returns `Unsupported`.
 - **Owner watch.** `spawn_orphan_watch` (`shutdown.rs:214`) is `cfg(unix)` only. On Windows a daemon does not stop when its owner dies.
 - **Console events.** Only ctrl-c is handled. Close, logoff and shutdown events skip the graceful path.
 - **State file.** `state_file.rs:225` writes a temporary file and renames it over the target. On Windows the rename fails while a reader holds the file open without `FILE_SHARE_DELETE`.
@@ -150,7 +149,7 @@ Done. The design changed from the first text of this section, after review. The 
 
 **Limits.**
 
-- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file did. Until R5, `terminate` on Windows returns `Unsupported`, and the only stop is a hard kill, so a stale marker is the common case there.
+- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file did. A graceful stop removes the marker of its own daemon (R5). A hard kill, such as `Stop-Process -Force`, leaves it, as a crash does.
 - On Unix, two daemons with the same nickname on one mesh have the same socket path, and the second bind replaces the first. That is not new.
 - The DACL cannot be tested with a second user on CI. T4 tests it on the real machine.
 
@@ -168,8 +167,17 @@ Add Windows versions in `crates/habilis-network-util/src/process.rs`:
 
 ### R5. Graceful stop
 
-- Add an IPC `Quit` command. It runs the same path as `SIGTERM`: broadcast `Left`, remove the state file and the marker, exit. It answers the client before the process exits.
-- `terminate` sends `Quit` on every OS. On Unix, `SIGTERM` stays as the fallback when the IPC send fails.
+Done.
+
+**The command.** The engine answers `{"command":"quit","mesh":"<mesh id>"}` on the IPC endpoint, before the app sees the line. Every app with an IPC endpoint gets it, and an app command with that shape never reaches the app. A line that does not parse as that command goes to the app as before.
+
+**The path.** The daemon writes `{"ok":true}`, then feeds the quit channel that the signals and the owner watch feed. The shutdown then removes the state file and the marker, broadcasts `Left`, and exits. So the client has the answer before the process exits. The channel is fed also when the client does not read the answer.
+
+**The mesh guard.** A quit for another mesh is refused and stops nothing, so a stale marker cannot stop another session.
+
+**The client.** `runtime::ipc::quit(&QuitTarget)` sends the quit at the address of `send`: the runtime base, the mesh and the nickname. Its `QuitError` tells three cases apart: the quit was not heard (`Unreached`), the daemon is too old to know it (`OldDaemon`), or the daemon refused it (`Refused`). `runtime::ipc::terminate(&QuitTarget, pid)` sends the quit on every OS. On Unix it sends `SIGTERM` to `pid` when the quit was not heard or the daemon is too old. A daemon that refused the quit gets no signal. The caller must know that `pid` is the daemon of the target, for example from its `Info` answer.
+
+**Two `terminate` functions.** `util::process::terminate(pid)` does not change: it only signals a pid, and on Windows it returns `Unsupported`, because the util crate sits below the IPC. G3 renames it to `sigterm`, Unix only, when agent-gossip moves to `runtime::ipc::terminate`.
 
 ### R6. Owner watch
 
@@ -234,7 +242,7 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 3. IPC `Quit` stops the node. The state file and the endpoint are gone.
 4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval.
 
-Steps 1 and 2 are done (part 1). Steps 3 and 4 need the node in a child process: in `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. Part 1 stops the node with an abort of its task.
+Steps 1 to 3 are done. In `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. So step 3 runs the node in a child process: the test binary itself, with only its `child_node` entry selected. Part 1 stops its node with an abort of its task. Step 4 also needs a child process.
 
 **Nightly and e2e.**
 
@@ -290,7 +298,9 @@ Start it after the engine work of [§3](#3-requirements-habilis-network).
 
 ### G3. Leave
 
-`leave` (`cli/session.rs`) stops the daemon with the engine `terminate`, which sends `Quit` (R5).
+`leave` (`cli/session.rs`) stops the daemon with `runtime::ipc::terminate` (R5) in place of `util::process::terminate`. It already has the target (the runtime base, the mesh and the nickname) and the pid that its `Info` check confirms.
+
+With that change, rename `util::process::terminate` to `sigterm`, Unix only, and remove its Windows version, which returns `Unsupported`. `cli/session.rs` is its only caller outside the engine. The rename waits for this step, so that agent-gossip does not break before it.
 
 ### G4. Skills
 
@@ -314,7 +324,7 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 is done.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 and R5 are done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
@@ -419,6 +429,7 @@ Pass:
 |---|---|
 | Kill the Claude Code process that owns the daemon (`Stop-Process -Force`). | The daemon stops within one owner-watch interval. macOS sees the peer leave or time out. |
 | Close the console window of a foreground node. | The graceful `Left` arrives on macOS (`ctrl_close`). |
+| Stop a daemon with an IPC `quit` (`/gossip-leave` after G3). | The graceful `Left` arrives on macOS. The state file and the marker are gone. |
 | Sign out, then sign in. | No stale state file stays. |
 | Pid reuse after the owner dies. | A unit test covers this: the start time does not match, so the watch stops the daemon. |
 

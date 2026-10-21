@@ -190,9 +190,9 @@ pub trait Addressed {
 #[derive(Debug, Serialize, serde::Deserialize)]
 #[serde(tag = "command")]
 enum EngineCommand {
-    /// Stop the daemon by the path of a signal: `Left`, then the state file and
-    /// the marker are removed, then the process exits. `mesh` must be the mesh
-    /// of the daemon, so a stale marker cannot stop another session.
+    /// Stop the daemon by the path of a signal: the state file and the marker
+    /// are removed, then `Left` goes out, then the process exits. `mesh` must be
+    /// the mesh of the daemon, so a stale marker cannot stop another session.
     #[serde(rename = "quit")]
     Quit { mesh: MeshId },
 }
@@ -802,8 +802,8 @@ impl std::error::Error for QuitError {
 }
 
 /// Stop a daemon through its IPC endpoint: the engine's `quit` command. The
-/// daemon answers, then takes the path of a signal: it broadcasts `Left`,
-/// removes its state file and its marker, and exits. `Ok` means that the daemon
+/// daemon answers, then takes the path of a signal: it removes its state file
+/// and its marker, broadcasts `Left`, and exits. `Ok` means that the daemon
 /// accepted the quit, not that it is gone already.
 ///
 /// This works on every OS. See [`terminate`] for the version with a signal as
