@@ -136,6 +136,9 @@ impl<A: NodeDriver + 'static> Node<A> {
     pub async fn crash(mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
+            // `abort` only marks the task. On a multi-thread runtime the loop can run once more
+            // and read the end of its gossip stream, which the close below causes, as a fault.
+            let _ = task.await;
         }
         let (webrtc, endpoint) = &self.crash_handles;
         let _ = webrtc.abort_sessions();
