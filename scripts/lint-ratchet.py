@@ -21,6 +21,14 @@ LINTS = (
     "clippy::unwrap_used",
 )
 
+# Struct fields and variants may stay without docs. The Google Rust Style Guide says that a
+# variant with a clear name needs no doc, and that a doc which only repeats a field name is worse
+# than none. Every other missing_docs finding counts.
+UNDOCUMENTED_OK = (
+    "missing documentation for a struct field",
+    "missing documentation for a variant",
+)
+
 CLIPPY = [
     "cargo",
     "clippy",
@@ -67,6 +75,8 @@ def findings(lines):
         message = obj["message"]
         code = (message.get("code") or {}).get("code")
         if code not in LINTS:
+            continue
+        if code == "missing_docs" and message.get("message", "").startswith(UNDOCUMENTED_OK):
             continue
         primary = [span for span in message.get("spans", []) if span.get("is_primary")]
         if not primary:

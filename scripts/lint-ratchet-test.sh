@@ -78,6 +78,19 @@ check 'new crate without baseline fails' 1 'habilis-network-newcrate' ratchet "$
 python3 "$here/lint-ratchet.py" --from-json "$base" --baseline "$work/rt.baseline" --update >/dev/null
 check 'update then compare passes' 0 - ratchet "$base" "$work/rt.baseline"
 
+# Struct fields and variants are left without docs on purpose, so they are not counted.
+kinds="$fixtures/kinds.json"
+grep 'struct field' "$kinds" >"$work/field.json"
+check 'missing_docs for a struct field is ignored' 0 - ratchet "$work/field.json" "$work/empty"
+grep 'a variant' "$kinds" >"$work/variant.json"
+check 'missing_docs for a variant is ignored' 0 - ratchet "$work/variant.json" "$work/empty"
+
+# Functions and methods still need docs, so they are counted.
+grep 'a function' "$kinds" >"$work/function.json"
+check 'missing_docs for a function counts' 1 'New finding' ratchet "$work/function.json" "$work/empty"
+grep 'a method' "$kinds" >"$work/method.json"
+check 'missing_docs for a method counts' 1 'New finding' ratchet "$work/method.json" "$work/empty"
+
 if [ "$failures" -gt 0 ]; then
     printf '%s case(s) failed\n' "$failures"
     exit 1
