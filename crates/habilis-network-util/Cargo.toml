@@ -54,7 +54,8 @@ web-time.workspace = true
 libc = { workspace = true, optional = true }
 
 # Only the features that the code calls: `Win32_Foundation` for `HANDLE`,
-# `FILETIME`, `STILL_ACTIVE`, `LocalFree` and the generic rights,
+# `FILETIME`, `STILL_ACTIVE`, `LocalFree`, the generic rights, and the two
+# error codes of `file_retry.rs`,
 # `Win32_System_Threading` for the process and token queries,
 # `Win32_System_Diagnostics_ToolHelp` for the process snapshot. The runtime
 # base (`lib.rs`) adds `Win32_UI_Shell` for `SHGetKnownFolderPath`,

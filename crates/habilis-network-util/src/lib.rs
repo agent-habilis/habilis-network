@@ -13,6 +13,10 @@ pub mod clock;
 pub mod consts;
 pub mod cooldown;
 pub mod file_name;
+// The retry of a rename or a remove that a reader blocks on Windows: the state
+// file and the IPC marker.
+#[cfg(feature = "host")]
+pub mod file_retry;
 pub mod logs;
 #[cfg(feature = "host")]
 pub mod process;
