@@ -190,6 +190,8 @@ The rules of this file win over the guide. If the two conflict, follow this file
 
 CI runs `cargo fmt --check` and `cargo clippy` with `-D warnings`. The lints of `[workspace.lints]` and `clippy.toml` apply. A rule that a tool can check must be checked in CI, so that a change that breaks it cannot merge. A rule that no tool can check is a review rule.
 
+A rule with no lint is checked by `scripts/style-check.sh`, which CI runs after clippy. Run it before you push. Each exception is a line of `scripts/style-check.allow` with a count and a reason. A new violation, or an exception with a count that is too high, fails the check.
+
 ### Rules of the guide that do not apply
 
 - A rule that the guide tags for Chromium, Android or Fuchsia does not apply. This repository is none of them.

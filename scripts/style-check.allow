@@ -1,0 +1,18 @@
+# rule|file|matches allowed|reason
+# Used by scripts/style-check.sh. Keep the count exact: the check fails when it is too low as well.
+
+# A Drop that runs while a panic unwinds must not panic: a second panic aborts the process.
+poison|crates/habilis-network/src/transport/pool.rs|2|InFlightDial::drop clears the in-flight entry during unwinding. register_dial must read the same map.
+# The registry map is whole after a panic. Decision for the owner: replace with expect or keep.
+poison|crates/habilis-network-stream/src/produce.rs|1|Registry::entries: a panic while the lock is held leaves a whole map.
+# A sink slot or a queue end has no invariant to break. Decision for the owner: replace with expect or keep.
+poison|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|locked(): a poisoned lock holds data with no invariant.
+# The guard of a test must survive a test that panicked, or it hides the failure that matters.
+poison|crates/habilis-network-test-tracing/src/lib.rs|1|lock helper of the test guard.
+
+# The light-cycles example uses native generators. Its own rust-toolchain.toml pins nightly.
+feature|crates/habilis-network-netplay/examples/light-cycles/native/game/src/lib.rs|1|coroutines, yield_expr (nightly example)
+feature|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/lib.rs|1|coroutines, coroutine_trait (nightly example)
+
+# A panic must not cross the C boundary: this is the defence in depth that the guide allows.
+catch_unwind|crates/habilis-network-ffi/src/ffi.rs|1|FFI boundary

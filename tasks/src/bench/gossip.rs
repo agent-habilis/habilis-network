@@ -87,10 +87,7 @@ struct Tap {
 
 impl ProtocolHandler for Tap {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        *self
-            .served
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connection.clone());
+        *self.served.lock().expect("served slot poisoned") = Some(connection.clone());
         self.inner.accept(connection).await
     }
 }
@@ -100,7 +97,7 @@ impl Tap {
     fn lost_packets(&self) -> u64 {
         self.served
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("served slot poisoned")
             .as_ref()
             .map_or(0, |connection| connection.stats().lost_packets)
     }
