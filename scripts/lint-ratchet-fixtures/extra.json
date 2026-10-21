@@ -1,0 +1,2 @@
+{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"spans":[{"file_name":"crates/habilis-network/src/c.rs","line_start":7,"column_start":1,"is_primary":true}]}}
+{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"spans":[{"file_name":"crates/habilis-network-newcrate/src/lib.rs","line_start":1,"column_start":1,"is_primary":true}]}}

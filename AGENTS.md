@@ -192,6 +192,8 @@ CI runs `cargo fmt --check` and `cargo clippy` with `-D warnings`. The lints of 
 
 A rule with no lint is checked by `scripts/style-check.sh`, which CI runs after clippy. Run it before you push. Each exception is a line of `scripts/style-check.allow` with a count and a reason. A new violation, or an exception with a count that is too high, fails the check.
 
+Four lints still have old findings: `missing_docs`, `clippy::exhaustive_enums`, `clippy::exhaustive_structs` and `clippy::unwrap_used` (tests are exempt). `scripts/lint-ratchet.py` counts them for each crate under `crates/<crate>/src/` and compares the counts with `scripts/lint-ratchet.baseline`. CI runs it after the style check. A count above the baseline is a new finding and fails. A count below the baseline fails too, so that the baseline only gets lower: run `python3 scripts/lint-ratchet.py --update` and commit the file. The run takes about three minutes.
+
 ### Rules of the guide that do not apply
 
 - A rule that the guide tags for Chromium, Android or Fuchsia does not apply. This repository is none of them.

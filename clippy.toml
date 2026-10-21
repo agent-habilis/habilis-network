@@ -62,3 +62,8 @@ disallowed-methods = [
     { path = "tokio::time::interval", reason = "panics in a browser: use n0_future::time::interval" },
     { path = "tokio::time::interval_at", reason = "panics in a browser: use n0_future::time::interval" },
 ]
+
+# Google Rust Style Guide (issue #29): a test may call `unwrap`, because a failed `unwrap` fails the
+# test with a line number. The ratchet of scripts/lint-ratchet.py counts `clippy::unwrap_used`
+# outside tests only.
+allow-unwrap-in-tests = true
