@@ -161,6 +161,30 @@ pub fn expect_warn(target: &str, text: &str) {
         target: target.to_owned(),
         text: text.to_owned(),
         seen: false,
+        optional: false,
+    });
+}
+
+/// Like [`expect_warn`], but the WARN may also not come. For a scenario that can race, such as a
+/// handover that two members claim at once: the relay then logs the replaced connection of one of
+/// them. Allow a WARN only where the test is about that scenario and the code cannot avoid it.
+///
+/// # Panics
+///
+/// Panics if the calling thread is not the thread of a live guard.
+pub fn allow_warn(target: &str, text: &str) {
+    let current = thread::current();
+    let name = current.name().unwrap_or_default();
+    let live = lock(&LIVE);
+    let slot = live
+        .iter()
+        .find(|slot| slot.thread == name)
+        .unwrap_or_else(|| panic!("allow_warn outside a guarded test (thread {name})"));
+    lock(&slot.expected).push(Expectation {
+        target: target.to_owned(),
+        text: text.to_owned(),
+        seen: false,
+        optional: true,
     });
 }
 
@@ -358,6 +382,17 @@ impl Guard {
             target: target.to_owned(),
             text: text.to_owned(),
             seen: false,
+            optional: false,
+        });
+    }
+
+    /// Like [`Self::expect_warn`], but the WARN may also not come, see [`allow_warn`].
+    pub fn allow_warn(&self, target: &str, text: &str) {
+        lock(&self.slot.expected).push(Expectation {
+            target: target.to_owned(),
+            text: text.to_owned(),
+            seen: false,
+            optional: true,
         });
     }
 }
@@ -410,7 +445,7 @@ impl Slot {
                 )),
             }
         }
-        for want in expected.iter().filter(|want| !want.seen) {
+        for want in expected.iter().filter(|want| !want.seen && !want.optional) {
             problems.push(format!(
                 "  expected WARN {} containing {:?}, and it was not logged",
                 want.target, want.text
@@ -432,6 +467,8 @@ struct Expectation {
     target: String,
     text: String,
     seen: bool,
+    /// The WARN may come or not: a test that allows it does not fail when it is absent.
+    optional: bool,
 }
 
 impl Expectation {
