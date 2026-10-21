@@ -38,7 +38,9 @@ jobs:
       # The rules of the Rust style guide that no lint checks (issue #29). The exceptions, each
       # with its reason, are in scripts/style-check.allow.
       - name: Style rules without a lint
-        run: sh scripts/style-check.sh
+        run: |
+          sh scripts/style-check-test.sh
+          sh scripts/style-check.sh
 
       # `blob` is off by default (only agent-gossip enables it), so the line
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
