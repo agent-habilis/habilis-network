@@ -10,15 +10,21 @@
 //! The child exits with 0, and its state file, its marker and its endpoint are
 //! gone.
 //!
+//! Part 3, the owner watch (R6): a node in a child process, with the pid of a
+//! second child process as its owner, stops when that owner is killed. The
+//! node exits with 0, and its state file and its marker are gone, so the watch
+//! took the graceful path.
+//!
 //! In CLI mode a quit ends the process with `std::process::exit`, so no node of
 //! the test process is ever sent a quit. Part 1 aborts the task of its node
 //! instead, and awaits it, so the loop is gone before the folder is removed.
 //! The tasks that the loop spawned (the IPC accept loop, the signal tasks,
-//! iroh) stay until the test runtime ends, which is harmless. Part 2 runs its
-//! node in a child process: the test binary itself, with only `child_node`
-//! selected.
-//!
-//! Step 4 of R11 (the owner watch, R6) is not here yet.
+//! iroh) stay until the test runtime ends, which is harmless. Parts 2 and 3
+//! run their node in a child process: the test binary itself, with only
+//! `child_node` selected. The owner of part 3 is the test binary too, with only
+//! `owner_process` selected, so the test needs no `sleep` or `ping` of the OS.
+//! (The unit tests of the owner watch in `daemon/shutdown.rs` use them, because
+//! a lib test binary is too large to start as an idle process.)
 
 #![cfg(feature = "host")]
 
@@ -34,7 +40,9 @@ use habilis_network::embed::{
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::message::Authored;
 use habilis_network::protocol::{LookupOpts, MeshId, Nickname};
-use habilis_network::runtime::ipc::{QuitTarget, active_endpoints, quit, send_to_endpoint};
+use habilis_network::runtime::ipc::{
+    IpcName, QuitTarget, active_endpoints, quit, send_to_endpoint,
+};
 use habilis_network::runtime::{
     EventLoopConfig, SetupKind, SetupParams, derive_topic_mesh_with, run, setup_mesh,
 };
@@ -44,9 +52,12 @@ use tokio::sync::Notify;
 /// The nickname of the test node. A valid Windows file stem too.
 const NICKNAME: &str = "host-test";
 
-/// The variable that makes [`child_node`] run a node: the runtime base and the
-/// topic, one per line.
+/// The variable that makes [`child_node`] run a node: the runtime base, the
+/// topic, and, for part 3, the pid of the owner, one per line.
 const CHILD_ENV: &str = "HABILIS_HOST_LIFECYCLE_CHILD";
+
+/// The variable that makes [`owner_process`] wait.
+const OWNER_ENV: &str = "HABILIS_HOST_LIFECYCLE_OWNER";
 
 /// An app with no frames of its own that answers every IPC command with its
 /// nickname and its mesh, as the `Info` command of a real consumer does.
@@ -228,19 +239,24 @@ async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
     let _ = node.await;
 }
 
-/// The node of part 2, in the child process that
-/// [`quit_stops_a_cli_node_in_a_child_process`] starts. With no [`CHILD_ENV`]
-/// it does nothing, so a run with `--include-ignored` passes it at once.
+/// The node of parts 2 and 3, in the child process that [`ChildNode`] starts.
+/// With no [`CHILD_ENV`] it does nothing, so a run with `--include-ignored`
+/// passes it at once.
 ///
-/// The quit ends this process with 0. It does not remove the base: the parent
-/// owns it.
+/// A quit, or the exit of its owner, ends this process with 0. It does not
+/// remove the base: the parent owns it.
 #[test]
-#[ignore = "the child process of quit_stops_a_cli_node_in_a_child_process"]
+#[ignore = "the child process of parts 2 and 3"]
 fn child_node() {
     let Ok(spec) = std::env::var(CHILD_ENV) else {
         return;
     };
-    let (base, topic) = spec.split_once('\n').expect("the base and the topic");
+    let mut lines = spec.splitn(3, '\n');
+    let base = lines.next().expect("the base");
+    let topic = lines.next().expect("the topic");
+    let owner = lines
+        .next()
+        .map(|pid| pid.parse::<u32>().expect("the pid of the owner"));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -248,18 +264,46 @@ fn child_node() {
         .expect("a runtime");
     runtime.block_on(async {
         let sink = Arc::new(ReadySink::default()) as Arc<dyn NodeSink>;
-        let config = cli_config(Path::new(base), topic, sink).await;
+        let mut config = cli_config(Path::new(base), topic, sink).await;
+        if let Some(owner) = owner {
+            config = config.with_owner_pid(owner).expect("a live owner");
+        }
         let ran = tokio::time::timeout(
             Duration::from_mins(1),
             Box::pin(run(config, InfoApp, None, None)),
         )
         .await;
-        panic!("the node did not exit on a quit within 60 s: {ran:?}");
+        panic!("the node did not exit within 60 s: {ran:?}");
     });
 }
 
-/// The child process of part 2, with its output read from the start, so a child
-/// that writes much never blocks on a full pipe.
+/// The owner of part 3, in its own child process: it only waits, until the
+/// test kills it. With no [`OWNER_ENV`] it does nothing.
+#[test]
+#[ignore = "the owner process of part 3"]
+fn owner_process() {
+    if std::env::var_os(OWNER_ENV).is_none() {
+        return;
+    }
+    std::thread::sleep(Duration::from_mins(2));
+}
+
+/// Start the test binary with only `entry` selected. The process is killed on
+/// drop, so a test that fails leaves no child behind.
+fn spawn_entry(entry: &str, env: (&str, &str), stdout: Stdio) -> tokio::process::Command {
+    let mut command =
+        tokio::process::Command::new(std::env::current_exe().expect("the path of the test binary"));
+    command
+        .args([entry, "--exact", "--ignored", "--nocapture"])
+        .env(env.0, env.1)
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .kill_on_drop(true);
+    command
+}
+
+/// The child process of parts 2 and 3, with its output read from the start, so
+/// a child that writes much never blocks on a full pipe.
 struct ChildNode {
     process: tokio::process::Child,
     stdout: tokio::task::JoinHandle<String>,
@@ -267,18 +311,15 @@ struct ChildNode {
 }
 
 impl ChildNode {
-    fn spawn(base: &Path, topic: &str) -> Self {
-        let mut process = tokio::process::Command::new(
-            std::env::current_exe().expect("the path of the test binary"),
-        )
-        .args(["child_node", "--exact", "--ignored", "--nocapture"])
-        .env(CHILD_ENV, format!("{}\n{topic}", base.display()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("the child starts");
+    fn spawn(base: &Path, topic: &str, owner: Option<u32>) -> Self {
+        let spec = match owner {
+            Some(owner) => format!("{}\n{topic}\n{owner}", base.display()),
+            None => format!("{}\n{topic}", base.display()),
+        };
+        let mut process = spawn_entry("child_node", (CHILD_ENV, &spec), Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the child starts");
         let stdout = tokio::spawn(read_all(process.stdout.take().expect("piped")));
         let stderr = tokio::spawn(read_all(process.stderr.take().expect("piped")));
         Self {
@@ -295,6 +336,42 @@ impl ChildNode {
         let stderr = self.stderr.await.unwrap_or_default();
         panic!("{what}\n--- child stdout ---\n{stdout}\n--- child stderr ---\n{stderr}");
     }
+
+    /// The endpoint of the child and its mesh, from its `Info` answer. The
+    /// marker shows that the endpoint accepts. A slow first start (an
+    /// antivirus scan of the binary on Windows) is covered by the 30 s.
+    async fn endpoint(&mut self, base: &Path) -> Result<(IpcName, MeshId), String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let name = loop {
+            if let Some(name) = active_endpoints(base).into_iter().next() {
+                break name;
+            }
+            if let Ok(Some(status)) = self.process.try_wait() {
+                return Err(format!("the child exited before its endpoint: {status}"));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("the child wrote no marker within 30 s".to_owned());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let reply = send_to_endpoint(&name, &serde_json::json!({ "command": "info" }))
+            .await
+            .map_err(|error| format!("the Info command: {error}"))?;
+        let reply: serde_json::Value = serde_json::from_str(&reply).expect("JSON");
+        let mesh = MeshId::new(reply["mesh"].as_str().expect("the mesh in the answer"))
+            .expect("a valid mesh id");
+        Ok((name, mesh))
+    }
+
+    /// Wait up to 10 s for the child to exit with 0.
+    async fn exits_with_zero(&mut self) -> Result<(), String> {
+        match tokio::time::timeout(Duration::from_secs(10), self.process.wait()).await {
+            Ok(Ok(status)) if status.success() => Ok(()),
+            Ok(Ok(status)) => Err(format!("the child exited with {status}, not 0")),
+            Ok(Err(error)) => Err(format!("wait for the child: {error}")),
+            Err(_) => Err("the child did not exit within 10 s".to_owned()),
+        }
+    }
 }
 
 async fn read_all(mut pipe: impl AsyncRead + Unpin) -> String {
@@ -303,36 +380,35 @@ async fn read_all(mut pipe: impl AsyncRead + Unpin) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// The node left by the graceful path: the shutdown removed the state file and
+/// the marker. On Unix the socket file stays, as after a SIGTERM, and nothing
+/// accepts on it.
+async fn assert_left_cleanly(base: &Path, name: &IpcName) {
+    let state_files = files_ending_with(base, ".state.json");
+    assert!(
+        state_files.is_empty(),
+        "the state file stays: {state_files:?}"
+    );
+    let markers = files_ending_with(base, ".ipc");
+    assert!(markers.is_empty(), "the marker stays: {markers:?}");
+    assert!(active_endpoints(base).is_empty());
+    assert!(
+        send_to_endpoint(name, &serde_json::json!({ "command": "info" }))
+            .await
+            .is_err(),
+        "the old endpoint still answers"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quit_stops_a_cli_node_in_a_child_process() {
     let base = TempBase::new("quit");
     let topic = format!("host-lifecycle-quit-{}", std::process::id());
-    let mut child = ChildNode::spawn(&base.0, &topic);
-
-    // The marker shows that the endpoint accepts. A slow first start (an
-    // antivirus scan of the binary on Windows) is covered by the 30 s.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let name = loop {
-        if let Some(name) = active_endpoints(&base.0).into_iter().next() {
-            break name;
-        }
-        if let Ok(Some(status)) = child.process.try_wait() {
-            child
-                .fail(&format!("the child exited before its endpoint: {status}"))
-                .await;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            child.fail("the child wrote no marker within 30 s").await;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut child = ChildNode::spawn(&base.0, &topic, None);
+    let (name, mesh) = match child.endpoint(&base.0).await {
+        Ok(found) => found,
+        Err(what) => child.fail(&what).await,
     };
-    let reply = match send_to_endpoint(&name, &serde_json::json!({ "command": "info" })).await {
-        Ok(reply) => reply,
-        Err(error) => child.fail(&format!("the Info command: {error}")).await,
-    };
-    let reply: serde_json::Value = serde_json::from_str(&reply).expect("JSON");
-    let mesh = MeshId::new(reply["mesh"].as_str().expect("the mesh in the answer"))
-        .expect("a valid mesh id");
     let nickname = Nickname::new(NICKNAME).expect("a valid nickname");
 
     // `quit` and not `terminate`: on Unix the fallback signal of `terminate`
@@ -345,31 +421,33 @@ async fn quit_stops_a_cli_node_in_a_child_process() {
     if let Err(error) = quit(&target).await {
         child.fail(&format!("the quit: {error}")).await;
     }
-    let status = match tokio::time::timeout(Duration::from_secs(10), child.process.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => child.fail(&format!("wait for the child: {error}")).await,
-        Err(_) => child.fail("the child did not exit within 10 s").await,
-    };
-    if !status.success() {
-        child
-            .fail(&format!("the child exited with {status}, not 0"))
-            .await;
+    if let Err(what) = child.exits_with_zero().await {
+        child.fail(&what).await;
     }
+    assert_left_cleanly(&base.0, &name).await;
+}
 
-    // The shutdown removed the state file and the marker. On Unix the socket
-    // file stays, as after a SIGTERM, and nothing accepts on it.
-    let state_files = files_ending_with(&base.0, ".state.json");
-    assert!(
-        state_files.is_empty(),
-        "the state file stays: {state_files:?}"
-    );
-    let markers = files_ending_with(&base.0, ".ipc");
-    assert!(markers.is_empty(), "the marker stays: {markers:?}");
-    assert!(active_endpoints(&base.0).is_empty());
-    assert!(
-        send_to_endpoint(&name, &serde_json::json!({ "command": "info" }))
-            .await
-            .is_err(),
-        "the old endpoint still answers"
-    );
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_owner_watch_stops_a_cli_node_when_its_owner_dies() {
+    let base = TempBase::new("owner");
+    let topic = format!("host-lifecycle-owner-{}", std::process::id());
+    // The owner first: `with_owner_pid` refuses an owner that is not running.
+    let mut owner = spawn_entry("owner_process", (OWNER_ENV, "1"), Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the owner starts");
+    let owner_pid = owner.id().expect("the owner runs");
+    let mut child = ChildNode::spawn(&base.0, &topic, Some(owner_pid));
+    let name = match child.endpoint(&base.0).await {
+        Ok((name, _)) => name,
+        Err(what) => child.fail(&what).await,
+    };
+
+    // `kill` waits for the owner, so the node watches an owner that is gone.
+    // Then one watch interval (1.5 s) and the `Left` delay (500 ms) pass.
+    owner.kill().await.expect("kill the owner");
+    if let Err(what) = child.exits_with_zero().await {
+        child.fail(&what).await;
+    }
+    assert_left_cleanly(&base.0, &name).await;
 }

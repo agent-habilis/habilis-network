@@ -19,7 +19,7 @@ Ids, wire formats, the IPC protocol and the C ABI can change.
 ## 2. Current state
 
 The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy and the tests there.
-The IPC of a daemon works on Windows, over a named pipe, and a daemon stops gracefully on an IPC `quit`. The owner watch and the console events do not work yet, and the state file can fail to update.
+The IPC of a daemon works on Windows, over a named pipe. A daemon stops gracefully on an IPC `quit`, and when its owner exits. The console events do not work yet, and the state file can fail to update.
 
 | Requirement | State |
 |---|---|
@@ -28,12 +28,12 @@ The IPC of a daemon works on Windows, over a named pipe, and a daemon stops grac
 | R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. Discovery reads a `<nick>.ipc` marker on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
 | R5. Graceful stop | Done. The engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::quit` and `runtime::ipc::terminate` send it on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
-| R6. Owner watch | Open. `spawn_orphan_watch` is `cfg(unix)` only. |
+| R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
 | R7. Console events | Open. Only ctrl-c reaches the quit channel. |
 | R8. State file | Open. `state_file.rs` still replaces the file with `std::fs::rename`. |
 | R9. FFI | Open. `ffi.rs` and `habilis_network.h` still use `c_long` / `long`. `dlopen/node.ts` and `abi.ts` are not changed. `tasks/src/ffi.rs` still reads `libhabilis_network_ffi.a`. |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
-| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and steps 1 to 3 of `host_lifecycle.rs` run. Open: `cargo task ffi` (with R9), step 4 of `host_lifecycle.rs` (with R6), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
+| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the four steps of `host_lifecycle.rs` run. Open: `cargo task ffi` (with R9), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
 | R12. Runtime base of a Unix client | Open. A Unix client does not check the base before it reads a marker. |
 
 The descriptions of [§2.2](#22-runtime-breaks) and the open lines of [§2.3](#23-tooling-and-tests) are still true. Their line numbers can be out of date.
@@ -65,9 +65,8 @@ These parts were already correct on Windows:
 
 ### 2.2 Runtime breaks
 
-These problems occur after the workspace compiles. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5.
+These problems occur after the workspace compiles. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5, and the owner watch item with R6.
 
-- **Owner watch.** `spawn_orphan_watch` (`shutdown.rs:214`) is `cfg(unix)` only. On Windows a daemon does not stop when its owner dies.
 - **Console events.** Only ctrl-c is handled. Close, logoff and shutdown events skip the graceful path.
 - **State file.** `state_file.rs:225` writes a temporary file and renames it over the target. On Windows the rename fails while a reader holds the file open without `FILE_SHARE_DELETE`.
 - **Node FFI.** `packages/habilis-network-ffi/src/dlopen/node.ts:26` maps `isize` to koffi `long`. On Win64, `long` is 4 bytes, so return values are truncated. `abi.ts:14` says "8 bytes on every target here", which is false on Windows.
@@ -181,8 +180,21 @@ Done.
 
 ### R6. Owner watch
 
-- On Windows, watch the `--owner-pid` process with `is_alive` and `live_start_time`. The start time guards against pid reuse.
-- Windows has no `getppid`. Without an owner pid, there is no watch.
+Done.
+
+**The watch.** A daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) watches its owner on every OS, with the same code. Every `PPID_WATCH_INTERVAL` (1.5 s), `Owner::lost` compares `live_start_time` of the owner with the start time that it read at startup. The start time guards against pid reuse. The watch calls `live_start_time` only, not `is_alive`: on Windows `live_start_time` gives `None` for an owner that exited, also while a handle still holds it, as `is_alive` does. When the owner is gone, the watch writes `owner exited; leaving` (target `habilis_network::lifecycle`) and feeds the quit channel. The daemon then takes the path of `SIGTERM`.
+
+**No owner, no watch on Windows.** Windows has no `getppid`, does not reparent an orphan, and can reuse the pid of a dead parent. So a daemon with no owner pid has no watch on Windows. The watch of the parent pid stays Unix only.
+
+**Limits.**
+
+- An owner that this process cannot read is refused at startup ("is not running or cannot be read"). On Windows that is a live owner of another account. An owner that cannot be read later counts as gone: the watch fails closed. An owner of the same user is readable also across integrity levels.
+- An owner that exits with the code 259 (`STILL_ACTIVE`) reads as alive while a handle holds it.
+- The start time has the resolution of the system clock (about 15.6 ms). A reused pid with the same start time would need the owner to exit, every handle to close, and the pid to come back within one tick.
+- An owner that puts the daemon in a job with `KILL_ON_JOB_CLOSE` kills it hard, before the watch, with no `Left`.
+- A watch that holds a handle of the owner from startup and waits on it would be immediate and immune to pid reuse. It needs new `unsafe` code, and the start time already covers reuse, so it is a possible later change.
+
+**Who uses it.** agent-gossip does not start a daemon on Windows before G1, and its skills pass the MSYS `$PPID` before G4. Until then, step 4 of the host lifecycle test proves the watch on Windows, on CI.
 
 ### R7. Console events
 
@@ -239,10 +251,10 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 
 1. Start a node in `Cli` driver mode, with a runtime base in a temporary directory.
 2. IPC `Info` returns the node, and `active_endpoints` finds it.
-3. IPC `Quit` stops the node. The state file and the endpoint are gone.
-4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval.
+3. IPC `quit` stops the node. The state file and the endpoint are gone.
+4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval plus the `Left` delay.
 
-Steps 1 to 3 are done. In `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. So step 3 runs the node in a child process: the test binary itself, with only its `child_node` entry selected. Part 1 stops its node with an abort of its task. Step 4 also needs a child process.
+The four steps are done. In `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. So steps 3 and 4 run the node in a child process: the test binary itself, with only its `child_node` entry selected. In step 4 the owner is a second child process, the test binary with only its `owner_process` entry selected. Part 1 stops its node with an abort of its task.
 
 **Nightly and e2e.**
 
@@ -324,12 +336,12 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 and R5 are done.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4, R5 and R6 are done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
 3. **Runtime base and IPC (R2, R3).** Add the `Info` and `active_endpoints` part of `host_lifecycle.rs`.
-4. **Process helpers, `Quit`, owner watch, console events (R4 to R7).** Add the `Quit` and owner-watch parts of `host_lifecycle.rs`.
+4. **Process helpers, `quit`, owner watch, console events (R4 to R7).** Add the `quit` and owner-watch parts of `host_lifecycle.rs`.
 5. **State file and FFI ABI (R8, R9).**
 6. **agent-gossip (G0 to G5).**
 
@@ -427,7 +439,7 @@ Pass:
 
 | Action on Windows | Expected result |
 |---|---|
-| Kill the Claude Code process that owns the daemon (`Stop-Process -Force`). | The daemon stops within one owner-watch interval. macOS sees the peer leave or time out. |
+| Kill the Claude Code process that owns the daemon (`Stop-Process -Force`), after G1. | The daemon stops within one owner-watch interval plus the `Left` delay, about 2 s. macOS sees the peer leave. |
 | Close the console window of a foreground node. | The graceful `Left` arrives on macOS (`ctrl_close`). |
 | Stop a daemon with an IPC `quit` (`/gossip-leave` after G3). | The graceful `Left` arrives on macOS. The state file and the marker are gone. |
 | Sign out, then sign in. | No stale state file stays. |
