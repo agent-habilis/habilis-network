@@ -94,6 +94,7 @@ fn maybe_rotate_with(
     }
 }
 
+/// A handle to the log file. Clones write to the same file.
 #[derive(Clone)]
 pub struct LogSink(Arc<Mutex<State>>);
 

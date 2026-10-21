@@ -25,8 +25,7 @@ clippy::exhaustive_structs|habilis-network-util|2
 clippy::unwrap_used|habilis-network|2
 missing_docs|habilis-network|6
 missing_docs|habilis-network-ffi|3
-missing_docs|habilis-network-iroh-gossip-transport|4
+missing_docs|habilis-network-iroh-gossip-transport|2
 missing_docs|habilis-network-iroh-webrtc-transport|10
-missing_docs|habilis-network-logging|1
 missing_docs|habilis-network-protocol|19
-missing_docs|habilis-network-util|15
+missing_docs|habilis-network-util|9

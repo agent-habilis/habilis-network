@@ -20,12 +20,14 @@ fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
     (written == size).then_some(info)
 }
 
+/// The parent pid of `pid`, or `None` if the lookup fails.
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
     Some(bsdinfo_for(pid)?.pbi_ppid)
 }
 
+/// The command name of `pid`, or `None` if the lookup fails or the name is not UTF-8.
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
@@ -50,6 +52,7 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
         .then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
+/// The parent pid of `pid`, or `None` if the lookup fails.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
@@ -78,6 +81,7 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
     fields.nth(18)?.parse().ok()
 }
 
+/// The command name of `pid`, or `None` if the lookup fails or the name is not UTF-8.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {

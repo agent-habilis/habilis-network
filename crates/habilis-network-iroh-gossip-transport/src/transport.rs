@@ -38,6 +38,7 @@ const INBOUND_CAP: usize = 256;
 /// Where a frame goes: the mesh gossip topic, once the engine has joined it.
 /// It never blocks. `false` means the frame was not accepted.
 pub trait FrameSink: std::fmt::Debug + Send + Sync + 'static {
+    /// Hand over one frame. It never blocks. Returns `false` if the frame was not accepted.
     fn try_send(&self, frame: Bytes) -> bool;
 
     /// Whether the sink can still carry a frame. A sink whose topic has closed
@@ -148,6 +149,7 @@ pub struct GossipHandle {
 }
 
 impl GossipHandle {
+    /// A handle with no sink. The path is not valid until `attach` is called.
     #[must_use]
     pub fn new(app_id: EndpointId) -> Self {
         let shared = Arc::new(Shared {
