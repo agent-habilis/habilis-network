@@ -139,7 +139,8 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         })
         .await;
         // A tick has to run while the link is down, or the test proves nothing: the pair grafts again
-        // within seconds. So both ends tick every 50 ms through the window.
+        // within tens of milliseconds (28 ms in a run that failed). So both ends tick every 5 ms
+        // through the window.
         let window = Instant::now();
         while window.elapsed() < SETTLE {
             for member in [&alice, &bob] {
@@ -148,7 +149,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
                     .await
                     .expect("the loop answers");
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert!(
             neighbor_down(since, &alice_id, &bob_id) && neighbor_down(since, &bob_id, &alice_id),
