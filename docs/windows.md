@@ -19,7 +19,7 @@ Ids, wire formats, the IPC protocol and the C ABI can change.
 ## 2. Current state
 
 The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy and the tests there.
-The IPC of a daemon works on Windows, over a named pipe. A daemon stops gracefully on an IPC `quit`, when its owner exits, and on ctrl-c, ctrl-break and the close of its console. A logoff and a shutdown do not stop it gracefully yet, and the state file can fail to update.
+The IPC of a daemon works on Windows, over a named pipe. A daemon stops gracefully on an IPC `quit`, when its owner exits, and on ctrl-c, ctrl-break and the close of its console. A logoff and a shutdown do not stop it gracefully yet.
 
 | Requirement | State |
 |---|---|
@@ -30,7 +30,7 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R5. Graceful stop | Done. The engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::quit` and `runtime::ipc::terminate` send it on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
 | R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
 | R7. Console events | Done. Ctrl-c, ctrl-break, close, logoff and shutdown feed the quit channel (`crates/habilis-network/src/daemon/shutdown.rs`). A logoff and a shutdown do not reach a node that loaded `user32.dll`, and a node loads it: see R13. |
-| R8. State file | Open. `state_file.rs` still replaces the file with `std::fs::rename`. |
+| R8. State file | Done. The replace and the remove of the state file and of the IPC marker run again for up to 50 ms while a reader blocks them (`crates/habilis-network-util/src/file_retry.rs`). |
 | R9. FFI | Open. `ffi.rs` and `habilis_network.h` still use `c_long` / `long`. `dlopen/node.ts` and `abi.ts` are not changed. `tasks/src/ffi.rs` still reads `libhabilis_network_ffi.a`. |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
 | R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the five steps of `host_lifecycle.rs` run. Open: `cargo task ffi` (with R9), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
@@ -66,9 +66,8 @@ These parts were already correct on Windows:
 
 ### 2.2 Runtime breaks
 
-These problems occur after the workspace compiles. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5, the owner watch item with R6, and the console events item with R7, except a logoff and a shutdown (R13).
+These problems occur after the workspace compiles. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5, the owner watch item with R6, the console events item with R7, except a logoff and a shutdown (R13), and the state file item with R8.
 
-- **State file.** `state_file.rs:225` writes a temporary file and renames it over the target. On Windows the rename fails while a reader holds the file open without `FILE_SHARE_DELETE`.
 - **Node FFI.** `packages/habilis-network-ffi/src/dlopen/node.ts:26` maps `isize` to koffi `long`. On Win64, `long` is 4 bytes, so return values are truncated. `abi.ts:14` says "8 bytes on every target here", which is false on Windows.
 - **C ABI.** `crates/habilis-network-ffi/src/ffi.rs` returns `c_long`, and `include/habilis_network.h:107`, `:122`, `:125`, `:135`, `:212` declare `long`. Both sides agree, but on Windows the value is 32-bit.
 
@@ -214,9 +213,30 @@ Done.
 
 ### R8. State file
 
-- The atomic replace must work while a reader holds the file. Use `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and retry for a short time on a sharing violation.
-- Readers in this repository open the file with `FILE_SHARE_DELETE`.
-- The file is private through the inherited profile ACL.
+Done.
+
+**What blocks the replace.** `write_private_atomic` (`crates/habilis-network/src/daemon/state_file.rs`) writes the state file and the IPC marker: a sibling `<file>.tmp.<pid>`, then `std::fs::rename` over the target. The rename of `std` calls `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, and on error 5 it replaces the file with POSIX semantics. So it replaces a file that a reader holds with `FILE_SHARE_DELETE`, and a switch to `MoveFileExW` would add nothing. A reader without `FILE_SHARE_DELETE` makes the rename fail with error 5 (`ERROR_ACCESS_DENIED`), and the remove fail with error 32 (`ERROR_SHARING_VIOLATION`), while it holds the file.
+
+**Measured** on a Windows 11 host, with Rust 1.95:
+
+| Reader, in a tight loop | Failed renames | Failed removes |
+|---|---|---|
+| None | 0 of 3000 | 0 of 2000 |
+| PowerShell `Get-Content -Raw` | 2620 of 3000 | 297 and 312 of 2000 |
+| .NET `[IO.File]::ReadAllText` | 2640 of 3000 | not measured |
+| .NET `[IO.File]::Open(..., 'ReadWrite,Delete')` | 0 of 3000 | not measured |
+
+With a retry every 1 ms for up to 100 ms, no rename and no remove failed. The worst wait was 10.7 ms for a rename and 17.6 ms for a remove.
+
+**The fix.** `util::file_retry::retry_while_shared` runs the rename and the remove again every `SHARED_FILE_RETRY_STEP` (1 ms) while they fail with error 5 or 32, up to `SHARED_FILE_RETRY_DEADLINE` (50 ms). Any other error comes back at once. It wraps the rename of `write_private_atomic`, `StateFile::remove`, and the remove of the marker (`IpcMarker::remove_if_ours`). `StateFile::remove` now logs a remove that fails for a reason other than a missing file. On Unix the retry runs the operation once.
+
+**Limits.**
+
+- The state file is written in line, in the loop of the daemon, every `STATE_REFRESH` and on a change of members. With a reader that blocks it, one write can stall the loop for up to the deadline plus one sleep, about 65 ms. At a graceful exit the two removes, the state file and then the marker, can each wait as long before the `Left`, so about 130 ms in all, well inside the deadline of R7.
+- Error 5 is also a real refusal, such as a rename over a directory. The retry delays that error by the deadline, and then it comes back unchanged.
+- A reader that holds the file for longer than the deadline, such as an editor, makes the write fail. The daemon logs the failure once, and the next write tries again.
+- Every reader in this repository and in agent-gossip uses `std::fs`, which opens with `FILE_SHARE_DELETE`, so none of them blocks a write. A reader in PowerShell, such as a statusline, should open the file with `[IO.File]::Open($path, 'Open', 'Read', 'ReadWrite,Delete')`, not with `Get-Content`.
+- Under the runtime base of R2 (`<LocalAppData>\<product>\run`) the file is private through the inherited profile ACL. A `--state-file` outside the base gets the ACL of the folder that it names.
 
 ### R9. FFI
 
@@ -358,7 +378,7 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. In step 5, R8 is done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
@@ -466,6 +486,7 @@ Pass:
 | Stop a daemon with an IPC `quit` (`/gossip-leave` after G3). | The graceful `Left` arrives on macOS. The state file and the marker are gone. |
 | Sign out, then sign in. | Until R13, the daemon sends no `Left`, and its state file stays with a dead pid, which agent-gossip skips. After R13, no stale state file stays. |
 | Pid reuse after the owner dies. | A unit test covers this: the start time does not match, so the watch stops the daemon. |
+| Read the state file with `Get-Content` in a loop while a daemon runs. | `last_updated` keeps moving, and the daemon logs no `state file write failed`. |
 
 ### T7. Network
 

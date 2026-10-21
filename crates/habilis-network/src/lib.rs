@@ -114,6 +114,9 @@ pub mod util {
     pub use habilis_network_util::bounded_read;
     #[cfg(feature = "host")]
     pub use habilis_network_util::process;
+    // The retry of a rename or a remove that a reader blocks on Windows.
+    #[cfg(feature = "host")]
+    pub use habilis_network_util::file_retry;
     // The Windows security calls of the IPC named pipe.
     #[cfg(all(windows, feature = "host"))]
     pub use habilis_network_util::win_security;

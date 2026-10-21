@@ -13,6 +13,7 @@ use crate::protocol::{MeshId, MessageId, Nickname};
 use crate::util::bounded_read::{LineRead, read_bounded_line};
 use crate::util::clock::millis_saturating;
 use crate::util::consts::{MAX_IPC_COMMAND_BYTES, MAX_IPC_RESPONSE_BYTES};
+use crate::util::file_retry::retry_while_shared;
 use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
 use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
 
@@ -150,7 +151,9 @@ impl IpcMarker {
     pub(crate) fn remove_if_ours(&self) {
         match read_marker(&self.path) {
             Ok(Some(current)) if current == self.name => {
-                if let Err(error) = std::fs::remove_file(&self.path) {
+                // On Windows a reader without `FILE_SHARE_DELETE` blocks the
+                // remove while it holds the marker (R8 of `docs/windows.md`).
+                if let Err(error) = retry_while_shared(|| std::fs::remove_file(&self.path)) {
                     tracing::warn!(
                         target: "habilis_network::lifecycle",
                         path = %self.path.display(),
@@ -1166,6 +1169,39 @@ mod tests {
         assert!(!path.exists(), "the second daemon removes its own marker");
         second.remove_if_ours();
         assert!(!path.exists(), "no marker: nothing to do");
+    }
+
+    // A reader that opens the marker as the `Get-Content` of `PowerShell` does,
+    // with no `FILE_SHARE_DELETE`, and closes it after 2 ms: the remove waits
+    // for it. The short hold leaves most of the 50 ms deadline to a slow runner.
+    #[cfg(windows)]
+    #[test]
+    fn a_marker_remove_waits_for_a_reader_without_share_delete() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        // `FILE_SHARE_READ`, with no `FILE_SHARE_DELETE`. This crate has no
+        // `windows-sys`.
+        const FILE_SHARE_READ: u32 = 1;
+
+        let base = TestBase::new("held");
+        std::fs::create_dir_all(base.path()).unwrap();
+        let path = base.path().join("nick.ipc");
+        let marker = IpcMarker::write(path.clone(), absent_name("held")).unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            drop(reader);
+        });
+        marker.remove_if_ours();
+        closer.join().unwrap();
+        assert!(
+            !path.exists(),
+            "the marker is removed after the reader closes"
+        );
     }
 
     // A marker that cannot be written fails the bind, and leaves no socket: an

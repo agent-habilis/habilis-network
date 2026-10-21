@@ -56,6 +56,11 @@ published to a registry; pin it with
   `habilis_network::lifecycle` when it stops the daemon. The error of an owner refused at startup
   now says "is not running or cannot be read", and an owner that cannot be read later counts as
   gone.
+- `habilis-network-util`'s `file_retry`, re-exported as `habilis_network::util::file_retry` under
+  `host`: `retry_while_shared` runs a rename or a remove again on Windows while a reader blocks it
+  (error 5 or 32), every `tuning::SHARED_FILE_RETRY_STEP` (1 ms) up to
+  `tuning::SHARED_FILE_RETRY_DEADLINE` (50 ms); `retry_while_shared_for` takes the deadline; and
+  `is_shared_file_error` tells the two codes apart. On Unix it runs the operation once.
 - On Windows, ctrl-break and the close of the console take the graceful path of a daemon, as
   ctrl-c does: the five console events of `tokio::signal::windows` (ctrl-c, ctrl-break, close,
   logoff and shutdown) feed the quit channel, and the daemon takes the path of `SIGTERM`. Each
@@ -577,6 +582,13 @@ published to a registry; pin it with
 
 ### Fixed
 
+- On Windows, a reader that holds the state file or the IPC marker without `FILE_SHARE_DELETE`,
+  such as the `Get-Content` of PowerShell, no longer makes the daemon fail to replace or remove
+  it. The rename and the remove run again every 1 ms while they fail with error 5 or 32, for up
+  to 50 ms (`habilis-network-util`'s `file_retry::retry_while_shared`, re-exported as
+  `habilis_network::util::file_retry`). With a PowerShell reader in a tight loop, most renames
+  failed before. `StateFile::remove` now logs a remove that fails for a reason other than a
+  missing file.
 - A loopback room no longer stays split into separate meshes when a joiner took the rung of a
   holder that left: a member that let go of the rendezvous owes a return when its walk reads a
   holder that no member of its mesh hosts (#4).
