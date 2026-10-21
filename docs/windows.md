@@ -33,7 +33,7 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R8. State file | Done. The replace and the remove of the state file and of the IPC marker run again for up to 50 ms while a reader blocks them (`crates/habilis-network-util/src/file_retry.rs`). |
 | R9. FFI | Open. `ffi.rs` and `habilis_network.h` still use `c_long` / `long`. `dlopen/node.ts` and `abi.ts` are not changed. `tasks/src/ffi.rs` still reads `libhabilis_network_ffi.a`. |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
-| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the five steps of `host_lifecycle.rs` run. Open: `cargo task ffi` (with R9), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. |
+| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the five steps of `host_lifecycle.rs` run. Open: `cargo task ffi` (with R9), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. Four loopback tests of `main` are ignored on Windows until the pin of `iroh` carries the fix of #31: the test relay logs a client reset as ERROR there. |
 | R12. Runtime base of a Unix client | Open. A Unix client does not check the base before it reads a marker. |
 | R13. Logoff and shutdown | Open. A logoff or a shutdown ends a daemon with no `Left`. |
 
