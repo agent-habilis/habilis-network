@@ -76,7 +76,7 @@ Code: `habilis-network/src/beacon`.
 
 Layer: lookup.
 
-A way to resolve the rendezvous id into a reachable address: mDNS on the LAN, the mainline DHT, or a relay. Each lookup is complete on its own. The others add reliability and are never a dependency.
+A way to resolve the rendezvous id into a reachable address: mDNS on the LAN, the mainline DHT, pkarr relays over HTTPS, or a relay. Each lookup is complete on its own, with one exception: pkarr needs a relay, because its record names only the home relay. The others add reliability and are never a dependency.
 
 Code: `habilis-network/src/lookup`.
 
@@ -168,7 +168,7 @@ Arrival and departure are surfaced once each, as `joined` and `left`, keyed by n
 
 ### Lookups are independently sufficient
 
-Each lookup bootstraps a mesh and runs it with no other lookup present. An added lookup adds reliability and never a feature.
+Each lookup bootstraps a mesh and runs it with no other lookup present. An added lookup adds reliability and never a feature. The one exception is pkarr, which needs `relay` among the lookups: a pkarr record names the home relay and nothing else, so it resolves only with a relay to reach.
 
 ## Logging
 

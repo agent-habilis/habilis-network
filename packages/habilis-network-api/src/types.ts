@@ -4,7 +4,7 @@
  */
 
 /** One way a mesh's members find each other. */
-export type Lookup = 'mdns' | 'dht' | 'relay'
+export type Lookup = 'mdns' | 'dht' | 'relay' | 'pkarr'
 
 /**
  * One path a mesh's payload may ride. A list needs `udp` or `webrtc`; a
@@ -21,7 +21,7 @@ export interface JoinOpts {
    * lands in the same mesh.
    *
    * A topic mesh is always reached over the public preset — mDNS, the mainline
-   * DHT and the pinned relay ladder. That is not a default you can change: the
+   * DHT, the pinned relay ladder and pkarr. That is not a default you can change: the
    * derivation mixes the lookups into the mesh id, so two reaches over one
    * string are two different meshes that never meet. Hence no discovery flags
    * here.
@@ -56,7 +56,7 @@ export interface CreateOpts {
    * How members find each other. Naming any uses only those; naming none
    * is not "the default set" — it is a loopback mesh, reachable only from
    * this machine, which is useful for tests and surprising everywhere else.
-   * `['mdns', 'dht', 'relay']` is the all-on set a topic uses.
+   * `['mdns', 'dht', 'relay', 'pkarr']` is the all-on set a topic uses.
    */
   lookup?: Lookup[]
   /**
@@ -72,6 +72,12 @@ export interface CreateOpts {
    * Needs `'relay'` in `lookup`, and is part of the mesh id.
    */
   relayUrls?: string[]
+  /**
+   * Which pkarr relays: every member publishes its record to all of them.
+   * Needs `'pkarr'` in `lookup`, and is part of the mesh id. Omit for the
+   * default list.
+   */
+  pkarrUrls?: string[]
   /** Active-view cap (G). Omit for the engine default, 32. */
   maxPeers?: number
   /** Ceiling of direct connections (C). Omit for the engine default, 64. */

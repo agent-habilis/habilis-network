@@ -11,8 +11,9 @@ pub(crate) struct Args {
     /// A stream hash to read to stdout. Without one, stdin is streamed and the
     /// new stream's hash is printed.
     pub hash: Option<String>,
-    /// How peers find the producer, any of `mdns,dht,relay`. All three when
-    /// none is named. Ignored when reading: the hash carries its own.
+    /// How peers find the producer, any of `mdns,dht,relay,pkarr`.
+    /// `mdns,dht,relay,pkarr` when none is named. Ignored when reading: the hash
+    /// carries its own.
     #[arg(long, value_delimiter = ',')]
     pub lookup: Vec<Lookup>,
     /// What may carry the bytes: `udp,webrtc` when none is named, and `relay`
@@ -23,6 +24,10 @@ pub(crate) struct Args {
     /// A custom relay ladder, first preferred. Ignored when reading.
     #[arg(long = "relay-url", value_name = "URL")]
     pub relay_urls: Vec<String>,
+    /// A custom pkarr relay; repeat it for more. Needs `pkarr` in `--lookup`.
+    /// Ignored when reading.
+    #[arg(long = "pkarr-url", value_name = "URL")]
+    pub pkarr_urls: Vec<String>,
     /// The web page's address, printed with the hash in its fragment as the
     /// URL a browser reads the stream from.
     #[arg(long, env = "HABILIS_NETWORK_STREAM_WEB", value_name = "URL")]
@@ -37,7 +42,7 @@ impl Args {
     /// hash is useless to a reader that cannot find the producer.
     pub(crate) fn opts(&self) -> StreamOpts {
         let lookup = if self.lookup.is_empty() {
-            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr]
         } else {
             self.lookup.clone()
         };
@@ -45,6 +50,7 @@ impl Args {
             lookup,
             transport: self.transport.clone(),
             relay_urls: self.relay_urls.clone(),
+            pkarr_urls: self.pkarr_urls.clone(),
         }
     }
 
@@ -68,11 +74,29 @@ mod tests {
     fn a_bare_producer_uses_every_lookup_and_a_named_one_replaces_them() {
         assert_eq!(
             parse(&[]).opts().lookup,
-            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay]
+            vec![Lookup::Mdns, Lookup::Dht, Lookup::Relay, Lookup::Pkarr]
         );
         assert_eq!(
             parse(&["--lookup", "mdns,relay"]).opts().lookup,
             vec![Lookup::Mdns, Lookup::Relay]
+        );
+    }
+
+    #[test]
+    fn pkarr_is_a_lookup_and_its_urls_repeat() {
+        let opts = parse(&[
+            "--lookup",
+            "pkarr,relay",
+            "--pkarr-url",
+            "https://a.example/",
+            "--pkarr-url",
+            "https://b.example/",
+        ])
+        .opts();
+        assert_eq!(opts.lookup, vec![Lookup::Pkarr, Lookup::Relay]);
+        assert_eq!(
+            opts.pkarr_urls,
+            ["https://a.example/", "https://b.example/"]
         );
     }
 

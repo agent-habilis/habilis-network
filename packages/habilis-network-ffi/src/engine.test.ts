@@ -13,6 +13,7 @@ const OPTS: WireOpts = {
   transport: null,
   relayUrls: null,
   maxPeers: 0,
+  pkarrUrls: null,
   maxDirect: 0,
 }
 
@@ -108,6 +109,8 @@ function fakeLib(
           state.closes += 1
           return 0
         }
+        // Asked by `loadNative` before the engine exists, never by the loop.
+        case 'habilis_network_abi_version':
         case 'habilis_network_mesh_open':
         case 'habilis_network_mesh_peer_count':
         case 'habilis_network_streams_bind':

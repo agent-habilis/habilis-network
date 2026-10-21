@@ -183,6 +183,7 @@ describe('wire opts', () => {
       transport: null,
       relayUrls: null,
       maxPeers: 0,
+      pkarrUrls: null,
       maxDirect: 0,
     })
     expect(createWire({ lookup: ['mdns', 'dht', 'relay'], name: 'salon' })).toMatchObject({
@@ -198,5 +199,12 @@ describe('wire opts', () => {
       relayUrls: 'http://a/,http://b/',
     })
     expect(createWire({ relayUrls: [], transport: [] })).toMatchObject({ relayUrls: null, transport: null })
+  })
+
+  test('pkarr relays ride a create as a comma list, and never a join', () => {
+    expect(
+      createWire({ lookup: ['pkarr', 'relay'], pkarrUrls: ['https://a/', 'https://b/'] }),
+    ).toMatchObject({ lookup: 'pkarr,relay', pkarrUrls: 'https://a/,https://b/' })
+    expect(joinWire({ topic: 't' })).toMatchObject({ pkarrUrls: null })
   })
 })

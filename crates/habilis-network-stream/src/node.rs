@@ -37,8 +37,8 @@ const ONLINE_WAIT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct StreamOpts {
-    /// How peers find each other: any of `mdns`, `dht`, `relay`. None is a
-    /// loopback node.
+    /// How peers find each other: any of `mdns`, `dht`, `relay`, `pkarr`.
+    /// None is a loopback node.
     pub lookup: Vec<Lookup>,
     /// What may carry bytes: any of `udp`, `webrtc`, `relay`, with `udp` or
     /// `webrtc` among them. Empty ⇒ `udp,webrtc`. `multihop` and `gossip` are refused: a
@@ -46,6 +46,38 @@ pub struct StreamOpts {
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Empty is the default ladder.
     pub relay_urls: Vec<String>,
+    /// Custom pkarr relays; the node publishes to all of them. Needs `pkarr`
+    /// in `lookup`. Empty is the default list.
+    pub pkarr_urls: Vec<String>,
+}
+
+impl StreamOpts {
+    /// The config these lists name.
+    ///
+    /// # Errors
+    /// The lists conflict, or a URL is invalid.
+    pub fn config(&self) -> Result<MeshConfig> {
+        anyhow::ensure!(
+            !self.transport.contains(&Transport::Multihop),
+            "a stream has no multihop: it is one direct lane"
+        );
+        anyhow::ensure!(
+            !self.transport.contains(&Transport::Gossip),
+            "a stream has no gossip: its node never joins a gossip mesh"
+        );
+        // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
+        let list = if self.transport.is_empty() {
+            &[Transport::Udp, Transport::WebRtc][..]
+        } else {
+            &self.transport
+        };
+        MeshConfig::resolve(
+            &self.lookup,
+            relay_ladder(&self.relay_urls)?,
+            habilis_network::protocol::parse_pkarr_urls(&self.pkarr_urls)?,
+            list,
+        )
+    }
 }
 
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
@@ -71,21 +103,7 @@ impl StreamNode {
     /// Conflicting or invalid options, a loopback node in a browser, or an
     /// endpoint that fails to bind.
     pub async fn bind(opts: &StreamOpts) -> Result<Self> {
-        anyhow::ensure!(
-            !opts.transport.contains(&Transport::Multihop),
-            "a stream has no multihop: it is one direct lane"
-        );
-        anyhow::ensure!(
-            !opts.transport.contains(&Transport::Gossip),
-            "a stream has no gossip: its node never joins a gossip mesh"
-        );
-        // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
-        let list = if opts.transport.is_empty() {
-            &[Transport::Udp, Transport::WebRtc][..]
-        } else {
-            &opts.transport
-        };
-        let config = MeshConfig::resolve(&opts.lookup, relay_ladder(&opts.relay_urls)?, list)?;
+        let config = opts.config()?;
         let transports = TransportOpts::default().within(&config.transport);
         Self::bind_with(config.lookups, config.transport, transports).await
     }
@@ -255,6 +273,23 @@ mod tests {
 
     use super::*;
 
+    /// A tab passes the pkarr list by its camelCase name, and it reaches
+    /// the config the node binds with.
+    #[test]
+    fn pkarr_urls_reach_the_stream_config() {
+        let opts: StreamOpts = serde_json::from_str(
+            r#"{"lookup":["pkarr","relay"],"pkarrUrls":["https://pkarr.example/"]}"#,
+        )
+        .expect("pkarrUrls parses");
+        let config = opts.config().expect("valid");
+        assert_eq!(
+            config.lookups.pkarr,
+            habilis_network::protocol::PkarrChoice::Custom(vec![
+                "https://pkarr.example/".parse().unwrap()
+            ])
+        );
+    }
+
     // A stream is one direct lane: a list that names `multihop` is refused
     // before anything binds.
     #[tokio::test]
@@ -305,7 +340,8 @@ mod tests {
     #[test]
     fn a_browser_refuses_a_list_with_no_path_it_can_run() {
         let refused = |transport: &[Transport]| {
-            let config = MeshConfig::resolve(&[Lookup::Relay], None, transport).expect("valid");
+            let config =
+                MeshConfig::resolve(&[Lookup::Relay], None, None, transport).expect("valid");
             let transports = TransportOpts::default().within(&config.transport);
             refuse_in_browser(&config.lookups, config.transport, transports).is_err()
         };
@@ -321,9 +357,13 @@ mod tests {
     // other way to reach a producer.
     #[test]
     fn a_browser_refuses_a_stream_with_no_relay_lookup() {
-        let config =
-            MeshConfig::resolve(&[Lookup::Dht], None, &[Transport::Udp, Transport::WebRtc])
-                .expect("valid");
+        let config = MeshConfig::resolve(
+            &[Lookup::Dht],
+            None,
+            None,
+            &[Transport::Udp, Transport::WebRtc],
+        )
+        .expect("valid");
         let transports = TransportOpts::default().within(&config.transport);
         let error = refuse_in_browser(&config.lookups, config.transport, transports)
             .expect_err("no path to signal on");

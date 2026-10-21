@@ -55,6 +55,8 @@ iroh-test-utils = [
     "iroh/test-utils",
     "dep:iroh-relay",
     "iroh-relay/server",
+    "dep:axum",
+    "dep:iroh-dns",
     "habilis-network-iroh-webrtc-transport/test-hooks",
     "habilis-network-iroh-multihop-transport?/test-hooks",
 ]
@@ -204,6 +206,12 @@ iroh = { workspace = true, features = [
 iroh-gossip.workspace = true
 # Only for `iroh-test-utils` (see the feature); pinned to `iroh`'s rev so it is
 # the copy already in the graph, not a second one.
+# Only for `iroh-test-utils`: the local pkarr relay (`net::test_pkarr`). The
+# same axum iroh already pulls in, so no second copy.
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"], optional = true }
+# Only for `net::test_pkarr`, which verifies the signature of each record it is
+# handed, as the real relays do. The same rev as `iroh`, already in the graph.
+iroh-dns = { workspace = true, optional = true }
 iroh-relay = { version = "=1.0.3", git = "https://github.com/agent-habilis/iroh", rev = "0e7cdb4cd73952c49699cd7ae971a1fc2982b866", default-features = false, optional = true }
 
 # The browser needs the endpoint and the relay transport and nothing else:

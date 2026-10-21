@@ -5,7 +5,7 @@ use anyhow::Result;
 use iroh::Watcher;
 use serde::Serialize;
 
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::mesh::{LookupOpts, PkarrChoice};
 use crate::util::clock::millis_saturating;
 
 use super::build_peer_endpoint;
@@ -43,7 +43,13 @@ pub struct NetworkCapability {
 /// # Errors
 /// The endpoint fails to bind (the local network stack is broken).
 pub async fn probe(timeout: Duration) -> Result<NetworkCapability> {
-    let endpoint = build_peer_endpoint(&LookupOpts::public_preset()).await?;
+    // No pkarr: a doctor run is a probe, not a member, and pkarr would publish its fresh key
+    // to the public relays on every run.
+    let lookups = LookupOpts {
+        pkarr: PkarrChoice::Disabled,
+        ..LookupOpts::public_preset()
+    };
+    let endpoint = build_peer_endpoint(&lookups).await?;
     let node_id = endpoint.id().to_string();
     let local_addrs = endpoint.bound_sockets();
 

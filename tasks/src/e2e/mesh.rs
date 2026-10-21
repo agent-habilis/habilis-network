@@ -189,6 +189,14 @@ pub(super) fn logs_contain(needle: &str) -> bool {
         .is_ok_and(|buffer| buffer.contains(needle))
 }
 
+/// Read without draining, for a check that needs the text itself.
+pub(super) fn logs_snapshot() -> String {
+    log_buffer()
+        .lock()
+        .map(|buffer| buffer.clone())
+        .unwrap_or_default()
+}
+
 pub(super) fn drain_logs() -> String {
     log_buffer()
         .lock()

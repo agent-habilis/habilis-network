@@ -1,7 +1,8 @@
 //! The lookup layer: building the iroh endpoint for a mesh mode and
 //! wiring the selected lookups onto it. Each lookup mechanism lives in
 //! its own submodule — [`mdns`] (LAN multicast), [`dht`] (mainline DHT),
-//! and [`relay`] (the relay ladder + bootstrap-rung selection/failover).
+//! [`pkarr`] (HTTPS pkarr relays), and [`relay`] (the relay ladder +
+//! bootstrap-rung selection/failover).
 
 #[cfg(feature = "host")]
 mod capability;
@@ -9,6 +10,7 @@ mod capability;
 mod dht;
 #[cfg(all(feature = "host", feature = "mdns"))]
 mod mdns;
+mod pkarr;
 mod relay;
 
 // Only the `host` loopback bind names a socket address; a browser has no IP
@@ -25,7 +27,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, endpoint::presets, prot
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
-use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
+use crate::protocol::mesh::{LookupOpts, PkarrChoice, RelayChoice, TransportPolicy};
 use crate::util::clock::millis_saturating;
 
 /// A local relay server every side of a test can reach: plain HTTP, so the
@@ -63,8 +65,247 @@ pub mod test_relay {
     }
 }
 
+/// A local pkarr relay every side of a test can reach, a browser included:
+/// plain HTTP, `PUT` and `GET` on `{prefix}/{key}`, and open CORS.
+///
+/// It is as strict as the real relays, so a client that would be refused by
+/// them is refused here, in CI, and not only against the public servers:
+///
+/// - a `PUT` whose signature does not verify against the key in the path is
+///   `400`;
+/// - a `PUT` that is not newer than the stored record is `409`, the Pubky
+///   behaviour (n0's server only keeps the newer one, so a client that
+///   survives this survives both);
+/// - a `PUT` or a `GET` with a path that is not under the prefix is `404`;
+/// - the CORS preflight is answered, because a browser sends one before the
+///   `PUT`.
+///
+/// (iroh's own test relay serves `PUT` only, because iroh's tests resolve over
+/// DNS.)
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub mod test_pkarr {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use anyhow::Context as _;
+    use axum::body::Bytes;
+    use axum::extract::{Path, State};
+    use axum::http::{HeaderValue, StatusCode, header};
+    use axum::response::{IntoResponse, Response};
+    use iroh::PublicKey;
+    use iroh::endpoint_info::EndpointInfo;
+    use iroh_dns::pkarr::SignedPacket;
+    use n0_future::task::AbortOnDropHandle;
+
+    use crate::protocol::Url;
+
+    #[derive(Default)]
+    struct Store {
+        records: Mutex<HashMap<String, SignedPacket>>,
+        hits: AtomicUsize,
+        refusals: Mutex<Vec<(String, u16)>>,
+    }
+
+    type Records = Arc<Store>;
+
+    /// A running relay. Dropping it stops the relay.
+    #[derive(Debug)]
+    pub struct TestPkarr {
+        store: Records,
+        _task: AbortOnDropHandle<()>,
+    }
+
+    impl std::fmt::Debug for Store {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("Store")
+        }
+    }
+
+    impl TestPkarr {
+        /// How many keys hold a record.
+        ///
+        /// # Panics
+        /// A relay handler panicked while it held the lock.
+        #[must_use]
+        pub fn records(&self) -> usize {
+            self.store.records.lock().expect("records lock").len()
+        }
+
+        /// Whether `key` (z-base-32, as the relay path spells it) holds a
+        /// record.
+        ///
+        /// # Panics
+        /// A relay handler panicked while it held the lock.
+        #[must_use]
+        pub fn holds(&self, key: &str) -> bool {
+            self.store
+                .records
+                .lock()
+                .expect("records lock")
+                .contains_key(key)
+        }
+
+        /// The record `key` holds, decoded: the addresses a peer that
+        /// resolves it would learn.
+        ///
+        /// # Panics
+        /// A relay handler panicked while it held the lock.
+        #[must_use]
+        pub fn info(&self, key: &str) -> Option<EndpointInfo> {
+            let records = self.store.records.lock().expect("records lock");
+            let packet = records.get(key)?;
+            EndpointInfo::from_pkarr_signed_packet(packet).ok()
+        }
+
+        /// The keys that hold a record, z-base-32.
+        ///
+        /// # Panics
+        /// A relay handler panicked while it held the lock.
+        #[must_use]
+        pub fn keys(&self) -> Vec<String> {
+            self.store
+                .records
+                .lock()
+                .expect("records lock")
+                .keys()
+                .cloned()
+                .collect()
+        }
+
+        /// How many lookups found a record.
+        #[must_use]
+        pub fn hits(&self) -> usize {
+            self.store.hits.load(Ordering::Relaxed)
+        }
+
+        /// Each write the relay refused, as the key of its path and the
+        /// status: `400` for a bad signature, `409` for a record that was not
+        /// newer.
+        ///
+        /// # Panics
+        /// A relay handler panicked while it held the lock.
+        #[must_use]
+        pub fn refusals(&self) -> Vec<(String, u16)> {
+            self.store.refusals.lock().expect("refusals lock").clone()
+        }
+
+        /// How many writes the relay refused: a bad signature, or a record
+        /// that was not newer.
+        #[must_use]
+        pub fn rejected(&self) -> usize {
+            self.refusals().len()
+        }
+    }
+
+    /// Spawn the relay under `/pkarr`, like n0's: the URL is
+    /// `http://127.0.0.1:<port>/pkarr`.
+    ///
+    /// # Errors
+    /// Binding the listener fails.
+    pub async fn spawn_plain() -> anyhow::Result<(Url, TestPkarr)> {
+        spawn_at("/pkarr").await
+    }
+
+    /// Spawn the relay under `prefix`: `"/pkarr"` is n0's layout, `""` serves
+    /// at the root like the Pubky relays.
+    ///
+    /// # Errors
+    /// Binding the listener fails.
+    pub async fn spawn_at(prefix: &str) -> anyhow::Result<(Url, TestPkarr)> {
+        let store = Records::default();
+        let app = axum::Router::new()
+            .route(
+                &format!("{prefix}/{{key}}"),
+                axum::routing::get(get).put(put).options(preflight),
+            )
+            .layer(axum::middleware::map_response(allow_any_origin))
+            .with_state(Arc::clone(&store));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .context("binding the local pkarr relay")?;
+        let url = format!("http://{}{prefix}", listener.local_addr()?)
+            .parse()
+            .context("the local pkarr address is not a URL")?;
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((
+            url,
+            TestPkarr {
+                store,
+                _task: AbortOnDropHandle::new(task),
+            },
+        ))
+    }
+
+    fn refuse(records: &Store, key: &str, status: StatusCode) -> StatusCode {
+        records
+            .refusals
+            .lock()
+            .expect("refusals lock")
+            .push((key.to_owned(), status.as_u16()));
+        status
+    }
+
+    async fn put(
+        State(records): State<Records>,
+        Path(key): Path<String>,
+        body: Bytes,
+    ) -> StatusCode {
+        let Ok(public) = PublicKey::from_z32(&key) else {
+            return refuse(&records, &key, StatusCode::BAD_REQUEST);
+        };
+        let Ok(packet) = SignedPacket::from_relay_payload(&public, &body) else {
+            return refuse(&records, &key, StatusCode::BAD_REQUEST);
+        };
+        let mut stored = records.records.lock().expect("records lock");
+        if let Some(current) = stored.get(&key)
+            && !packet.more_recent_than(current)
+        {
+            drop(stored);
+            return refuse(&records, &key, StatusCode::CONFLICT);
+        }
+        stored.insert(key, packet);
+        StatusCode::NO_CONTENT
+    }
+
+    async fn get(State(records): State<Records>, Path(key): Path<String>) -> Response {
+        match records.records.lock().expect("records lock").get(&key) {
+            Some(packet) => {
+                records.hits.fetch_add(1, Ordering::Relaxed);
+                packet.to_relay_payload().into_response()
+            }
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    async fn preflight() -> Response {
+        (
+            [
+                (header::ACCESS_CONTROL_ALLOW_METHODS, "GET, PUT, OPTIONS"),
+                (header::ACCESS_CONTROL_ALLOW_HEADERS, "content-type"),
+            ],
+            StatusCode::NO_CONTENT,
+        )
+            .into_response()
+    }
+
+    async fn allow_any_origin(mut response: Response) -> Response {
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        response
+    }
+}
+
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+pub use pkarr::probe::{
+    DEFAULT_PKARR_URLS, Probe as PkarrProbe, ProbeRecord, probe as probe_pkarr, probe_record,
+};
 pub(crate) use relay::RungRefresh;
 pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 pub(crate) use relay::{
@@ -468,7 +709,10 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     let network = lookups.network_label();
     let mut builder = if lookups.is_loopback() {
         debug_assert!(
-            !lookups.mdns && !lookups.dht && lookups.relay_lookup == RelayChoice::Disabled,
+            !lookups.mdns
+                && !lookups.dht
+                && lookups.relay_lookup == RelayChoice::Disabled
+                && lookups.pkarr == PkarrChoice::Disabled,
             "loopback-only mesh must resolve to all-off lookups"
         );
         // Loopback-only = strictly loopback, **zero external network calls**.
@@ -496,9 +740,10 @@ pub(crate) async fn build_endpoint_keeping_mdns(
             builder.relay_mode(RelayMode::Disabled)
         }
     } else {
-        // `Minimal` (not `presets::N0`): N0-DNS is intentionally not
-        // wired (the relay ladder is the fast path; DHT is the
-        // operator-free eternal backstop). `Minimal` still sets the
+        // `Minimal` (not `presets::N0`): N0-DNS is not wired by default (the
+        // relay ladder is the fast path; DHT is the operator-free eternal
+        // backstop). The `pkarr` lookup adds n0's pkarr server among others,
+        // over HTTPS only, further down. `Minimal` still sets the
         // rustls crypto provider. The mDNS / DHT address-lookups are
         // wired **after** bind (below) — in iroh 1.0 they live in
         // companion crates and need the bound endpoint's id.
@@ -573,6 +818,10 @@ pub(crate) async fn build_endpoint_keeping_mdns(
     // (decision D11), never the keep-alive, the idle timeout or the multipath settings.
     builder = builder.transport_config(quic_limits());
 
+    // Pre-bind, unlike mDNS and DHT: iroh's pkarr builders take the endpoint
+    // at bind. Not gated on `udp` either, because the record names the relay.
+    builder = pkarr::wire(builder, &lookups.pkarr, &lookups.relay_lookup);
+
     // For the private rendezvous endpoint this returns `AddrInUse`
     // when another member already holds the deterministic port — the
     // caller treats that as "someone else is the beacon" and retries.
@@ -602,6 +851,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
         mdns = lookups.mdns,
         dht = lookups.dht,
         relay = ?lookups.relay_lookup,
+        pkarr = ?lookups.pkarr,
         role = if underlay {
             "underlay"
         } else if is_beacon {
@@ -944,6 +1194,9 @@ pub(crate) async fn build_peer_multihop_with(
             crate::transport::SignalAdmission::new_route_table(cap),
         )
     });
+    // The underlay takes the mesh's lookups, pkarr included: a forwarder dials an underlay it has
+    // no route vector for by its bare id (`dial_addr`, iroh-multihop-transport underlay.rs:446-466),
+    // and only the address lookup can resolve that id, so pkarr stays on here.
     let underlay = build_endpoint(
         lookups,
         Some(underlay_secret),
@@ -1321,7 +1574,28 @@ pub(crate) fn build_mesh(
 
 #[cfg(test)]
 mod tests {
+    /// A tripwire on the source: the underlay endpoint takes the mesh's lookups unchanged, pkarr
+    /// included, because a forwarder resolves a hop it has no vector for by its bare id. A change
+    /// to that first argument fails here and asks for a new decision.
+    #[test]
+    fn the_underlay_is_built_with_the_mesh_lookups_unchanged() {
+        let source = include_str!("mod.rs");
+        let call = "let underlay = build_endpoint(";
+        let start = source.find(call).expect("the underlay build") + call.len();
+        let first_arg = source[start..]
+            .trim_start()
+            .split(',')
+            .next()
+            .expect("the first argument");
+        assert_eq!(
+            first_arg.trim(),
+            "lookups",
+            "the underlay takes the mesh lookups as they are"
+        );
+    }
+
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+    use crate::protocol::mesh::PkarrChoice;
 
     /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
     /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
@@ -1430,6 +1704,7 @@ mod tests {
                 mdns: true,
                 dht: false,
                 relay_lookup: RelayChoice::Disabled,
+                pkarr: PkarrChoice::Disabled,
             };
             let (endpoint, handle) = super::build_endpoint_keeping_mdns(
                 &lan,

@@ -17,7 +17,7 @@ use habilis_network::iroh::EndpointAddr;
 use habilis_network::net::{endpoint_addr_from_json, endpoint_addr_to_json};
 use habilis_network::protocol::base58check::{self, take_array};
 use habilis_network::protocol::identity::write_hex;
-use habilis_network::protocol::{LookupOpts, TransportPolicy, ct_eq};
+use habilis_network::protocol::{LookupOpts, MeshConfig, TransportPolicy, ct_eq};
 use zeroize::Zeroizing;
 
 /// Framing version. An unknown version is rejected on decode.
@@ -235,17 +235,28 @@ impl StreamHash {
         let value: serde_json::Value =
             serde_json::from_slice(addr_json).context("invalid stream hash address")?;
         let (_id, addr) = endpoint_addr_from_json(&value)?;
+        // A stream is one direct lane: its node has no multi-hop and never gossips.
+        let transport = TransportPolicy {
+            udp: flags & NO_UDP_BIT == 0,
+            webrtc: flags & NO_WEBRTC_BIT == 0,
+            multihop: false,
+            gossip: false,
+            relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
+        };
+        // The rules a mesh id meets on decode: `pkarr` needs `relay`, plain
+        // http for pkarr needs an all-loopback ladder, and the transports
+        // need a direct path. A hash carries no password or invite.
+        MeshConfig {
+            lookups: lookups.clone(),
+            password: None,
+            issuer_pubkey: None,
+            transport,
+        }
+        .validate()?;
         Ok(Self {
             addr,
             lookups,
-            transport: TransportPolicy {
-                udp: flags & NO_UDP_BIT == 0,
-                webrtc: flags & NO_WEBRTC_BIT == 0,
-                // A stream is one direct lane: its node has no multi-hop.
-                multihop: false,
-                gossip: false,
-                relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
-            },
+            transport,
             id,
             secret,
         })
@@ -270,6 +281,8 @@ impl FromStr for StreamHash {
 mod tests {
     use habilis_network::iroh::{EndpointAddr, SecretKey, TransportAddr};
 
+    use habilis_network::protocol::{PkarrChoice, RelayChoice};
+
     use super::*;
 
     fn sample(transport: TransportPolicy) -> StreamHash {
@@ -281,7 +294,7 @@ mod tests {
                     "127.0.0.1:4433".parse().expect("socket addr"),
                 )],
             ),
-            lookups: LookupOpts::loopback(),
+            lookups: LookupOpts::public_preset(),
             transport,
             id: StreamId::from_bytes([1; ID_LEN]),
             secret: StreamSecret::from_bytes([2; SECRET_LEN]),
@@ -316,13 +329,65 @@ mod tests {
         }
     }
 
-    /// The bytes of a hash minted by the code at the base commit. A change
+    /// A hash is read like a mesh id, so the rules that join its lookups and
+    /// its transport hold for it too. A forged one is encoded without them.
+    #[test]
+    fn a_hash_the_mesh_rules_refuse_is_refused() {
+        let forged = |lookups: LookupOpts| StreamHash {
+            lookups,
+            ..sample(TransportPolicy::default())
+        };
+        // Pkarr names the home relay and nothing else: with no relay lookup
+        // its record holds no address.
+        let no_relay = forged(LookupOpts {
+            pkarr: PkarrChoice::Pinned,
+            ..LookupOpts::loopback()
+        });
+        let pkarr_only = StreamHash::decode(&no_relay.encode()).expect_err("pkarr without relay");
+        assert!(pkarr_only.to_string().contains("pkarr"), "{pkarr_only}");
+        // Plain http for pkarr is for a mesh whose relay is on this machine.
+        let http = forged(LookupOpts {
+            relay_lookup: RelayChoice::Pinned,
+            pkarr: PkarrChoice::Custom(vec!["http://127.0.0.1:1/pkarr".parse().unwrap()]),
+            ..LookupOpts::loopback()
+        });
+        let plain_http = StreamHash::decode(&http.encode()).expect_err("http pkarr, public relay");
+        assert!(
+            plain_http.to_string().contains("plain http"),
+            "{plain_http}"
+        );
+        // A transport with no direct path, or a relay that carries payload
+        // with no relay lookup to carry it.
+        let no_path = sample(policy(false, false, true));
+        assert!(StreamHash::decode(&no_path.encode()).is_err());
+        let relay_payload = StreamHash {
+            lookups: LookupOpts::loopback(),
+            ..sample(policy(true, true, true))
+        };
+        let no_lookup = StreamHash::decode(&relay_payload.encode()).expect_err("no relay lookup");
+        assert!(no_lookup.to_string().contains("relay"), "{no_lookup}");
+        // The same hash, well formed, decodes.
+        let ok = sample(policy(true, true, false));
+        assert_eq!(StreamHash::decode(&ok.encode()).expect("decodes"), ok);
+    }
+
+    /// The bytes of a hash minted before pkarr joined the public preset. A change
     /// here is a wire change: tokens of this shape exist outside the code.
-    const GOLDEN: &str = "JNa7ZgZwvMzW441NiDGTgK654QRhVajAbdBBcye6WJ3gqu3uyqWdEZZAUNs5cyu9H6FsPMQhkgfib2UHxLsS7a3Xq8jURe1VErA8rdM3UdgvXdmQH74aYiQHPj6hFUCK8dkMb5eFCLZy8D3f3cYXiScH5c7Uk23z4gfeoEbH3ZPX2DSk8niKsyZG1C2mtWdpeMuYQc5f4ytXUKRb5vPHyKrKT4BKPSjA3rK";
+    const GOLDEN: &str = "JNa7ZgZwvMzW441NiDGTgK654QRhVajAbdBBcye6WJ3gqu3uyqWdEZZAUNs5cyu9H6FsQrdy5dPUHcXeYCWTt4axrbcFDhWuoDBjr4zRLF98ACN2SN8hF96pm2WHcREaPriXuG613yAxqeRHKVaXq4QbTPe8me6qUV3Q7exwREKfQQUDgzxzjrV6N39HD5pHWydqyxYeiHnqMGNtHPvQqeLoA93LabKCNiK";
 
     #[test]
     fn encode_matches_the_golden_string() {
         assert_eq!(sample(policy(true, true, true)).encode(), GOLDEN);
+    }
+
+    /// The golden before pkarr joined the default lookups. It encodes a loopback sample with a
+    /// relay transport, and the decoder refuses that: a relay transport needs a relay lookup.
+    const GOLDEN_BEFORE_PKARR: &str = "JNa7ZgZwvMzW441NiDGTgK654QRhVajAbdBBcye6WJ3gqu3uyqWdEZZAUNs5cyu9H6FsPMQhkgfib2UHxLsS7a3Xq8jURe1VErA8rdM3UdgvXdmQH74aYiQHPj6hFUCK8dkMb5eFCLZy8D3f3cYXiScH5c7Uk23z4gfeoEbH3ZPX2DSk8niKsyZG1C2mtWdpeMuYQc5f4ytXUKRb5vPHyKrKT4BKPSjA3rK";
+
+    #[test]
+    fn a_golden_from_before_pkarr_is_refused() {
+        let refused = StreamHash::decode(GOLDEN_BEFORE_PKARR).expect_err("refused");
+        assert!(refused.to_string().contains("relay"), "{refused}");
     }
 
     #[test]

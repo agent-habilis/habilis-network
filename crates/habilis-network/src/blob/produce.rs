@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 
 use crate::lookup::build_endpoint;
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
-use crate::protocol::mesh::LookupOpts;
+use crate::protocol::mesh::{LookupOpts, PkarrChoice};
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::store::BlobStore;
@@ -121,6 +121,7 @@ impl BlobServer {
         relay_transport: bool,
         limits: ServeLimits,
     ) -> Result<Self> {
+        let lookups = server_lookups(lookups);
         let endpoint =
             // `TransportHandles::default()` — IP and relay only. The blob
             // server is a side-channel endpoint of its own; the mesh's custom
@@ -277,6 +278,16 @@ fn spawn_accept_loop(
 /// Serve one accepted connection and log a failed fetch. Split out of
 /// [`spawn_accept_loop`] so the error branch isn't nested inside its
 /// spawned-within-spawned `while let`.
+/// The lookups a blob server binds and copies into its tickets. No pkarr: the server has a fresh
+/// random key, and its ticket already carries its address, so a record would only name the
+/// server to the public relays.
+fn server_lookups(lookups: LookupOpts) -> LookupOpts {
+    LookupOpts {
+        pkarr: PkarrChoice::Disabled,
+        ..lookups
+    }
+}
+
 async fn handle_incoming(
     incoming: Incoming,
     store: Arc<Mutex<BlobStore>>,
@@ -419,4 +430,23 @@ async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
     })
     .await
     .context("blob hash task panicked")?
+}
+
+#[cfg(test)]
+mod server_lookups_tests {
+    use super::*;
+
+    /// The server builds its endpoint and its tickets from `server_lookups`, so a ticket from a
+    /// public-preset server carries pkarr off and the rest of the preset.
+    #[test]
+    fn a_blob_server_publishes_no_pkarr_record_and_keeps_the_rest_of_the_preset() {
+        let lookups = server_lookups(LookupOpts::public_preset());
+        assert_eq!(lookups.pkarr, PkarrChoice::Disabled);
+        assert_eq!(lookups.mdns, LookupOpts::public_preset().mdns);
+        assert_eq!(lookups.dht, LookupOpts::public_preset().dht);
+        assert_eq!(
+            lookups.relay_lookup,
+            LookupOpts::public_preset().relay_lookup
+        );
+    }
 }

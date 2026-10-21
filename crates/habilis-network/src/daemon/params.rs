@@ -188,6 +188,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
             mdns: true,
             dht: false,
             relay_lookup: crate::protocol::mesh::RelayChoice::Disabled,
+            pkarr: crate::protocol::mesh::PkarrChoice::Disabled,
         }
     } else {
         LookupOpts::public_preset()

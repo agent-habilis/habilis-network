@@ -27,6 +27,7 @@ export interface StreamOpts {
   lookup?: Lookup[]
   transport?: Transport[]
   relayUrls?: string[]
+  pkarrUrls?: string[]
 }
 
 export interface Producer {
@@ -106,6 +107,7 @@ export async function bindStreams(opts: StreamOpts & WasmOpts = {}): Promise<Str
       lookup: opts.lookup ?? [],
       transport: opts.transport ?? [],
       relayUrls: opts.relayUrls ?? [],
+      pkarrUrls: opts.pkarrUrls ?? [],
     }),
   )
   return wrapNode(node)

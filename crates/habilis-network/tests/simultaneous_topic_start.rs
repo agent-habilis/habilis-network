@@ -222,6 +222,7 @@ fn mdns_only() -> LookupOpts {
         mdns: true,
         dht: false,
         relay_lookup: RelayChoice::Disabled,
+        pkarr: habilis_network::protocol::PkarrChoice::Disabled,
     }
 }
 

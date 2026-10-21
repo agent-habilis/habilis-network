@@ -1102,7 +1102,7 @@ fn the_cells_cover_every_valid_transport_list_and_no_other() {
             .filter(|(bit, _)| mask >> bit & 1 == 1)
             .map(|(_, transport)| *transport)
             .collect();
-        let valid = MeshConfig::resolve(&[Lookup::Relay], None, &list).is_ok();
+        let valid = MeshConfig::resolve(&[Lookup::Relay], None, None, &list).is_ok();
         assert_eq!(in_cells(&list), valid, "the transport list {list:?}");
     }
 }
@@ -1176,7 +1176,7 @@ fn the_gossip_cells_use_valid_lists_and_the_ladder_orders_gossip_between_multiho
             "{name}: gossip rides the links that another path carries"
         );
         assert!(
-            MeshConfig::resolve(&[Lookup::Relay], None, cell.transports).is_ok(),
+            MeshConfig::resolve(&[Lookup::Relay], None, None, cell.transports).is_ok(),
             "{name}: the transport list {:?}",
             cell.transports
         );

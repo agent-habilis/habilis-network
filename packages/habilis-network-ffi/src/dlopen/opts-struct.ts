@@ -14,7 +14,8 @@
  *   const char *relay_urls;  // offset 48
  *   size_t max_peers;        // offset 56
  *   size_t max_direct;       // offset 64
- * } habilis_network_opts;             // 72 bytes
+ *   const char *pkarr_urls;  // offset 72
+ * } habilis_network_opts;             // 80 bytes
  * ```
  *
  * 64-bit little-endian only, the same scope `msg.ts` claims for the same
@@ -32,8 +33,9 @@ const TRANSPORT_OFFSET = 40
 const RELAY_URLS_OFFSET = 48
 const MAX_PEERS_OFFSET = 56
 const MAX_DIRECT_OFFSET = 64
+const PKARR_URLS_OFFSET = 72
 
-export const OPTS_BYTES = 72
+export const OPTS_BYTES = 80
 
 const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1
 
@@ -97,6 +99,7 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
   field(RELAY_URLS_OFFSET, opts.relayUrls)
   view.setBigUint64(MAX_PEERS_OFFSET, BigInt(opts.maxPeers), LITTLE_ENDIAN)
   view.setBigUint64(MAX_DIRECT_OFFSET, BigInt(opts.maxDirect), LITTLE_ENDIAN)
+  field(PKARR_URLS_OFFSET, opts.pkarrUrls)
 
   return { struct, keepAlive }
 }
@@ -110,16 +113,18 @@ export function encodeOpts(opts: WireOpts, pointerOf: (buffer: Uint8Array) => bi
  *   const char *lookup;      // offset  0
  *   const char *transport;   // offset  8
  *   const char *relay_urls;  // offset 16
- * } habilis_network_stream_opts;      // 24 bytes
+ *   const char *pkarr_urls;  // offset 24
+ * } habilis_network_stream_opts;      // 32 bytes
  * ```
  */
 export interface WireStreamOpts {
   readonly lookup: string | null
   readonly transport: string | null
   readonly relayUrls: string | null
+  readonly pkarrUrls: string | null
 }
 
-export const STREAM_OPTS_BYTES = 24
+export const STREAM_OPTS_BYTES = 32
 
 export function encodeStreamOpts(
   opts: WireStreamOpts,
@@ -132,5 +137,6 @@ export function encodeStreamOpts(
   field(0, opts.lookup)
   field(8, opts.transport)
   field(16, opts.relayUrls)
+  field(24, opts.pkarrUrls)
   return { struct, keepAlive }
 }

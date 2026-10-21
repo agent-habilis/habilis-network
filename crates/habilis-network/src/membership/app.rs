@@ -1111,6 +1111,7 @@ mod tests {
         let config = MeshConfig::resolve(
             &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
             Some(ladder),
+            None,
             &[],
         )
         .expect("config");

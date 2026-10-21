@@ -143,7 +143,7 @@ mod tests {
     use super::BlobTicket;
     use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
-    use crate::protocol::mesh::LookupOpts;
+    use crate::protocol::mesh::{LookupOpts, PkarrChoice};
     use iroh::{EndpointAddr, SecretKey};
 
     fn sample_addr(byte: u8) -> EndpointAddr {
@@ -178,9 +178,21 @@ mod tests {
         assert!(!decoded.password);
     }
 
-    /// The bytes of a ticket minted by the code at the base commit. A change
+    /// The bytes of a ticket minted before pkarr joined the public preset. A change
     /// here is a wire change: tokens of this shape exist outside the code.
-    const GOLDEN: &str = "7uoCFwgsTez8XFb4njvMAMtE2vJeBnmBrmZUx5yWRCWRQLMdHteB1NQfJibHEK1WioE5QiSF1L29xXB7Jz1Q6z65hGReoUL4qgUyMJ8FijN6j5dJoGV4Z6HZ7iHiabPLdgWqXbLdBMpo7d1DKBM99xrYT79PaLDPMCAtbwHF13yJQ99G9G9LNVeEaaYs9b1Jdex66d8drD2vYGnZvoeJo2dyennE6g8TTVCogg6xvo4ev6RKcaTVLaipT1a6XzUVQg2S";
+    const GOLDEN: &str = "7uoCFwgsTez8XFb4njvMAMtE2vJeBnmBrmZUx5yWRCWRQLMdHteB1NQfJibHEK1WioE5QiSF1L29xXB7Jz1Q6z65hGReoUL4qgUyMKUtBckU2R4HjmNLn7zoZYAuDhn78MVNP74XfEGDYouUBkCfpgCMcbLBMC95nPSfXM29dKJQcxJFDNHm3oru4aahCpinXYdSWy1CSoGnARMP1Dn5sqESwRYVmMk5r5PmniPn8j7imhizqdSzCtJeB9CLahaiC7ht";
+
+    /// The golden before pkarr joined the default lookups. Its lookup bytes carry no pkarr
+    /// bit, so it still decodes, and it reads as a ticket with pkarr off.
+    const GOLDEN_BEFORE_PKARR: &str = "7uoCFwgsTez8XFb4njvMAMtE2vJeBnmBrmZUx5yWRCWRQLMdHteB1NQfJibHEK1WioE5QiSF1L29xXB7Jz1Q6z65hGReoUL4qgUyMJ8FijN6j5dJoGV4Z6HZ7iHiabPLdgWqXbLdBMpo7d1DKBM99xrYT79PaLDPMCAtbwHF13yJQ99G9G9LNVeEaaYs9b1Jdex66d8drD2vYGnZvoeJo2dyennE6g8TTVCogg6xvo4ev6RKcaTVLaipT1a6XzUVQg2S";
+
+    #[test]
+    fn a_ticket_from_before_pkarr_reads_as_pkarr_off() {
+        let decoded = BlobTicket::decode(GOLDEN_BEFORE_PKARR).expect("decode");
+        assert_eq!(decoded.lookups.pkarr, PkarrChoice::Disabled);
+        assert_eq!(decoded.lookups.mdns, LookupOpts::public_preset().mdns);
+        assert_eq!(decoded.lookups.dht, LookupOpts::public_preset().dht);
+    }
 
     #[test]
     fn encode_matches_the_golden_string() {

@@ -15,6 +15,8 @@ export type CType =
   | 'isize'
   /** C `size_t`. Likewise a bigint. */
   | 'usize'
+  /** C `uint32_t`. Fits a number on every runtime. */
+  | 'u32'
   /** An opaque address in or out — a handle, or a returned `char *`. */
   | 'ptr'
   /** A caller-owned buffer the callee reads or writes in place. Never NULL. */
@@ -26,6 +28,16 @@ export interface Signature {
   readonly args: readonly CType[]
   readonly returns: CType
 }
+
+/**
+ * The ABI version this package speaks: the `HABILIS_NETWORK_ABI_VERSION` of
+ * the header it was written against. A loader asks the library for
+ * `habilis_network_abi_version()` right after it opens it and refuses a
+ * library that answers anything else, because a struct that gained a field is
+ * read at the wrong offsets with no error. `abi.test.ts` holds this equal to
+ * the header's macro.
+ */
+export const ABI_VERSION = 1
 
 export const ABI = {
   habilis_network_mesh_open: { args: ['ptr'], returns: 'ptr' },
@@ -72,6 +84,12 @@ export const ABI = {
   /** > 0 = bytes, 0 = timeout, -1 = failure, -2 = end of stream. */
   habilis_network_stream_read: { args: ['ptr', 'buf', 'usize', 'i32'], returns: 'isize' },
   habilis_network_reader_close: { args: ['ptr'], returns: 'i32' },
+  /**
+   * Called before every other symbol, and on its own: a library too old to
+   * export it must fail with a message that says so, not with the loader's
+   * "symbol not found" for whichever call came first.
+   */
+  habilis_network_abi_version: { args: [], returns: 'u32' },
   habilis_network_last_error: { args: [], returns: 'ptr' },
   habilis_network_version: { args: [], returns: 'ptr' },
   habilis_network_max_msg: { args: [], returns: 'usize' },
