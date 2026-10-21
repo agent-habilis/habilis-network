@@ -100,6 +100,17 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
     members
 }
 
+/// Every member leaves, the first one last. The first member holds the rendezvous. If it left
+/// first, the members that remain would all claim the rendezvous at once: two of them can claim
+/// it a few milliseconds apart, and the relay then logs a WARN for the connection that it
+/// replaced. That overlap is the contest the beacon resolves by design, and no test here is
+/// about it.
+async fn leave_all(members: Vec<Membership>) {
+    for member in members.into_iter().rev() {
+        let _ = member.node.leave().await;
+    }
+}
+
 /// The roster size of every member, once all hold `peers` or the deadline ends.
 async fn rosters_until(members: &[Membership], peers: usize, deadline: Duration) -> Vec<usize> {
     let started = Instant::now();
@@ -133,9 +144,7 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
 
         let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
 
-        for member in members {
-            let _ = member.node.leave().await;
-        }
+        leave_all(members).await;
         let trace = logs()
             .lines()
             .filter(|line| {
@@ -230,9 +239,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
 
         let trace = come_back_trace();
         dump_logs();
-        for member in members {
-            let _ = member.node.leave().await;
-        }
+        leave_all(members).await;
         assert!(
             joined.iter().all(|len| *len == MEMBERS - 1),
             "a joiner after the crash must see everyone; roster sizes: {joined:?}\n{trace}"
