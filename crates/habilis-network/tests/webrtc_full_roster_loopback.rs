@@ -255,12 +255,15 @@ fn rendezvous_visits() -> usize {
         .count()
 }
 
-/// How many members hold a link to the rendezvous in `log`: those whose last rendezvous event
-/// is a `neighbor up`. A member lets go of the link by its own release, or because the beacon
-/// drops it from a full view. Both end in a `neighbor down`, and only the first logs a release.
+/// How many members hold a link to the rendezvous that they made after the crash: those whose
+/// last rendezvous event after the crash is a `neighbor up`. A member lets go of the link by its
+/// own release, or because the beacon drops it from a full view. Both end in a `neighbor down`,
+/// and only the first logs a release. A member that held the link before the crash and logs no
+/// event after it is none of these: it did not come back.
 fn rendezvous_holders(log: &str) -> usize {
+    let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
     let mut last_is_up = std::collections::HashMap::new();
-    for line in log
+    for line in after_the_crash
         .lines()
         .filter(|line| line.contains("is_rendezvous=true"))
     {
@@ -281,11 +284,15 @@ fn rendezvous_holders(log: &str) -> usize {
 }
 
 /// A member that the beacon dropped is gone from the rendezvous, though it logged no release: it
-/// is no holder, and a member that came back after its drop is one.
+/// is no holder, and a member that came back after its drop is one. A member that held the link
+/// since before the crash and stayed is none.
 #[test]
 fn a_member_that_the_beacon_dropped_holds_no_link() {
     let rendezvous = "endpoint_id=aa is_rendezvous=true";
     let log = [
+        format!("gossip neighbor up local=stayed {rendezvous}"),
+        format!("gossip neighbor up local=crashed {rendezvous}"),
+        "member crashed".to_owned(),
         format!("gossip neighbor up local=one {rendezvous}"),
         format!("gossip neighbor up local=two {rendezvous}"),
         format!("gossip neighbor down local=two {rendezvous}"),
@@ -296,7 +303,11 @@ fn a_member_that_the_beacon_dropped_holds_no_link() {
         "gossip neighbor up local=four endpoint_id=bb is_rendezvous=false".to_owned(),
     ]
     .join("\n");
-    assert_eq!(rendezvous_holders(&log), 2, "one and the returned three");
+    assert_eq!(
+        rendezvous_holders(&log),
+        2,
+        "one and the returned three, not the member that stayed"
+    );
 }
 
 /// The lines that say how the rendezvous was released and visited again.
