@@ -58,11 +58,9 @@ pub(crate) use accept::UnicastAcceptor;
 pub use admission::SignalAdmission;
 pub(crate) use direct_gossip::DirectOnlyGossip;
 pub(crate) use outbox::{Resend, ResendOutbox};
-#[cfg(any(feature = "blob", feature = "multihop"))]
-pub(crate) use path::PayloadPath;
 #[cfg(feature = "blob")]
 pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};
-pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
+pub(crate) use path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
 pub use send::Lane;
 pub(crate) use send::lane_for;
@@ -71,6 +69,7 @@ pub(crate) use send::{HeldForDirect, note_held};
 pub(crate) use send::{resolve, send_best_effort, unicast_answer_target};
 pub use sender::MeshSender;
 pub use webrtc::MAX_DIRECT_PEERS;
+pub(crate) use webrtc::UdpTransport;
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};
 
 /// ALPN for the unicast channel — a raw bidirectional QUIC stream with its own

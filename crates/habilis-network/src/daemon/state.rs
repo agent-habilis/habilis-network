@@ -1,3 +1,4 @@
+use crate::transport::UdpTransport;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -490,7 +491,7 @@ pub struct EventLoopState {
     /// on wasm). The local half of every `WebRTC` lane decision — read from
     /// here, not from the endpoint address, which is empty whenever the relay
     /// link is down.
-    pub(crate) local_udp_transport: bool,
+    pub(crate) local_udp_transport: UdpTransport,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -990,7 +991,7 @@ impl EventLoopState {
             rendezvous_probe_read_free: false,
             probe_backoff: super::probe_backoff::ProbeBackoff::default(),
             rendezvous_graft_needs_session: false,
-            local_udp_transport: true,
+            local_udp_transport: UdpTransport::Present,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),

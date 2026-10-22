@@ -15,7 +15,8 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
 use super::LOG_TARGET;
-use super::path::{PROBE_DEADLINE, PayloadPath, refuse_unless_direct};
+use super::PayloadPath;
+use super::path::{PROBE_DEADLINE, refuse_unless_direct};
 use super::webrtc::close_code::{IDLE, UNICAST_RELAY_REFUSED};
 
 /// Per-frame read cap: one wire message plus gossip's envelope headroom (the
@@ -26,7 +27,7 @@ const MAX_UNICAST_FRAME: usize = MAX_MESSAGE_SIZE + 256;
 #[derive(Debug, Clone)]
 pub(crate) struct UnicastAcceptor {
     tx: mpsc::Sender<Bytes>,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
     /// How long an accepted connection may carry no new stream before it is
     /// closed. The dialing pool has the same timeout, so this is the backstop for a dialer
     /// that is gone.
@@ -43,7 +44,7 @@ impl UnicastAcceptor {
         self
     }
 
-    pub(crate) fn new(tx: mpsc::Sender<Bytes>, relay_transport: bool) -> Self {
+    pub(crate) fn new(tx: mpsc::Sender<Bytes>, relay_transport: PayloadPath) -> Self {
         Self::with_idle(tx, relay_transport, DIRECT_IDLE_BACKSTOP)
     }
 
@@ -51,7 +52,7 @@ impl UnicastAcceptor {
     /// wait the real one.
     pub(crate) fn with_idle(
         tx: mpsc::Sender<Bytes>,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
         idle: Duration,
     ) -> Self {
         Self {
@@ -90,7 +91,7 @@ impl ProtocolHandler for UnicastAcceptor {
         // hostile peer may not: hold until this side has proof too.
         if !refuse_unless_direct(
             &conn,
-            PayloadPath::from(self.relay_transport),
+            self.relay_transport,
             PROBE_DEADLINE,
             UNICAST_RELAY_REFUSED,
         )
@@ -148,7 +149,10 @@ mod tests {
         let (tx, frames) = mpsc::channel(8);
         let server = bind().await;
         let router = Router::builder(server.clone())
-            .accept(UNICAST_ALPN, UnicastAcceptor::with_idle(tx, true, idle))
+            .accept(
+                UNICAST_ALPN,
+                UnicastAcceptor::with_idle(tx, PayloadPath::RelayAllowed, idle),
+            )
             .spawn();
         let client = bind().await;
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
@@ -240,6 +244,9 @@ mod tests {
     #[test]
     fn an_acceptor_closes_an_idle_connection_after_the_one_backstop() {
         let (tx, _frames) = mpsc::channel(1);
-        assert_eq!(UnicastAcceptor::new(tx, true).idle, DIRECT_IDLE_BACKSTOP);
+        assert_eq!(
+            UnicastAcceptor::new(tx, PayloadPath::RelayAllowed).idle,
+            DIRECT_IDLE_BACKSTOP
+        );
     }
 }

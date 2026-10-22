@@ -9,8 +9,8 @@ use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
 use habilis_network::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
-    PROBE_DEADLINE, SignalAdmission, WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc,
-    dial_signal, is_cap_refusal, pair_needs_lane, wait_direct,
+    PROBE_DEADLINE, PayloadPath, SignalAdmission, WebRtcHandle, WebRtcSignalAcceptor,
+    build_peer_webrtc, dial_signal, is_cap_refusal, pair_needs_lane, wait_direct,
 };
 use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
@@ -117,7 +117,7 @@ impl StreamNode {
             crate::STREAM_ALPN,
             StreamAcceptor {
                 registry: Arc::clone(&registry),
-                relay_transport: transport.relay_transport,
+                relay_transport: PayloadPath::from(transport.relay_transport),
             },
         );
         if transports.webrtc {

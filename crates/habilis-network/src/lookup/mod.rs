@@ -26,7 +26,6 @@ use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
 use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
-#[cfg(feature = "multihop")]
 use crate::transport::PayloadPath;
 use crate::util::clock::millis_saturating;
 
@@ -670,11 +669,11 @@ pub fn multihop_handle_config(
 )]
 #[must_use]
 pub(crate) fn browser_handle_config(
-    relay_payload: bool,
+    relay_payload: PayloadPath,
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
     habilis_network_iroh_multihop_transport::HandleConfig {
         link_cost: habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost,
-        ..multihop_handle_config(PayloadPath::from(relay_payload))
+        ..multihop_handle_config(relay_payload)
     }
 }
 
@@ -877,7 +876,7 @@ pub(crate) async fn build_peer_multihop(
     lookups: &LookupOpts,
     opts: TransportOpts,
     admission: Option<&crate::transport::SignalAdmission>,
-    relay_payload: bool,
+    relay_payload: PayloadPath,
 ) -> Result<(
     Endpoint,
     habilis_network_iroh_multihop_transport::MultihopHandle,
@@ -887,7 +886,7 @@ pub(crate) async fn build_peer_multihop(
         lookups,
         opts,
         admission,
-        multihop_handle_config(PayloadPath::from(relay_payload)),
+        multihop_handle_config(relay_payload),
         None,
     )
     .await?;
@@ -1300,7 +1299,11 @@ pub(crate) fn build_mesh(
     let mut builder = Router::builder(endpoint)
         .accept(
             GOSSIP_ALPN,
-            crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport, session_gate),
+            crate::transport::DirectOnlyGossip::new(
+                gossip.clone(),
+                PayloadPath::from(relay_transport),
+                session_gate,
+            ),
         )
         .accept(
             crate::transport::webrtc::NUDGE_ALPN,
@@ -1995,7 +1998,7 @@ mod tests {
     #[test]
     fn the_handle_config_of_a_browser_differs_from_the_engine_s_in_the_link_cost_only() {
         let native = super::multihop_handle_config(PayloadPath::RelayAllowed);
-        let browser = super::browser_handle_config(true);
+        let browser = super::browser_handle_config(PayloadPath::RelayAllowed);
         assert_eq!(native.link_cost, 10);
         assert_eq!(browser.link_cost, 100);
         assert_eq!(
@@ -2072,7 +2075,7 @@ mod tests {
             &LookupOpts::loopback(),
             TransportOpts::default(),
             None,
-            false,
+            PayloadPath::DirectOnly,
         )
         .await
         .expect("a multihop peer binds");

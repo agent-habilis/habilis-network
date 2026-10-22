@@ -2070,6 +2070,7 @@ mod evicted_orphan_tests {
 
 #[cfg(test)]
 mod first_contact_tests {
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
@@ -2387,7 +2388,11 @@ mod first_contact_tests {
         let router = Router::builder(bob.clone())
             .accept(
                 UNICAST_ALPN,
-                UnicastAcceptor::with_idle(inbox, false, std::time::Duration::from_mins(1)),
+                UnicastAcceptor::with_idle(
+                    inbox,
+                    crate::transport::PayloadPath::DirectOnly,
+                    std::time::Duration::from_mins(1),
+                ),
             )
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&node.endpoint), bob.addr());
@@ -3018,7 +3023,7 @@ mod first_contact_tests {
         let mut state = fresh_state();
         state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
         state.relay_transport = false;
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_linked = true;
 
         handle_gossip_event(
@@ -3047,7 +3052,7 @@ mod first_contact_tests {
         let mut state = fresh_state();
         state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
         state.relay_transport = false;
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_answers_jsep = false;
 
         crate::transport::webrtc::negotiate_rendezvous_session(&mut state, &ctx);
@@ -3205,14 +3210,22 @@ mod left_tests {
     #[test]
     async fn a_peer_that_left_takes_its_advertised_links_with_it() {
         let lookups = LookupOpts::loopback();
-        let (endpoint, handle, _webrtc) =
-            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
-                .await
-                .expect("a multihop peer binds");
-        let (leaver_endpoint, leaver_handle, _leaver_webrtc) =
-            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
-                .await
-                .expect("a second multihop peer binds");
+        let (endpoint, handle, _webrtc) = build_peer_multihop(
+            &lookups,
+            TransportOpts::default(),
+            None,
+            crate::transport::PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("a multihop peer binds");
+        let (leaver_endpoint, leaver_handle, _leaver_webrtc) = build_peer_multihop(
+            &lookups,
+            TransportOpts::default(),
+            None,
+            crate::transport::PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("a second multihop peer binds");
         let leaver_id = leaver_handle.app_id().to_string();
         let advertises = |held_by: &habilis_network_iroh_multihop_transport::MultihopHandle| {
             held_by
@@ -3303,10 +3316,14 @@ mod left_tests {
         use crate::daemon::event_loop::linkstate_arm;
 
         let lookups = LookupOpts::loopback();
-        let (endpoint, peer_handle, _webrtc) =
-            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
-                .await
-                .expect("a multihop peer binds");
+        let (endpoint, peer_handle, _webrtc) = build_peer_multihop(
+            &lookups,
+            TransportOpts::default(),
+            None,
+            crate::transport::PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("a multihop peer binds");
         // Our own handle, with a short max age so that a test can wait it out.
         let secret = iroh::SecretKey::generate();
         let underlay = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -3320,10 +3337,14 @@ mod left_tests {
             ..HandleConfig::default()
         };
         let handle = MultihopHandle::new(&secret, underlay, config).expect("a handle");
-        let (leaver_endpoint, leaver_handle, _leaver_webrtc) =
-            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
-                .await
-                .expect("a second multihop peer binds");
+        let (leaver_endpoint, leaver_handle, _leaver_webrtc) = build_peer_multihop(
+            &lookups,
+            TransportOpts::default(),
+            None,
+            crate::transport::PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("a second multihop peer binds");
         let leaver_id = leaver_handle.app_id().to_string();
         let advertises = |held_by: &MultihopHandle| {
             held_by

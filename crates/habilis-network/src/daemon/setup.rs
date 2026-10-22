@@ -1,3 +1,4 @@
+use crate::transport::UdpTransport;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -14,7 +15,6 @@ use crate::lookup::{
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
-#[cfg(all(feature = "host", feature = "multihop"))]
 use crate::transport::PayloadPath;
 use crate::util::tuning::RELAY_RUNG_PROBE;
 
@@ -201,7 +201,7 @@ fn unicast_inbox(
     let (tx, rx) = mpsc::channel::<bytes::Bytes>(crate::util::consts::UNICAST_INBOX_CAP);
     (
         rx,
-        crate::transport::UnicastAcceptor::new(tx, relay_transport),
+        crate::transport::UnicastAcceptor::new(tx, PayloadPath::from(relay_transport)),
     )
 }
 
@@ -335,7 +335,7 @@ async fn build_member_endpoint(
             build.lookups,
             build.transports,
             Some(&admission),
-            crate::lookup::browser_handle_config(build.relay_transport),
+            crate::lookup::browser_handle_config(PayloadPath::from(build.relay_transport)),
             crate::lookup::underlay_cap(build.max_peers),
         )
         .await?;
@@ -928,7 +928,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         lan_contacts,
         webrtc,
         webrtc_enabled: transports.webrtc,
-        local_udp_transport: transports.udp,
+        local_udp_transport: UdpTransport::from(transports.udp),
         webrtc_admission,
         address_book,
         webrtc_ice,
@@ -985,7 +985,7 @@ fn build_overlay(
             .then(|| (webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
         build.relay_transport,
-        crate::transport::webrtc::local_needs_webrtc_lane(build.transports.udp),
+        crate::transport::webrtc::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
     );
     (gossip, router, admission, address_book, ice)
 }
@@ -1193,7 +1193,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // it is attached.
     let needs_session = crate::transport::webrtc::node_graft_needs_session(
         build.relay_transport,
-        build.transports.udp,
+        UdpTransport::from(build.transports.udp),
     );
     let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
     let topic = crate::gossip::split::subscribe_mesh(&gossip, topic_id, rdv.id, bootstrap).await?;
@@ -1528,7 +1528,7 @@ mod tests {
     /// A multihop handle on `secret`, with its underlay on the key that the handle derives.
     async fn multihop_on(
         secret: &iroh::SecretKey,
-        relay_payload: bool,
+        relay_payload: PayloadPath,
     ) -> habilis_network_iroh_multihop_transport::MultihopHandle {
         use habilis_network_iroh_multihop_transport::{MultihopHandle, underlay_secret};
         use iroh::endpoint::presets;
@@ -1542,14 +1542,14 @@ mod tests {
         MultihopHandle::new(
             secret,
             underlay,
-            crate::lookup::multihop_handle_config(PayloadPath::from(relay_payload)),
+            crate::lookup::multihop_handle_config(relay_payload),
         )
         .expect("underlay on the derived key")
     }
 
     /// An endpoint a caller built to inject: the engine's wiring, a multihop
     /// handle with `relay_payload`, and one key.
-    async fn injected(relay_payload: bool) -> super::InjectedEndpoint {
+    async fn injected(relay_payload: PayloadPath) -> super::InjectedEndpoint {
         let secret = iroh::SecretKey::from_bytes(&[91; 32]);
         let webrtc = crate::lookup::new_webrtc_handle(secret.public());
         let handle = multihop_on(&secret, relay_payload).await;
@@ -1597,7 +1597,7 @@ mod tests {
         let own_webrtc = crate::lookup::new_webrtc_handle(secret.public());
         let other_webrtc = crate::lookup::new_webrtc_handle(other.public());
 
-        let other_hop = multihop_on(&other, false).await;
+        let other_hop = multihop_on(&other, PayloadPath::DirectOnly).await;
         let hop_error = bind(Some(own_webrtc.clone()), Some(other_hop.clone()))
             .await
             .expect_err("a hop identity on another key");
@@ -1726,7 +1726,7 @@ mod tests {
     // none in.
     #[test]
     async fn an_injected_multihop_handle_is_dropped_when_the_mesh_has_no_multihop() {
-        let first = injected(false).await;
+        let first = injected(PayloadPath::DirectOnly).await;
         let (first_endpoint, first_handle) = (first.endpoint.clone(), first.multihop.clone());
         let config = setup_with(vec![Transport::Udp, Transport::WebRtc], first)
             .await
@@ -1741,7 +1741,7 @@ mod tests {
         }
         first_endpoint.close().await;
 
-        let default_list = setup_with(Vec::new(), injected(false).await)
+        let default_list = setup_with(Vec::new(), injected(PayloadPath::DirectOnly).await)
             .await
             .expect("a loopback mesh sets up");
         assert!(default_list.multihop.is_some(), "the default list has it");
@@ -1759,7 +1759,7 @@ mod tests {
     // it, on a lookup-only mesh, is refused.
     #[test]
     async fn an_injected_multihop_handle_that_lets_the_relay_carry_cells_is_refused() {
-        let refused = injected(true).await;
+        let refused = injected(PayloadPath::RelayAllowed).await;
         let (endpoint, handle) = (refused.endpoint.clone(), refused.multihop.clone());
         let error = setup_with(Vec::new(), refused)
             .await
@@ -1850,7 +1850,7 @@ mod tests {
     // An injected endpoint is the caller's, and it may carry protocols of the caller.
     #[test]
     async fn leave_keeps_an_injected_endpoint_and_its_underlay_open() {
-        let injected = injected(false).await;
+        let injected = injected(PayloadPath::DirectOnly).await;
         let config = setup_with(Vec::new(), injected)
             .await
             .expect("a loopback mesh sets up");

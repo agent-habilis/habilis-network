@@ -11,6 +11,7 @@
 //! peer that never proves a direct path stays `RelayOnly`, retried on the
 //! alive tick, and is never grafted through the relay.
 
+use crate::transport::UdpTransport;
 use std::collections::HashMap;
 
 use futures_util::StreamExt as _;
@@ -150,7 +151,7 @@ pub(crate) fn ensure_watchers(
     local: EndpointId,
     rendezvous: EndpointId,
 ) {
-    if state.webrtc.is_none() || !state.local_udp_transport {
+    if state.webrtc.is_none() || state.local_udp_transport == UdpTransport::Absent {
         return;
     }
     let peers: Vec<EndpointId> = state
@@ -273,7 +274,12 @@ pub(crate) fn nudge_climbing_pairs(
                     .webrtc
                     .as_ref()
                     .is_some_and(|handle| handle.has_session(&addr.id));
-                (addr.id, kind, has_session, route_to(state, addr.id))
+                PairToClimb {
+                    peer: addr.id,
+                    kind,
+                    has_session,
+                    route: route_to(state, addr.id),
+                }
             })
         })
         .collect();
@@ -309,7 +315,13 @@ fn forget_route_unless_climbing(
 
 /// A pair that a route can still climb from: the peer, the kind of its selected path (the relay or
 /// gossip), whether it has a session, and the route that the topology has for it.
-pub(crate) type PairToClimb = (EndpointId, PathKind, bool, Option<iroh::TransportAddr>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PairToClimb {
+    pub(crate) peer: EndpointId,
+    pub(crate) kind: PathKind,
+    pub(crate) has_session: bool,
+    pub(crate) route: Option<iroh::TransportAddr>,
+}
 
 /// Pure: the dials of one pass over the pairs that read as the relay or as gossip, as `(peer,
 /// kind, has a session, route)`. A pair is dialed when it has a session address or a route to carry. With
@@ -324,9 +336,15 @@ pub(crate) fn plan_relay_dials(
     gossip_on: bool,
 ) -> Vec<(EndpointId, NudgeAddrs)> {
     let pairs: Vec<_> = pairs.into_iter().collect();
-    route_dialed.retain(|peer, _| pairs.iter().any(|(climbing, ..)| climbing == peer));
+    route_dialed.retain(|peer, _| pairs.iter().any(|climbing| climbing.peer == *peer));
     let mut dials = Vec::new();
-    for (peer, kind, has_session, route) in pairs {
+    for PairToClimb {
+        peer,
+        kind,
+        has_session,
+        route,
+    } in pairs
+    {
         let input = StepInput {
             kind,
             has_session,
@@ -1147,6 +1165,8 @@ fn retry_candidates_at(
 
 #[cfg(test)]
 mod tests {
+    use super::PairToClimb;
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
     use iroh::EndpointAddr;
 
@@ -1734,7 +1754,7 @@ mod tests {
         };
         let rendezvous = endpoint_id(3);
         state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(local)));
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state
             .peer_endpoints
             .insert(nick("peer"), EndpointAddr::new(peer));
@@ -2009,7 +2029,12 @@ mod tests {
         let bob = endpoint_id(2);
         let mut dialed = HashMap::new();
         let dials = plan_relay_dials(
-            [(bob, PathKind::Gossip, false, Some(a_route()))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Gossip,
+                has_session: false,
+                route: Some(a_route()),
+            }],
             &mut dialed,
             true,
             true,
@@ -2233,7 +2258,12 @@ mod tests {
         let mut dialed = HashMap::new();
 
         let first = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route(1)))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route(1)),
+            }],
             &mut dialed,
             true,
             false,
@@ -2243,7 +2273,12 @@ mod tests {
         assert_eq!(first[0].1.route, Some(route(1)), "with the route");
 
         let same = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route(1)))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route(1)),
+            }],
             &mut dialed,
             true,
             false,
@@ -2251,7 +2286,12 @@ mod tests {
         assert!(same.is_empty(), "the same route is not dialed again");
 
         let changed = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route(2)))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route(2)),
+            }],
             &mut dialed,
             true,
             false,
@@ -2260,7 +2300,12 @@ mod tests {
         assert_eq!(changed[0].1.route, Some(route(2)));
 
         let tick = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route(2)))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route(2)),
+            }],
             &mut dialed,
             false,
             false,
@@ -2283,7 +2328,12 @@ mod tests {
         let mut dialed = HashMap::new();
         assert!(
             plan_relay_dials(
-                [(bob, PathKind::Relay, true, None)],
+                [PairToClimb {
+                    peer: bob,
+                    kind: PathKind::Relay,
+                    has_session: true,
+                    route: None
+                }],
                 &mut dialed,
                 true,
                 false
@@ -2292,7 +2342,12 @@ mod tests {
             "an event with no route dials nothing"
         );
         let tick = plan_relay_dials(
-            [(bob, PathKind::Relay, true, None)],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: true,
+                route: None,
+            }],
             &mut dialed,
             false,
             false,
@@ -2301,7 +2356,12 @@ mod tests {
         assert!(tick[0].1.session);
         assert!(
             plan_relay_dials(
-                [(bob, PathKind::Relay, false, None)],
+                [PairToClimb {
+                    peer: bob,
+                    kind: PathKind::Relay,
+                    has_session: false,
+                    route: None
+                }],
                 &mut dialed,
                 false,
                 false
@@ -2326,8 +2386,18 @@ mod tests {
 
         let first = plan_relay_dials(
             [
-                (bob, PathKind::Relay, false, Some(route.clone())),
-                (carol, PathKind::Relay, false, Some(route.clone())),
+                PairToClimb {
+                    peer: bob,
+                    kind: PathKind::Relay,
+                    has_session: false,
+                    route: Some(route.clone()),
+                },
+                PairToClimb {
+                    peer: carol,
+                    kind: PathKind::Relay,
+                    has_session: false,
+                    route: Some(route.clone()),
+                },
             ],
             &mut dialed,
             true,
@@ -2344,7 +2414,12 @@ mod tests {
         );
 
         let again = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route),
+            }],
             &mut dialed,
             true,
             false,
@@ -2431,7 +2506,7 @@ mod tests {
         ids.sort_unstable();
         let [local, rendezvous, bob] = ids;
         state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(local)));
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.peer_endpoints.insert(
             nick("bob"),
             EndpointAddr::from_parts(
@@ -2494,7 +2569,7 @@ mod tests {
             .collect();
         let mut state = fresh_state();
         state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(client.id())));
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.unicast_pool = crate::transport::UnicastPool::new(client.clone(), false);
         for (name, server) in [("bob", &bob), ("beacon", &beacon)] {
             crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());

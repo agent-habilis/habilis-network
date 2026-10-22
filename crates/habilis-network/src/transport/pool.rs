@@ -1423,7 +1423,10 @@ mod tests {
             .await
             .expect("bind a loopback endpoint");
         let router = Router::builder(server.clone())
-            .accept(super::super::UNICAST_ALPN, UnicastAcceptor::new(tx, true))
+            .accept(
+                super::super::UNICAST_ALPN,
+                UnicastAcceptor::new(tx, crate::transport::PayloadPath::RelayAllowed),
+            )
             .spawn();
         let admission = SignalAdmission::new(8);
         let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -1471,7 +1474,10 @@ mod tests {
             .await
             .expect("bind a loopback endpoint");
         let router = Router::builder(server.clone())
-            .accept(super::super::UNICAST_ALPN, UnicastAcceptor::new(tx, true))
+            .accept(
+                super::super::UNICAST_ALPN,
+                UnicastAcceptor::new(tx, crate::transport::PayloadPath::RelayAllowed),
+            )
             .spawn();
         let admission = SignalAdmission::new(8);
         let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)

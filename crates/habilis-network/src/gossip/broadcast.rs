@@ -420,6 +420,7 @@ fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Ve
 
 #[cfg(test)]
 mod tests {
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
 
     use super::{mark_parked, peer_info_json};
@@ -460,7 +461,7 @@ mod tests {
     fn an_unmeshed_directed_frame_to_a_lane_peer_marks_the_peer_wanted() {
         let mut state = fresh_state();
         state.meshed = false;
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
         state.peer_endpoints.insert(
             nick("bob"),

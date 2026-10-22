@@ -4,6 +4,7 @@
 //! consumed by [`daemon::run`](super::run). Split out of `mod.rs` so the
 //! orchestrator file reads as pure lifecycle narrative.
 
+use crate::transport::UdpTransport;
 use std::path::PathBuf;
 
 use iroh::{Endpoint, protocol::Router};
@@ -204,7 +205,7 @@ pub struct EventLoopConfig {
     pub(crate) webrtc_enabled: bool,
     /// See `EventLoopState::local_udp_transport`. With `relay_transport` it
     /// also decides `EventLoopState::rendezvous_graft_needs_session`.
-    pub(crate) local_udp_transport: bool,
+    pub(crate) local_udp_transport: UdpTransport,
     /// The negotiation-slot table this peer's Router acceptor was built with.
     /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
     /// side and the answering side share one direct-peer ceiling.

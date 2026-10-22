@@ -13,6 +13,7 @@
 //! members use must not end with it. So there is one session per known member
 //! that needs one, and the cap of the admission table bounds them.
 
+use crate::transport::UdpTransport;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -87,10 +88,10 @@ pub(crate) fn plan(
 /// has to want the pair for the lower one to offer.
 fn wanted_underlays(
     neighbors: &[(EndpointId, iroh::EndpointAddr)],
-    local_has_udp: bool,
+    local_has_udp: UdpTransport,
     kind_of: impl Fn(EndpointId) -> Option<super::probe::PathKind>,
 ) -> Vec<iroh::EndpointAddr> {
-    if !local_has_udp {
+    if local_has_udp == UdpTransport::Absent {
         return neighbors.iter().map(|(_, addr)| addr.clone()).collect();
     }
     neighbors
@@ -348,6 +349,7 @@ pub(crate) struct UnderlayWebRtc {
 
 #[cfg(test)]
 mod tests {
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
 
@@ -452,7 +454,11 @@ mod tests {
             .into_iter()
             .map(|member| (member, reachable_over_ip(id(member.as_bytes()[0] ^ 0x55))))
             .collect();
-        let wanted = wanted_underlays(&neighbors, true, neighbor_kinds(webrtc, ip, relay));
+        let wanted = wanted_underlays(
+            &neighbors,
+            UdpTransport::Present,
+            neighbor_kinds(webrtc, ip, relay),
+        );
         assert_eq!(wanted, vec![neighbors[0].1.clone()]);
     }
 
@@ -479,7 +485,7 @@ mod tests {
         ];
         let on_relay = |_member: EndpointId| Some(PathKind::Relay);
         assert_eq!(
-            wanted_underlays(&neighbors, true, on_relay),
+            wanted_underlays(&neighbors, UdpTransport::Present, on_relay),
             vec![neighbors[0].1.clone()]
         );
     }
@@ -506,7 +512,11 @@ mod tests {
             .into_iter()
             .map(|member| (member, EndpointAddr::new(id(member.as_bytes()[0] ^ 0x55))))
             .collect();
-        let wanted = wanted_underlays(&neighbors, false, neighbor_kinds(webrtc, ip, relay));
+        let wanted = wanted_underlays(
+            &neighbors,
+            UdpTransport::Absent,
+            neighbor_kinds(webrtc, ip, relay),
+        );
         let all: Vec<EndpointAddr> = neighbors.iter().map(|(_, addr)| addr.clone()).collect();
         assert_eq!(wanted, all);
     }

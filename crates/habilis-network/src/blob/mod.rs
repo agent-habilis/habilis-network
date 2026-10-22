@@ -303,9 +303,9 @@ mod tests {
             .register(&src, ContentId::new("blob-test-direct"))
             .await
             .expect("register");
-        assert!(!ticket.relay_transport);
+        assert_eq!(ticket.relay_transport, PayloadPath::DirectOnly);
         let decoded = super::BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
-        assert!(!decoded.relay_transport);
+        assert_eq!(decoded.relay_transport, PayloadPath::DirectOnly);
         let mut out = Vec::new();
         fetch(&decoded, &mut out, None)
             .await

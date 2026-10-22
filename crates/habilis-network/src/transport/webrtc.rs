@@ -726,8 +726,8 @@ pub(crate) fn needs_webrtc_lane(addr: &EndpointAddr) -> bool {
 /// snapshot — that snapshot is empty while the relay link is down, and empty
 /// reads as "unknown" for a remote but must not for ourselves. A wasm node
 /// reads `false`: `TransportOpts::within` clears UDP there.
-pub(crate) fn local_needs_webrtc_lane(has_udp_transport: bool) -> bool {
-    !has_udp_transport
+pub(crate) fn local_needs_webrtc_lane(has_udp_transport: UdpTransport) -> bool {
+    has_udp_transport == UdpTransport::Absent
 }
 
 /// Whether this node has a UDP transport, as its own state knows it.
@@ -749,8 +749,7 @@ impl From<bool> for UdpTransport {
 /// about itself.
 #[must_use]
 pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: UdpTransport) -> bool {
-    needs_webrtc_lane(remote)
-        || local_needs_webrtc_lane(local_has_udp_transport == UdpTransport::Present)
+    needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_udp_transport)
 }
 
 /// Whether a pair runs a `WebRTC` round: a pair that needs the lane always
@@ -819,12 +818,7 @@ pub(crate) async fn detach_sessions_under_udp(
         .peer_endpoints
         .values()
         .filter(|addr| addr.id != ctx.rendezvous_id && handle.has_session(&addr.id))
-        .map(|addr| {
-            (
-                addr.id,
-                pair_needs_lane(addr, state.local_udp_transport.into()),
-            )
-        })
+        .map(|addr| (addr.id, pair_needs_lane(addr, state.local_udp_transport)))
         .collect();
     for (peer, needs_lane) in holders {
         if detach_session_under_udp(state, peer, needs_lane)
@@ -883,7 +877,10 @@ pub(crate) fn waits_for_the_offer(
 /// Whether *this* node's rendezvous graft must wait for a data-channel
 /// session: a lane-needing node on a lookup-only mesh. With the relay allowed
 /// as a transport nothing needs holding.
-pub(crate) fn node_graft_needs_session(relay_transport: bool, has_udp_transport: bool) -> bool {
+pub(crate) fn node_graft_needs_session(
+    relay_transport: bool,
+    has_udp_transport: UdpTransport,
+) -> bool {
     !relay_transport && local_needs_webrtc_lane(has_udp_transport)
 }
 
@@ -912,7 +909,7 @@ pub(crate) fn negotiate_session(
     // browser is the lower id it is the browser that evaluates this. It would
     // see the native peer's IP, skip, and the native — waiting to be dialled —
     // would never offer. The pair would silently never get a channel.
-    let needs_lane = pair_needs_lane(&addr, state.local_udp_transport.into());
+    let needs_lane = pair_needs_lane(&addr, state.local_udp_transport);
     let kind = state.pair_path_kind(peer);
     let proven = state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct);
     if !wants_session(needs_lane, kind, proven) {
@@ -1939,7 +1936,7 @@ mod tests {
             pair_needs_lane(&native, UdpTransport::Absent),
             "a node with no IP transport must offer whatever its address says"
         );
-        assert!(local_needs_webrtc_lane(false));
+        assert!(local_needs_webrtc_lane(UdpTransport::Absent));
         assert!(
             !pair_needs_lane(&native, UdpTransport::Present),
             "two IP-capable peers stay on iroh's own transports"
@@ -2333,7 +2330,11 @@ mod tests {
             )
             .accept(
                 GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(server_gossip.clone(), false, None),
+                super::super::DirectOnlyGossip::new(
+                    server_gossip.clone(),
+                    crate::transport::PayloadPath::DirectOnly,
+                    None,
+                ),
             )
             .spawn();
 
@@ -2454,7 +2455,11 @@ mod tests {
             )
             .accept(
                 GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(server_gossip.clone(), false, None),
+                super::super::DirectOnlyGossip::new(
+                    server_gossip.clone(),
+                    crate::transport::PayloadPath::DirectOnly,
+                    None,
+                ),
             )
             .spawn();
 
@@ -2782,7 +2787,11 @@ mod tests {
             )
             .accept(
                 GOSSIP_ALPN,
-                super::super::DirectOnlyGossip::new(server_gossip.clone(), false, None),
+                super::super::DirectOnlyGossip::new(
+                    server_gossip.clone(),
+                    crate::transport::PayloadPath::DirectOnly,
+                    None,
+                ),
             )
             .spawn();
 
@@ -3026,9 +3035,9 @@ mod tests {
     #[test]
     fn only_a_node_that_already_offers_offers_off_the_heal_tick() {
         let mut state = crate::testing::fresh_state();
-        state.local_udp_transport = false;
+        state.local_udp_transport = UdpTransport::Absent;
         assert!(offers_off_tick(&state), "a lane-needing node");
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         assert!(
             !offers_off_tick(&state),
             "an IP-capable node before its fallback"
@@ -3057,7 +3066,7 @@ mod tests {
         let lane_pair = EndpointAddr::new(peer)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
         let mut state = crate::testing::fresh_state();
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
 
         assert!(held_back(&state, &ip_pair), "cold, no neighbor, an IP path");
         assert!(
@@ -3093,7 +3102,7 @@ mod tests {
         let peer = crate::testing::endpoint_id(7);
         let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         let mut state = crate::testing::fresh_state();
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.relay_transport = false;
 
         for (known, held) in [
@@ -3137,7 +3146,7 @@ mod tests {
         let peer = crate::testing::endpoint_id(7);
         let pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         let mut state = crate::testing::fresh_state();
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.relay_transport = false;
         state.direct.insert(peer, DirectState::RelayOnly);
         assert!(!held_back(&state, &pair), "a failed probe offers a session");
@@ -3201,7 +3210,7 @@ mod tests {
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(client_hub.clone());
         state.webrtc_admission = client_admission.clone();
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state
             .peer_endpoints
             .insert(crate::testing::nick("bob"), bob_addr(server.id()));
@@ -3302,7 +3311,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state
             .peer_endpoints
@@ -3410,7 +3419,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.relay_transport = false;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state
@@ -3523,7 +3532,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state.peer_endpoints.insert(
             crate::testing::nick("bob"),
@@ -3604,7 +3613,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         let addr = EndpointAddr::new(peer)
             .with_relay_url("https://relay.invalid".parse().expect("relay url"));
@@ -3683,7 +3692,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle.clone());
-        state.local_udp_transport = false;
+        state.local_udp_transport = UdpTransport::Absent;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state
             .peer_endpoints
@@ -3764,7 +3773,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle.clone());
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.relay_transport = false;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state
@@ -3867,7 +3876,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle.clone());
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.relay_transport = false;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state
@@ -3948,7 +3957,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.relay_transport = false;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
@@ -4016,7 +4025,7 @@ mod tests {
         };
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.relay_transport = false;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();

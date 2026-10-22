@@ -207,7 +207,7 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
         .peer_endpoints
         .values()
         .find(|addr| addr.id == held.eid)
-        .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport.into()));
+        .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport));
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
     let reads_as_relay = state.pair_path_kind(held.eid) == Some(super::probe::PathKind::Relay);
@@ -353,6 +353,7 @@ async fn broadcast(sender: &MeshSender, bytes: WireFrame) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
 
     use iroh::EndpointId;
@@ -414,7 +415,7 @@ mod tests {
     fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
         let mut state = fresh_state();
         state.meshed = true;
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
         state.peer_endpoints.insert(
             nick("bob"),
@@ -452,7 +453,7 @@ mod tests {
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
 
         let error = resolve(
             &directed_msg(),
@@ -478,7 +479,7 @@ mod tests {
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
 

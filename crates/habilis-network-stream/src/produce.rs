@@ -107,7 +107,7 @@ impl std::fmt::Debug for Registry {
 #[derive(Debug, Clone)]
 pub(crate) struct StreamAcceptor {
     pub(crate) registry: Arc<Registry>,
-    pub(crate) relay_transport: bool,
+    pub(crate) relay_transport: PayloadPath,
 }
 
 impl ProtocolHandler for StreamAcceptor {
@@ -116,7 +116,7 @@ impl ProtocolHandler for StreamAcceptor {
         // refused here must not spend the hash.
         if !refuse_unless_direct(
             &conn,
-            PayloadPath::from(self.relay_transport),
+            self.relay_transport,
             PROBE_DEADLINE,
             code::RELAY_REFUSED,
         )

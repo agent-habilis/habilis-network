@@ -4,6 +4,7 @@
 //! made [`StateInit`] painful to extend: one new field meant editing six test
 //! modules that had no reason to know about it. One home instead.
 
+use crate::transport::UdpTransport;
 use std::sync::Arc;
 
 use iroh::{EndpointId, SecretKey};
@@ -217,7 +218,7 @@ impl LaneNode {
     pub(crate) fn state(&self) -> EventLoopState {
         let mut state = fresh_state();
         state.webrtc = Some(self.handle.clone());
-        state.local_udp_transport = false;
+        state.local_udp_transport = UdpTransport::Absent;
         state.unicast_pool = crate::transport::UnicastPool::new(self.endpoint.clone(), false);
         state.peer_endpoints.insert(
             nick("bob"),

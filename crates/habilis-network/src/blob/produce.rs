@@ -73,7 +73,7 @@ pub struct BlobServer {
     password: Option<Password>,
     /// `TransportPolicy::relay`. Off, a fetch whose selected path is the
     /// relay is refused before any byte.
-    relay_transport: bool,
+    relay_transport: PayloadPath,
     /// Serves currently in flight. The accept loop holds the counter it
     /// actually reads; this handle exists so a test can observe that a peer
     /// which connects and then goes quiet cannot accumulate them.
@@ -151,7 +151,7 @@ impl BlobServer {
             store,
             lookups,
             password,
-            relay_transport: relay_transport.relay_allowed(),
+            relay_transport,
             inflight,
         })
     }

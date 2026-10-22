@@ -14,15 +14,15 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_gossip::net::Gossip;
 use n0_future::time::Instant;
 
+use super::PayloadPath;
 use super::path::{
-    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, PayloadPath, refuse_unless_direct,
-    selected_is_direct,
+    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
 };
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectOnlyGossip {
     inner: Gossip,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
     /// Set on a node with no UDP path, whose only direct path to anyone is a
     /// `WebRTC` session. See [`DirectOnlyGossip::accept`]. The third element is
     /// this node's own id: the lower id of a pair offers, and the gate treats
@@ -33,7 +33,7 @@ pub(crate) struct DirectOnlyGossip {
 impl DirectOnlyGossip {
     pub(crate) fn new(
         inner: Gossip,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
         session_gate: Option<(WebRtcHandle, super::SignalAdmission, iroh::EndpointId)>,
     ) -> Self {
         Self {
@@ -59,7 +59,7 @@ impl ProtocolHandler for DirectOnlyGossip {
     /// through the rendezvous before any session exists.
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
-        if !self.relay_transport
+        if !self.relay_transport.relay_allowed()
             && let Some((webrtc, admission, local)) = &self.session_gate
             && refuse_before_session(
                 webrtc.has_session(&remote),
@@ -73,7 +73,7 @@ impl ProtocolHandler for DirectOnlyGossip {
         }
         if !refuse_unless_direct(
             &conn,
-            PayloadPath::from(self.relay_transport),
+            self.relay_transport,
             PROBE_DEADLINE,
             GOSSIP_RELAY_REFUSED_CODE,
         )
@@ -81,7 +81,7 @@ impl ProtocolHandler for DirectOnlyGossip {
         {
             return Ok(());
         }
-        if !self.relay_transport {
+        if !self.relay_transport.relay_allowed() {
             watch_relay_policy(&conn, None);
         }
         self.inner
