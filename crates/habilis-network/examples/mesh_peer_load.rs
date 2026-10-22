@@ -49,7 +49,7 @@ use habilis_network::membership::{
 };
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{Lookup, Nickname, Transport};
-use habilis_network::runtime::{Node, SetupParams, setup_mesh};
+use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};
 use habilis_network::util::resident_memory::current_resident_memory_mb;
 use tokio::sync::{mpsc, oneshot};
 
@@ -287,7 +287,12 @@ async fn main() -> anyhow::Result<()> {
     println!("nick    {author}");
 
     let webrtc = config.webrtc_handle();
-    let node = Node::spawn(config, MembershipApp::new(inbound_tx), None, false);
+    let node = Node::spawn(
+        config,
+        MembershipApp::new(inbound_tx),
+        None,
+        SignalHandling::Leave,
+    );
     tokio::spawn(async move { while inbound.recv().await.is_some() {} });
     let sender = node.sender();
 

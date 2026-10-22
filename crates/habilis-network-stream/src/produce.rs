@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use habilis_network::iroh::endpoint::{Connection, SendStream};
 use habilis_network::iroh::protocol::{AcceptError, ProtocolHandler};
-use habilis_network::net::direct::{PROBE_DEADLINE, refuse_unless_direct};
+use habilis_network::net::direct::{PROBE_DEADLINE, PayloadPath, refuse_unless_direct};
 use habilis_network::protocol::ct_eq;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -116,7 +116,7 @@ impl ProtocolHandler for StreamAcceptor {
         // refused here must not spend the hash.
         if !refuse_unless_direct(
             &conn,
-            self.relay_transport,
+            PayloadPath::from(self.relay_transport),
             PROBE_DEADLINE,
             code::RELAY_REFUSED,
         )

@@ -21,7 +21,7 @@ use habilis_network::iroh::RelayUrl;
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MeshConfig, Nickname, RelayChoice, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 use tokio::sync::Notify;
 
@@ -159,7 +159,7 @@ async fn spawn_with(
     )
     .await
     .expect("setup_mesh");
-    Node::spawn(config, Probe, None, false)
+    Node::spawn(config, Probe, None, SignalHandling::Leave)
 }
 
 #[test]

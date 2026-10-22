@@ -31,7 +31,9 @@ use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
     DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, TransportPolicy,
 };
-use habilis_network::runtime::{CreateParams, JoinParams, Node, Resolved, SetupParams, setup_mesh};
+use habilis_network::runtime::{
+    CreateParams, JoinParams, Node, Resolved, SetupParams, SignalHandling, setup_mesh,
+};
 
 /// The do-nothing application. A peer that only carries presence still forms a
 /// mesh — payload handling is a separate concern from membership.
@@ -204,7 +206,7 @@ async fn run_peer(
     // `handle_signals: false` — registering tokio's signal handlers suppresses
     // the OS default-terminate for the whole process, permanently. This example
     // wants ctrl-c to keep working.
-    let node: Node<Probe> = Node::spawn(config, Probe, None, false);
+    let node: Node<Probe> = Node::spawn(config, Probe, None, SignalHandling::Leave);
 
     let ticker = async {
         loop {

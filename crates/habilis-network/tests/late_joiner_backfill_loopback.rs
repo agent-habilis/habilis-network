@@ -18,7 +18,9 @@ use habilis_network::embed::{
 use habilis_network::net::TransportOpts;
 use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
 use habilis_network::protocol::{Channel, LookupOpts, MessageKind, Nickname, PresenceSubtype};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
 /// The agent-gossip late-joiner test's log size: two and a half answers.
@@ -177,7 +179,10 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
-    (Node::spawn(config, Store, None, false), sink)
+    (
+        Node::spawn(config, Store, None, SignalHandling::Leave),
+        sink,
+    )
 }
 
 /// More changes than one digest answer carries, so the backfill takes several

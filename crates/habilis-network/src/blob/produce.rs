@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 use crate::lookup::build_endpoint;
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
 use crate::protocol::mesh::LookupOpts;
+use crate::transport::PayloadPath;
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::store::BlobStore;
@@ -100,7 +101,7 @@ impl BlobServer {
         lookups: LookupOpts,
         spool_dir: PathBuf,
         password: Option<Password>,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
     ) -> Result<Self> {
         Self::start_with_limits(
             lookups,
@@ -118,7 +119,7 @@ impl BlobServer {
         lookups: LookupOpts,
         spool_dir: PathBuf,
         password: Option<Password>,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
         limits: ServeLimits,
     ) -> Result<Self> {
         let endpoint =
@@ -150,7 +151,7 @@ impl BlobServer {
             store,
             lookups,
             password,
-            relay_transport,
+            relay_transport: relay_transport.relay_allowed(),
             inflight,
         })
     }
@@ -250,7 +251,7 @@ fn spawn_accept_loop(
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
     inflight: Arc<AtomicUsize>,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) {
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
@@ -282,7 +283,7 @@ async fn handle_incoming(
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
     inflight: Arc<AtomicUsize>,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) {
     if let Err(error) = serve_connection(incoming, &store, limits, relay_transport).await {
         tracing::debug!(%error, "blob serve connection ended");
@@ -295,7 +296,7 @@ async fn serve_connection(
     incoming: Incoming,
     store: &Mutex<BlobStore>,
     limits: ServeLimits,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) -> Result<()> {
     // One deadline across everything the requester controls. The secret that
     // authorizes this fetch is inside the request we are waiting for, so none

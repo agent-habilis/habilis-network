@@ -146,6 +146,32 @@ pub(crate) async fn wait_ip(conn: &Connection, deadline: Duration) -> bool {
     wait_selected(conn, deadline, selected_is_ip).await
 }
 
+/// Whether a payload may flow on the relay path, or only on a direct one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PayloadPath {
+    DirectOnly,
+    RelayAllowed,
+}
+
+impl PayloadPath {
+    /// The flag form that the wire and the handle config still carry.
+    #[must_use]
+    pub const fn relay_allowed(self) -> bool {
+        matches!(self, Self::RelayAllowed)
+    }
+}
+
+impl From<bool> for PayloadPath {
+    fn from(relay_allowed: bool) -> Self {
+        if relay_allowed {
+            Self::RelayAllowed
+        } else {
+            Self::DirectOnly
+        }
+    }
+}
+
 /// How a wait for a selected path ended.
 #[derive(Debug, PartialEq, Eq)]
 enum PathWait {
@@ -191,11 +217,11 @@ async fn wait_selected_outcome(
 /// may flow on `conn`.
 pub async fn refuse_unless_direct(
     conn: &Connection,
-    relay_transport: bool,
+    relay: PayloadPath,
     deadline: Duration,
     close_code: u32,
 ) -> bool {
-    let outcome = if relay_transport {
+    let outcome = if relay.relay_allowed() {
         PathWait::Selected
     } else {
         wait_selected_outcome(conn, deadline, selected_is_direct).await
@@ -241,11 +267,11 @@ pub async fn refuse_unless_direct(
 #[cfg(feature = "blob")]
 pub(crate) async fn refuse_relayed(
     conn: &Connection,
-    relay_transport: bool,
+    relay: PayloadPath,
     deadline: Duration,
     close_code: u32,
 ) -> anyhow::Result<()> {
-    if refuse_unless_direct(conn, relay_transport, deadline, close_code).await {
+    if refuse_unless_direct(conn, relay, deadline, close_code).await {
         return Ok(());
     }
     anyhow::bail!("{RELAY_REFUSED}")

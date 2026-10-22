@@ -15,7 +15,7 @@ use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
 use super::LOG_TARGET;
-use super::path::{PROBE_DEADLINE, refuse_unless_direct};
+use super::path::{PROBE_DEADLINE, PayloadPath, refuse_unless_direct};
 use super::webrtc::close_code::{IDLE, UNICAST_RELAY_REFUSED};
 
 /// Per-frame read cap: one wire message plus gossip's envelope headroom (the
@@ -90,7 +90,7 @@ impl ProtocolHandler for UnicastAcceptor {
         // hostile peer may not: hold until this side has proof too.
         if !refuse_unless_direct(
             &conn,
-            self.relay_transport,
+            PayloadPath::from(self.relay_transport),
             PROBE_DEADLINE,
             UNICAST_RELAY_REFUSED,
         )

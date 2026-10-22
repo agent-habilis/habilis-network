@@ -20,7 +20,9 @@ use habilis_network::protocol::{
     AppFrameParams, AppTag, LookupOpts, Message, MessageBody, MessageId, MessageKind, Nickname,
     PresenceSubtype,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
 /// Bounds a slow join only: with the tick pinned away, nothing but the ask on
@@ -197,7 +199,11 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
     let chat = Chat::default();
-    (Node::spawn(config, chat.clone(), None, false), chat, sink)
+    (
+        Node::spawn(config, chat.clone(), None, SignalHandling::Leave),
+        chat,
+        sink,
+    )
 }
 
 #[test]

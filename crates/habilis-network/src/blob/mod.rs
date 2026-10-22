@@ -32,6 +32,7 @@ use anyhow::Result;
 use iroh::Endpoint;
 
 use crate::protocol::mesh::LookupOpts;
+use crate::transport::PayloadPath;
 
 mod consume;
 mod produce;
@@ -93,7 +94,7 @@ pub struct OffloadRequest {
 pub async fn offload(
     server: &mut Option<BlobServer>,
     lookups: &LookupOpts,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
     request: OffloadRequest,
 ) -> Result<BlobTicket> {
     let OffloadRequest {
@@ -179,6 +180,7 @@ async fn wait_online(endpoint: &Endpoint) {
 mod tests {
     use super::{BlobServer, ContentId, fetch};
     use crate::protocol::mesh::LookupOpts;
+    use crate::transport::PayloadPath;
     use habilis_network_test_tracing::test;
     use rand::RngCore;
     use std::fs;
@@ -263,9 +265,14 @@ mod tests {
     /// Start a loopback producer serving `payload`, fetch it back over a second
     /// loopback endpoint, and return the fetched bytes.
     async fn round_trip(payload: &[u8]) -> Vec<u8> {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .expect("start producer");
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .expect("start producer");
         let src = temp_file(payload);
         let ticket = server
             .register(&src, ContentId::new("blob-test-content"))
@@ -283,9 +290,14 @@ mod tests {
     /// carries the policy to the consumer.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn relay_lookup_only_still_serves_a_direct_fetch() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, false)
-            .await
-            .expect("start producer");
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("start producer");
         let src = temp_file(b"direct bytes");
         let ticket = server
             .register(&src, ContentId::new("blob-test-direct"))
@@ -319,10 +331,15 @@ mod tests {
             pre_auth: Duration::from_millis(300),
             max_inflight: 4,
         };
-        let server =
-            BlobServer::start_with_limits(LookupOpts::loopback(), temp_spool(), None, true, limits)
-                .await
-                .expect("start producer");
+        let server = BlobServer::start_with_limits(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+            limits,
+        )
+        .await
+        .expect("start producer");
 
         // Connect and then do nothing at all — never open a stream, never send.
         let mut clients = Vec::new();
@@ -389,7 +406,7 @@ mod tests {
         let ticket = super::offload(
             &mut server,
             &LookupOpts::loopback(),
-            true,
+            PayloadPath::RelayAllowed,
             super::OffloadRequest {
                 path: src.clone(),
                 spool_dir: temp_spool(),
@@ -414,7 +431,7 @@ mod tests {
         let again = super::offload(
             &mut server,
             &LookupOpts::loopback(),
-            true,
+            PayloadPath::RelayAllowed,
             super::OffloadRequest {
                 path: src.clone(),
                 spool_dir: temp_spool(),
@@ -440,7 +457,7 @@ mod tests {
             LookupOpts::loopback(),
             temp_spool(),
             Some(password.clone()),
-            true,
+            PayloadPath::RelayAllowed,
         )
         .await
         .unwrap();
@@ -479,9 +496,14 @@ mod tests {
     /// evicting one group must leave the other's ticket redeemable.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"shared bytes");
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
@@ -507,9 +529,14 @@ mod tests {
 
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bad_secret_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"secret payload");
         let mut ticket = server
             .register(&src, ContentId::new("blob-test-content"))
@@ -527,9 +554,14 @@ mod tests {
 
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unknown_hash_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"real content");
         let mut ticket = server
             .register(&src, ContentId::new("blob-test-content"))
@@ -547,9 +579,14 @@ mod tests {
 
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_size_disagreement_is_rejected() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"exactly this many bytes");
         let mut ticket = server
             .register(&src, ContentId::new("blob-test-content"))

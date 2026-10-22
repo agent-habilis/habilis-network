@@ -47,6 +47,7 @@ use super::beacon_arm::{
 use super::config::{CoHostPolicy, DriverMode, EventLoopConfig};
 use super::ctx::HandlerCtx;
 use super::heal::{GossipLink, ResubscribeEnv, apply_rung_change, resubscribe_tick, run_heal};
+use super::node::SignalHandling;
 #[cfg(feature = "host")]
 use super::shutdown::spawn_quit_signal_tasks;
 use super::shutdown::{OwnedEndpoints, QuitParams, announce_departure, never_quit};
@@ -120,7 +121,7 @@ pub async fn run<A: NodeDriver>(
     // (in-process: library API or MCP) take typed requests on `session_rx` instead.
     let (external_quit_rx, external_msg_tx, ipc_listener_disabled, exit_on_quit, handle_signals) =
         match driver {
-            DriverMode::Cli => (None, None, false, true, true),
+            DriverMode::Cli => (None, None, false, true, SignalHandling::Handle),
             DriverMode::InProcess {
                 msg_tx,
                 quit_rx,
@@ -323,7 +324,7 @@ pub async fn run<A: NodeDriver>(
     // shutdown comes from `external_quit_rx` / drop. A browser is always this
     // case: there are no process signals to listen for.
     #[cfg(feature = "host")]
-    let quit_rx = if handle_signals {
+    let quit_rx = if handle_signals == SignalHandling::Handle {
         spawn_quit_signal_tasks(exit_on_quit, owner)
     } else {
         never_quit()

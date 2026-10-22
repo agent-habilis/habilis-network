@@ -18,7 +18,9 @@ use habilis_network::embed::{
 };
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
 type Rtts = Vec<(Nickname, u64)>;
@@ -141,7 +143,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Pinger> {
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
-    Node::spawn(config, Pinger, None, false)
+    Node::spawn(config, Pinger, None, SignalHandling::Leave)
 }
 
 async fn ping(node: &Node<Pinger>) -> Rtts {

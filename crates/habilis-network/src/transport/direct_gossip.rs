@@ -15,7 +15,8 @@ use iroh_gossip::net::Gossip;
 use n0_future::time::Instant;
 
 use super::path::{
-    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
+    GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, PayloadPath, refuse_unless_direct,
+    selected_is_direct,
 };
 
 #[derive(Debug, Clone)]
@@ -72,7 +73,7 @@ impl ProtocolHandler for DirectOnlyGossip {
         }
         if !refuse_unless_direct(
             &conn,
-            self.relay_transport,
+            PayloadPath::from(self.relay_transport),
             PROBE_DEADLINE,
             GOSSIP_RELAY_REFUSED_CODE,
         )

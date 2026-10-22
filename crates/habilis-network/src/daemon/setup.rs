@@ -14,6 +14,8 @@ use crate::lookup::{
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
+#[cfg(all(feature = "host", feature = "multihop"))]
+use crate::transport::PayloadPath;
 use crate::util::tuning::RELAY_RUNG_PROBE;
 
 use crate::beacon::RendezvousParams;
@@ -270,7 +272,7 @@ async fn build_member_endpoint(
             build.lookups,
             build.transports,
             Some(&admission),
-            crate::lookup::multihop_handle_config(build.relay_transport),
+            crate::lookup::multihop_handle_config(PayloadPath::from(build.relay_transport)),
             crate::lookup::underlay_cap(build.max_peers),
         )
         .await?;
@@ -1239,6 +1241,8 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    use crate::daemon::node::SignalHandling;
+    use crate::transport::PayloadPath;
     use habilis_network_test_tracing::test;
     use std::time::Duration;
 
@@ -1538,7 +1542,7 @@ mod tests {
         MultihopHandle::new(
             secret,
             underlay,
-            crate::lookup::multihop_handle_config(relay_payload),
+            crate::lookup::multihop_handle_config(PayloadPath::from(relay_payload)),
         )
         .expect("underlay on the derived key")
     }
@@ -1805,7 +1809,7 @@ mod tests {
             config,
             crate::membership::MembershipApp::new(inbound_tx),
             None,
-            false,
+            SignalHandling::Leave,
         );
         node.leave().await.expect("the node leaves");
         (endpoint, underlay)

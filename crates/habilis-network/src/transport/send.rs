@@ -207,7 +207,7 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
         .peer_endpoints
         .values()
         .find(|addr| addr.id == held.eid)
-        .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport));
+        .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport.into()));
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
     let reads_as_relay = state.pair_path_kind(held.eid) == Some(super::probe::PathKind::Relay);

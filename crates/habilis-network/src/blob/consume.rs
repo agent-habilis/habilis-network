@@ -14,6 +14,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
 use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret};
+use crate::transport::PayloadPath;
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::ticket::BlobTicket;
@@ -62,7 +63,7 @@ where
     // cause.
     crate::transport::refuse_relayed(
         &conn,
-        ticket.relay_transport,
+        PayloadPath::from(ticket.relay_transport),
         crate::transport::PROBE_DEADLINE,
         super::RELAY_REFUSED_CODE,
     )

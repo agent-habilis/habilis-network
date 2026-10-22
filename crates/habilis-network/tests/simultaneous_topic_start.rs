@@ -31,7 +31,9 @@ use habilis_network::embed::{
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype, RelayChoice};
 use habilis_network::runtime::tuning::{Tuning, init};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::Notify;
 
 /// The time that a mesh of members has to converge. A quiet run converges in 15 to 25
@@ -246,7 +248,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
     )
     .await
     .expect("setup_mesh on an mDNS-only mesh");
-    Node::spawn(config, Member, None, false)
+    Node::spawn(config, Member, None, SignalHandling::Leave)
 }
 
 /// How the members of a round start.

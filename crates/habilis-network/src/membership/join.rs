@@ -8,7 +8,7 @@ use crate::net::TransportOpts;
 use crate::protocol::JoinTarget;
 use crate::protocol::Nickname;
 use crate::protocol::{DirectorySelection, Lookup, MeshConfig, MeshName, RelayLadder, Transport};
-use crate::runtime::{CreateParams, JoinParams, Node, Resolved};
+use crate::runtime::{CreateParams, JoinParams, Node, Resolved, SignalHandling};
 use crate::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
 use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 use anyhow::{Context, Result};
@@ -183,7 +183,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
         crate::beacon::set_blind_rung_probes(config.endpoint.id(), true);
     }
 
-    // `handle_signals: false` — this is a library inside somebody else's
+    // `SignalHandling::Leave` — this is a library inside somebody else's
     // process, unlike a CLI that owns its own: installing process-wide ctrl-c /
     // SIGTERM listeners would hijack the host's own handling. A foreign caller
     // traps signals itself and closes the handle.
@@ -191,7 +191,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
         config,
         MembershipApp::new(inbound_tx),
         /* push */ None,
-        /* handle_signals */ false,
+        SignalHandling::Leave,
     );
 
     Ok(Membership { node, inbound })

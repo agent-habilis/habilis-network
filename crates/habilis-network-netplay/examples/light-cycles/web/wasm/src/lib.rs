@@ -28,7 +28,7 @@ use habilis_network::embed::SilentSink;
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MeshConfig, MeshName, Nickname, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 use habilis_network::util::clock::Instant;
 use habilis_network_netplay::RollbackDriver;
@@ -198,7 +198,8 @@ impl LightCyclesPeer {
 
         // `handle_signals: false` — nothing to catch in a browser.
         let (driver, pending) = RollbackDriver::<LightCycles>::new();
-        let node: Node<RollbackDriver<LightCycles>> = Node::spawn(config, driver, None, false);
+        let node: Node<RollbackDriver<LightCycles>> =
+            Node::spawn(config, driver, None, SignalHandling::Leave);
         let game = Game::new(pending.connect(node.sender()), author);
 
         Ok(LightCyclesPeer {

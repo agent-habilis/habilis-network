@@ -10,6 +10,16 @@ use tokio::sync::{broadcast, mpsc};
 use crate::daemon::app::NodeDriver;
 use crate::daemon::config::{DriverMode, EventLoopConfig};
 use crate::protocol::mesh::MeshName;
+
+/// Whether a session registers the process-wide ctrl-c and SIGTERM listeners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignalHandling {
+    /// Register the listeners: a foreground command that owns the process.
+    Handle,
+    /// Register nothing: a session nested inside a host that owns the signals.
+    Leave,
+}
 use crate::protocol::message::Authored;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
@@ -76,7 +86,7 @@ impl<A: NodeDriver + 'static> Node<A> {
         mut cfg: EventLoopConfig,
         app: A,
         push: Option<broadcast::Sender<Authored>>,
-        handle_signals: bool,
+        handle_signals: SignalHandling,
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<A::Session>(SESSION_REQUEST_CAP);
         let (quit_tx, quit_rx) = mpsc::channel::<()>(1);

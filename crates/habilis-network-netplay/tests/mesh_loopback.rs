@@ -16,7 +16,9 @@ use std::time::Duration;
 use habilis_network::embed::SilentSink;
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{AuthorKey, LookupOpts, Nickname};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use serde::{Deserialize, Serialize};
 
 use habilis_network_netplay::{
@@ -84,7 +86,7 @@ async fn spawn(topic: &str, nick: &str) -> Player {
     .expect("setup_mesh on a loopback mesh must not touch the network");
 
     let (driver, pending) = RollbackDriver::<Game>::new();
-    let node: Node<RollbackDriver<Game>> = Node::spawn(config, driver, None, false);
+    let node: Node<RollbackDriver<Game>> = Node::spawn(config, driver, None, SignalHandling::Leave);
     let transport = pending.connect(node.sender());
 
     Player {

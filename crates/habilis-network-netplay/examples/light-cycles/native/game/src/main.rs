@@ -21,7 +21,7 @@ use habilis_network::embed::SilentSink;
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MeshConfig, MeshName, Nickname, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 
 use habilis_network_netplay::RollbackDriver;
@@ -210,7 +210,8 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
     // whole process, permanently. This CLI races its own `ctrl_c()` in
     // `render_loop` instead, and always reaches `node.leave()` below.
     let (driver, pending) = RollbackDriver::<LightCycles>::new();
-    let node: Node<RollbackDriver<LightCycles>> = Node::spawn(config, driver, None, false);
+    let node: Node<RollbackDriver<LightCycles>> =
+        Node::spawn(config, driver, None, SignalHandling::Leave);
     let mut game = Game::new(pending.connect(node.sender()), room.to_string(), my_nick);
 
     let result = render_loop(&mut game).await;

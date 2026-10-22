@@ -17,7 +17,9 @@ use habilis_network::embed::{
 };
 use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::Notify;
 
 /// The do-nothing application: presence alone forms a mesh.
@@ -121,7 +123,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Probe> {
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
-    Node::spawn(config, Probe, None, false)
+    Node::spawn(config, Probe, None, SignalHandling::Leave)
 }
 
 #[test]

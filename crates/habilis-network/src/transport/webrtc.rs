@@ -730,12 +730,27 @@ pub(crate) fn local_needs_webrtc_lane(has_udp_transport: bool) -> bool {
     !has_udp_transport
 }
 
+/// Whether this node has a UDP transport, as its own state knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UdpTransport {
+    Present,
+    Absent,
+}
+
+impl From<bool> for UdpTransport {
+    fn from(present: bool) -> Self {
+        if present { Self::Present } else { Self::Absent }
+    }
+}
+
 /// Whether a pair needs the lane: **either** end lacking IP is enough. The
 /// remote is judged by its advertised address, this node by what it knows
 /// about itself.
 #[must_use]
-pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: bool) -> bool {
-    needs_webrtc_lane(remote) || local_needs_webrtc_lane(local_has_udp_transport)
+pub fn pair_needs_lane(remote: &EndpointAddr, local_has_udp_transport: UdpTransport) -> bool {
+    needs_webrtc_lane(remote)
+        || local_needs_webrtc_lane(local_has_udp_transport == UdpTransport::Present)
 }
 
 /// Whether a pair runs a `WebRTC` round: a pair that needs the lane always
@@ -804,7 +819,12 @@ pub(crate) async fn detach_sessions_under_udp(
         .peer_endpoints
         .values()
         .filter(|addr| addr.id != ctx.rendezvous_id && handle.has_session(&addr.id))
-        .map(|addr| (addr.id, pair_needs_lane(addr, state.local_udp_transport)))
+        .map(|addr| {
+            (
+                addr.id,
+                pair_needs_lane(addr, state.local_udp_transport.into()),
+            )
+        })
         .collect();
     for (peer, needs_lane) in holders {
         if detach_session_under_udp(state, peer, needs_lane)
@@ -892,7 +912,7 @@ pub(crate) fn negotiate_session(
     // browser is the lower id it is the browser that evaluates this. It would
     // see the native peer's IP, skip, and the native — waiting to be dialled —
     // would never offer. The pair would silently never get a channel.
-    let needs_lane = pair_needs_lane(&addr, state.local_udp_transport);
+    let needs_lane = pair_needs_lane(&addr, state.local_udp_transport.into());
     let kind = state.pair_path_kind(peer);
     let proven = state.direct.get(&peer) == Some(&crate::daemon::state::DirectState::Direct);
     if !wants_session(needs_lane, kind, proven) {
@@ -1916,12 +1936,12 @@ mod tests {
         // The address is not consulted at all for the local end; a node
         // without IP transports needs the lane, full stop.
         assert!(
-            pair_needs_lane(&native, false),
+            pair_needs_lane(&native, UdpTransport::Absent),
             "a node with no IP transport must offer whatever its address says"
         );
         assert!(local_needs_webrtc_lane(false));
         assert!(
-            !pair_needs_lane(&native, true),
+            !pair_needs_lane(&native, UdpTransport::Present),
             "two IP-capable peers stay on iroh's own transports"
         );
     }

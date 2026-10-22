@@ -49,7 +49,9 @@ use habilis_network::ops::{app_frame, send_app};
 use habilis_network::protocol::{
     AppFrameParams, AppTag, Lookup, LookupOpts, MessageBody, Nickname, Transport,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
@@ -347,7 +349,7 @@ impl LoggingMember {
         .expect("setup_mesh on a loopback mesh");
         let chat = Chat::default();
         Self {
-            node: Node::spawn(config, chat.clone(), None, false),
+            node: Node::spawn(config, chat.clone(), None, SignalHandling::Leave),
             chat,
         }
     }

@@ -60,6 +60,8 @@ pub(crate) use direct_gossip::DirectOnlyGossip;
 pub(crate) use outbox::{Resend, ResendOutbox};
 #[cfg(feature = "blob")]
 pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};
+#[cfg(any(feature = "blob", feature = "multihop"))]
+pub(crate) use path::PayloadPath;
 pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
 pub use send::Lane;

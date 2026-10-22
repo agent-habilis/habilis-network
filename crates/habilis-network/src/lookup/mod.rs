@@ -26,6 +26,8 @@ use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
 use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
+#[cfg(feature = "multihop")]
+use crate::transport::PayloadPath;
 use crate::util::clock::millis_saturating;
 
 /// A local relay server every side of a test can reach: plain HTTP, so the
@@ -644,10 +646,10 @@ pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
 #[cfg(feature = "multihop")]
 #[must_use]
 pub fn multihop_handle_config(
-    relay_payload: bool,
+    relay_payload: PayloadPath,
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
     habilis_network_iroh_multihop_transport::HandleConfig {
-        relay_payload,
+        relay_payload: relay_payload.relay_allowed(),
         vector_max_age: crate::util::tuning::LINKSTATE_MAX_AGE,
         relay_stuck_after: crate::util::tuning::MULTIHOP_RELAY_STUCK,
         ..habilis_network_iroh_multihop_transport::HandleConfig::default()
@@ -672,7 +674,7 @@ pub(crate) fn browser_handle_config(
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
     habilis_network_iroh_multihop_transport::HandleConfig {
         link_cost: habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost,
-        ..multihop_handle_config(relay_payload)
+        ..multihop_handle_config(PayloadPath::from(relay_payload))
     }
 }
 
@@ -885,7 +887,7 @@ pub(crate) async fn build_peer_multihop(
         lookups,
         opts,
         admission,
-        multihop_handle_config(relay_payload),
+        multihop_handle_config(PayloadPath::from(relay_payload)),
         None,
     )
     .await?;
@@ -1345,6 +1347,7 @@ pub(crate) fn build_mesh(
 #[cfg(test)]
 mod tests {
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+    use crate::transport::PayloadPath;
     use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
@@ -1879,7 +1882,7 @@ mod tests {
                 &LookupOpts::loopback(),
                 opts,
                 Some(&table),
-                super::multihop_handle_config(false),
+                super::multihop_handle_config(PayloadPath::DirectOnly),
                 Some(5),
             )
             .await
@@ -1991,7 +1994,7 @@ mod tests {
     #[cfg(feature = "multihop")]
     #[test]
     fn the_handle_config_of_a_browser_differs_from_the_engine_s_in_the_link_cost_only() {
-        let native = super::multihop_handle_config(true);
+        let native = super::multihop_handle_config(PayloadPath::RelayAllowed);
         let browser = super::browser_handle_config(true);
         assert_eq!(native.link_cost, 10);
         assert_eq!(browser.link_cost, 100);
@@ -2012,7 +2015,7 @@ mod tests {
                 &LookupOpts::loopback(),
                 opts,
                 None,
-                super::multihop_handle_config(false),
+                super::multihop_handle_config(PayloadPath::DirectOnly),
                 cap,
             )
             .await

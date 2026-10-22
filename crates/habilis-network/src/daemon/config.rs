@@ -16,6 +16,7 @@ use crate::protocol::message::Authored;
 use crate::protocol::{MeshId, Nickname};
 
 use crate::beacon;
+use crate::daemon::node::SignalHandling;
 
 /// Who drives the event loop. The variants make illegal channel
 /// combinations unrepresentable and let the loop *derive* both "exit the
@@ -43,7 +44,7 @@ pub enum DriverMode {
         /// lifetime (a `--advertise` transfer's directory session, a
         /// directory browse) must pass `false`, or ctrl-c stops killing
         /// the host command.
-        handle_signals: bool,
+        handle_signals: SignalHandling,
     },
 }
 

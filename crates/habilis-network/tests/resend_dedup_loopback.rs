@@ -24,7 +24,9 @@ use habilis_network::ops::{StateMergeParams, app_frame, broadcast_state_merge, s
 use habilis_network::protocol::{
     AppFrameParams, AppTag, Channel, LookupOpts, MessageBody, Nickname,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::oneshot;
 
 /// Two anti-entropy cycles (10 s each) and margin, less than the 90 s dedup of the gossip layer.
@@ -203,7 +205,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>)
             read: Arc::clone(&read),
         },
         None,
-        false,
+        SignalHandling::Leave,
     );
     (node, read)
 }

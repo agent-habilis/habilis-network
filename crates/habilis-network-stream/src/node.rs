@@ -181,7 +181,7 @@ impl StreamNode {
     /// The producer cannot be reached, the only path is a relay the stream
     /// refuses, or the producer refuses the hash (a [`Refused`]).
     pub async fn open(&self, hash: &StreamHash) -> Result<Reader> {
-        let needs_lane = pair_needs_lane(&hash.addr, self.transports.udp);
+        let needs_lane = pair_needs_lane(&hash.addr, self.transports.udp.into());
         // A data channel needs `webrtc` on both ends: the producer's list is in
         // the hash, and a producer without it answers no offer.
         let can_lane = self.transports.webrtc && hash.transport.webrtc;

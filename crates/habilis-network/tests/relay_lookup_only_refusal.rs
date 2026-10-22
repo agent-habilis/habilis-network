@@ -25,7 +25,7 @@ use habilis_network::protocol::{
     LookupOpts, MeshConfig, MessageKind, Nickname, PresenceSubtype, RelayChoice, TransportPolicy,
 };
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 use tokio::sync::Notify;
 
@@ -154,7 +154,7 @@ async fn spawn(
     )
     .await
     .expect("setup_mesh against a local relay");
-    Node::spawn(config, Probe, None, false)
+    Node::spawn(config, Probe, None, SignalHandling::Leave)
 }
 
 /// Whether two relay-only nodes see each other join within `deadline`.

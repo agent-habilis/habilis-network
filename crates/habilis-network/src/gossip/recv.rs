@@ -2661,7 +2661,7 @@ mod first_contact_tests {
             MultihopHandle::new(
                 secret,
                 underlay,
-                crate::lookup::multihop_handle_config(false),
+                crate::lookup::multihop_handle_config(crate::transport::PayloadPath::DirectOnly),
             )
             .expect("underlay on the derived key")
         }
@@ -3082,7 +3082,7 @@ mod link_state_tests {
         MultihopHandle::new(
             secret,
             underlay,
-            crate::lookup::multihop_handle_config(false),
+            crate::lookup::multihop_handle_config(crate::transport::PayloadPath::DirectOnly),
         )
         .expect("underlay on the derived key")
     }
@@ -3450,7 +3450,7 @@ mod parked_link_state_tests {
         MultihopHandle::new(
             secret,
             underlay,
-            crate::lookup::multihop_handle_config(false),
+            crate::lookup::multihop_handle_config(crate::transport::PayloadPath::DirectOnly),
         )
         .expect("underlay on the derived key")
     }
