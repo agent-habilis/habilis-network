@@ -1,15 +1,10 @@
 # Count of findings per lint and crate, under crates/<crate>/src/.
 # Written by `bun scripts/lint-ratchet/lint-ratchet.ts --update`. Lower a count when a finding
 # goes away. A count above this file is a new finding and fails CI.
-clippy::exhaustive_enums|habilis-network|10
 clippy::exhaustive_enums|habilis-network-doc|1
-clippy::exhaustive_enums|habilis-network-ffi|1
-clippy::exhaustive_enums|habilis-network-iroh-gossip-transport|3
 clippy::exhaustive_enums|habilis-network-iroh-transport-util|1
-clippy::exhaustive_enums|habilis-network-iroh-webrtc-transport|3
-clippy::exhaustive_enums|habilis-network-netplay|9
-clippy::exhaustive_enums|habilis-network-protocol|15
-clippy::exhaustive_enums|habilis-network-stream|1
+clippy::exhaustive_enums|habilis-network-netplay|1
+clippy::exhaustive_enums|habilis-network-protocol|7
 clippy::exhaustive_enums|habilis-network-util|1
 clippy::exhaustive_structs|habilis-network|27
 clippy::exhaustive_structs|habilis-network-chunks|1

@@ -27,6 +27,7 @@ use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 /// What kind of mesh we're setting up — either minting a new one
 /// (create) or attaching to an existing one (join).
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SetupKind {
     Create {
         name: MeshName,

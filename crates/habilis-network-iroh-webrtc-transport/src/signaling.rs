@@ -21,6 +21,7 @@ pub const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
 /// breaks the liar's own session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum SignalEnvelope {
     Offer {
         #[serde(rename = "v")]

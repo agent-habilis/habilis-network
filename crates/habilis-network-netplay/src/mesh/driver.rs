@@ -25,6 +25,7 @@ pub const LOBBY_TAG: &str = "rb_lobby";
 /// [`RollbackDriver::handle_session`], which is where `&mut EventLoopState`
 /// finally exists.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Outbound {
     /// A rollback packet for one peer, addressed by public key.
     Rollback {

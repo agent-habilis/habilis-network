@@ -17,6 +17,7 @@ use super::ChoiceError;
 /// the mesh id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Transport {
     /// QUIC on a direct or hole-punched UDP socket. A browser has none.
     Udp,

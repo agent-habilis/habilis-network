@@ -29,6 +29,7 @@ use crate::transport::{Message, Transport};
 
 /// Whether the session is still handshaking or actually playing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SessionState {
     /// At least one peer has not completed its handshake. **Do not advance
     /// frames yet** — this is what makes every peer start together, without
@@ -40,6 +41,7 @@ pub enum SessionState {
 
 /// Something the application should know about.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event<A> {
     /// A peer finished its handshake.
     Synchronized {

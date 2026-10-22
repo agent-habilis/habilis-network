@@ -15,6 +15,7 @@ const CHUNK: usize = 64 * 1024;
 /// Reached through `anyhow::Error::downcast_ref`, so a caller can tell a refusal
 /// from a lost link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Refused {
     /// No open stream has this hash: never created, closed, or abandoned
     /// before this consumer was admitted.

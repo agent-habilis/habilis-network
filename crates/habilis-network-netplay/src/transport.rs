@@ -45,6 +45,7 @@ pub struct Message<I> {
 
 /// The packet kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Body<I> {
     /// Handshake, outbound: "echo this back". Repeated a few times so both
     /// sides have evidence the path works in both directions before either

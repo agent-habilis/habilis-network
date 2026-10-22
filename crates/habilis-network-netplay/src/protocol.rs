@@ -48,6 +48,7 @@ const QUALITY_REPORT_INTERVAL: u32 = 60;
 
 /// Where a peer is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PeerState {
     /// Handshaking. No inputs are exchanged yet.
     Syncing,

@@ -147,6 +147,7 @@ pub struct Listing {
 /// [`Listings::expire`], which returns the aged-out ids directly. A consumer
 /// maps this onto its own public directory-event type.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ListingChange {
     /// A mesh seen for the first time.
     Found(MeshId),

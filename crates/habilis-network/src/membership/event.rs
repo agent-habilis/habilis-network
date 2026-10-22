@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 /// already has a byte array.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MembershipEvent {
     Ready {
         mesh: String,

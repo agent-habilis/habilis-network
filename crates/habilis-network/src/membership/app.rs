@@ -100,6 +100,7 @@ pub struct Inbound {
     missing_debug_implementations,
     reason = "the oneshot reply senders carry no Debug bound worth adding for a value that never reaches a log line"
 )]
+#[non_exhaustive]
 pub enum Request {
     /// Send one `msg`. Build `body` with [`msg_body`].
     Send {

@@ -464,6 +464,7 @@ impl MeshConfig {
 /// intent — each with the same three variants and the same private `is_set`.
 /// The duplicate admitted it in a doc comment.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum OptFlag<T> {
     /// The flag was absent.
     #[default]
@@ -589,6 +590,7 @@ pub fn validate_advertise(
 /// none is a loopback-only mesh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Lookup {
     /// LAN mDNS multicast.
     Mdns,

@@ -50,6 +50,7 @@ pub trait FrameSink: std::fmt::Debug + Send + Sync + 'static {
 
 /// What became of a frame that arrived from the topic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Delivery {
     /// Queued for iroh.
     Queued,

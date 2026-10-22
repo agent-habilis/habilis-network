@@ -19,6 +19,7 @@ use crate::transport::MeshSender;
 /// What [`deliver`] did with a frame.
 #[derive(Debug)]
 #[must_use = "a dropped Pending handle loses the verdict of the send"]
+#[non_exhaustive]
 pub enum Delivered {
     /// Sent, or handed to a warm connection: nothing is left to wait for.
     Done,
@@ -230,6 +231,7 @@ fn held(eid: EndpointId, state: &EventLoopState) -> bool {
 /// real send decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Lane {
     Unicast,
     Multihop,

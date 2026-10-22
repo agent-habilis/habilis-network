@@ -146,6 +146,7 @@ impl Writer {
 
 /// What [`ReadEnd::read`] produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Read {
     /// This many bytes are in the caller's buffer.
     Bytes(usize),

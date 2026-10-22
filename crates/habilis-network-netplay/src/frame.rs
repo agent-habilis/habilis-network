@@ -126,6 +126,7 @@ impl TryFrom<Frame> for usize {
 /// is worth honouring for effects that shouldn't fire twice — a sound cue on
 /// a predicted input may be re-triggered after a rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InputStatus {
     /// The player's real input for this frame, received and confirmed.
     Confirmed,

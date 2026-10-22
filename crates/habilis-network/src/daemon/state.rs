@@ -52,6 +52,7 @@ const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
 /// `peer_endpoints`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Reach {
     Direct,
     Gossip,
@@ -60,6 +61,7 @@ pub enum Reach {
 /// Tests only: which inbound frame the drop hook takes.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TestDrop {
     /// The app frame whose body is this text.
     AppBody(String),

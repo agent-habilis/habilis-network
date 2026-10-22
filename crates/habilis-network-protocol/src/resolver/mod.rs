@@ -29,6 +29,7 @@ pub enum JoinTarget {
 ///
 /// [`Unrecognized`]: JoinTargetError::Unrecognized
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JoinTargetError {
     /// Looked like a mesh id (base58) but failed checksum/payload validation.
     MalformedMeshId(MeshIdError),

@@ -33,6 +33,7 @@ pub const MAX_TRANSFER_BYTES: usize = 64 << 20;
 /// "the receive path drops under load" are different claims, and an exchange
 /// that is bulk in both directions cannot distinguish them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Direction {
     /// Small request, bulk reply — the `OP_READ` shape.
     Download,

@@ -7,6 +7,7 @@ use crate::protocol::{AuthorKey, Channel, MeshId, Nickname};
 /// existing `Output` method, so the rendered stdout / `--output json` / library API
 /// forms stay byte-identical.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum NodeEvent {
     /// The daemon can serve. Mesh identity only — a consumer that wants to
     /// announce startup diagnostics of its own (a stale install, a localhost

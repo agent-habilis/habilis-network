@@ -24,6 +24,7 @@ use crate::daemon::node::SignalHandling;
 /// process on quit?" and "spawn the unix-socket listener?" instead of
 /// carrying them as independent, drift-prone bools.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DriverMode {
     /// A long-running CLI daemon. Owns the unix-socket IPC listener
     /// (for `msg` / `poll`); ctrl-c / SIGTERM `std::process::exit`s.
@@ -56,6 +57,7 @@ pub enum DriverMode {
 /// policy plus the public probe-before-claim (`beacon::ensure`) keep
 /// that from happening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CoHostPolicy {
     /// Co-host from t=0 with no probe — the mesh origin (`create`),
     /// which has no peers to collide with, so a beacon exists before any
