@@ -106,7 +106,7 @@ pub(super) const WORDS: &[&str] = &[
     "pilgrim", "plover", "quiver", "raptor", "sentry",
 ];
 
-const _: () = assert!(!WORDS.is_empty());
+const _: () = assert!(!WORDS.is_empty(), "the word list is not empty");
 
 /// A random `word-word` pair from the curated list.
 ///

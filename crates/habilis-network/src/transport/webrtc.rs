@@ -3205,7 +3205,10 @@ mod tests {
         drop(round);
         // Both roles tell the table of the attach, as `spawn_offer_round` does.
         client_admission.note_success(server.id());
-        assert!(client_hub.has_session(&server.id()));
+        assert!(
+            client_hub.has_session(&server.id()),
+            "the client has a session with the server"
+        );
 
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(client_hub.clone());
@@ -3217,18 +3220,23 @@ mod tests {
         let window = crate::util::tuning::DIRECT_IDLE_BACKSTOP;
         let start = Instant::now();
 
-        assert!(detach_idle_sessions_at(&mut state, start).is_empty());
+        assert!(
+            detach_idle_sessions_at(&mut state, start).is_empty(),
+            "no idle session is detached before its window passes"
+        );
         assert!(
             detach_idle_sessions_at(
                 &mut state,
                 start + window.saturating_sub(Duration::from_secs(1))
             )
-            .is_empty()
+            .is_empty(),
+            "no idle session is detached one second before its window closes"
         );
         assert!(client_hub.has_session(&server.id()), "not yet");
         assert_eq!(
             detach_idle_sessions_at(&mut state, start + window),
-            vec![server.id()]
+            vec![server.id()],
+            "the idle session is detached when its window closes"
         );
         assert!(!client_hub.has_session(&server.id()), "the session is gone");
         assert!(

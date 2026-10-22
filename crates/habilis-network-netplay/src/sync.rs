@@ -227,7 +227,10 @@ impl<T: Config> Sync<T> {
             requests.push(Request::AdvanceFrame { inputs });
             self.advance_frame();
         }
-        debug_assert_eq!(self.current_frame, resume_at);
+        debug_assert_eq!(
+            self.current_frame, resume_at,
+            "the simulation resumes at the frame it was asked to resume at"
+        );
     }
 
     /// The saved state for `frame`, for checksum comparison.

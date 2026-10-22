@@ -240,6 +240,7 @@ undocumented_unsafe_blocks = "warn"
 string_add = "warn"
 # `expect` says why a panic is right. Tests may use `unwrap` (clippy.toml).
 unwrap_used = "warn"
+missing_assert_message = "warn"
 # Force `#[expect(...)]` over `#[allow(...)]` where the lint still fires, so a
 # suppression that goes stale (lint no longer triggers) becomes a build error
 # instead of silently lingering.

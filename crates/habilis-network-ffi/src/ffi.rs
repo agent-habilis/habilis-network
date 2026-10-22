@@ -73,16 +73,46 @@ const _: () = {
         size_of::<HabilisNetworkOpts>() == 72,
         "opts-struct.ts OPTS_BYTES"
     );
-    assert!(align_of::<HabilisNetworkOpts>() == 8);
-    assert!(offset_of!(HabilisNetworkOpts, mesh) == 0);
-    assert!(offset_of!(HabilisNetworkOpts, topic) == 8);
-    assert!(offset_of!(HabilisNetworkOpts, nick) == 16);
-    assert!(offset_of!(HabilisNetworkOpts, name) == 24);
-    assert!(offset_of!(HabilisNetworkOpts, lookup) == 32);
-    assert!(offset_of!(HabilisNetworkOpts, transport) == 40);
-    assert!(offset_of!(HabilisNetworkOpts, relay_urls) == 48);
-    assert!(offset_of!(HabilisNetworkOpts, max_peers) == 56);
-    assert!(offset_of!(HabilisNetworkOpts, max_direct) == 64);
+    assert!(
+        align_of::<HabilisNetworkOpts>() == 8,
+        "HabilisNetworkOpts has the alignment the C header declares, 8"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, mesh) == 0,
+        "mesh is at offset 0 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, topic) == 8,
+        "topic is at offset 8 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, nick) == 16,
+        "nick is at offset 16 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, name) == 24,
+        "name is at offset 24 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, lookup) == 32,
+        "lookup is at offset 32 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, transport) == 40,
+        "transport is at offset 40 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, relay_urls) == 48,
+        "relay_urls is at offset 48 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, max_peers) == 56,
+        "max_peers is at offset 56 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, max_direct) == 64,
+        "max_direct is at offset 64 of HabilisNetworkOpts"
+    );
 };
 
 /// One received message's metadata, mirroring `habilis_network_msg` in the header. The
@@ -102,10 +132,22 @@ const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
     assert!(size_of::<HabilisNetworkMsg>() == 80, "msg.ts MSG_BYTES");
-    assert!(align_of::<HabilisNetworkMsg>() == 8);
-    assert!(offset_of!(HabilisNetworkMsg, nick) == 0);
-    assert!(offset_of!(HabilisNetworkMsg, directed) == 64);
-    assert!(offset_of!(HabilisNetworkMsg, len) == 72);
+    assert!(
+        align_of::<HabilisNetworkMsg>() == 8,
+        "HabilisNetworkMsg has the alignment the C header declares, 8"
+    );
+    assert!(
+        offset_of!(HabilisNetworkMsg, nick) == 0,
+        "nick is at offset 0 of HabilisNetworkMsg"
+    );
+    assert!(
+        offset_of!(HabilisNetworkMsg, directed) == 64,
+        "directed is at offset 64 of HabilisNetworkMsg"
+    );
+    assert!(
+        offset_of!(HabilisNetworkMsg, len) == 72,
+        "len is at offset 72 of HabilisNetworkMsg"
+    );
 };
 
 /// The opaque handle behind `habilis_network_mesh *`. Holds the [`Mesh`] plus
@@ -631,11 +673,26 @@ pub struct HabilisNetworkStreamOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<HabilisNetworkStreamOpts>() == 24);
-    assert!(align_of::<HabilisNetworkStreamOpts>() == 8);
-    assert!(offset_of!(HabilisNetworkStreamOpts, lookup) == 0);
-    assert!(offset_of!(HabilisNetworkStreamOpts, transport) == 8);
-    assert!(offset_of!(HabilisNetworkStreamOpts, relay_urls) == 16);
+    assert!(
+        size_of::<HabilisNetworkStreamOpts>() == 24,
+        "HabilisNetworkStreamOpts has the size the C header declares, 24"
+    );
+    assert!(
+        align_of::<HabilisNetworkStreamOpts>() == 8,
+        "HabilisNetworkStreamOpts has the alignment the C header declares, 8"
+    );
+    assert!(
+        offset_of!(HabilisNetworkStreamOpts, lookup) == 0,
+        "lookup is at offset 0 of HabilisNetworkStreamOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkStreamOpts, transport) == 8,
+        "transport is at offset 8 of HabilisNetworkStreamOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkStreamOpts, relay_urls) == 16,
+        "relay_urls is at offset 16 of HabilisNetworkStreamOpts"
+    );
 };
 
 /// The opaque handle behind `habilis_network_streams *`.

@@ -153,11 +153,22 @@ async fn round_trip(harness: &impl Harness) {
     let hash = chunk_hash(&chunk);
 
     assert!(!store.has(hash).await.expect("has"), "nothing stored yet");
-    assert_eq!(store.get(hash).await.expect("get"), None);
+    assert_eq!(
+        store.get(hash).await.expect("get"),
+        None,
+        "an unknown chunk is absent from the store"
+    );
 
     store.put(hash, &chunk).await.expect("put");
-    assert!(store.has(hash).await.expect("has"));
-    assert_eq!(store.get(hash).await.expect("get"), Some(chunk));
+    assert!(
+        store.has(hash).await.expect("has"),
+        "the store reports the stored chunk as present"
+    );
+    assert_eq!(
+        store.get(hash).await.expect("get"),
+        Some(chunk),
+        "the stored chunk reads back unchanged"
+    );
 }
 
 /// The single most important rule in the crate: a chunk that does not address
@@ -178,11 +189,19 @@ async fn a_lying_chunk_is_refused_and_stores_nothing(harness: &impl Harness) {
         !store.has(hash).await.expect("has"),
         "a refused put must leave no record"
     );
-    assert_eq!(store.get(hash).await.expect("get"), None);
+    assert_eq!(
+        store.get(hash).await.expect("get"),
+        None,
+        "a chunk that was never stored is absent"
+    );
     // And the honest bytes still work afterwards, so the refusal poisoned
     // nothing.
     store.put(hash, &honest).await.expect("put");
-    assert_eq!(store.get(hash).await.expect("get"), Some(honest));
+    assert_eq!(
+        store.get(hash).await.expect("get"),
+        Some(honest),
+        "the honest chunk reads back after the bad one was refused"
+    );
 }
 
 /// An unknown address is "not held", not a failure. A peer asking for something
@@ -190,15 +209,26 @@ async fn a_lying_chunk_is_refused_and_stores_nothing(harness: &impl Harness) {
 async fn an_unknown_chunk_is_absent_not_an_error(harness: &impl Harness) {
     let store = harness.store();
     let hash = chunk_hash(b"never stored");
-    assert_eq!(store.get(hash).await.expect("get"), None);
-    assert!(!store.has(hash).await.expect("has"));
+    assert_eq!(
+        store.get(hash).await.expect("get"),
+        None,
+        "the chunk is gone after it was removed"
+    );
+    assert!(
+        !store.has(hash).await.expect("has"),
+        "the removed chunk is no longer present"
+    );
 }
 
 async fn an_empty_chunk_is_storable(harness: &impl Harness) {
     let store = harness.store();
     let hash = chunk_hash(b"");
     store.put(hash, b"").await.expect("put");
-    assert_eq!(store.get(hash).await.expect("get"), Some(Vec::new()));
+    assert_eq!(
+        store.get(hash).await.expect("get"),
+        Some(Vec::new()),
+        "an empty chunk is stored and reads back as empty"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -208,17 +238,33 @@ async fn an_empty_chunk_is_storable(harness: &impl Harness) {
 async fn maps_round_trip(harness: &impl Harness) {
     let store = harness.store();
     let map = ChunkMap::build(&body(CHUNK_BYTES_USIZE * 2 + 7, 4));
-    assert_eq!(store.map(map.root()).await.expect("map"), None);
+    assert_eq!(
+        store.map(map.root()).await.expect("map"),
+        None,
+        "an unknown map is absent from the store"
+    );
     store.put_map(&map).await.expect("put_map");
-    assert_eq!(store.map(map.root()).await.expect("map"), Some(map));
+    assert_eq!(
+        store.map(map.root()).await.expect("map"),
+        Some(map),
+        "the stored map reads back unchanged"
+    );
 }
 
 async fn an_unknown_root_covers_nothing(harness: &impl Harness) {
     let store = harness.store();
     let map = ChunkMap::build(&body(4096, 5));
     let coverage = store.coverage(map.root()).await.expect("coverage");
-    assert_eq!(coverage.len(), 0);
-    assert_eq!(coverage.count(), 0);
+    assert_eq!(
+        coverage.len(),
+        0,
+        "a new coverage holds no chunks by length"
+    );
+    assert_eq!(
+        coverage.count(),
+        0,
+        "a new coverage holds no chunks by count"
+    );
 }
 
 /// The batched question must answer exactly what the single one does.
@@ -263,9 +309,9 @@ async fn coverage_of_agrees_with_coverage_root_for_root(harness: &impl Harness) 
             "disagreed on which chunks for {root:?}"
         );
     }
-    assert!(batched[0].is_complete());
-    assert_eq!(batched[1].count(), 1);
-    assert_eq!(batched[2].count(), 0);
+    assert!(batched[0].is_complete(), "the first batch is complete");
+    assert_eq!(batched[1].count(), 1, "the second batch holds one chunk");
+    assert_eq!(batched[2].count(), 0, "the third batch holds no chunks");
 }
 
 /// Positional, so a caller can zip the answers onto what it asked about. A root
@@ -284,11 +330,23 @@ async fn coverage_of_keeps_its_place_for_a_root_it_does_not_know(harness: &impl 
         .await
         .expect("coverage_of");
 
-    assert_eq!(coverages.len(), 3);
-    assert_eq!(coverages[0].count(), 0);
+    assert_eq!(
+        coverages.len(),
+        3,
+        "there are three coverages, one per file"
+    );
+    assert_eq!(
+        coverages[0].count(),
+        0,
+        "the first coverage holds no chunks"
+    );
     assert_eq!(coverages[0].len(), 0, "an unknown root covers nothing");
     assert!(coverages[1].is_complete(), "the known root kept its slot");
-    assert_eq!(coverages[2].count(), 0);
+    assert_eq!(
+        coverages[2].count(),
+        0,
+        "the third coverage holds no chunks"
+    );
 }
 
 /// Asking about nothing is not an error. The callers build this slice from
@@ -297,7 +355,10 @@ async fn coverage_of_keeps_its_place_for_a_root_it_does_not_know(harness: &impl 
 async fn coverage_of_nothing_is_nothing(harness: &impl Harness) {
     let store = harness.store();
     let coverages = store.coverage_of(&[]).await.expect("coverage_of");
-    assert!(coverages.is_empty());
+    assert!(
+        coverages.is_empty(),
+        "no coverage is left after the batch is consumed"
+    );
 }
 
 /// **Partial is a first-class answer.** This is the behaviour that replaces the
@@ -309,7 +370,11 @@ async fn coverage_grows_chunk_by_chunk(harness: &impl Harness) {
     let map = ChunkMap::build(&bytes);
     store.put_map(&map).await.expect("put_map");
 
-    assert_eq!(store.coverage(map.root()).await.expect("cov").count(), 0);
+    assert_eq!(
+        store.coverage(map.root()).await.expect("cov").count(),
+        0,
+        "a map with no stored chunks has an empty coverage"
+    );
 
     // Land them out of order, the way a swarm actually delivers.
     for index in [2usize, 0, 3, 1] {
@@ -324,8 +389,11 @@ async fn coverage_grows_chunk_by_chunk(harness: &impl Harness) {
     }
 
     let coverage = store.coverage(map.root()).await.expect("cov");
-    assert!(coverage.is_complete());
-    assert_eq!(coverage.count(), 4);
+    assert!(
+        coverage.is_complete(),
+        "the coverage is complete after the last chunk arrives"
+    );
+    assert_eq!(coverage.count(), 4, "four chunks are covered");
 }
 
 /// A zero-byte file is complete the moment its row is known — there is nothing
@@ -335,8 +403,15 @@ async fn an_empty_file_is_complete_immediately(harness: &impl Harness) {
     let map = ChunkMap::build(b"");
     store.put_map(&map).await.expect("put_map");
     let coverage = store.coverage(map.root()).await.expect("cov");
-    assert_eq!(coverage.len(), 0);
-    assert!(coverage.is_complete());
+    assert_eq!(
+        coverage.len(),
+        0,
+        "a fresh coverage holds no chunks by length"
+    );
+    assert!(
+        coverage.is_complete(),
+        "the coverage is complete once every chunk is in"
+    );
 }
 
 /// The dedup claim, asserted directly: two different files that happen to share
@@ -360,7 +435,11 @@ async fn a_shared_chunk_is_stored_once_and_covers_both_files(harness: &impl Harn
 
     // The shared chunk sits at index 0 of one file and index 1 of the other,
     // and addresses the same either way.
-    assert_eq!(first_map.leaf(0), second_map.leaf(1));
+    assert_eq!(
+        first_map.leaf(0),
+        second_map.leaf(1),
+        "the shared chunk has the same leaf at either index"
+    );
 
     // Fetch the whole of the first file only.
     for index in 0..first_map.len() {
@@ -378,7 +457,10 @@ async fn a_shared_chunk_is_stored_once_and_covers_both_files(harness: &impl Harn
         "the shared chunk must count towards the other file too"
     );
     assert!(!coverage.contains(0), "the unshared chunk is still missing");
-    assert!((coverage.fraction() - 0.5).abs() < f64::EPSILON);
+    assert!(
+        (coverage.fraction() - 0.5).abs() < f64::EPSILON,
+        "the coverage fraction is one half, within float epsilon"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +478,11 @@ async fn binding_survives_and_a_version_change_breaks_it(harness: &impl Harness)
         "nothing bound"
     );
     store.set_bind(&file, map.root()).await.expect("set_bind");
-    assert_eq!(store.bind(&file).await.expect("bind"), Some(map.root()));
+    assert_eq!(
+        store.bind(&file).await.expect("bind"),
+        Some(map.root()),
+        "the bound root is the root of the file's map"
+    );
 
     // A file that grew, and a file merely touched, are both different content
     // as far as this gate is concerned. Answering for either under the old root
@@ -409,8 +495,16 @@ async fn binding_survives_and_a_version_change_breaks_it(harness: &impl Harness)
         mtime: file.mtime + 1,
         ..file.clone()
     };
-    assert_eq!(store.bind(&grown).await.expect("bind"), None);
-    assert_eq!(store.bind(&touched).await.expect("bind"), None);
+    assert_eq!(
+        store.bind(&grown).await.expect("bind"),
+        None,
+        "a grown file is not bound to the old root"
+    );
+    assert_eq!(
+        store.bind(&touched).await.expect("bind"),
+        None,
+        "a touched file is not bound to the old root"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -439,9 +533,15 @@ async fn a_sweep_keeps_marked_and_drops_the_rest(harness: &impl Harness) {
     store.mark(kept.root()).await.expect("mark");
     let dropped = store.sweep().await.expect("sweep");
 
-    assert_eq!(dropped, 1);
-    assert!(store.has(kept.leaf(0).expect("one")).await.expect("has"));
-    assert!(!store.has(junk.leaf(0).expect("one")).await.expect("has"));
+    assert_eq!(dropped, 1, "one orphan chunk is dropped by the sweep");
+    assert!(
+        store.has(kept.leaf(0).expect("one")).await.expect("has"),
+        "the kept chunk is still stored after the sweep"
+    );
+    assert!(
+        !store.has(junk.leaf(0).expect("one")).await.expect("has"),
+        "the junk chunk is removed by the sweep"
+    );
 }
 
 /// Marks are the *only* thing that keeps data alive. A sweep with nothing
@@ -461,8 +561,11 @@ async fn a_sweep_with_no_marks_clears_everything(harness: &impl Harness) {
     store.start_marking().await.expect("start");
     let dropped = store.sweep().await.expect("sweep");
 
-    assert_eq!(dropped, 1);
-    assert!(!store.has(map.leaf(0).expect("one")).await.expect("has"));
+    assert_eq!(dropped, 1, "one chunk is dropped by the second sweep");
+    assert!(
+        !store.has(map.leaf(0).expect("one")).await.expect("has"),
+        "the swept chunk is no longer stored"
+    );
 }
 
 /// The case a reference count would get wrong and mark-and-sweep gets right for
@@ -511,7 +614,10 @@ async fn marking_a_root_with_no_stored_map_is_refused(harness: &impl Harness) {
     let store = harness.store();
     let orphan = ChunkMap::build(&body(512, 15));
     store.start_marking().await.expect("start");
-    assert!(store.mark(orphan.root()).await.is_err());
+    assert!(
+        store.mark(orphan.root()).await.is_err(),
+        "marking a map with no stored root fails"
+    );
 }
 
 /// A pass starts clean: marks from a previous sweep must not keep this one's
@@ -529,12 +635,18 @@ async fn a_new_pass_forgets_the_previous_marks(harness: &impl Harness) {
     store.start_marking().await.expect("start");
     store.mark(map.root()).await.expect("mark");
     store.sweep().await.expect("sweep");
-    assert!(store.has(map.leaf(0).expect("one")).await.expect("has"));
+    assert!(
+        store.has(map.leaf(0).expect("one")).await.expect("has"),
+        "the chunk is stored before the removal"
+    );
 
     // Second pass, marking nothing: the earlier mark must not carry over.
     store.start_marking().await.expect("start");
     store.sweep().await.expect("sweep");
-    assert!(!store.has(map.leaf(0).expect("one")).await.expect("has"));
+    assert!(
+        !store.has(map.leaf(0).expect("one")).await.expect("has"),
+        "the chunk is removed after the removal"
+    );
 }
 
 async fn clear_drops_only_what_it_names(harness: &impl Harness) {
@@ -547,8 +659,14 @@ async fn clear_drops_only_what_it_names(harness: &impl Harness) {
     store.put(two_hash, &two).await.expect("put");
 
     store.clear(&[one_hash]).await.expect("clear");
-    assert!(!store.has(one_hash).await.expect("has"));
-    assert!(store.has(two_hash).await.expect("has"));
+    assert!(
+        !store.has(one_hash).await.expect("has"),
+        "the first chunk is absent after the sweep"
+    );
+    assert!(
+        store.has(two_hash).await.expect("has"),
+        "the second chunk is still present after the sweep"
+    );
 
     // Clearing something absent is a no-op rather than an error: eviction races
     // with a sweep, and both removing the same chunk is ordinary.
@@ -576,16 +694,22 @@ async fn coverage_shrinks_when_chunks_are_cleared(harness: &impl Harness) {
             .await
             .expect("put");
     }
-    assert!(store.coverage(map.root()).await.expect("cov").is_complete());
+    assert!(
+        store.coverage(map.root()).await.expect("cov").is_complete(),
+        "the map coverage is complete after the sweep"
+    );
 
     store
         .clear(&[map.leaf(0).expect("one")])
         .await
         .expect("clear");
     let coverage = store.coverage(map.root()).await.expect("cov");
-    assert!(!coverage.is_complete());
-    assert!(!coverage.contains(0));
-    assert!(coverage.contains(1));
+    assert!(
+        !coverage.is_complete(),
+        "the coverage is not complete before the last chunk"
+    );
+    assert!(!coverage.contains(0), "chunk zero is not yet held");
+    assert!(coverage.contains(1), "chunk one is held");
 }
 
 /// Every chunk fetched through a map verifies against that map. The round trip
@@ -635,8 +759,15 @@ async fn coverage_survives_being_described_and_rebuilt(harness: &impl Harness) {
 
     let coverage = store.coverage(map.root()).await.expect("cov");
     let rebuilt = Coverage::from_bits(coverage.as_bits(), coverage.len()).expect("rebuild");
-    assert_eq!(rebuilt, coverage);
-    assert_eq!(rebuilt.held().collect::<Vec<_>>(), vec![0, 2, 4]);
+    assert_eq!(
+        rebuilt, coverage,
+        "the rebuilt coverage equals the original"
+    );
+    assert_eq!(
+        rebuilt.held().collect::<Vec<_>>(),
+        vec![0, 2, 4],
+        "the rebuilt coverage holds chunks 0, 2 and 4"
+    );
 }
 
 /// Re-storing a chunk already held is idempotent, which matters because a swarm
@@ -647,7 +778,11 @@ async fn putting_a_held_chunk_again_is_idempotent(harness: &impl Harness) {
     let hash = chunk_hash(&chunk);
     store.put(hash, &chunk).await.expect("put");
     store.put(hash, &chunk).await.expect("put again");
-    assert_eq!(store.get(hash).await.expect("get"), Some(chunk));
+    assert_eq!(
+        store.get(hash).await.expect("get"),
+        Some(chunk),
+        "the chunk reads back after the second put"
+    );
 }
 
 /// A hash that differs from the real one in a single bit is refused. Guards
@@ -661,7 +796,8 @@ async fn a_one_bit_difference_is_caught(harness: &impl Harness) {
         store
             .put(ChunkHash::from_bytes(wrong), &chunk)
             .await
-            .is_err()
+            .is_err(),
+        "a chunk with a wrong hash is refused"
     );
 }
 

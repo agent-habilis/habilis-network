@@ -153,4 +153,7 @@ fn refusal(conn: &Connection) -> anyhow::Error {
 
 /// Assert at compile time that the request header the producer reads
 /// (`HASH_LEN + SECRET_LEN`) matches what this side writes.
-const _: () = assert!(HASH_LEN + SECRET_LEN == 64);
+const _: () = assert!(
+    HASH_LEN + SECRET_LEN == 64,
+    "the hash and the secret fill exactly 64 bytes"
+);

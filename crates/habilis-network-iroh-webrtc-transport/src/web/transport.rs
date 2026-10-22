@@ -146,7 +146,10 @@ type SessionMap = Arc<Registry<SessionHandle>>;
 /// [`DISCONNECT_GRACE_MS`] for `sleep_ms`, which takes the browser's `i32`
 /// milliseconds. Written out rather than cast so the two cannot drift.
 const DISCONNECT_GRACE_MS_I32: i32 = 10_000;
-const _: () = assert!(DISCONNECT_GRACE_MS_I32 as f64 == DISCONNECT_GRACE_MS);
+const _: () = assert!(
+    DISCONNECT_GRACE_MS_I32 as f64 == DISCONNECT_GRACE_MS,
+    "the i32 disconnect grace constant matches the f64 one"
+);
 
 fn phase_of(state: RtcPeerConnectionState) -> ConnectionPhase {
     match state {
