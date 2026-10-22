@@ -71,6 +71,23 @@ test("block doc: inner", () => {
   expectExit("src/a.rs", "/*! crate doc */", 1);
 });
 
+// A type lifetime is named for what it borrows. A single letter is allowed on a fn.
+test("lifetime: single letter on a struct", () => {
+  expectExit("src/a.rs", "pub struct Frame<'a>(&'a [u8]);", 1);
+});
+test("lifetime: single letter on an enum", () => {
+  expectExit("src/a.rs", "enum Keying<'a> { Shared(&'a u8) }", 1);
+});
+test("lifetime: descriptive name on a struct", () => {
+  expectExit("src/a.rs", "pub struct Frame<'frame>(&'frame [u8]);", 0);
+});
+test("lifetime: serde de on a struct", () => {
+  expectExit("src/a.rs", "struct Visitor<'de>(PhantomData<&'de ()>);", 0);
+});
+test("lifetime: single letter on a fn", () => {
+  expectExit("src/a.rs", "fn first<'a>(x: &'a [u8]) -> &'a u8 { &x[0] }", 0);
+});
+
 // A clean file passes, and so does a string that only looks like a block doc comment.
 test("clean file", () => {
   expectExit("src/a.rs", "fn f() {}", 0);

@@ -165,12 +165,12 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, ctx: &HandlerC
     missing_debug_implementations,
     reason = "sink is a &'a dyn NodeSink trait object with no Debug impl"
 )]
-pub struct StateMergeParams<'a> {
-    pub mesh: &'a MeshId,
-    pub author: &'a Nickname,
+pub struct StateMergeParams<'mesh> {
+    pub mesh: &'mesh MeshId,
+    pub author: &'mesh Nickname,
     pub merge: serde_json::Value,
-    pub sender: &'a MeshSender,
-    pub sink: &'a dyn NodeSink,
+    pub sender: &'mesh MeshSender,
+    pub sink: &'mesh dyn NodeSink,
     pub channel: Channel,
     pub surface: bool,
 }

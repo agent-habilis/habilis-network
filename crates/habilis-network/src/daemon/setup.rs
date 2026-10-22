@@ -643,13 +643,13 @@ pub fn refuse_in_browser(
 /// The kind-independent build inputs threaded into [`setup_create`] /
 /// [`setup_join`]: the loop-shared refs both attach paths need to stand up
 /// the endpoint, gossip overlay and rendezvous.
-struct SetupBuild<'a> {
-    author: &'a Nickname,
-    sink: &'a dyn NodeSink,
+struct SetupBuild<'build> {
+    author: &'build Nickname,
+    sink: &'build dyn NodeSink,
     max_peers: usize,
     max_direct: usize,
-    lookups: &'a LookupOpts,
-    unicast_acceptor: &'a crate::transport::UnicastAcceptor,
+    lookups: &'build LookupOpts,
+    unicast_acceptor: &'build crate::transport::UnicastAcceptor,
     /// The mesh policy's `multihop`: register the multi-hop transport on the
     /// peer endpoint.
     #[cfg_attr(
@@ -673,7 +673,7 @@ struct SetupBuild<'a> {
     /// contended here and nothing holds the guard across an `.await`; the
     /// `Mutex` is bought purely for the `Sync` it carries.
     protocols: std::sync::Mutex<CallerProtocols>,
-    rung_tx: &'a watch::Sender<Option<RelayUrl>>,
+    rung_tx: &'build watch::Sender<Option<RelayUrl>>,
     /// The mesh's `transport.relay_transport`, for the accept gates.
     relay_transport: bool,
 }

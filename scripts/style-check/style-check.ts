@@ -46,6 +46,12 @@ const RULES: Rule[] = [
     glob: "*.rs",
     why: "Document with /// and //!, not with /** */ or /*! */.",
   },
+  {
+    name: "lifetime",
+    pattern: /\b(struct|enum|trait)\s+\w+<[^>{]*'[a-z](?![A-Za-z0-9_])/,
+    glob: "*.rs",
+    why: "Name a type lifetime for what it borrows ('frame, not 'a). The guide allows one letter only on a fn.",
+  },
 ];
 
 // The files git knows, tracked or not yet, minus what .gitignore hides: the same list `git ls-files

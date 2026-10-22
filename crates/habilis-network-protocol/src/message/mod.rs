@@ -531,38 +531,38 @@ struct WireIn {
 
 /// A [`Message`] as the wire has it, written. The field order is the order of the JSON text.
 #[derive(Serialize)]
-struct WireOut<'a> {
+struct WireOut<'message> {
     #[serde(rename = "v")]
-    version: &'a str,
-    id: &'a MessageId,
+    version: &'message str,
+    id: &'message MessageId,
     #[serde(flatten)]
-    kind: &'a MessageKind,
-    mesh: &'a MeshId,
-    author: &'a Nickname,
+    kind: &'message MessageKind,
+    mesh: &'message MeshId,
+    author: &'message Nickname,
     #[serde(rename = "ts")]
     timestamp: i64,
-    body: &'a MessageBody,
+    body: &'message MessageBody,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pubkey: Option<HexOut<'a>>,
+    pubkey: Option<HexOut<'message>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    sig: Option<HexOut<'a>>,
+    sig: Option<HexOut<'message>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    prev: &'a Option<ContentHash>,
+    prev: &'message Option<ContentHash>,
     #[serde(skip_serializing_if = "<[ContentHash]>::is_empty")]
-    parents: &'a [ContentHash],
+    parents: &'message [ContentHash],
     #[serde(skip_serializing_if = "Option::is_none")]
-    shard: &'a Option<Shard>,
-    ext: &'a serde_json::Value,
+    shard: &'message Option<Shard>,
+    ext: &'message serde_json::Value,
 }
 
 /// Bytes written as lowercase hex, straight into the serializer.
-struct HexOut<'a>(&'a [u8]);
+struct HexOut<'bytes>(&'bytes [u8]);
 
 impl Serialize for HexOut<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        struct Hex<'a>(&'a [u8]);
+        struct Hex<'bytes>(&'bytes [u8]);
         impl fmt::Display for Hex<'_> {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 identity::write_hex(formatter, self.0)
@@ -574,7 +574,7 @@ impl Serialize for HexOut<'_> {
 
 /// The wire form of a message. The serde impl lives on this private wrapper, not on [`Message`], so a
 /// message that a caller holds through a `Deref` (an [`Authored`] view) has no public `Serialize`.
-struct Wire<'a>(&'a Message);
+struct Wire<'message>(&'message Message);
 
 impl Serialize for Wire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -1168,9 +1168,9 @@ impl ChainCtx {
 /// The inputs of a test message: the mesh, the author, the body, the chain and the app tag.
 #[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug)]
-pub struct BuildMsgParams<'a> {
-    pub mesh: &'a MeshId,
-    pub author: &'a Nickname,
+pub struct BuildMsgParams<'mesh> {
+    pub mesh: &'mesh MeshId,
+    pub author: &'mesh Nickname,
     pub body: MessageBody,
     pub chain: ChainCtx,
     /// The app tag to stamp. A parameter, not a constant: this fixture is used

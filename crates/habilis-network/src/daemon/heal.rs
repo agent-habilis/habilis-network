@@ -160,18 +160,18 @@ pub(super) enum Resubscribe {
 /// re-subscribe through, the rendezvous params to bootstrap from, the shared
 /// ctx-building parts (for its `sink` and to rebuild a [`HandlerCtx`] once the
 /// sender is swapped).
-pub(super) struct ResubscribeEnv<'a> {
-    pub(super) gossip: &'a iroh_gossip::net::Gossip,
-    pub(super) params: &'a beacon::RendezvousParams,
-    pub(super) parts: &'a CtxParts<'a>,
+pub(super) struct ResubscribeEnv<'node> {
+    pub(super) gossip: &'node iroh_gossip::net::Gossip,
+    pub(super) params: &'node beacon::RendezvousParams,
+    pub(super) parts: &'node CtxParts<'node>,
 }
 /// The live gossip link a resubscribe mutates: the sender/receiver pair
 /// swapped in on success, and the consecutive-failure counter it resets or
 /// increments.
-pub(super) struct GossipLink<'a> {
-    pub(super) sender: &'a mut MeshSender,
-    pub(super) receiver: &'a mut MeshReceiver<GossipReceiver>,
-    pub(super) attempts: &'a mut u32,
+pub(super) struct GossipLink<'link> {
+    pub(super) sender: &'link mut MeshSender,
+    pub(super) receiver: &'link mut MeshReceiver<GossipReceiver>,
+    pub(super) attempts: &'link mut u32,
 }
 /// One heal-tick turn while the gossip stream is down: attempt the
 /// resubscribe and, on success, swap in the fresh sender/receiver,

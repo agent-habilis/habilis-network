@@ -32,10 +32,10 @@ pub const MAX_DATAGRAM_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 /// A frame: the two ends and the datagram. A decode borrows the datagram from the
 /// input, and an encode writes this value out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Frame<'a> {
+pub struct Frame<'datagram> {
     pub dst: EndpointId,
     pub src: EndpointId,
-    pub datagram: &'a [u8],
+    pub datagram: &'datagram [u8],
 }
 
 /// Why a datagram cannot be framed.

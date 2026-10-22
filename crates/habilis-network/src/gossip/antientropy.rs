@@ -392,9 +392,9 @@ pub(crate) enum DigestTrigger {
 }
 
 #[derive(Clone, Copy)]
-struct DigestOrigin<'a> {
-    mesh: &'a MeshId,
-    author: &'a Nickname,
+struct DigestOrigin<'mesh> {
+    mesh: &'mesh MeshId,
+    author: &'mesh Nickname,
 }
 
 async fn broadcast_state_digest(

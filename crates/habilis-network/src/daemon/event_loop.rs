@@ -1307,22 +1307,22 @@ impl TickAnchors {
 /// holds one of these and builds the ctx per-arm (`parts.ctx(&sender)`):
 /// a loop-lifetime ctx would borrow `sender` forever, and the
 /// resubscribe path must be able to replace it.
-pub(super) struct CtxParts<'a> {
-    pub(super) endpoint: &'a Endpoint,
-    pub(super) mesh: &'a MeshId,
-    pub(super) author: &'a Nickname,
-    pub(super) identity: &'a crate::protocol::identity::Identity,
+pub(super) struct CtxParts<'node> {
+    pub(super) endpoint: &'node Endpoint,
+    pub(super) mesh: &'node MeshId,
+    pub(super) author: &'node Nickname,
+    pub(super) identity: &'node crate::protocol::identity::Identity,
     pub(super) our_pubkey: AuthorKey,
     pub(super) max_peers: usize,
     pub(super) rendezvous_id: EndpointId,
-    pub(super) external_msg_tx: Option<&'a broadcast::Sender<Authored>>,
-    pub(super) sink: &'a dyn NodeSink,
+    pub(super) external_msg_tx: Option<&'node broadcast::Sender<Authored>>,
+    pub(super) sink: &'node dyn NodeSink,
 }
 
-impl<'a> CtxParts<'a> {
-    pub(super) fn ctx<'b>(&'b self, sender: &'b MeshSender) -> HandlerCtx<'b>
+impl<'node> CtxParts<'node> {
+    pub(super) fn ctx<'ctx>(&'ctx self, sender: &'ctx MeshSender) -> HandlerCtx<'ctx>
     where
-        'a: 'b,
+        'node: 'ctx,
     {
         HandlerCtx {
             sender,

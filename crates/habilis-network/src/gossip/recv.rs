@@ -874,9 +874,9 @@ async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'
     }
 }
 
-struct InboundFrame<'a> {
-    message: &'a Verified,
-    canonical: &'a [u8],
+struct InboundFrame<'message> {
+    message: &'message Verified,
+    canonical: &'message [u8],
     surfaceable: bool,
 }
 
@@ -965,9 +965,9 @@ async fn handle_shard(
 /// must stay out of the fork/DAG indexes (see the `task` glossary invariant).
 /// Presence is loggable but not indexed.
 #[derive(Clone, Copy)]
-struct RetainMeta<'a> {
-    canonical: &'a [u8],
-    class: Option<&'a AppClass>,
+struct RetainMeta<'meta> {
+    canonical: &'meta [u8],
+    class: Option<&'meta AppClass>,
 }
 
 fn retain_and_index(
@@ -1072,9 +1072,9 @@ pub(crate) fn retain_own_app_broadcast(
 /// field so the borrow released by [`ingest_channel_event`] frees `state` for the
 /// address adoption.
 #[derive(Clone, Copy)]
-struct ChannelEvent<'a> {
+struct ChannelEvent<'message> {
     channel: Channel,
-    message: &'a Verified,
+    message: &'message Verified,
     surfaceable: bool,
 }
 

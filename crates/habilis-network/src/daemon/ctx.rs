@@ -11,14 +11,14 @@ use crate::transport::MeshSender;
 
 /// Immutable loop-level context threaded through every handler.
 /// Bundles the refs a handler may need but never mutates itself.
-pub struct HandlerCtx<'a> {
-    pub sender: &'a MeshSender,
-    pub endpoint: &'a Endpoint,
-    pub mesh: &'a MeshId,
-    pub author: &'a Nickname,
+pub struct HandlerCtx<'node> {
+    pub sender: &'node MeshSender,
+    pub endpoint: &'node Endpoint,
+    pub mesh: &'node MeshId,
+    pub author: &'node Nickname,
     /// This member's signing identity (Ed25519). Messages we author are
     /// signed with it before broadcast; see [`Identity`].
-    pub identity: &'a Identity,
+    pub identity: &'node Identity,
     /// Our own author key — taken once at loop setup so the per-message
     /// self-echo check is a 32-byte compare, not a fresh key derivation on
     /// every inbound message.
@@ -32,13 +32,13 @@ pub struct HandlerCtx<'a> {
     /// (`DriverMode::InProcess::msg_tx`); every inbound message that survives
     /// the self-author filter is forwarded here before kind routing. `None` for
     /// the CLI, and for an in-process consumer that drains frames some other way.
-    pub(crate) external_msg_tx: Option<&'a broadcast::Sender<Authored>>,
+    pub(crate) external_msg_tx: Option<&'node broadcast::Sender<Authored>>,
     /// Per-loop generic event sink: the engine emits
     /// [`NodeEvent`](crate::gossip::event::NodeEvent) through it and never names
     /// the app's concrete `Output`. Borrowed for the loop's lifetime; handlers
     /// emit through `ctx.sink`. The app layer reaches its own renderer
     /// separately (it owns the concrete `Output`).
-    pub sink: &'a dyn NodeSink,
+    pub sink: &'node dyn NodeSink,
 }
 
 // Manual: `sink` is a `&dyn NodeSink` trait object with no `Debug` bound, so

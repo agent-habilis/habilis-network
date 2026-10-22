@@ -163,13 +163,13 @@ impl Graph {
 /// `weight` atop the already-settled `cost` to `node`, gated by `dst` (never
 /// itself blocked) and the `blocked` set.
 #[derive(Clone, Copy)]
-struct RelaxEdge<'a> {
+struct RelaxEdge<'blocked> {
     node: AppId,
     cost: LinkMetric,
     next: AppId,
     weight: LinkMetric,
     dst: AppId,
-    blocked: &'a HashSet<AppId>,
+    blocked: &'blocked HashSet<AppId>,
 }
 
 /// Relax `candidate`: skip it when `next` is blocked (unless it's `dst` itself),

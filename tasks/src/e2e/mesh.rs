@@ -439,8 +439,8 @@ fn native_opts(cell: &Cell, relay_url: &str, selector: NativeSelector<'_>) -> me
 }
 
 #[derive(Clone, Copy)]
-enum NativeSelector<'a> {
-    Topic(&'a str),
+enum NativeSelector<'topic> {
+    Topic(&'topic str),
     Create,
 }
 

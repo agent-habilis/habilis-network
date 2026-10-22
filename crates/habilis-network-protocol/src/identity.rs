@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn write_hex_writes_the_same_text_as_encode_hex() {
-        struct Hex<'a>(&'a [u8]);
+        struct Hex<'bytes>(&'bytes [u8]);
         impl std::fmt::Display for Hex<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 super::write_hex(f, self.0)

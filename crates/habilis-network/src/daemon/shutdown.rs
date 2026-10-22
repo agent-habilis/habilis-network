@@ -64,9 +64,9 @@ pub(super) async fn shutdown<A: NodeDriver>(
 /// whether this quit should hard-exit the process — the plain values
 /// [`announce_departure`] needs beyond the loop state and the shared
 /// handler context.
-pub(super) struct QuitParams<'a> {
-    pub(super) name: &'a MeshName,
-    pub(super) leave_label: &'a str,
+pub(super) struct QuitParams<'name> {
+    pub(super) name: &'name MeshName,
+    pub(super) leave_label: &'name str,
     pub(super) exit_on_quit: bool,
 }
 /// Announce departure, and say whether the loop must hard-exit the process once it has ended.

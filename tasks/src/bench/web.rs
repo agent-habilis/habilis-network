@@ -140,9 +140,9 @@ fn rounds(
 }
 
 /// What every browser cell needs: the page server and the run's arguments.
-pub(crate) struct Browser<'a> {
-    pub(crate) server: &'a Static,
-    pub(crate) args: &'a Args,
+pub(crate) struct Browser<'bench> {
+    pub(crate) server: &'bench Static,
+    pub(crate) args: &'bench Args,
 }
 
 impl Browser<'_> {

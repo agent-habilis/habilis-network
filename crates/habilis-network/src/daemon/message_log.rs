@@ -56,11 +56,11 @@ pub(crate) fn seconds(lo: UnixSecs, hi: UnixSecs) -> WindowRange {
 /// asking — the last because entitlement is per-peer, not global (see
 /// [`resendable_to`]).
 #[derive(Clone, Copy)]
-pub(crate) struct MissingQuery<'a> {
+pub(crate) struct MissingQuery<'query> {
     pub range: WindowRange,
-    pub have: &'a HashSet<DedupKey>,
+    pub have: &'query HashSet<DedupKey>,
     pub max: usize,
-    pub requester: &'a Nickname,
+    pub requester: &'query Nickname,
 }
 
 /// A bounded buffer of the recent messages a member retains — the

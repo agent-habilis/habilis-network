@@ -180,9 +180,9 @@ impl std::fmt::Debug for SymmetricKey {
 /// place. Two types feed one derivation because a mesh has one or the other,
 /// never both, and the derivations are the same hash over either.
 #[derive(Clone, Copy)]
-pub(crate) enum Keying<'a> {
-    Wire(&'a Seed),
-    Secret(&'a SymmetricKey),
+pub(crate) enum Keying<'key> {
+    Wire(&'key Seed),
+    Secret(&'key SymmetricKey),
 }
 
 impl Keying<'_> {
