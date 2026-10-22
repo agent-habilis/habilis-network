@@ -45,6 +45,12 @@ jobs:
           bun test scripts/style-check/style-check.test.ts
           bun scripts/style-check/style-check.ts
 
+      # Every script is TypeScript run with Bun (AGENTS.md, "Scripts").
+      - name: Script language
+        run: |
+          bun test scripts/script-language/script-language.test.ts
+          bun scripts/script-language/script-language.ts
+
       # Three lints still have old findings (issue #29). A ratchet refuses a new one. Lower the
       # baseline with `bun scripts/lint-ratchet/lint-ratchet.ts --update` when you fix one.
       - name: Lint ratchet
