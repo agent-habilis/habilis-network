@@ -167,9 +167,18 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
          WebRTC session is offered only after the close\n{}",
             trace()
         );
+        let rendezvous = alice.membership.node.endpoint_id().to_string();
+        let attached_to_rendezvous = || {
+            ["answerer", "offerer"].iter().any(|role| {
+                logs().contains(&format!(
+                    "webrtc session attached ({role}) remote={rendezvous}"
+                ))
+            })
+        };
         assert!(
-            logs().contains("webrtc session attached to the linked rendezvous"),
-            "no session attached to the linked rendezvous\n{}",
+            logs().contains("webrtc session attached to the linked rendezvous")
+                || attached_to_rendezvous(),
+            "the rendezvous has no WebRTC session after the IP loss\n{}",
             trace()
         );
         for member in [alice, bob] {
