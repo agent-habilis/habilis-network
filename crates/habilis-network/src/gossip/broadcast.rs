@@ -500,7 +500,7 @@ mod tests {
             &MeshId::from("test"),
             &nick("alice"),
             crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
+                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
                 to: None,
                 corr: None,
                 body: crate::protocol::MessageBody::from("hi"),

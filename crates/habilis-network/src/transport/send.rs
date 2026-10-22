@@ -399,7 +399,7 @@ mod tests {
             &mesh(),
             &nick("alice"),
             AppFrameParams {
-                tag: AppTag::from("app_msg"),
+                tag: AppTag::new("app_msg").expect("a valid app tag"),
                 to: None,
                 corr: None,
                 body: body(),
@@ -792,9 +792,12 @@ mod tests {
             &mesh(),
             &nick("alice"),
             AppFrameParams {
-                tag: AppTag::from("app_req"),
+                tag: AppTag::new("app_req").expect("a valid app tag"),
                 to: Some(nick("bob")),
-                corr: Some(CorrId::from("00000000-0000-0000-0000-0000000000aa")),
+                corr: Some(
+                    CorrId::new("00000000-0000-0000-0000-0000000000aa")
+                        .expect("a valid correlation id"),
+                ),
                 body: body(),
             },
         )

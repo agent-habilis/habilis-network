@@ -3190,7 +3190,7 @@ mod tests {
             &MeshId::from("test"),
             &nick("author-nick"),
             AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
+                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
                 to: None,
                 corr: None,
                 body: MessageBody::from("body"),

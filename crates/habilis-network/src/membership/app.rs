@@ -514,7 +514,7 @@ impl NodeDriver for MembershipApp {
                 let frame = app_frame(
                     ctx,
                     AppFrameParams {
-                        tag: AppTag::from(MSG_TAG),
+                        tag: AppTag::new(MSG_TAG).expect("a valid app tag"),
                         to,
                         corr: None,
                         body,
@@ -546,7 +546,7 @@ impl NodeDriver for MembershipApp {
                 let frame = app_frame(
                     ctx,
                     AppFrameParams {
-                        tag: AppTag::from(MSG_TAG),
+                        tag: AppTag::new(MSG_TAG).expect("a valid app tag"),
                         to,
                         corr: None,
                         body,
@@ -1124,7 +1124,7 @@ mod tests {
             &long_mesh(),
             &widest_nick('\u{1F980}'),
             AppFrameParams {
-                tag: AppTag::from(MSG_TAG),
+                tag: AppTag::new(MSG_TAG).expect("a valid app tag"),
                 to: Some(widest_nick('\u{1F99E}')),
                 corr: None,
                 body: MessageBody::new(text.to_owned()).expect("body"),

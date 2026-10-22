@@ -438,7 +438,7 @@ mod tests {
             &crate::protocol::MeshId::from("test"),
             &Nickname::from("author"),
             crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
+                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
                 to: None,
                 corr: None,
                 body: crate::protocol::MessageBody::from(id),
@@ -556,7 +556,7 @@ mod tests {
             &crate::protocol::MeshId::from("test"),
             &Nickname::from("author"),
             crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
+                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
                 to: Some(Nickname::from(to)),
                 corr: None,
                 body: crate::protocol::MessageBody::from(body),

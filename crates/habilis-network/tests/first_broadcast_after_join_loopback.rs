@@ -286,7 +286,7 @@ impl NodeDriver for Chat {
                 let frame = app_frame(
                     ctx,
                     AppFrameParams {
-                        tag: AppTag::from("chat"),
+                        tag: AppTag::new("chat").expect("a valid app tag"),
                         to: None,
                         corr: None,
                         body: MessageBody::new(text).expect("a short body"),

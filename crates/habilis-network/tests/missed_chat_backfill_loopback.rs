@@ -86,7 +86,7 @@ impl NodeDriver for Chat {
             ctx.mesh,
             ctx.author,
             AppFrameParams {
-                tag: AppTag::from("chat"),
+                tag: AppTag::new("chat").expect("a valid app tag"),
                 to: None,
                 corr: None,
                 body: MessageBody::new("\"hello\"").expect("a JSON body"),

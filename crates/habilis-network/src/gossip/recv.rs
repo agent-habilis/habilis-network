@@ -1807,7 +1807,7 @@ mod retain_own_broadcast_tests {
             &MeshId::from("💬test"),
             &Nickname::from("me"),
             crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
+                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
                 to: to.map(Nickname::from),
                 corr: None,
                 body: crate::protocol::MessageBody::from("hello"),
@@ -2296,7 +2296,7 @@ mod first_contact_tests {
             &node.mesh,
             &nick("alice"),
             crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
+                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
                 to: None,
                 corr: None,
                 body: MessageBody::from("hello"),

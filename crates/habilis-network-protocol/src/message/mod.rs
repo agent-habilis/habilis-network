@@ -162,6 +162,18 @@ impl AppTag {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     }
 
+    /// There is no `From<&str>`: a bad literal would panic, so every caller handles the error.
+    ///
+    /// ```compile_fail
+    /// use habilis_network_protocol::AppTag;
+    /// let _ = AppTag::from("app_msg");
+    /// ```
+    ///
+    /// ```
+    /// use habilis_network_protocol::AppTag;
+    /// assert!(AppTag::new("app_msg").is_ok());
+    /// ```
+    ///
     /// # Errors
     /// The tag is empty, longer than 32 bytes, or not an ASCII slug.
     pub fn new(raw: impl Into<String>) -> Result<Self, &'static str> {
@@ -170,12 +182,6 @@ impl AppTag {
             return Err("invalid app tag");
         }
         Ok(Self(raw))
-    }
-}
-
-impl From<&str> for AppTag {
-    fn from(raw: &str) -> Self {
-        Self::new(raw).expect("invalid app tag")
     }
 }
 
@@ -194,6 +200,18 @@ impl CorrId {
         !raw.is_empty() && raw.len() <= 64
     }
 
+    /// There is no `From<&str>`: a bad literal would panic, so every caller handles the error.
+    ///
+    /// ```compile_fail
+    /// use habilis_network_protocol::CorrId;
+    /// let _ = CorrId::from("aaaa");
+    /// ```
+    ///
+    /// ```
+    /// use habilis_network_protocol::CorrId;
+    /// assert!(CorrId::new("aaaa").is_ok());
+    /// ```
+    ///
     /// # Errors
     /// The correlation id is empty or longer than 64 bytes.
     pub fn new(raw: impl Into<String>) -> Result<Self, &'static str> {
@@ -216,12 +234,6 @@ impl<'de> Deserialize<'de> for CorrId {
         // frame, not a correlation id. Mirrors [`AppTag`]'s bounded deserialize.
         let raw = String::deserialize(deserializer)?;
         Self::new(raw).map_err(serde::de::Error::custom)
-    }
-}
-
-impl From<&str> for CorrId {
-    fn from(raw: &str) -> Self {
-        Self::new(raw).expect("invalid correlation id")
     }
 }
 
@@ -386,11 +398,14 @@ impl MessageKind {
     /// A broadcast [`App`](MessageKind::App) kind (no addressee, no correlation)
     /// with tag `tag` — the test/fixture ergonomic for what used to be a bare
     /// unit variant per app tag.
+    ///
+    /// # Panics
+    /// `tag` is not a valid [`AppTag`]. A fixture names a fixed literal.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn app_broadcast(tag: &str) -> Self {
         MessageKind::App {
-            tag: AppTag::from(tag),
+            tag: AppTag::new(tag).expect("a valid app tag"),
             to: None,
             corr: None,
         }
@@ -399,11 +414,14 @@ impl MessageKind {
     /// A directed [`App`](MessageKind::App) kind addressed to `to`, tag `tag`,
     /// with an optional correlation id — the test ergonomic for the former
     /// directed app variants.
+    ///
+    /// # Panics
+    /// `tag` is not a valid [`AppTag`]. A fixture names a fixed literal.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn app_to(tag: &str, to: Nickname, corr: Option<CorrId>) -> Self {
         MessageKind::App {
-            tag: AppTag::from(tag),
+            tag: AppTag::new(tag).expect("a valid app tag"),
             to: Some(to),
             corr,
         }
