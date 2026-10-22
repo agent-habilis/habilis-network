@@ -114,6 +114,11 @@ impl Member {
 #[test]
 fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
     let guard = habilis_network_test_tracing::init();
+    // The test cuts IP on purpose, so the pair stays meshed with no link for a while. The census
+    // calls that a silent partition once the gap outlasts a heal, so that WARN is expected here.
+    // Whether it comes depends on timing, so it is optional. The broadcast after the loss is the
+    // real check, and it stays asserted below.
+    guard.allow_warn("habilis_network::lifecycle", "silent partition");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
             .await
