@@ -215,6 +215,11 @@ pub(super) async fn resubscribe_tick(
             if let Some(state_file) = state.state_file.as_ref() {
                 state_file.remove();
             }
+            // The exit below runs no destructor, so the marker goes here too.
+            #[cfg(feature = "host")]
+            if let Some(marker) = state.ipc_marker.as_ref() {
+                marker.remove_if_ours();
+            }
             env.parts.sink.emit(NodeEvent::Error(
                 "gossip subscription unrecoverable; shutting down".to_owned(),
             ));

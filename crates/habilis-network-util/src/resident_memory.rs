@@ -135,7 +135,12 @@ fn maxrss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    // Its one caller is the `unix` test below; the other test is macOS and
+    // Linux only and names its own import.
+    #[cfg(all(unix, feature = "host"))]
     use super::peak_resident_memory_bytes;
+    // Both tests are Unix only.
+    #[cfg(all(unix, feature = "host"))]
     use habilis_network_test_tracing::test;
 
     /// The current reading falls when memory is given back, which the peak never

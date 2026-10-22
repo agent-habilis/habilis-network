@@ -388,3 +388,65 @@ jobs:
       - name: Typecheck
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web
         run: bun run typecheck
+
+  # The native steps of `check` on Windows (R11, "Windows on CI", in
+  # docs/windows.md). The wasm32 steps, `cargo fmt`, `cargo doc` and every step
+  # that needs bash stay on Linux.
+  #
+  # `cargo task ffi` is not here: it needs R9, "FFI" in docs/windows.md. The
+  # task reads `target/release/libhabilis_network_ffi.a` with `nm`; on Windows
+  # it needs the `.lib` name, `llvm-nm.exe` (`components: llvm-tools`) and COFF
+  # symbols in `tasks/src/ffi.rs`. It joins this job with R9.
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    # The first run has no cache and builds `aws-lc-sys`; `cargo test
+    # --workspace` alone, build included, took 19 minutes on a developer machine.
+    timeout-minutes: 120
+    env:
+      # The debug build of the test executables did not fit on the disk of a
+      # developer machine: two builds wrote 19.9 GB there without finishing.
+      # Without debug info all the cargo commands of this job wrote 6 GB there,
+      # so the job builds without it.
+      CARGO_PROFILE_DEV_DEBUG: 0
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # The Bun steps come before every step that restores a cache, so that
+      # `target/` cannot exist when they run. `smoke.test.ts` loads the DLL when
+      # it finds one under `target/`, and the C ABI returns `c_long`, 32 bits on
+      # Windows, until R9, "FFI" in docs/windows.md. A smoke test against that
+      # ABI would pass by luck. So the smoke test is skipped here, and this step
+      # does not test the `isize` mapping until R9.
+      - name: Test (bun)
+        run: bun run test
+
+      # `aws-lc-sys` assembles with NASM, which the runner does not have.
+      - uses: ilammy/setup-nasm@v1
+
+      # Reads rust-toolchain.toml, as in `check`.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+
+      # One command for each `run:`, and no `shell:`. The default shell here is
+      # pwsh, which gives the exit code of the last command of a script only.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Test (blob)
+        run: cargo test -p habilis-network --features blob
+
+      - name: Test (webrtc, native backend)
+        run: cargo test -p habilis-network-iroh-webrtc-transport --features native

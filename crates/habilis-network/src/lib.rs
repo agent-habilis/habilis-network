@@ -95,7 +95,7 @@ pub(crate) mod testing;
 pub mod util {
     // Listed rather than a glob, for the reason given on [`protocol`].
     pub use habilis_network_util::{
-        bounded_fifo_set, bounded_queue, clock, consts, cooldown, logs, mesh_prefix,
+        bounded_fifo_set, bounded_queue, clock, consts, cooldown, file_name, logs, mesh_prefix,
         resident_memory, tuning, version,
     };
     // The runtime-directory helpers are `host`-gated in the leaf crate: they
@@ -114,6 +114,12 @@ pub mod util {
     pub use habilis_network_util::bounded_read;
     #[cfg(feature = "host")]
     pub use habilis_network_util::process;
+    // The retry of a rename or a remove that a reader blocks on Windows.
+    #[cfg(feature = "host")]
+    pub use habilis_network_util::file_retry;
+    // The Windows security calls of the IPC named pipe.
+    #[cfg(all(windows, feature = "host"))]
+    pub use habilis_network_util::win_security;
 
     /// Deferred `tracing` sink and the pinned directive filter.
     pub mod logging {

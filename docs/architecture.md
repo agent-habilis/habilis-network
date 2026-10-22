@@ -32,7 +32,7 @@ Three unrelated consumers enforce this claim:
 
 1. **agent-gossip** — a gossip network for AI agents, in a separate repository.
    The `gossip-*` skills of Claude Code are thin shells over this CLI.
-   The CLI embeds the engine and drives it over an IPC socket.
+   The CLI embeds the engine and drives it over an IPC endpoint.
 2. **agent-share** — file sharing over the same engine.
 3. **A C host application** — links `habilis-network-ffi` as a static library.
 
@@ -40,7 +40,7 @@ Three unrelated consumers enforce this claim:
 graph LR
     subgraph "Agent machine"
         SKILLS["Claude Code skills"] --> CLI["agent-gossip CLI"]
-        CLI -->|"IPC socket"| E1["habilis-network engine"]
+        CLI -->|"IPC endpoint"| E1["habilis-network engine"]
     end
     subgraph "C host"
         APP["C host application"] --> FFI["habilis-network-ffi (C ABI)"]
@@ -137,7 +137,7 @@ Consumers reach iroh through re-exports: `habilis_network::iroh`, `habilis_netwo
 
 The default features of the engine are `host`, `mdns`, and `dht`.
 The `host` feature is the coarse "needs an OS" gate.
-It adds the control socket, the state file, process helpers, the log sink, and the multihop transport.
+It adds the IPC endpoint, the state file, process helpers, the log sink, and the multihop transport.
 The `mdns` and `dht` features each select one address-lookup mechanism, and each implies `host`.
 The `blob` feature adds a side channel for oversize payloads (section 7.3).
 A build with `--no-default-features` leaves the portable engine that runs in a browser.
@@ -329,7 +329,8 @@ Topic setup makes the first peer claim the beacon eagerly, because a topic mesh 
 ### 6.2 Driver modes
 
 `DriverMode` is the single branch between the two ways to drive a node.
-`Cli` binds the control socket and exits the process on quit.
+`Cli` binds the IPC endpoint and exits the process on quit.
+A quit comes from a signal, a console event on Windows, the owner watch, or the IPC `quit` command, and all of them take one path: the state file and the marker are removed, then `Left` goes out, then the process exits.
 `InProcess` takes typed requests over channels and returns cleanly.
 A browser node and an embedded node are always `InProcess`.
 
@@ -346,7 +347,7 @@ flowchart LR
         I["IPC commands"]
         S["session requests"]
         W["relay rung watch"]
-        Q["quit signals"]
+        Q["quit signals and IPC quit"]
     end
     subgraph Timers
         T1["alive / sweep"]
@@ -662,13 +663,18 @@ Everything except `classify` and `on_app_frame` has a default body.
 `NodeSink` is the outbound event surface, one `emit` call per node event.
 The example `crates/habilis-network/examples/mesh_peer.rs` is the smallest embedding, near 40 lines of seam.
 
-### 10.3 The IPC socket
+### 10.3 The IPC endpoint
 
-With the `host` feature, a CLI-driven node binds a Unix socket, with newline-delimited JSON in both directions.
-The socket is a full control plane with no in-band authentication.
-The protection is filesystem permissions: a uid-scoped `0700` runtime directory and a `0600` socket.
-The bind happens before the node reports ready, so a client that observes readiness always connects.
-The socket module compiles out on wasm32, and a browser binds nothing.
+With the `host` feature, a CLI-driven node binds a local IPC endpoint, with newline-delimited JSON in both directions.
+On Unix the endpoint is a socket.
+On Windows it is a named pipe with a random name.
+The endpoint is a full control plane with no in-band authentication.
+On Unix the protection is filesystem permissions: a uid-scoped `0700` runtime directory and a `0600` socket.
+On Windows the protection is the DACL of the pipe, which gives access only to the user, and the client checks that the user owns the pipe before it sends a byte.
+The node writes the name of its endpoint into a `<nick>.ipc` marker in the mesh folder, on every OS, and a client finds the endpoint through the marker.
+The bind and the marker come before the node reports ready, so a client that observes readiness always connects.
+The IPC module compiles out on wasm32, and a browser binds nothing.
+`docs/windows.md` (R3) gives the Windows design.
 
 ### 10.4 The C ABI
 
@@ -681,7 +687,7 @@ For this reason the release profile keeps unwinding and does not set `panic = "a
 ### 10.5 The browser build
 
 A build with `--no-default-features` keeps gossip, the CRDT documents, the protocol types, address lookup, and the whole node runtime.
-It loses the control socket, the state file, process helpers, and the log sink.
+It loses the IPC endpoint, the state file, process helpers, and the log sink.
 Portability rests on two shims: `web-time` for the clock and `n0-future` for timers and task spawn.
 A dedicated test guards the shims, because `tokio::time` compiles for wasm32 and then panics at run time.
 

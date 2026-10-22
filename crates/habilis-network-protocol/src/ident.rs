@@ -11,9 +11,10 @@
 //!
 //! The two types differ on the **path separators** `/` `\`. A `Nickname`
 //! forbids them ([`is_forbidden`]) because it is embedded raw in the
-//! per-member filenames (`transport::ipc` builds `<prefix>/<nick>.ipc.sock`,
-//! and the log/state files mirror it), and clients recompute those paths — a
-//! `/` would break the socket. A `MeshName` is never in a path (paths key on
+//! per-member filenames (`transport::ipc` builds `<prefix>/<nick>.ipc` for the
+//! marker and, on Unix, `<prefix>/<nick>.ipc.sock`, and the log/state files
+//! mirror it), and clients recompute those paths — a `/` would break the
+//! marker and the socket. A `MeshName` is never in a path (paths key on
 //! the base58 mesh-id prefix), so it allows `/ \` ([`is_forbidden_mesh_name`])
 //! and may be a URL.
 //!
@@ -38,9 +39,13 @@ pub(super) fn is_forbidden_mesh_name(ch: char) -> bool {
 
 /// Forbidden in a [`Nickname`](crate::Nickname): the mesh-name rule
 /// plus the path separators `/ \`. A nickname is embedded raw in the per-member
-/// filenames (`<prefix>/<nick>.ipc.sock`, `<nick>.tracing.log`,
-/// `<nick>.state.json`), and clients recompute those paths to reach the daemon,
-/// so a path separator would break the socket bind/connect.
+/// filenames (`<prefix>/<nick>.ipc`, `<prefix>/<nick>.ipc.sock` on Unix,
+/// `<nick>.tracing.log`, `<nick>.state.json`), and clients recompute those
+/// paths to reach the daemon, so a path separator would break the marker and
+/// the socket bind/connect. Windows refuses more in a file name; the engine
+/// checks the local nickname for that with
+/// `habilis_network_util::file_name::windows_file_stem_problem`, on Windows
+/// only, so the wire rule here stays the same on every OS.
 pub(super) fn is_forbidden(ch: char) -> bool {
     is_forbidden_mesh_name(ch) || matches!(ch, '/' | '\\')
 }

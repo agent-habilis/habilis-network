@@ -35,7 +35,8 @@ pub mod state_file {
     };
 }
 
-/// The local control socket a CLI-driven daemon serves, and its client half.
+/// The local IPC endpoint a CLI-driven daemon serves (a socket on Unix, a
+/// named pipe on Windows), and its client half.
 ///
 /// Host-only: unix sockets and named pipes have no wasm32 equivalent. An
 /// in-process driver — which is what a browser always is — takes typed requests
@@ -43,8 +44,8 @@ pub mod state_file {
 #[cfg(feature = "host")]
 pub mod ipc {
     pub use crate::transport::ipc::{
-        Addressed, NoDaemon, active_socket_paths, json_ack, json_error, json_ok_msg, send,
-        send_to_path,
+        Addressed, ForeignEndpoint, IpcName, NoDaemon, QuitError, QuitTarget, active_endpoints,
+        json_ack, json_error, json_ok_msg, quit, send, send_to_endpoint, terminate,
     };
 }
 

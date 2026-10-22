@@ -787,6 +787,14 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         transports,
         per_peer_gate,
     } = params;
+    // The local nickname is the stem of every per-member file (state, log, IPC
+    // marker), so on Windows it must also be a valid file stem. Checked first,
+    // before any file or socket exists. Only the local name: a peer's name never
+    // becomes a file, and the wire rule of `Nickname` stays the same everywhere.
+    #[cfg(windows)]
+    if let Some(problem) = crate::util::file_name::windows_file_stem_problem(author.as_str()) {
+        anyhow::bail!("the nickname '{author}' cannot be used on Windows: the name {problem}");
+    }
     let endpoint_owner = if injected.is_none() {
         EndpointOwner::Engine
     } else {
@@ -1317,6 +1325,43 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::testing::{errors_through_runtime_drop, silent_relay_rung};
+
+    // On Windows a local nickname that is no valid file stem stops the setup
+    // with a message that names the reason, before any endpoint binds.
+    #[cfg(windows)]
+    #[test]
+    async fn a_windows_device_name_is_refused_as_the_local_nickname() {
+        let nickname = crate::protocol::Nickname::new("con").expect("a valid nickname");
+        let (kind, author) =
+            crate::membership::resolve_kind(&crate::membership::Opts::default(), Some(nickname))
+                .expect("a kind");
+        let result = super::setup_mesh(
+            kind,
+            super::SetupParams {
+                author,
+                max_peers: 8,
+                max_direct: 0,
+                runtime_base: None,
+                state_file: None,
+                sink: std::sync::Arc::new(crate::embed::SilentSink),
+                endpoint: None,
+                protocols: Vec::new(),
+                transports: crate::lookup::TransportOpts::default(),
+                per_peer_gate: None,
+                cohost: None,
+                live_count: None,
+            },
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("the nickname 'con' must be refused on Windows");
+        };
+        let shown = error.to_string();
+        assert!(
+            shown.contains("cannot be used on Windows") && shown.contains("device"),
+            "{shown}"
+        );
+    }
 
     // The mesh policy decides multi-hop: the default list has it, a list that
     // leaves it out has none, and no flag says otherwise.

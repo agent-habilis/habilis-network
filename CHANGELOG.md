@@ -21,6 +21,61 @@ published to a registry; pin it with
 - `LookupSet::any` is public: whether the set names at least one lookup. A set that names none
   resolves to a loopback-only mesh, and a consumer with another default for that case asks this
   in place of its own copy of the rule (#9).
+- `runtime::ipc::IpcName`: the name of the local control endpoint of a daemon, a socket path on
+  Unix and a named pipe on Windows. A daemon writes it in a marker, `<mesh folder>/<nick>.ipc`,
+  one line, born `0600` on Unix, beside its state file. The marker is written after the endpoint
+  binds and before the daemon reports ready, and it is removed at a graceful exit only while it
+  still names that daemon. On Windows, where the pipe name is per process, a second daemon with
+  the same nickname keeps its marker. On Unix both have the same socket path, and the second
+  bind replaces the first's socket, as before. A marker that cannot be written fails the bind.
+- The IPC of a daemon works on Windows, over a named pipe. Its name is `\\.\pipe\habilis-` and
+  128 random bits, with no mesh prefix and no nickname in it, because any local account can list
+  pipe names. The pipe has the security descriptor `O:<user>D:P(A;;GA;;;<user>)`: the user owns
+  it, also in an elevated process, and no other account can open it. A client opens the pipe
+  with `SECURITY_IDENTIFICATION`, so the server can identify the client but not act as it, and
+  checks that the user owns the pipe before it sends a byte.
+- `runtime::ipc::ForeignEndpoint`: the error of a client whose endpoint belongs to another
+  account (on Windows, a pipe that the user does not own). It is not `NoDaemon`: the endpoint is
+  there, and the remedy "start a daemon" does not fit.
+- A daemon stops on an IPC `quit`, on every OS: `{"command":"quit","mesh":"<mesh id>"}`. The
+  engine answers it before the app sees the line. The daemon answers `{"ok":true}`, then takes
+  the path of `SIGTERM`: it removes its state file and its marker, broadcasts `Left`, and exits.
+  A quit for another mesh is refused, so a stale marker cannot stop another session. On Windows
+  this is the only graceful stop. `runtime::ipc::quit(&QuitTarget)` sends it, at the address that
+  `send` takes (base, mesh, nickname), and returns a `QuitError` (`Unreached`, `OldDaemon`,
+  `Refused`). `runtime::ipc::terminate(&QuitTarget, pid)` sends it on every OS and, on Unix,
+  sends `SIGTERM` to `pid` when the quit was not heard or the daemon is too old to know it.
+  `util::process::terminate` does not change: it signals a pid, and on Windows it stays
+  `Unsupported`.
+- On Windows, a daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) stops when its
+  owner exits, by the same watch as on Unix: every `PPID_WATCH_INTERVAL` (1.5 s) it compares the
+  start time of the owner with the one it read at startup, so a reused pid does not fool it. The
+  daemon then takes the path of `SIGTERM`. A daemon with no `--owner-pid` has no watch on Windows:
+  Windows does not reparent an orphan, and the pid of a dead parent can be reused, so the watch of
+  the parent pid stays Unix only. On every OS the watch now writes an `info` line with the target
+  `habilis_network::lifecycle` when it stops the daemon. The error of an owner refused at startup
+  now says "is not running or cannot be read", and an owner that cannot be read later counts as
+  gone.
+- `habilis-network-util`'s `file_retry`, re-exported as `habilis_network::util::file_retry` under
+  `host`: `retry_while_shared` runs a rename or a remove again on Windows while a reader blocks it
+  (error 5 or 32), every `tuning::SHARED_FILE_RETRY_STEP` (1 ms) up to
+  `tuning::SHARED_FILE_RETRY_DEADLINE` (50 ms); `retry_while_shared_for` takes the deadline; and
+  `is_shared_file_error` tells the two codes apart. On Unix it runs the operation once.
+- On Windows, ctrl-break and the close of the console take the graceful path of a daemon, as
+  ctrl-c does: the five console events of `tokio::signal::windows` (ctrl-c, ctrl-break, close,
+  logoff and shutdown) feed the quit channel, and the daemon takes the path of `SIGTERM`. Each
+  writes `console event; leaving` with the target `habilis_network::lifecycle`. The listeners are
+  made before the node is ready, so an event that comes just after it is not lost. A logoff and a
+  shutdown do not reach a node today: Windows does not give them to the console handler of a
+  process that loaded `user32.dll`, and a node loads it (iroh's `netwatch` through COM, and the
+  runtime base through `SHGetKnownFolderPath`). A process with no console gets no console event.
+- `habilis-network-util`, with `test-fixtures` on Windows: `win_console::send_console_event`
+  sends ctrl-c or ctrl-break to another process through its console, and
+  `win_console::allow_ctrl_c` turns off the flag that makes a process ignore ctrl-c. They exist
+  for tests: the sender changes the console of the calling process.
+- On Windows, a local nickname that is no valid Windows file stem stops the setup with the
+  reason: one of `: * ? " |`, a trailing dot, or a device name such as `con` or `com1`, also
+  with an extension. The wire rule of `Nickname` does not change.
 - `SymmetricKey::from_zeroizing`, `TicketSecret::from_zeroizing`, and
   `StreamSecret::from_zeroizing` take a `Zeroizing<[u8; 32]>` whole, so a consumer that holds a
   secret in a wiped buffer (a salt, a token read off a stream) moves it into its type without a
@@ -209,6 +264,15 @@ published to a registry; pin it with
   keys of the handles before it binds the endpoint with its transports. Its fields are private,
   so an `InjectedEndpoint { .. }` literal no longer compiles. The transport wiring and the mesh
   check are crate-private.
+- **Breaking:** the discovery of local daemons reads markers, not socket files.
+  `runtime::ipc::active_socket_paths` is `active_endpoints` and returns `Vec<IpcName>`, sorted,
+  and `send_to_path` is `send_to_endpoint(&IpcName, ..)`. `send` finds the daemon through its
+  marker: a client of this version does not find a daemon of an earlier one, which writes no
+  marker. On Unix the socket path does not change. The wire does not change.
+- The engine reserves one IPC command: a JSON object whose `command` is `"quit"` and whose
+  `mesh` is a valid mesh id. Such a line never reaches `NodeDriver::handle_ipc`. Any other line,
+  also a `quit` with no valid `mesh`, reaches the app as before. No app of this workspace or of
+  agent-gossip has a `quit` command.
 - A secret key no longer passes through a plain array that the engine writes and nobody wipes.
   The stretched password key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the
   root of an invite, the salt and the token of a blob ticket, and the secret of a stream
@@ -518,6 +582,18 @@ published to a registry; pin it with
 
 ### Fixed
 
+- On Windows, the relay server no longer logs a client that reset its connection as "failed to
+  handle connection" at error (#31). The fix is in agent-habilis/iroh (fdf6cc2); until it is
+  merged there, a `[patch]` in the root `Cargo.toml` points the iroh family at it. The patch holds
+  only in this workspace, so a consumer of habilis-network still gets the pin without the fix.
+  Four loopback tests that were ignored on Windows for this run there again.
+- On Windows, a reader that holds the state file or the IPC marker without `FILE_SHARE_DELETE`,
+  such as the `Get-Content` of PowerShell, no longer makes the daemon fail to replace or remove
+  it. The rename and the remove run again every 1 ms while they fail with error 5 or 32, for up
+  to 50 ms (`habilis-network-util`'s `file_retry::retry_while_shared`, re-exported as
+  `habilis_network::util::file_retry`). With a PowerShell reader in a tight loop, most renames
+  failed before. `StateFile::remove` now logs a remove that fails for a reason other than a
+  missing file.
 - A loopback room no longer stays split into separate meshes when a joiner took the rung of a
   holder that left: a member that let go of the rendezvous owes a return when its walk reads a
   holder that no member of its mesh hosts (#4).
