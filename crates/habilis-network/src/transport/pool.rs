@@ -110,6 +110,10 @@ struct PoolInner {
     /// [`UnicastPool::send_registered`] and [`UnicastPool::send_batch_in_background`]: an inline
     /// dial through [`UnicastPool::warm_or_dial`] does not.
     dialing: std::sync::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
+    /// Tests only: the next dial waits on this before it connects, so a test can queue a send
+    /// behind it.
+    #[cfg(test)]
+    dial_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// Each peer's full address, from its `PeerInfo`. Dialed instead of the
     /// bare id so the relay is in the address book before the handshake:
     /// iroh opens a connection's relay path only then, and with it a UDP loss
@@ -171,6 +175,8 @@ impl UnicastPool {
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashMap::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                dial_gate: std::sync::Mutex::new(None),
                 relay_transport,
                 admission: std::sync::OnceLock::new(),
             }),
@@ -205,6 +211,8 @@ impl UnicastPool {
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashMap::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                dial_gate: std::sync::Mutex::new(None),
                 relay_transport: false,
                 admission: std::sync::OnceLock::new(),
             }),
@@ -374,6 +382,16 @@ impl UnicastPool {
             }
         });
         true
+    }
+
+    /// Tests only: hold the next dial until the returned [`Notify`](tokio::sync::Notify) is notified.
+    #[cfg(test)]
+    pub(crate) fn hold_next_dial(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        if let Ok(mut slot) = self.inner.dial_gate.lock() {
+            *slot = Some(gate.clone());
+        }
+        gate
     }
 
     /// Forget the pooled connection of `eid` and its dial-failure cooldown, and keep its address,
@@ -669,6 +687,18 @@ impl UnicastPool {
             .ok()
             .and_then(|addrs| addrs.get(&eid).cloned())
             .unwrap_or_else(|| EndpointAddr::new(eid));
+        #[cfg(test)]
+        {
+            let gate = self
+                .inner
+                .dial_gate
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+        }
         match dial(&endpoint, addr).await {
             Ok(conn) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
@@ -1285,17 +1315,18 @@ mod tests {
     async fn a_background_frame_during_a_dial_is_delivered_after_it() {
         let (pool, server, router, client, mut frames) = pool_with_collecting_server().await;
 
+        let gate = pool.hold_next_dial();
         assert!(
             pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"one"))
                 .await,
             "the first frame starts the dial"
         );
-        tokio::task::yield_now().await;
         assert!(
             pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"two"))
                 .await,
             "the second frame waits for the dial instead of being dropped"
         );
+        gate.notify_one();
 
         let mut got = vec![next_frame(&mut frames).await, next_frame(&mut frames).await];
         got.sort();
