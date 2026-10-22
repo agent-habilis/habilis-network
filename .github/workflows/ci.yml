@@ -388,11 +388,11 @@ jobs:
           echo "wasm-bindgen resolved to $version"
           cargo install wasm-bindgen-cli --version "$version" --locked
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Build wasm
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web
-        run: ./build-wasm.sh
-
-      - uses: oven-sh/setup-bun@v2
+        run: bun build-wasm.ts
 
       - name: Install frontend dependencies
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web
