@@ -29,7 +29,7 @@ function readings(file: string): Reading[] {
   for (const line of readFileSync(file, "utf8").split("\n")) {
     const found = LINE.exec(line);
     if (found) {
-      const [t, phase, , , , underlay, rss] = found.slice(1).map(Number);
+      const [t = 0, phase = 0, , , , underlay = 0, rss = 0] = found.slice(1).map(Number);
       rows.push({ t, phase, underlay, rss });
     }
   }
@@ -48,11 +48,13 @@ function report(run: string): string {
     const phase1 = rows.filter((row) => row.phase === 1);
     const phase2 = rows.filter((row) => row.phase === 2);
     if (phase1.length === 0 || phase2.length === 0) continue;
-    const switchAt = phase2[0].t;
+    const switchAt = phase2[0]?.t ?? 0;
     const late = phase2.filter((row) => row.t >= switchAt + SECS_INTO_PHASE_2);
-    if (late.length === 0) continue;
-    deltas.push(late[0].rss - phase1[phase1.length - 1].rss);
-    underlays.push(late[0].underlay);
+    const first = late[0];
+    const last = phase1[phase1.length - 1];
+    if (!first || !last) continue;
+    deltas.push(first.rss - last.rss);
+    underlays.push(first.underlay);
   }
   if (deltas.length === 0) return `${run}: no node has both readings`;
   const name = run.replace(/\/+$/, "").split("/").pop() ?? run;

@@ -7,15 +7,15 @@ export type Num = { value: number; float: boolean };
 export function median(values: number[], float: boolean): Num {
   const sorted = [...values].sort((a, b) => a - b);
   const n = sorted.length;
-  if (n % 2 === 1) return { value: sorted[(n - 1) / 2], float };
-  return { value: (sorted[n / 2 - 1] + sorted[n / 2]) / 2, float: true };
+  if (n % 2 === 1) return { value: sorted[(n - 1) / 2] ?? 0, float };
+  return { value: ((sorted[n / 2 - 1] ?? 0) + (sorted[n / 2] ?? 0)) / 2, float: true };
 }
 
 // Python prints a float in exponent form from 1e16 up and below 1e-4, and a whole float with ".0".
 export function show(n: Num): string {
   const v = n.value;
   if (n.float && v !== 0 && Number.isFinite(v) && (Math.abs(v) >= 1e16 || Math.abs(v) < 1e-4)) {
-    const [mantissa, exponent] = v.toExponential().split("e");
+    const [mantissa = "", exponent = ""] = v.toExponential().split("e");
     const sign = exponent.startsWith("-") ? "-" : "+";
     return `${mantissa}e${sign}${exponent.replace(/^[+-]/, "").padStart(2, "0")}`;
   }

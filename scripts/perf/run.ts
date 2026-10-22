@@ -26,7 +26,7 @@ function capture(cmd: string): string {
   return (proc.stdout ?? "").replace(/\n+$/, "");
 }
 
-const [bin, nArg, steadyArg, outArg] = process.argv.slice(2);
+const [bin = "", nArg = "0", steadyArg = "0", outArg = ""] = process.argv.slice(2);
 const N = Number(nArg);
 const STEADY = Number(steadyArg);
 const OUT = outArg;

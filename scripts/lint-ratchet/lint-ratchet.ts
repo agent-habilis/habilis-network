@@ -97,7 +97,7 @@ export function findings(lines: string[]): Counts {
     const dedupe = [code, span.file_name, span.line_start, span.column_start].join("\u0000");
     if (seen.has(dedupe)) continue;
     seen.add(dedupe);
-    const k = key(code, match[1]);
+    const k = key(code, match[1] ?? "");
     counts.set(k, (counts.get(k) ?? 0) + 1);
   }
   return counts;
@@ -105,7 +105,7 @@ export function findings(lines: string[]): Counts {
 
 /** Run clippy on the workspace and return its JSON lines. Exit if it did not finish. */
 export function clippyLines(): string[] {
-  const proc = spawnSync(CLIPPY[0], CLIPPY.slice(1), {
+  const proc = spawnSync("cargo", CLIPPY.slice(1), {
     cwd: ROOT,
     encoding: "utf8",
     maxBuffer: 1 << 30,
@@ -128,8 +128,8 @@ export function readBaseline(file: string): Counts {
   for (const raw of readFileSync(file, "utf8").split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
-    const [lint, crate, count] = line.split("|");
-    counts.set(key(lint, crate), Number(count));
+    const [lint = "", crate = "", count] = line.split("|");
+    counts.set(key(lint, crate), Number(count ?? 0));
   }
   return counts;
 }
@@ -181,7 +181,7 @@ function main(argv: string[]): number {
     const arg = argv[i];
     if (arg === "--update") update = true;
     else if (arg === "--from-json") fromJson = argv[++i];
-    else if (arg === "--baseline") baseline = argv[++i];
+    else if (arg === "--baseline") baseline = argv[++i] ?? baseline;
     else {
       console.error(`lint-ratchet: unknown argument ${arg}`);
       return 2;

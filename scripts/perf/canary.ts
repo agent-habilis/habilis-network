@@ -10,7 +10,7 @@ const clock = () => {
   return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 };
 
-const out = openSync(process.argv[2], "w");
+const out = openSync(process.argv[2] ?? "", "w");
 let last = performance.now() / 1000;
 while (true) {
   await Bun.sleep(100);

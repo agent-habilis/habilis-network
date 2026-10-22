@@ -13,7 +13,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const [bin, root, steadyArg, ...specs] = process.argv.slice(2);
+const [bin = "", root = "", steadyArg = "", ...specs] = process.argv.slice(2);
 const STEADY = steadyArg;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LOAD_BELOW = Number(process.env.LOAD_BELOW || "5");
@@ -30,7 +30,7 @@ mkdirSync(root, { recursive: true });
 const drive = path.join(root, "drive.log");
 
 for (const spec of specs) {
-  const [N, k] = spec.split(":");
+  const [N = "", k = ""] = spec.split(":");
   let waited = 0;
   while (true) {
     const load = Number(capture("sysctl -n vm.loadavg | awk '{print $2}'"));

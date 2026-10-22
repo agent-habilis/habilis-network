@@ -99,7 +99,7 @@ function main(): number {
   const why = new Map(RULES.map((rule) => [rule.name, rule.why]));
 
   for (const [key, count] of [...found].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    const [rule, file] = key.split("|");
+    const [rule = "", file = ""] = key.split("|");
     const limit = allowed.get(key)?.count ?? 0;
     if (count > limit) {
       problems.push(

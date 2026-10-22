@@ -75,7 +75,7 @@ function summarize(run: string): string {
   }
   let gaps: string[] = [];
   if (existsSync(`${run}/canary.log`)) {
-    gaps = [...readFileSync(`${run}/canary.log`, "utf8").matchAll(/gap_s=([0-9.]+)/g)].map((m) => m[1]);
+    gaps = [...readFileSync(`${run}/canary.log`, "utf8").matchAll(/gap_s=([0-9.]+)/g)].map((m) => m[1] ?? "");
   }
 
   const rosterMed = roster.length ? show(median(roster, false)) : "-";

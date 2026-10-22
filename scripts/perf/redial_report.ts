@@ -35,7 +35,7 @@ function report(folder: string): void {
     console.log(folder, "no lines");
     return;
   }
-  const hours = Math.max(...rows.map((row) => row[0])) / 3600;
+  const hours = Math.max(...rows.map((row) => row[0] ?? 0)) / 3600;
   const nodes = rows.length;
   const name = folder.replace(/\/+$/, "").split("/").pop() ?? folder;
   for (const [kind, closes, redials] of [
@@ -43,10 +43,10 @@ function report(folder: string): void {
     ["pool", 5, 6],
     ["session", 3, 4],
   ] as const) {
-    const totalCloses = rows.reduce((sum, row) => sum + row[closes], 0);
-    const totalRedials = rows.reduce((sum, row) => sum + row[redials], 0);
+    const totalCloses = rows.reduce((sum, row) => sum + (row[closes] ?? 0), 0);
+    const totalRedials = rows.reduce((sum, row) => sum + (row[redials] ?? 0), 0);
     const share = totalCloses ? totalRedials / totalCloses : 0.0;
-    const perNode = rows.map((row) => row[redials] / hours);
+    const perNode = rows.map((row) => (row[redials] ?? 0) / hours);
     console.log(
       `${name.padEnd(12)} ${kind.padEnd(8)} nodes=${nodes} ` +
         `closes/node/h=${fixed(totalCloses / nodes / hours, 1)} ` +
