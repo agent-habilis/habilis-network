@@ -23,7 +23,7 @@
 //! - `MESH_FLOOD_PEERS=K`: from the second 30 on, the node sends messages of 3000 bytes to its first
 //!   K roster peers as fast as it can. The RSS against K is the worst case of one connection.
 //! - `MESH_FLOOD_SENDERS=S`: with `MESH_FLOOD_PEERS`, only the nodes with `MESH_NODE_INDEX` up to S
-//!   flood (`scripts/perf/run.sh` sets the index). The others only receive. Each line then ends
+//!   flood (`scripts/perf/run.ts` sets the index). The others only receive. Each line then ends
 //!   with `role sender` or `role receiver`. Unset, every node floods and the line has no role.
 //! - `MESH_BLOCK_UDP_AFTER_SECS=60`: after that many seconds the node takes IP away
 //!   from every connection of the process, once. This is the second phase of the
