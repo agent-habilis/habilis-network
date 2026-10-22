@@ -23,7 +23,12 @@ if (!file) {
 // directory (mkdtemp is 0700) and a 0600 FIFO inside it.
 const dir = mkdtempSync(path.join(process.env.TMPDIR || tmpdir(), "tail-stream."));
 const fifo = path.join(dir, "input");
-spawnSync("mkfifo", ["-m", "600", fifo], { stdio: "inherit" });
+const mkfifo = spawnSync("mkfifo", ["-m", "600", fifo], { stdio: "inherit" });
+if (mkfifo.status !== 0) {
+  console.error(`tail.ts: mkfifo failed for ${fifo}`);
+  rmSync(dir, { recursive: true, force: true });
+  process.exit(1);
+}
 
 let tailPid = 0;
 let streamPid = 0;

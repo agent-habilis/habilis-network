@@ -56,6 +56,26 @@ test("a shebang file with no extension fails (env python3)", () => {
   expectExit({ "bin/tool": "#!/usr/bin/env python3\nprint('hi')\n" }, 1);
 });
 
+// Other names for the same languages.
+test("a .zsh file fails", () => {
+  expectExit({ "scripts/build.zsh": "echo hi\n" }, 1);
+});
+test("a .js file fails", () => {
+  expectExit({ "scripts/tool.js": "console.log('hi')\n" }, 1);
+});
+test("a shebang in /usr/local/bin fails", () => {
+  expectExit({ "bin/tool": "#!/usr/local/bin/bash\necho hi\n" }, 1);
+});
+test("a shebang with env -S fails", () => {
+  expectExit({ "bin/tool": "#!/usr/bin/env -S bash -e\necho hi\n" }, 1);
+});
+test("a shebang in a file with another extension fails", () => {
+  expectExit({ "bin/tool.txt": "#!/bin/sh\necho hi\n" }, 1);
+});
+test("a bun shebang with env -S passes", () => {
+  expectExit({ "bin/tool": "#!/usr/bin/env -S bun run\nconsole.log('hi')\n" }, 0);
+});
+
 // A TypeScript script, a script with another shebang, and a file that mentions a shell in its text pass.
 test("a clean tree passes", () => {
   expectExit({ "scripts/build.ts": "console.log('hi')\n", "README.md": "run it with bun\n" }, 0);

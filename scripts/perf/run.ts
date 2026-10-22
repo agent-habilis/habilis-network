@@ -13,7 +13,7 @@
 // of each node), host.log (one line per 10 s: load, process states, free memory),
 // canary.log (every pause of the host over 0.5 s), probe.log, and `done` at the end.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,7 +123,10 @@ const sampler = (async () => {
         appendFileSync(`${OUT}/probe.log`, `${capture("date +%T")} n${i} pid=${pid} silent ${age}s: ${info}\n`);
         const sampleFile = `${OUT}/sample-n${i}.txt`;
         if (sampled < 4 && !existsSync(sampleFile)) {
-          capture(`sample ${pid} 3 -file ${sampleFile} > /dev/null 2>&1`);
+          // Not `spawnSync`: `sample` takes 3 s, and the loop would stall every other node's probe.
+          const sampler = spawn("sample", [String(pid), "3", "-file", sampleFile], { stdio: "ignore" });
+          sampler.on("error", () => {}); // `sample` is macOS only.
+          sampler.unref();
           sampled++;
         }
       }
