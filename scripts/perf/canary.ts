@@ -2,7 +2,7 @@
 // usage: bun scripts/perf/canary.ts <out file>
 
 import { openSync, writeSync } from "node:fs";
-import { fixed } from "./pyformat";
+import { fixed } from "./pyformat/pyformat";
 
 const clock = () => {
   const now = new Date();

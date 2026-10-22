@@ -21,7 +21,7 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { median, show } from "./pyformat";
+import { median, show } from "./pyformat/pyformat";
 
 const clean = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
 

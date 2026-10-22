@@ -17,7 +17,7 @@
 // the lines of the two cells by hand, three runs each.
 
 import { readdirSync, readFileSync } from "node:fs";
-import { fixed, mean, median, show } from "./pyformat";
+import { fixed, mean, median, show } from "./pyformat/pyformat";
 
 const SECS_INTO_PHASE_2 = 180;
 const LINE = /^t (\d+) phase (\d) peers (\d+) links (\d+) sessions (\d+) underlay (\d+) rss_mb (\d+)/;

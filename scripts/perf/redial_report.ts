@@ -7,7 +7,7 @@
 // re-dials per node per hour and the share of closes that were followed by a re-dial.
 
 import { readdirSync, readFileSync } from "node:fs";
-import { fixed, median } from "./pyformat";
+import { fixed, median } from "./pyformat/pyformat";
 
 const LINE =
   /^t (\d+) .* qclose (\d+) qredial (\d+) sclose (\d+) sredial (\d+)(?: pclose (\d+) predial (\d+))?/;
