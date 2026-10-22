@@ -277,10 +277,6 @@ fn a_node_steps_down_the_ladder_and_climbs_back() {
 /// `Request::OfferSession`, blocks `WebRTC`, and lets the vector go only after the loss
 /// is observed. The two asserts that no route exists hold by construction: a failure of
 /// either is a fault of the hook, not a reason to skip.
-#[cfg_attr(
-    windows,
-    ignore = "the test relay logs a client reset as ERROR on Windows (#31)"
-)]
 #[test]
 fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     let guard = habilis_network_test_tracing::init();
@@ -390,10 +386,6 @@ async fn cut_webrtc_between(first: &Member, second: &Member) {
 /// gate keeps cells off the relay and the only way left is the hop. The edge
 /// between alice and bob ages out of the topology after the stuck time of 20 s
 /// plus one link-state of 15 s, which is why the waits are long.
-#[cfg_attr(
-    windows,
-    ignore = "the test relay logs a client reset as ERROR on Windows (#31)"
-)]
 #[test]
 fn the_multihop_rung_forwards_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();

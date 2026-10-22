@@ -163,10 +163,6 @@ async fn until_every_view_holds(
     }
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "the test relay logs a client reset as ERROR on Windows (#31)"
-)]
 #[test]
 fn a_mesh_of_ten_links_every_member_to_every_other() {
     let guard = habilis_network_test_tracing::init();
@@ -190,10 +186,6 @@ fn a_mesh_of_ten_links_every_member_to_every_other() {
 /// G + 1 members form a full mesh, so every member holds G links: the holder of the beacon too.
 /// Its link to its own rendezvous is no link to a peer, and it must not take one of its G slots,
 /// or the holder stays at G - 1 peers forever and, by parity, so does one member more.
-#[cfg_attr(
-    windows,
-    ignore = "the test relay logs a client reset as ERROR on Windows (#31)"
-)]
 #[test]
 fn a_mesh_of_g_plus_one_links_every_member_to_every_other_the_beacon_holder_too() {
     let guard = habilis_network_test_tracing::init();

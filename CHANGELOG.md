@@ -582,6 +582,11 @@ published to a registry; pin it with
 
 ### Fixed
 
+- On Windows, the relay server no longer logs a client that reset its connection as "failed to
+  handle connection" at error (#31). The fix is in agent-habilis/iroh (fdf6cc2); until it is
+  merged there, a `[patch]` in the root `Cargo.toml` points the iroh family at it. The patch holds
+  only in this workspace, so a consumer of habilis-network still gets the pin without the fix.
+  Four loopback tests that were ignored on Windows for this run there again.
 - On Windows, a reader that holds the state file or the IPC marker without `FILE_SHARE_DELETE`,
   such as the `Get-Content` of PowerShell, no longer makes the daemon fail to replace or remove
   it. The rename and the remove run again every 1 ms while they fail with error 5 or 32, for up
