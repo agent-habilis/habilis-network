@@ -39,6 +39,7 @@ pub struct AppClass {
 /// engine's generic prefix (join-horizon / third-party gating), passed to
 /// [`NodeApp::on_app_frame`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct InboundApp<'message> {
     pub message: &'message Authored,
     pub surfaceable: bool,

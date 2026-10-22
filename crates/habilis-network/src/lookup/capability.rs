@@ -16,6 +16,7 @@ use super::build_peer_endpoint;
 /// when no report completes (offline / slow): then only `node_id` /
 /// `local_addrs` are known and the rest stay `None`.
 #[derive(Debug, Serialize)]
+#[non_exhaustive]
 pub struct NetworkCapability {
     pub node_id: String,
     pub local_addrs: Vec<SocketAddr>,

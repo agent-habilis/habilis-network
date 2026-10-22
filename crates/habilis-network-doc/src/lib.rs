@@ -101,6 +101,7 @@ pub enum Ingested {
 /// discards one, and a peer's entry is silently erased. Changing either key on a
 /// live mesh is a format break.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SelfWriteGate {
     /// Root key of the per-peer map, keyed by nickname.
     pub map: String,

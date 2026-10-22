@@ -38,6 +38,7 @@ const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 
 /// A decoded blob ticket.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct BlobTicket {
     pub addr: EndpointAddr,
     pub secret: TicketSecret,

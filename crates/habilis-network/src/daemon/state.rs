@@ -134,6 +134,7 @@ impl Default for ParkedLinkStates {
 /// is a gossip-overlay link fact). Serialized directly into the
 /// consumer's roster surfaces.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct RosterEntry {
     pub nickname: Nickname,
     pub last_seen_secs_ago: Option<u64>,
@@ -146,6 +147,7 @@ pub struct RosterEntry {
 /// most-recently-seen first, plus `count == peers.len() + 1` (the
 /// `+1` is self — same definition as the statusline `peer_count`).
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct RosterSnapshot {
     pub peers: Vec<RosterEntry>,
     pub count: usize,

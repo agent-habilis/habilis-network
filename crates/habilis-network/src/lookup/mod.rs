@@ -110,6 +110,7 @@ pub(crate) use relay::{
 /// UDP sockets), so the field list itself differs per target. `Default` is
 /// "IP and relay only".
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct TransportHandles {
     /// Source-routed multi-hop: reach a peer with no direct path by relaying
     /// through intermediate peers. Built with the `multihop` feature; the native

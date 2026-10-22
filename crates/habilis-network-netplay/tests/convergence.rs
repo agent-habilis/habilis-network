@@ -23,15 +23,18 @@ mod harness;
 use harness::{Runner, sim};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Input(pub i32);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct State {
     pub value: i64,
     pub frame: Frame,
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Game;
 
 impl Config for Game {

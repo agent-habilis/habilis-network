@@ -321,6 +321,7 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 /// One stalled big group's repair ask: which author to query and which shard
 /// indexes we still lack.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct RepairTicket {
     pub author: Nickname,
     pub group: ShardGroup,

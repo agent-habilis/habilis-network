@@ -15,6 +15,7 @@ use crate::tuning::LOG_FILE_MAX_BYTES;
 /// calls [`configure`]; if it never does (a path that doesn't log to files)
 /// the defaults apply.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct LogConfig {
     /// The consumer's runtime base (see
     /// [`runtime_base`](crate::runtime_base)) — the default log root when

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A copy of the counters at one moment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stats {
     /// Frames this member put on the topic, and their bytes (header included).
     pub frames_out: u64,

@@ -51,12 +51,14 @@ const POLL_MS: i32 = 50;
 /// refuses (see [`crate::accept_ice_uri`]). Dropping the fields means a
 /// credentialed server cannot be expressed, let alone configured.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct IceServer {
     pub urls: Vec<String>,
 }
 
 /// ICE servers for the browser's own agent.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct IceServers(pub Vec<IceServer>);
 
 impl Default for IceServers {
@@ -130,6 +132,7 @@ fn new_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), Js
 }
 
 /// A negotiated browser session attached into a [`BrowserHubTransport`].
+#[non_exhaustive]
 pub struct BrowserSession {
     pub remote: EndpointId,
 }

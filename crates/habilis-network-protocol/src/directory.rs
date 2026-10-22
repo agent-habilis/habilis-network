@@ -94,6 +94,7 @@ pub fn directory_config(lookups: LookupOpts) -> MeshConfig {
 /// discoverers ignore unknown keys via serde's default behaviour and
 /// ignore unparseable bodies entirely).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Ad {
     pub id: MeshId,
     pub peers: usize,
@@ -124,6 +125,7 @@ impl Ad {
 
 /// One live directory entry, decoded from an [`Ad`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Listing {
     pub mesh: MeshId,
     pub name: MeshName,

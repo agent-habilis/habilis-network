@@ -170,6 +170,7 @@ fn decode_address(
 /// deployment: a laptop on the open internet wants a public server, a private
 /// network wants its own, and the test suite wants none at all.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct IceConfig {
     /// `host:port` STUN servers, all asked at once; the first well-formed
     /// answer wins. Resolved at gather time, so a hostname is fine.

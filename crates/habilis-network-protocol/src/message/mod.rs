@@ -450,6 +450,7 @@ fn empty_body() -> MessageBody {
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
 /// `ext`: free-form object for experimental/future fields; parsers MUST ignore unknown keys inside it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Message {
     pub version: String,
     pub id: MessageId,
@@ -1164,6 +1165,7 @@ impl Message {
 /// the multipart split.
 #[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ChainCtx {
     pub seq: u64,
     pub prev: Option<ContentHash>,
@@ -1186,6 +1188,7 @@ impl ChainCtx {
 /// The inputs of a test message: the mesh, the author, the body, the chain and the app tag.
 #[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct BuildMsgParams<'mesh> {
     pub mesh: &'mesh MeshId,
     pub author: &'mesh Nickname,

@@ -85,6 +85,7 @@ fn escaped_len(text: &str) -> usize {
 
 /// One surfaced `msg`, flattened for a consumer outside the engine.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Inbound {
     /// The author's nickname.
     pub nick: String,

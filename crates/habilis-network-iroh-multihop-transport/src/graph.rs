@@ -24,6 +24,7 @@ pub(crate) struct Graph {
 /// One struct for the pair, because both are an `AppId` and a call that swaps
 /// them compiles and routes the wrong way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Leg {
     /// Where the route starts.
     pub src: AppId,

@@ -68,6 +68,7 @@ impl std::error::Error for PasswordRequired {}
 /// always public. Name + config are derived, not supplied — the string alone
 /// determines the mesh.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct TopicParams {
     pub string: String,
     /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
@@ -78,6 +79,7 @@ pub struct TopicParams {
 /// [`setup_mesh`](super::setup::setup_mesh). `advertise_directory` is the
 /// directory to re-broadcast into (`create --advertise`), or `None`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Resolved {
     pub kind: SetupKind,
     pub author: Nickname,

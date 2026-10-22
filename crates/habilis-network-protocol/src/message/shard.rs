@@ -70,6 +70,7 @@ impl ShardGroup {
 /// memory guard: the reassembly store is byte-budgeted and never allocates by
 /// `total`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Shard {
     pub group: ShardGroup,
     pub idx: u32,

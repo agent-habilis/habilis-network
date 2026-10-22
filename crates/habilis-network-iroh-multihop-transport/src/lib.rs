@@ -70,6 +70,7 @@ pub use graph::Leg;
 
 /// What the data path of a node counted: a test reads them to tell where cells go.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MultihopCounters {
     /// Cells passed on to a next hop for other nodes.
     pub forwarded: u64,

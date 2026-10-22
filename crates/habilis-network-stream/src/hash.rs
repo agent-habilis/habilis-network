@@ -125,6 +125,7 @@ impl fmt::Debug for StreamSecret {
 /// }
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct StreamHash {
     /// The producer's endpoint: its id, its relay, and its direct addresses.
     pub addr: EndpointAddr,

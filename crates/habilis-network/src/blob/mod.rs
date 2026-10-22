@@ -63,6 +63,7 @@ impl ContentId {
 /// and the mesh password it inherits (so a scraped ticket cannot be redeemed
 /// without it).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct OffloadRequest {
     pub path: PathBuf,
     pub spool_dir: PathBuf,

@@ -233,6 +233,7 @@ where
 /// and only the consumer knows what its commands are called. It appends that
 /// half after matching on this.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NoDaemon {
     pub nickname: Nickname,
 }

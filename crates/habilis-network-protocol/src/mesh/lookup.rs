@@ -558,6 +558,7 @@ impl OptFlag<MeshName> {
 /// (never a silent no-op). Typed so callers can classify it — the MCP
 /// server maps it to `invalid_params`, the CLI to an `anyhow` bail.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AdvertiseRequiresReachable;
 
 impl fmt::Display for AdvertiseRequiresReachable {
@@ -638,6 +639,7 @@ impl fmt::Display for Lookup {
 /// the id. `mdns`/`dht` are address-lookups; `relay_lookup` is the
 /// rendezvous through a relay, bare or with a custom ladder.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct LookupSet {
     pub mdns: bool,
     pub dht: bool,

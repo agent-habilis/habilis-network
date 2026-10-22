@@ -56,6 +56,7 @@ pub(crate) struct InboundPacket {
 /// demote a peer to the relay can then say *why* rather than inferring it from
 /// a transfer that did not finish.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct SessionCounters {
     /// Datagrams handed to `RTCDataChannel.send` without it throwing.
     pub sent: AtomicU64,
@@ -73,6 +74,7 @@ pub struct SessionCounters {
 /// A snapshot of [`SessionCounters`], since the counters themselves are not
 /// `Clone` and reading four atomics separately would not be one moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SessionCounts {
     pub sent: u64,
     pub dropped_queue_full: u64,
@@ -93,6 +95,7 @@ impl SessionCounts {
 /// positional tuple: every value shares one type, so a swapped pair would
 /// compile silently.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct DataChannelCounters {
     pub bytes_sent: f64,
     pub bytes_received: f64,
@@ -104,6 +107,7 @@ pub struct DataChannelCounters {
 /// [`DataChannelCounters`] is named: the byte counters share one type, so a
 /// swapped pair would compile silently.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct SelectedPairStats {
     pub bytes_sent: f64,
     pub bytes_received: f64,

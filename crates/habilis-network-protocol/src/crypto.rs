@@ -418,6 +418,7 @@ impl std::fmt::Debug for TicketSecret {
 /// directory ad (which carries the secret) is not enough to redeem a
 /// passworded ticket.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct TicketAuth {
     pub token: TicketSecret,
     pub password_protected: bool,

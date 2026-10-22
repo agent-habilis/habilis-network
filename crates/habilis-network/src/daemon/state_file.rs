@@ -247,6 +247,7 @@ impl Drop for StateFile {
 /// session identity is read separately ([`read_identity`]) only on the success
 /// path, so the poll loop allocates nothing beyond these two fields.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ReadySnapshot {
     pub ready: bool,
     pub last_updated: u64,
@@ -256,6 +257,7 @@ pub struct ReadySnapshot {
 /// `None` when the state file is unreadable, not JSON, or predates that field
 /// — so the JSON the gate prints carries only the keys actually present.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SessionIdentity {
     pub mesh: Option<String>,
     pub name: Option<String>,
@@ -305,6 +307,7 @@ fn mesh_field(doc: &serde_json::Value) -> Option<String> {
 /// written by an older binary predates `pid`, and discovery must still be
 /// able to *report* such an entry rather than error on it.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SessionEntry {
     pub mesh: Option<String>,
     pub name: Option<String>,

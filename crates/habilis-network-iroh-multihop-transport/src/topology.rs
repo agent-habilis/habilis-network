@@ -389,6 +389,7 @@ impl Topology {
 /// A node's-eye view of the routing graph, ready to serialize to JSON for the
 /// `topology` IPC query.
 #[derive(Debug, serde::Serialize)]
+#[non_exhaustive]
 pub struct TopologyView {
     /// This node's own endpoint id (hex) — the graph's "you".
     pub self_id: String,
@@ -397,6 +398,7 @@ pub struct TopologyView {
 
 /// One directed, metric-labelled edge in a [`TopologyView`].
 #[derive(Debug, serde::Serialize)]
+#[non_exhaustive]
 pub struct TopologyEdge {
     pub from: String,
     pub to: String,
