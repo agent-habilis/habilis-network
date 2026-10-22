@@ -1,5 +1,5 @@
 # rule|file|matches allowed|reason
-# Used by scripts/style-check.sh. Keep the count exact: the check fails when it is too low as well.
+# Used by scripts/style-check/style-check.ts. Keep the count exact: the check fails when it is too low as well.
 
 # A Drop that runs while a panic unwinds must not panic: a second panic aborts the process.
 poison|crates/habilis-network/src/transport/pool.rs|2|InFlightDial::drop clears the in-flight entry during unwinding. register_dial must read the same map.

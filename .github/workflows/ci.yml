@@ -39,11 +39,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The rules of the Rust style guide that no lint checks (issue #29). The exceptions, each
-      # with its reason, are in scripts/style-check.allow.
+      # with its reason, are in scripts/style-check/style-check.allow.
       - name: Style rules without a lint
         run: |
-          sh scripts/style-check-test.sh
-          sh scripts/style-check.sh
+          bun test scripts/style-check/style-check.test.ts
+          bun scripts/style-check/style-check.ts
 
       # Three lints still have old findings (issue #29). A ratchet refuses a new one. Lower the
       # baseline with `bun scripts/lint-ratchet/lint-ratchet.ts --update` when you fix one.
