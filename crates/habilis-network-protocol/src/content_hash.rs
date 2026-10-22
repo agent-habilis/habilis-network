@@ -1,6 +1,6 @@
 //! The content hash of a message.
 
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 /// The SHA-256 of the canonical bytes of a message: its id for another author's `prev`
 /// backlink, for the DAG `parents`, and for fork detection. It is recomputed on receive and
@@ -23,6 +23,7 @@ impl ContentHash {
     /// The SHA-256 of `bytes`.
     #[must_use]
     pub fn of(bytes: &[u8]) -> Self {
+        use sha2::Digest;
         Self(Sha256::digest(bytes).into())
     }
 

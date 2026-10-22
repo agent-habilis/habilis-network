@@ -22,7 +22,7 @@ use std::fmt;
 use anyhow::Result;
 use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 use crate::{AuthorKey, DedupKey, SymmetricKey};
 
@@ -107,6 +107,7 @@ pub(crate) fn verify(pubkey: &PublicKey, bytes: &[u8], signature: &Signature) ->
 /// key ⇒ not falsely deduped).
 #[must_use]
 pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> DedupKey {
+    use sha2::Digest;
     let mut hasher = Sha256::new();
     // The hex text of the key, as the signed bytes carry it; nothing for an unsigned message.
     if let Some(author) = author {

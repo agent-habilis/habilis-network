@@ -12,10 +12,11 @@
 //! another.
 
 use anyhow::{Result, bail};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 /// The double-SHA-256 checksum, truncated to its first 4 bytes.
 fn checksum(bytes: &[u8]) -> [u8; 4] {
+    use sha2::Digest;
     let first = Sha256::digest(bytes);
     let second = Sha256::digest(first);
     let mut out = [0u8; 4];

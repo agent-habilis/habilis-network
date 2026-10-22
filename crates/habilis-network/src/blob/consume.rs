@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncWrite, AsyncWriteExt as _};
+use sha2::Sha256;
+use tokio::io::AsyncWrite;
 
 use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret};
@@ -55,6 +55,8 @@ async fn fetch_over<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    use sha2::Digest;
+    use tokio::io::AsyncWriteExt as _;
     let conn = dial(endpoint, ticket).await?;
     // A fresh connection to a peer behind NAT starts on the relay and punches
     // inside it, so this waits rather than refusing at once. The producer

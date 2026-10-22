@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use iroh::Endpoint;
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -397,6 +397,7 @@ async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
 /// Read + SHA-256-hash a file off the async runtime (`spawn_blocking`), never
 /// loading it whole. Returns the digest and byte length.
 async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
+    use sha2::Digest;
     tokio::task::spawn_blocking(move || {
         let mut file = std::fs::File::open(&path)
             .with_context(|| format!("opening {} failed", path.display()))?;

@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -517,6 +517,7 @@ impl FsOrigin {
 
 impl ChunkSource for FsOrigin {
     async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>> {
+        use std::io::Seek as _;
         let located = {
             let locations = self.locations.lock().map_err(|_| poisoned("location"))?;
             locations.get(&hash).copied()
