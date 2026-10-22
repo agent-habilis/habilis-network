@@ -202,7 +202,8 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 - Glob imports are not allowed, with two exceptions: `use super::*` in a test module, and the prelude of a third-party crate (`wasm_bindgen::prelude::*`, `proptest::prelude::*`). Do not define a prelude of our own.
 - `clippy::absolute_paths` is not on. The audit counted 2923 uses.
 - `non_exhaustive_omitted_patterns` is an unstable rustc lint. The pinned stable toolchain does not have it.
-- `exhaustive_enums` and `exhaustive_structs`: under review. The owner has not decided, and the ratchet counts both.
+- `exhaustive_enums` and `exhaustive_structs`: the owner decided to mark public types `#[non_exhaustive]`. 34 of 45 enums and 47 of 72 structs are marked. Another crate of the workspace matches or builds each of the others, so a mark needs a wildcard arm or a builder there. The ratchet counts those. Mark a new public type unless a crate of the workspace needs it open.
+- `From<&str>` that can panic: a type that validates its input has `new` returning a `Result`, and no `From<&str>`. `AppTag` and `CorrId` follow this, and a `compile_fail` doc test pins it.
 
 ### Rules of the guide that do not apply
 
@@ -211,9 +212,9 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 
 ### Rules still under audit
 
-- Arc, dyn and anyhow policy.
-- `From<&str>` for `AppTag` and `CorrId` in `message/mod.rs`. Both panic on bad input, which breaks the rule that `From` cannot fail. The fix waits for the owner's ruling on two tests that pin the panic.
-- `exhaustive_enums` and `exhaustive_structs`, as above.
+- Errors in public signatures. Proposal, waiting for the owner: a library crate returns a typed error from each new public function, and the engine API, the CLIs and the examples keep `anyhow`.
+- `Arc`. Proposal, waiting for the owner: judge each use in review and add no gate. Use `Arc` to share across tasks or threads, or for a trait object, and write the reason when it is not clear.
+- The 11 enums and 25 structs above that are not marked yet.
 - Everything else follows the guide until issue #29 records a decision.
 
 ## Scripts
