@@ -24,6 +24,7 @@ string_newtype!(
     from_str,
 );
 
+/// Why a mesh name was refused: its length, or a character outside the allowed set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NameError {
     Length(usize),

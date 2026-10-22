@@ -27,6 +27,7 @@ string_newtype!(
     test_from,
 );
 
+/// A message id text that is not a valid UUID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdError(String);
 
@@ -47,6 +48,7 @@ impl MessageId {
         Ok(Self(value))
     }
 
+    /// A new random id, a version 4 UUID.
     #[must_use]
     pub fn random() -> Self {
         Self(Uuid::new_v4().to_string())

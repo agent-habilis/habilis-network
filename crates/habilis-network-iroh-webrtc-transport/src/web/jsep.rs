@@ -73,6 +73,7 @@ impl Default for IceServers {
 }
 
 impl IceServers {
+    /// No STUN or TURN server, so only host addresses are used.
     #[must_use]
     pub fn host_only() -> Self {
         Self(Vec::new())

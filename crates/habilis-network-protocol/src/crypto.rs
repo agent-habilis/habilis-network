@@ -262,6 +262,7 @@ pub(crate) fn rendezvous_ports(source: Keying<'_>) -> [u16; RENDEZVOUS_LADDER] {
 pub struct Password(String);
 
 impl Password {
+    /// Wraps an operator password. Its `Debug` output is `***`.
     #[must_use]
     pub fn new(value: String) -> Self {
         Self(value)

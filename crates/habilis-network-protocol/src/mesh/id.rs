@@ -23,6 +23,7 @@ string_newtype!(
     borrow,
 );
 
+/// Why a mesh id text was refused: its length, a character outside the alphabet, or a bad hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeshIdError {
     Length(usize),

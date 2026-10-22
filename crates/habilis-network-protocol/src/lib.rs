@@ -25,6 +25,7 @@ pub mod identity;
 pub mod invite;
 pub mod mesh;
 pub mod message;
+/// Nicknames: display labels for members. A nickname is not an identity.
 pub mod nickname;
 pub mod peer_addr;
 pub mod reassembly;

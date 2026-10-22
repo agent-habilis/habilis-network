@@ -12,6 +12,7 @@ use iroh::TransportAddr;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 
+/// The ALPN of the bench handler.
 pub const BENCH_ALPN: &[u8] = b"habilis-network-webrtc/test-bench/0";
 
 /// Bytes the plain bulk case asks for. Comfortably past one QUIC congestion
@@ -42,6 +43,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// The name of this direction in the bench output: `down`, `up` or `both`.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {

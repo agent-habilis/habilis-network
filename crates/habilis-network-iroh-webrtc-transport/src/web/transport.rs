@@ -280,6 +280,7 @@ pub struct BrowserHubTransport {
 }
 
 impl BrowserHubTransport {
+    /// A transport for `local_id`, with no sessions yet.
     #[must_use]
     pub fn new(local_id: EndpointId) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(IN_QUEUE);

@@ -51,6 +51,7 @@ pub use ticket::BlobTicket;
 pub struct ContentId(String);
 
 impl ContentId {
+    /// Wraps `id` as it is. Nothing is checked.
     #[must_use]
     pub fn new(id: &str) -> Self {
         Self(id.to_owned())

@@ -125,6 +125,7 @@ pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> De
 // hex strings in the JSON envelope, so the `--output json` wire stays
 // inspectable and does not depend on iroh's serde representation.
 
+/// The public key as lowercase hex, 64 characters.
 #[must_use]
 pub fn encode_pubkey(pubkey: &PublicKey) -> String {
     to_hex(pubkey.as_bytes())

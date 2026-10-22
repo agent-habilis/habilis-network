@@ -732,6 +732,7 @@ impl Message {
         Self::new(mesh, author, MessageKind::App { tag, to, corr }, body)
     }
 
+    /// A presence message for `author` joining `mesh`. It has no body.
     #[must_use]
     pub fn new_joined(mesh: &MeshId, author: &Nickname) -> Self {
         // Presence carries no body; peer metadata (model/harness/host) is application
@@ -746,6 +747,7 @@ impl Message {
         )
     }
 
+    /// A presence message for `author` leaving `mesh`. It has no body.
     #[must_use]
     pub fn new_left(mesh: &MeshId, author: &Nickname) -> Self {
         Self::new(
@@ -758,6 +760,7 @@ impl Message {
         )
     }
 
+    /// A presence message that `author` is alive on `mesh`. It has no body.
     #[must_use]
     pub fn new_alive(mesh: &MeshId, author: &Nickname) -> Self {
         Self::new(
@@ -1162,6 +1165,7 @@ impl ChainCtx {
     }
 }
 
+/// The inputs of a test message: the mesh, the author, the body, the chain and the app tag.
 #[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug)]
 pub struct BuildMsgParams<'a> {
@@ -1209,6 +1213,7 @@ impl Message {
         self
     }
 
+    /// A fixed test message of `kind` with `body`, from `alice-bot` on mesh `test`.
     #[must_use]
     pub fn fixture(kind: MessageKind, body: &str) -> Self {
         Message {

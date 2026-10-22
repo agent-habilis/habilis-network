@@ -38,6 +38,7 @@ pub(crate) use super::IpcMessage;
 /// socket path directly (via [`send_to_path`]) and carries no mesh — the
 /// concrete command type is defined app-side, the engine only needs the address.
 pub trait Addressed {
+    /// The mesh this command is for, or `None` for a command that has none.
     fn mesh_id(&self) -> Option<&MeshId>;
 }
 
@@ -74,6 +75,7 @@ pub fn json_ack() -> String {
     serde_json::json!({"ok": true}).to_string()
 }
 
+/// The JSON reply of a failed IPC command, with `ok` false and the `error` text.
 #[must_use]
 pub fn json_error(error: &str) -> String {
     serde_json::json!({"ok": false, "error": error}).to_string()

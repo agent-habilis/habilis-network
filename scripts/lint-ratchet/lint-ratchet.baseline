@@ -22,9 +22,9 @@ clippy::exhaustive_structs|habilis-network-netplay|3
 clippy::exhaustive_structs|habilis-network-protocol|14
 clippy::exhaustive_structs|habilis-network-stream|2
 clippy::exhaustive_structs|habilis-network-util|2
-missing_docs|habilis-network|6
+missing_docs|habilis-network|3
 missing_docs|habilis-network-ffi|3
 missing_docs|habilis-network-iroh-gossip-transport|2
-missing_docs|habilis-network-iroh-webrtc-transport|10
-missing_docs|habilis-network-protocol|19
+missing_docs|habilis-network-iroh-webrtc-transport|5
+missing_docs|habilis-network-protocol|5
 missing_docs|habilis-network-util|9
