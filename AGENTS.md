@@ -184,30 +184,37 @@ The `transport` target has no pin. Its lines appear only when `RUST_LOG` names t
 
 The Google Rust Style Guide is the reference for Rust style in this repository: https://google.github.io/styleguide/rustguide.html
 
-The rules of this file win over the guide. If the two conflict, follow this file. Issue #29 holds the list of decisions, rule by rule.
+This file wins over the guide. If the two conflict, follow this file. Issue #29 records each decision.
 
-### How a rule is enforced
+### What each gate refuses
 
-CI runs `cargo fmt --check` and `cargo clippy` with `-D warnings`. The lints of `[workspace.lints]` and `clippy.toml` apply. A rule that a tool can check must be checked in CI, so that a change that breaks it cannot merge. A rule that no tool can check is a review rule. For example, `clippy::unwrap_used` is on: write `.expect("reason")` in code that is not a test.
+- `cargo fmt --check` runs in CI. It refuses unformatted code.
+- `cargo clippy` runs in CI with `-D warnings`. Its lints come from `[workspace.lints]` in `Cargo.toml` and from `clippy.toml`. The `pedantic` group is on. These lints are on by name: `unwrap_used`, `wildcard_enum_match_arm`, `await_holding_lock`, `allow_attributes`, `string_add`, `undocumented_unsafe_blocks`, `excessive_nesting`, `shadow_unrelated`, `min_ident_chars` and `semicolon_inside_block`. The rustc lints `unsafe_code` and `non_ascii_idents` are denied.
+- `scripts/style-check/style-check.ts` checks six rules that no compiler lint covers: `poison`, `feature`, `catch_unwind`, `ctor`, `block_doc` and `lifetime`. Each exception is a line in `style-check.allow`, with a count and a reason. A new violation fails the check. An exception whose count is too high fails it too.
+- `scripts/lint-ratchet/lint-ratchet.ts` counts `missing_docs`, `clippy::exhaustive_enums` and `clippy::exhaustive_structs` for each crate under `crates/<crate>/src/`. It compares the counts with `scripts/lint-ratchet/lint-ratchet.baseline`. A count above the baseline fails. A count below it fails too, so the baseline only goes down. Run `bun scripts/lint-ratchet/lint-ratchet.ts --update` and commit the file. The run takes about three minutes.
+- `scripts/script-language/script-language.ts` refuses a `.sh`, `.bash` or `.py` file, and a file with a shell or Python shebang. See the Scripts section.
+- `typecheck:scripts` in `package.json` runs `tsc --noEmit -p tsconfig.scripts.json`. The `typecheck` script runs it too.
 
-A rule with no lint is checked by `scripts/style-check/style-check.ts`, which CI runs after clippy. Run it before you push. Each exception is a line of `scripts/style-check/style-check.allow` with a count and a reason. A new violation, or an exception with a count that is too high, fails the check.
+### Rules we decline, or leave to the reviewer
 
-Three lints still have old findings: `missing_docs`, `clippy::exhaustive_enums` and `clippy::exhaustive_structs`. For `missing_docs`, a struct field and an enum variant are not counted: the guide lets a clear name stand without a doc. `scripts/lint-ratchet/lint-ratchet.ts` counts them for each crate under `crates/<crate>/src/` and compares the counts with `scripts/lint-ratchet/lint-ratchet.baseline`. CI runs it after the style check. A count above the baseline is a new finding and fails. A count below the baseline fails too, so that the baseline only gets lower: run `bun scripts/lint-ratchet/lint-ratchet.ts --update` and commit the file. The run takes about three minutes.
+- `imports_granularity = Module` needs nightly `rustfmt`. The toolchain is pinned to stable 1.95.0 in `rust-toolchain.toml`, and the repository has no `rustfmt.toml`.
+- Module names after the primary item: a scan flags 98 of the 156 leaf files that declare a public type. The scan takes the first public type in each file, so it is too noisy to enforce. The reviewer checks it.
+- Glob imports are not allowed, with two exceptions: `use super::*` in a test module, and the prelude of a third-party crate (`wasm_bindgen::prelude::*`, `proptest::prelude::*`). Do not define a prelude of our own.
+- `clippy::absolute_paths` is not on. The audit counted 2923 uses.
+- `non_exhaustive_omitted_patterns` is an unstable rustc lint. The pinned stable toolchain does not have it.
+- `exhaustive_enums` and `exhaustive_structs`: under review. The owner has not decided, and the ratchet counts both.
 
 ### Rules of the guide that do not apply
 
 - A rule that the guide tags for Chromium, Android or Fuchsia does not apply. This repository is none of them.
-- `imports_granularity = Module` needs a nightly `rustfmt`. The toolchain is pinned to stable.
-- The lint `non_exhaustive_omitted_patterns` is unstable. The lint `clippy::wildcard_enum_match_arm` is on, and it is stricter: it refuses a catch-all arm on an enum.
 - The guide names a closure accessor `with_foo`. This repository also uses `with_foo` for a builder method that returns `Self`, for example `EndpointAddr::with_ip_addr` of iroh. Keep the builder meaning.
-
-### Rules where the guide leaves the choice to the reviewer
-
-- Glob imports are not allowed, with two exceptions: `use super::*` in a test module, and the prelude of a third-party crate (`wasm_bindgen::prelude::*`, `proptest::prelude::*`). Do not define a prelude of our own.
 
 ### Rules still under audit
 
-Ownership and borrowing, types, traits, and part of code organization are still under audit. Follow the guide for them until issue #29 records a decision.
+- Arc, dyn and anyhow policy.
+- `From<&str>` for `AppTag` and `CorrId` in `message/mod.rs`. Both panic on bad input, which breaks the rule that `From` cannot fail. The fix waits for the owner's ruling on two tests that pin the panic.
+- `exhaustive_enums` and `exhaustive_structs`, as above.
+- Everything else follows the guide until issue #29 records a decision.
 
 ## Scripts
 
