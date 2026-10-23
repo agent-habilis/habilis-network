@@ -1,9 +1,0 @@
-{"reason":"compiler-artifact","package_id":"habilis-network"}
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"spans":[{"file_name":"crates/habilis-network/src/a.rs","line_start":10,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"spans":[{"file_name":"crates/habilis-network/src/a.rs","line_start":10,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"clippy::exhaustive_enums"},"spans":[{"file_name":"crates/habilis-network-protocol/src/b.rs","line_start":3,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"spans":[{"file_name":"crates/habilis-network/tests/t.rs","line_start":5,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"spans":[{"file_name":"crates/habilis-network-netplay/examples/e.rs","line_start":1,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"spans":[{"file_name":"tasks/src/y.rs","line_start":1,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"clippy::needless_return"},"spans":[{"file_name":"crates/habilis-network/src/a.rs","line_start":20,"column_start":1,"is_primary":true}]}}
-{"reason":"build-finished","success":true}

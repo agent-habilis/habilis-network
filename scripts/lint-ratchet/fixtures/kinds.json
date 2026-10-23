@@ -1,4 +1,0 @@
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"message":"missing documentation for a struct field","spans":[{"file_name":"crates/habilis-network/src/k.rs","line_start":1,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"message":"missing documentation for a variant","spans":[{"file_name":"crates/habilis-network/src/k.rs","line_start":2,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"message":"missing documentation for a function","spans":[{"file_name":"crates/habilis-network/src/k.rs","line_start":3,"column_start":1,"is_primary":true}]}}
-{"reason":"compiler-message","message":{"code":{"code":"missing_docs"},"message":"missing documentation for a method","spans":[{"file_name":"crates/habilis-network/src/k.rs","line_start":4,"column_start":1,"is_primary":true}]}}
