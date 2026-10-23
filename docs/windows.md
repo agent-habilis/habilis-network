@@ -19,7 +19,7 @@ Ids, wire formats, the IPC protocol and the C ABI can change.
 ## 2. Current state
 
 The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy, `cargo task ffi` and the tests there.
-The IPC of a daemon works on Windows, over a named pipe. A daemon stops gracefully on an IPC `quit`, when its owner exits, on ctrl-c, ctrl-break and the close of its console. A CLI daemon also stops gracefully on a logoff, a shutdown and `taskkill /PID` without `/F`.
+The IPC of a daemon works on Windows, over a named pipe. A daemon stops gracefully on an IPC `quit`, on the exit of its owner, and on ctrl-c, ctrl-break and the close of its console. A CLI daemon also stops gracefully on a logoff, a shutdown and `taskkill /PID` without `/F`.
 
 | Requirement | State |
 |---|---|
@@ -318,11 +318,18 @@ Done.
 
 - `win_session::watch_session_end` (`crates/habilis-network-util/src/win_session.rs`) makes a hidden top-level window on a thread of its own, with a message loop. A message-only window (`HWND_MESSAGE`) gets no broadcast message, so it is of no use here. The call returns when the window exists, so the window is there when the node is ready.
 - `WM_QUERYENDSESSION` gets `TRUE`, so the daemon never stops the end of the session. `WM_ENDSESSION` with `TRUE` gives the kind from the bits of `lParam`: a logoff, a shutdown, or a close by the Restart Manager (`ENDSESSION_CLOSEAPP`). `WM_CLOSE`, which `taskkill /PID` without `/F` sends, is an event too. The window does not destroy itself on it.
-- Only the CLI daemon has the window (`spawn_session_end_watch` in `crates/habilis-network/src/daemon/shutdown.rs`): it alone exits the process. On the end of the session it writes `session end; leaving`, feeds the quit channel, and its window thread does not return, because Windows ends the process when it does. The process lives until the `std::process::exit` of the quit path, or until the deadline (`WaitToKillAppTimeout`, 5 s by default). On `WM_CLOSE` it writes `window close; leaving`, feeds the quit channel, and returns, because a close has no deadline.
+- Only the CLI daemon has the window (`spawn_session_end_watch` in `crates/habilis-network/src/daemon/shutdown.rs`): it alone exits the process. On the end of the session it feeds the quit channel, writes `session end; leaving`, and its window thread does not return, because Windows ends the process when it does. The process lives until the `std::process::exit` of the quit path, or until the deadline (`WaitToKillAppTimeout`, 5 s by default). On `WM_CLOSE` it feeds the quit channel, writes `window close; leaving`, and returns, because a close has no deadline.
 - The quit path fits the deadline: the state file and the marker go first (about 130 ms), then the `Left` and its 500 ms, then the release of the rendezvous (up to about 3 s with bad connectivity). The quit arm of the loop is read only when the current arm ends, so a probe that runs adds its time. The console events of R7 have the same gap.
 - When the window cannot be made, the daemon logs a warn and runs on, with the behavior from before R13.
 - A window makes Windows count the process as a window process in the order of a shutdown.
+- `WM_CLOSE` carries no sender, so the window cannot refuse one. A process of the same user could already stop the daemon (`taskkill /F`, the IPC `quit`). The window adds one sender: a process of another account on the same desktop, at the same or a higher integrity level. It can only make the daemon leave, and it gets no data back. Windows blocks a sender at a lower integrity level, except a `uiAccess` process.
 - Step 6 of the host lifecycle test ([R11](#r11-windows-on-ci)) sends the messages to the window of a node in a child process. The wait of the node until its `Left` is tested by hand, in T6.
+
+Follow-up items, outside R13:
+
+- agent-gossip needs no code change for R13, only the engine version that has it. After G1, the sign-out row and the `taskkill` row of T6 check it.
+- The window gets the end of the session only in the interactive session of the user, on window station `WinSta0`. A child process gets the window station and the desktop of its parent, and the creation flags of G1 do not change them. So the daemon of G1 gets the end of the session only when its parent is in that session. A daemon under a service or an SSH session gets none. A service gets `SERVICE_CONTROL_SHUTDOWN` from the service control manager instead.
+- The window thread does not return from `WM_ENDSESSION`, so the screen of the apps that are still open can list the daemon, by the title of the window (`habilis-network-session`) or by the name of the program. `ShutdownBlockReasonCreate` sets a reason that a user can read, such as "leaving the mesh". Check in T6 what the screen shows, and whether the reason makes the screen show on each logoff, before R13 uses it.
 
 ## 4. Requirements: agent-gossip
 
