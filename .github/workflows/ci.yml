@@ -393,10 +393,9 @@ jobs:
   # docs/windows.md). The wasm32 steps, `cargo fmt`, `cargo doc` and every step
   # that needs bash stay on Linux.
   #
-  # `cargo task ffi` is not here: it needs R9, "FFI" in docs/windows.md. The
-  # task reads `target/release/libhabilis_network_ffi.a` with `nm`; on Windows
-  # it needs the `.lib` name, `llvm-nm.exe` (`components: llvm-tools`) and COFF
-  # symbols in `tasks/src/ffi.rs`. It joins this job with R9.
+  # `cargo task ffi` runs here too (R9, "FFI" in docs/windows.md): on Windows it
+  # reads `target/release/habilis_network_ffi.lib` with the `llvm-nm.exe` of the
+  # toolchain, so this job adds `llvm-tools`.
   windows:
     name: Windows
     runs-on: windows-latest
@@ -417,20 +416,15 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
-      # The Bun steps come before every step that restores a cache, so that
-      # `target/` cannot exist when they run. `smoke.test.ts` loads the DLL when
-      # it finds one under `target/`, and the C ABI returns `c_long`, 32 bits on
-      # Windows, until R9, "FFI" in docs/windows.md. A smoke test against that
-      # ABI would pass by luck. So the smoke test is skipped here, and this step
-      # does not test the `isize` mapping until R9.
-      - name: Test (bun)
-        run: bun run test
-
       # `aws-lc-sys` assembles with NASM, which the runner does not have.
       - uses: ilammy/setup-nasm@v1
 
       # Reads rust-toolchain.toml, as in `check`.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # `llvm-nm.exe` for `cargo task ffi`, as in `staticlib`. Windows has
+          # no system `nm`.
+          components: llvm-tools
 
       - uses: Swatinem/rust-cache@v2
 
@@ -441,6 +435,25 @@ jobs:
 
       - name: Clippy (all features)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # Builds the release DLL and the staticlib, and checks the staticlib
+      # against include/habilis_network.h, as `staticlib` does on macOS.
+      - name: Build the staticlib and check it against the header
+        run: cargo task ffi
+
+      # After `cargo task ffi`, so that `smoke.test.ts` finds the release DLL
+      # under `target/` and loads it. That tests the C ABI of Windows through the
+      # Bun loader; the Node loader (koffi) is not run on CI.
+      - name: Test (bun)
+        run: bun run test
+
+      # The smoke test again, named by path: `discover()` takes the variable
+      # without a check, so a DLL that is not there fails here instead of
+      # skipping the test.
+      - name: Smoke (bun, the built DLL)
+        env:
+          HABILIS_NETWORK_LIB: ${{ github.workspace }}\target\release\habilis_network_ffi.dll
+        run: bun test packages/habilis-network-ffi/src/smoke.test.ts
 
       - name: Test
         run: cargo test --workspace
