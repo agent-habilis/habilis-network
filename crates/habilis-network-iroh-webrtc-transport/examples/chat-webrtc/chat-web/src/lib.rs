@@ -317,6 +317,11 @@ async fn negotiate(
         SignalEnvelope::Error { reason, .. } => {
             return Err(JsValue::from_str(&format!("the room refused: {reason}")));
         }
+        _ => {
+            return Err(JsValue::from_str(
+                "the room sent an envelope this client does not know",
+            ));
+        }
     }
 
     let session = pending.complete(hub, &answer).await?;

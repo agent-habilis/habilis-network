@@ -42,6 +42,7 @@ impl Runner {
                 let inputs: Vec<Input> = inputs.iter().map(|(input, _)| *input).collect();
                 sim::step(&mut self.world, &inputs);
             }
+            _ => unreachable!("a request this test does not expect"),
         }
     }
 }

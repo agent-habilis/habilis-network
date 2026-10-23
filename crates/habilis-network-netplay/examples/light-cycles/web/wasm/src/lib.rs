@@ -158,15 +158,12 @@ impl LightCyclesPeer {
 
         let mesh = derive_topic_mesh_config(
             &room_code,
-            MeshConfig {
-                lookups: LookupOpts::public_preset(),
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport,
-                    ..TransportPolicy::default()
-                },
-            },
+            MeshConfig::new(
+                LookupOpts::public_preset(),
+                None,
+                None,
+                TransportPolicy::default().with_relay_transport(relay_transport),
+            ),
         )
         .map_err(to_js_error)?;
         let author = Nickname::new(&nick).map_err(to_js_error)?;
@@ -187,7 +184,7 @@ impl LightCyclesPeer {
                 // No files and no control socket: a browser has neither.
                 runtime_base: None,
                 state_file: None,
-                sink: Arc::new(SilentSink),
+                sink: Arc::new(SilentSink::default()),
                 per_peer_gate: None,
                 cohost: None,
                 live_count: None,

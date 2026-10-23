@@ -168,15 +168,12 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
     };
     let mesh = derive_topic_mesh_config(
         room,
-        MeshConfig {
+        MeshConfig::new(
             lookups,
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport,
-                ..TransportPolicy::default()
-            },
-        },
+            None,
+            None,
+            TransportPolicy::default().with_relay_transport(relay_transport),
+        ),
     )?;
     let author = Nickname::new(nick)?;
     let my_nick = author.clone();

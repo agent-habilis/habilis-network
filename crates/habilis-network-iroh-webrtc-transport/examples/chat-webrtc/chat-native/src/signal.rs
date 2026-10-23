@@ -120,6 +120,7 @@ async fn answer_one(
         SignalEnvelope::Offer { .. } => {}
         SignalEnvelope::Answer { .. } => bail!("peer sent an answer where an offer belongs"),
         SignalEnvelope::Error { reason, .. } => bail!("peer reported: {reason}"),
+        _ => bail!("peer sent an envelope this version does not know"),
     }
 
     let (pending, answer) = answer_with(local, &offer, ice)
@@ -187,6 +188,7 @@ pub async fn dial(
         SignalEnvelope::Answer { .. } => {}
         SignalEnvelope::Offer { .. } => bail!("peer sent an offer where an answer belongs"),
         SignalEnvelope::Error { reason, .. } => bail!("the room refused: {reason}"),
+        _ => bail!("the room sent an envelope this version does not know"),
     }
 
     let session = Box::pin(pending.complete(&answer, JSEP_DEADLINE))
