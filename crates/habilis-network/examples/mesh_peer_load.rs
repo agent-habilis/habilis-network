@@ -47,7 +47,6 @@ use habilis_network::embed::SilentSink;
 use habilis_network::membership::{
     INBOUND_CAP, MembershipApp, Opts, Request, msg_body, resolve_kind,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{Lookup, Nickname, Transport};
 use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};
 use habilis_network::util::resident_memory::current_resident_memory_mb;
@@ -262,20 +261,9 @@ async fn main() -> anyhow::Result<()> {
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author: author.clone(),
-            max_peers: usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0),
-            max_direct: usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0),
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink::default()),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author.clone(), Arc::new(SilentSink::default()))
+            .with_max_peers(usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0))
+            .with_max_direct(usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0)),
     )
     .await?;
 

@@ -44,7 +44,6 @@ use habilis_network::embed::{
 };
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Inbound, Membership, Request};
-use habilis_network::net::TransportOpts;
 use habilis_network::ops::{app_frame, send_app};
 use habilis_network::protocol::{
     AppFrameParams, AppTag, Lookup, LookupOpts, MessageBody, Nickname, Transport,
@@ -327,20 +326,11 @@ impl LoggingMember {
                 mesh,
                 topic_string: topic.to_owned(),
             },
-            SetupParams {
-                author: Nickname::new(name).expect("valid nickname"),
-                max_peers: 16,
-                max_direct: 0,
-                endpoint: None,
-                protocols: Vec::new(),
-                transports: TransportOpts::default(),
-                runtime_base: None,
-                state_file: None,
-                sink: Arc::new(Quiet),
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+            SetupParams::new(
+                Nickname::new(name).expect("valid nickname"),
+                Arc::new(Quiet),
+            )
+            .with_max_peers(16),
         )
         .await
         .expect("setup_mesh on a loopback mesh");

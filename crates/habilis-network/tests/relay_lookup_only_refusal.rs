@@ -120,24 +120,15 @@ async fn spawn(
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default()
-                .with_udp(false)
-                .with_relay(true)
-                .with_webrtc(false)
-                .with_gossip(false),
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink)
+            .with_max_peers(16)
+            .with_transports(
+                TransportOpts::default()
+                    .with_udp(false)
+                    .with_relay(true)
+                    .with_webrtc(false)
+                    .with_gossip(false),
+            ),
     )
     .await
     .expect("setup_mesh against a local relay");

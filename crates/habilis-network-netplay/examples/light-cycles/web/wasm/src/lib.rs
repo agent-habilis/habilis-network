@@ -25,7 +25,6 @@ mod sim;
 use std::cell::RefCell;
 
 use habilis_network::embed::SilentSink;
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MeshConfig, MeshName, Nickname, TransportPolicy};
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
@@ -174,21 +173,7 @@ impl LightCyclesPeer {
 
         let config = setup_mesh(
             kind,
-            SetupParams {
-                author: author.clone(),
-                max_peers: 16,
-                max_direct: 0,
-                endpoint: None,
-                protocols: Vec::new(),
-                transports: TransportOpts::default(),
-                // No files and no control socket: a browser has neither.
-                runtime_base: None,
-                state_file: None,
-                sink: Arc::new(SilentSink::default()),
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+            SetupParams::new(author.clone(), Arc::new(SilentSink::default())).with_max_peers(16),
         )
         .await
         .map_err(to_js_error)?;

@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use crate::embed::NodeSink;
-use crate::net::TransportOpts;
 use crate::protocol::{
     DirectorySelection, JoinTarget, Lookup, MeshConfig, MeshName, Nickname, RelayLadder, Transport,
 };
@@ -222,30 +221,9 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
     let (inbound_tx, inbound) = mpsc::channel(INBOUND_CAP);
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author,
-            max_peers,
-            max_direct: opts.max_direct,
-            // An embedded library writes no files and binds no control
-            // socket, so it claims no /tmp root of its own.
-            runtime_base: None,
-            state_file: None,
-            sink,
-            // The engine binds its own endpoint and serves no extra
-            // ALPNs here: injecting either is for a consumer that
-            // already owns an iroh endpoint, which an embedded member does
-            // not.
-            endpoint: None,
-            protocols: Vec::new(),
-            // Everything this target has; the mesh's transport list narrows
-            // it in `setup_mesh`.
-            transports: TransportOpts::default(),
-            // An embedded member publishes no per-peer identity, so `meta`
-            // stays free-form.
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink)
+            .with_max_peers(max_peers)
+            .with_max_direct(opts.max_direct),
     )
     .await
     .context("setting up the mesh")?;

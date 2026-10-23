@@ -130,20 +130,9 @@ async fn spawn_with(
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports,
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink)
+            .with_max_peers(16)
+            .with_transports(transports),
     )
     .await
     .expect("setup_mesh");

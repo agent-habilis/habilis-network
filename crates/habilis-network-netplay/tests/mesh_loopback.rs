@@ -14,7 +14,6 @@
 use std::time::Duration;
 
 use habilis_network::embed::SilentSink;
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{AuthorKey, LookupOpts, Nickname};
 use habilis_network::runtime::{
     Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
@@ -67,20 +66,8 @@ async fn spawn(topic: &str, nick: &str) -> Player {
     };
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author: author.clone(),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: std::sync::Arc::new(SilentSink::default()),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author.clone(), std::sync::Arc::new(SilentSink::default()))
+            .with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");

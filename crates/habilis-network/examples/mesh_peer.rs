@@ -27,7 +27,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
     DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, TransportPolicy,
 };
@@ -169,22 +168,9 @@ async fn run_peer(
     let live = Arc::new(AtomicUsize::new(0));
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author: author.clone(),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            // No files and no control socket: this is an embedded peer, not a
-            // daemon something else drives.
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink::default()),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: Some(Arc::clone(&live)),
-        },
+        SetupParams::new(author.clone(), Arc::new(SilentSink::default()))
+            .with_max_peers(16)
+            .with_live_count(Arc::clone(&live)),
     )
     .await?;
 

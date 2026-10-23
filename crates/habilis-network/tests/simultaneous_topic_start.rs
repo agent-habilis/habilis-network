@@ -28,7 +28,6 @@ use std::time::{Duration, Instant};
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype, RelayChoice};
 use habilis_network::runtime::tuning::{Tuning, init};
 use habilis_network::runtime::{
@@ -221,20 +220,7 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink).with_max_peers(16),
     )
     .await
     .expect("setup_mesh on an mDNS-only mesh");

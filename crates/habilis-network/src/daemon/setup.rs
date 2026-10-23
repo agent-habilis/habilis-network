@@ -543,6 +543,7 @@ impl std::fmt::Debug for InjectedEndpoint {
 /// [`SetupKind`]: this member's identity/io/tuning and the localhost
 /// binding request. Bundled so the one-shot assembly stays within the
 /// argument budget.
+#[non_exhaustive]
 pub struct SetupParams {
     pub author: Nickname,
     pub max_peers: usize,
@@ -585,6 +586,109 @@ pub struct SetupParams {
     /// Supplied up front rather than patched onto the returned config, so the
     /// config is complete the moment it exists.
     pub live_count: Option<std::sync::Arc<atomic::AtomicUsize>>,
+}
+
+impl SetupParams {
+    /// The params of one member with every other field at its default: the engine's own caps, no
+    /// runtime files, no shared endpoint, no ALPNs, and the default transports.
+    #[must_use]
+    pub fn new(author: Nickname, sink: std::sync::Arc<dyn NodeSink>) -> Self {
+        Self {
+            author,
+            max_peers: 0,
+            max_direct: 0,
+            runtime_base: None,
+            state_file: None,
+            sink,
+            endpoint: None,
+            protocols: Vec::new(),
+            transports: crate::lookup::TransportOpts::default(),
+            per_peer_gate: None,
+            cohost: None,
+            live_count: None,
+        }
+    }
+
+    /// Set the ceiling of peers in the mesh.
+    #[must_use]
+    pub fn with_max_peers(self, max_peers: usize) -> Self {
+        Self { max_peers, ..self }
+    }
+
+    /// Set the ceiling of direct connections.
+    #[must_use]
+    pub fn with_max_direct(self, max_direct: usize) -> Self {
+        Self { max_direct, ..self }
+    }
+
+    /// Set the per-user runtime base.
+    #[must_use]
+    pub fn with_runtime_base(self, runtime_base: PathBuf) -> Self {
+        Self {
+            runtime_base: Some(runtime_base),
+            ..self
+        }
+    }
+
+    /// Set the default state file.
+    #[must_use]
+    pub fn with_state_file(self, state_file: PathBuf) -> Self {
+        Self {
+            state_file: Some(state_file),
+            ..self
+        }
+    }
+
+    /// Share the caller's endpoint instead of minting one.
+    #[must_use]
+    pub fn with_endpoint(self, endpoint: InjectedEndpoint) -> Self {
+        Self {
+            endpoint: Some(endpoint),
+            ..self
+        }
+    }
+
+    /// Serve these ALPNs on the mesh's Router.
+    #[must_use]
+    pub fn with_protocols(
+        self,
+        protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
+    ) -> Self {
+        Self { protocols, ..self }
+    }
+
+    /// Narrow this node's own paths.
+    #[must_use]
+    pub fn with_transports(self, transports: crate::lookup::TransportOpts) -> Self {
+        Self { transports, ..self }
+    }
+
+    /// Set the `meta` channel's per-peer write gate.
+    #[must_use]
+    pub fn with_per_peer_gate(self, per_peer_gate: crate::doc::SelfWriteGate) -> Self {
+        Self {
+            per_peer_gate: Some(per_peer_gate),
+            ..self
+        }
+    }
+
+    /// Override the co-host policy the [`SetupKind`] would imply.
+    #[must_use]
+    pub fn with_cohost(self, cohost: CoHostPolicy) -> Self {
+        Self {
+            cohost: Some(cohost),
+            ..self
+        }
+    }
+
+    /// Set the shared live-peer counter a directory advertiser re-broadcasts from.
+    #[must_use]
+    pub fn with_live_count(self, live_count: std::sync::Arc<atomic::AtomicUsize>) -> Self {
+        Self {
+            live_count: Some(live_count),
+            ..self
+        }
+    }
 }
 
 impl std::fmt::Debug for SetupParams {
@@ -1341,20 +1445,8 @@ mod tests {
             let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
-                super::SetupParams {
-                    author,
-                    max_peers: 8,
-                    max_direct: 0,
-                    runtime_base: None,
-                    state_file: None,
-                    sink: std::sync::Arc::new(crate::embed::SilentSink),
-                    endpoint: None,
-                    protocols: Vec::new(),
-                    transports: crate::lookup::TransportOpts::default(),
-                    per_peer_gate: None,
-                    cohost: None,
-                    live_count: None,
-                },
+                super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                    .with_max_peers(8),
             )
             .await
             .expect("a loopback mesh sets up");
@@ -1401,20 +1493,9 @@ mod tests {
             let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
-                super::SetupParams {
-                    author,
-                    max_peers: 8,
-                    max_direct: 0,
-                    runtime_base: None,
-                    state_file: None,
-                    sink: std::sync::Arc::new(crate::embed::SilentSink),
-                    endpoint: None,
-                    protocols: Vec::new(),
-                    transports,
-                    per_peer_gate: None,
-                    cohost: None,
-                    live_count: None,
-                },
+                super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                    .with_max_peers(8)
+                    .with_transports(transports),
             )
             .await
             .expect("a mesh sets up");
@@ -1441,23 +1522,12 @@ mod tests {
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
         let config = super::setup_mesh(
             kind,
-            super::SetupParams {
-                author,
-                max_peers: 8,
-                max_direct: 0,
-                runtime_base: None,
-                state_file: None,
-                sink: std::sync::Arc::new(crate::embed::SilentSink),
-                endpoint: None,
-                protocols: Vec::new(),
-                transports: crate::lookup::TransportOpts {
+            super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                .with_max_peers(8)
+                .with_transports(crate::lookup::TransportOpts {
                     udp: false,
                     ..crate::lookup::TransportOpts::default()
-                },
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+                }),
         )
         .await
         .expect("a mesh sets up");
@@ -1490,20 +1560,9 @@ mod tests {
             let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
             let config = super::setup_mesh(
                 kind,
-                super::SetupParams {
-                    author,
-                    max_peers,
-                    max_direct,
-                    runtime_base: None,
-                    state_file: None,
-                    sink: std::sync::Arc::new(crate::embed::SilentSink),
-                    endpoint: None,
-                    protocols: Vec::new(),
-                    transports: crate::lookup::TransportOpts::default(),
-                    per_peer_gate: None,
-                    cohost: None,
-                    live_count: None,
-                },
+                super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                    .with_max_peers(max_peers)
+                    .with_max_direct(max_direct),
             )
             .await
             .expect("a loopback mesh sets up");
@@ -1702,20 +1761,9 @@ mod tests {
         let (kind, author) = crate::membership::resolve_kind(&opts, None)?;
         super::setup_mesh(
             kind,
-            super::SetupParams {
-                author,
-                max_peers: 8,
-                max_direct: 0,
-                runtime_base: None,
-                state_file: None,
-                sink: std::sync::Arc::new(crate::embed::SilentSink),
-                endpoint: Some(injected),
-                protocols: Vec::new(),
-                transports: crate::lookup::TransportOpts::default(),
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+            super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                .with_max_peers(8)
+                .with_endpoint(injected),
         )
         .await
     }
@@ -1821,20 +1869,8 @@ mod tests {
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
         let config = super::setup_mesh(
             kind,
-            super::SetupParams {
-                author,
-                max_peers: 8,
-                max_direct: 0,
-                runtime_base: None,
-                state_file: None,
-                sink: std::sync::Arc::new(crate::embed::SilentSink),
-                endpoint: None,
-                protocols: Vec::new(),
-                transports: crate::lookup::TransportOpts::default(),
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+            super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                .with_max_peers(8),
         )
         .await
         .expect("a loopback mesh sets up");
@@ -1883,23 +1919,12 @@ mod browser_tests {
         let (kind, author) = crate::membership::resolve_kind(&opts, None).expect("a kind");
         let mut config = super::setup_mesh(
             kind,
-            super::SetupParams {
-                author,
-                max_peers: 8,
-                max_direct: 0,
-                runtime_base: None,
-                state_file: None,
-                sink: std::sync::Arc::new(crate::embed::SilentSink),
-                endpoint: None,
-                protocols: Vec::new(),
-                transports: crate::lookup::TransportOpts {
+            super::SetupParams::new(author, std::sync::Arc::new(crate::embed::SilentSink))
+                .with_max_peers(8)
+                .with_transports(crate::lookup::TransportOpts {
                     udp: false,
                     ..crate::lookup::TransportOpts::default()
-                },
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+                }),
         )
         .await
         .expect("a mesh sets up");

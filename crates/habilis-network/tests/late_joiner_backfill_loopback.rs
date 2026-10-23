@@ -15,7 +15,6 @@ use std::time::Duration;
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
 use habilis_network::protocol::{Channel, LookupOpts, MessageKind, Nickname, PresenceSubtype};
 use habilis_network::runtime::{
@@ -146,20 +145,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author: nick(name),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(nick(name), Arc::clone(&sink) as Arc<dyn NodeSink>).with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
