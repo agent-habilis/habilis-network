@@ -608,15 +608,7 @@ impl NodeDriver for MembershipApp {
             Request::StateMerge { merge, reply } => {
                 let merged = broadcast_state_merge(
                     state,
-                    StateMergeParams {
-                        mesh: ctx.mesh,
-                        author: ctx.author,
-                        merge,
-                        sender: ctx.sender,
-                        sink: ctx.sink,
-                        channel: Channel::State,
-                        surface: true,
-                    },
+                    StateMergeParams::new(ctx.into(), Channel::State, merge),
                 )
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));

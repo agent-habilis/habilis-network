@@ -162,21 +162,75 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, ctx: &HandlerC
     broadcast_msg(ctx.sender, &probe).await;
 }
 
-/// Parameters for [`broadcast_state_merge`]. A dedicated struct rather than
-/// reusing `HandlerCtx`: several root-crate callers only hold loose
-/// `mesh`/`author`/`sender`/`sink` locals, not a full `HandlerCtx`.
+/// The four refs that a state write needs from the loop: the mesh, the author, the sender of the
+/// topic, and the sink that reports the write. A [`HandlerCtx`] holds all four.
 #[expect(
     missing_debug_implementations,
     reason = "sink is a &'a dyn NodeSink trait object with no Debug impl"
 )]
-pub struct StateMergeParams<'mesh> {
+#[non_exhaustive]
+pub struct MergeCtx<'mesh> {
     pub mesh: &'mesh MeshId,
     pub author: &'mesh Nickname,
-    pub merge: serde_json::Value,
     pub sender: &'mesh MeshSender,
     pub sink: &'mesh dyn NodeSink,
+}
+
+impl<'mesh> MergeCtx<'mesh> {
+    /// The four refs of a state write, in the order of the struct.
+    #[must_use]
+    pub const fn new(
+        mesh: &'mesh MeshId,
+        author: &'mesh Nickname,
+        sender: &'mesh MeshSender,
+        sink: &'mesh dyn NodeSink,
+    ) -> Self {
+        Self {
+            mesh,
+            author,
+            sender,
+            sink,
+        }
+    }
+}
+
+impl<'ctx> From<&HandlerCtx<'ctx>> for MergeCtx<'ctx> {
+    fn from(ctx: &HandlerCtx<'ctx>) -> Self {
+        Self::new(ctx.mesh, ctx.author, ctx.sender, ctx.sink)
+    }
+}
+
+/// Parameters for [`broadcast_state_merge`]. Agent-driven writes surface to the operator, so
+/// `surface` is `true` unless [`StateMergeParams::with_surface`] says otherwise.
+#[expect(
+    missing_debug_implementations,
+    reason = "the ctx holds a &dyn NodeSink, which has no Debug impl"
+)]
+#[non_exhaustive]
+pub struct StateMergeParams<'mesh> {
+    pub ctx: MergeCtx<'mesh>,
     pub channel: Channel,
+    pub merge: serde_json::Value,
     pub surface: bool,
+}
+
+impl<'mesh> StateMergeParams<'mesh> {
+    /// A write on `channel` that surfaces to the operator.
+    #[must_use]
+    pub fn new(ctx: MergeCtx<'mesh>, channel: Channel, merge: serde_json::Value) -> Self {
+        Self {
+            ctx,
+            channel,
+            merge,
+            surface: true,
+        }
+    }
+
+    /// Whether the write is reported to the operator as a `state` or `meta` event.
+    #[must_use]
+    pub fn with_surface(self, surface: bool) -> Self {
+        Self { surface, ..self }
+    }
 }
 
 /// The single shared-state write helper, shared by the IPC `state_merge` command
@@ -210,12 +264,15 @@ pub async fn broadcast_state_merge(
     use crate::doc::Ingested;
 
     let StateMergeParams {
-        mesh,
-        author,
-        merge,
-        sender,
-        sink,
+        ctx:
+            MergeCtx {
+                mesh,
+                author,
+                sender,
+                sink,
+            },
         channel,
+        merge,
         surface,
     } = params;
 

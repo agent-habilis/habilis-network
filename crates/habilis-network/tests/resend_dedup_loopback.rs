@@ -141,15 +141,7 @@ impl NodeDriver for Chat {
             Request::Merge(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams {
-                        mesh: ctx.mesh,
-                        author: ctx.author,
-                        merge,
-                        sender: ctx.sender,
-                        sink: ctx.sink,
-                        channel: Channel::State,
-                        surface: false,
-                    },
+                    StateMergeParams::new(ctx.into(), Channel::State, merge).with_surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
