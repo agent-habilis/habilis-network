@@ -7,7 +7,7 @@ use std::rc::Rc;
 use habilis_network_stream::{StreamHash, StreamOpts};
 use n0_future::future::or;
 use tokio::sync::{Mutex, watch};
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 use crate::to_js_error;
 

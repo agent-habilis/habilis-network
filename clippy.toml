@@ -8,12 +8,9 @@
 # on every configurable lint even though their lint sets match, and code that
 # passes in one fails in the other.
 #
-# One deliberate divergence: agent-share also sets
-# `warn-on-all-wildcard-imports = true`. That cannot hold here. `habilis-network`'s
-# `protocol` and `util` facades are `pub use habilis_network_protocol::*` /
-# `pub use habilis_network_util::*`, which is the whole mechanism by which the split
-# crates keep their old module paths; enumerating those names by hand would
-# drift on every new public item in a leaf crate.
+# Wildcard imports are flagged. Clippy exempts `pub use ...::*` facades and `use super::*` in
+# test modules, so the crate facades and the test modules stay as they are.
+warn-on-all-wildcard-imports = true
 
 # Flag single-character identifiers; keep idiomatic generics and loop vars.
 min-ident-chars-threshold = 1

@@ -11,7 +11,7 @@
 //! arbitrary per-frame lag — and asserts the final states match exactly.
 
 use habilis_network_netplay::{Config, Frame, PlayerHandle, Request, SyncTestSession};
-use proptest::prelude::*;
+use proptest::prelude::{prop, prop_assert_eq, proptest};
 use serde::{Deserialize, Serialize};
 
 // The rollback core is `pub(crate)`, so drive it through the one public

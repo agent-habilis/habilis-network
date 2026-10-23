@@ -13,7 +13,7 @@
 
 use futures::channel::oneshot;
 use wasm_bindgen::JsCast as _;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcIceConnectionState,

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::{Listener, Stream};
+use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
 use interprocess::local_socket::{ListenerOptions, Name};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     async fn idle_connection_is_closed_at_the_read_deadline() {
         use interprocess::local_socket::tokio::Stream;
-        use interprocess::local_socket::tokio::prelude::*;
+        use interprocess::local_socket::traits::tokio::Stream as _;
         use interprocess::local_socket::{GenericFilePath, ToFsName};
         use tokio::io::AsyncReadExt;
 

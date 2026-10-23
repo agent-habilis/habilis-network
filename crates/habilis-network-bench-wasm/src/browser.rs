@@ -12,7 +12,7 @@ use habilis_network_iroh_webrtc_transport::{
     BrowserPendingAnswer, BrowserPendingOffer, IceServers, SignalEnvelope, WebRtcHandle,
     browser_answer, browser_offer, custom_addr,
 };
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 struct State {
     endpoint: Endpoint,

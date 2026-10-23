@@ -20,7 +20,7 @@ use iroh_base::CustomAddr;
 use js_sys::Reflect;
 use n0_watcher::Watchable;
 use wasm_bindgen::JsCast as _;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection, RtcPeerConnectionState};
 

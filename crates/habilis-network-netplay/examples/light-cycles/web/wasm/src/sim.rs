@@ -224,7 +224,7 @@ mod tests {
     use crate::grid::{Dir, Input};
     use crate::round::RoundDescriptor;
     use habilis_network_test_tracing::test;
-    use proptest::prelude::*;
+    use proptest::prelude::{Just, Strategy, any, prop, prop_assert_eq, prop_oneof, proptest};
 
     /// Runs `count` ticks with nobody steering.
     fn coast(desc: &RoundDescriptor, count: u16) -> World {

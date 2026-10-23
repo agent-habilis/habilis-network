@@ -48,7 +48,7 @@ use habilis_network_iroh_webrtc_transport::{
     WebRtcHandle, browser_offer, custom_addr,
 };
 use serde::Serialize;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 /// What the tab is told, as it happens.
 ///

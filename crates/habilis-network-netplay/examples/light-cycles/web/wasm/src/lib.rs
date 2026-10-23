@@ -35,7 +35,7 @@ use habilis_network_netplay::RollbackDriver;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 use app::{Game, LightCycles};
 use grid::{Dir, GRID_H, GRID_W, TICK_MS};
