@@ -10,6 +10,9 @@ use tokio::sync::{broadcast, mpsc};
 use crate::daemon::app::NodeDriver;
 use crate::daemon::config::{DriverMode, EventLoopConfig};
 use crate::protocol::mesh::MeshName;
+use crate::protocol::message::Authored;
+use crate::protocol::{MeshId, Nickname};
+use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 
 /// Whether a session registers the process-wide ctrl-c and SIGTERM listeners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,9 +23,6 @@ pub enum SignalHandling {
     /// Register nothing: a session nested inside a host that owns the signals.
     Leave,
 }
-use crate::protocol::message::Authored;
-use crate::protocol::{MeshId, Nickname};
-use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 
 /// A live in-process membership over a background event loop, generic over the
 /// application driver `A`. Drop it (or call [`Node::leave`]) to wind the loop

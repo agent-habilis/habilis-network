@@ -15,7 +15,6 @@ use crate::lookup::{
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
-use crate::transport::PayloadPath;
 use crate::util::tuning::RELAY_RUNG_PROBE;
 
 use crate::beacon::RendezvousParams;
@@ -95,7 +94,9 @@ fn rendezvous_params(
         bind_ports,
         id: mesh.rendezvous_id(),
         lookups: lookups.clone(),
-        relay_transport: mesh.config().transport.relay_transport,
+        relay_transport: crate::transport::PayloadPath::from(
+            mesh.config().transport.relay_transport,
+        ),
         bootstrap_relay,
         rung_tx,
     }
@@ -194,7 +195,7 @@ pub(crate) fn register_rendezvous(
 /// loop drains into `gossip::ingest`. Bounded so a flooding peer can't
 /// back-pressure the loop (a dropped frame heals via anti-entropy).
 fn unicast_inbox(
-    relay_transport: bool,
+    relay_transport: crate::transport::PayloadPath,
 ) -> (
     mpsc::Receiver<bytes::Bytes>,
     crate::transport::UnicastAcceptor,
@@ -202,7 +203,7 @@ fn unicast_inbox(
     let (tx, rx) = mpsc::channel::<bytes::Bytes>(crate::util::consts::UNICAST_INBOX_CAP);
     (
         rx,
-        crate::transport::UnicastAcceptor::new(tx, PayloadPath::from(relay_transport)),
+        crate::transport::UnicastAcceptor::new(tx, relay_transport),
     )
 }
 
@@ -251,7 +252,7 @@ async fn build_member_endpoint(
                 habilis_network_iroh_multihop_transport::MultihopHandle::relay_payload,
             ),
             build.lookups,
-            build.relay_transport,
+            build.relay_transport.relay_allowed(),
         )?;
         // The caller built the underlay of its handle itself, so there is no
         // `WebRTC` leg on it.
@@ -273,7 +274,7 @@ async fn build_member_endpoint(
             build.lookups,
             build.transports,
             Some(&admission),
-            crate::lookup::multihop_handle_config(PayloadPath::from(build.relay_transport)),
+            crate::lookup::multihop_handle_config(build.relay_transport),
             crate::lookup::underlay_cap(build.max_peers),
         )
         .await?;
@@ -318,7 +319,7 @@ async fn build_member_endpoint(
             &injected.endpoint,
             false,
             build.lookups,
-            build.relay_transport,
+            build.relay_transport.relay_allowed(),
         )?;
         return Ok((
             injected.endpoint.clone(),
@@ -336,7 +337,7 @@ async fn build_member_endpoint(
             build.lookups,
             build.transports,
             Some(&admission),
-            crate::lookup::browser_handle_config(PayloadPath::from(build.relay_transport)),
+            crate::lookup::browser_handle_config(build.relay_transport),
             crate::lookup::underlay_cap(build.max_peers),
         )
         .await?;
@@ -676,7 +677,7 @@ struct SetupBuild<'build> {
     protocols: std::sync::Mutex<CallerProtocols>,
     rung_tx: &'build watch::Sender<Option<RelayUrl>>,
     /// The mesh's `transport.relay_transport`, for the accept gates.
-    relay_transport: bool,
+    relay_transport: crate::transport::PayloadPath,
 }
 
 impl SetupBuild<'_> {
@@ -809,7 +810,8 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
     // yet, and an invalid one would produce an id every joiner rejects.
     mesh_config.validate()?;
     let lookups = mesh_config.lookups.clone();
-    let relay_transport = mesh_config.transport.relay_transport;
+    let relay_transport =
+        crate::transport::PayloadPath::from(mesh_config.transport.relay_transport);
     let transports = member_transports(&lookups, transports, mesh_config.transport)?;
     // The mesh policy's `multihop`, on a node that has a direct path for its underlay to
     // forward over: UDP, or a WebRTC data channel when IP is cleared. With neither there is
@@ -985,7 +987,7 @@ fn build_overlay(
             .webrtc
             .then(|| (webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
-        build.relay_transport,
+        build.relay_transport.relay_allowed(),
         crate::transport::webrtc::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
     );
     (gossip, router, admission, address_book, ice)
@@ -1193,7 +1195,7 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // `transport::webrtc::rendezvous_graftable`); the heal tick grafts once
     // it is attached.
     let needs_session = crate::transport::webrtc::node_graft_needs_session(
-        build.relay_transport,
+        build.relay_transport.relay_allowed(),
         UdpTransport::from(build.transports.udp),
     );
     let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };

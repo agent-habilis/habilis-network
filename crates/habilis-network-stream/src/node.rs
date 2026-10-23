@@ -9,7 +9,7 @@ use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
 use habilis_network::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
-    PROBE_DEADLINE, PayloadPath, SignalAdmission, WebRtcHandle, WebRtcSignalAcceptor,
+    PROBE_DEADLINE, PayloadPath, SignalAdmission, UdpTransport, WebRtcHandle, WebRtcSignalAcceptor,
     build_peer_webrtc, dial_signal, is_cap_refusal, pair_needs_lane, wait_direct,
 };
 use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
@@ -181,7 +181,7 @@ impl StreamNode {
     /// The producer cannot be reached, the only path is a relay the stream
     /// refuses, or the producer refuses the hash (a [`Refused`]).
     pub async fn open(&self, hash: &StreamHash) -> Result<Reader> {
-        let needs_lane = pair_needs_lane(&hash.addr, self.transports.udp.into());
+        let needs_lane = pair_needs_lane(&hash.addr, UdpTransport::from(self.transports.udp));
         // A data channel needs `webrtc` on both ends: the producer's list is in
         // the hash, and a producer without it answers no offer.
         let can_lane = self.transports.webrtc && hash.transport.webrtc;

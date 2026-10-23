@@ -229,7 +229,7 @@ pub struct EventLoopConfig {
     pub(crate) live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
-    pub(crate) relay_transport: bool,
+    pub(crate) relay_transport: crate::transport::PayloadPath,
     /// Who drives the loop (CLI / in-process) and the channels that driver
     /// needs. Assigned by [`Node::spawn`](super::node::Node::spawn) for an in-process
     /// consumer; a config handed straight to [`run`](super::run) keeps the CLI

@@ -703,7 +703,7 @@ pub(crate) fn ensure_direct(
     peer: EndpointId,
     peer_addr: &iroh::EndpointAddr,
 ) -> bool {
-    if state.relay_transport {
+    if state.relay_transport.relay_allowed() {
         return true;
     }
     let needs_webrtc = needs_webrtc_lane(peer_addr) || needs_webrtc_lane(&ctx.endpoint.addr());
@@ -906,7 +906,7 @@ pub(crate) async fn retry_direct(
     let now = Instant::now();
     state.note_link_count(state.linked_endpoints.len(), ctx.max_peers, now);
     state.settle_graft_backoff(now);
-    if state.relay_transport {
+    if state.relay_transport.relay_allowed() {
         fill_active_view(state, ctx).await;
         return;
     }
@@ -985,7 +985,7 @@ async fn retry_one(
 /// next members do not wait for the alive tick. The members are not served in a fair order: the
 /// random start spreads the load, and nothing more is promised.
 pub(crate) async fn top_up_lane_offers(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    if state.relay_transport || state.webrtc.is_none() {
+    if state.relay_transport.relay_allowed() || state.webrtc.is_none() {
         return;
     }
     let lane: Vec<_> = retry_candidates(state, ctx.rendezvous_id, ctx.max_peers, false)
@@ -1774,7 +1774,7 @@ mod tests {
     #[test]
     fn a_re_bridge_keeps_linked_peers_as_candidates() {
         let mut state = fresh_state();
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         let rendezvous = endpoint_id(1);
         let linked = endpoint_id(2);
         let unlinked = endpoint_id(3);
@@ -2753,7 +2753,7 @@ mod tests {
             sink: &sink,
         };
         let mut state = fresh_state();
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         let ids: Vec<_> = (2u8..=4).map(endpoint_id).collect();
         for (index, id) in ids.iter().enumerate() {
             state.peer_endpoints.insert(

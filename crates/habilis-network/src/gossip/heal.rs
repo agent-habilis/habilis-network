@@ -129,7 +129,7 @@ pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<
         count = peers.len(),
         "heal: rendezvous-independent re-bridge (re-dialing known peers)"
     );
-    if !state.relay_transport {
+    if !state.relay_transport.relay_allowed() {
         crate::transport::probe::retry_direct(state, ctx, true).await;
         return;
     }

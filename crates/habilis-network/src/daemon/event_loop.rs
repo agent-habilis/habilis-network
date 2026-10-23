@@ -205,15 +205,18 @@ pub async fn run<A: NodeDriver>(
     // made it with the endpoint and keeps it, to tell it which peers are established and which
     // pairs a higher rung carries.
     state.gossip_handle = state.webrtc_admission.gossip_handle();
-    state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), relay_transport);
+    state.unicast_pool =
+        crate::transport::UnicastPool::new(endpoint.clone(), relay_transport.relay_allowed());
     state
         .unicast_pool
         .set_admission(state.webrtc_admission.clone());
     // Before the first write, so the initial advertisement carries a real count.
     state.live_count = live_count;
     state.relay_transport = relay_transport;
-    state.rendezvous_graft_needs_session =
-        crate::transport::webrtc::node_graft_needs_session(relay_transport, local_udp_transport);
+    state.rendezvous_graft_needs_session = crate::transport::webrtc::node_graft_needs_session(
+        relay_transport.relay_allowed(),
+        local_udp_transport,
+    );
     state.local_udp_transport = local_udp_transport;
     // Direct-path probes report here; the loop grafts on the verdict.
     let (direct_tx, direct_rx) = mpsc::unbounded_channel();

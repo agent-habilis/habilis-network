@@ -84,7 +84,7 @@ pub(crate) struct RendezvousParams {
     /// The mesh's `transport.relay_transport`. With it off, the beacon holds every
     /// inbound gossip connection — a joiner's first link — until iroh selects
     /// a direct path on it, so no frame ever crosses the relay.
-    pub(crate) relay_transport: bool,
+    pub(crate) relay_transport: crate::transport::PayloadPath,
     /// The single relay **rung** the beacon homes on — initialized to
     /// the first ladder rung (optimistic, unprobed) at setup and
     /// corrected off the event loop: a backgrounded startup probe and
@@ -1631,7 +1631,7 @@ async fn claim_holder(
         // The rendezvous serves no caller protocol either — it is a meeting
         // point, not somewhere an application is reachable.
         Vec::new(),
-        params.relay_transport,
+        params.relay_transport.relay_allowed(),
         // The rendezvous keeps the hold: a joiner grafts it only once their
         // session is attached, so a held dial here is not a second one.
         false,
@@ -2584,7 +2584,7 @@ mod tests {
             bind_ports: Vec::new(),
             id,
             lookups: LookupOpts::loopback(),
-            relay_transport: false,
+            relay_transport: crate::transport::PayloadPath::DirectOnly,
             bootstrap_relay: None,
             rung_tx: watch::channel(None).0,
         }

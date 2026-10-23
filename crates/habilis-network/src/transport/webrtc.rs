@@ -1220,7 +1220,7 @@ pub(crate) fn negotiate_rendezvous_session(
         }
         return;
     }
-    if state.relay_transport || state.rendezvous_linked {
+    if state.relay_transport.relay_allowed() || state.rendezvous_linked {
         return;
     }
     let Some(handle) = state.webrtc.clone() else {
@@ -1280,7 +1280,10 @@ pub(crate) fn offer_rendezvous_on_path_loss(
     state: &mut crate::daemon::state::EventLoopState,
     ctx: &crate::daemon::ctx::HandlerCtx<'_>,
 ) {
-    if !state.rendezvous_wanted() || state.relay_transport || !state.rendezvous_linked {
+    if !state.rendezvous_wanted()
+        || state.relay_transport.relay_allowed()
+        || !state.rendezvous_linked
+    {
         return;
     }
     let Some(handle) = state.webrtc.clone() else {
@@ -1649,7 +1652,7 @@ pub(crate) fn retry_sessions(
 /// for a proven direct path. A pair behind NAT, with addresses but no punched
 /// path, would wait for ever. A session is its way out.
 fn held_back(state: &crate::daemon::state::EventLoopState, addr: &EndpointAddr) -> bool {
-    let probe_failed = !state.relay_transport
+    let probe_failed = !state.relay_transport.relay_allowed()
         && state.direct.get(&addr.id) == Some(&crate::daemon::state::DirectState::RelayOnly);
     let linked = state.linked_endpoints.contains(&addr.id);
     let wanted = state.lane_session_wanted(addr.id, crate::util::clock::Instant::now());
@@ -3103,7 +3106,7 @@ mod tests {
         let ip_pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         let mut state = crate::testing::fresh_state();
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
 
         for (known, held) in [
             (None, true),
@@ -3128,7 +3131,7 @@ mod tests {
 
         // With the relay carrying payload the pair can talk without a session, so
         // a failed probe is no reason to open one before a send.
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         state.direct.insert(peer, DirectState::RelayOnly);
         assert!(
             held_back(&state, &ip_pair),
@@ -3147,7 +3150,7 @@ mod tests {
         let pair = EndpointAddr::new(peer).with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         let mut state = crate::testing::fresh_state();
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.direct.insert(peer, DirectState::RelayOnly);
         assert!(!held_back(&state, &pair), "a failed probe offers a session");
 
@@ -3428,7 +3431,7 @@ mod tests {
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state
             .peer_endpoints
@@ -3782,7 +3785,7 @@ mod tests {
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle.clone());
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state
             .peer_endpoints
@@ -3885,7 +3888,7 @@ mod tests {
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle.clone());
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         state
             .peer_endpoints
@@ -3966,7 +3969,7 @@ mod tests {
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
         for (index, id) in members.iter().enumerate() {
@@ -4034,7 +4037,7 @@ mod tests {
         let mut state = crate::testing::fresh_state();
         state.webrtc = Some(handle);
         state.local_udp_transport = UdpTransport::Present;
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
         let members: Vec<EndpointId> = (1..=6).map(crate::testing::endpoint_id).collect();
         for (index, id) in members.iter().enumerate() {

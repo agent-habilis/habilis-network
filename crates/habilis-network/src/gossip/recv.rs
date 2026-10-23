@@ -105,7 +105,7 @@ pub(crate) async fn handle_gossip_event(
                 // its signal.
                 #[cfg(feature = "multihop")]
                 crate::transport::underlay_webrtc::tick_now(state);
-                if state.relay_transport {
+                if state.relay_transport.relay_allowed() {
                     state.observe_path(node_id, conn);
                 } else {
                     // The accept gate and the graft probe both admit a link
@@ -3022,7 +3022,7 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut state = fresh_state();
         state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_linked = true;
 
@@ -3051,7 +3051,7 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut state = fresh_state();
         state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_answers_jsep = false;
 

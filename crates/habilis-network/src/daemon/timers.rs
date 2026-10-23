@@ -125,7 +125,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         roster_len,
         link_len,
         meshed = state.meshed,
-        relay_transport = state.relay_transport,
+        relay_transport = state.relay_transport.relay_allowed(),
         links_direct = links.direct,
         links_relay_only = links.relay_only,
         links_pending = links.pending,

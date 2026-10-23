@@ -221,7 +221,7 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
 /// only and no direct path to the peer is proven yet. An unprobed peer is
 /// held too — the alive tick probes every known peer, so the hold is short.
 fn held(eid: EndpointId, state: &EventLoopState) -> bool {
-    !state.relay_transport
+    !state.relay_transport.relay_allowed()
         && state.direct.get(&eid) != Some(&crate::daemon::state::DirectState::Direct)
 }
 
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn on_a_payload_relay_the_cold_send_to_a_lane_peer_is_not_held() {
         let (mut state, bob) = state_knowing_a_lane_bob();
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
 
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
     }
@@ -859,9 +859,9 @@ mod tests {
         use crate::daemon::state::DirectState;
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         for unproven in [
             None,
             Some(DirectState::Pending),
@@ -908,9 +908,9 @@ mod tests {
         use crate::daemon::state::DirectState;
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         assert_eq!(lane_for(&nick("bob"), &state), Lane::RelayOnly);
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);

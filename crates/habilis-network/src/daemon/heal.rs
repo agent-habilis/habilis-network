@@ -367,7 +367,7 @@ mod tests {
                 secret,
                 bind_ports: Vec::new(),
                 lookups: crate::protocol::mesh::LookupOpts::loopback(),
-                relay_transport: false,
+                relay_transport: crate::transport::PayloadPath::DirectOnly,
                 bootstrap_relay: None,
                 rung_tx: tokio::sync::watch::channel(None).0,
             };
