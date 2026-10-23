@@ -22,8 +22,8 @@ function koffiType(type: CType): string {
   switch (type) {
     case 'i32':
       return 'int'
-    case 'isize':
-      return 'long'
+    case 'i64':
+      return 'int64_t'
     case 'usize':
       return 'size_t'
     case 'ptr':
@@ -97,7 +97,7 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
     const signature = ABI[name]
     const lowered = args.map((arg, index) => {
       switch (signature.args[index] as CType | undefined) {
-        case 'isize':
+        case 'i64':
         case 'usize':
           // koffi takes plain numbers for its integer types.
           return typeof arg === 'bigint' ? Number(arg) : arg
@@ -111,7 +111,7 @@ export async function loadWithKoffi(path: string): Promise<NativeLibrary> {
     switch (signature.returns) {
       case 'i32':
         return Number(result)
-      case 'isize':
+      case 'i64':
       case 'usize':
         return BigInt(result as number | bigint)
       default:

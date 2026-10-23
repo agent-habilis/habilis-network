@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { discover } from './discover.ts'
+import { loadNative } from './dlopen/native.ts'
 import { create } from './index.ts'
 
 const library = discover()
@@ -31,4 +32,16 @@ describe.skipIf(library.path === null)('smoke over the built library', () => {
       await mesh.leave()
     }
   }, 30000)
+
+  // A negative return is the case that a 32-bit `long` broke on Windows: the
+  // low half of -1 read as 64 bits is 4294967295. A positive count read
+  // right by luck, so it proves nothing about the width.
+  test('a NULL handle gives -1 from a call that returns an int64_t', async () => {
+    const native = await loadNative(library.path ?? '')
+    try {
+      expect(native.call('habilis_network_mesh_peer_count', null)).toBe(-1n)
+    } finally {
+      native.close()
+    }
+  })
 })

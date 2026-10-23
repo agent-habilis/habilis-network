@@ -44,7 +44,7 @@ function ffiType(type: CType): string {
   switch (type) {
     case 'i32':
       return 'i32'
-    case 'isize':
+    case 'i64':
       return 'i64'
     case 'usize':
       return 'u64'
@@ -92,13 +92,13 @@ export function loadWithDeno(path: string): NativeLibrary {
   const call = (name: SymbolName, ...args: NativeValue[]): number | bigint | NativePointer => {
     const signature = ABI[name]
     const lowered = args.map((arg, index) => {
-      // Widened: no ABI *argument* is an `isize` today, but the lowering is
+      // Widened: no ABI *argument* is an `i64` today, but the lowering is
       // written for the whole vocabulary so a header change cannot skew it.
       const type = signature.args[index] as CType | undefined
       switch (type) {
         case 'i32':
           return arg as number
-        case 'isize':
+        case 'i64':
         case 'usize':
           return arg as bigint
         case 'buf':
@@ -119,7 +119,7 @@ export function loadWithDeno(path: string): NativeLibrary {
     switch (signature.returns) {
       case 'i32':
         return Number(result)
-      case 'isize':
+      case 'i64':
       case 'usize':
         return BigInt(result as number | bigint)
       default:

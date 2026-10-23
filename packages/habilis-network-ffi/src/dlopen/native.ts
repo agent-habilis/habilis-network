@@ -23,9 +23,9 @@ export type NativeValue = number | bigint | Uint8Array | string | null | NativeP
 export interface NativeLibrary {
   /**
    * Call one symbol from the `ABI` table. Arguments follow the table's types:
-   * `i32` a number, `isize`/`usize` a bigint, `buf` a Uint8Array read or
+   * `i32` a number, `i64`/`usize` a bigint, `buf` a Uint8Array read or
    * written in place, `cstr` a string or null, `ptr` a `NativePointer`.
-   * Returns a number for `i32`, a bigint for `isize`/`usize`, and a
+   * Returns a number for `i32`, a bigint for `i64`/`usize`, and a
    * `NativePointer` for `ptr`.
    */
   call(name: SymbolName, ...args: NativeValue[]): number | bigint | NativePointer
