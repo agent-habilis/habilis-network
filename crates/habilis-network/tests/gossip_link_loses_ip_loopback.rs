@@ -20,6 +20,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// Past the point where the relay policy closes a gossip link that stayed on the
 /// relay: the probe deadline of 15 s, and a margin. A broadcast sent before it can
 /// still arrive over the relay, which proves nothing about recovery.
@@ -120,9 +121,7 @@ fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
     // real check, and it stays asserted below.
     guard.allow_warn("habilis_network::lifecycle", "silent partition");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let mut bob = Member::join("bob", &alice).await;
 

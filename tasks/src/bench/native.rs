@@ -29,6 +29,7 @@ use habilis_network_iroh_webrtc_transport::{
 use super::Args;
 use super::run::{Measured, Outcome, Rtt, Sample, TRANSFER_TIMEOUT};
 
+use habilis_network::net::test_relay;
 /// A JSEP round on loopback is milliseconds; this is the stall bound.
 pub(crate) const JSEP_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -393,7 +394,7 @@ pub(crate) async fn ladder_webrtc(args: &Args) -> Outcome {
 /// relay between them, throughput and round trips.
 pub(crate) async fn ladder_relay(args: &Args) -> Outcome {
     let run = async {
-        let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
+        let (relay_url, _relay) = test_relay::spawn_plain()
             .await
             .map_err(|error| format!("the local relay failed: {error:#}"))?;
         let bind = || async {

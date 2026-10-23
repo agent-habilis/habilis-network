@@ -17,6 +17,7 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 const FORMATION: Duration = Duration::from_mins(1);
 /// The local request goes out this long after the send, so that the send is already in the loop.
 const ASK_AFTER: Duration = Duration::from_millis(200);
@@ -131,9 +132,7 @@ impl Member {
 fn a_directed_send_that_waits_on_a_dial_does_not_stop_the_node() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
 

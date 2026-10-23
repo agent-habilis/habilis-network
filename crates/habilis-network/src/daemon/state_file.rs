@@ -48,6 +48,7 @@ use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::clock;
 
+use std::sync::atomic;
 /// Owns a session state file for the lifetime of a daemon process.
 /// Drop removes the file (best effort), but because the daemon exits
 /// via `std::process::exit`, callers must also call `remove()`
@@ -68,7 +69,7 @@ pub struct StateFile {
     /// (see [`Self::set_discovery`]). Opaque to the engine, and the reason every
     /// write is 0o600: an app may put a bearer token in here.
     discovery: std::sync::Mutex<serde_json::Map<String, serde_json::Value>>,
-    write_failing: std::sync::atomic::AtomicBool,
+    write_failing: atomic::AtomicBool,
 }
 
 impl StateFile {
@@ -82,7 +83,7 @@ impl StateFile {
             topic: None,
             owner_pid: None,
             discovery: std::sync::Mutex::new(serde_json::Map::new()),
-            write_failing: std::sync::atomic::AtomicBool::new(false),
+            write_failing: atomic::AtomicBool::new(false),
         }
     }
 

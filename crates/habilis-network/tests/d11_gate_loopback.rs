@@ -29,6 +29,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 const ROSTER_DEADLINE: Duration = Duration::from_mins(2);
 const FRAME_DEADLINE: Duration = Duration::from_mins(2);
 /// How long a lane pair may take from the roster to a frame in both directions. The session is
@@ -169,9 +170,7 @@ async fn delivered(from: &Member, to: &mut Member, to_nick: &str, text: &str) ->
 fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay, vec![Transport::Udp], 2).await;
         let mut bob = Member::join("bob", &alice).await;
         let mut carol = Member::join("carol", &alice).await;
@@ -222,9 +221,7 @@ fn a_node_at_a_ceiling_of_two_delivers_every_frame_while_it_evicts() {
 fn a_lane_pair_delivers_a_frame_sent_as_soon_as_the_roster_forms() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut alice = Member::create("alice", &relay, vec![Transport::WebRtc], 0).await;
         let mut bob = Member::join("bob", &alice).await;
         assert!(

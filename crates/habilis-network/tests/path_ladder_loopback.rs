@@ -21,6 +21,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 use until_known::until_peer_known;
 
+use habilis_network::net::test_relay;
 /// Long enough for an ICE round, or for a multihop route to be advertised once
 /// (every 15 s) and then used.
 const STEP_DEADLINE: Duration = Duration::from_mins(2);
@@ -211,9 +212,7 @@ async fn rosters_hold(members: &[&Member], peers: usize, deadline: Duration) -> 
 fn a_node_steps_down_the_ladder_and_climbs_back() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
         let carol = Member::join("carol", &alice).await;
@@ -281,9 +280,7 @@ fn a_node_steps_down_the_ladder_and_climbs_back() {
 fn a_pair_that_loses_webrtc_before_any_route_exists_climbs_to_multihop() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
         let carol = Member::join("carol", &alice).await;
@@ -390,9 +387,7 @@ async fn cut_webrtc_between(first: &Member, second: &Member) {
 fn the_multihop_rung_forwards_through_a_third_member() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let list = vec![Transport::Udp, Transport::WebRtc, Transport::Multihop];
         let alice = Member::create_with("alice", &relay, list).await;
         let bob = Member::join("bob", &alice).await;

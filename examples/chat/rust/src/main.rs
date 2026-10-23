@@ -19,6 +19,7 @@ use habilis_network::membership::{
 };
 use tokio::sync::oneshot;
 
+use tokio::sync::mpsc;
 struct Args {
     opts: Opts,
     robot: bool,
@@ -70,7 +71,7 @@ async fn main() -> Result<()> {
 
     // Stdin on its own thread: the engine owns no stdio, and tokio's own stdin
     // wants the `io-std` feature this crate deliberately leaves off.
-    let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (lines_tx, mut lines) = mpsc::unbounded_channel::<String>();
     std::thread::spawn(move || {
         use std::io::BufRead as _;
         for line in std::io::stdin().lock().lines() {

@@ -11,6 +11,7 @@
 //! `complete` (which Chromium withholds until every STUN server answered or
 //! timed out).
 
+use futures::channel::oneshot;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -219,7 +220,7 @@ impl std::fmt::Debug for PendingOffer {
 pub struct PendingAnswer {
     peer_connection: OpenPeerConnection,
     /// Filled by `ondatachannel` when the remote opens the channel.
-    channel_rx: futures::channel::oneshot::Receiver<RtcDataChannel>,
+    channel_rx: oneshot::Receiver<RtcDataChannel>,
     /// Datagrams that arrived before the hub's handler was installed, in
     /// arrival order — see the buffering handler in [`answer`].
     backlog: std::rc::Rc<std::cell::RefCell<PreAttachBacklog>>,
@@ -391,7 +392,7 @@ pub async fn answer(
     let (peer_connection, expects_srflx) = new_peer_connection(ice)?;
     let peer_connection = OpenPeerConnection::new(peer_connection);
 
-    let (channel_tx, channel_rx) = futures::channel::oneshot::channel::<RtcDataChannel>();
+    let (channel_tx, channel_rx) = oneshot::channel::<RtcDataChannel>();
     let channel_tx = std::cell::RefCell::new(Some(channel_tx));
     // Everything that arrives before the hub's own `onmessage` is installed.
     //

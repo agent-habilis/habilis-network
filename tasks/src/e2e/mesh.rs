@@ -31,6 +31,9 @@ use habilis_network::protocol::{Lookup, Transport};
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
+use habilis_network::net::test_relay;
+use habilis_network::util::tuning;
+use tokio::sync::{mpsc, oneshot};
 /// A linked pair has to survive the beacon claim (~8 s), a WebRTC
 /// negotiation or a hole punch, and one alive-tick retry.
 pub(super) const LINK_TIMEOUT: Duration = Duration::from_mins(4);
@@ -200,7 +203,7 @@ pub(super) fn drain_logs() -> String {
 /// reads — inbound messages, surfaced events, the roster on demand.
 pub(super) struct Native {
     pub(super) membership: membership::Membership,
-    events: tokio::sync::mpsc::UnboundedReceiver<String>,
+    events: mpsc::UnboundedReceiver<String>,
     seen_events: Vec<serde_json::Value>,
     seen_msgs: Vec<membership::Inbound>,
 }
@@ -247,7 +250,7 @@ impl Native {
 
     pub(super) async fn request<T>(
         &self,
-        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> membership::Request,
+        build: impl FnOnce(oneshot::Sender<T>) -> membership::Request,
     ) -> Result<T, String> {
         self.membership.request(build).await
     }
@@ -635,8 +638,8 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // the matrix measures the mesh's steady state, and same-id split repair
     // has the engine's own tests. In-process only — the browser side never
     // claims under the stagger, so its defaults stay untouched.
-    habilis_network::util::tuning::init(
-        habilis_network::util::tuning::Tuning::DEFAULTS
+    tuning::init(
+        tuning::Tuning::DEFAULTS
             .with_rival_recheck_first(Duration::from_hours(1))
             .with_rival_recheck(Duration::from_hours(1))
             .with_rival_recheck_meshed(Duration::from_hours(1)),
@@ -649,7 +652,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // One relay and one harness server for the whole sweep; topics are
     // random, so cells never meet each other.
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let harness = BunServer::serve(
         &repo_root().join("packages/habilis-network-wasm"),

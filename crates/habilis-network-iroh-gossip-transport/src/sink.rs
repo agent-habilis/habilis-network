@@ -98,6 +98,7 @@ mod tests {
 
     use crate::{GossipHandle, frame};
 
+    use iroh::endpoint::transports;
     fn secret(seed: u8) -> SecretKey {
         SecretKey::from_bytes(&[seed; 32])
     }
@@ -176,14 +177,11 @@ mod tests {
     #[derive(Debug)]
     struct Ladder;
 
-    impl iroh::endpoint::transports::PathSelector for Ladder {
-        fn select(
-            &self,
-            ctx: &iroh::endpoint::transports::PathSelectionContext<'_>,
-        ) -> iroh::endpoint::transports::PathSelection {
+    impl transports::PathSelector for Ladder {
+        fn select(&self, ctx: &transports::PathSelectionContext<'_>) -> transports::PathSelection {
             use habilis_network_iroh_transport_util::{climb, custom_rung};
             let paths: Vec<_> = ctx.paths().collect();
-            let mut selection = iroh::endpoint::transports::PathSelection::none();
+            let mut selection = transports::PathSelection::none();
             if let Some(path) = climb(&paths, custom_rung, |_, _| true) {
                 selection.set(path);
             }

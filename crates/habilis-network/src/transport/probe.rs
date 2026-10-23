@@ -24,6 +24,9 @@ use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
 use crate::util::clock::Instant;
 
+#[cfg(feature = "multihop")]
+use crate::transport::underlay_webrtc;
+use crate::util::tuning;
 /// A probe's verdict, reported back to the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectOutcome {
@@ -420,7 +423,7 @@ pub(crate) async fn on_path_change(
     // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
     // session now, not at the alive tick.
     #[cfg(feature = "multihop")]
-    crate::transport::underlay_webrtc::tick_now(state);
+    underlay_webrtc::tick_now(state);
     // The fast path of the gossip drop rule for a watched pair: the table reads the pair from
     // all of its connections, so that this path and the sweep never disagree on what to tell
     // the gossip transport.
@@ -935,7 +938,7 @@ pub(crate) fn plan_lane_offers(
     in_flight: usize,
     pick: usize,
 ) -> Vec<iroh::EndpointAddr> {
-    let budget = crate::util::tuning::LANE_OFFERS_IN_FLIGHT.saturating_sub(in_flight);
+    let budget = tuning::LANE_OFFERS_IN_FLIGHT.saturating_sub(in_flight);
     let (mut browsers, mut natives): (Vec<_>, Vec<_>) =
         lane.into_iter().partition(needs_webrtc_lane);
     let mut ordered = Vec::new();
@@ -1180,6 +1183,9 @@ mod tests {
     // A multihop route proves a pair that no watcher reports: not a watched peer (its watcher
     // decides), not a proven one, not a pair on the relay, on IP or on gossip, not a pair with
     // no selected path.
+    use crate::gossip::event;
+    use crate::transport::graft_backoff;
+    use crate::util::{clock, tuning};
     #[test]
     fn a_pair_on_a_multihop_route_with_no_watcher_is_proven() {
         use super::proven_by_route;
@@ -1226,7 +1232,7 @@ mod tests {
     fn a_graft_asks_with_low_priority_except_for_the_rendezvous() {
         let mut state = fresh_state();
         let rendezvous = endpoint_id(3);
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         assert_eq!(
             graft_request(
                 &mut state,
@@ -1263,8 +1269,8 @@ mod tests {
         use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
-        let window = crate::util::tuning::STARVED;
+        let start = clock::Instant::now();
+        let window = tuning::STARVED;
         // G = 4 and two links: G - 2.
         state.linked_endpoints.insert(endpoint_id(10));
         state.linked_endpoints.insert(endpoint_id(11));
@@ -1316,7 +1322,7 @@ mod tests {
             .peer_endpoints
             .insert(nick("refuser"), native(refuser));
         state.peer_endpoints.insert(nick("other"), native(other));
-        let start = crate::util::clock::Instant::now();
+        let start = clock::Instant::now();
 
         // The request is not paced: it goes out and is recorded.
         assert_eq!(
@@ -1332,7 +1338,7 @@ mod tests {
             ),
             GraftRequest::Neighbor
         );
-        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let later = start + tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         state.settle_graft_backoff(later);
 
         assert_eq!(
@@ -1405,8 +1411,8 @@ mod tests {
             nick("tombstone"),
             EndpointAddr::new(tombstone).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
-        let start = crate::util::clock::Instant::now();
-        let window = crate::util::tuning::STARVED;
+        let start = clock::Instant::now();
+        let window = tuning::STARVED;
         // G = 4 and two links: starved once the window has passed.
         state.linked_endpoints.insert(endpoint_id(10));
         state.linked_endpoints.insert(endpoint_id(11));
@@ -1423,7 +1429,7 @@ mod tests {
             ),
             GraftRequest::Neighbor
         );
-        let refused = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let refused = start + tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         state.settle_graft_backoff(refused);
         assert_eq!(
             graft_request(
@@ -1473,10 +1479,10 @@ mod tests {
         let addr = |port: u16| {
             EndpointAddr::new(peer).with_ip_addr(format!("127.0.0.1:{port}").parse().expect("addr"))
         };
-        let start = crate::util::clock::Instant::now();
-        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let start = clock::Instant::now();
+        let later = start + tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         let refuse = |node: &mut EventLoopState| {
-            node.graft_backoff = crate::transport::graft_backoff::GraftBackoff::default();
+            node.graft_backoff = graft_backoff::GraftBackoff::default();
             let _ = graft_request(node, GraftTarget { peer, rendezvous }, 8, start, false);
             node.settle_graft_backoff(later);
             assert!(node.graft_blocked(peer, later), "refused");
@@ -1509,8 +1515,8 @@ mod tests {
         use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
-        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let start = clock::Instant::now();
+        let later = start + tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         let _ = graft_request(
             &mut state,
             GraftTarget { peer, rendezvous },
@@ -1654,11 +1660,11 @@ mod tests {
     fn a_node_with_g_minus_one_links_is_not_starved() {
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
+        let start = clock::Instant::now();
         for seed in 10..13 {
             state.linked_endpoints.insert(endpoint_id(seed));
         }
-        let late = start + crate::util::tuning::STARVED * 2;
+        let late = start + tuning::STARVED * 2;
         assert_eq!(
             graft_request(&mut state, GraftTarget { peer, rendezvous }, 4, start, true),
             GraftRequest::Neighbor
@@ -1674,8 +1680,8 @@ mod tests {
         use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
-        let window = crate::util::tuning::STARVED;
+        let start = clock::Instant::now();
+        let window = tuning::STARVED;
         state.linked_endpoints.insert(endpoint_id(10));
         assert_eq!(
             graft_request(&mut state, GraftTarget { peer, rendezvous }, 4, start, true),
@@ -1722,8 +1728,8 @@ mod tests {
     fn a_peer_info_graft_never_falls_back_to_a_join() {
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
-        let late = start + crate::util::tuning::STARVED * 3;
+        let start = clock::Instant::now();
+        let late = start + tuning::STARVED * 3;
         assert_eq!(
             graft_request(
                 &mut state,
@@ -2609,7 +2615,7 @@ mod tests {
                 [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
             )
         };
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         let lost = ids[0];
         let isolated = || {
             let mut state = fresh_state();
@@ -2647,7 +2653,7 @@ mod tests {
         assert_eq!(
             pick(
                 &state,
-                now + crate::util::tuning::RECLAIM_WINDOW + Duration::from_secs(1)
+                now + tuning::RECLAIM_WINDOW + Duration::from_secs(1)
             ),
             None,
             "the window is closed"
@@ -2693,7 +2699,7 @@ mod tests {
         state.peer_endpoints.insert(nick("free-a"), native(ids[3]));
         state.peer_endpoints.insert(nick("free-b"), native(ids[4]));
         state.linked_endpoints.insert(ids[1]);
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         state.note_relink(ids[2], now);
         let mut free = [ids[3], ids[4]];
         free.sort_unstable();
@@ -2739,7 +2745,7 @@ mod tests {
         let identity = Identity::generate();
         let our_pubkey = identity.author_key();
         let author = nick("alice");
-        let sink = crate::gossip::event::SilentSink;
+        let sink = event::SilentSink;
         let rendezvous = endpoint_id(1);
         let ctx = crate::daemon::ctx::HandlerCtx {
             sender: &sender,
@@ -2768,7 +2774,7 @@ mod tests {
         let mut ordered = ids.clone();
         ordered.sort_unstable();
         let tried = |view: &EventLoopState| {
-            let now = crate::util::clock::Instant::now();
+            let now = clock::Instant::now();
             ordered
                 .iter()
                 .filter(|id| view.relink_on_cooldown(**id, now))
@@ -2804,7 +2810,7 @@ mod tests {
         }
         let mut ordered = ids.clone();
         ordered.sort_unstable();
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         let pick = |pick| super::next_fill(&state, 8, rendezvous, now, pick).map(|addr| addr.id);
 
         assert_eq!(pick(0), Some(ordered[0]));

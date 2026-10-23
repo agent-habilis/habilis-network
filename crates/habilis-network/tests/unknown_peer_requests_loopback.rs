@@ -10,13 +10,12 @@
 use habilis_network::membership::{self, Request, Rung, UnknownPeer};
 use habilis_network::protocol::{Lookup, Transport};
 
+use habilis_network::net::test_relay;
 #[test]
 fn a_cut_a_deny_an_offer_and_a_close_on_a_member_the_node_does_not_know_are_refused() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (sink, _events) = membership::json_sink();
         let member = membership::join(
             &membership::Opts::default()

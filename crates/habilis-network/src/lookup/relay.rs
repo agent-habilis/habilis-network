@@ -467,6 +467,9 @@ mod tests {
     use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
+    use crate::lookup::test_relay;
+    use crate::util::tuning;
+    use iroh::endpoint::presets;
     /// Tripwire: the iroh fallback rungs of our pinned rendezvous ladder
     /// must stay equal to iroh's `defaults::prod` relay hosts, **in
     /// order** (rung 1 = NA-east). Rung 0 is our own operated relay and
@@ -582,7 +585,7 @@ mod tests {
     #[test]
     fn backoff_doubles_then_saturates_at_max() {
         let max = super::RELAY_REPROBE_BACKOFF_MAX;
-        let min = crate::util::tuning::RELAY_REPROBE_BACKOFF_MIN;
+        let min = tuning::RELAY_REPROBE_BACKOFF_MIN;
         // Doubles each round...
         let mut backoff = min;
         let next = next_relay_backoff(backoff);
@@ -707,10 +710,10 @@ mod tests {
     /// packet.
     #[tokio::test]
     async fn an_endpoint_on_a_plain_http_rung_is_online_without_the_probe_timeout() {
-        let (url, _server) = crate::lookup::test_relay::spawn_plain()
+        let (url, _server) = test_relay::spawn_plain()
             .await
             .expect("a plain local relay");
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![url])))
             .bind()
             .await

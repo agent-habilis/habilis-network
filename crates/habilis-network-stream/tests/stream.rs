@@ -11,6 +11,8 @@ use habilis_network_stream::{
     Producer, Reader, Refused, StreamHash, StreamNode, StreamOpts, StreamSecret,
 };
 
+use habilis_network::iroh::endpoint::presets;
+use habilis_network::net::direct;
 /// Generous: a relay dial, a JSEP round and a hole punch all fit inside it.
 const BUDGET: Duration = Duration::from_mins(1);
 
@@ -461,14 +463,10 @@ fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
         let node = loopback().await;
         let producer = node.create().await;
         let addr = producer.hash().addr.clone();
-        let dialer = habilis_network::iroh::Endpoint::bind(
-            habilis_network::iroh::endpoint::presets::Minimal,
-        )
-        .await
-        .expect("bind a dialer");
-        let nudge = dialer
-            .connect(addr, habilis_network::net::direct::NUDGE_ALPN)
-            .await;
+        let dialer = habilis_network::iroh::Endpoint::bind(presets::Minimal)
+            .await
+            .expect("bind a dialer");
+        let nudge = dialer.connect(addr, direct::NUDGE_ALPN).await;
         assert!(nudge.is_ok(), "the nudge was refused: {:?}", nudge.err());
         dialer.close().await;
         node.close().await;

@@ -20,6 +20,7 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use until_known::until_peer_known;
 
+use habilis_network::net::test_relay;
 const STEP_DEADLINE: Duration = Duration::from_mins(3);
 
 /// How long both ends tick after the close.
@@ -72,9 +73,7 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
         "habilis_network=info,habilis_network::transport=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (sink_a, _events_a) = membership::json_sink();
         let alice = membership::join(
             &membership::Opts::default()

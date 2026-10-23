@@ -20,6 +20,9 @@ use tungstenite::{Message, WebSocket};
 
 use super::{Skip, json_to_string};
 
+use std::env::consts;
+use std::sync::atomic;
+use std::sync::atomic::Ordering;
 /// How long a single CDP call may take before the runner gives up on it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -62,7 +65,7 @@ pub(crate) fn chrome_for_testing() -> Result<PathBuf, Skip> {
     if let Some(binary) = std::env::var_os("CHROME_FOR_TESTING") {
         return Ok(PathBuf::from(binary));
     }
-    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+    let platform = match (consts::OS, consts::ARCH) {
         ("macos", "aarch64") => "mac-arm64",
         ("macos", _) => "mac-x64",
         ("linux", _) => "linux64",
@@ -160,9 +163,9 @@ impl Browser {
     pub(crate) fn launch() -> Result<Self, Skip> {
         // A counter beside the timestamp: the benchmark launches two of these
         // back to back, and one Chrome per profile is the whole mechanism.
-        static LAUNCHES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        static LAUNCHES: atomic::AtomicU32 = atomic::AtomicU32::new(0);
         let binary = chrome_for_testing()?;
-        let launch = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let launch = LAUNCHES.fetch_add(1, Ordering::Relaxed);
         let profile = std::env::temp_dir().join(format!(
             "habilis-network-cdp-{}-{}-{launch}",
             std::process::id(),
@@ -524,6 +527,7 @@ mod tests {
 
     use super::{page_socket, page_socket_within};
 
+    use std::sync::mpsc;
     /// Answer each `/json/list` request with the next body, then stop.
     fn fake_devtools(bodies: Vec<&'static str>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
@@ -591,7 +595,7 @@ mod tests {
                 held.push(stream);
             }
         });
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let within = std::time::Duration::from_secs(2);
             let _ = done_tx.send(page_socket_within(port, within).map_err(|skip| skip.0));

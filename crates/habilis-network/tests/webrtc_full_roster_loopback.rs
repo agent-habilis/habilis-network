@@ -17,6 +17,7 @@ use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
+use habilis_network::net::test_relay;
 /// One more than `MAX_DIRECT_PEERS + 1`, so that a node cannot hold a session
 /// to every other member and still keep one for the rendezvous.
 const MEMBERS: usize = 18;
@@ -130,9 +131,7 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let members = start_group(&relay).await;
 
         let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
@@ -171,9 +170,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = start_group(&relay).await;
         let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
         assert!(

@@ -15,6 +15,8 @@
 //! The bytes ride a direct path by default (the relay only with
 //! `--transport udp,webrtc,relay`), never gossip, and the reader paces the writer.
 
+#[cfg(unix)]
+use tokio::signal::unix;
 mod args;
 
 use std::io::{IsTerminal as _, Write as _};
@@ -135,8 +137,8 @@ fn hangup_ignored() -> bool {
 
 /// Resolves with `code` at the first `kind` signal.
 #[cfg(unix)]
-async fn unix_signal(kind: tokio::signal::unix::SignalKind, code: i32) -> i32 {
-    match tokio::signal::unix::signal(kind) {
+async fn unix_signal(kind: unix::SignalKind, code: i32) -> i32 {
+    match unix::signal(kind) {
         Ok(mut signals) => {
             signals.recv().await;
             code

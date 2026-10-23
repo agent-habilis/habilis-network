@@ -25,6 +25,8 @@ use iroh::{Endpoint, EndpointId};
 use super::webrtc::close_code::NOT_A_NEIGHBOR;
 use super::{LOG_TARGET, SignalAdmission, WebRtcSignalAcceptor};
 
+use crate::daemon::state;
+use iroh::address_lookup::memory;
 /// How long the task of an offer that was turned away as not a neighbor keeps its slot, the first
 /// time in a row. Its end wakes the event loop, which offers again: the answerer reads our link
 /// vector a few milliseconds after our offer reaches it, so the second offer finds us a neighbor,
@@ -175,7 +177,7 @@ impl ProtocolHandler for UnderlaySignalGate {
 /// tick. A hop that stays on the relay is withdrawn from the vector after 20 s,
 /// so a session offered 30 s late would come too late for the route it carries.
 /// It does nothing for a node that has no underlay leg.
-pub(crate) fn tick_now(state: &crate::daemon::state::EventLoopState) {
+pub(crate) fn tick_now(state: &state::EventLoopState) {
     if let Some(underlay) = state.underlay_webrtc.as_ref() {
         tick(state, underlay);
     }
@@ -185,7 +187,7 @@ pub(crate) fn tick_now(state: &crate::daemon::state::EventLoopState) {
 /// member is in its signed link-vector, and a member we hold no vector from yet is skipped: it
 /// gets one on a later tick.
 fn neighbors_of(
-    state: &crate::daemon::state::EventLoopState,
+    state: &state::EventLoopState,
     multihop: &habilis_network_iroh_multihop_transport::MultihopHandle,
 ) -> Vec<(EndpointId, iroh::EndpointAddr)> {
     let mut neighbors: Vec<(EndpointId, iroh::EndpointAddr)> = Vec::new();
@@ -202,7 +204,7 @@ fn neighbors_of(
 /// One alive tick: offer a session to each neighbor that needs one, and drop the
 /// sessions that no neighbor needs. A neighbor needs one when its application
 /// path is `WebRTC`; see the module note.
-pub(crate) fn tick(state: &crate::daemon::state::EventLoopState, underlay: &UnderlayWebRtc) {
+pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
     let Some(multihop) = state.multihop() else {
         return;
     };
@@ -324,7 +326,7 @@ pub(crate) fn members_with_session(
 /// that a session carries, whether or not a gossip link to the member is up. Empty when the
 /// node has no multihop handle.
 pub(crate) fn held_members(
-    state: &crate::daemon::state::EventLoopState,
+    state: &state::EventLoopState,
     underlay: &UnderlayWebRtc,
 ) -> Vec<EndpointId> {
     let Some(multihop) = state.multihop() else {
@@ -343,7 +345,7 @@ pub(crate) struct UnderlayWebRtc {
     pub(crate) admission: SignalAdmission,
     pub(crate) endpoint: Endpoint,
     /// The address book of `endpoint`: the sessions of the underlay are named in it.
-    pub(crate) book: iroh::address_lookup::memory::MemoryLookup,
+    pub(crate) book: memory::MemoryLookup,
     pub(crate) allowed: Allowed,
 }
 
@@ -366,6 +368,7 @@ mod tests {
         IceProfile, MESH_WEBRTC_SIGNAL_ALPN, SignalAdmission, WebRtcSignalAcceptor,
     };
 
+    use crate::transport::webrtc;
     fn id(seed: u8) -> EndpointId {
         SecretKey::from_bytes(&[seed; 32]).public()
     }
@@ -715,7 +718,7 @@ mod tests {
         let handle = crate::lookup::new_webrtc_handle(client.id());
         let book = crate::lookup::address_book(&client);
 
-        let error = crate::transport::webrtc::dial_signal(
+        let error = webrtc::dial_signal(
             &client,
             &book,
             server.addr(),
@@ -725,11 +728,11 @@ mod tests {
         .await
         .expect_err("the gate turns a stranger away");
         assert!(
-            crate::transport::webrtc::is_not_a_neighbor_refusal(&error),
+            webrtc::is_not_a_neighbor_refusal(&error),
             "the refusal is read from the close code: {error:#}"
         );
         assert!(
-            !crate::transport::webrtc::is_cap_refusal(&error),
+            !webrtc::is_cap_refusal(&error),
             "a stranger is not a cap refusal: {error:#}"
         );
 
@@ -737,7 +740,7 @@ mod tests {
         allowed.replace([client.id()].into_iter().collect());
         if let Ok(Err(late_error)) = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            crate::transport::webrtc::dial_signal(
+            webrtc::dial_signal(
                 &client,
                 &book,
                 server.addr(),
@@ -748,7 +751,7 @@ mod tests {
         .await
         {
             assert!(
-                !crate::transport::webrtc::is_not_a_neighbor_refusal(&late_error),
+                !webrtc::is_not_a_neighbor_refusal(&late_error),
                 "a neighbor is not turned away: {late_error:#}"
             );
         }

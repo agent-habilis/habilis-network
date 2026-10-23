@@ -246,14 +246,15 @@ mod tests {
     use super::{MeshReceiver, TopicItem, spawn_split};
     use crate::testing::endpoint_id;
 
+    use tokio::sync::mpsc;
     type Mesh = MeshReceiver<BoxStream<'static, TopicItem>>;
 
     /// A topic that the test feeds by hand.
     fn topic() -> (
-        tokio::sync::mpsc::UnboundedSender<TopicItem>,
+        mpsc::UnboundedSender<TopicItem>,
         BoxStream<'static, TopicItem>,
     ) {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let events = stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         })

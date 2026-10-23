@@ -23,6 +23,15 @@ use crate::lifecycle;
 use super::config::EndpointOwner;
 use super::{CoHostPolicy, DriverMode, EventLoopConfig};
 
+use crate::gossip::split;
+use crate::protocol::identity;
+use crate::protocol::mesh::RelayChoice;
+#[cfg(any(feature = "host", feature = "multihop"))]
+use crate::transport::underlay_webrtc;
+use crate::transport::webrtc;
+use crate::util::{consts, tuning};
+use iroh::address_lookup::memory;
+use std::sync::atomic;
 /// What kind of mesh we're setting up — either minting a new one
 /// (create) or attaching to an existing one (join).
 #[derive(Debug)]
@@ -155,7 +164,7 @@ fn spawn_startup_rung_confirmation(
 /// the identity *a joiner would reach*, so the two must name the same place or
 /// it is answering a different question.
 pub(crate) fn register_rendezvous(
-    book: &iroh::address_lookup::memory::MemoryLookup,
+    book: &memory::MemoryLookup,
     params: &RendezvousParams,
     withheld: &[u16],
 ) {
@@ -200,7 +209,7 @@ fn unicast_inbox(
     mpsc::Receiver<bytes::Bytes>,
     crate::transport::UnicastAcceptor,
 ) {
-    let (tx, rx) = mpsc::channel::<bytes::Bytes>(crate::util::consts::UNICAST_INBOX_CAP);
+    let (tx, rx) = mpsc::channel::<bytes::Bytes>(consts::UNICAST_INBOX_CAP);
     (
         rx,
         crate::transport::UnicastAcceptor::new(tx, relay_transport),
@@ -215,7 +224,7 @@ type MultihopSlot = Option<habilis_network_iroh_multihop_transport::MultihopHand
 type MultihopSlot = Option<()>;
 /// The `WebRTC` leg of the multihop underlay that `build_member_endpoint` returns, likewise.
 #[cfg(all(feature = "multihop", not(feature = "host")))]
-type UnderlaySlot = Option<crate::transport::underlay_webrtc::UnderlayWebRtc>;
+type UnderlaySlot = Option<underlay_webrtc::UnderlayWebRtc>;
 #[cfg(all(not(feature = "multihop"), not(feature = "host")))]
 type UnderlaySlot = Option<()>;
 
@@ -230,7 +239,7 @@ async fn build_member_endpoint(
     Option<habilis_network_iroh_multihop_transport::MultihopHandle>,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
     crate::transport::SignalAdmission,
-    Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    Option<underlay_webrtc::UnderlayWebRtc>,
     Option<crate::lookup::MdnsHandle>,
 )> {
     if let Some(injected) = build.injected.as_ref() {
@@ -575,7 +584,7 @@ pub struct SetupParams {
     /// The shared live-peer counter a directory advertiser re-broadcasts from.
     /// Supplied up front rather than patched onto the returned config, so the
     /// config is complete the moment it exists.
-    pub live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    pub live_count: Option<std::sync::Arc<atomic::AtomicUsize>>,
 }
 
 impl std::fmt::Debug for SetupParams {
@@ -619,7 +628,7 @@ fn member_transports(
 /// registers a relay transport. A node without UDP reaches a peer only through
 /// the relay, and a data channel's handshake crosses the relay too.
 fn reaches_relay(lookups: &LookupOpts, transports: crate::lookup::TransportOpts) -> bool {
-    lookups.relay_lookup != crate::protocol::mesh::RelayChoice::Disabled && transports.relay
+    lookups.relay_lookup != RelayChoice::Disabled && transports.relay
 }
 
 /// Whether a browser, which has no UDP, can run with these lookups and paths
@@ -724,7 +733,7 @@ struct Assembled {
     /// The `WebRTC` leg of the multihop underlay, threaded into `EventLoopState`
     /// for the alive tick that opens its sessions. `None` when multihop is off.
     #[cfg(feature = "multihop")]
-    underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    underlay_webrtc: Option<underlay_webrtc::UnderlayWebRtc>,
     /// The members of the mesh that the LAN announces; see `EventLoopConfig::lan_contacts`.
     lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
     /// This peer's `WebRTC` transport handle, threaded into `EventLoopState` so
@@ -736,7 +745,7 @@ struct Assembled {
     /// and the answering side must share a ceiling, or neither enforces it.
     webrtc_admission: crate::transport::SignalAdmission,
     /// The address book of the member endpoint: the one place its peers' addresses are registered.
-    address_book: iroh::address_lookup::memory::MemoryLookup,
+    address_book: memory::MemoryLookup,
     /// How far ICE may reach — host-only on a loopback mesh. Derived from the
     /// mesh's own lookups, so it cannot disagree with them.
     webrtc_ice: crate::transport::IceProfile,
@@ -750,7 +759,7 @@ struct Assembled {
 fn resolve_caps(max_peers: usize, max_direct: usize) -> (usize, usize) {
     (
         if max_peers == 0 {
-            crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY
+            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY
         } else {
             max_peers
         },
@@ -830,7 +839,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
 
     // This member's per-author signing identity. Hoisted above the match so it is
     // available to both attach paths.
-    let identity = std::sync::Arc::new(crate::protocol::identity::Identity::generate());
+    let identity = std::sync::Arc::new(identity::Identity::generate());
 
     let build = SetupBuild {
         author: &author,
@@ -967,7 +976,7 @@ fn build_overlay(
     iroh_gossip::net::Gossip,
     iroh::protocol::Router,
     crate::transport::SignalAdmission,
-    iroh::address_lookup::memory::MemoryLookup,
+    memory::MemoryLookup,
     crate::transport::IceProfile,
 ) {
     let ice = crate::transport::IceProfile {
@@ -988,7 +997,7 @@ fn build_overlay(
             .then(|| (webrtc.clone(), admission.clone(), ice)),
         build.take_protocols(),
         build.relay_transport.relay_allowed(),
-        crate::transport::webrtc::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
+        webrtc::local_needs_webrtc_lane(UdpTransport::from(build.transports.udp)),
     );
     (gossip, router, admission, address_book, ice)
 }
@@ -1109,7 +1118,7 @@ async fn setup_create(build: &SetupBuild<'_>, create: CreateSetup) -> Result<Ass
         build_overlay(build, &mesh, &endpoint, &webrtc, admission);
     let rdv = rendezvous_params(&mesh, topic_id, build.lookups, build.rung_tx.clone());
     // Creator has no peers yet — bootstrap is empty.
-    let topic = crate::gossip::split::subscribe_mesh(&gossip, topic_id, rdv.id, []).await?;
+    let topic = split::subscribe_mesh(&gossip, topic_id, rdv.id, []).await?;
 
     register_rendezvous(&address_book, &rdv, &crate::beacon::busy_rungs(&rdv));
 
@@ -1194,12 +1203,12 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // rendezvous yet: the graft waits for its session (see
     // `transport::webrtc::rendezvous_graftable`); the heal tick grafts once
     // it is attached.
-    let needs_session = crate::transport::webrtc::node_graft_needs_session(
+    let needs_session = webrtc::node_graft_needs_session(
         build.relay_transport.relay_allowed(),
         UdpTransport::from(build.transports.udp),
     );
     let bootstrap = if needs_session { vec![] } else { vec![rdv.id] };
-    let topic = crate::gossip::split::subscribe_mesh(&gossip, topic_id, rdv.id, bootstrap).await?;
+    let topic = split::subscribe_mesh(&gossip, topic_id, rdv.id, bootstrap).await?;
 
     // `ready` is emitted by `run`, once the IPC socket accepts — not here.
     lifecycle::log_ready(
@@ -1255,6 +1264,11 @@ mod tests {
     // data channel's handshake crosses the relay too. `validate` accepts
     // `udp,webrtc` with no relay lookup, because a native node can signal
     // over UDP.
+    use crate::daemon::node;
+    use crate::lookup::test_relay;
+    use crate::protocol::mesh::Lookup;
+    use crate::util::tuning;
+    use tokio::sync::mpsc;
     #[test]
     fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
         let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
@@ -1359,9 +1373,7 @@ mod tests {
     // meets a node that has no `udp`.
     #[test]
     async fn a_member_without_udp_gets_a_multihop_handle_when_it_has_webrtc() {
-        let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
-            .await
-            .expect("a local relay");
+        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
         for (transports, expected) in [
             (
                 crate::lookup::TransportOpts {
@@ -1382,7 +1394,7 @@ mod tests {
             // A node without UDP needs the relay: it carries the offers of its data channels.
             let opts = crate::membership::Opts {
                 transport: vec![Transport::WebRtc, Transport::Multihop],
-                lookup: vec![crate::protocol::mesh::Lookup::Relay],
+                lookup: vec![Lookup::Relay],
                 relay_urls: vec![relay_url.to_string()],
                 ..crate::membership::Opts::default()
             };
@@ -1419,12 +1431,10 @@ mod tests {
     // the relay: it has no IP socket, and it has the WebRTC leg that carries its cells.
     #[test]
     async fn the_underlay_of_a_member_without_udp_has_no_ip_socket_and_has_a_webrtc_leg() {
-        let (relay_url, _relay) = crate::lookup::test_relay::spawn_plain()
-            .await
-            .expect("a local relay");
+        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("a local relay");
         let opts = crate::membership::Opts {
             transport: vec![Transport::WebRtc, Transport::Multihop],
-            lookup: vec![crate::protocol::mesh::Lookup::Relay],
+            lookup: vec![Lookup::Relay],
             relay_urls: vec![relay_url.to_string()],
             ..crate::membership::Opts::default()
         };
@@ -1510,7 +1520,7 @@ mod tests {
     // direct peers, counting `WebRTC` sessions and unicast connections.
     #[test]
     fn the_default_bounds_are_32_neighbors_and_64_direct_peers() {
-        assert_eq!(crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY, 32);
+        assert_eq!(tuning::GOSSIP_ACTIVE_VIEW_CAPACITY, 32);
         assert_eq!(crate::transport::MAX_DIRECT_PEERS, 64);
     }
 
@@ -1793,8 +1803,8 @@ mod tests {
     ) {
         let endpoint = config.endpoint.clone();
         let underlay = config.multihop.clone();
-        let (inbound_tx, _inbound_rx) = tokio::sync::mpsc::channel(1);
-        let node = crate::daemon::node::Node::spawn(
+        let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+        let node = node::Node::spawn(
             config,
             crate::membership::MembershipApp::new(inbound_tx),
             None,

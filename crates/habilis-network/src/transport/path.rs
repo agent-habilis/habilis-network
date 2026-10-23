@@ -13,6 +13,8 @@ use iroh::endpoint::Connection;
 
 use super::LOG_TARGET;
 
+use std::sync::atomic;
+use std::sync::atomic::Ordering;
 /// How long a hold waits for iroh to select a non-relay path. Hole punching
 /// starts as soon as the connection has both sides' candidates, and a first
 /// round lands within seconds; a punch that has not landed by now is
@@ -29,12 +31,12 @@ pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = super::webrtc::close_code::GOS
 pub(crate) const GOSSIP_RECURSION_REFUSED_CODE: u32 =
     super::webrtc::close_code::GOSSIP_ON_GOSSIP_PATH;
 
-static GOSSIP_RECURSION_CLOSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GOSSIP_RECURSION_CLOSES: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// How many gossip connections the recursion rule closed since the process started: a total,
 /// not a delta. A count that grows without bound is a pair that dials again after each close.
 pub(crate) fn gossip_recursion_closes() -> u64 {
-    GOSSIP_RECURSION_CLOSES.load(std::sync::atomic::Ordering::Relaxed)
+    GOSSIP_RECURSION_CLOSES.load(Ordering::Relaxed)
 }
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -76,7 +78,7 @@ pub(crate) fn watch_gossip_recursion(
         conn,
         GOSSIP_RECURSION_REFUSED_CODE,
         move || {
-            GOSSIP_RECURSION_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            GOSSIP_RECURSION_CLOSES.fetch_add(1, Ordering::Relaxed);
             admission.note_closed_on_rung(remote);
             tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is the gossip rung");
         },

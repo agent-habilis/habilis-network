@@ -12,6 +12,8 @@ use iroh::TransportAddr;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 
+#[cfg(all(feature = "web", not(feature = "native")))]
+use iroh::endpoint::presets;
 /// The ALPN of the bench handler.
 pub const BENCH_ALPN: &[u8] = b"habilis-network-webrtc/test-bench/0";
 
@@ -226,7 +228,7 @@ pub async fn browser_endpoint(
     key: iroh::SecretKey,
     hub: &crate::WebRtcHandle,
 ) -> anyhow::Result<iroh::Endpoint> {
-    Ok(iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+    Ok(iroh::Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .relay_mode(iroh::RelayMode::Disabled)
         .add_custom_transport(hub.transport())

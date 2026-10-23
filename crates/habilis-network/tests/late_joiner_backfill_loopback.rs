@@ -23,6 +23,7 @@ use habilis_network::runtime::{
 };
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::runtime::tuning;
 /// The agent-gossip late-joiner test's log size: two and a half answers.
 const WRITES: usize = 160;
 /// Changes one digest answer carries (the default `ANTIENTROPY_MAX_RESEND`).
@@ -143,10 +144,7 @@ impl Joined {
 /// a slow join cannot let a tick pass it instead. Per process, and every test
 /// here wants the same value.
 fn pin_antientropy_tick() {
-    habilis_network::runtime::tuning::init(
-        habilis_network::runtime::tuning::Tuning::DEFAULTS
-            .with_antientropy_interval(Duration::from_hours(1)),
-    );
+    tuning::init(tuning::Tuning::DEFAULTS.with_antientropy_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {

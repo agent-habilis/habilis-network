@@ -22,6 +22,7 @@ use super::mesh::{BunServer, launch_page};
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
+use habilis_network::net::test_relay;
 type Failure = Box<dyn std::error::Error>;
 
 /// Lookup over the relay, JSEP and the direct path on a cold pair; generous
@@ -302,7 +303,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let server = BunServer::serve(
         &repo_root().join("packages/habilis-network-stream-web"),

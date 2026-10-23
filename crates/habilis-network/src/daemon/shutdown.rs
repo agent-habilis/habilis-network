@@ -18,6 +18,11 @@ use crate::protocol::{MeshName, Message};
 #[cfg(all(unix, feature = "host"))]
 use crate::util::tuning::ppid_watch_interval;
 
+#[cfg(feature = "host")]
+use crate::util::process;
+#[cfg(feature = "host")]
+#[cfg(unix)]
+use tokio::signal::unix;
 /// Graceful shutdown: remove the statusline state file first, then
 /// announce `Left` and give the broadcast a moment to reach peers.
 /// Shared by both the external-quit and ctrl-c/SIGTERM/SIGHUP paths so
@@ -116,14 +121,13 @@ pub(super) fn spawn_quit_signal_tasks(
     });
     #[cfg(unix)]
     for kind in [
-        tokio::signal::unix::SignalKind::terminate(),
-        tokio::signal::unix::SignalKind::hangup(),
-        tokio::signal::unix::SignalKind::quit(),
+        unix::SignalKind::terminate(),
+        unix::SignalKind::hangup(),
+        unix::SignalKind::quit(),
     ] {
         let signal_tx = quit_tx.clone();
         tokio::spawn(async move {
-            let mut signal =
-                tokio::signal::unix::signal(kind).expect("failed to register termination handler");
+            let mut signal = unix::signal(kind).expect("failed to register termination handler");
             signal.recv().await;
             let _ = signal_tx.send(()).await;
         });
@@ -159,8 +163,7 @@ fn owner_start(pid: u32) -> anyhow::Result<u64> {
         pid != std::process::id(),
         "owner pid {pid} is this process itself"
     );
-    crate::util::process::live_start_time(pid)
-        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))
+    process::live_start_time(pid).ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))
 }
 /// The process a detached daemon lives for, in place of its parent. The pid
 /// alone cannot tell the owner from a later process that reuses the pid, so
@@ -188,7 +191,7 @@ impl Owner {
     }
 
     fn lost(self) -> bool {
-        crate::util::process::live_start_time(self.pid) != Some(self.start)
+        process::live_start_time(self.pid) != Some(self.start)
     }
 }
 /// Detect orphaning by the spawning agent and route it through the same quit

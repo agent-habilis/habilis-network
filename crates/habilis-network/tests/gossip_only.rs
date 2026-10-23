@@ -25,6 +25,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// Long enough for the gossip path to be tried and chosen: a probe goes every second.
 const STEP_DEADLINE: Duration = Duration::from_mins(2);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
@@ -217,9 +218,7 @@ struct Fixture {
 
 impl Fixture {
     async fn stand_up(name: &str) -> Self {
-        let (relay_url, relay) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, relay) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay_url).await;
         let bob = Member::join("bob", &alice).await;
         let carol = Member::join("carol", &alice).await;

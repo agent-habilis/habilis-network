@@ -150,6 +150,7 @@ mod tests {
     use habilis_network_test_tracing::test;
     use iroh::{EndpointAddr, SecretKey};
 
+    use crate::protocol::mesh;
     fn sample_addr(byte: u8) -> EndpointAddr {
         let id = SecretKey::from_bytes(&[byte; 32]).public();
         EndpointAddr::new(id).with_ip_addr("127.0.0.1:4242".parse().unwrap())
@@ -242,10 +243,10 @@ mod tests {
     fn rejects_a_mesh_token() {
         // A mesh id shares the bare-base58 shape but has a different payload;
         // blob decode must refuse it (wrong kind / structure).
-        let mesh = crate::protocol::mesh::Mesh::new(
+        let mesh = mesh::Mesh::new(
             crate::protocol::Seed::from_bytes([1u8; 32]),
-            crate::protocol::mesh::MeshName::new("t").unwrap(),
-            crate::protocol::mesh::MeshConfig::loopback(),
+            mesh::MeshName::new("t").unwrap(),
+            mesh::MeshConfig::loopback(),
         )
         .unwrap()
         .to_string();

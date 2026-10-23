@@ -2,6 +2,10 @@ use crate::protocol::mesh::MeshName;
 use crate::protocol::message::Authored;
 use crate::protocol::{AuthorKey, Channel, MeshId, Nickname};
 
+#[cfg(test)]
+use std::sync::atomic;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 /// A generic surfacing the engine emits — the chat-agnostic subset of the app's
 /// `OutputEvent`. The app's [`NodeSink`] impl maps each variant onto the
 /// existing `Output` method, so the rendered stdout / `--output json` / library API
@@ -83,22 +87,22 @@ impl NodeSink for SilentSink {
 /// enough to assert an engine surfacing fired (and how many times) without
 /// pulling the app's `Output` into an engine test.
 #[cfg(test)]
-pub(crate) struct CountingSink(std::sync::atomic::AtomicUsize);
+pub(crate) struct CountingSink(atomic::AtomicUsize);
 
 #[cfg(test)]
 impl CountingSink {
     pub(crate) fn new() -> Self {
-        Self(std::sync::atomic::AtomicUsize::new(0))
+        Self(atomic::AtomicUsize::new(0))
     }
 
     pub(crate) fn count(&self) -> usize {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
+        self.0.load(Ordering::Relaxed)
     }
 }
 
 #[cfg(test)]
 impl NodeSink for CountingSink {
     fn emit(&self, _event: NodeEvent) {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.0.fetch_add(1, Ordering::Relaxed);
     }
 }

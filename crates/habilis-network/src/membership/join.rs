@@ -19,6 +19,11 @@ use tokio::sync::mpsc;
 
 use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::sync::atomic;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::sync::atomic::Ordering;
+use tokio::sync::oneshot;
 /// How the caller selects a mesh — an id to join, a shared string to derive one
 /// from, or a create over the choices below.
 ///
@@ -161,14 +166,13 @@ pub struct Membership {
 /// Tests only: whether a member that is set up now has its rung probes blind from its first walk.
 /// [`Request::BlindRungProbes`] can only reach a member that is up, after its startup walk ran.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-static NEW_MEMBERS_ARE_BLIND: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static NEW_MEMBERS_ARE_BLIND: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 /// Tests only: make every member that [`join`] sets up from now on blind (`blind`), or not. The
 /// dial is process-wide, so a test turns it on around the opens that it means and off again.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub fn blind_new_members(blind: bool) {
-    NEW_MEMBERS_ARE_BLIND.store(blind, std::sync::atomic::Ordering::SeqCst);
+    NEW_MEMBERS_ARE_BLIND.store(blind, Ordering::SeqCst);
 }
 
 /// Resolve `opts`, stand the mesh up, and spawn the event loop.
@@ -247,7 +251,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
     .context("setting up the mesh")?;
 
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    if NEW_MEMBERS_ARE_BLIND.load(std::sync::atomic::Ordering::SeqCst) {
+    if NEW_MEMBERS_ARE_BLIND.load(Ordering::SeqCst) {
         // Before the loop is spawned, so that the startup walk is blind too.
         crate::beacon::set_blind_rung_probes(config.endpoint.id(), true);
     }
@@ -275,9 +279,9 @@ impl Membership {
     /// The event loop stopped, or dropped the reply.
     pub async fn request<T>(
         &self,
-        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> Request,
+        build: impl FnOnce(oneshot::Sender<T>) -> Request,
     ) -> Result<T, String> {
-        let (reply, answer) = tokio::sync::oneshot::channel();
+        let (reply, answer) = oneshot::channel();
         self.node
             .sender()
             .send(build(reply))

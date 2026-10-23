@@ -133,13 +133,14 @@ mod tests {
     use super::super::UNICAST_ALPN;
     use super::*;
 
+    use iroh::endpoint::presets;
     /// A server accepting unicast with the given idle timeout, and a client
     /// connected to it.
     async fn connected(
         idle: Duration,
     ) -> (Connection, Router, iroh::Endpoint, mpsc::Receiver<Bytes>) {
         let bind = || async {
-            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await

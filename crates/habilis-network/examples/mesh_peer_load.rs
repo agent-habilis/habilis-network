@@ -53,6 +53,7 @@ use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};
 use habilis_network::util::resident_memory::current_resident_memory_mb;
 use tokio::sync::{mpsc, oneshot};
 
+use habilis_network::net::test_relay;
 /// A number from the environment, `0` when it is unset or not a number.
 fn env_number(name: &str) -> u64 {
     std::env::var(name)
@@ -249,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
     let opts = if let Some(id) = std::env::args().nth(1) {
         Opts::default().with_mesh(Some(id))
     } else {
-        let (url, server) = habilis_network::net::test_relay::spawn_plain().await?;
+        let (url, server) = test_relay::spawn_plain().await?;
         relay_server = Some(server);
         Opts::default()
             .with_lookup(vec![Lookup::Relay])

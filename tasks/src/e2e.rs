@@ -17,6 +17,7 @@ use crate::TaskOutcome;
 use crate::util::webdriver::{Driver, SAFARI_TP};
 use crate::util::{Skip, json_to_string, output};
 
+use crate::util::{cdp as util_cdp, wasm};
 pub(crate) mod build;
 mod cdp;
 #[cfg(feature = "mesh")]
@@ -322,7 +323,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     let env = if args.list {
         BTreeMap::new()
     } else {
-        crate::util::wasm::wasm_env()?
+        wasm::wasm_env()?
     };
     if !args.list {
         build::check_tooling()?;
@@ -331,7 +332,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
     // The fast suite reports per-test through the runner rather than through a
     // published table, so it takes its own path and returns here.
     if args.suite == Suite::Loopback {
-        let chrome = crate::util::cdp::chrome_for_testing().map_err(|Skip(why)| why)?;
+        let chrome = util_cdp::chrome_for_testing().map_err(|Skip(why)| why)?;
         return loopback::run(&chrome.to_string_lossy(), &env);
     }
 
@@ -357,9 +358,7 @@ pub(crate) fn run(args: &Args) -> TaskOutcome {
             let missing = match browser.backend {
                 Backend::Cdp if args.list => None,
                 Backend::Cdp => chrome_for_testing
-                    .get_or_insert_with(|| {
-                        crate::util::cdp::chrome_for_testing().map_err(|Skip(why)| why)
-                    })
+                    .get_or_insert_with(|| util_cdp::chrome_for_testing().map_err(|Skip(why)| why))
                     .clone()
                     .err(),
                 Backend::WebDriver => (!PathBuf::from(&browser.binary).exists())

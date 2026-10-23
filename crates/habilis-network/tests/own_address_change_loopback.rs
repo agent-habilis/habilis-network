@@ -22,6 +22,7 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// The address that the member adds: a documentation range (RFC 5737), so no
 /// real interface carries it and no other log line names it.
 const NEW_ADDR: &str = "192.0.2.77:4000";
@@ -112,9 +113,7 @@ fn a_member_that_changes_its_own_address_floods_it_again() {
         "habilis_network=info,habilis_network::gossip=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
 

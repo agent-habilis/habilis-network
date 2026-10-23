@@ -27,6 +27,7 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// The probe deadline of 15 s and 10 s more: a link that stayed on the relay
 /// would be closed inside it, and a session round takes a few seconds.
 const WINDOW: Duration = Duration::from_secs(25);
@@ -135,9 +136,7 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
         "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
 

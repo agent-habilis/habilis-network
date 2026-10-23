@@ -43,6 +43,7 @@
 //! handle.feed_topology(link_vector);
 //! ```
 
+use tokio::sync::mpsc;
 mod addr;
 mod graph;
 mod lookup;
@@ -279,7 +280,7 @@ impl MultihopHandle {
             underlay.id() == underlay_secret(secret).public(),
             "the underlay must be bound to `underlay_secret(secret)`, not another key"
         );
-        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(INBOUND_CAP);
+        let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_CAP);
         let topology = Arc::new(RwLock::new(Topology::with_max_age(config.vector_max_age)));
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
@@ -634,6 +635,8 @@ mod tests {
     use crate::test_support::relay_server;
     use crate::wire::Cell;
 
+    use std::sync::atomic;
+    use std::sync::atomic::Ordering;
     #[test]
     fn the_underlay_key_is_derived_from_the_peer_key() {
         let peer = SecretKey::from_bytes(&[7; 32]);
@@ -787,14 +790,14 @@ mod tests {
 
     /// Counts the connections it accepts, then waits for the dialer to close.
     #[derive(Debug, Clone)]
-    struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    struct Counting(std::sync::Arc<atomic::AtomicUsize>);
 
     impl iroh::protocol::ProtocolHandler for Counting {
         async fn accept(
             &self,
             connection: iroh::endpoint::Connection,
         ) -> Result<(), iroh::protocol::AcceptError> {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.fetch_add(1, Ordering::SeqCst);
             connection.closed().await;
             Ok(())
         }
@@ -804,7 +807,7 @@ mod tests {
 
     #[test]
     async fn an_extra_protocol_is_accepted_on_the_underlay() {
-        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = std::sync::Arc::new(atomic::AtomicUsize::new(0));
         let secret = SecretKey::from_bytes(&[51; 32]);
         let handle = MultihopHandle::with_protocols(
             &secret,
@@ -835,7 +838,7 @@ mod tests {
             .expect("the underlay answers the extra ALPN");
         connection.close(0u32.into(), b"done");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
     }
 
     #[test]

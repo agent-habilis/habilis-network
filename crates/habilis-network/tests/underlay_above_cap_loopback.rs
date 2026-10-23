@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
+use habilis_network::net::test_relay;
 const MEMBERS: usize = 4;
 const CAP: usize = 2;
 const MESH_DEADLINE: Duration = Duration::from_mins(3);
@@ -65,9 +66,7 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
         "habilis_network=info,habilis_network::transport=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (first_sink, _first_events) = membership::json_sink();
         let creator = membership::join(
             &membership::Opts::default()

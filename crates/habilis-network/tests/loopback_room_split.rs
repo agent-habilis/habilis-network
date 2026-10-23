@@ -56,6 +56,7 @@ use habilis_network::protocol::LockedMesh;
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use tokio::sync::mpsc;
 /// How long the setup of a split waits for the rosters of its two groups to settle.
 const COUNTS_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -722,7 +723,7 @@ async fn open_watched(nick: &str, mesh: &str) -> (Member, UnboundedReceiver<Stri
     )
     .await
     .expect("open a member");
-    let (_sender, unread) = tokio::sync::mpsc::unbounded_channel();
+    let (_sender, unread) = mpsc::unbounded_channel();
     (
         Member {
             membership,

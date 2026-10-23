@@ -21,6 +21,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use habilis_network::util::tuning::STARVED;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// Long enough for a mesh of ten to form and for the alive ticks to fill what the
 /// first grafts missed.
 const FILL_DEADLINE: Duration = Duration::from_mins(3);
@@ -121,9 +122,7 @@ impl Member {
 
 /// `count` members on a local relay, each with the active view cap `max_peers`.
 async fn mesh(count: usize, max_peers: usize) -> (Vec<Member>, tokio::task::JoinHandle<()>) {
-    let (relay, server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
+    let (relay, server) = test_relay::spawn_plain().await.expect("local relay");
     let keep = tokio::spawn(async move {
         let _server = server;
         std::future::pending::<()>().await;

@@ -15,6 +15,30 @@ use crate::protocol::message::Authored;
 use crate::protocol::{AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
+#[cfg(all(
+    feature = "iroh-test-utils",
+    feature = "host",
+    not(target_arch = "wasm32")
+))]
+use crate::daemon::event_loop;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::daemon::state::DirectState;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::transport::path;
+#[cfg(all(
+    feature = "iroh-test-utils",
+    not(target_arch = "wasm32"),
+    feature = "multihop"
+))]
+use crate::transport::underlay_webrtc;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::transport::webrtc;
+#[cfg(all(
+    feature = "iroh-test-utils",
+    feature = "host",
+    not(target_arch = "wasm32")
+))]
+use crate::util::clock;
 /// The one `App`-frame tag a member sends: a whole UTF-8 text, broadcast or
 /// directed. Bulk bytes do not ride gossip; they take a stream.
 pub const MSG_TAG: &str = "msg";
@@ -634,7 +658,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());
@@ -658,7 +682,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());
@@ -681,7 +705,7 @@ impl NodeDriver for MembershipApp {
                     );
                     let endpoint = ctx.endpoint.clone();
                     n0_future::task::spawn(async move {
-                        crate::transport::webrtc::nudge(&endpoint, remote).await;
+                        webrtc::nudge(&endpoint, remote).await;
                     });
                 });
                 let _ = reply.send(result);
@@ -707,7 +731,7 @@ impl NodeDriver for MembershipApp {
                         );
                     }
                     #[cfg(feature = "multihop")]
-                    crate::transport::underlay_webrtc::tick_now(state);
+                    underlay_webrtc::tick_now(state);
                 }
                 let _ = reply.send(member.map(|_| ()));
                 false
@@ -715,10 +739,8 @@ impl NodeDriver for MembershipApp {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::OfferSession { peer, reply } => {
                 let result = known_peer(state, &peer).cloned().map(|addr| {
-                    state
-                        .direct
-                        .insert(addr.id, crate::daemon::state::DirectState::RelayOnly);
-                    crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
+                    state.direct.insert(addr.id, DirectState::RelayOnly);
+                    webrtc::negotiate_session(state, ctx, addr.id, addr);
                 });
                 let _ = reply.send(result);
                 false
@@ -726,7 +748,7 @@ impl NodeDriver for MembershipApp {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::CloseLink { peer, reply } => {
                 let result = known_peer(state, &peer).map(|addr| {
-                    crate::transport::path::close_gossip_links_to(addr.id);
+                    path::close_gossip_links_to(addr.id);
                 });
                 let _ = reply.send(result);
                 false
@@ -737,7 +759,7 @@ impl NodeDriver for MembershipApp {
                 feature = "multihop"
             ))]
             Request::UnderlayTick { reply } => {
-                crate::transport::underlay_webrtc::tick_now(state);
+                underlay_webrtc::tick_now(state);
                 let _ = reply.send(());
                 false
             }
@@ -759,7 +781,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::GossipRecursionCloses { reply } => {
-                let _ = reply.send(crate::transport::path::gossip_recursion_closes());
+                let _ = reply.send(path::gossip_recursion_closes());
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -781,7 +803,7 @@ impl NodeDriver for MembershipApp {
                 n0_future::task::spawn(async move {
                     let rung = match id {
                         Some(id) => pool.warm_or_dial(id).await.ok().and_then(|conn| {
-                            let rung = crate::transport::path::selected_rung(&conn);
+                            let rung = path::selected_rung(&conn);
                             // The same stable id twice is one connection read twice: a test that
                             // waits for a rung can see whether the connection it reads is the one
                             // that climbed.
@@ -812,7 +834,7 @@ impl NodeDriver for MembershipApp {
                     let _ = handle.remove_origin(handle.app_id());
                 }
                 if !hold {
-                    crate::daemon::event_loop::linkstate_arm(state, ctx).await;
+                    event_loop::linkstate_arm(state, ctx).await;
                 }
                 let _ = reply.send(());
                 false
@@ -895,7 +917,7 @@ impl NodeDriver for MembershipApp {
                 not(target_arch = "wasm32")
             ))]
             Request::RedialCounts { reply } => {
-                let now = crate::util::clock::Instant::now();
+                let now = clock::Instant::now();
                 let ids: Vec<_> = state.peer_endpoints.values().map(|addr| addr.id).collect();
                 for id in ids {
                     let quic = state.webrtc_admission.has_live_connection(id);
@@ -958,7 +980,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());

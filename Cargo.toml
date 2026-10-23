@@ -256,6 +256,8 @@ module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
 # An impl stays async like its trait, and the work waits for the poll.
 unused_async_trait_impl = "allow"
+# Google Rust Style Guide (issue 29): at most three path segments; a longer path imports its parent module.
+absolute_paths = "warn"
 
 # Dependencies get light optimization in dev/test builds; workspace members
 # stay at opt-level 0 (`package."*"` never applies to them) so incremental

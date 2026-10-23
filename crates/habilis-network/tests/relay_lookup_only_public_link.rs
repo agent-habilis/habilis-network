@@ -25,6 +25,7 @@ use habilis_network::runtime::{
 };
 use tokio::sync::Notify;
 
+use habilis_network::net::test_relay;
 struct Probe;
 
 #[habilis_network::async_trait]
@@ -159,9 +160,7 @@ async fn spawn_with(
 fn two_ip_peers_link_through_the_gated_rendezvous() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let topic = format!("scratch-link-{}", rand::random::<u64>());
         let alice_saw = Arc::new(Joined::default());
         let bob_saw = Arc::new(Joined::default());
@@ -201,9 +200,7 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
 fn a_webrtc_only_peer_links_through_the_beacon_lane() {
     let guard = habilis_network_test_tracing::init_capturing("habilis_network=info");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let topic = format!("scratch-lane-{}", rand::random::<u64>());
         let alice_saw = Arc::new(Joined::default());
         let bob_saw = Arc::new(Joined::default());

@@ -9,12 +9,14 @@ use serde::de::DeserializeOwned;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use crate::protocol::{MeshId, MessageId, Nickname};
+use crate::gossip::event;
+use crate::protocol::{MeshId, MessageId, Nickname, message};
 use crate::util::bounded_read::{LineRead, read_bounded_line};
 use crate::util::clock::millis_saturating;
 use crate::util::consts::{MAX_IPC_COMMAND_BYTES, MAX_IPC_RESPONSE_BYTES};
 use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
 use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
+use tokio::sync::oneshot;
 
 /// Returns the IPC endpoint identifier for a specific agent on a mesh —
 /// a filesystem socket path (the project targets Unix only). Lives in the
@@ -52,7 +54,7 @@ pub trait Addressed {
 #[must_use]
 /// # Panics
 /// Panics if an internal invariant is violated.
-pub fn json_ok_msg(id: &MessageId, msg: &crate::protocol::message::Verified) -> String {
+pub fn json_ok_msg(id: &MessageId, msg: &message::Verified) -> String {
     serde_json::json!({
         "ok": true,
         "id": id,
@@ -127,7 +129,7 @@ pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -
 pub(crate) async fn serve<C>(
     listener: Listener,
     tx: mpsc::Sender<IpcMessage<C>>,
-    sink: std::sync::Arc<dyn crate::gossip::event::NodeSink>,
+    sink: std::sync::Arc<dyn event::NodeSink>,
 ) where
     C: DeserializeOwned + Send + 'static,
 {
@@ -150,7 +152,7 @@ pub(crate) async fn serve<C>(
             }
             Err(error) => {
                 if !failing {
-                    sink.emit(crate::gossip::event::NodeEvent::Error(format!(
+                    sink.emit(event::NodeEvent::Error(format!(
                         "IPC: accept error (retrying): {error}"
                     )));
                     failing = true;
@@ -209,7 +211,7 @@ where
     let response = match serde_json::from_str::<C>(line.trim()) {
         Err(error) => json_error(&format!("parse error: {error}")),
         Ok(cmd) => {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = oneshot::channel();
             if tx.send((cmd, resp_tx)).await.is_err() {
                 json_error("server channel closed")
             } else {
@@ -337,6 +339,8 @@ mod tests {
         socket_path,
     };
 
+    use crate::gossip::event;
+    use crate::util::tuning;
     /// A minimal mesh-addressed command standing in for the app's real
     /// `IpcCommand` (which lives app-side): exercises the engine's generic
     /// socket framing without naming any application type.
@@ -507,11 +511,8 @@ mod tests {
         // Bind synchronously (no sleep needed — the socket is accepting the
         // instant `bind` returns), then spawn the accept loop.
         let listener = bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
-        let listener_handle = tokio::spawn(serve(
-            listener,
-            tx,
-            std::sync::Arc::new(crate::gossip::event::SilentSink),
-        ));
+        let listener_handle =
+            tokio::spawn(serve(listener, tx, std::sync::Arc::new(event::SilentSink)));
 
         // Spawn a handler that responds to messages
         let handler = tokio::spawn(respond_once(rx));
@@ -571,11 +572,8 @@ mod tests {
         let nickname = Nickname::from("idle-nick");
         let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
         let listener = bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
-        let listener_handle = tokio::spawn(serve(
-            listener,
-            tx,
-            std::sync::Arc::new(crate::gossip::event::SilentSink),
-        ));
+        let listener_handle =
+            tokio::spawn(serve(listener, tx, std::sync::Arc::new(event::SilentSink)));
         // Echo handler so a healthy command still round-trips while the
         // idle connection is parked.
         let handler = tokio::spawn(respond_healthy_forever(rx));
@@ -593,7 +591,7 @@ mod tests {
         // The parked connection is closed (EOF) at the deadline, with margin.
         let mut sink = Vec::new();
         let read = tokio::time::timeout(
-            crate::util::tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
+            tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
             idle.read_to_end(&mut sink),
         )
         .await;

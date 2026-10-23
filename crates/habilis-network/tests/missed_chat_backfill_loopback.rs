@@ -25,6 +25,7 @@ use habilis_network::runtime::{
 };
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::runtime::tuning;
 /// Bounds a slow join only: with the tick pinned away, nothing but the ask on
 /// the first link can deliver.
 const BUDGET: Duration = Duration::from_secs(15);
@@ -162,10 +163,7 @@ impl Joined {
 }
 
 fn pin_antientropy_tick() {
-    habilis_network::runtime::tuning::init(
-        habilis_network::runtime::tuning::Tuning::DEFAULTS
-            .with_antientropy_interval(Duration::from_hours(1)),
-    );
+    tuning::init(tuning::Tuning::DEFAULTS.with_antientropy_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {

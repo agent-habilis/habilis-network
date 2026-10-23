@@ -26,6 +26,7 @@ use crate::counters::{Counters, Stats};
 use crate::frame::{self, EncodeError, Frame};
 use crate::{gossip_addr, parse_gossip_addr};
 
+use iroh::endpoint::transports;
 /// The guard of `mutex`. A poisoned lock means a panic happened while it was held,
 /// so this function panics too.
 pub(crate) fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -202,7 +203,7 @@ impl GossipHandle {
     /// and no other selector is: iroh's default treats a custom transport as primary, and the
     /// mesh topic would carry the bytes of a pair that has an IP path.
     #[must_use]
-    pub fn path_selector(&self) -> Arc<dyn iroh::endpoint::transports::PathSelector> {
+    pub fn path_selector(&self) -> Arc<dyn transports::PathSelector> {
         Arc::new(crate::selector::GossipLadder::new(self.app_id()))
     }
 

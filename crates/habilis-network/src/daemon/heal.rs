@@ -24,6 +24,8 @@ use crate::util::clock::{Instant, millis_saturating};
 use crate::util::tuning::{RESUBSCRIBE_MAX_ATTEMPTS, heal_stall_threshold};
 use crate::{beacon, gossip, lookup};
 
+use crate::transport::webrtc;
+use crate::util::tuning;
 /// Monotonic `gap` past `stall_threshold`: the process was throttled
 /// (but not fully frozen) between heal ticks (macOS App Nap / timer
 /// coalescing) long enough that the mesh died of idle timeout.
@@ -63,7 +65,7 @@ pub(super) async fn run_heal(
     state.pay_periodic_return(Instant::now(), ctx.endpoint.id());
     // A browser-shaped peer's rendezvous link can only ever be admitted on
     // a data channel; keep offering one while the link is down.
-    crate::transport::webrtc::negotiate_rendezvous_session(state, ctx);
+    webrtc::negotiate_rendezvous_session(state, ctx);
     // A node that came back to a mesh whose links are all up gets no link
     // event to release on, so the heal tick checks too.
     gossip::heal::release_rendezvous_if_due(state, ctx).await;
@@ -91,14 +93,14 @@ pub(super) async fn run_heal(
         // re-forming; push it out a steady interval so the re-bootstrap
         // settles first.
         if state.next_rival_recheck.is_some() {
-            state.next_rival_recheck = Some(Instant::now() + crate::util::tuning::rival_recheck());
+            state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
         }
         // Re-assert the rendezvous hint (the network changed). The rung
         // is re-validated off-loop by the beacon's liveness self-monitor,
         // so a rung that died during the freeze self-corrects — no inline
         // ladder walk on the event loop here.
         setup::register_rendezvous(&state.address_book, params, &state.rungs.withheld_rungs());
-        if crate::transport::webrtc::rendezvous_graftable(state) {
+        if webrtc::rendezvous_graftable(state) {
             gossip::heal::tick_heal_hard(ctx.endpoint, params.id, ctx.sender).await;
         }
     } else if state.rendezvous_linked {
@@ -119,7 +121,7 @@ pub(super) async fn run_heal(
             target: "habilis_network::gossip",
             "heal tick: rendezvous released; idle"
         );
-    } else if crate::transport::webrtc::rendezvous_graftable(state) {
+    } else if webrtc::rendezvous_graftable(state) {
         gossip::heal::tick_heal(params.id, ctx.sender).await;
     } else {
         // The JSEP offer fired at the top of this tick; the graft waits for
@@ -145,7 +147,7 @@ pub(super) async fn run_heal(
     // Starvation watchdog: links/heal can look busy while no traffic
     // flows (the roster-collapse signature), so the last word every heal
     // tick is a check on verified *inbound* silence.
-    if state.starvation_due(Instant::now(), crate::util::tuning::starvation_threshold()) {
+    if state.starvation_due(Instant::now(), tuning::starvation_threshold()) {
         gossip::heal::recover_from_starvation(state, ctx).await;
     }
 }
@@ -328,6 +330,14 @@ mod tests {
     use habilis_network_test_tracing::test;
     use std::time::Duration;
 
+    #[cfg(feature = "host")]
+    use crate::gossip::split;
+    #[cfg(feature = "host")]
+    use crate::protocol::mesh;
+    #[cfg(feature = "host")]
+    use tokio::sync::mpsc;
+    #[cfg(feature = "host")]
+    use tokio::sync::watch;
     /// The test binary runs the test below again, in a process of its own, with this variable set.
     #[cfg(feature = "host")]
     const FATAL_CHILD: &str = "HABILIS_TEST_FATAL_RESUBSCRIBE_CHILD";
@@ -347,7 +357,7 @@ mod tests {
         if std::env::var_os(FATAL_CHILD).is_some() {
             let node = LaneNode::start().await;
             let topic_id = iroh_gossip::proto::TopicId::from_bytes([8u8; 32]);
-            let topic = crate::gossip::split::subscribe_mesh(
+            let topic = split::subscribe_mesh(
                 &node.gossip,
                 topic_id,
                 iroh::SecretKey::generate().public(),
@@ -357,7 +367,7 @@ mod tests {
             .expect("subscribe while the actor lives");
             let (gossip_sender, gossip_receiver) = topic.split();
             let mut sender = crate::transport::MeshSender::new(gossip_sender);
-            let mut receiver = crate::gossip::split::spawn_split(gossip_receiver, None);
+            let mut receiver = split::spawn_split(gossip_receiver, None);
             node.stop_gossip().await;
 
             let secret = iroh::SecretKey::generate();
@@ -366,10 +376,10 @@ mod tests {
                 id: secret.public(),
                 secret,
                 bind_ports: Vec::new(),
-                lookups: crate::protocol::mesh::LookupOpts::loopback(),
+                lookups: mesh::LookupOpts::loopback(),
                 relay_transport: crate::transport::PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: tokio::sync::watch::channel(None).0,
+                rung_tx: watch::channel(None).0,
             };
             let parts = CtxParts {
                 endpoint: &node.endpoint,
@@ -388,7 +398,7 @@ mod tests {
                 parts: &parts,
             };
             let mut state = node.state();
-            let (inbound, _unread) = tokio::sync::mpsc::channel(1);
+            let (inbound, _unread) = mpsc::channel(1);
             let mut app = crate::membership::MembershipApp::new(inbound);
             let mut attempts = 0;
             let mut outcome = Ok(());

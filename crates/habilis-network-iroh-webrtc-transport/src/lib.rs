@@ -42,6 +42,8 @@
 //! same iroh relay rather than to a second relay at the ICE layer. Neither
 //! backend has a TURN client, and neither should grow one.
 
+#[cfg(any(feature = "web", feature = "native"))]
+use iroh::endpoint::transports;
 mod addr;
 mod ice_uri;
 // The session table both backends use. The host backend had a verbatim copy in
@@ -218,7 +220,7 @@ impl WebRtcHandle {
     /// registered — see `crate::selector` for why registering the transport
     /// alone is not enough.
     #[must_use]
-    pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
+    pub fn path_selector(&self) -> std::sync::Arc<dyn transports::PathSelector> {
         std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
     }
 
@@ -292,7 +294,7 @@ impl WebRtcHandle {
     /// registered — see [`crate::selector`] for why registering the transport
     /// alone is not enough.
     #[must_use]
-    pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
+    pub fn path_selector(&self) -> std::sync::Arc<dyn transports::PathSelector> {
         std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
     }
 

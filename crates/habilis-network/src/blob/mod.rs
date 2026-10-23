@@ -34,6 +34,7 @@ use iroh::Endpoint;
 use crate::protocol::mesh::LookupOpts;
 use crate::transport::PayloadPath;
 
+use crate::protocol::{crypto, identity};
 mod consume;
 mod produce;
 mod store;
@@ -68,7 +69,7 @@ pub struct OffloadRequest {
     pub path: PathBuf,
     pub spool_dir: PathBuf,
     pub content_id: ContentId,
-    pub password: Option<crate::protocol::crypto::Password>,
+    pub password: Option<crypto::Password>,
 }
 
 /// Offload a file over the blob channel and return the [`BlobTicket`] that
@@ -149,7 +150,7 @@ impl BlobDigest {
 
 impl std::fmt::Display for BlobDigest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        crate::protocol::identity::write_hex(formatter, &self.0)
+        identity::write_hex(formatter, &self.0)
     }
 }
 
@@ -188,6 +189,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use crate::protocol::crypto;
+    use iroh::endpoint::presets;
     /// A secret that is already in a wiped buffer (the blob salt, the token read off
     /// the wire) moves into its type whole, through the constructor that takes the
     /// buffer, with no plain `[u8; 32]` copy on the way. This does not compile
@@ -346,7 +349,7 @@ mod tests {
         let mut clients = Vec::new();
         let mut idle = Vec::new();
         for _ in 0..12u8 {
-            let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            let client = iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await
@@ -543,7 +546,7 @@ mod tests {
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.secret = crate::protocol::crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
+        ticket.secret = crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),

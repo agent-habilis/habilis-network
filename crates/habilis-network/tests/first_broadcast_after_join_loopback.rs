@@ -55,6 +55,7 @@ use habilis_network::runtime::{
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
+use habilis_network::net::test_relay;
 /// How long a broadcast may take to reach the creator before the test calls it lost.
 const EXPECTED: Duration = Duration::from_mins(1);
 /// How long the test keeps looking, to tell a late message from one that never comes: past the
@@ -540,9 +541,7 @@ fn membership_race(
 ) {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("local relay");
         let creator = Member::create("creator", &relay_url, transport).await;
         let j1 = Member::join("joiner-one", &creator).await;
         let j2 = Member::join("joiner-two", &creator).await;

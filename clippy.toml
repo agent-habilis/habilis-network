@@ -66,3 +66,7 @@ disallowed-methods = [
 # Google Rust Style Guide (issue #29): a test may call `unwrap`, because a failed `unwrap` fails the
 # test with a line number. `clippy::unwrap_used` is on for all other code (Cargo.toml).
 allow-unwrap-in-tests = true
+
+# Google Rust Style Guide (issue 29): a path names at most three segments. A longer one imports
+# its parent module (absolute_paths, Cargo.toml).
+absolute-paths-max-segments = 3

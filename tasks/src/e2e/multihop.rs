@@ -30,6 +30,8 @@ use super::mesh::{
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
+use habilis_network::net::test_relay;
+use habilis_network::util::tuning;
 /// The route is learned from link vectors (15 s apart) and the underlay session of the tab comes
 /// on the next tick after that, so a message may wait a few ticks for its route.
 const ROUTE_TIMEOUT: Duration = Duration::from_mins(3);
@@ -260,8 +262,8 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     init_logging();
     // As in the mesh suite: the beacon re-check is parked beyond the cell, which measures the mesh's
     // steady state.
-    habilis_network::util::tuning::init(
-        habilis_network::util::tuning::Tuning::DEFAULTS
+    tuning::init(
+        tuning::Tuning::DEFAULTS
             .with_rival_recheck_first(Duration::from_hours(1))
             .with_rival_recheck(Duration::from_hours(1))
             .with_rival_recheck_meshed(Duration::from_hours(1)),
@@ -271,7 +273,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let harness = BunServer::serve(
         &repo_root().join("packages/habilis-network-wasm"),

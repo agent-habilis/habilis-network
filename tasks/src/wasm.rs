@@ -10,6 +10,7 @@ use crate::scope::Scope;
 use crate::util::output;
 use crate::{TaskOutcome, dev};
 
+use crate::e2e::build;
 const TARGET: &str = "wasm32-unknown-unknown";
 
 /// `cargo task build-wasm` — build habilis-network-wasm and emit its JS glue.
@@ -19,7 +20,7 @@ const TARGET: &str = "wasm32-unknown-unknown";
 /// this drops under `packages/habilis-network-wasm/wasm/`.
 pub(crate) fn build_peer(sh: &Shell) -> TaskOutcome {
     ensure_target(sh)?;
-    crate::e2e::build::build_browser_peer()?;
+    build::build_browser_peer()?;
     output::status("Built", "habilis-network-wasm");
     Ok(())
 }

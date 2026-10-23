@@ -23,6 +23,8 @@ use crate::resolver::{self, JoinTarget};
 
 use super::setup::SetupKind;
 
+use crate::protocol::mesh::RelayChoice;
+use crate::util::tuning;
 /// The create intent, before resolution. Each frontend builds this from its
 /// own input struct (the lookups are already resolved into `config`).
 #[derive(Debug)]
@@ -246,8 +248,8 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
     //
     // Deliberately applied here and not in `derive_topic_mesh_with`: a caller
     // that states its own reach must not have it silently rewritten.
-    let lookups = if crate::util::tuning::topic_mdns_only_for_test() {
-        LookupOpts::new(crate::protocol::mesh::RelayChoice::Disabled).with_mdns(true)
+    let lookups = if tuning::topic_mdns_only_for_test() {
+        LookupOpts::new(RelayChoice::Disabled).with_mdns(true)
     } else {
         LookupOpts::public_preset()
     };

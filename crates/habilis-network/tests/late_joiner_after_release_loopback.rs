@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::Lookup;
 
+use habilis_network::net::test_relay;
 const OLD_MEMBERS: usize = 6;
 const RELEASE_LINKS: usize = 3;
 const PRECONDITION_DEADLINE: Duration = Duration::from_mins(1);
@@ -86,9 +87,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
         "habilis_network=info,habilis_network::transport=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let creator = open(
             "member-00",

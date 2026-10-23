@@ -30,6 +30,7 @@ use iroh::endpoint::transports::{
     PathSelection, PathSelectionContext, PathSelectionData, PathSelector,
 };
 
+use iroh::endpoint::transports;
 /// Prefers, in order: direct IP, `WebRTC`, multihop, gossip, relay.
 ///
 /// On a browser target the first rung is always empty — iroh's whole IP stack
@@ -80,7 +81,7 @@ impl PathSelector for WebRtcPreferred {
             tracing::trace!(
                 target: "habilis_ladder",
                 local = %self.local.fmt_short(),
-                current = ?ctx.current().map(iroh::endpoint::transports::FourTuple::remote),
+                current = ?ctx.current().map(transports::FourTuple::remote),
                 ?seen,
                 chosen = ?chosen.map(|path| path.network_path().remote()),
                 "path selection"

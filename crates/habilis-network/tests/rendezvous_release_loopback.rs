@@ -16,6 +16,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// Members of the first group: the creator, who hosts the rendezvous, and five
 /// joiners. Each joiner ends with five links, above the release count of three.
 const GROUP: usize = 6;
@@ -355,9 +356,7 @@ fn a_late_joiner_finds_a_mesh_where_every_member_let_go_of_the_rendezvous() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _serial = serial().lock().await;
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = group_that_let_go(&relay).await;
 
         let late = Member::join("late-joiner", &members[0]).await;
@@ -382,9 +381,7 @@ fn the_beacon_holder_leaving_is_replaced_though_every_other_member_let_go_of_it(
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _serial = serial().lock().await;
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = group_that_let_go(&relay).await;
         let before = count("beacon role active");
 
@@ -421,9 +418,7 @@ fn a_link_left_on_the_relay_is_closed_and_the_heal_brings_it_back() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _serial = serial().lock().await;
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let creator = Member::create("alice", &relay).await;
         assert!(
             eventually(Duration::from_mins(1), || logs()
@@ -498,9 +493,7 @@ fn a_cut_between_two_members_closes_their_link_and_leaves_the_others() {
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         let _serial = serial().lock().await;
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = vec![Member::create("member-0", &relay).await];
         assert!(
             eventually(Duration::from_mins(1), || logs()

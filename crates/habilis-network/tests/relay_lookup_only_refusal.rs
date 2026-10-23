@@ -29,6 +29,7 @@ use habilis_network::runtime::{
 };
 use tokio::sync::Notify;
 
+use habilis_network::net::test_relay;
 /// The do-nothing application: presence alone forms a mesh.
 struct Probe;
 
@@ -183,9 +184,7 @@ fn relay_only_pair_links_only_when_the_relay_may_carry_payload() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         // Plain HTTP, the same relay flavour the browser matrix uses.
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay server");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay server");
 
         // The control first: the pair *can* meet through this relay.
         assert!(

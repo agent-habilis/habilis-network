@@ -16,6 +16,10 @@ use std::time::Duration;
 
 use iroh::endpoint::transports::{Addr, PathSelectionData, Transmit};
 
+#[cfg(feature = "test-hooks")]
+use std::sync::atomic;
+#[cfg(feature = "test-hooks")]
+use std::sync::atomic::Ordering;
 /// The lowest-RTT path in `iter`.
 ///
 /// A path whose stats are not readable yet — freshly added, not yet validated —
@@ -210,7 +214,7 @@ pub fn is_blocked_to(
 }
 
 #[cfg(feature = "test-hooks")]
-static IP_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static IP_BLOCKED: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 #[cfg(feature = "test-hooks")]
 type PortBlocks = std::sync::Mutex<Option<HashMap<iroh::EndpointId, HashSet<u16>>>>;
@@ -279,7 +283,7 @@ pub fn is_blocked_to(
         return true;
     }
     rung == Rung::Ip
-        && (IP_BLOCKED.load(std::sync::atomic::Ordering::SeqCst)
+        && (IP_BLOCKED.load(Ordering::SeqCst)
             || remote.is_some_and(|remote| {
                 IP_BLOCKED_TO
                     .lock()
@@ -295,7 +299,7 @@ pub fn is_blocked_to(
 /// connection leaves UDP within a few seconds and returns once it is cleared.
 #[cfg(feature = "test-hooks")]
 pub fn block_ip_paths(blocked: bool) {
-    IP_BLOCKED.store(blocked, std::sync::atomic::Ordering::SeqCst);
+    IP_BLOCKED.store(blocked, Ordering::SeqCst);
 }
 
 /// Tests only: from now on the endpoint `local` selects no IP path whose remote

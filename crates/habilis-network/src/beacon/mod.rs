@@ -60,6 +60,8 @@ use crate::util::tuning::{
     HEAL_PROBE, RECLAIM_WINDOW, RENDEZVOUS_CLOSE, RENDEZVOUS_PROBE, heal_interval,
 };
 
+use crate::util::tuning;
+use iroh::address_lookup::memory;
 /// Everything [`ensure`] needs to (re)build the rendezvous endpoint.
 /// Cheap to clone-hold for the event loop's lifetime.
 #[derive(Debug)]
@@ -428,7 +430,7 @@ fn rung_of(endpoint: &Endpoint, ladder: &[u16]) -> Option<usize> {
 async fn forget_rungs(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     forget: impl Fn(u16) -> bool,
 ) {
     let forgotten = params
@@ -469,7 +471,7 @@ pub(crate) fn busy_rungs(params: &RendezvousParams) -> Vec<u16> {
 async fn admit_rung(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     port: u16,
 ) {
     let held = peer_book
@@ -491,7 +493,7 @@ async fn admit_rung(
 async fn settle_on_rung(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     port: u16,
 ) {
     forget_rungs(params, peer, peer_book, |rung| rung != port).await;
@@ -509,7 +511,7 @@ async fn settle_on_rung(
 pub(crate) async fn refresh_holder_rung(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     rungs: &mut RungWatch,
 ) {
     let now = Instant::now();
@@ -1272,7 +1274,7 @@ fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
 async fn build_rendezvous_endpoint(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     rungs: &mut RungWatch,
 ) -> Walk {
     let node = peer.id();
@@ -1432,7 +1434,7 @@ pub(crate) enum Held {
 pub(crate) async fn walk_ladder(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     probe_first: bool,
     probe: &mut Option<RivalProbe>,
@@ -1460,7 +1462,7 @@ pub(crate) async fn walk_ladder(
 pub(crate) async fn ensure_holder(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     probe_first: bool,
     probe: &mut Option<RivalProbe>,
@@ -1502,7 +1504,7 @@ pub(crate) async fn ensure_holder(
 pub(crate) async fn ensure(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     probe_first: bool,
     probe: &mut Option<RivalProbe>,
@@ -1535,7 +1537,7 @@ impl Contest {
 pub(crate) async fn claim_after_probe(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     found_rival: bool,
     rungs: &mut RungWatch,
@@ -1580,7 +1582,7 @@ fn releasable(current: &mut Option<Rendezvous>) -> bool {
 async fn claim(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
 ) -> bool {
     claim_holder(params, peer, peer_book, current, &mut RungWatch::detached()).await
@@ -1591,7 +1593,7 @@ async fn claim(
 async fn claim_holder(
     params: &RendezvousParams,
     peer: &Endpoint,
-    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    peer_book: &memory::MemoryLookup,
     current: &mut Option<Rendezvous>,
     rungs: &mut RungWatch,
 ) -> Held {
@@ -1619,7 +1621,7 @@ async fn claim_holder(
     // way onto a mesh whose relay is lookup only.
     let (gossip, router, book) = build_mesh(
         endpoint.clone(),
-        crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+        tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
         None,
         lane.clone().map(|(handle, admission)| {
             (
@@ -1728,6 +1730,10 @@ mod tests {
     };
     use habilis_network_test_tracing::test;
 
+    use crate::daemon::setup;
+    use crate::util::{clock, tuning};
+    use iroh::address_lookup::memory;
+    use tokio::sync::mpsc;
     /// Two ports of a ladder: the first is taken by `held` (a socket that says nothing, or another
     /// mesh's beacon), the second is free.
     fn ladder_of_two() -> (std::net::UdpSocket, Vec<u16>) {
@@ -1919,7 +1925,7 @@ mod tests {
         let book = crate::lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
-        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
 
         // The first walk asks, and binds nothing.
@@ -1937,7 +1943,7 @@ mod tests {
             .await
             .expect("a probe task reports")
             .expect("the channel is open");
-        rungs.note(report, crate::util::clock::Instant::now());
+        rungs.note(report, clock::Instant::now());
         // The rung says nothing: still no bind.
         let waited = walk_ladder(
             &params,
@@ -2005,7 +2011,7 @@ mod tests {
         let book = crate::lookup::address_book(&peer);
         let mut beacon = None;
         let mut probe = None;
-        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
 
         let asked = walk_ladder(
@@ -2025,7 +2031,7 @@ mod tests {
                 .await
                 .expect("a probe task reports")
                 .expect("the channel is open");
-            rungs.note(report, crate::util::clock::Instant::now());
+            rungs.note(report, clock::Instant::now());
         }
         let both_asked_at_once = started.elapsed() < std::time::Duration::from_millis(1800);
         let window = RECLAIM_WINDOW + std::time::Duration::from_secs(1);
@@ -2072,9 +2078,9 @@ mod tests {
         use crate::lookup::ProbeAnswer;
         use crate::util::tuning::RECLAIM_WINDOW;
 
-        let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, _arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
-        let then = crate::util::clock::Instant::now();
+        let then = clock::Instant::now();
         rungs.note(
             RungReport {
                 port: 4242,
@@ -2103,7 +2109,7 @@ mod tests {
         let params = public_params();
         let node = SecretKey::generate().public();
         crate::beacon::set_blind_rung_probes(node, true);
-        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
         let port = 4242;
 
@@ -2113,7 +2119,7 @@ mod tests {
         rungs.ask(&params, node, port, true);
         let new = arrivals.recv().await.expect("the second probe reports");
 
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         rungs.note(old, now);
         let waiting = rungs.waiting();
         let read = rungs.reading(port, now);
@@ -2145,7 +2151,7 @@ mod tests {
     fn a_refused_rung_is_withheld_until_it_answers_as_ours() {
         use super::{ProbeAnswer, RungReport, RungWatch};
 
-        let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, _arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
         let port = 4242;
         let mut generation = 0;
@@ -2157,7 +2163,7 @@ mod tests {
                     answer,
                     generation,
                 },
-                crate::util::clock::Instant::now(),
+                clock::Instant::now(),
             );
             watch.withheld_rungs()
         };
@@ -2178,7 +2184,7 @@ mod tests {
         let params = public_params();
         let node = SecretKey::generate().public();
         crate::beacon::set_blind_rung_probes(node, true);
-        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
         let port = 4242;
 
@@ -2188,7 +2194,7 @@ mod tests {
         rungs.ask(&params, node, port, true);
         let new = arrivals.recv().await.expect("the second probe reports");
 
-        let first = crate::util::clock::Instant::now();
+        let first = clock::Instant::now();
         rungs.note(new, first);
         rungs.note(old, first + std::time::Duration::from_secs(5));
         let stored = rungs
@@ -2215,7 +2221,7 @@ mod tests {
         let params = public_params();
         let node = SecretKey::generate().public();
         crate::beacon::set_blind_rung_probes(node, true);
-        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
         let port = 4242;
 
@@ -2225,7 +2231,7 @@ mod tests {
         rungs.ask(&params, node, port, true);
         let new = arrivals.recv().await.expect("the second probe reports");
 
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         rungs.note(new, now);
         rungs.forget();
         rungs.note(old, now);
@@ -2246,9 +2252,9 @@ mod tests {
         use crate::lookup::ProbeAnswer;
         use crate::util::tuning::RECLAIM_WINDOW;
 
-        let (reports, _arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, _arrivals) = mpsc::unbounded_channel();
         let mut rungs = RungWatch::new(reports);
-        let then = crate::util::clock::Instant::now();
+        let then = clock::Instant::now();
         let report = RungReport {
             port: 4242,
             answer: ProbeAnswer::NoAnswer,
@@ -2280,7 +2286,7 @@ mod tests {
         let mut beacon = None;
         let mut probe = None;
         let mut rungs = RungWatch::detached();
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
 
         rungs.note(
             RungReport {
@@ -2354,7 +2360,7 @@ mod tests {
         let mut beacon = None;
         let mut probe = None;
         let mut rungs = RungWatch::detached();
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         for port in [first, second] {
             rungs.note(
                 RungReport {
@@ -2567,7 +2573,7 @@ mod tests {
             monitor: None,
             endpoint,
             lane: None,
-            arrivals: tokio::sync::mpsc::channel(1).1,
+            arrivals: mpsc::channel(1).1,
             released: false,
         }
     }
@@ -2731,7 +2737,7 @@ mod tests {
                 monitor: Some(monitor),
                 endpoint,
                 lane: None,
-                arrivals: tokio::sync::mpsc::channel(1).1,
+                arrivals: mpsc::channel(1).1,
                 released: false,
             };
 
@@ -2765,7 +2771,7 @@ mod tests {
         params.bind_ports = rungs.clone();
         let peer = loopback_endpoint().await;
         let book = crate::lookup::address_book(&peer);
-        crate::daemon::setup::register_rendezvous(&book, &params, &[]);
+        setup::register_rendezvous(&book, &params, &[]);
         peer.add_endpoint_addr(rendezvous_addr(&params).expect("the ladder"))
             .await
             .expect("the endpoint takes the ladder");
@@ -2848,7 +2854,7 @@ mod tests {
         let member = loopback_endpoint().await;
         let book = crate::lookup::address_book(&member);
         crate::lookup::replace_peer_addr(&book, super::rendezvous_holder_addr(&params, stale));
-        let (reports, mut arrivals) = super::mpsc::unbounded_channel();
+        let (reports, mut arrivals) = mpsc::unbounded_channel();
         let mut rungs_watch = super::RungWatch::new(reports);
         for _ in 0..3 {
             super::refresh_holder_rung(&params, &member, &book, &mut rungs_watch).await;
@@ -2929,7 +2935,7 @@ mod tests {
                 port,
             )))
         };
-        let book = iroh::address_lookup::memory::MemoryLookup::new();
+        let book = memory::MemoryLookup::new();
         crate::lookup::add_peer_addr(&book, at(4000));
 
         crate::lookup::replace_peer_addr(&book, holder_entry(at(5000), &params, &[]));
@@ -3132,7 +3138,7 @@ mod tests {
             monitor: None,
             endpoint: endpoint.clone(),
             lane: None,
-            arrivals: tokio::sync::mpsc::channel(1).1,
+            arrivals: mpsc::channel(1).1,
             released: false,
         });
 
@@ -3164,7 +3170,7 @@ mod tests {
         let peer = loopback_endpoint().await;
         let (gossip, router, _book) = crate::lookup::build_mesh(
             peer.clone(),
-            crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             None,
             None,
             Vec::new(),
@@ -3220,7 +3226,7 @@ mod tests {
         let peer = loopback_endpoint().await;
         let (gossip, router, _book) = crate::lookup::build_mesh(
             peer.clone(),
-            crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             None,
             None,
             Vec::new(),
@@ -3277,7 +3283,7 @@ mod tests {
         let peer = loopback_endpoint().await;
         let (gossip, router, _book) = crate::lookup::build_mesh(
             peer.clone(),
-            crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
+            tuning::GOSSIP_ACTIVE_VIEW_CAPACITY,
             None,
             None,
             Vec::new(),

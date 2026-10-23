@@ -3,6 +3,18 @@
 //! its own submodule — [`mdns`] (LAN multicast), [`dht`] (mainline DHT),
 //! and [`relay`] (the relay ladder + bootstrap-rung selection/failover).
 
+#[cfg(feature = "multihop")]
+use crate::transport::underlay_webrtc;
+use crate::transport::webrtc;
+use crate::util::{clock, tuning};
+#[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
+use std::sync::atomic;
+#[cfg(any(
+    all(feature = "host", feature = "iroh-test-utils"),
+    all(feature = "iroh-test-utils", feature = "multihop")
+))]
+use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
 #[cfg(feature = "host")]
 mod capability;
 #[cfg(all(feature = "host", feature = "dht"))]
@@ -438,7 +450,7 @@ pub(crate) async fn lan_contacts(
     endpoint: &Endpoint,
     mdns: Option<MdnsHandle>,
     topic: &iroh_gossip::proto::TopicId,
-) -> Result<Option<tokio::sync::mpsc::Receiver<LanEvent>>> {
+) -> Result<Option<mpsc::Receiver<LanEvent>>> {
     #[cfg(all(feature = "host", feature = "mdns"))]
     if let Some(handle) = mdns {
         // The tag first, so that the record we announce already says that we are a member.
@@ -682,8 +694,8 @@ pub fn multihop_handle_config(
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
     habilis_network_iroh_multihop_transport::HandleConfig::default()
         .with_relay_payload(relay_payload.relay_allowed())
-        .with_vector_max_age(crate::util::tuning::LINKSTATE_MAX_AGE)
-        .with_relay_stuck_after(crate::util::tuning::MULTIHOP_RELAY_STUCK)
+        .with_vector_max_age(tuning::LINKSTATE_MAX_AGE)
+        .with_relay_stuck_after(tuning::MULTIHOP_RELAY_STUCK)
 }
 
 /// [`multihop_handle_config`] for a browser: the same numbers, and the link cost of
@@ -928,12 +940,12 @@ pub(crate) async fn build_peer_multihop(
 /// leg costs. A flag of the process, like `block_ip_paths`: set it before the node
 /// starts.
 #[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
-static UNDERLAY_LEG_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static UNDERLAY_LEG_OFF: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 /// Tests only: see `UNDERLAY_LEG_OFF`.
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
 pub fn set_underlay_leg_off(off: bool) {
-    UNDERLAY_LEG_OFF.store(off, std::sync::atomic::Ordering::SeqCst);
+    UNDERLAY_LEG_OFF.store(off, Ordering::SeqCst);
 }
 
 /// The cap of the `WebRTC` leg of the underlay for a node with `max_peers` (G):
@@ -948,7 +960,7 @@ pub fn set_underlay_leg_off(off: bool) {
 )]
 pub(crate) fn underlay_cap(max_peers: usize) -> Option<usize> {
     #[cfg(feature = "iroh-test-utils")]
-    if UNDERLAY_LEG_OFF.load(std::sync::atomic::Ordering::SeqCst) {
+    if UNDERLAY_LEG_OFF.load(Ordering::SeqCst) {
         return None;
     }
     Some(max_peers)
@@ -973,7 +985,7 @@ pub(crate) async fn build_peer_multihop_with(
     Endpoint,
     habilis_network_iroh_multihop_transport::MultihopHandle,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
-    Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    Option<underlay_webrtc::UnderlayWebRtc>,
     Option<MdnsHandle>,
 )> {
     let secret = mint_secret();
@@ -1011,7 +1023,7 @@ pub(crate) async fn build_peer_multihop_with(
     let mut protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = Vec::new();
     let mut underlay_webrtc = None;
     if let Some((handle, table)) = underlay_leg {
-        let allowed = crate::transport::underlay_webrtc::Allowed::default();
+        let allowed = underlay_webrtc::Allowed::default();
         let ice = crate::transport::IceProfile {
             host_only: lookups.is_loopback(),
         };
@@ -1028,18 +1040,15 @@ pub(crate) async fn build_peer_multihop_with(
         );
         protocols.push((
             crate::transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
-            Box::new(crate::transport::underlay_webrtc::UnderlaySignalGate::new(
+            Box::new(underlay_webrtc::UnderlaySignalGate::new(
                 acceptor,
                 allowed.clone(),
             )),
         ));
         // A session that attached is used only after a connect that completes, and
         // the nudge is that connect: see `webrtc::nudge_session`.
-        protocols.push((
-            crate::transport::webrtc::NUDGE_ALPN.to_vec(),
-            Box::new(crate::transport::webrtc::NudgeAcceptor),
-        ));
-        underlay_webrtc = Some(crate::transport::underlay_webrtc::UnderlayWebRtc {
+        protocols.push((webrtc::NUDGE_ALPN.to_vec(), Box::new(webrtc::NudgeAcceptor)));
+        underlay_webrtc = Some(underlay_webrtc::UnderlayWebRtc {
             handle,
             admission: table,
             endpoint: underlay.clone(),
@@ -1158,7 +1167,7 @@ pub(crate) async fn probe_answer(
     timeout: Duration,
 ) -> ProbeAnswer {
     let addr: EndpointAddr = target.into();
-    let started = crate::util::clock::Instant::now();
+    let started = clock::Instant::now();
     let mut failure = None;
     let answer = match n0_future::time::timeout(
         timeout,
@@ -1270,7 +1279,7 @@ fn answer_of_connection_error(error: &iroh::endpoint::ConnectionError) -> ProbeA
 /// answers to an anti-entropy digest. A late joiner meets the answers of its peers in one burst,
 /// and every change is a message of the topic. The default of 256 overflowed on a loaded host
 /// (the reader got `Lagged`, and the node logged "gossip event stream lagged").
-const TOPIC_EVENT_CAPACITY: usize = 16 * crate::util::tuning::ANTIENTROPY_MAX_RESEND;
+const TOPIC_EVENT_CAPACITY: usize = 16 * tuning::ANTIENTROPY_MAX_RESEND;
 
 /// Build an iroh-gossip instance and a Router that accepts incoming gossip connections.
 ///
@@ -1335,10 +1344,7 @@ pub(crate) fn build_mesh(
                 session_gate,
             ),
         )
-        .accept(
-            crate::transport::webrtc::NUDGE_ALPN,
-            crate::transport::webrtc::NudgeAcceptor,
-        );
+        .accept(webrtc::NUDGE_ALPN, webrtc::NudgeAcceptor);
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {
@@ -1384,6 +1390,14 @@ mod tests {
     use habilis_network_test_tracing::test;
     use std::collections::HashSet;
 
+    #[cfg(feature = "host")]
+    use crate::transport::path;
+    use crate::transport::webrtc;
+    use iroh::address_lookup::memory;
+    #[cfg(feature = "host")]
+    use iroh::endpoint::presets;
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    use tokio::sync::mpsc;
     /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
     /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
     /// user data of an endpoint.
@@ -1481,7 +1495,7 @@ mod tests {
             book: MemoryLookup,
             sender: iroh_gossip::api::GossipSender,
             receiver: iroh_gossip::api::GossipReceiver,
-            events: tokio::sync::mpsc::Receiver<LanEvent>,
+            events: mpsc::Receiver<LanEvent>,
             _router: Router,
         }
 
@@ -1589,7 +1603,7 @@ mod tests {
     fn replacing_a_peer_address_leaves_exactly_the_new_one() {
         use super::{add_peer_addr, replace_peer_addr};
 
-        let book = iroh::address_lookup::memory::MemoryLookup::new();
+        let book = memory::MemoryLookup::new();
         let id = iroh::SecretKey::generate().public();
         let at = |port: u16| {
             iroh::EndpointAddr::new(id).with_ip_addr(std::net::SocketAddr::from((
@@ -1670,7 +1684,7 @@ mod tests {
         )
         .await
         .expect("bind the receiver");
-        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let sender = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .transport_config(
                 iroh::endpoint::QuicTransportConfig::builder()
@@ -1749,7 +1763,7 @@ mod tests {
         )
         .await
         .expect("bind the receiver");
-        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let sender = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .transport_config(
                 iroh::endpoint::QuicTransportConfig::builder()
@@ -2003,7 +2017,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(
-            crate::transport::path::selected_is_ip(&connection),
+            path::selected_is_ip(&connection),
             "IP is above gossip: the ladder of the gossip handle is the selector"
         );
         router.shutdown().await.expect("shutdown");
@@ -2291,7 +2305,7 @@ mod tests {
 
         let nudge = n0_future::time::timeout(
             std::time::Duration::from_secs(5),
-            dialer.connect(addr, crate::transport::webrtc::NUDGE_ALPN),
+            dialer.connect(addr, webrtc::NUDGE_ALPN),
         )
         .await
         .map(|dialed| dialed.map(|_| ()));
