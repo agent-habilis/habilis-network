@@ -20,17 +20,10 @@ use std::path::Path;
 use habilis_network_chunks::{CHUNK_BYTES_USIZE, ChunkSource, FileId, FsOrigin, chunk_hash};
 
 fn block_on<F: Future>(future: F) -> F::Output {
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::{Context, Poll, Waker};
 
     let mut future = Box::pin(future);
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     match future.as_mut().poll(&mut context) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("an origin future parked; this suite has no reactor"),

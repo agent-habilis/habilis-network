@@ -341,8 +341,16 @@ fn two_streams_on_one_node_stay_apart() {
         );
         let (first_got, second_got) =
             tokio::join!(read_all(&mut first_reader), read_all(&mut second_reader));
-        assert!(first_got.expect("first") == payload(300_000));
-        assert!(second_got.expect("second") == b"second".repeat(50_000));
+        assert_eq!(
+            first_got.expect("first"),
+            payload(300_000),
+            "the first reader gets the whole first payload"
+        );
+        assert_eq!(
+            second_got.expect("second"),
+            b"second".repeat(50_000),
+            "the second reader gets the whole second payload"
+        );
         writers.0.await.expect("first writer");
         writers.1.await.expect("second writer");
         producer_node.close().await;

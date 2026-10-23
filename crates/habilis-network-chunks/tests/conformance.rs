@@ -71,17 +71,10 @@ trait Harness {
 /// stay free of — and `tests/isolation.rs` would fail the build for the
 /// dev-dependency anyway.
 fn block_on<F: Future>(future: F) -> F::Output {
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::{Context, Poll, Waker};
 
     let mut future = Box::pin(future);
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     // Polled once, deliberately: every future here resolves without yielding. A
     // backend that introduces real async I/O will park, and should bring its own
     // driver rather than have this one silently spin.
