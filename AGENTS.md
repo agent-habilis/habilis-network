@@ -199,7 +199,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 
 - Module names after the primary item: a scan flags 98 of the 156 leaf files that declare a public type. The scan takes the first public type in each file, so it is too noisy to enforce. The reviewer checks it.
 - Glob imports are not allowed, with two exceptions: `use super::*` in a test module, and the prelude of a third-party crate (`wasm_bindgen::prelude::*`, `proptest::prelude::*`). Do not define a prelude of our own.
-- `clippy::absolute_paths`: the owner decided to turn it on with `absolute-paths-max-segments = 3` (636 hits at 3 segments, 3109 at the default 2). A script fixes the hits. Work is open.
+- `clippy::absolute_paths`: the owner set `absolute-paths-max-segments = 3` in `clippy.toml`. The lint is on in `[workspace.lints]`. `scripts/absolute-paths/` rewrote the hits to import the parent module.
 - `non_exhaustive_omitted_patterns` is an unstable rustc lint. The project toolchain is a nightly, so a CI step runs it with `-Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint)`. Work is open.
 - `exhaustive_enums` and `exhaustive_structs`: the owner decided to mark public types `#[non_exhaustive]`. All public enums are marked. Of the structs, seven stay open, each with its reason: `Frame` (two `EndpointId` fields make a constructor swap-prone, so a named-field literal is the safe form), `StateMergeParams` (seven required fields), `SetupParams` (twelve fields, every site sets all), `AppClass` (five adjacent bools), and the three `repr(C)` structs of the FFI (`HabilisNetworkMsg`, `HabilisNetworkOpts`, `HabilisNetworkStreamOpts`: the C layout is the ABI). A struct that other crates build gets `new` with all fields (up to four, no two adjacent of one type), or `new` with the required fields and a `with_` method for each optional field that a call site sets. Never set a field after `Default`, because `field_reassign_with_default` refuses it.
 - A `match` on a foreign `#[non_exhaustive]` enum names every variant and keeps a wildcard arm last. The compiler needs that arm and `wildcard_enum_match_arm` refuses it, so the arm carries `#[expect(clippy::wildcard_enum_match_arm, reason = "...")]` on the narrowest scope. Use `expect`, never `allow`: a stale `expect` is a warning.
@@ -214,7 +214,6 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 
 ### Rules still under audit
 
-- The 11 enums and 25 structs above that are not marked yet. The owner decided to mark them all. Work is open.
 - Everything else follows the guide until issue #29 records a decision.
 
 ## Scripts
