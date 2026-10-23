@@ -197,6 +197,8 @@ divan = "0.1"
 # unused_extern_crates, ellipsis_inclusive_range_patterns).
 # `rust_2021_compatibility` is a migration-only group, not used here.
 [workspace.lints.rust]
+# Every public item carries a doc comment, so the rustdoc and the reader agree.
+missing_docs = "warn"
 # A warning is a test failure: the output of a build and of a test stays clean.
 warnings = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
@@ -218,6 +220,9 @@ unsafe_op_in_unsafe_fn = "deny"
 # dead deps it surfaced (`include_dir`, `schemars`) were removed below.
 
 [workspace.lints.clippy]
+# Public enums and structs are `#[non_exhaustive]`, so a new variant or field is not a break.
+exhaustive_enums = "warn"
+exhaustive_structs = "warn"
 pedantic = { level = "warn", priority = -1 }
 # `clippy.toml` lists the Tokio calls that panic in a browser. The lint stays off here: on a native
 # target `n0_future` re-exports those functions, so a native run would flag the replacements. Every
