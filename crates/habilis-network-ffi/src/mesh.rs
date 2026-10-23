@@ -69,16 +69,19 @@ impl Mesh {
         })
     }
 
+    /// The id of the mesh.
     #[must_use]
     pub fn habilis_network_id(&self) -> &str {
         &self.habilis_network_id
     }
 
+    /// The nickname of this member.
     #[must_use]
     pub fn nickname(&self) -> &str {
         &self.nickname
     }
 
+    /// The name of the mesh.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name

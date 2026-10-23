@@ -107,7 +107,9 @@ impl std::fmt::Debug for AppClass {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct InboundApp<'message> {
+    /// The message as it was authored.
     pub message: &'message Authored,
+    /// Whether the engine lets the frame surface.
     pub surfaceable: bool,
 }
 

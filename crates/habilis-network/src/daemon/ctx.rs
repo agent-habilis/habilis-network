@@ -12,9 +12,13 @@ use crate::transport::MeshSender;
 /// Immutable loop-level context threaded through every handler.
 /// Bundles the refs a handler may need but never mutates itself.
 pub struct HandlerCtx<'node> {
+    /// The sender of the topic.
     pub sender: &'node MeshSender,
+    /// The endpoint.
     pub endpoint: &'node Endpoint,
+    /// The mesh.
     pub mesh: &'node MeshId,
+    /// The author of the write.
     pub author: &'node Nickname,
     /// This member's signing identity (Ed25519). Messages we author are
     /// signed with it before broadcast; see [`Identity`].

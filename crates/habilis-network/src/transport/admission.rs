@@ -499,6 +499,7 @@ impl SignalAdmission {
             .saturating_sub(inner.ceiling.units() + inner.rounds_in_flight())
     }
 
+    /// An empty value.
     #[must_use]
     pub fn new(cap: usize) -> Self {
         Self {

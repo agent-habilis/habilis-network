@@ -42,7 +42,9 @@ pub enum DriverMode {
     /// session, or an app that consumes every frame inside the loop). Never
     /// exits the process and binds no socket; shutdown on `quit_rx`.
     InProcess {
+        /// Where the messages go.
         msg_tx: Option<broadcast::Sender<Authored>>,
+        /// Where the quit signal comes from.
         quit_rx: mpsc::Receiver<()>,
         /// Whether this session registers the process-wide
         /// ctrl-c/SIGTERM/SIGHUP/SIGQUIT listeners for a graceful leave.

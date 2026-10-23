@@ -39,9 +39,13 @@ thread_local! {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct HabilisNetworkOpts {
+    /// The mesh name, as a NUL-terminated string.
     pub mesh: *const c_char,
+    /// The gossip topic, as a NUL-terminated string.
     pub topic: *const c_char,
+    /// The nickname, as a NUL-terminated string.
     pub nick: *const c_char,
+    /// The name, as a NUL-terminated string.
     pub name: *const c_char,
     /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
     /// (a loopback mesh on create).
@@ -141,8 +145,11 @@ const _: () = {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct HabilisNetworkMsg {
+    /// The nickname of the sender, NUL-terminated.
     pub nick: [c_char; NICK_CAP],
+    /// Non-zero when the message was directed to us.
     pub directed: c_int,
+    /// The length of the body, in bytes.
     pub len: usize,
 }
 
@@ -700,8 +707,11 @@ pub unsafe extern "C" fn habilis_network_mesh_close(handle: *mut HabilisNetworkM
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct HabilisNetworkStreamOpts {
+    /// The lookups, as a NUL-terminated string.
     pub lookup: *const c_char,
+    /// The transports, as a NUL-terminated string.
     pub transport: *const c_char,
+    /// The relay URLs, as a NUL-terminated string.
     pub relay_urls: *const c_char,
 }
 

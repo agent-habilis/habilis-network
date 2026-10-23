@@ -20,15 +20,23 @@ use tokio::sync::mpsc;
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MembershipEvent {
+    /// The daemon is ready.
     Ready {
+        /// The mesh.
         mesh: String,
+        /// The name of the mesh.
         name: String,
+        /// The nickname of the member.
         nick: String,
     },
+    /// A member joined.
     Joined {
+        /// The nickname of the member.
         nick: String,
     },
+    /// A member left.
     Left {
+        /// The nickname of the member.
         nick: String,
     },
     /// Heartbeat-evicted past `ALIVE_TIMEOUT`. Deliberately **not** `left`:
@@ -36,28 +44,44 @@ pub enum MembershipEvent {
     /// together would desync a consumer's mirror from the roster it can read
     /// back.
     Quiet {
+        /// The nickname of the member.
         nick: String,
+        /// Seconds since the member was last heard from.
         last_seen_secs_ago: u64,
     },
+    /// A member came back.
     Returned {
+        /// The nickname of the member.
         nick: String,
     },
     /// A peer's per-author hash chain forked — two signed messages at one `seq`.
     Fork {
+        /// The nickname of the member.
         nick: String,
+        /// The public key of the member, in hex.
         pubkey: String,
+        /// The sequence number of the message.
         seq: u64,
     },
+    /// The shared state changed.
     StateChanged {
+        /// The channel of the write.
         channel: String,
+        /// The author of the write.
         author: String,
+        /// The shared document after the write.
         document: serde_json::Value,
+        /// Whether the write is this member's own.
         is_self: bool,
     },
+    /// An informational line.
     Info {
+        /// The text.
         text: String,
     },
+    /// An error line.
     Error {
+        /// The text.
         text: String,
     },
 }

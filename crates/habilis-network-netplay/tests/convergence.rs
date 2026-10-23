@@ -22,17 +22,22 @@ mod harness;
 
 use harness::{Runner, sim};
 
+/// The input of one player in a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Input(pub i32);
 
+/// The game state that every peer must agree on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct State {
+    /// The score.
     pub value: i64,
+    /// The frame that the state belongs to.
     pub frame: Frame,
 }
 
+/// The game under test.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Game;

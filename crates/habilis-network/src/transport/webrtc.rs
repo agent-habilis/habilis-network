@@ -362,6 +362,7 @@ pub struct WebRtcSignalAcceptor {
 }
 
 impl WebRtcSignalAcceptor {
+    /// An empty value.
     #[must_use]
     pub fn new(
         handle: WebRtcHandle,
@@ -748,7 +749,9 @@ pub(crate) fn local_needs_webrtc_lane(has_udp_transport: UdpTransport) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UdpTransport {
+    /// The peer is present.
     Present,
+    /// The peer is absent.
     Absent,
 }
 

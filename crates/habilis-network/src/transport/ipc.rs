@@ -242,6 +242,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NoDaemon {
+    /// The nickname of the member.
     pub nickname: Nickname,
 }
 

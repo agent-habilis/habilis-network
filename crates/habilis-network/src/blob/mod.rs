@@ -66,9 +66,13 @@ impl ContentId {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct OffloadRequest {
+    /// The path of the blob.
     pub path: PathBuf,
+    /// The directory where the blob is spooled.
     pub spool_dir: PathBuf,
+    /// The id of the content.
     pub content_id: ContentId,
+    /// The password, if the blob needs one.
     pub password: Option<crypto::Password>,
 }
 

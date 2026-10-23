@@ -64,7 +64,9 @@ const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum Reach {
+    /// A direct path.
     Direct,
+    /// The gossip topic.
     Gossip,
 }
 
@@ -146,10 +148,15 @@ impl Default for ParkedLinkStates {
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct RosterEntry {
+    /// The nickname of the member.
     pub nickname: Nickname,
+    /// Seconds since the member was last heard from.
     pub last_seen_secs_ago: Option<u64>,
+    /// Whether the member has been silent past the alive timeout.
     pub quiet: bool,
+    /// How the member is reached.
     pub reach: Reach,
+    /// The transport that carries the member's traffic.
     pub transport: crate::transport::Lane,
 }
 
@@ -159,7 +166,9 @@ pub struct RosterEntry {
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct RosterSnapshot {
+    /// The members of the roster.
     pub peers: Vec<RosterEntry>,
+    /// How many members there are.
     pub count: usize,
 }
 

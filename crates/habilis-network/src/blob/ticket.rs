@@ -40,10 +40,15 @@ const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct BlobTicket {
+    /// The address.
     pub addr: EndpointAddr,
+    /// The bearer secret of the ticket.
     pub secret: TicketSecret,
+    /// The SHA-256 of the blob.
     pub sha256: BlobDigest,
+    /// The size of the blob, in bytes.
     pub size: u64,
+    /// The lookups that find the mesh.
     pub lookups: LookupOpts,
     /// Password-protected: the consumer must present the Argon2id stretch of the
     /// password (salted by `secret`) in the stream header instead of the raw

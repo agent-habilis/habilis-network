@@ -250,7 +250,9 @@ impl Drop for StateFile {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ReadySnapshot {
+    /// Whether the daemon is ready.
     pub ready: bool,
+    /// When the file was last written, in seconds since the epoch.
     pub last_updated: u64,
 }
 
@@ -260,8 +262,11 @@ pub struct ReadySnapshot {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct SessionIdentity {
+    /// The mesh.
     pub mesh: Option<String>,
+    /// The name of the mesh.
     pub name: Option<String>,
+    /// The nickname of the member.
     pub nickname: Option<String>,
     /// The raw topic string; present only for a topic gossip.
     pub topic: Option<String>,
@@ -310,11 +315,15 @@ fn mesh_field(doc: &serde_json::Value) -> Option<String> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct SessionEntry {
+    /// The mesh.
     pub mesh: Option<String>,
+    /// The name of the mesh.
     pub name: Option<String>,
+    /// The nickname of the member.
     pub nickname: Option<String>,
     /// The raw topic string; present only for a topic gossip.
     pub topic: Option<String>,
+    /// The process id of the daemon.
     pub pid: Option<u32>,
     /// The process the daemon lives for; present only for a daemon started
     /// with an owner (see `EventLoopConfig::with_owner_pid`).

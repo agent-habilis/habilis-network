@@ -37,7 +37,9 @@ use std::sync::atomic;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SetupKind {
+    /// Create a mesh.
     Create {
+        /// The name of the mesh.
         name: MeshName,
         /// The mesh-wide config (lookups) baked into the minted id and
         /// mixed into the topic.
@@ -55,7 +57,9 @@ pub enum SetupKind {
         /// only creator-minted invites can.
         invite_only: bool,
     },
+    /// Join a mesh.
     Join {
+        /// The mesh.
         mesh: Mesh,
         /// The password the joiner presented (already verified + applied to
         /// `mesh`), retained so the daemon can key blob-ticket protection with
@@ -67,6 +71,7 @@ pub enum SetupKind {
     /// so it co-hosts the shared rendezvous eagerly-but-probed
     /// ([`CoHostPolicy::EagerProbed`]) rather than deferring.
     Topic {
+        /// The mesh.
         mesh: Mesh,
         /// The raw string the mesh was derived from. The derived name is
         /// lossy (URL scheme and query stripped, truncated), so the string
@@ -545,7 +550,9 @@ impl std::fmt::Debug for InjectedEndpoint {
 /// argument budget.
 #[non_exhaustive]
 pub struct SetupParams {
+    /// The author of the write.
     pub author: Nickname,
+    /// The max peers.
     pub max_peers: usize,
     /// C: the ceiling of direct connections. `0` takes [`crate::transport::MAX_DIRECT_PEERS`].
     pub max_direct: usize,
@@ -556,7 +563,9 @@ pub struct SetupParams {
     /// claim a `/tmp` path under any single one's name. `None` for an embedder
     /// that writes no files and binds no control socket.
     pub runtime_base: Option<PathBuf>,
+    /// The state file.
     pub state_file: Option<PathBuf>,
+    /// The sink that reports the write.
     pub sink: std::sync::Arc<dyn NodeSink>,
     /// Share the caller's endpoint instead of minting one. `None` ⇒ the mesh
     /// builds its own, which is right for a standalone peer and wrong for a

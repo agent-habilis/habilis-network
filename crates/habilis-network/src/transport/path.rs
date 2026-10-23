@@ -152,7 +152,9 @@ pub(crate) async fn wait_ip(conn: &Connection, deadline: Duration) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PayloadPath {
+    /// Only direct paths.
     DirectOnly,
+    /// Direct paths, or the relay.
     RelayAllowed,
 }
 

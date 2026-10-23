@@ -115,6 +115,7 @@ pub struct Inbound {
     pub nick: String,
     /// The message was addressed to us specifically, not broadcast.
     pub directed: bool,
+    /// The text.
     pub text: String,
 }
 
@@ -129,8 +130,11 @@ pub struct Inbound {
 pub enum Request {
     /// Send one `msg`. Build `body` with [`msg_body`].
     Send {
+        /// The recipient, when the message is directed.
         to: Option<Nickname>,
+        /// The payload.
         body: MessageBody,
+        /// Where the answer goes.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Tests only: send one directed `msg` the way [`Request::Send`] does, but never take the
@@ -140,21 +144,33 @@ pub enum Request {
     /// waits for a direct path on the pooled connection, as the cold path does.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     SendCold {
+        /// The recipient, when the message is directed.
         to: Option<Nickname>,
+        /// The payload.
         body: MessageBody,
+        /// Where the answer goes.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Merge a change into the shared state.
     StateMerge {
+        /// The RFC 7386 merge to apply.
         merge: serde_json::Value,
+        /// Where the answer goes.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// The shared state as JSON.
     StateJson {
+        /// Where the answer goes.
         reply: oneshot::Sender<String>,
     },
+    /// The members of the roster.
     Peers {
+        /// Where the answer goes.
         reply: oneshot::Sender<String>,
     },
+    /// How many members there are.
     PeerCount {
+        /// Where the answer goes.
         reply: oneshot::Sender<usize>,
     },
     /// Tests only, and the only request that is a test hook: take UDP away
@@ -163,7 +179,9 @@ pub enum Request {
     /// path events.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlockUdp {
+        /// Whether the block is on.
         blocked: bool,
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: add `addr` to the addresses this node advertises, as an
@@ -171,13 +189,16 @@ pub enum Request {
     /// what a late home relay or an interface change does.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     AddExternalAddr {
+        /// The address.
         addr: std::net::SocketAddr,
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: make the beacon of this node stop answering while it keeps its rung, as a
     /// stopped process or a wedged accept loop does. Nothing happens when it holds no beacon.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     StallBeacon {
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: shed the beacon of this node at once, as a rival re-check shed does, and leave
@@ -185,6 +206,7 @@ pub enum Request {
     /// beacon.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     ShedBeacon {
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: hold this node's rendezvous claims back (`hold`), or let it claim again. A held
@@ -192,7 +214,9 @@ pub enum Request {
     /// holds the old members of a room so that a late joiner takes the free rung first.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     HoldClaims {
+        /// Whether the hold is on.
         hold: bool,
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: make the rung probe of this node read "not ours" whatever answers (`blind`), or
@@ -201,7 +225,9 @@ pub enum Request {
     /// a beacon of its own.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlindRungProbes {
+        /// Whether the probes are blind.
         blind: bool,
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: take UDP away from this node alone, to the nodes bound on
@@ -211,7 +237,9 @@ pub enum Request {
     /// keeps its own links.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlockIpTo {
+        /// The ports of the remote side.
         remote_ports: Vec<u16>,
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: take one rung of the path ladder away from this node alone
@@ -219,8 +247,11 @@ pub enum Request {
     /// the node down the ladder one rung at a time.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlockRung {
+        /// The rung of the path.
         rung: Rung,
+        /// Whether the block is on.
         blocked: bool,
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: take one rung of the path ladder away from this node alone (or
@@ -229,9 +260,13 @@ pub enum Request {
     /// only that rung is cut this way.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlockRungTo {
+        /// The rung of the path.
         rung: Rung,
+        /// The peer, by nickname.
         peer: String,
+        /// Whether the block is on.
         blocked: bool,
+        /// Where the answer goes.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: refuse every `WebRTC` session with the member `peer`, on the application
@@ -240,8 +275,11 @@ pub enum Request {
     /// take the multihop route through a third member.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     DenyPeer {
+        /// The peer, by nickname.
         peer: String,
+        /// Whether the peer is denied.
         denied: bool,
+        /// Where the answer goes.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: ping every member and answer with the round trip time in
@@ -249,6 +287,7 @@ pub enum Request {
     /// show that a pair answers over the one path it has.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     Ping {
+        /// Where the answer goes.
         reply: oneshot::Sender<Vec<(Nickname, u64)>>,
     },
     /// Tests only: how many gossip connections the recursion rule has closed since the process
@@ -257,6 +296,7 @@ pub enum Request {
     /// so a count that grows without a bound is that loop.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     GossipRecursionCloses {
+        /// Where the answer goes.
         reply: oneshot::Sender<u64>,
     },
     /// Tests only: how many messages this node holds in its log, the ones that anti-entropy
@@ -264,6 +304,7 @@ pub enum Request {
     /// send path retains it.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     MessageLogLen {
+        /// Where the answer goes.
         reply: oneshot::Sender<usize>,
     },
     /// Tests only: forget the pooled unicast connection of the member `peer`, and its dial
@@ -272,7 +313,9 @@ pub enum Request {
     /// `false`, because a direct-path probe can pool a connection again.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     ForgetUnicast {
+        /// The peer, by nickname.
         peer: String,
+        /// Where the answer goes.
         reply: oneshot::Sender<Result<bool, UnknownPeer>>,
     },
     /// Tests only: forget that the member `peer` is proven direct, and offer it a
@@ -281,14 +324,18 @@ pub enum Request {
     /// next alive tick.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     OfferSession {
+        /// The peer, by nickname.
         peer: String,
+        /// Where the answer goes.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: close the live gossip connections to the member `peer` and nothing else. The
     /// engine then runs its own `NeighborDown` path.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     CloseLink {
+        /// The peer, by nickname.
         peer: String,
+        /// Where the answer goes.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: run the underlay tick now, as the alive tick does. A test that closes a link
@@ -299,12 +346,14 @@ pub enum Request {
         feature = "multihop"
     ))]
     UnderlayTick {
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: the endpoint id of this node. A test that needs the order of two
     /// ids (the lower id offers a session) reads them here.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     EndpointId {
+        /// Where the answer goes.
         reply: oneshot::Sender<iroh::EndpointId>,
     },
     /// Tests only: mark the gossip topic closed without a real end of the stream, as the heal
@@ -312,6 +361,7 @@ pub enum Request {
     /// and the messages that arrive in between must still reach the app.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     SeverGossip {
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: the rung of the selected path on this node's pooled
@@ -321,7 +371,9 @@ pub enum Request {
     /// closes a gossip link that stays on the relay.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     SelectedRung {
+        /// The peer, by nickname.
         peer: String,
+        /// Where the answer goes.
         reply: oneshot::Sender<Option<&'static str>>,
     },
     /// Tests only: whether the multihop topology of this node has a route to the
@@ -332,7 +384,9 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     HasRoute {
+        /// The peer, by nickname.
         peer: String,
+        /// Where the answer goes.
         reply: oneshot::Sender<bool>,
     },
     /// Tests only: hold this node's link-vector back, or let it go. Holding withdraws the vector
@@ -347,7 +401,9 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     HoldLinkState {
+        /// Whether the hold is on.
         hold: bool,
+        /// Where the answer goes.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: the multihop view of this node as one line: its edges, and for each
@@ -360,6 +416,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     RouteDiag {
+        /// Where the answer goes.
         reply: oneshot::Sender<String>,
     },
     /// Tests only: how many multihop cells this node has passed on for other
@@ -370,6 +427,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     ForwardedCells {
+        /// Where the answer goes.
         reply: oneshot::Sender<u64>,
     },
     /// Tests only: what the multihop data path of this node counted: cells passed on,
@@ -381,6 +439,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     MultihopCounters {
+        /// Where the answer goes.
         reply: oneshot::Sender<habilis_network_iroh_multihop_transport::MultihopCounters>,
     },
     /// Tests only: how many `WebRTC` sessions the multihop underlay of this node
@@ -391,6 +450,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     UnderlaySessions {
+        /// Where the answer goes.
         reply: oneshot::Sender<usize>,
     },
     /// Tests only: how many `WebRTC` sessions of this node go to a member that is
@@ -402,6 +462,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     SessionsToNonNeighbors {
+        /// Where the answer goes.
         reply: oneshot::Sender<usize>,
     },
     /// Tests only: the closes of direct connections, and how many of them were followed by
@@ -416,6 +477,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     RedialCounts {
+        /// Where the answer goes.
         reply: oneshot::Sender<[u64; 6]>,
     },
     /// Tests only: the direct peers the ledger of the ceiling counts now, and by how many it is over
@@ -426,6 +488,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     DirectUnits {
+        /// Where the answer goes.
         reply: oneshot::Sender<(usize, usize)>,
     },
 }

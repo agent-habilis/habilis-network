@@ -10,5 +10,6 @@
 //! single-threaded and the JSEP handles are `JsValue`s, which are neither
 //! `Send` nor `Sync`.
 
+/// The browser endpoint of the benchmark.
 #[cfg(target_arch = "wasm32")]
 pub mod browser;

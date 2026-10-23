@@ -18,22 +18,36 @@ pub enum NodeEvent {
     /// port it bound) splices them in on receipt; the engine has no notion of
     /// either and used to carry them purely to hand them back.
     Ready {
+        /// The mesh id.
         mesh: MeshId,
+        /// The mesh name.
         name: MeshName,
+        /// The nickname of this member.
         nickname: Nickname,
     },
+    /// An informational line.
     Info(String),
+    /// An error line.
     Error(String),
+    /// The author forked its chain.
     Fork {
+        /// The nickname of the member.
         nickname: Nickname,
+        /// The public key of the member, in hex.
         pubkey: String,
+        /// The sequence number of the message.
         seq: u64,
     },
+    /// A member went quiet.
     PeerTimeout {
+        /// The nickname of the member.
         nickname: Nickname,
+        /// Seconds since the member was last heard from.
         last_seen_secs_ago: u64,
     },
+    /// A member came back.
     PeerReturn {
+        /// The nickname of the member.
         nickname: Nickname,
     },
     /// A peer's arrival, departure, or announcement. `msg` is the proof of the presence
@@ -42,24 +56,33 @@ pub enum NodeEvent {
     /// about: the signer of the frame that triggered it. It is never read from `msg`, so
     /// a synthetic presence cannot name the peer by a key it does not hold.
     Presence {
+        /// The message that was received.
         msg: Box<Authored>,
+        /// The peer, by nickname.
         peer: AuthorKey,
         /// `true` when this node minted the presence for a peer's arrival, `false` when
         /// it is the peer's own frame.
         synthetic: bool,
     },
+    /// The result of a ping round.
     PingReport {
         /// Each responder and its round-trip time in milliseconds, sorted by
         /// nickname. A pair rather than a named struct: the only consumer maps
         /// it straight onto its own public ping type, so a struct here was one
         /// field-for-field conversion in each direction and nothing else.
         peers: Vec<(Nickname, u64)>,
+        /// How many peers the node knows.
         known: usize,
     },
+    /// The shared state changed.
     StateChanged {
+        /// The channel of the write.
         channel: Channel,
+        /// The message that was received.
         event: Box<Authored>,
+        /// The shared document after the write.
         document: serde_json::Value,
+        /// Whether the write is this member's own.
         is_self: bool,
     },
 }
@@ -68,6 +91,7 @@ pub enum NodeEvent {
 /// it (backed by its `Output` renderer); the engine holds only a `&dyn NodeSink`
 /// / `Arc<dyn NodeSink>` and never names the concrete sink.
 pub trait NodeSink: Send + Sync {
+    /// Send an event to the consumer.
     fn emit(&self, event: NodeEvent);
 }
 

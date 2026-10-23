@@ -30,10 +30,13 @@ use crate::util::tuning;
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct CreateParams {
+    /// The name of the mesh.
     pub name: MeshName,
     /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
     pub nickname: Option<Nickname>,
+    /// The mesh configuration.
     pub config: MeshConfig,
+    /// How the mesh is advertised.
     pub advertise: DirectorySelection,
     /// Password to protect the mesh with; the verifier is baked into the
     /// id at setup (the salt is the seed, minted there).
@@ -82,7 +85,9 @@ impl CreateParams {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct JoinParams {
+    /// The target to join.
     pub target: JoinTarget,
+    /// The nickname of the member.
     pub nickname: Option<Nickname>,
     /// Password for a passworded id; verified against the id's verifier in
     /// `resolve` (before any network).
@@ -125,6 +130,7 @@ impl std::error::Error for PasswordRequired {}
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct TopicParams {
+    /// The text of the value.
     pub string: String,
     /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
     pub nickname: Option<Nickname>,
@@ -136,8 +142,11 @@ pub struct TopicParams {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Resolved {
+    /// What the setup creates.
     pub kind: SetupKind,
+    /// The author of the write.
     pub author: Nickname,
+    /// The directory the mesh is advertised to, if any.
     pub advertise_directory: Option<MeshName>,
 }
 

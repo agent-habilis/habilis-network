@@ -150,6 +150,7 @@ impl Writer {
 pub enum Read {
     /// This many bytes are in the caller's buffer.
     Bytes(usize),
+    /// Nothing arrived before the deadline.
     Timeout,
     /// The producer closed the stream; nothing more will come.
     End,

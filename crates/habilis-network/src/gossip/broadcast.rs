@@ -170,9 +170,13 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, ctx: &HandlerC
 )]
 #[non_exhaustive]
 pub struct MergeCtx<'mesh> {
+    /// The mesh.
     pub mesh: &'mesh MeshId,
+    /// The author of the write.
     pub author: &'mesh Nickname,
+    /// The sender of the topic.
     pub sender: &'mesh MeshSender,
+    /// The sink that reports the write.
     pub sink: &'mesh dyn NodeSink,
 }
 
@@ -208,9 +212,13 @@ impl<'ctx> From<&HandlerCtx<'ctx>> for MergeCtx<'ctx> {
 )]
 #[non_exhaustive]
 pub struct StateMergeParams<'mesh> {
+    /// The context of the write.
     pub ctx: MergeCtx<'mesh>,
+    /// The channel of the write.
     pub channel: Channel,
+    /// The RFC 7386 merge to apply.
     pub merge: serde_json::Value,
+    /// The surface.
     pub surface: bool,
 }
 
