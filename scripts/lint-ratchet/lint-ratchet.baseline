@@ -1,7 +1,7 @@
 # Count of findings per lint and crate, under crates/<crate>/src/.
 # Written by `bun scripts/lint-ratchet/lint-ratchet.ts --update`. Lower a count when a finding
 # goes away. A count above this file is a new finding and fails CI.
-clippy::exhaustive_structs|habilis-network|2
+clippy::exhaustive_structs|habilis-network|1
 missing_docs|habilis-network|3
 missing_docs|habilis-network-ffi|3
 missing_docs|habilis-network-iroh-gossip-transport|2
