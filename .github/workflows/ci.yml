@@ -12,6 +12,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Only the formatter is nightly (rustfmt.toml needs it). The build stays on the stable toolchain
+  # of rust-toolchain.toml. The light-cycles native workspace pins the same date in its own
+  # rust-toolchain.toml.
+  NIGHTLY_RUSTFMT: nightly-2026-06-05
+
 jobs:
   check:
     name: Check
@@ -32,8 +38,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install the nightly rustfmt
+        run: rustup toolchain install "$NIGHTLY_RUSTFMT" --profile minimal --component rustfmt
+
       - name: Format
-        run: cargo fmt --check
+        run: cargo +"$NIGHTLY_RUSTFMT" fmt --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -362,8 +371,11 @@ jobs:
           target: wasm32-unknown-unknown
           cache-workspaces: crates/habilis-network-netplay/examples/light-cycles/web/wasm
 
+      - name: Install the nightly rustfmt
+        run: rustup toolchain install "$NIGHTLY_RUSTFMT" --profile minimal --component rustfmt
+
       - name: Format
-        run: cargo fmt --check
+        run: cargo +"$NIGHTLY_RUSTFMT" fmt --check
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings

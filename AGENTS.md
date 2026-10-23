@@ -188,7 +188,7 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 
 ### What each gate refuses
 
-- `cargo fmt --check` runs in CI. It refuses unformatted code.
+- `cargo +nightly-2026-06-05 fmt --check` runs in CI. It refuses unformatted code. `rustfmt.toml` sets `imports_granularity = "Module"`, which only a nightly `rustfmt` enforces. The build stays on the stable toolchain of `rust-toolchain.toml`. To format a file, run `rustup toolchain install nightly-2026-06-05 --profile minimal --component rustfmt` once, then `rustfmt +nightly-2026-06-05 --edition 2024 <file>`. A stable `rustfmt` ignores the key with a warning.
 - `cargo clippy` runs in CI with `-D warnings`. Its lints come from `[workspace.lints]` in `Cargo.toml` and from `clippy.toml`. The `pedantic` group is on. These lints are on by name: `unwrap_used`, `wildcard_enum_match_arm`, `await_holding_lock`, `allow_attributes`, `string_add`, `undocumented_unsafe_blocks`, `excessive_nesting`, `shadow_unrelated`, `min_ident_chars` and `semicolon_inside_block`. The rustc lints `unsafe_code` and `non_ascii_idents` are denied.
 - `scripts/style-check/style-check.ts` checks six rules that no compiler lint covers: `poison`, `feature`, `catch_unwind`, `ctor`, `block_doc` and `lifetime`. Each exception is a line in `style-check.allow`, with a count and a reason. A new violation fails the check. An exception whose count is too high fails it too.
 - `scripts/lint-ratchet/lint-ratchet.ts` counts `missing_docs`, `clippy::exhaustive_enums` and `clippy::exhaustive_structs` for each crate under `crates/<crate>/src/`. It compares the counts with `scripts/lint-ratchet/lint-ratchet.baseline`. A count above the baseline fails. A count below it fails too, so the baseline only goes down. Run `bun scripts/lint-ratchet/lint-ratchet.ts --update` and commit the file. The run takes about three minutes.
@@ -197,7 +197,6 @@ This file wins over the guide. If the two conflict, follow this file. Issue #29 
 
 ### Rules we decline, or leave to the reviewer
 
-- `imports_granularity = Module` needs nightly `rustfmt`. The toolchain is pinned to stable 1.95.0 in `rust-toolchain.toml`, and the repository has no `rustfmt.toml`.
 - Module names after the primary item: a scan flags 98 of the 156 leaf files that declare a public type. The scan takes the first public type in each file, so it is too noisy to enforce. The reviewer checks it.
 - Glob imports are not allowed, with two exceptions: `use super::*` in a test module, and the prelude of a third-party crate (`wasm_bindgen::prelude::*`, `proptest::prelude::*`). Do not define a prelude of our own.
 - `clippy::absolute_paths` is not on. The audit counted 2923 uses.

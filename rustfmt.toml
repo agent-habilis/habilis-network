@@ -1,0 +1,3 @@
+# `imports_granularity` is unstable, so it needs a nightly rustfmt. CI runs `cargo +$NIGHTLY_RUSTFMT fmt
+# --check` (see .github/workflows/ci.yml). A stable rustfmt ignores this key with a warning.
+imports_granularity = "Module"
