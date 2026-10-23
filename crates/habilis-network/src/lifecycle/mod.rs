@@ -72,7 +72,7 @@ pub(crate) fn observe(
         }
     }
 
-    let update = membership::compute(&message.kind, &message.author, message.timestamp, state);
+    let update = membership::compute_for(message, state);
     membership::apply(&update, &message.author, state);
 
     // Join horizon: the node still relays/logs everything (anti-entropy
@@ -162,7 +162,7 @@ pub(crate) async fn handle_presence(
         return;
     }
     if subtype == PresenceSubtype::Left {
-        state.note_left(&message.author, message.timestamp);
+        state.note_left(&message.author, message.key(), message.timestamp);
         if state.peers.remove(message.author.as_str()) {
             state.write_peer_count();
         }

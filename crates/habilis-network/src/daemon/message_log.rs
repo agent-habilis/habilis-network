@@ -176,6 +176,10 @@ impl MessageLog {
             .expect("the fullest author holds at least one message")
     }
 
+    pub(crate) fn contains(&self, key: &DedupKey) -> bool {
+        self.keys.contains(key)
+    }
+
     #[cfg(any(test, feature = "iroh-test-utils"))]
     pub(crate) fn len(&self) -> usize {
         self.messages.len()

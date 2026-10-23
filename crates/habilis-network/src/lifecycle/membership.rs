@@ -5,7 +5,7 @@
 //! Glossary in AGENTS.md for the layer split.
 
 use crate::daemon::state::EventLoopState;
-use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs};
+use crate::protocol::{MessageKind, Nickname, PresenceSubtype, UnixSecs, Verified};
 
 /// Summary of how a newly received message changes our view of the
 /// sender's membership. Computed from the message kind + current state
@@ -77,6 +77,25 @@ pub(crate) fn compute(
     }
 }
 
+/// [`compute`] for a verified message, plus the one rule that needs the key: a message signed
+/// by a key that said goodbye is stale at any timestamp.
+pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> MembershipUpdate {
+    let is_left = matches!(
+        message.kind,
+        MessageKind::Presence {
+            subtype: PresenceSubtype::Left
+        }
+    );
+    if !is_left && state.key_said_goodbye(message.key()) {
+        return MembershipUpdate {
+            returned: false,
+            joined_new: false,
+            stale: true,
+        };
+    }
+    compute(&message.kind, &message.author, message.timestamp, state)
+}
+
 /// Apply a membership update to the mutable state. Mirror of the
 /// pure `compute`: all side effects live here so tests of `compute`
 /// remain free of any mutation.
@@ -105,7 +124,12 @@ mod tests {
     use crate::testing::{fresh_state, nick};
     use habilis_network_test_tracing::test;
 
-    use super::{MembershipUpdate, MessageKind, PresenceSubtype, UnixSecs, apply, compute};
+    use crate::protocol::identity::Identity;
+    use crate::protocol::{AuthorKey, MeshId, Message};
+
+    use super::{
+        MembershipUpdate, MessageKind, PresenceSubtype, UnixSecs, apply, compute, compute_for,
+    };
 
     #[test]
     fn first_time_seeing_author_is_joined_new() {
@@ -210,7 +234,7 @@ mod tests {
     fn a_message_sent_in_the_second_of_a_goodbye_is_stale() {
         let at = UnixSecs::from_secs(1_000);
         let mut state = fresh_state();
-        state.note_left(&nick("swift-cedar"), at);
+        state.note_left(&nick("swift-cedar"), AuthorKey::from_bytes([1; 32]), at);
         let joined = MessageKind::Presence {
             subtype: PresenceSubtype::Joined,
         };
@@ -242,7 +266,7 @@ mod tests {
     fn a_message_stamped_after_a_goodbye_is_a_return() {
         let at = UnixSecs::from_secs(1_000);
         let mut state = fresh_state();
-        state.note_left(&nick("swift-cedar"), at);
+        state.note_left(&nick("swift-cedar"), AuthorKey::from_bytes([1; 32]), at);
         let joined = MessageKind::Presence {
             subtype: PresenceSubtype::Joined,
         };
@@ -268,15 +292,49 @@ mod tests {
     fn the_mark_of_a_goodbye_only_moves_forward() {
         let mut state = fresh_state();
         let who = nick("swift-cedar");
-        state.note_left(&who, UnixSecs::from_secs(1_000));
-        state.note_left(&who, UnixSecs::from_secs(900));
+        state.note_left(
+            &who,
+            AuthorKey::from_bytes([1; 32]),
+            UnixSecs::from_secs(1_000),
+        );
+        state.note_left(
+            &who,
+            AuthorKey::from_bytes([1; 32]),
+            UnixSecs::from_secs(900),
+        );
         assert!(state.sent_before_goodbye(&who, UnixSecs::from_secs(1_000)));
-        state.note_left(&who, UnixSecs::from_secs(1_200));
+        state.note_left(
+            &who,
+            AuthorKey::from_bytes([1; 32]),
+            UnixSecs::from_secs(1_200),
+        );
         assert!(state.sent_before_goodbye(&who, UnixSecs::from_secs(1_100)));
         assert!(!state.sent_before_goodbye(&who, UnixSecs::from_secs(1_201)));
         let left = MessageKind::Presence {
             subtype: PresenceSubtype::Left,
         };
         assert!(!compute(&left, &who, UnixSecs::from_secs(1_200), &state).stale);
+    }
+
+    /// A key is minted per run, so once it has said goodbye nothing it signs is a presence, even
+    /// when the timestamp lies after the goodbye. The nickname stays free for another key.
+    #[test]
+    fn a_key_that_said_goodbye_stays_gone_at_any_timestamp() {
+        let mesh = MeshId::from("test");
+        let who = nick("swift-cedar");
+        let leaver = Identity::generate();
+        let mut state = fresh_state();
+        state.note_left(&who, leaver.author_key(), UnixSecs::from_secs(1_000));
+
+        let replay = Message::new_joined(&mesh, &who).sign(&leaver);
+        let update = compute_for(&replay, &state);
+        assert!(update.stale && !update.joined_new, "a replay of the leaver");
+
+        let newcomer = Message::new_joined(&mesh, &who).sign(&Identity::generate());
+        let arrival = compute_for(&newcomer, &state);
+        assert!(
+            !arrival.stale && arrival.joined_new,
+            "another key takes the nickname"
+        );
     }
 }
