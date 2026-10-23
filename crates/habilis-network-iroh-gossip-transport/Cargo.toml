@@ -35,6 +35,10 @@ iroh-gossip.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 
+[features]
+# Off by default. Exposes `Frame::fixture` to the engine's tests, which build a frame outside this crate.
+test-fixtures = []
+
 [dev-dependencies]
 habilis-network-test-tracing = { path = "../habilis-network-test-tracing" }
 # The engine's message cap, which the frame size must equal (a test pins it).

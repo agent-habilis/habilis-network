@@ -32,10 +32,20 @@ pub const MAX_DATAGRAM_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 /// A frame: the two ends and the datagram. A decode borrows the datagram from the
 /// input, and an encode writes this value out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Frame<'datagram> {
     pub dst: EndpointId,
     pub src: EndpointId,
     pub datagram: &'datagram [u8],
+}
+
+#[cfg(feature = "test-fixtures")]
+impl<'datagram> Frame<'datagram> {
+    /// A frame from its two ends and its datagram, for the engine's tests.
+    #[must_use]
+    pub fn fixture(dst: EndpointId, src: EndpointId, datagram: &'datagram [u8]) -> Self {
+        Self { dst, src, datagram }
+    }
 }
 
 /// Why a datagram cannot be framed.
