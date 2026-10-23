@@ -247,19 +247,14 @@ async fn main() -> anyhow::Result<()> {
 
     let mut relay_server = None;
     let opts = if let Some(id) = std::env::args().nth(1) {
-        Opts {
-            mesh: Some(id),
-            ..Opts::default()
-        }
+        Opts::default().with_mesh(Some(id))
     } else {
         let (url, server) = habilis_network::net::test_relay::spawn_plain().await?;
         relay_server = Some(server);
-        Opts {
-            lookup: vec![Lookup::Relay],
-            transport: transports()?,
-            relay_urls: vec![url.to_string()],
-            ..Opts::default()
-        }
+        Opts::default()
+            .with_lookup(vec![Lookup::Relay])
+            .with_transport(transports()?)
+            .with_relay_urls(vec![url.to_string()])
     };
     let (kind, author) = resolve_kind(&opts, None)?;
 
@@ -275,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
             transports: TransportOpts::default(),
             runtime_base: None,
             state_file: None,
-            sink: Arc::new(SilentSink),
+            sink: Arc::new(SilentSink::default()),
             per_peer_gate: None,
             cohost: None,
             live_count: None,

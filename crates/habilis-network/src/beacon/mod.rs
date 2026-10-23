@@ -1251,16 +1251,16 @@ impl RungWatch {
 /// finds nothing. A `None` rung ⇒ relay off for the beacon (joiners use
 /// mDNS/DHT).
 fn beacon_lookups(params: &RendezvousParams) -> LookupOpts {
-    LookupOpts {
-        mdns: params.lookups.mdns,
-        dht: params.lookups.dht,
-        relay_lookup: params
+    LookupOpts::new(
+        params
             .bootstrap_relay
             .clone()
             .map_or(RelayChoice::Disabled, |rung| {
                 RelayChoice::Custom(vec![rung])
             }),
-    }
+    )
+    .with_mdns(params.lookups.mdns)
+    .with_dht(params.lookups.dht)
 }
 
 /// Build the rendezvous endpoint (see module docs for the one-beacon /

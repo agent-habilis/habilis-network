@@ -67,6 +67,7 @@ struct Refusals {
 
 /// The outcome of ingesting one frame into a [`MeshDoc`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Ingested {
     /// Applied to the live doc. `changed` is whether the derived document moved
     /// (a no-op change surfaces nothing); `doc` is the document after applying

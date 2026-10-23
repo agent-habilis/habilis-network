@@ -111,19 +111,12 @@ async fn spawn(
 ) -> Node<Probe> {
     let mesh = derive_topic_mesh_config(
         topic,
-        MeshConfig {
-            lookups: LookupOpts {
-                mdns: false,
-                dht: false,
-                relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
-            },
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport,
-                ..TransportPolicy::default()
-            },
-        },
+        MeshConfig::new(
+            LookupOpts::new(RelayChoice::Custom(vec![relay.clone()])),
+            None,
+            None,
+            TransportPolicy::default().with_relay_transport(relay_transport),
+        ),
     )
     .expect("derive a relay-only mesh");
     let author = Nickname::new(nick).expect("valid nickname");
@@ -138,12 +131,11 @@ async fn spawn(
             max_direct: 0,
             endpoint: None,
             protocols: Vec::new(),
-            transports: TransportOpts {
-                udp: false,
-                relay: true,
-                webrtc: false,
-                gossip: false,
-            },
+            transports: TransportOpts::default()
+                .with_udp(false)
+                .with_relay(true)
+                .with_webrtc(false)
+                .with_gossip(false),
             runtime_base: None,
             state_file: None,
             sink,

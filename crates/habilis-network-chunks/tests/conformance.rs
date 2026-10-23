@@ -60,11 +60,7 @@ trait Harness {
     fn key(&self, name: &str) -> String;
 
     fn file(&self, name: &str, size: u64) -> FileId {
-        FileId {
-            key: self.key(name),
-            size,
-            mtime: 1_700_000_000,
-        }
+        FileId::new(self.key(name), size, 1_700_000_000)
     }
 }
 
@@ -487,14 +483,8 @@ async fn binding_survives_and_a_version_change_breaks_it(harness: &impl Harness)
     // A file that grew, and a file merely touched, are both different content
     // as far as this gate is concerned. Answering for either under the old root
     // is the silent corruption the gate exists to prevent.
-    let grown = FileId {
-        size: 4096,
-        ..file.clone()
-    };
-    let touched = FileId {
-        mtime: file.mtime + 1,
-        ..file.clone()
-    };
+    let grown = FileId::new(file.key.clone(), 4096, file.mtime);
+    let touched = FileId::new(file.key.clone(), file.size, file.mtime + 1);
     assert_eq!(
         store.bind(&grown).await.expect("bind"),
         None,

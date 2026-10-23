@@ -202,7 +202,7 @@ async fn webrtc_pair() -> Result<(WebRtcPeer, WebRtcPeer, Router, f64), String> 
         }
     };
     let router = Router::builder(server.endpoint.clone())
-        .accept(BENCH_ALPN, Bench)
+        .accept(BENCH_ALPN, Bench::new())
         .spawn();
     match Box::pin(negotiate(&client, &server)).await {
         Ok(negotiate_ms) => Ok((client, server, router, negotiate_ms)),
@@ -274,7 +274,9 @@ async fn bench_between<T, F: Future<Output = Result<T, String>>>(
     addr: EndpointAddr,
     measure: impl FnOnce(Endpoint, EndpointAddr) -> F,
 ) -> Result<T, String> {
-    let router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+    let router = Router::builder(server)
+        .accept(BENCH_ALPN, Bench::new())
+        .spawn();
     let result = measure(client.clone(), addr).await;
     close_cell(&client, router).await;
     result

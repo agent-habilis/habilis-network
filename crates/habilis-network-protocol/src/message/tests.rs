@@ -572,10 +572,10 @@ mod snapshots {
 
 mod prop {
     use habilis_network_test_tracing::test;
-    use proptest::{
-        collection::vec as arb_vec, prelude::any, prop_assert, prop_assert_eq, proptest,
-        strategy::Strategy,
-    };
+    use proptest::collection::vec as arb_vec;
+    use proptest::prelude::any;
+    use proptest::strategy::Strategy;
+    use proptest::{prop_assert, prop_assert_eq, proptest};
 
     use super::super::{
         AppFrameParams, AppTag, MAX_MESSAGE_SIZE, Message, MessageBody, MessageKind, Nickname,

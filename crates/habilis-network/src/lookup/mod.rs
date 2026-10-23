@@ -21,7 +21,9 @@ use anyhow::{Context, Result};
 use iroh::address_lookup::memory::MemoryLookup;
 #[cfg(feature = "host")]
 use iroh::endpoint::PortmapperConfig;
-use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, endpoint::presets, protocol::Router};
+use iroh::endpoint::presets;
+use iroh::protocol::Router;
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
@@ -80,10 +82,9 @@ pub mod test_relay {
 
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
-pub(crate) use relay::RungRefresh;
 pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 pub(crate) use relay::{
-    StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor,
+    RungRefresh, StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor,
 };
 
 /// Build an iroh endpoint for a mesh's lookups.
@@ -164,6 +165,7 @@ impl TransportHandles {
     clippy::struct_excessive_bools,
     reason = "one independent on/off per path this node may carry data on"
 )]
+#[non_exhaustive]
 pub struct TransportOpts {
     /// QUIC on direct and hole-punched UDP paths, plus the address lookups
     /// that find them. Cleared by a WebRTC-only instance.
@@ -185,6 +187,36 @@ pub struct TransportOpts {
     /// other path. Off by default, and set only by [`Self::within`]: it is a choice of the
     /// mesh, which every member makes the same way, and not a limit of this node.
     pub gossip: bool,
+}
+
+impl TransportOpts {
+    /// Set the UDP transport.
+    #[must_use]
+    pub fn with_udp(mut self, udp: bool) -> Self {
+        self.udp = udp;
+        self
+    }
+
+    /// Set the relay.
+    #[must_use]
+    pub fn with_relay(mut self, relay: bool) -> Self {
+        self.relay = relay;
+        self
+    }
+
+    /// Set the WebRTC transport.
+    #[must_use]
+    pub fn with_webrtc(mut self, webrtc: bool) -> Self {
+        self.webrtc = webrtc;
+        self
+    }
+
+    /// Set the gossip transport.
+    #[must_use]
+    pub fn with_gossip(mut self, gossip: bool) -> Self {
+        self.gossip = gossip;
+        self
+    }
 }
 
 impl Default for TransportOpts {
@@ -648,12 +680,10 @@ pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
 pub fn multihop_handle_config(
     relay_payload: PayloadPath,
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
-    habilis_network_iroh_multihop_transport::HandleConfig {
-        relay_payload: relay_payload.relay_allowed(),
-        vector_max_age: crate::util::tuning::LINKSTATE_MAX_AGE,
-        relay_stuck_after: crate::util::tuning::MULTIHOP_RELAY_STUCK,
-        ..habilis_network_iroh_multihop_transport::HandleConfig::default()
-    }
+    habilis_network_iroh_multihop_transport::HandleConfig::default()
+        .with_relay_payload(relay_payload.relay_allowed())
+        .with_vector_max_age(crate::util::tuning::LINKSTATE_MAX_AGE)
+        .with_relay_stuck_after(crate::util::tuning::MULTIHOP_RELAY_STUCK)
 }
 
 /// [`multihop_handle_config`] for a browser: the same numbers, and the link cost of
@@ -672,10 +702,9 @@ pub fn multihop_handle_config(
 pub(crate) fn browser_handle_config(
     relay_payload: PayloadPath,
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
-    habilis_network_iroh_multihop_transport::HandleConfig {
-        link_cost: habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost,
-        ..multihop_handle_config(relay_payload)
-    }
+    multihop_handle_config(relay_payload).with_link_cost(
+        habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost,
+    )
 }
 
 /// Assert that an injected endpoint agrees with the mesh it joins.
@@ -1442,10 +1471,9 @@ mod tests {
         use futures_util::StreamExt as _;
         use iroh_gossip::api::Event;
 
-        use super::LanEvent;
         use super::{
-            Endpoint, GOSSIP_ALPN, Gossip, MemoryLookup, RelayChoice, Router, TransportHandles,
-            address_book,
+            Endpoint, GOSSIP_ALPN, Gossip, LanEvent, MemoryLookup, RelayChoice, Router,
+            TransportHandles, address_book,
         };
 
         struct Member {
@@ -1458,11 +1486,7 @@ mod tests {
         }
 
         async fn member(topic: iroh_gossip::proto::TopicId) -> Member {
-            let lan = LookupOpts {
-                mdns: true,
-                dht: false,
-                relay_lookup: RelayChoice::Disabled,
-            };
+            let lan = LookupOpts::new(RelayChoice::Disabled).with_mdns(true);
             let (endpoint, handle) = super::build_endpoint_keeping_mdns(
                 &lan,
                 None,
@@ -1596,17 +1620,11 @@ mod tests {
 
     #[test]
     fn the_mesh_policy_turns_off_the_paths_it_leaves_out() {
-        let webrtc_only = TransportPolicy {
-            udp: false,
-            ..TransportPolicy::default()
-        };
+        let webrtc_only = TransportPolicy::default().with_udp(false);
         let on_webrtc = TransportOpts::default().within(&webrtc_only);
         assert!(!on_webrtc.udp && on_webrtc.webrtc && on_webrtc.relay);
 
-        let udp_only = TransportPolicy {
-            webrtc: false,
-            ..TransportPolicy::default()
-        };
+        let udp_only = TransportPolicy::default().with_webrtc(false);
         let on_udp = TransportOpts::default().within(&udp_only);
         assert!(on_udp.udp && !on_udp.webrtc && on_udp.relay);
 
@@ -1850,11 +1868,11 @@ mod tests {
     // Gossip is a choice of the mesh: the opts follow the policy, and it needs a direct path.
     #[test]
     fn the_mesh_policy_decides_gossip_for_the_opts() {
-        let policy = |gossip: bool, udp: bool, webrtc: bool| TransportPolicy {
-            gossip,
-            udp,
-            webrtc,
-            ..TransportPolicy::default()
+        let policy = |gossip: bool, udp: bool, webrtc: bool| {
+            TransportPolicy::default()
+                .with_gossip(gossip)
+                .with_udp(udp)
+                .with_webrtc(webrtc)
         };
         let within = |mesh: TransportPolicy| TransportOpts::default().within(&mesh).gossip;
         assert!(!TransportOpts::default().gossip, "off until the mesh asks");
@@ -2002,13 +2020,7 @@ mod tests {
         let browser = super::browser_handle_config(PayloadPath::RelayAllowed);
         assert_eq!(native.link_cost, 10);
         assert_eq!(browser.link_cost, 100);
-        assert_eq!(
-            habilis_network_iroh_multihop_transport::HandleConfig {
-                link_cost: native.link_cost,
-                ..browser
-            },
-            native
-        );
+        assert_eq!(browser.with_link_cost(native.link_cost), native);
     }
 
     #[cfg(feature = "host")]
@@ -2185,8 +2197,7 @@ mod tests {
     async fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
         use std::net::SocketAddr;
 
-        use iroh::EndpointAddr;
-        use iroh::SecretKey;
+        use iroh::{EndpointAddr, SecretKey};
         use iroh_gossip::net::GOSSIP_ALPN;
 
         use super::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer};
@@ -2245,8 +2256,7 @@ mod tests {
     async fn a_router_that_carries_no_unicast_completes_a_nudge() {
         use std::net::SocketAddr;
 
-        use iroh::EndpointAddr;
-        use iroh::SecretKey;
+        use iroh::{EndpointAddr, SecretKey};
         use iroh_gossip::net::GOSSIP_ALPN;
 
         use super::{TransportHandles, build_endpoint, build_mesh};

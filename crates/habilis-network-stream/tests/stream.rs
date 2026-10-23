@@ -352,11 +352,12 @@ fn two_streams_on_one_node_stay_apart() {
 
 /// A node on the local relay, with `transport` as given.
 async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
-    StreamNode::bind(&StreamOpts {
-        lookup: vec![Lookup::Relay],
-        transport,
-        relay_urls: vec![url.to_owned()],
-    })
+    StreamNode::bind(
+        &StreamOpts::default()
+            .with_lookup(vec![Lookup::Relay])
+            .with_transport(transport)
+            .with_relay_urls(vec![url.to_owned()]),
+    )
     .await
     .expect("bind a relay node")
 }
@@ -545,10 +546,7 @@ fn a_stream_node_refuses_the_gossip_and_multihop_transports() {
             (Transport::Gossip, "a stream has no gossip"),
             (Transport::Multihop, "a stream has no multihop"),
         ] {
-            let opts = StreamOpts {
-                transport: vec![Transport::Udp, transport],
-                ..StreamOpts::default()
-            };
+            let opts = StreamOpts::default().with_transport(vec![Transport::Udp, transport]);
             let error = StreamNode::bind(&opts)
                 .await
                 .expect_err("the transport must be refused");

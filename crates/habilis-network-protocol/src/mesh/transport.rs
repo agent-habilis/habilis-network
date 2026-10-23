@@ -86,6 +86,7 @@ impl fmt::Display for Transport {
     clippy::struct_excessive_bools,
     reason = "one independent on/off per path; the id writes them as one bitset byte"
 )]
+#[non_exhaustive]
 pub struct TransportPolicy {
     /// QUIC on UDP. Off, no native member binds a UDP path, and a mesh with
     /// `webrtc` rides the data channel alone.
@@ -126,6 +127,41 @@ impl Default for TransportPolicy {
 }
 
 impl TransportPolicy {
+    /// Set the UDP transport. Start from `default()` and chain the `with_` methods.
+    #[must_use]
+    pub const fn with_udp(mut self, udp: bool) -> Self {
+        self.udp = udp;
+        self
+    }
+
+    /// Set the WebRTC transport.
+    #[must_use]
+    pub const fn with_webrtc(mut self, webrtc: bool) -> Self {
+        self.webrtc = webrtc;
+        self
+    }
+
+    /// Set the multihop transport.
+    #[must_use]
+    pub const fn with_multihop(mut self, multihop: bool) -> Self {
+        self.multihop = multihop;
+        self
+    }
+
+    /// Set the gossip transport.
+    #[must_use]
+    pub const fn with_gossip(mut self, gossip: bool) -> Self {
+        self.gossip = gossip;
+        self
+    }
+
+    /// Set whether the relay carries payload.
+    #[must_use]
+    pub const fn with_relay_transport(mut self, relay_transport: bool) -> Self {
+        self.relay_transport = relay_transport;
+        self
+    }
+
     /// The policy a `transport` list names. Empty ⇒ the default,
     /// `udp,webrtc,multihop,gossip`. A list names exactly what it carries: `udp,webrtc,multihop`
     /// has no gossip.

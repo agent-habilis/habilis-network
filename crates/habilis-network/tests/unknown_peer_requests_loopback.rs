@@ -19,13 +19,11 @@ fn a_cut_a_deny_an_offer_and_a_close_on_a_member_the_node_does_not_know_are_refu
             .expect("local relay");
         let (sink, _events) = membership::json_sink();
         let member = membership::join(
-            &membership::Opts {
-                nick: Some("alice".to_owned()),
-                lookup: vec![Lookup::Relay],
-                transport: vec![Transport::Udp],
-                relay_urls: vec![relay.to_string()],
-                ..membership::Opts::default()
-            },
+            &membership::Opts::default()
+                .with_nick(Some("alice".to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(vec![Transport::Udp])
+                .with_relay_urls(vec![relay.to_string()]),
             sink,
         )
         .await
@@ -65,7 +63,7 @@ fn a_cut_a_deny_an_offer_and_a_close_on_a_member_the_node_does_not_know_are_refu
             .expect("the loop answers");
 
         let _ = member.node.leave().await;
-        let unknown = Err(UnknownPeer(nobody()));
+        let unknown = Err(UnknownPeer::new(nobody()));
         assert_eq!(
             cut, unknown,
             "the cut of a rung to an unknown member was acknowledged"

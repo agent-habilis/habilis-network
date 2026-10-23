@@ -54,10 +54,9 @@ impl Mesh {
         // learns about joins, leaves and state changes by polling the roster and
         // the document. The browser peer passes `json_sink()`'s here instead,
         // which is the one thing that differs between the two.
-        let Membership { node, inbound } = runtime.block_on(habilis_network::membership::join(
-            opts,
-            Arc::new(SilentSink),
-        ))?;
+        let Membership { node, inbound, .. } = runtime.block_on(
+            habilis_network::membership::join(opts, Arc::new(SilentSink::default())),
+        )?;
 
         Ok(Self {
             habilis_network_id: node.mesh_id().as_str().to_owned(),

@@ -15,9 +15,9 @@
 
 #![cfg(target_arch = "wasm32")]
 
+use habilis_network_chunks::idb::IdbStore;
 use habilis_network_chunks::{
     CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, chunk_hash,
-    idb::IdbStore,
 };
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
@@ -436,11 +436,7 @@ async fn clear_drops_only_what_it_names() {
 async fn binding_survives_and_a_version_change_breaks_it() {
     let store = fresh("bind").await;
     let map = ChunkMap::build(&body(2048, 16));
-    let file = FileId {
-        key: "doc.txt".to_owned(),
-        size: 2048,
-        mtime: 1_700_000_000,
-    };
+    let file = FileId::new("doc.txt".to_owned(), 2048, 1_700_000_000);
 
     assert_eq!(
         store.bind(&file).await.expect("bind"),
@@ -454,10 +450,7 @@ async fn binding_survives_and_a_version_change_breaks_it() {
         "the bound root is the root of the file's map"
     );
 
-    let touched = FileId {
-        mtime: file.mtime + 1,
-        ..file.clone()
-    };
+    let touched = FileId::new(file.key.clone(), file.size, file.mtime + 1);
     assert_eq!(
         store.bind(&touched).await.expect("bind"),
         None,

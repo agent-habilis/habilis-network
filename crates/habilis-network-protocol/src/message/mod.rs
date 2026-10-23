@@ -31,8 +31,7 @@ pub use wire::WireFrame;
 
 pub use body::{BodyError, MessageBody};
 pub use id::{IdError, MessageId};
-pub use shard::shard_fits_log;
-pub use shard::{Shard, ShardGroup};
+pub use shard::{Shard, ShardGroup, shard_fits_log};
 
 /// Maximum serialized message size — a network-wide wire contract kept
 /// under iroh-gossip's payload budget so a message we accept always fits
@@ -99,6 +98,7 @@ pub(crate) const VERSION: &str = "12.0";
 /// by the heartbeat-based peer tracker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum PresenceSubtype {
     Joined,
     Left,
@@ -248,6 +248,7 @@ impl<'de> Deserialize<'de> for CorrId {
 /// - `PeerInfo`: infrastructure — carries endpoint address for mesh formation. Not user-visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum MessageKind {
     /// An application payload. `tag` is the wire discriminant the app dispatches
     /// on (the engine treats it opaquely); `to` is the directed addressee
@@ -320,6 +321,7 @@ pub enum MessageKind {
 /// Which shared-state channel an event/digest belongs to. The two channels share
 /// all machinery; this selects the wire kind, the log, and the surfaced name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Channel {
     State,
     Meta,
@@ -694,11 +696,30 @@ fn is_lower_hex(value: &str, bytes: usize) -> bool {
 /// Parameters for [`Message::new_app`] (and `habilis_network::ops::send_app`, which
 /// shares the same `App` frame shape).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct AppFrameParams {
     pub tag: AppTag,
     pub to: Option<Nickname>,
     pub corr: Option<CorrId>,
     pub body: MessageBody,
+}
+
+impl AppFrameParams {
+    /// The parts of an app frame: its tag, the addressee and the request id, if any, and the body.
+    #[must_use]
+    pub const fn new(
+        tag: AppTag,
+        to: Option<Nickname>,
+        corr: Option<CorrId>,
+        body: MessageBody,
+    ) -> Self {
+        Self {
+            tag,
+            to,
+            corr,
+            body,
+        }
+    }
 }
 
 impl Message {

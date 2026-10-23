@@ -59,23 +59,23 @@ impl Member {
         transport: Vec<Transport>,
         max_direct: usize,
     ) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            max_direct,
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(transport)
+                .with_relay_urls(vec![relay.to_string()])
+                .with_max_direct(max_direct),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 

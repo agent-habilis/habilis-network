@@ -36,6 +36,7 @@ const ONLINE_WAIT: Duration = Duration::from_secs(5);
 /// `deny_unknown_fields` so a typo is an error, not a silent loopback node.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct StreamOpts {
     /// How peers find each other: any of `mdns`, `dht`, `relay`. None is a
     /// loopback node.
@@ -46,6 +47,29 @@ pub struct StreamOpts {
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Empty is the default ladder.
     pub relay_urls: Vec<String>,
+}
+
+impl StreamOpts {
+    /// Set the lookups.
+    #[must_use]
+    pub fn with_lookup(mut self, lookup: Vec<Lookup>) -> Self {
+        self.lookup = lookup;
+        self
+    }
+
+    /// Set the transports.
+    #[must_use]
+    pub fn with_transport(mut self, transport: Vec<Transport>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Set the relay URLs.
+    #[must_use]
+    pub fn with_relay_urls(mut self, relay_urls: Vec<String>) -> Self {
+        self.relay_urls = relay_urls;
+        self
+    }
 }
 
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
@@ -110,9 +134,7 @@ impl StreamNode {
         let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports).await?;
         let producers = address_book(&endpoint);
         let registry = Arc::new(Registry::default());
-        let ice = IceProfile {
-            host_only: lookups.is_loopback(),
-        };
+        let ice = IceProfile::default().with_host_only(lookups.is_loopback());
         let mut router = Router::builder(endpoint.clone()).accept(
             crate::STREAM_ALPN,
             StreamAcceptor {
@@ -133,7 +155,7 @@ impl StreamNode {
                 ),
             );
             // The answerer of a session dials this when the session attaches.
-            router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+            router = router.accept(NUDGE_ALPN, NudgeAcceptor::new());
         }
         let router = router.spawn();
         Ok(Self {

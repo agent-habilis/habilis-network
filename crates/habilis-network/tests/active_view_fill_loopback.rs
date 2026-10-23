@@ -58,29 +58,29 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, max_peers: usize) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![
-                Transport::Udp,
-                Transport::WebRtc,
-                Transport::Multihop,
-                Transport::Relay,
-            ],
-            relay_urls: vec![relay.to_string()],
-            max_peers,
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(vec![
+                    Transport::Udp,
+                    Transport::WebRtc,
+                    Transport::Multihop,
+                    Transport::Relay,
+                ])
+                .with_relay_urls(vec![relay.to_string()])
+                .with_max_peers(max_peers),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self, max_peers: usize) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            max_peers,
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string()))
+                .with_max_peers(max_peers),
+        )
         .await
     }
 

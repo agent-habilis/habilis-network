@@ -80,22 +80,22 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(transport)
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 
@@ -285,12 +285,12 @@ impl NodeDriver for Chat {
             ChatSession::Send(text, reply) => {
                 let frame = app_frame(
                     ctx,
-                    AppFrameParams {
-                        tag: AppTag::new("chat").expect("a valid app tag"),
-                        to: None,
-                        corr: None,
-                        body: MessageBody::new(text).expect("a short body"),
-                    },
+                    AppFrameParams::new(
+                        AppTag::new("chat").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::new(text).expect("a short body"),
+                    ),
                 );
                 let class = self.classify(&frame.authored());
                 let sent = send_app(state, ctx, frame, class).await.map(|_| ());

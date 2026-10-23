@@ -13,6 +13,7 @@ use crate::mesh::{LockedMesh, MeshIdError};
 /// validated **once**, at the boundary (clap `FromStr` / MCP entry), so
 /// `resolve` matches the variant instead of re-sniffing a `String`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JoinTarget {
     /// A bare base58 mesh id — resolves with no I/O.
     Mesh(MeshId),

@@ -366,17 +366,16 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
         let relay_urls: Vec<String> = relay_urls
             .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
             .unwrap_or_default();
-        let parsed = Opts {
-            mesh: mesh.map(str::to_owned),
-            topic: topic.map(str::to_owned),
-            nick: nick.map(str::to_owned),
-            name: name.map(str::to_owned),
-            lookup,
-            transport,
-            relay_urls,
-            max_peers: opts.max_peers,
-            max_direct: opts.max_direct,
-        };
+        let parsed = Opts::default()
+            .with_mesh(mesh.map(str::to_owned))
+            .with_topic(topic.map(str::to_owned))
+            .with_nick(nick.map(str::to_owned))
+            .with_name(name.map(str::to_owned))
+            .with_lookup(lookup)
+            .with_transport(transport)
+            .with_relay_urls(relay_urls)
+            .with_max_peers(opts.max_peers)
+            .with_max_direct(opts.max_direct);
         match Mesh::open(&parsed) {
             Ok(opened) => {
                 // The nickname the engine settled on — not `nick` above, which is
@@ -759,13 +758,14 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
-        let parsed = habilis_network_stream::StreamOpts {
-            lookup,
-            transport,
-            relay_urls: relay_urls
-                .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-                .unwrap_or_default(),
-        };
+        let parsed = habilis_network_stream::StreamOpts::default()
+            .with_lookup(lookup)
+            .with_transport(transport)
+            .with_relay_urls(
+                relay_urls
+                    .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
+                    .unwrap_or_default(),
+            );
         boxed(Streams::bind(&parsed).map(|streams| HabilisNetworkStreams { streams }))
     })
 }

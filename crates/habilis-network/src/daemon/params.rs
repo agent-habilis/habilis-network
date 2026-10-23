@@ -26,6 +26,7 @@ use super::setup::SetupKind;
 /// The create intent, before resolution. Each frontend builds this from its
 /// own input struct (the lookups are already resolved into `config`).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct CreateParams {
     pub name: MeshName,
     /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
@@ -40,14 +41,66 @@ pub struct CreateParams {
     pub invite_only: bool,
 }
 
+impl CreateParams {
+    /// The name, nickname, config and advertisement of a new mesh. Set the password and the
+    /// invite-only flag with their `with_` methods.
+    #[must_use]
+    pub const fn new(
+        name: MeshName,
+        nickname: Option<Nickname>,
+        config: MeshConfig,
+        advertise: DirectorySelection,
+    ) -> Self {
+        Self {
+            name,
+            nickname,
+            config,
+            advertise,
+            password: None,
+            invite_only: false,
+        }
+    }
+
+    /// Set the password.
+    #[must_use]
+    pub fn with_password(mut self, password: Option<Password>) -> Self {
+        self.password = password;
+        self
+    }
+
+    /// Set whether the mesh is invite-only.
+    #[must_use]
+    pub fn with_invite_only(mut self, invite_only: bool) -> Self {
+        self.invite_only = invite_only;
+        self
+    }
+}
+
 /// The join intent, before resolution.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct JoinParams {
     pub target: JoinTarget,
     pub nickname: Option<Nickname>,
     /// Password for a passworded id; verified against the id's verifier in
     /// `resolve` (before any network).
     pub password: Option<Password>,
+}
+
+impl JoinParams {
+    /// The join target, the nickname and the password: every field a join sets.
+    #[must_use]
+    pub const fn new(
+        target: JoinTarget,
+        nickname: Option<Nickname>,
+        password: Option<Password>,
+    ) -> Self {
+        Self {
+            target,
+            nickname,
+            password,
+        }
+    }
 }
 
 /// A passworded id was joined without a password. Typed so callers can
@@ -129,14 +182,21 @@ impl JoinParams {
                 // ~100ms of Argon2id, accepted synchronously: this runs once
                 // per join, before the daemon exists. `unlock` decides whether a
                 // password is needed; only its typed reason is mapped here.
-                locked
-                    .unlock(self.password.as_ref())
-                    .map_err(|error| match error {
-                        UnlockError::PasswordRequired => anyhow::Error::from(PasswordRequired),
-                        error @ (UnlockError::InviteOnly
-                        | UnlockError::NoPassword
-                        | UnlockError::WrongPassword) => anyhow::Error::from(error),
-                    })?
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
+                )]
+                let unlocked =
+                    locked
+                        .unlock(self.password.as_ref())
+                        .map_err(|error| match error {
+                            UnlockError::PasswordRequired => anyhow::Error::from(PasswordRequired),
+                            error @ (UnlockError::InviteOnly
+                            | UnlockError::NoPassword
+                            | UnlockError::WrongPassword) => anyhow::Error::from(error),
+                            other => anyhow::Error::from(other),
+                        })?;
+                unlocked
             }
             // Redeem the invite: verify the creator's signature + expiry and
             // unwrap the join root. An invite-only mesh carries no id-level
@@ -152,6 +212,7 @@ impl JoinParams {
                 }
                 invite.redeem(self.password.as_ref())?
             }
+            _ => anyhow::bail!("this join target is not supported by this build"),
         };
         Ok(Resolved {
             kind: SetupKind::Join {
@@ -186,11 +247,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
     // Deliberately applied here and not in `derive_topic_mesh_with`: a caller
     // that states its own reach must not have it silently rewritten.
     let lookups = if crate::util::tuning::topic_mdns_only_for_test() {
-        LookupOpts {
-            mdns: true,
-            dht: false,
-            relay_lookup: crate::protocol::mesh::RelayChoice::Disabled,
-        }
+        LookupOpts::new(crate::protocol::mesh::RelayChoice::Disabled).with_mdns(true)
     } else {
         LookupOpts::public_preset()
     };
@@ -222,12 +279,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
 pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh> {
     derive_topic_mesh_config(
         string,
-        MeshConfig {
-            lookups,
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy::default(),
-        },
+        MeshConfig::new(lookups, None, None, TransportPolicy::default()),
     )
 }
 
@@ -246,12 +298,7 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
     config.validate()?;
     Mesh::from_topic(
         string,
-        MeshConfig {
-            lookups: config.lookups,
-            password: None,
-            issuer_pubkey: None,
-            transport: config.transport,
-        },
+        MeshConfig::new(config.lookups, None, None, config.transport),
     )
 }
 
@@ -341,15 +388,12 @@ mod topic_derivation_tests {
             derive_topic_mesh_with("standup", LookupOpts::public_preset()).expect("derive");
         let relayed = derive_topic_mesh_config(
             "standup",
-            MeshConfig {
-                lookups: LookupOpts::public_preset(),
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport: true,
-                    ..TransportPolicy::default()
-                },
-            },
+            MeshConfig::new(
+                LookupOpts::public_preset(),
+                None,
+                None,
+                TransportPolicy::default().with_relay_transport(true),
+            ),
         )
         .expect("derive");
         assert_ne!(lookup_only.to_string(), relayed.to_string());
@@ -361,15 +405,12 @@ mod topic_derivation_tests {
     /// otherwise the creator would run a mesh whose id every joiner rejects.
     #[test]
     fn a_relay_transport_without_a_relay_lookup_is_rejected_on_mint() {
-        let config = MeshConfig {
-            lookups: LookupOpts::loopback(),
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport: true,
-                ..TransportPolicy::default()
-            },
-        };
+        let config = MeshConfig::new(
+            LookupOpts::loopback(),
+            None,
+            None,
+            TransportPolicy::default().with_relay_transport(true),
+        );
         assert!(derive_topic_mesh_config("standup", config).is_err());
     }
 }
@@ -394,11 +435,7 @@ mod join_password_tests {
 
     #[test]
     fn a_passworded_id_without_a_password_is_password_required() {
-        let params = JoinParams {
-            target: passworded_id().parse().unwrap(),
-            nickname: None,
-            password: None,
-        };
+        let params = JoinParams::new(passworded_id().parse().unwrap(), None, None);
         let error = params.resolve().unwrap_err();
         assert!(
             error.downcast_ref::<PasswordRequired>().is_some(),

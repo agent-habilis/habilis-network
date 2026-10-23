@@ -28,6 +28,7 @@ const LOG_TARGET: &str = "habilis_network::gossip";
 
 /// What became of one ingested shard.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ShardIngest {
     /// Buffered; its group is still incomplete.
     Buffered,

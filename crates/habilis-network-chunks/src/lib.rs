@@ -522,6 +522,7 @@ impl Coverage {
 /// whatever it can reopen the bytes with. Keeping it opaque is what stops this
 /// crate learning about filesystems.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileId {
     /// Opaque to this crate. Whatever the backend can reopen the bytes with.
     pub key: String,
@@ -532,6 +533,12 @@ pub struct FileId {
 }
 
 impl FileId {
+    /// The identity of one file version: the key the backend reopens it with, and its size and mtime.
+    #[must_use]
+    pub fn new(key: String, size: u64, mtime: i64) -> Self {
+        Self { key, size, mtime }
+    }
+
     /// Whether `other` describes the same file *version* as this one.
     ///
     /// The comparison guarding every read of a non-owned file. Two files at one

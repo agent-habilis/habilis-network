@@ -72,6 +72,7 @@ pub trait NodeSink: Send + Sync {
 /// bytes-piping consumer that only reacts to its own `App` frames), and for
 /// tests that need a sink handle without asserting on it.
 #[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
 pub struct SilentSink;
 
 impl NodeSink for SilentSink {

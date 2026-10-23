@@ -77,24 +77,24 @@ fn an_underlay_tick_inside_a_link_gap_keeps_the_session() {
             .expect("local relay");
         let (sink_a, _events_a) = membership::json_sink();
         let alice = membership::join(
-            &membership::Opts {
-                nick: Some("alice".to_owned()),
-                lookup: vec![Lookup::Relay],
-                transport: vec![Transport::WebRtc, Transport::Multihop, Transport::Relay],
-                relay_urls: vec![relay.to_string()],
-                ..membership::Opts::default()
-            },
+            &membership::Opts::default()
+                .with_nick(Some("alice".to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(vec![
+                    Transport::WebRtc,
+                    Transport::Multihop,
+                    Transport::Relay,
+                ])
+                .with_relay_urls(vec![relay.to_string()]),
             sink_a,
         )
         .await
         .expect("open alice");
         let (sink_b, _events_b) = membership::json_sink();
         let bob = membership::join(
-            &membership::Opts {
-                nick: Some("bob".to_owned()),
-                mesh: Some(alice.node.mesh_id().to_string()),
-                ..membership::Opts::default()
-            },
+            &membership::Opts::default()
+                .with_nick(Some("bob".to_owned()))
+                .with_mesh(Some(alice.node.mesh_id().to_string())),
             sink_b,
         )
         .await

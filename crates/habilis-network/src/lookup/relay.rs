@@ -16,10 +16,8 @@ use std::future::Future;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use iroh::{
-    Endpoint, RelayConfig, RelayMode, RelayUrl,
-    endpoint::{default_relay_mode, presets},
-};
+use iroh::endpoint::{default_relay_mode, presets};
+use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl};
 use n0_future::task::JoinHandle;
 use tokio::sync::watch;
 
@@ -85,11 +83,16 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 /// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
 /// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
 /// the relay-direct bootstrap dial finds nothing.
+#[expect(
+    clippy::match_same_arms,
+    reason = "the named variants are listed on purpose, so a new variant stays visible"
+)]
 pub fn relay_ladder(choice: &RelayChoice) -> Vec<RelayUrl> {
     match choice {
         RelayChoice::Disabled => Vec::new(),
         RelayChoice::Pinned => RENDEZVOUS_RELAY_LADDER_URLS.clone(),
         RelayChoice::Custom(ladder) => ladder.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -133,6 +136,7 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
             tracing::debug!("peer on iroh resilient multi-relay default");
             default_relay_mode()
         }
+        _ => RelayMode::Disabled,
     }
 }
 

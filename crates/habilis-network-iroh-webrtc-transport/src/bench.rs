@@ -108,8 +108,17 @@ fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
 /// Serves one exchange per bi-stream, as many streams as the client opens,
 /// until the connection closes. A benchmark reuses one connection so only its
 /// warm-up round pays the handshake and the congestion-window ramp.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Bench;
+
+impl Bench {
+    /// The bench protocol handler.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
 
 impl ProtocolHandler for Bench {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -337,7 +346,7 @@ mod tests {
     async fn rtt_samples_returns_one_timed_probe_per_round() {
         let server = loopback_endpoint().await;
         let router = Router::builder(server.clone())
-            .accept(BENCH_ALPN, Bench)
+            .accept(BENCH_ALPN, Bench::new())
             .spawn();
         let socket = server
             .bound_sockets()

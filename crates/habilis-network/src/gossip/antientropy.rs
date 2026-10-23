@@ -1643,12 +1643,12 @@ mod tests {
             let mut message = Message::new_app(
                 &MeshId::from("test"),
                 &Nickname::from("author"),
-                crate::protocol::message::AppFrameParams {
-                    tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
-                    to: None,
-                    corr: None,
-                    body: MessageBody::from(format!("m{index}").as_str()),
-                },
+                crate::protocol::message::AppFrameParams::new(
+                    crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from(format!("m{index}").as_str()),
+                ),
             );
             message.timestamp = UnixSecs::from_secs(1_700_000_000 + i64::try_from(index).unwrap());
             log.push(message.sign(&Identity::generate()));
@@ -1787,12 +1787,12 @@ mod tests {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
-                to: None,
-                corr: None,
-                body: MessageBody::from(body),
-            },
+            crate::protocol::message::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from(body),
+            ),
         );
         message.timestamp = UnixSecs::from_secs(timestamp);
         message

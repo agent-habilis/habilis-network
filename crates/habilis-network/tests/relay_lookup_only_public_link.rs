@@ -121,19 +121,12 @@ async fn spawn_with(
 ) -> Node<Probe> {
     let mesh = derive_topic_mesh_config(
         topic,
-        MeshConfig {
-            lookups: LookupOpts {
-                mdns: false,
-                dht: false,
-                relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
-            },
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport: false,
-                ..TransportPolicy::default()
-            },
-        },
+        MeshConfig::new(
+            LookupOpts::new(RelayChoice::Custom(vec![relay.clone()])),
+            None,
+            None,
+            TransportPolicy::default().with_relay_transport(false),
+        ),
     )
     .expect("derive");
     let author = Nickname::new(nick).expect("valid nickname");
@@ -172,12 +165,11 @@ fn two_ip_peers_link_through_the_gated_rendezvous() {
         let topic = format!("scratch-link-{}", rand::random::<u64>());
         let alice_saw = Arc::new(Joined::default());
         let bob_saw = Arc::new(Joined::default());
-        let ip_only = TransportOpts {
-            udp: true,
-            relay: true,
-            webrtc: false,
-            gossip: false,
-        };
+        let ip_only = TransportOpts::default()
+            .with_udp(true)
+            .with_relay(true)
+            .with_webrtc(false)
+            .with_gossip(false);
         let alice = spawn_with(&topic, "alice", &relay, Arc::clone(&alice_saw), ip_only).await;
         assert!(
             wait_for_log("beacon role active", Duration::from_mins(1)).await,
@@ -220,12 +212,11 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
             "alice",
             &relay,
             Arc::clone(&alice_saw),
-            TransportOpts {
-                udp: true,
-                relay: true,
-                webrtc: true,
-                gossip: false,
-            },
+            TransportOpts::default()
+                .with_udp(true)
+                .with_relay(true)
+                .with_webrtc(true)
+                .with_gossip(false),
         )
         .await;
         // Stagger like a real join: the first node claims the beacon, the second
@@ -237,12 +228,11 @@ fn a_webrtc_only_peer_links_through_the_beacon_lane() {
             "bob",
             &relay,
             Arc::clone(&bob_saw),
-            TransportOpts {
-                udp: false,
-                relay: true,
-                webrtc: true,
-                gossip: false,
-            },
+            TransportOpts::default()
+                .with_udp(false)
+                .with_relay(true)
+                .with_webrtc(true)
+                .with_gossip(false),
         )
         .await;
 

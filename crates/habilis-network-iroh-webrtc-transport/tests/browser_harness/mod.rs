@@ -110,7 +110,9 @@ impl Pair {
 
         let client = browser_endpoint(key_client, &client_hub).await?;
         let server = browser_endpoint(key_server, &server_hub).await?;
-        let router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+        let router = Router::builder(server)
+            .accept(BENCH_ALPN, Bench::new())
+            .spawn();
 
         // Host-only ICE: both agents are in this tab, so loopback candidates
         // pair without a STUN round trip — and a test that reached a public

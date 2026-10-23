@@ -204,9 +204,19 @@ impl SignalDeadlines {
 /// the browser backend ignores it, because a tab is never a loopback peer — it
 /// has no loopback peers to reach.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct IceProfile {
     /// Gather host candidates only: no STUN, no TURN, no packets off the box.
     pub host_only: bool,
+}
+
+impl IceProfile {
+    /// Set whether only host candidates are gathered.
+    #[must_use]
+    pub fn with_host_only(mut self, host_only: bool) -> Self {
+        self.host_only = host_only;
+        self
+    }
 }
 
 /// The peer refused us: it is at its direct-peer ceiling. We back off for a
@@ -998,8 +1008,17 @@ pub const NUDGE_ALPN: &[u8] = b"habilis-mesh/nudge/0";
 
 /// Closes every nudge at once. See [`NUDGE_ALPN`]. An endpoint that runs the `WebRTC` signal
 /// acceptor must serve this too: its answerer dials the nudge when a session attaches.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct NudgeAcceptor;
+
+impl NudgeAcceptor {
+    /// The acceptor of the nudge ALPN.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
 
 impl ProtocolHandler for NudgeAcceptor {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
@@ -1712,8 +1731,9 @@ mod tests {
     use std::time::Duration;
 
     use habilis_network_iroh_webrtc_transport::WebRtcTransport;
+    use iroh::endpoint::presets;
     use iroh::protocol::Router;
-    use iroh::{RelayMode, SecretKey, endpoint::presets};
+    use iroh::{RelayMode, SecretKey};
 
     use super::*;
     use crate::transport::probe::PathKind;

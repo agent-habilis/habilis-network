@@ -76,7 +76,7 @@ async fn spawn(topic: &str, nick: &str) -> Player {
             transports: TransportOpts::default(),
             runtime_base: None,
             state_file: None,
-            sink: std::sync::Arc::new(SilentSink),
+            sink: std::sync::Arc::new(SilentSink::default()),
             per_peer_gate: None,
             cohost: None,
             live_count: None,
@@ -118,6 +118,7 @@ impl Player {
                 self.state.value += sum;
                 self.state.frame += 1;
             }
+            _ => unreachable!("a request this test does not expect"),
         }
     }
 

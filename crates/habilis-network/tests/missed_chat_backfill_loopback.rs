@@ -85,12 +85,12 @@ impl NodeDriver for Chat {
         let mut frame = Message::new_app(
             ctx.mesh,
             ctx.author,
-            AppFrameParams {
-                tag: AppTag::new("chat").expect("a valid app tag"),
-                to: None,
-                corr: None,
-                body: MessageBody::new("\"hello\"").expect("a JSON body"),
-            },
+            AppFrameParams::new(
+                AppTag::new("chat").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::new("\"hello\"").expect("a JSON body"),
+            ),
         );
         frame.timestamp = frame.timestamp + AHEAD;
         let frame = frame.sign(ctx.identity);
@@ -162,10 +162,10 @@ impl Joined {
 }
 
 fn pin_antientropy_tick() {
-    habilis_network::runtime::tuning::init(habilis_network::runtime::tuning::Tuning {
-        antientropy_interval: Duration::from_hours(1),
-        ..habilis_network::runtime::tuning::Tuning::DEFAULTS
-    });
+    habilis_network::runtime::tuning::init(
+        habilis_network::runtime::tuning::Tuning::DEFAULTS
+            .with_antientropy_interval(Duration::from_hours(1)),
+    );
 }
 
 fn nick(name: &str) -> Nickname {

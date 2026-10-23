@@ -607,27 +607,23 @@ pub(crate) async fn ingest(
 
     maybe_push_inbound(ctx, &view, surfaceable, app_class.as_ref());
 
-    match &view.kind {
+    // `true` means the kind is fully handled and never reaches retention.
+    let stop = match &view.kind {
+        // The app-payload seam: dispatch RPC legs / chat / task frames.
+        // `false` means the frame is plumbing or addressed elsewhere —
+        // stop before retention.
         MessageKind::App { .. } => {
-            // The app-payload seam: dispatch RPC legs / chat / task frames.
-            // `false` means the frame is plumbing or addressed elsewhere —
-            // stop before retention.
-            if !app
-                .on_app_frame(
-                    InboundApp {
-                        message: &view,
-                        surfaceable,
-                    },
-                    state,
-                    ctx,
-                )
-                .await
-            {
-                return;
-            }
+            !app.on_app_frame(
+                InboundApp {
+                    message: &view,
+                    surfaceable,
+                },
+                state,
+                ctx,
+            )
+            .await
         }
-        // Everything the engine owns itself. `Break` means the kind is fully
-        // handled and never reaches retention. Spelled out rather than `_` so
+        // Everything the engine owns itself. Spelled out rather than `_` so
         // a new kind has to be routed deliberately.
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo
@@ -639,13 +635,14 @@ pub(crate) async fn ingest(
         | MessageKind::Meta
         | MessageKind::MetaDigest
         | MessageKind::LinkState => {
-            if dispatch_infra(&verified, surfaceable, &observed.update, state, app, ctx)
+            dispatch_infra(&verified, surfaceable, &observed.update, state, app, ctx)
                 .await
                 .is_break()
-            {
-                return;
-            }
         }
+        _ => false,
+    };
+    if stop {
+        return;
     }
 
     retain_and_index(
@@ -760,6 +757,7 @@ async fn dispatch_infra(
             .await;
         }
         MessageKind::App { .. } => unreachable!("the app seam is handled by `ingest`"),
+        _ => {}
     }
     ControlFlow::Continue(())
 }
@@ -1121,6 +1119,10 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
+#[expect(
+    clippy::match_same_arms,
+    reason = "the named variants are listed on purpose, so a new variant stays visible"
+)]
 fn ingest_channel_event(
     event: ChannelEvent<'_>,
     doc: &mut crate::doc::MeshDoc,
@@ -1162,6 +1164,7 @@ fn ingest_channel_event(
         }
         Ingested::Applied { .. } | Ingested::Duplicate | Ingested::Buffered | Ingested::Ignored => {
         }
+        _ => {}
     }
 }
 
@@ -1335,6 +1338,14 @@ fn decrypt_directed<F: std::ops::Deref<Target = Message>>(
     }
 }
 
+#[expect(
+    clippy::match_same_arms,
+    reason = "the named variants are listed on purpose, so a new variant stays visible"
+)]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
+)]
 fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
     match &message.kind {
         MessageKind::App { to: Some(to), .. } => to == us,
@@ -1350,6 +1361,7 @@ fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::LinkState => true,
+        _ => true,
     }
 }
 
@@ -1806,12 +1818,12 @@ mod retain_own_broadcast_tests {
         Message::new_app(
             &MeshId::from("💬test"),
             &Nickname::from("me"),
-            crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
-                to: to.map(Nickname::from),
-                corr: None,
-                body: crate::protocol::MessageBody::from("hello"),
-            },
+            crate::protocol::message::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                to.map(Nickname::from),
+                None,
+                crate::protocol::MessageBody::from("hello"),
+            ),
         )
         .sign(&state.identity)
     }
@@ -2082,8 +2094,7 @@ mod first_contact_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::message::MessageBody;
-    use crate::protocol::message::{Authored, Verified};
+    use crate::protocol::message::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
@@ -2295,12 +2306,12 @@ mod first_contact_tests {
         let frame = Message::new_app(
             &node.mesh,
             &nick("alice"),
-            crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
-                to: None,
-                corr: None,
-                body: MessageBody::from("hello"),
-            },
+            crate::protocol::message::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from("hello"),
+            ),
         )
         .sign(&Identity::generate());
         let original = frame.serialize().expect("serialize");
@@ -3332,10 +3343,7 @@ mod left_tests {
             .bind()
             .await
             .expect("bind an underlay");
-        let config = HandleConfig {
-            vector_max_age: Duration::from_millis(400),
-            ..HandleConfig::default()
-        };
+        let config = HandleConfig::default().with_vector_max_age(Duration::from_millis(400));
         let handle = MultihopHandle::new(&secret, underlay, config).expect("a handle");
         let (leaver_endpoint, leaver_handle, _leaver_webrtc) = build_peer_multihop(
             &lookups,

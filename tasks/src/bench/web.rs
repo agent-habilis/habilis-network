@@ -192,7 +192,7 @@ impl Browser<'_> {
         let run = async {
             let peer = WebRtcPeer::bind().await?;
             let _router = Router::builder(peer.endpoint.clone())
-                .accept(BENCH_ALPN, Bench)
+                .accept(BENCH_ALPN, Bench::new())
                 .spawn();
 
             let started = Instant::now();

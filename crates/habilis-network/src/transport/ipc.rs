@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use interprocess::local_socket::{
-    ListenerOptions, Name,
-    tokio::{Listener, Stream, prelude::*},
-};
-use serde::{Serialize, de::DeserializeOwned};
+use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::tokio::{Listener, Stream};
+use interprocess::local_socket::{ListenerOptions, Name};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
@@ -199,7 +199,7 @@ where
             .await;
             return;
         }
-        Ok(Ok(LineRead::Eof) | Err(_)) => return,
+        Ok(_) => return,
         Err(_idle) => {
             tracing::debug!("IPC: connection sent nothing within the read deadline; closing");
             return;
@@ -304,6 +304,7 @@ async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
         LineRead::Line(line) => Ok(line.trim().to_string()),
         LineRead::Eof => Ok(String::new()),
         LineRead::TooLong => anyhow::bail!("IPC response too large"),
+        _ => anyhow::bail!("IPC response unreadable"),
     }
 }
 
@@ -410,7 +411,8 @@ mod tests {
         use crate::util::mesh_prefix;
         use habilis_network_test_tracing::test;
         use proptest::collection::vec as arb_vec;
-        use proptest::{prop_assert, prop_assert_eq, proptest, strategy::Strategy};
+        use proptest::strategy::Strategy;
+        use proptest::{prop_assert, prop_assert_eq, proptest};
 
         use super::{MeshId, json_error, json_ok};
 
@@ -559,9 +561,9 @@ mod tests {
     // throughout. Real-time: waits out `IPC_IO_TIMEOUT` (10s).
     #[test]
     async fn idle_connection_is_closed_at_the_read_deadline() {
-        use interprocess::local_socket::{
-            GenericFilePath, ToFsName, tokio::Stream, tokio::prelude::*,
-        };
+        use interprocess::local_socket::tokio::Stream;
+        use interprocess::local_socket::tokio::prelude::*;
+        use interprocess::local_socket::{GenericFilePath, ToFsName};
         use tokio::io::AsyncReadExt;
 
         let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();

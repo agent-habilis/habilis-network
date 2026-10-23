@@ -112,6 +112,7 @@ fn a_rollback_loads_then_re_saves_and_re_advances() {
                 Request::SaveState { .. } => 'S',
                 Request::LoadState { .. } => 'L',
                 Request::AdvanceFrame { .. } => 'A',
+                _ => unreachable!("a request this test does not expect"),
             });
             // Fulfilling is not optional: the next rollback loads a state
             // this must have saved. Collecting without fulfilling is the

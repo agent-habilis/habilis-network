@@ -226,6 +226,10 @@ impl Cell {
     }
 
     /// Whether the transport list lets `rung` carry payload.
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the named variants are listed on purpose, so a new variant stays visible"
+    )]
     fn allows(self, rung: Rung) -> bool {
         match rung {
             Rung::Ip => self.has(Transport::Udp),
@@ -234,12 +238,17 @@ impl Cell {
             Rung::Gossip => self.has(Transport::Gossip),
             Rung::Relay => self.has(Transport::Relay),
             Rung::Other => false,
+            _ => false,
         }
     }
 
     /// The rung of the ladder, as a pure function: the highest rung that the
     /// list allows and that the cell leaves available. `None`: no rung may carry
     /// payload, so the pair stays unlinked for it.
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the named variants are listed on purpose, so a new variant stays visible"
+    )]
     fn expected(self) -> Option<Rung> {
         habilis_network_iroh_webrtc_transport::expected_rung(
             |rung| self.allows(rung),
@@ -250,6 +259,7 @@ impl Cell {
                 Rung::Gossip => self.blocked < Blocked::IpWebRtcMultihopGossip,
                 Rung::Other => false,
                 Rung::Relay => true,
+                _ => false,
             },
         )
     }
@@ -263,6 +273,7 @@ fn rung_name(rung: Rung) -> &'static str {
         Rung::Gossip => "gossip",
         Rung::Relay => "relay",
         Rung::Other => "other",
+        _ => "unknown",
     }
 }
 
@@ -284,22 +295,22 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(transport)
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 

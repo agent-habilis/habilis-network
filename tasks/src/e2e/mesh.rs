@@ -22,10 +22,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::TaskOutcome;
-use crate::util::cdp;
 use crate::util::page::{rand_token, wait_ready};
-use crate::util::webdriver;
-use crate::util::{output, repo_root, target_dir, wait_for};
+use crate::util::{cdp, output, repo_root, target_dir, wait_for, webdriver};
 
 use habilis_network::membership;
 use habilis_network::protocol::{Lookup, Transport};
@@ -637,12 +635,12 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
     // the matrix measures the mesh's steady state, and same-id split repair
     // has the engine's own tests. In-process only — the browser side never
     // claims under the stagger, so its defaults stay untouched.
-    habilis_network::util::tuning::init(habilis_network::util::tuning::Tuning {
-        rival_recheck_first: Duration::from_hours(1),
-        rival_recheck: Duration::from_hours(1),
-        rival_recheck_meshed: Duration::from_hours(1),
-        ..habilis_network::util::tuning::Tuning::DEFAULTS
-    });
+    habilis_network::util::tuning::init(
+        habilis_network::util::tuning::Tuning::DEFAULTS
+            .with_rival_recheck_first(Duration::from_hours(1))
+            .with_rival_recheck(Duration::from_hours(1))
+            .with_rival_recheck_meshed(Duration::from_hours(1)),
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

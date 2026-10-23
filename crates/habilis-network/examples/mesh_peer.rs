@@ -107,21 +107,16 @@ async fn main() -> anyhow::Result<()> {
         };
         let mesh = habilis_network::runtime::derive_topic_mesh_config(
             &topic,
-            MeshConfig {
-                lookups: LookupOpts {
-                    mdns: true,
-                    dht: true,
-                    relay_lookup: ladder,
-                },
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
-                        .is_some_and(|value| value == "on"),
-                    udp,
-                    ..TransportPolicy::default()
-                },
-            },
+            MeshConfig::new(
+                LookupOpts::new(ladder).with_mdns(true).with_dht(true),
+                None,
+                None,
+                TransportPolicy::default()
+                    .with_relay_transport(
+                        std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
+                    )
+                    .with_udp(udp),
+            ),
         )?;
         return run_peer(
             habilis_network::runtime::SetupKind::Topic {
@@ -135,35 +130,29 @@ async fn main() -> anyhow::Result<()> {
 
     let arg = std::env::args().nth(1);
     let Resolved { kind, author, .. } = match arg {
-        Some(id) => JoinParams {
-            target: id.parse::<JoinTarget>()?,
-            nickname: None,
-            password: None,
-        }
-        .resolve()?,
-        None => CreateParams {
-            name: MeshName::random(),
-            nickname: None,
+        Some(id) => JoinParams::new(id.parse::<JoinTarget>()?, None, None).resolve()?,
+        None => CreateParams::new(
+            MeshName::random(),
+            None,
             // Public preset: mDNS + DHT + the pinned relay ladder. The relay
             // rung is the part that matters here — it is the only leg a browser
             // peer has, and the rendezvous homes on it.
-            config: MeshConfig {
-                lookups: LookupOpts::public_preset(),
-                password: None,
-                issuer_pubkey: None,
+            MeshConfig::new(
+                LookupOpts::public_preset(),
+                None,
+                None,
                 // Baked into the id, so a joiner inherits it: only the
                 // creator reads the env var.
-                transport: TransportPolicy {
-                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
-                        .is_some_and(|value| value == "on"),
-                    udp,
-                    ..TransportPolicy::default()
-                },
-            },
-            advertise: DirectorySelection::Unset,
-            password: None,
-            invite_only: false,
-        }
+                TransportPolicy::default()
+                    .with_relay_transport(
+                        std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
+                    )
+                    .with_udp(udp),
+            ),
+            DirectorySelection::Unset,
+        )
+        .with_password(None)
+        .with_invite_only(false)
         .resolve()?,
     };
 
@@ -192,7 +181,7 @@ async fn run_peer(
             // daemon something else drives.
             runtime_base: None,
             state_file: None,
-            sink: Arc::new(SilentSink),
+            sink: Arc::new(SilentSink::default()),
             per_peer_gate: None,
             cohost: None,
             live_count: Some(Arc::clone(&live)),

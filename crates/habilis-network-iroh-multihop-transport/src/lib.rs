@@ -124,6 +124,7 @@ pub const BROWSER_HOP_FACTOR: u32 = 10;
 /// an endpoint that is injected into a mesh must be built with the values that
 /// mesh's policy implies (see `InjectedEndpoint::bind` in the engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HandleConfig {
     /// Whether the relay may carry cells (the mesh's `relay_transport`). Off, the
     /// relay is for lookup alone: the forwarder drops a cell it would send, and
@@ -157,6 +158,34 @@ impl Default for HandleConfig {
 }
 
 impl HandleConfig {
+    /// Set whether the relay carries payload.
+    #[must_use]
+    pub const fn with_relay_payload(mut self, relay_payload: bool) -> Self {
+        self.relay_payload = relay_payload;
+        self
+    }
+
+    /// Set the age after which a vector entry is dropped.
+    #[must_use]
+    pub const fn with_vector_max_age(mut self, vector_max_age: Duration) -> Self {
+        self.vector_max_age = vector_max_age;
+        self
+    }
+
+    /// Set how long a hop may stay stuck on the relay before it is reported.
+    #[must_use]
+    pub const fn with_relay_stuck_after(mut self, relay_stuck_after: Duration) -> Self {
+        self.relay_stuck_after = relay_stuck_after;
+        self
+    }
+
+    /// Set the cost of a link.
+    #[must_use]
+    pub const fn with_link_cost(mut self, link_cost: u32) -> Self {
+        self.link_cost = link_cost;
+        self
+    }
+
     /// The config of a browser: the default, with a link cost [`BROWSER_HOP_FACTOR`] times
     /// higher, so that routes avoid a browser as a hop and use it only when nothing else
     /// reaches the destination. A native route of up to ten hops costs less than a route through

@@ -1708,6 +1708,7 @@ impl EventLoopState {
                 self.reassembled_groups.insert(shard.group.clone());
                 Some(logical)
             }
+            _ => None,
         }
     }
 
@@ -1952,6 +1953,7 @@ impl EventLoopState {
         match channel {
             crate::protocol::Channel::State => &self.state_doc,
             crate::protocol::Channel::Meta => &self.meta_doc,
+            _ => unreachable!("a channel added later needs its own document"),
         }
     }
 
@@ -1960,6 +1962,7 @@ impl EventLoopState {
         match channel {
             crate::protocol::Channel::State => &mut self.state_doc,
             crate::protocol::Channel::Meta => &mut self.meta_doc,
+            _ => unreachable!("a channel added later needs its own document"),
         }
     }
 
@@ -2235,8 +2238,9 @@ mod tests {
         KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN, Reach, RivalFlag,
         TokioInstant,
     };
-    use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-    use crate::protocol::{AuthorKey, ContentHash, UnixSecs};
+    use crate::protocol::{
+        AppFrameParams, AuthorKey, ContentHash, MeshId, MessageBody, MessageId, UnixSecs,
+    };
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
     use habilis_network_test_tracing::test;
 
@@ -3193,12 +3197,12 @@ mod tests {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &nick("author-nick"),
-            AppFrameParams {
-                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
-                to: None,
-                corr: None,
-                body: MessageBody::from("body"),
-            },
+            AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from("body"),
+            ),
         );
         message.id = id.clone();
         message

@@ -11,8 +11,7 @@ use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
 use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::message::AppFrameParams;
-use crate::protocol::message::{Verified, WireFrame};
+use crate::protocol::message::{AppFrameParams, Verified, WireFrame};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
@@ -250,6 +249,7 @@ pub async fn broadcast_state_merge(
         }
         Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
         Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
+        _ => anyhow::bail!("the document did not take the change"),
     };
 
     // 4. Surface our own change, and gossip it (or buffer while no gossip path
@@ -499,12 +499,12 @@ mod tests {
         let frame = Message::new_app(
             &MeshId::from("test"),
             &nick("alice"),
-            crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
-                to: None,
-                corr: None,
-                body: crate::protocol::MessageBody::from("hi"),
-            },
+            crate::protocol::message::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                crate::protocol::MessageBody::from("hi"),
+            ),
         )
         .sign(&crate::protocol::Identity::generate());
         mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));

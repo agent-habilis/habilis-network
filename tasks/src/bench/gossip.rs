@@ -158,7 +158,7 @@ async fn start_flood() -> Result<Flood, String> {
             .collect(),
         endpoints: Vec::new(),
         tap: Tap {
-            inner: Bench,
+            inner: Bench::new(),
             served: Arc::default(),
         },
         routers: Vec::new(),
@@ -432,7 +432,7 @@ async fn run_group(
         }
     };
     let tap = Tap {
-        inner: Bench,
+        inner: Bench::new(),
         served: Arc::default(),
     };
     let router = Router::builder(bob.clone())

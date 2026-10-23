@@ -115,12 +115,12 @@ impl NodeDriver for Chat {
             Request::Say(text, done) => {
                 let frame = app_frame(
                     ctx,
-                    AppFrameParams {
-                        tag: AppTag::new("app_msg").expect("a valid app tag"),
-                        to: None,
-                        corr: None,
-                        body: MessageBody::from(text.as_str()),
-                    },
+                    AppFrameParams::new(
+                        AppTag::new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text.as_str()),
+                    ),
                 );
                 let class = self.classify(&frame.authored());
                 let _ = send_app(state, ctx, frame, class)
@@ -191,7 +191,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>)
             transports: TransportOpts::default(),
             runtime_base: None,
             state_file: None,
-            sink: Arc::new(SilentSink) as Arc<dyn NodeSink>,
+            sink: Arc::new(SilentSink::default()) as Arc<dyn NodeSink>,
             per_peer_gate: None,
             cohost: None,
             live_count: None,

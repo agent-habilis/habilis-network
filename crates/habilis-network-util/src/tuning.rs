@@ -212,6 +212,7 @@ pub fn ppid_watch_interval() -> Duration {
 /// the flag. Production runs on [`Tuning::DEFAULTS`] (the `crate::consts`
 /// values) when [`init`] is never called (the in-process path).
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Tuning {
     pub alive_timeout: Duration,
     pub sweep_interval: Duration,
@@ -232,6 +233,64 @@ pub struct Tuning {
     pub rival_recheck_alone: Duration,
     pub rendezvous_periodic_return: Duration,
     pub topic_mdns_only: bool,
+}
+
+impl Tuning {
+    /// Set how often anti-entropy runs.
+    #[must_use]
+    pub fn with_antientropy_interval(mut self, antientropy_interval: Duration) -> Self {
+        self.antientropy_interval = antientropy_interval;
+        self
+    }
+
+    /// Set how long the first rival recheck waits.
+    #[must_use]
+    pub fn with_rival_recheck_first(mut self, rival_recheck_first: Duration) -> Self {
+        self.rival_recheck_first = rival_recheck_first;
+        self
+    }
+
+    /// Set how long each rival recheck waits.
+    #[must_use]
+    pub fn with_rival_recheck(mut self, rival_recheck: Duration) -> Self {
+        self.rival_recheck = rival_recheck;
+        self
+    }
+
+    /// Set how long each rival recheck waits once meshed.
+    #[must_use]
+    pub fn with_rival_recheck_meshed(mut self, rival_recheck_meshed: Duration) -> Self {
+        self.rival_recheck_meshed = rival_recheck_meshed;
+        self
+    }
+
+    /// Set how often the heal tick runs.
+    #[must_use]
+    pub fn with_heal_interval(mut self, heal_interval: Duration) -> Self {
+        self.heal_interval = heal_interval;
+        self
+    }
+
+    /// Set the co-host grace period.
+    #[must_use]
+    pub fn with_cohost_grace(mut self, cohost_grace: Duration) -> Self {
+        self.cohost_grace = cohost_grace;
+        self
+    }
+
+    /// Set how long a member waits before it asks for the rendezvous again.
+    #[must_use]
+    pub fn with_rendezvous_periodic_return(mut self, rendezvous_periodic_return: Duration) -> Self {
+        self.rendezvous_periodic_return = rendezvous_periodic_return;
+        self
+    }
+
+    /// Set the rival recheck interval for a lone member.
+    #[must_use]
+    pub fn with_rival_recheck_alone(mut self, rival_recheck_alone: Duration) -> Self {
+        self.rival_recheck_alone = rival_recheck_alone;
+        self
+    }
 }
 
 impl Tuning {

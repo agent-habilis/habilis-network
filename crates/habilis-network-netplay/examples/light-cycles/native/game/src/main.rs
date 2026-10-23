@@ -26,8 +26,7 @@ use habilis_network::runtime::{
 
 use habilis_network_netplay::RollbackDriver;
 
-use light_cycles_native::app::Snapshot;
-use light_cycles_native::app::{Game, LightCycles};
+use light_cycles_native::app::{Game, LightCycles, Snapshot};
 use light_cycles_native::grid::{Dir, GRID_H, GRID_W, TICK_MS};
 use light_cycles_native::ui;
 
@@ -197,7 +196,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
             transports: TransportOpts::default(),
             runtime_base: None,
             state_file: None,
-            sink: Arc::new(SilentSink),
+            sink: Arc::new(SilentSink::default()),
             per_peer_gate: None,
             cohost: None,
             live_count: None,

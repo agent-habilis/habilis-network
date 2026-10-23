@@ -515,12 +515,12 @@ impl NodeDriver for MembershipApp {
             Request::Send { to, body, reply } => {
                 let frame = app_frame(
                     ctx,
-                    AppFrameParams {
-                        tag: AppTag::new(MSG_TAG).expect("a valid app tag"),
+                    AppFrameParams::new(
+                        AppTag::new(MSG_TAG).expect("a valid app tag"),
                         to,
-                        corr: None,
+                        None,
                         body,
-                    },
+                    ),
                 );
                 let class = self.classify(&frame.authored());
                 match send_app(state, ctx, frame, class).await {
@@ -547,12 +547,12 @@ impl NodeDriver for MembershipApp {
             Request::SendCold { to, body, reply } => {
                 let frame = app_frame(
                     ctx,
-                    AppFrameParams {
-                        tag: AppTag::new(MSG_TAG).expect("a valid app tag"),
+                    AppFrameParams::new(
+                        AppTag::new(MSG_TAG).expect("a valid app tag"),
                         to,
-                        corr: None,
+                        None,
                         body,
-                    },
+                    ),
                 );
                 let routed = frame
                     .serialize()
@@ -990,7 +990,17 @@ impl NodeDriver for MembershipApp {
 /// does nothing; the node says so, and the test waits for the `PeerInfo` that brings the member.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnknownPeer(pub String);
+
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+impl UnknownPeer {
+    /// The peer that was not found.
+    #[must_use]
+    pub const fn new(peer: String) -> Self {
+        Self(peer)
+    }
+}
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 impl std::fmt::Display for UnknownPeer {
@@ -1092,8 +1102,7 @@ fn route_diag(state: &EventLoopState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Message;
-    use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, RelayLadder};
+    use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime::derive_topic_mesh_config;
     use habilis_network_test_tracing::test;
 
@@ -1125,12 +1134,12 @@ mod tests {
         Message::new_app(
             &long_mesh(),
             &widest_nick('\u{1F980}'),
-            AppFrameParams {
-                tag: AppTag::new(MSG_TAG).expect("a valid app tag"),
-                to: Some(widest_nick('\u{1F99E}')),
-                corr: None,
-                body: MessageBody::new(text.to_owned()).expect("body"),
-            },
+            AppFrameParams::new(
+                AppTag::new(MSG_TAG).expect("a valid app tag"),
+                Some(widest_nick('\u{1F99E}')),
+                None,
+                MessageBody::new(text.to_owned()).expect("body"),
+            ),
         )
         .sign(&Identity::generate())
         .wire_len()

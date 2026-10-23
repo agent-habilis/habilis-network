@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::protocol::message::Verified;
-use crate::protocol::message::sole_addressee;
+use crate::protocol::message::{Verified, sole_addressee};
 use crate::protocol::{AuthorKey, DedupKey, Nickname, UnixSecs};
 
 /// Where a message sits in the log's total order: its timestamp, then its id
@@ -437,12 +436,12 @@ mod tests {
         Message::new_app(
             &crate::protocol::MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
-                to: None,
-                corr: None,
-                body: crate::protocol::MessageBody::from(id),
-            },
+            crate::protocol::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                crate::protocol::MessageBody::from(id),
+            ),
         )
     }
 
@@ -555,12 +554,12 @@ mod tests {
         let mut message = Message::new_app(
             &crate::protocol::MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
-                to: Some(Nickname::from(to)),
-                corr: None,
-                body: crate::protocol::MessageBody::from(body),
-            },
+            crate::protocol::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                Some(Nickname::from(to)),
+                None,
+                crate::protocol::MessageBody::from(body),
+            ),
         );
         message.timestamp = UnixSecs::from_secs(ts);
         message

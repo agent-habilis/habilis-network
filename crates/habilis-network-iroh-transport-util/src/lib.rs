@@ -50,6 +50,7 @@ pub fn best_of<'a>(
 /// The order is the declaration order, and both selectors take it from here, so
 /// that it does not depend on which transports an endpoint has installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Rung {
     Ip,
     WebRtc,

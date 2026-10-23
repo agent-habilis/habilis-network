@@ -362,8 +362,7 @@ mod tests {
 
     use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
-    use crate::protocol::message::AppFrameParams;
-    use crate::protocol::message::{Verified, WireFrame};
+    use crate::protocol::message::{AppFrameParams, Verified, WireFrame};
     use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
 
     fn mesh() -> MeshId {
@@ -400,12 +399,12 @@ mod tests {
         Message::new_app(
             &mesh(),
             &nick("alice"),
-            AppFrameParams {
-                tag: AppTag::new("app_msg").expect("a valid app tag"),
-                to: None,
-                corr: None,
-                body: body(),
-            },
+            AppFrameParams::new(
+                AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                body(),
+            ),
         )
         .sign(&Identity::generate())
     }
@@ -793,15 +792,15 @@ mod tests {
         let req = Message::new_app(
             &mesh(),
             &nick("alice"),
-            AppFrameParams {
-                tag: AppTag::new("app_req").expect("a valid app tag"),
-                to: Some(nick("bob")),
-                corr: Some(
+            AppFrameParams::new(
+                AppTag::new("app_req").expect("a valid app tag"),
+                Some(nick("bob")),
+                Some(
                     CorrId::new("00000000-0000-0000-0000-0000000000aa")
                         .expect("a valid correlation id"),
                 ),
-                body: body(),
-            },
+                body(),
+            ),
         )
         .sign(&Identity::generate());
         let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())

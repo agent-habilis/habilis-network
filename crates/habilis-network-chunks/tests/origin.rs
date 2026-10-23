@@ -83,11 +83,7 @@ fn describe(path: &Path) -> FileId {
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|since| i64::try_from(since.as_secs()).ok())
         .unwrap_or(0);
-    FileId {
-        key: path.display().to_string(),
-        size: meta.len(),
-        mtime,
-    }
+    FileId::new(path.display().to_string(), meta.len(), mtime)
 }
 
 fn write(dir: &TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
@@ -403,10 +399,7 @@ fn adopting_records_a_binding_that_a_version_change_breaks() {
         let root = origin.adopt(&described, &path).expect("adopt");
         assert_eq!(origin.bind(&described).await.expect("bind"), Some(root));
 
-        let moved = FileId {
-            size: described.size + 1,
-            ..described.clone()
-        };
+        let moved = FileId::new(described.key.clone(), described.size + 1, described.mtime);
         assert_eq!(origin.bind(&moved).await.expect("bind"), None);
     });
 }

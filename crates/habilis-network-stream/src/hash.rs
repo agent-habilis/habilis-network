@@ -239,14 +239,13 @@ impl StreamHash {
         Ok(Self {
             addr,
             lookups,
-            transport: TransportPolicy {
-                udp: flags & NO_UDP_BIT == 0,
-                webrtc: flags & NO_WEBRTC_BIT == 0,
+            transport: TransportPolicy::default()
+                .with_udp(flags & NO_UDP_BIT == 0)
+                .with_webrtc(flags & NO_WEBRTC_BIT == 0)
                 // A stream is one direct lane: its node has no multi-hop.
-                multihop: false,
-                gossip: false,
-                relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
-            },
+                .with_multihop(false)
+                .with_gossip(false)
+                .with_relay_transport(flags & RELAY_TRANSPORT_BIT != 0),
             id,
             secret,
         })
@@ -291,13 +290,12 @@ mod tests {
     }
 
     fn policy(udp: bool, webrtc: bool, relay_transport: bool) -> TransportPolicy {
-        TransportPolicy {
-            udp,
-            webrtc,
-            multihop: false,
-            gossip: false,
-            relay_transport,
-        }
+        TransportPolicy::default()
+            .with_udp(udp)
+            .with_webrtc(webrtc)
+            .with_multihop(false)
+            .with_gossip(false)
+            .with_relay_transport(relay_transport)
     }
 
     #[test]

@@ -162,7 +162,7 @@ pub fn serve() -> Result<String, JsValue> {
     with_state(|state| {
         if state.router.is_none() {
             let router = Router::builder(state.endpoint.clone())
-                .accept(BENCH_ALPN, Bench)
+                .accept(BENCH_ALPN, Bench::new())
                 .spawn();
             state.router = Some(router);
         }

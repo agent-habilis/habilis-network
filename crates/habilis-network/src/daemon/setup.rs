@@ -1257,11 +1257,7 @@ mod tests {
     // over UDP.
     #[test]
     fn a_browser_refuses_a_mesh_with_no_relay_lookup() {
-        let dht_only = LookupOpts {
-            mdns: false,
-            dht: true,
-            relay_lookup: RelayChoice::Disabled,
-        };
+        let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
         let policy =
             TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         let transports = crate::lookup::TransportOpts::default().within(&policy);
@@ -1269,10 +1265,9 @@ mod tests {
             .expect_err("no path to signal on");
         assert_eq!(error.to_string(), super::BROWSER_NEEDS_RELAY_LOOKUP);
 
-        let relay = LookupOpts {
-            relay_lookup: RelayChoice::Pinned,
-            ..dht_only
-        };
+        let relay = LookupOpts::new(RelayChoice::Pinned)
+            .with_mdns(dht_only.mdns)
+            .with_dht(dht_only.dht);
         super::refuse_in_browser(&relay, policy, transports).expect("the relay signals");
     }
 
@@ -1281,19 +1276,14 @@ mod tests {
     // narrower paths.
     #[test]
     fn a_node_without_udp_refuses_a_mesh_with_no_relay_lookup() {
-        let dht_only = LookupOpts {
-            mdns: false,
-            dht: true,
-            relay_lookup: RelayChoice::Disabled,
-        };
+        let dht_only = LookupOpts::new(RelayChoice::Disabled).with_dht(true);
         let policy =
             TransportPolicy::from_transports(&[Transport::Udp, Transport::WebRtc]).expect("valid");
         let webrtc_only = crate::lookup::TransportOpts::webrtc_only();
         super::member_transports(&dht_only, webrtc_only, policy).expect_err("no path to signal on");
-        let relay = LookupOpts {
-            relay_lookup: RelayChoice::Pinned,
-            ..dht_only
-        };
+        let relay = LookupOpts::new(RelayChoice::Pinned)
+            .with_mdns(dht_only.mdns)
+            .with_dht(dht_only.dht);
         super::member_transports(&relay, webrtc_only, policy).expect("the relay signals");
     }
 
@@ -1302,11 +1292,7 @@ mod tests {
     // payload.
     #[test]
     fn a_browser_refuses_a_node_with_no_relay_transport() {
-        let lookups = LookupOpts {
-            mdns: false,
-            dht: false,
-            relay_lookup: RelayChoice::Pinned,
-        };
+        let lookups = LookupOpts::new(RelayChoice::Pinned);
         let no_relay = |policy: &TransportPolicy| crate::lookup::TransportOpts {
             relay: false,
             ..crate::lookup::TransportOpts::default().within(policy)

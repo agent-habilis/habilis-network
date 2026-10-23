@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use crate::embed::NodeSink;
 use crate::net::TransportOpts;
-use crate::protocol::JoinTarget;
-use crate::protocol::Nickname;
-use crate::protocol::{DirectorySelection, Lookup, MeshConfig, MeshName, RelayLadder, Transport};
-use crate::runtime::{CreateParams, JoinParams, Node, Resolved, SignalHandling};
-use crate::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
+use crate::protocol::{
+    DirectorySelection, JoinTarget, Lookup, MeshConfig, MeshName, Nickname, RelayLadder, Transport,
+};
+use crate::runtime::{
+    CreateParams, JoinParams, Node, Resolved, SetupKind, SetupParams, SignalHandling,
+    derive_topic_mesh_config, setup_mesh,
+};
 use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -30,6 +32,7 @@ use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 /// than a silently loopback mesh; `default` so every field stays optional.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Opts {
     /// A `mesh id` to join.
     pub mesh: Option<String>,
@@ -66,6 +69,71 @@ pub struct Opts {
     pub max_direct: usize,
 }
 
+impl Opts {
+    /// Set the topic that derives the mesh.
+    #[must_use]
+    pub fn with_topic(mut self, topic: Option<String>) -> Self {
+        self.topic = topic;
+        self
+    }
+
+    /// Set the nickname.
+    #[must_use]
+    pub fn with_nick(mut self, nick: Option<String>) -> Self {
+        self.nick = nick;
+        self
+    }
+
+    /// Set the mesh name.
+    #[must_use]
+    pub fn with_mesh(mut self, mesh: Option<String>) -> Self {
+        self.mesh = mesh;
+        self
+    }
+
+    /// Set the name to create the mesh with.
+    #[must_use]
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Set the lookups.
+    #[must_use]
+    pub fn with_lookup(mut self, lookup: Vec<Lookup>) -> Self {
+        self.lookup = lookup;
+        self
+    }
+
+    /// Set the transports.
+    #[must_use]
+    pub fn with_transport(mut self, transport: Vec<Transport>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Set the relay URLs.
+    #[must_use]
+    pub fn with_relay_urls(mut self, relay_urls: Vec<String>) -> Self {
+        self.relay_urls = relay_urls;
+        self
+    }
+
+    /// Set the peer cap.
+    #[must_use]
+    pub fn with_max_peers(mut self, max_peers: usize) -> Self {
+        self.max_peers = max_peers;
+        self
+    }
+
+    /// Set the direct-session cap.
+    #[must_use]
+    pub fn with_max_direct(mut self, max_direct: usize) -> Self {
+        self.max_direct = max_direct;
+        self
+    }
+}
+
 /// The ladder these options name, or `None` for the default. Parsed as one
 /// list, so an empty or bad entry is an error rather than a shrunk ladder.
 fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
@@ -83,6 +151,7 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
     missing_debug_implementations,
     reason = "Node's Debug is manual and says nothing a caller wants; the identity a reader would look for is on `node` already"
 )]
+#[non_exhaustive]
 pub struct Membership {
     pub node: Node<MembershipApp>,
     /// Inbound `msg` frames in arrival order, bounded at [`INBOUND_CAP`].
@@ -251,13 +320,9 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
         (Some(_), Some(_)) => anyhow::bail!("pass only one of mesh / topic"),
         (Some(id), None) => {
             let target: JoinTarget = id.parse().map_err(|error| anyhow::anyhow!("{error}"))?;
-            let Resolved { kind, author, .. } = JoinParams {
-                target,
-                nickname,
-                password: None,
-            }
-            .resolve()
-            .context("resolving the mesh id")?;
+            let Resolved { kind, author, .. } = JoinParams::new(target, nickname, None)
+                .resolve()
+                .context("resolving the mesh id")?;
             Ok((kind, author))
         }
         (None, Some(string)) => {
@@ -296,16 +361,12 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
                     .unwrap_or_else(|| "habilis-network".to_string()),
             )
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-            let Resolved { kind, author, .. } = CreateParams {
-                name,
-                nickname,
-                config,
-                advertise: DirectorySelection::Unset,
-                password: None,
-                invite_only: false,
-            }
-            .resolve()
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let Resolved { kind, author, .. } =
+                CreateParams::new(name, nickname, config, DirectorySelection::Unset)
+                    .with_password(None)
+                    .with_invite_only(false)
+                    .resolve()
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
             Ok((kind, author))
         }
     }

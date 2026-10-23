@@ -30,10 +30,7 @@ fn logs() -> String {
 
 async fn open(nick: &str, opts: membership::Opts) -> Membership {
     let (sink, _events) = membership::json_sink();
-    let opts = membership::Opts {
-        nick: Some(nick.to_owned()),
-        ..opts
-    };
+    let opts = opts.with_nick(Some(nick.to_owned()));
     membership::join(&opts, sink).await.expect("open a member")
 }
 
@@ -95,11 +92,9 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
 
         let creator = open(
             "member-00",
-            membership::Opts {
-                lookup: vec![Lookup::Relay],
-                relay_urls: vec![relay.to_string()],
-                ..membership::Opts::default()
-            },
+            membership::Opts::default()
+                .with_lookup(vec![Lookup::Relay])
+                .with_relay_urls(vec![relay.to_string()]),
         )
         .await;
         let beacon_wait = Instant::now();
@@ -116,10 +111,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
             members.push(
                 open(
                     &format!("member-{index:02}"),
-                    membership::Opts {
-                        mesh: Some(mesh.clone()),
-                        ..membership::Opts::default()
-                    },
+                    membership::Opts::default().with_mesh(Some(mesh.clone())),
                 )
                 .await,
             );
@@ -156,10 +148,7 @@ fn a_joiner_after_every_member_released_the_rendezvous_meets_all_members() {
 
         let late = open(
             "member-late",
-            membership::Opts {
-                mesh: Some(mesh),
-                ..membership::Opts::default()
-            },
+            membership::Opts::default().with_mesh(Some(mesh)),
         )
         .await;
         let started = Instant::now();

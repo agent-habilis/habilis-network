@@ -256,12 +256,7 @@ fn frame_for(
     };
     Some(habilis_network::ops::app_frame(
         ctx,
-        AppFrameParams {
-            tag,
-            to,
-            corr: None,
-            body,
-        },
+        AppFrameParams::new(tag, to, None, body),
     ))
 }
 

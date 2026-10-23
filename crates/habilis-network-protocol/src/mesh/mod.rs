@@ -31,9 +31,9 @@ mod transport;
 pub use id::{MeshId, MeshIdError};
 pub use lookup::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, Lookup, LookupOpts,
-    MeshConfig, RelayChoice, resolve_lookups, validate_advertise,
+    LookupSet, MeshConfig, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection,
+    resolve_lookups, validate_advertise,
 };
-pub use lookup::{LookupSet, OptFlag, RelayLadder, RelayLadderError, RelaySelection};
 pub use name::{MeshName, NameError};
 pub use transport::{Transport, TransportPolicy};
 
@@ -142,6 +142,7 @@ pub struct LockedMesh {
 
 /// Why a [`LockedMesh`] would not unlock. The messages are the operator's text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnlockError {
     /// The id is invite-only: a bare hash never joins, redeem an invite.
     InviteOnly,

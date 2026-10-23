@@ -25,6 +25,7 @@ use crate::crypto::PASSWORD_VERIFIER_LEN;
 /// on the first reachable rung (see `lookup::relay_ladder` /
 /// `lookup::select_bootstrap_rung`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RelayChoice {
     Disabled,
     Pinned,
@@ -36,6 +37,7 @@ pub enum RelayChoice {
 /// `rendezvous_id`); `relay_lookup` is the connectivity relay (see
 /// [`RelayChoice`]). An all-off set is a loopback-only mesh.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LookupOpts {
     pub mdns: bool,
     pub dht: bool,
@@ -49,6 +51,30 @@ pub(super) const MAX_RELAY_LADDER: usize = 16;
 pub(super) const MAX_RELAY_URL_BYTES: usize = 512;
 
 impl LookupOpts {
+    /// Every lookup off, with the relay choice given. Turn one on with its `with_` method.
+    #[must_use]
+    pub const fn new(relay_lookup: RelayChoice) -> Self {
+        Self {
+            mdns: false,
+            dht: false,
+            relay_lookup,
+        }
+    }
+
+    /// Turn the mDNS lookup on or off.
+    #[must_use]
+    pub const fn with_mdns(mut self, mdns: bool) -> Self {
+        self.mdns = mdns;
+        self
+    }
+
+    /// Turn the DHT lookup on or off.
+    #[must_use]
+    pub const fn with_dht(mut self, dht: bool) -> Self {
+        self.dht = dht;
+        self
+    }
+
     /// Loopback-only: no address-lookups, no relay (the seed-derived
     /// port ladder bootstraps everything on one machine).
     #[must_use]
@@ -251,6 +277,7 @@ const ISSUER_PUBKEY_LEN: usize = 32;
 /// gossip topic, so every member that joins behaves identically. A
 /// different config is a different mesh (different topic).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MeshConfig {
     pub lookups: LookupOpts,
     /// The password verifier — a one-way check value derived from the
@@ -268,6 +295,22 @@ pub struct MeshConfig {
 }
 
 impl MeshConfig {
+    /// The mesh config from its four parts.
+    #[must_use]
+    pub const fn new(
+        lookups: LookupOpts,
+        password: Option<[u8; PASSWORD_VERIFIER_LEN]>,
+        issuer_pubkey: Option<[u8; ISSUER_PUBKEY_LEN]>,
+        transport: TransportPolicy,
+    ) -> Self {
+        Self {
+            lookups,
+            password,
+            issuer_pubkey,
+            transport,
+        }
+    }
+
     /// Default loopback-only config: no lookups. Test-only since the
     /// directory now builds its config from explicit lookups and `create`
     /// constructs `MeshConfig` directly.

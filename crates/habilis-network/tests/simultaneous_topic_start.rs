@@ -105,14 +105,14 @@ fn round_log_path(topic: &str) -> std::path::PathBuf {
 fn init_process() -> habilis_network_test_tracing::Guard {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        init(Tuning {
-            heal_interval: Duration::from_secs(5),
-            rival_recheck_first: Duration::from_secs(3),
-            rival_recheck: Duration::from_secs(8),
-            rival_recheck_meshed: Duration::from_secs(12),
-            rival_recheck_alone: Duration::from_secs(12),
-            ..Tuning::DEFAULTS
-        });
+        init(
+            Tuning::DEFAULTS
+                .with_heal_interval(Duration::from_secs(5))
+                .with_rival_recheck_first(Duration::from_secs(3))
+                .with_rival_recheck(Duration::from_secs(8))
+                .with_rival_recheck_meshed(Duration::from_secs(12))
+                .with_rival_recheck_alone(Duration::from_secs(12)),
+        );
     });
     habilis_network_test_tracing::init_with_writer(
         "habilis_network=info,habilis_network::beacon=info",
@@ -216,11 +216,7 @@ impl Joined {
 
 /// The reach of a public topic room cut down to the LAN. See the doc of the file.
 fn mdns_only() -> LookupOpts {
-    LookupOpts {
-        mdns: true,
-        dht: false,
-        relay_lookup: RelayChoice::Disabled,
-    }
+    LookupOpts::new(RelayChoice::Disabled).with_mdns(true)
 }
 
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
