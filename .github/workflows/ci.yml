@@ -38,6 +38,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The crate attr of this unstable lint comes from the command line: a crate root gated by
+      # target_arch drops it, so the wasm32 crates are checked on their own.
+      - name: Omitted patterns
+        env:
+          RUSTFLAGS: -Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint) -D non_exhaustive_omitted_patterns
+        run: |
+          cargo check --workspace --all-targets
+          cargo check --target wasm32-unknown-unknown -p habilis-network-bench-wasm
+          cargo check --target wasm32-unknown-unknown -p habilis-network-chunks --test idb_browser
+
       # The rules of the Rust style guide that no lint checks (issue #29). The exceptions, each
       # with its reason, are in scripts/style-check/style-check.allow.
       - name: Style rules without a lint
