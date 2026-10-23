@@ -214,24 +214,12 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
     // into a world-readable dir is rejected rather than trusted.
     let meta = std::fs::symlink_metadata(base)?;
     if !meta.file_type().is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "runtime dir {} is not a directory — remove it",
-                base.display()
-            ),
-        ));
+        return Err(not_a_directory(base));
     }
     if meta.uid() != current_uid() {
         // A local user squatted our predictable /tmp path. We refuse to write
         // secrets into a dir we do not own; the operator must clear it.
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "runtime dir {} is owned by another user (squatted) — remove it and retry",
-                base.display()
-            ),
-        ));
+        return Err(squatted(base));
     }
     if meta.permissions().mode() & 0o077 != 0 {
         std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700))?;
@@ -270,15 +258,103 @@ pub fn ensure_runtime_base(base: &std::path::Path) -> std::io::Result<()> {
         ));
     }
     if !meta.file_type().is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "runtime dir {} is not a directory — remove it",
-                base.display()
-            ),
-        ));
+        return Err(not_a_directory(base));
     }
     Ok(())
+}
+
+/// The refusal of a base that is not a directory, a link included. One text for
+/// [`ensure_runtime_base`] and [`check_runtime_base`].
+#[cfg(feature = "host")]
+fn not_a_directory(base: &std::path::Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "runtime dir {} is not a directory — remove it",
+            base.display()
+        ),
+    )
+}
+
+/// The refusal of a base that another user owns. One text for
+/// [`ensure_runtime_base`] and [`check_runtime_base`].
+#[cfg(all(unix, feature = "host"))]
+fn squatted(base: &std::path::Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "runtime dir {} is owned by another user (squatted) — remove it and retry",
+            base.display()
+        ),
+    )
+}
+
+/// What [`check_runtime_base`] found at the base.
+#[cfg(all(unix, feature = "host"))]
+#[derive(Debug)]
+pub enum RuntimeBaseCheck {
+    /// A directory that this user owns, with no group or other bits.
+    Private,
+    /// Nothing is at the base, so no daemon of this user runs there.
+    Absent,
+    /// Something is at the base, and it is not a private directory of this
+    /// user: a link, a file, a directory of another user, or a directory that
+    /// other users can open. The error says which.
+    Refused(std::io::Error),
+}
+
+/// Check the base of a client before it reads a file under it (R12 of
+/// `docs/windows.md`). The checks are the ones of [`ensure_runtime_base`], but
+/// this creates nothing and changes nothing: a client must not repair a base,
+/// and a base that is open to other users is refused, not tightened. A daemon
+/// always leaves its base at `0700`, because its bind goes through
+/// [`ensure_runtime_base`].
+///
+/// The base is `/tmp/<product>-<uid>`, a path that another user can create
+/// first. Without this check, a client reads the marker that the other user
+/// put there and talks to the other user's endpoint.
+///
+/// # Errors
+/// The base could not be read for a reason other than its absence.
+#[cfg(all(unix, feature = "host"))]
+pub fn check_runtime_base(base: &std::path::Path) -> std::io::Result<RuntimeBaseCheck> {
+    check_runtime_base_owned_by(base, current_uid())
+}
+
+/// [`check_runtime_base`] with the owner as a parameter, so that a test can
+/// prove the owner check without a second account.
+#[cfg(all(unix, feature = "host"))]
+fn check_runtime_base_owned_by(
+    base: &std::path::Path,
+    uid: u32,
+) -> std::io::Result<RuntimeBaseCheck> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    // `symlink_metadata` does not follow a link, as in `ensure_runtime_base`.
+    let meta = match std::fs::symlink_metadata(base) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RuntimeBaseCheck::Absent);
+        }
+        Err(error) => return Err(error),
+    };
+    if !meta.file_type().is_dir() {
+        return Ok(RuntimeBaseCheck::Refused(not_a_directory(base)));
+    }
+    if meta.uid() != uid {
+        return Ok(RuntimeBaseCheck::Refused(squatted(base)));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Ok(RuntimeBaseCheck::Refused(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "runtime dir {} is open to other users (mode {:o}) — remove it and retry",
+                base.display(),
+                meta.permissions().mode() & 0o777
+            ),
+        )));
+    }
+    Ok(RuntimeBaseCheck::Private)
 }
 
 /// Whether `path` is inside `base`. A `--state-file` / `--log-dir` override can
@@ -462,6 +538,128 @@ mod tests {
         super::ensure_runtime_base(&target).expect("a plain folder is accepted");
         drop(cleanup);
         assert!(!root.exists(), "the test folder is removed");
+    }
+
+    /// A private test folder under the temp dir, removed also when an
+    /// assertion fails.
+    #[cfg(unix)]
+    struct TempRoot(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl TempRoot {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("hn-r12-{}-{tag}", std::process::id()));
+            // A pid can come back, so a folder that an earlier run left goes first.
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("create the test folder");
+            Self(root)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The mode of `path`, without the file type bits.
+    #[cfg(unix)]
+    fn mode_of(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::symlink_metadata(path)
+            .expect("read the mode")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    /// The kind of the refusal, or a panic that names what was found.
+    #[cfg(unix)]
+    fn refused(found: std::io::Result<super::RuntimeBaseCheck>) -> std::io::ErrorKind {
+        match found.expect("the check reads the base") {
+            super::RuntimeBaseCheck::Refused(error) => error.kind(),
+            found @ (super::RuntimeBaseCheck::Private | super::RuntimeBaseCheck::Absent) => {
+                panic!("expected a refusal, got {found:?}")
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_runtime_base_accepts_a_private_folder_of_its_owner_only() {
+        let root = TempRoot::new("owner");
+        let base = root.0.join("base");
+        super::ensure_runtime_base(&base).expect("make a private base");
+        let uid = super::current_uid();
+
+        assert!(matches!(
+            super::check_runtime_base_owned_by(&base, uid),
+            Ok(super::RuntimeBaseCheck::Private)
+        ));
+        assert!(matches!(
+            super::check_runtime_base(&base),
+            Ok(super::RuntimeBaseCheck::Private)
+        ));
+        assert_eq!(
+            refused(super::check_runtime_base_owned_by(
+                &base,
+                uid.wrapping_add(1)
+            )),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_runtime_base_refuses_an_open_folder_and_leaves_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = TempRoot::new("open");
+        let base = root.0.join("base");
+        std::fs::create_dir(&base).expect("make the base");
+        // Set, not left to the umask, so that the test does not depend on it.
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755))
+            .expect("open the base");
+
+        assert_eq!(
+            refused(super::check_runtime_base(&base)),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(mode_of(&base), 0o755, "the check changes no mode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_runtime_base_refuses_a_link_and_a_file() {
+        let root = TempRoot::new("link");
+        let target = root.0.join("target");
+        super::ensure_runtime_base(&target).expect("make a private folder");
+        let link = root.0.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("make the link");
+        let file = root.0.join("file");
+        std::fs::write(&file, b"").expect("make the file");
+
+        assert_eq!(
+            refused(super::check_runtime_base(&link)),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            refused(super::check_runtime_base(&file)),
+            std::io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_runtime_base_creates_no_absent_base() {
+        let root = TempRoot::new("absent");
+        let base = root.0.join("base");
+
+        assert!(matches!(
+            super::check_runtime_base(&base),
+            Ok(super::RuntimeBaseCheck::Absent)
+        ));
+        assert!(!base.exists(), "the check creates nothing");
     }
 
     #[test]
