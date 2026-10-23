@@ -1,8 +1,8 @@
 use std::future::Future;
 
 use habilis_network_chunks::{
-    CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, FsStore,
-    MemStore, chunk_hash,
+    CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, DiskStore, FileId,
+    InMemoryStore, chunk_hash,
 };
 
 /// Bytes that differ per position and per seed, so a chunk lifted from one file
@@ -34,7 +34,7 @@ async fn store_chunk(store: &impl ChunkStore, map: &ChunkMap, bytes: &[u8], inde
 /// What a backend supplies beyond the traits.
 ///
 /// One thing, and it is exactly what the traits keep opaque: **where a file
-/// lives**. `MemStore` accepts any key; a filesystem backend needs a path it can
+/// lives**. `InMemoryStore` accepts any key; a filesystem backend needs a path it can
 /// open. A suite that hardcoded either would be testing one backend.
 trait Harness {
     type Store: ChunkStore;
@@ -67,11 +67,11 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-struct MemHarness(MemStore);
+struct MemHarness(InMemoryStore);
 
 impl Harness for MemHarness {
-    type Store = MemStore;
-    fn store(&self) -> &MemStore {
+    type Store = InMemoryStore;
+    fn store(&self) -> &InMemoryStore {
         &self.0
     }
     fn key(&self, name: &str) -> String {
@@ -796,20 +796,20 @@ impl Drop for TempDir {
 
 struct FsHarness {
     dir: TempDir,
-    store: FsStore,
+    store: DiskStore,
 }
 
 impl FsHarness {
     fn new() -> Self {
         let dir = TempDir::new("store");
-        let store = FsStore::open(dir.0.join("store")).expect("open");
+        let store = DiskStore::open(dir.0.join("store")).expect("open");
         Self { dir, store }
     }
 }
 
 impl Harness for FsHarness {
-    type Store = FsStore;
-    fn store(&self) -> &FsStore {
+    type Store = DiskStore;
+    fn store(&self) -> &DiskStore {
         &self.store
     }
     fn key(&self, name: &str) -> String {
@@ -819,7 +819,7 @@ impl Harness for FsHarness {
 
 /// The in-memory backend. A backend costs one module like this one.
 mod mem {
-    use super::{MemHarness, MemStore, block_on};
+    use super::{InMemoryStore, MemHarness, block_on};
 
     macro_rules! run {
         ($case:ident) => {
@@ -827,7 +827,7 @@ mod mem {
             fn $case() {
                 // A fresh store per case: conformance must not depend on what
                 // some earlier case happened to leave behind.
-                block_on(super::$case(&MemHarness(MemStore::new())));
+                block_on(super::$case(&MemHarness(InMemoryStore::new())));
             }
         };
     }
@@ -852,10 +852,10 @@ mod fs_store {
 }
 
 /// Dedup is a storage-level claim, so assert it at storage level too: the
-/// `MemStore` really does keep one record for a chunk two files share.
+/// `InMemoryStore` really does keep one record for a chunk two files share.
 #[test]
 fn mem_stores_a_shared_chunk_exactly_once() {
-    let store = MemStore::new();
+    let store = InMemoryStore::new();
     block_on(async {
         let shared = body(CHUNK_BYTES_USIZE, 45);
         let hash = chunk_hash(&shared);

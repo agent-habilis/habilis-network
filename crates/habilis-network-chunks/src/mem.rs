@@ -27,7 +27,7 @@ fn poisoned(what: &str) -> anyhow::Error {
 
 /// A store that keeps everything in memory and forgets it on drop.
 #[derive(Debug, Default)]
-pub struct MemStore {
+pub struct InMemoryStore {
     chunks: Mutex<HashMap<ChunkHash, Vec<u8>>>,
     maps: Mutex<HashMap<Root, ChunkMap>>,
     /// `key -> (size, mtime, root)`, the version gate.
@@ -40,7 +40,7 @@ pub struct MemStore {
     marks: Mutex<Option<HashSet<ChunkHash>>>,
 }
 
-impl MemStore {
+impl InMemoryStore {
     /// An empty store.
     #[must_use]
     pub fn new() -> Self {
@@ -60,7 +60,7 @@ impl MemStore {
     }
 }
 
-impl ChunkSource for MemStore {
+impl ChunkSource for InMemoryStore {
     async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>> {
         Ok(self
             .chunks
@@ -122,7 +122,7 @@ impl ChunkSource for MemStore {
     }
 }
 
-impl ChunkStore for MemStore {
+impl ChunkStore for InMemoryStore {
     async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<()> {
         // Verify before storing, always. A peer that sends bytes addressing
         // something else costs its own bandwidth and nothing of ours; storing

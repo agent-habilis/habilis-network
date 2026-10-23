@@ -683,10 +683,10 @@ pub mod idb;
 pub mod mem;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use fs::{FsOrigin, FsStore};
+pub use fs::{DiskOrigin, DiskStore};
 #[cfg(target_arch = "wasm32")]
 pub use idb::IdbStore;
-pub use mem::MemStore;
+pub use mem::InMemoryStore;
 
 #[cfg(test)]
 mod tests {

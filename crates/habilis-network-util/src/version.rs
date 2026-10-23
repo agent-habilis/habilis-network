@@ -43,7 +43,7 @@ static BUILD_VERSION: OnceLock<&'static str> = OnceLock::new();
 /// Register the consumer's build stamp. Idempotent: the first caller wins and
 /// later calls are ignored, so a test that spins up several in-process daemons
 /// cannot panic on a re-set.
-pub fn set_build_version(version: &'static str) {
+pub fn set_build_string(version: &'static str) {
     let _ = BUILD_VERSION.set(version);
 }
 
@@ -51,7 +51,7 @@ pub fn set_build_version(version: &'static str) {
 /// registered one. The fallback keeps a direct engine embedder truthful rather
 /// than blank.
 #[must_use]
-pub fn build_version() -> &'static str {
+pub fn build_string() -> &'static str {
     BUILD_VERSION.get().copied().unwrap_or(VERSION)
 }
 

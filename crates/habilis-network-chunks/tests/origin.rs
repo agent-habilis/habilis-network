@@ -1,6 +1,6 @@
 //! The non-owning half: serving the user's own files where they already sit.
 //!
-//! [`FsOrigin`] is the reason this crate exists rather than reaching for an
+//! [`DiskOrigin`] is the reason this crate exists rather than reaching for an
 //! ordinary content-addressed store. It answers a bare chunk address — no file,
 //! no offset, because that is all a peer sends — by resolving it back to a place
 //! on disk and reading through. Nothing is copied, so publishing a large tree

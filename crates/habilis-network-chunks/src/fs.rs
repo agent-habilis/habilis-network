@@ -2,13 +2,13 @@
 //!
 //! The split is the crate's central asymmetry made concrete.
 //!
-//! - [`FsStore`] **owns** its chunks. A mirror, a seeder, anyone who fetched
+//! - [`DiskStore`] **owns** its chunks. A mirror, a seeder, anyone who fetched
 //!   bytes from the network and has nowhere else to put them.
-//! - [`FsOrigin`] **borrows** them. It serves the user's own files where they
+//! - [`DiskOrigin`] **borrows** them. It serves the user's own files where they
 //!   already sit, holding nothing but addresses and offsets, so publishing a
 //!   500 GB tree costs a `stat` walk rather than a copy of it.
 //!
-//! `FsOrigin` implements [`ChunkSource`] and not [`ChunkStore`], and that is
+//! `DiskOrigin` implements [`ChunkSource`] and not [`ChunkStore`], and that is
 //! the honest shape rather than a missing feature: `put` on an origin would
 //! have to copy the caller's bytes into a store — the one thing this design
 //! exists to avoid — or silently do nothing.
@@ -20,7 +20,7 @@
 //! there is no separate range set that can outlive the data it describes and
 //! leave this peer advertising bytes it cannot serve. What remains is making a
 //! chunk file appear whole or not at all, which is what the temp-file-then-
-//! rename in [`FsStore::put`] is for. A half-written chunk under its final name
+//! rename in [`DiskStore::put`] is for. A half-written chunk under its final name
 //! would be a peer that lies.
 
 use std::collections::{HashMap, HashSet};
@@ -79,17 +79,17 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// of thousands of entries is slow to enumerate on every filesystem that
 /// matters.
 #[derive(Debug)]
-pub struct FsStore {
+pub struct DiskStore {
     root: PathBuf,
     binds: Mutex<HashMap<String, (u64, i64, Root)>>,
-    /// Live set for the current reclamation pass; see [`MemStore`]'s note on
+    /// Live set for the current reclamation pass; see [`InMemoryStore`]'s note on
     /// why `None` means "nothing is protected".
     ///
-    /// [`MemStore`]: crate::MemStore
+    /// [`InMemoryStore`]: crate::InMemoryStore
     marks: Mutex<Option<HashSet<ChunkHash>>>,
 }
 
-impl FsStore {
+impl DiskStore {
     /// Open or create a store under `root`.
     ///
     /// # Errors
@@ -249,7 +249,7 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap> {
     ChunkMap::from_leaves(leaves, size)
 }
 
-impl ChunkSource for FsStore {
+impl ChunkSource for DiskStore {
     async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>> {
         match fs::read(self.chunk_path(hash)) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -298,7 +298,7 @@ impl ChunkSource for FsStore {
     }
 }
 
-impl ChunkStore for FsStore {
+impl ChunkStore for DiskStore {
     async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<()> {
         let actual = chunk_hash(bytes);
         if actual != hash {
@@ -377,11 +377,11 @@ struct Borrowed {
 /// A source that serves the user's own files in place, copying nothing.
 ///
 /// This is what makes `serve ~/Movies` a `stat` walk. Addresses are computed
-/// **lazily, per file, on first interest** — [`FsOrigin::adopt`] reads one file
+/// **lazily, per file, on first interest** — [`DiskOrigin::adopt`] reads one file
 /// once and keeps its row — so publishing a tree costs nothing until somebody
 /// actually asks for something in it.
 #[derive(Debug, Default)]
-pub struct FsOrigin {
+pub struct DiskOrigin {
     files: Mutex<HashMap<Root, Borrowed>>,
     /// The reverse index that lets a bare `hash` find bytes it does not own.
     ///
@@ -393,7 +393,7 @@ pub struct FsOrigin {
     binds: Mutex<HashMap<String, (u64, i64, Root)>>,
 }
 
-impl FsOrigin {
+impl DiskOrigin {
     /// A source serving nothing yet.
     #[must_use]
     pub fn new() -> Self {
@@ -515,7 +515,7 @@ impl FsOrigin {
     }
 }
 
-impl ChunkSource for FsOrigin {
+impl ChunkSource for DiskOrigin {
     async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>> {
         use std::io::Seek as _;
         let located = {

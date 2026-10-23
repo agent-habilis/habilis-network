@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::Path;
 
-use habilis_network_chunks::{CHUNK_BYTES_USIZE, ChunkSource, FileId, FsOrigin, chunk_hash};
+use habilis_network_chunks::{CHUNK_BYTES_USIZE, ChunkSource, DiskOrigin, FileId, chunk_hash};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     use std::task::{Context, Poll, Waker};
@@ -76,7 +76,7 @@ fn an_origin_serves_by_address_without_copying() {
     let dir = TempDir::new("serve");
     let bytes = body(CHUNK_BYTES_USIZE * 3 + 17, 1);
     let path = write(&dir, "movie.bin", &bytes);
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
@@ -113,7 +113,7 @@ fn coverage_is_all_or_nothing_and_follows_the_file() {
     let dir = TempDir::new("coverage");
     let bytes = body(CHUNK_BYTES_USIZE * 2, 2);
     let path = write(&dir, "doc.bin", &bytes);
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
@@ -133,7 +133,7 @@ fn a_changed_file_stops_answering_for_its_old_addresses() {
     let dir = TempDir::new("gate");
     let bytes = body(CHUNK_BYTES_USIZE * 2, 4);
     let path = write(&dir, "notes.bin", &bytes);
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
@@ -163,7 +163,7 @@ fn bytes_that_changed_under_a_stable_stat_are_still_caught() {
     let dir = TempDir::new("inplace");
     let bytes = body(CHUNK_BYTES_USIZE, 5);
     let path = write(&dir, "same-size.bin", &bytes);
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let described = describe(&path);
@@ -244,7 +244,7 @@ fn a_shared_chunk_answers_from_whichever_file_was_adopted_first() {
 
     let first_path = write(&dir, "first.bin", &first);
     let second_path = write(&dir, "second.bin", &second);
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let first_root = origin
@@ -272,7 +272,7 @@ fn forgetting_a_root_drops_its_addresses() {
     let dir = TempDir::new("forget");
     let bytes = body(CHUNK_BYTES_USIZE, 8);
     let path = write(&dir, "gone.bin", &bytes);
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
@@ -290,7 +290,7 @@ fn forgetting_a_root_drops_its_addresses() {
 /// answer to a peer asking for a chunk from a share we do not serve.
 #[test]
 fn an_unadopted_address_is_absent() {
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
     block_on(async {
         assert_eq!(
             origin.get(chunk_hash(b"never adopted")).await.expect("get"),
@@ -306,7 +306,7 @@ fn an_unadopted_address_is_absent() {
 fn adopting_a_file_that_disagrees_with_its_description_fails() {
     let dir = TempDir::new("mismatch");
     let path = write(&dir, "grew.bin", &body(1024, 9));
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
     let mut described = describe(&path);
     described.size += 1;
     assert!(origin.adopt(&described, &path).is_err());
@@ -318,7 +318,7 @@ fn tiny_and_empty_files_adopt_cleanly() {
     let dir = TempDir::new("tiny");
     let empty = write(&dir, "empty.bin", b"");
     let tiny = write(&dir, "tiny.bin", b"hello");
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let empty_root = origin.adopt(&describe(&empty), &empty).expect("adopt");
@@ -350,7 +350,7 @@ fn a_file_on_an_exact_chunk_boundary_has_no_trailing_chunk() {
     let dir = TempDir::new("boundary");
     let bytes = body(CHUNK_BYTES_USIZE * 2, 10);
     let path = write(&dir, "exact.bin", &bytes);
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let root = origin.adopt(&describe(&path), &path).expect("adopt");
@@ -369,7 +369,7 @@ fn adopting_records_a_binding_that_a_version_change_breaks() {
     let dir = TempDir::new("bind");
     let bytes = body(2048, 11);
     let path = write(&dir, "bound.bin", &bytes);
-    let origin = FsOrigin::new();
+    let origin = DiskOrigin::new();
 
     block_on(async {
         let described = describe(&path);

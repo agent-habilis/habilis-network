@@ -3,7 +3,7 @@
 //! Reachable from the main thread, which is what makes it the browser backend
 //! that matters — a tab can seed without spinning up a Worker.
 //!
-//! Unlike [`FsOrigin`], this **does** copy the bytes in. A browser has no path
+//! Unlike [`DiskOrigin`], this **does** copy the bytes in. A browser has no path
 //! back to a file the user picked, so a tab that fetched a chunk has nowhere
 //! else to keep it. That is a property of the platform rather than a design
 //! choice, and it is why the store-versus-source split exists.
@@ -20,7 +20,7 @@
 //! scopes its answers, and must, or holding a chunk becomes a way for anyone to
 //! probe what else you hold.
 //!
-//! [`FsOrigin`]: crate::FsOrigin
+//! [`DiskOrigin`]: crate::DiskOrigin
 
 use std::cell::RefCell;
 use std::collections::HashSet;

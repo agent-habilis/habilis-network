@@ -685,7 +685,7 @@ struct EventLoop<A: NodeDriver> {
 fn log_daemon_start(author: &Nickname) {
     tracing::info!(
         target: "habilis_network::lifecycle",
-        version = version::build_version(),
+        version = version::build_string(),
         nickname = %author,
         "daemon starting"
     );
