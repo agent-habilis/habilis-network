@@ -157,7 +157,7 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
 )]
 #[non_exhaustive]
 pub struct Membership {
-    /// The node.
+    /// The running node that this membership drives.
     pub node: Node<MembershipApp>,
     /// Inbound `msg` frames in arrival order, bounded at [`INBOUND_CAP`].
     pub inbound: mpsc::Receiver<Inbound>,

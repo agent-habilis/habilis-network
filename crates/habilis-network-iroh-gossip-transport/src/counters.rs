@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct Stats {
     /// Frames this member put on the topic, and their bytes (header included).
     pub frames_out: u64,
-    /// Bytes of those frames.
+    /// Bytes of the frames sent.
     pub bytes_out: u64,
     /// Frames that arrived from the topic, for any member, and their bytes. This
     /// is the flood volume that this member pays for.

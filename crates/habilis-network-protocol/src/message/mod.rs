@@ -259,7 +259,7 @@ pub enum MessageKind {
     /// the pending-call registry (`None` for fire-and-forget). Everything else
     /// the payload needs (task id, method, params) rides inside `body`.
     App {
-        /// The application tag.
+        /// The application tag, which routes the frame to its app handler.
         tag: AppTag,
         /// The recipient, when the message is directed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -479,7 +479,7 @@ pub struct Message {
     pub author: Nickname,
     /// Unix timestamp (seconds, UTC).
     pub timestamp: UnixSecs,
-    /// The payload.
+    /// The body of the message (sealed for a directed frame on a passworded mesh).
     pub body: MessageBody,
     /// Author's Ed25519 public key and the detached signature over the message's
     /// [canonical bytes](Message::canonical_bytes), always together: a message has both or
@@ -718,13 +718,13 @@ fn is_lower_hex(value: &str, bytes: usize) -> bool {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct AppFrameParams {
-    /// The application tag.
+    /// The application tag, which routes the frame to its app handler.
     pub tag: AppTag,
     /// The recipient, when the frame is directed.
     pub to: Option<Nickname>,
     /// The correlation id of a request or reply.
     pub corr: Option<CorrId>,
-    /// The payload.
+    /// The body the app sends.
     pub body: MessageBody,
 }
 
@@ -1242,7 +1242,7 @@ pub struct BuildMsgParams<'mesh> {
     pub mesh: &'mesh MeshId,
     /// The member that signs the message.
     pub author: &'mesh Nickname,
-    /// The payload.
+    /// The body to sign.
     pub body: MessageBody,
     /// Where the message sits in its author's chain.
     pub chain: ChainCtx,

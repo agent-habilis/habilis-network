@@ -268,7 +268,7 @@ impl Password {
         Self(value)
     }
 
-    /// The text of the value.
+    /// The password in plain text. `Debug` hides it; this does not.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

@@ -66,13 +66,13 @@ impl ContentId {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct OffloadRequest {
-    /// The path of the blob.
+    /// The file to offload.
     pub path: PathBuf,
     /// The directory where the blob is spooled.
     pub spool_dir: PathBuf,
-    /// The id of the content.
+    /// The content group that the blob belongs to.
     pub content_id: ContentId,
-    /// The password, if the blob needs one.
+    /// The mesh password that the ticket inherits, so a scraped ticket cannot be redeemed without it.
     pub password: Option<crypto::Password>,
 }
 

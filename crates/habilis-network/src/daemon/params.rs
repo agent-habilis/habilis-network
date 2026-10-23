@@ -130,7 +130,7 @@ impl std::error::Error for PasswordRequired {}
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct TopicParams {
-    /// The text of the value.
+    /// The shared string that fixes the mesh. Every peer that passes the same string meets in the same mesh.
     pub string: String,
     /// `None` ⇒ a random `word-word` nickname is minted in `resolve`.
     pub nickname: Option<Nickname>,

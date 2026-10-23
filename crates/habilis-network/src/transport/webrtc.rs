@@ -362,7 +362,7 @@ pub struct WebRtcSignalAcceptor {
 }
 
 impl WebRtcSignalAcceptor {
-    /// An empty value.
+    /// An acceptor that answers WebRTC offers. It shares `admission` with the dialing side, so the ceiling is one number per node.
     #[must_use]
     pub fn new(
         handle: WebRtcHandle,

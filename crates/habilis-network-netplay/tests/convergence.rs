@@ -31,7 +31,7 @@ pub struct Input(pub i32);
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct State {
-    /// The score.
+    /// The sum of every input applied so far.
     pub value: i64,
     /// The frame that the state belongs to.
     pub frame: Frame,

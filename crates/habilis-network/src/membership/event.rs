@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 pub enum MembershipEvent {
     /// The daemon is ready.
     Ready {
-        /// The mesh.
+        /// The mesh id, as text.
         mesh: String,
         /// The name of the mesh.
         name: String,
@@ -76,12 +76,12 @@ pub enum MembershipEvent {
     },
     /// An informational line.
     Info {
-        /// The text.
+        /// The line to show.
         text: String,
     },
     /// An error line.
     Error {
-        /// The text.
+        /// The line to show.
         text: String,
     },
 }

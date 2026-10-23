@@ -172,9 +172,9 @@ pub trait NodeDriver: NodeApp {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct IpcRequest<'name, C> {
-    /// The command.
+    /// The parsed IPC command.
     pub cmd: C,
-    /// Where the response goes.
+    /// Gets the text of the answer.
     pub resp: oneshot::Sender<String>,
     /// The name of the mesh.
     pub name: &'name MeshName,

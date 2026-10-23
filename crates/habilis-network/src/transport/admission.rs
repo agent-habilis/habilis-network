@@ -499,7 +499,7 @@ impl SignalAdmission {
             .saturating_sub(inner.ceiling.units() + inner.rounds_in_flight())
     }
 
-    /// An empty value.
+    /// An admission table with a ceiling of `cap` direct connections and none in use.
     #[must_use]
     pub fn new(cap: usize) -> Self {
         Self {

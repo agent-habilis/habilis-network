@@ -59,7 +59,7 @@ pub enum SetupKind {
     },
     /// Join a mesh.
     Join {
-        /// The mesh.
+        /// The unlocked mesh to join.
         mesh: Mesh,
         /// The password the joiner presented (already verified + applied to
         /// `mesh`), retained so the daemon can key blob-ticket protection with
@@ -71,7 +71,7 @@ pub enum SetupKind {
     /// so it co-hosts the shared rendezvous eagerly-but-probed
     /// ([`CoHostPolicy::EagerProbed`]) rather than deferring.
     Topic {
-        /// The mesh.
+        /// The mesh derived from `topic_string`.
         mesh: Mesh,
         /// The raw string the mesh was derived from. The derived name is
         /// lossy (URL scheme and query stripped, truncated), so the string
@@ -552,7 +552,7 @@ impl std::fmt::Debug for InjectedEndpoint {
 pub struct SetupParams {
     /// This member's nickname, the author of every message it sends.
     pub author: Nickname,
-    /// The max peers.
+    /// G: the gossip active-view cap. `0` takes `tuning::GOSSIP_ACTIVE_VIEW_CAPACITY`.
     pub max_peers: usize,
     /// C: the ceiling of direct connections. `0` takes [`crate::transport::MAX_DIRECT_PEERS`].
     pub max_direct: usize,
@@ -563,7 +563,7 @@ pub struct SetupParams {
     /// claim a `/tmp` path under any single one's name. `None` for an embedder
     /// that writes no files and binds no control socket.
     pub runtime_base: Option<PathBuf>,
-    /// The state file.
+    /// Where the daemon writes its identity and readiness JSON. `None` writes none.
     pub state_file: Option<PathBuf>,
     /// Where the node emits its events (`NodeEvent`).
     pub sink: std::sync::Arc<dyn NodeSink>,

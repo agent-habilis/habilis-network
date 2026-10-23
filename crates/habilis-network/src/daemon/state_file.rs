@@ -262,7 +262,7 @@ pub struct ReadySnapshot {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct SessionIdentity {
-    /// The mesh.
+    /// The mesh id, as text.
     pub mesh: Option<String>,
     /// The name of the mesh.
     pub name: Option<String>,
@@ -315,7 +315,7 @@ fn mesh_field(doc: &serde_json::Value) -> Option<String> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct SessionEntry {
-    /// The mesh.
+    /// The mesh id, as text.
     pub mesh: Option<String>,
     /// The name of the mesh.
     pub name: Option<String>,

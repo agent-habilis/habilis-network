@@ -98,7 +98,7 @@ pub fn directory_config(lookups: LookupOpts) -> MeshConfig {
 pub struct Ad {
     /// The mesh that this ad advertises.
     pub id: MeshId,
-    /// How many peers the mesh has.
+    /// How many members the mesh has, this advertiser included.
     pub peers: usize,
 }
 
@@ -139,7 +139,7 @@ pub struct Listing {
     /// `true` if the advertised id carries a password verifier — joining
     /// needs the password, so the ad alone does not admit.
     pub password: bool,
-    /// How many peers the mesh has.
+    /// How many members the mesh has, this advertiser included.
     pub peers: usize,
     /// Local instant of the most recent ad; drives expiry.
     pub last_seen: Instant,

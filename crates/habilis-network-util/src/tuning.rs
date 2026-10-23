@@ -230,7 +230,7 @@ pub struct Tuning {
     pub ppid_watch_interval: Duration,
     /// How long the mesh may stay unhealthy before it re-bootstraps.
     pub heal_stall_threshold: Duration,
-    /// How long without traffic before the node recovers from starvation.
+    /// How long with no verified inbound gossip, while peers are known, before the node re-bridges and re-announces.
     pub starvation_threshold: Duration,
     /// How often a directory advertiser re-broadcasts its mesh.
     pub advertise_interval: Duration,
@@ -246,7 +246,7 @@ pub struct Tuning {
     pub rival_recheck: Duration,
     /// How often a meshed public beacon holder rechecks for a rival.
     pub rival_recheck_meshed: Duration,
-    /// How often a lone beacon holder rechecks, with a ramping interval.
+    /// The cap of the ramping recheck interval of a beacon holder with no peers (a topic peer that stays alone).
     pub rival_recheck_alone: Duration,
     /// How often a node revisits the rendezvous to meet split islands.
     pub rendezvous_periodic_return: Duration,

@@ -14,9 +14,9 @@ use crate::transport::MeshSender;
 pub struct HandlerCtx<'node> {
     /// The sender of the topic.
     pub sender: &'node MeshSender,
-    /// The endpoint.
+    /// This node's iroh endpoint.
     pub endpoint: &'node Endpoint,
-    /// The mesh.
+    /// The id of the mesh this node belongs to.
     pub mesh: &'node MeshId,
     /// This member's nickname, the author of every message it sends.
     pub author: &'node Nickname,

@@ -66,7 +66,7 @@ const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
 pub enum Reach {
     /// A direct path.
     Direct,
-    /// The gossip topic.
+    /// No direct link: the peer is heard over the gossip topic, through other members or the relay.
     Gossip,
 }
 
