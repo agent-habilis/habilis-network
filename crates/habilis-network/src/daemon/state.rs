@@ -387,6 +387,13 @@ pub struct EventLoopState {
     /// The keys that said goodbye. A key is minted per run, so a key that left never speaks again:
     /// anything it signs afterwards is a replay, whatever its timestamp says. Keyed on the key
     /// and not on the nickname, which another run may take.
+    ///
+    /// Bounded like `quiet` and `left`, by the same rule: keys are free, so an unbounded set is
+    /// a memory leak under churn. The bound is a second layer, not the first: a replay of a
+    /// frame this node still holds is dropped by [`Self::mark_seen`] before membership sees it,
+    /// whatever this set holds. What the bound gives up is narrow: a frame of a key that left
+    /// more than `QUIET_CAP` departures ago, that this node never held, counts as an arrival
+    /// until its author goes quiet.
     pub(crate) left_keys: BoundedFifoSet<AuthorKey>,
     /// Presentation layer: peers for whom we have *surfaced* an
     /// arrival (synthetic `joined`, real `Presence::Joined`, or
