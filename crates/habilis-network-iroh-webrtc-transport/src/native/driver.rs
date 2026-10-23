@@ -210,8 +210,6 @@ pub(crate) async fn drive_until_channel_ready(
                         opened = Some(id);
                     }
                 },
-                #[cfg(feature = "_internal_test_exports")]
-                Output::Event(Event::Probe(_)) => {}
                 Output::Event(
                     Event::Connected
                     | Event::IceConnectionStateChange(_)
@@ -233,6 +231,10 @@ pub(crate) async fn drive_until_channel_ready(
                     | Event::Closed
                     | Event::RawPacket(_),
                 ) => {}
+                #[expect(
+                    clippy::match_same_arms,
+                    reason = "str0m's Event is non_exhaustive, so rustc needs this wildcard after the arm that names every variant"
+                )]
                 Output::Event(_) => {}
             }
         }
@@ -452,8 +454,6 @@ async fn pump_outputs(
             Output::Event(Event::IceConnectionStateChange(IceConnectionState::Disconnected)) => {
                 return Err(SessionEnd::Closed("ICE disconnected"));
             }
-            #[cfg(feature = "_internal_test_exports")]
-            Output::Event(Event::Probe(_)) => {}
             Output::Event(
                 Event::Connected
                 | Event::IceConnectionStateChange(_)
@@ -476,6 +476,10 @@ async fn pump_outputs(
                 | Event::Closed
                 | Event::RawPacket(_),
             ) => {}
+            #[expect(
+                clippy::match_same_arms,
+                reason = "str0m's Event is non_exhaustive, so rustc needs this wildcard after the arm that names every variant"
+            )]
             Output::Event(_) => {}
         }
     }
