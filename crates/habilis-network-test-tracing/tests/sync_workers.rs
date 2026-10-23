@@ -1,7 +1,8 @@
 //! An event of a thread that no test owns goes to every live test, and the failure
 //! text names them all.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use habilis_network_test_tracing::catch_panic;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -26,7 +27,7 @@ fn an_event_of_a_worker_thread_names_every_live_sync_test() {
         .map(|name| {
             let (live, emitted) = (Arc::clone(&live), Arc::clone(&emitted));
             named(name, move || {
-                catch_unwind(AssertUnwindSafe(|| {
+                catch_panic(AssertUnwindSafe(|| {
                     let _guard = init();
                     live.wait();
                     emitted.wait();

@@ -577,9 +577,10 @@ mod tests {
         let handle = GossipHandle::new(secret(1).public());
         handle.attach(Arc::new(Panicking));
 
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handle.shared.path_is_valid()
-        }));
+        let outcome =
+            habilis_network_test_tracing::catch_panic(std::panic::AssertUnwindSafe(|| {
+                handle.shared.path_is_valid()
+            }));
 
         assert!(outcome.is_err(), "the liveness check should panic");
         assert!(

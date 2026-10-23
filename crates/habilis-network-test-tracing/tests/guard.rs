@@ -2,12 +2,13 @@
 //! passes a clean test. A spawned task is in `spawned_task.rs`, because an
 //! event from a worker thread reaches every live guard of its binary.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use habilis_network_test_tracing::catch_panic;
+use std::panic::AssertUnwindSafe;
 
 use habilis_network_test_tracing::init;
 
 fn panic_text(body: impl FnOnce()) -> Option<String> {
-    let err = catch_unwind(AssertUnwindSafe(body)).err()?;
+    let err = catch_panic(AssertUnwindSafe(body)).err()?;
     err.downcast_ref::<String>().cloned()
 }
 

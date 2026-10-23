@@ -1,7 +1,8 @@
 //! `run` and `run_multi_thread` drop the runtime before the guard, so an event
 //! that the runtime logs while it drops its tasks belongs to the test.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use habilis_network_test_tracing::catch_panic;
+use std::panic::AssertUnwindSafe;
 
 use habilis_network_test_tracing::{init, run, run_multi_thread};
 
@@ -14,7 +15,7 @@ impl Drop for LogsOnDrop {
 }
 
 fn panic_text(body: impl FnOnce()) -> String {
-    let err = catch_unwind(AssertUnwindSafe(body)).expect_err("the guard must panic");
+    let err = catch_panic(AssertUnwindSafe(body)).expect_err("the guard must panic");
     err.downcast_ref::<String>().cloned().expect("panic text")
 }
 

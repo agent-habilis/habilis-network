@@ -1,12 +1,13 @@
 //! A WARN that a test allows excuses that WARN only: any other WARN, and any ERROR, still fails
 //! the test. These cases build their own guard, so they use the plain test attribute.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use habilis_network_test_tracing::catch_panic;
+use std::panic::AssertUnwindSafe;
 
 use habilis_network_test_tracing::init;
 
 fn panic_text(body: impl FnOnce()) -> Option<String> {
-    let err = catch_unwind(AssertUnwindSafe(body)).err()?;
+    let err = catch_panic(AssertUnwindSafe(body)).err()?;
     err.downcast_ref::<String>().cloned()
 }
 

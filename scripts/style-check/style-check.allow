@@ -13,17 +13,5 @@ feature|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-
 # A panic must not cross the C boundary: this is the defence in depth that the guide allows.
 catch_unwind|crates/habilis-network-ffi/src/ffi.rs|1|FFI boundary
 
-# The tests of the test guard must catch the panic that the guard raises, or they cannot check it.
-catch_unwind|crates/habilis-network-test-tracing/tests/capturing.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/late.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/run.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/guard.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/spawned_task.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/writer.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/twice.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/sync_workers.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/allow_warn_guard.rs|2|test of the guard that checks a panic
-catch_unwind|crates/habilis-network-test-tracing/tests/saw_warn.rs|1|test of the guard that checks a panic
-
-# The test of the sink lock must catch the panic of the liveness check, to see that the lock is not poisoned.
-catch_unwind|crates/habilis-network-iroh-gossip-transport/src/transport.rs|1|test: a panic in the liveness check does not poison the sink lock
+# The one catch_unwind outside the FFI boundary: the helper that the tests use to check a panic.
+catch_unwind|crates/habilis-network-test-tracing/src/lib.rs|1|catch_panic, the helper that the tests use to check a panic

@@ -598,6 +598,17 @@ impl Visit for Fields {
     }
 }
 
+/// Runs `body` and returns the panic it raises, so that a test can check the panic.
+///
+/// # Errors
+///
+/// Returns the panic payload when `body` panics.
+pub fn catch_panic<F: FnOnce() -> R, R>(
+    body: std::panic::AssertUnwindSafe<F>,
+) -> thread::Result<R> {
+    std::panic::catch_unwind(body)
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
