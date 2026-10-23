@@ -516,7 +516,12 @@ pub unsafe extern "C" fn habilis_network_msg_recv(
             handle.mesh.keep(msg);
             return -2;
         }
-        let Inbound { text, .. } = msg;
+        let Inbound {
+            text,
+            nick: _nick,
+            directed: _directed,
+            ..
+        } = msg;
         // SAFETY: `text.len() + 1 <= cap` bytes are writable per the contract
         // above, and the source is a distinct Rust-owned allocation.
         unsafe {

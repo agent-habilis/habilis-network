@@ -44,6 +44,27 @@ fn expand(
             }
             (Some("flavor"), Lit::Str(flavor)) if flavor.value() == "current_thread" => {}
             (Some("worker_threads"), Lit::Int(count)) => workers = Some(count.clone()),
+            (
+                _,
+                Lit::Str(_)
+                | Lit::Int(_)
+                | Lit::ByteStr(_)
+                | Lit::Byte(_)
+                | Lit::Char(_)
+                | Lit::Float(_)
+                | Lit::Bool(_)
+                | Lit::Verbatim(_)
+                | Lit::CStr(_),
+            ) => {
+                return Err(syn::Error::new_spanned(
+                    option,
+                    "expected `flavor = \"multi_thread\"` or `worker_threads = N`",
+                ));
+            }
+            #[expect(
+                clippy::match_same_arms,
+                reason = "syn::Lit is non_exhaustive, so rustc needs this wildcard; the arm above names every variant"
+            )]
             _ => {
                 return Err(syn::Error::new_spanned(
                     option,

@@ -226,6 +226,11 @@ fn run(net: &Rc<std::cell::RefCell<Network>>, peers: &mut [Peer], ticks: usize) 
                 }
                 // The peer is behind, or we are deliberately yielding.
                 Err(RollbackError::PredictionLimit) => {}
+                Err(
+                    error @ (RollbackError::InvalidPlayer(_)
+                    | RollbackError::MissingLocalInput
+                    | RollbackError::Desync { .. }),
+                ) => panic!("unexpected session error: {error}"),
                 Err(other) => panic!("unexpected session error: {other}"),
             }
         }

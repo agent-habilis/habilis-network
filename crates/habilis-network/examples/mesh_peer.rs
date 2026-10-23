@@ -129,7 +129,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let arg = std::env::args().nth(1);
-    let Resolved { kind, author, .. } = match arg {
+    let Resolved {
+        kind,
+        author,
+        advertise_directory: _advertise_directory,
+        ..
+    } = match arg {
         Some(id) => JoinParams::new(id.parse::<JoinTarget>()?, None, None).resolve()?,
         None => CreateParams::new(
             MeshName::random(),

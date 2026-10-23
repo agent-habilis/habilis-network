@@ -205,6 +205,11 @@ impl Player {
             Ok(requests) => requests,
             // Normal: the peer is behind, or we are yielding pace.
             Err(RollbackError::PredictionLimit) => return,
+            Err(
+                error @ (RollbackError::InvalidPlayer(_)
+                | RollbackError::MissingLocalInput
+                | RollbackError::Desync { .. }),
+            ) => panic!("unexpected session error: {error}"),
             Err(other) => panic!("unexpected session error: {other}"),
         };
         for request in requests {
