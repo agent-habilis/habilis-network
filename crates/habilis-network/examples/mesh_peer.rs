@@ -41,7 +41,7 @@ struct Probe;
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(

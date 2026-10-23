@@ -1937,7 +1937,7 @@ mod evicted_orphan_tests {
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -2114,7 +2114,7 @@ mod first_contact_tests {
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -2276,7 +2276,7 @@ mod first_contact_tests {
     #[async_trait::async_trait]
     impl NodeApp for Counting {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -3196,7 +3196,7 @@ mod left_tests {
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(

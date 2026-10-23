@@ -42,7 +42,7 @@ struct Store;
 #[habilis_network::async_trait]
 impl NodeApp for Store {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
