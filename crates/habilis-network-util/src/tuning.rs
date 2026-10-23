@@ -222,7 +222,7 @@ pub struct Tuning {
     pub heal_interval: Duration,
     /// How often a node sends its digest to look for missing messages.
     pub antientropy_interval: Duration,
-    /// How long a beacon waits before its co-host policy applies.
+    /// How long an unmeshed joiner waits before it co-hosts the rendezvous anyway.
     pub cohost_grace: Duration,
     /// How long a ping round collects pongs before it reports.
     pub ping_window: Duration,

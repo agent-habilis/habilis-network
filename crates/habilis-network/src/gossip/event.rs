@@ -56,9 +56,9 @@ pub enum NodeEvent {
     /// about: the signer of the frame that triggered it. It is never read from `msg`, so
     /// a synthetic presence cannot name the peer by a key it does not hold.
     Presence {
-        /// The message that was received.
+        /// The proof of the presence frame. For a synthetic presence, the proof that this node minted.
         msg: Box<Authored>,
-        /// The peer, by nickname.
+        /// The key of the peer that the presence is about: the signer of the frame that triggered it.
         peer: AuthorKey,
         /// `true` when this node minted the presence for a peer's arrival, `false` when
         /// it is the peer's own frame.
@@ -78,7 +78,7 @@ pub enum NodeEvent {
     StateChanged {
         /// The channel of the write.
         channel: Channel,
-        /// The message that was received.
+        /// The signed message that carried the write. It is our own when `is_self`.
         event: Box<Authored>,
         /// The shared document after the write.
         document: serde_json::Value,

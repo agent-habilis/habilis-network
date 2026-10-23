@@ -18,7 +18,7 @@ pub struct HandlerCtx<'node> {
     pub endpoint: &'node Endpoint,
     /// The mesh.
     pub mesh: &'node MeshId,
-    /// The author of the write.
+    /// This member's nickname, the author of every message it sends.
     pub author: &'node Nickname,
     /// This member's signing identity (Ed25519). Messages we author are
     /// signed with it before broadcast; see [`Identity`].

@@ -144,7 +144,7 @@ pub struct TopicParams {
 pub struct Resolved {
     /// What the setup creates.
     pub kind: SetupKind,
-    /// The author of the write.
+    /// This member's nickname, the author of every message it sends.
     pub author: Nickname,
     /// The directory the mesh is advertised to, if any.
     pub advertise_directory: Option<MeshName>,

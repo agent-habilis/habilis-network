@@ -39,7 +39,7 @@ thread_local! {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct HabilisNetworkOpts {
-    /// The mesh name, as a NUL-terminated string.
+    /// The mesh id to join, NUL-terminated, or NULL. Set at most one of `mesh` and `topic`.
     pub mesh: *const c_char,
     /// The gossip topic, as a NUL-terminated string.
     pub topic: *const c_char,

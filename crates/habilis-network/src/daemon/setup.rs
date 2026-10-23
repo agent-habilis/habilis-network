@@ -550,7 +550,7 @@ impl std::fmt::Debug for InjectedEndpoint {
 /// argument budget.
 #[non_exhaustive]
 pub struct SetupParams {
-    /// The author of the write.
+    /// This member's nickname, the author of every message it sends.
     pub author: Nickname,
     /// The max peers.
     pub max_peers: usize,
@@ -565,7 +565,7 @@ pub struct SetupParams {
     pub runtime_base: Option<PathBuf>,
     /// The state file.
     pub state_file: Option<PathBuf>,
-    /// The sink that reports the write.
+    /// Where the node emits its events (`NodeEvent`).
     pub sink: std::sync::Arc<dyn NodeSink>,
     /// Share the caller's endpoint instead of minting one. `None` ⇒ the mesh
     /// builds its own, which is right for a standalone peer and wrong for a
