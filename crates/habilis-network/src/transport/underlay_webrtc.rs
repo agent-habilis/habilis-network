@@ -353,10 +353,9 @@ mod tests {
     use habilis_network_test_tracing::test;
     use iroh::{EndpointId, SecretKey};
 
-    use iroh::EndpointAddr;
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
-    use iroh::{Endpoint, RelayMode};
+    use iroh::{Endpoint, EndpointAddr, RelayMode};
 
     use super::{
         Allowed, Plan, UnderlaySignalGate, kept_underlays, members_with_session, plan, undenied,

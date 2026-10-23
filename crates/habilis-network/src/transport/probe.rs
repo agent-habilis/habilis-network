@@ -2526,9 +2526,9 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_rendezvous_is_not_watched() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
-        use iroh::endpoint::Connection;
+        use iroh::endpoint::{Connection, presets};
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-        use iroh::{RelayMode, SecretKey, endpoint::presets};
+        use iroh::{RelayMode, SecretKey};
 
         #[derive(Debug, Clone)]
         struct Hold;
@@ -2719,7 +2719,8 @@ mod tests {
     async fn the_alive_tick_fills_one_member_per_tick_on_a_relay_transport_mesh() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
-        use iroh::{RelayMode, TransportAddr, endpoint::presets};
+        use iroh::endpoint::presets;
+        use iroh::{RelayMode, TransportAddr};
 
         let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)

@@ -14,10 +14,9 @@ use tokio::sync::mpsc;
 use crate::util::consts::MAX_MESSAGE_SIZE;
 use crate::util::tuning::DIRECT_IDLE_BACKSTOP;
 
-use super::LOG_TARGET;
-use super::PayloadPath;
 use super::path::{PROBE_DEADLINE, refuse_unless_direct};
 use super::webrtc::close_code::{IDLE, UNICAST_RELAY_REFUSED};
+use super::{LOG_TARGET, PayloadPath};
 
 /// Per-frame read cap: one wire message plus gossip's envelope headroom (the
 /// same slack the size assertion reserves). Bounds allocation against a peer

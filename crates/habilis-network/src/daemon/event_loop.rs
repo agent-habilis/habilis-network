@@ -23,8 +23,7 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::protocol::mesh::MeshName;
 use crate::protocol::message::{Authored, Verified};
 use crate::protocol::{AuthorKey, MeshId, Nickname, UnixSecs};
-use crate::transport::IpcMessage;
-use crate::transport::MeshSender;
+use crate::transport::{IpcMessage, MeshSender};
 use crate::util::clock::{Instant, millis_saturating};
 // The timer-driver clock, distinct from `clock::Instant` off wasm32 (there it is
 // `tokio::time::Instant`). Aliased rather than path-qualified, matching
@@ -1482,7 +1481,8 @@ mod tests {
 mod route_wake_tests {
     use habilis_network_iroh_multihop_transport::{HandleConfig, MultihopHandle, underlay_secret};
     use habilis_network_test_tracing::test;
-    use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr, endpoint::presets};
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, EndpointAddr, SecretKey, TransportAddr};
 
     use super::{linkstate_arm, route_wake_arm};
     use crate::testing::{LaneNode, nick};

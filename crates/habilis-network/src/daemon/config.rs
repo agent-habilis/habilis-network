@@ -7,7 +7,8 @@
 use crate::transport::UdpTransport;
 use std::path::PathBuf;
 
-use iroh::{Endpoint, protocol::Router};
+use iroh::Endpoint;
+use iroh::protocol::Router;
 use iroh_gossip::api::GossipTopic;
 use tokio::sync::{broadcast, mpsc, watch};
 

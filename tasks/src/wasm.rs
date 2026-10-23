@@ -5,11 +5,10 @@ use std::path::Path;
 
 use xshell::{Shell, cmd};
 
-use crate::TaskOutcome;
-use crate::dev;
 use crate::gate::Kind;
 use crate::scope::Scope;
 use crate::util::output;
+use crate::{TaskOutcome, dev};
 
 const TARGET: &str = "wasm32-unknown-unknown";
 

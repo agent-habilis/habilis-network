@@ -2375,7 +2375,8 @@ mod tests {
     /// both are established: neither end needs a path watcher, which only the lower id has.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
-        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
         use iroh::{EndpointAddr, TransportAddr};
 
         let hub = MemoryHub::new();
@@ -2424,7 +2425,8 @@ mod tests {
     /// established no more, and allowed again.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
-        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
         use iroh::{EndpointAddr, TransportAddr};
 
         let hub = MemoryHub::new();
@@ -2460,7 +2462,8 @@ mod tests {
     /// would close it before iroh moves it onto the session.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
-        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
         use iroh::{EndpointAddr, TransportAddr};
 
         let hub = MemoryHub::new();
@@ -2497,7 +2500,8 @@ mod tests {
     /// up for the relay, though the session may carry nothing (its rung is cut).
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_and_a_connection_on_the_gossip_rung_is_allowed_for_gossip() {
-        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
         use iroh::{EndpointAddr, TransportAddr};
 
         let hub = MemoryHub::new();

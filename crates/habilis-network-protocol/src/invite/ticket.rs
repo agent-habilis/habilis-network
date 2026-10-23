@@ -17,9 +17,8 @@ use iroh_base::{PublicKey, Signature};
 
 use crate::base58check::{self, take_array};
 use crate::crypto::{self, Password, SymmetricKey};
-use crate::identity;
 use crate::mesh::{LockedMesh, Mesh};
-use crate::seal;
+use crate::{identity, seal};
 use habilis_network_util::clock::UnixSecs;
 use zeroize::Zeroizing;
 

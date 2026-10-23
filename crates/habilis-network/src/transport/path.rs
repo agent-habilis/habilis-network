@@ -282,7 +282,8 @@ mod tests {
     use habilis_network_test_tracing::test;
     use std::time::Duration;
 
-    use iroh::{Endpoint, RelayMode, endpoint::presets};
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, RelayMode};
 
     use super::{Connection, PathWait, wait_selected_outcome};
 

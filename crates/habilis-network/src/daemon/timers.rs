@@ -10,8 +10,7 @@ use iroh::Endpoint;
 use super::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
-use crate::util::resident_memory;
-use crate::util::tuning;
+use crate::util::{resident_memory, tuning};
 
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now

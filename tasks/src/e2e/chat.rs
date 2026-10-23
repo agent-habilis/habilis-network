@@ -15,9 +15,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::TaskOutcome;
-use crate::util::output;
 use crate::util::page::rand_token;
-use crate::util::{repo_root, wait_for};
+use crate::util::{output, repo_root, wait_for};
 
 use super::mesh::{BunServer, launch_page};
 use super::page::{Page, call_page, urlencode};

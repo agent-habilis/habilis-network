@@ -445,9 +445,9 @@ pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool 
 /// count the other, and that split is the one the brisk cap exists for.
 pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: EndpointId) -> Duration {
     use crate::util::clock::millis_saturating;
-    use crate::util::tuning::{RIVAL_RECHECK_OFFSET_SPAN, RIVAL_RECHECK_SMALL_ROSTER};
     use crate::util::tuning::{
-        rival_recheck, rival_recheck_alone, rival_recheck_first, rival_recheck_meshed,
+        RIVAL_RECHECK_OFFSET_SPAN, RIVAL_RECHECK_SMALL_ROSTER, rival_recheck, rival_recheck_alone,
+        rival_recheck_first, rival_recheck_meshed,
     };
 
     if round == 0 {

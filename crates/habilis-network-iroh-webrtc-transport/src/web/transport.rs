@@ -10,9 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use futures::SinkExt as _;
-use futures::StreamExt as _;
 use futures::channel::mpsc;
+use futures::{SinkExt as _, StreamExt as _};
 use iroh::EndpointId;
 use iroh::endpoint::transports::{
     CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
@@ -26,10 +25,9 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection, RtcPeerConnectionState};
 
 use super::jsep::{now_ms, sleep_ms};
-use crate::custom_addr;
 use crate::liveness::{ConnectionPhase, DISCONNECT_GRACE_MS, Verdict, judge_state};
 use crate::registry::Registry;
-use crate::{IN_QUEUE, OUT_QUEUE};
+use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
 /// Stop queueing into the channel above this much buffered data.
 const BUFFER_CAP: u32 = 1 << 20;
