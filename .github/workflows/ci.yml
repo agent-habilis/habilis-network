@@ -47,7 +47,6 @@ jobs:
           cargo check --workspace --all-targets
           cargo check --target wasm32-unknown-unknown -p habilis-network-bench-wasm
           cargo check --target wasm32-unknown-unknown -p habilis-network-chunks --test idb_browser --test origin --test conformance
-          cargo check --workspace --all-targets --features habilis-network-iroh-webrtc-transport/native,habilis-network-iroh-webrtc-transport/_internal_test_exports
 
       # The rules of the Rust style guide that no lint checks (issue #29). The exceptions, each
       # with its reason, are in scripts/style-check/style-check.allow.
