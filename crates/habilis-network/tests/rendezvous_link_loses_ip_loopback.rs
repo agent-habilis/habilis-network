@@ -155,6 +155,21 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
             );
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+        // The roster is presence, not a gossip link. Cut IP only once the member pair is a
+        // neighbor on both ends, or the test cuts a link that was never up.
+        let member_gossip_links = || {
+            logs()
+                .lines()
+                .filter(|line| {
+                    line.contains("gossip neighbor up") && line.contains("is_rendezvous=false")
+                })
+                .count()
+        };
+        assert!(
+            eventually(Duration::from_mins(1), || member_gossip_links() >= 2).await,
+            "the member pair never became a gossip neighbor on both ends\n{}",
+            trace()
+        );
         let downs_before = rendezvous_lines("down");
 
         alice.block_udp(true).await;
