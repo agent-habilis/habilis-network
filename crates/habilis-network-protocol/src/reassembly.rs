@@ -324,8 +324,11 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RepairTicket {
+    /// The member that sent the missing shards.
     pub author: Nickname,
+    /// The group of the missing shards.
     pub group: ShardGroup,
+    /// The positions of the missing shards.
     pub missing: Vec<u32>,
 }
 

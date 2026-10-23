@@ -23,21 +23,32 @@ pub const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
 #[serde(tag = "type", rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum SignalEnvelope {
+    /// A session offer, with the SDP of the caller.
     Offer {
+        /// The protocol version of the envelope.
         #[serde(rename = "v")]
         version: u32,
+        /// The endpoint id of the sender, in hex.
         endpoint_id: String,
+        /// The session description.
         sdp: String,
     },
+    /// A session answer, with the SDP of the callee.
     Answer {
+        /// The protocol version of the envelope.
         #[serde(rename = "v")]
         version: u32,
+        /// The endpoint id of the sender, in hex.
         endpoint_id: String,
+        /// The session description.
         sdp: String,
     },
+    /// A failure to set the session up, with the reason.
     Error {
+        /// The protocol version of the envelope.
         #[serde(rename = "v")]
         version: u32,
+        /// Why the session failed.
         reason: String,
     },
 }
@@ -63,6 +74,7 @@ impl SignalEnvelope {
         }
     }
 
+    /// An error envelope with the given reason.
     #[must_use]
     pub fn error(reason: impl Into<String>) -> Self {
         Self::Error {

@@ -34,8 +34,11 @@ pub const MAX_DATAGRAM_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Frame<'datagram> {
+    /// The member the frame is addressed to.
     pub dst: EndpointId,
+    /// The member that sent the frame.
     pub src: EndpointId,
+    /// The payload, borrowed from the input.
     pub datagram: &'datagram [u8],
 }
 
@@ -55,7 +58,10 @@ pub enum EncodeError {
     /// There is nothing to send.
     Empty,
     /// The datagram does not fit one gossip message.
-    TooLarge { len: usize },
+    TooLarge {
+        /// The length of the datagram.
+        len: usize,
+    },
 }
 
 /// Why bytes are not a frame this build reads.
@@ -69,7 +75,10 @@ pub enum DecodeError {
     /// Shorter than the header plus one byte of datagram.
     Truncated,
     /// Longer than [`MAX_FRAME_LEN`].
-    TooLarge { len: usize },
+    TooLarge {
+        /// The length the frame claimed.
+        len: usize,
+    },
     /// An id that is not a valid endpoint id.
     BadId,
 }

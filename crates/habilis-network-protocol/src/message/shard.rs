@@ -72,8 +72,11 @@ impl ShardGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct Shard {
+    /// The group that the shard belongs to.
     pub group: ShardGroup,
+    /// The position of the shard in its group.
     pub idx: u32,
+    /// How many shards the group has.
     pub total: u32,
 }
 

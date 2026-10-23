@@ -27,8 +27,11 @@ string_newtype!(
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MeshIdError {
+    /// The id is not the right length.
     Length(usize),
+    /// The id has a character outside the alphabet.
     Charset(String),
+    /// The id does not carry a valid hash.
     InvalidHash,
 }
 

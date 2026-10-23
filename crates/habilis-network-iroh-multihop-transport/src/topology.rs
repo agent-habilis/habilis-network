@@ -393,6 +393,7 @@ impl Topology {
 pub struct TopologyView {
     /// This node's own endpoint id (hex) — the graph's "you".
     pub self_id: String,
+    /// The links of the graph, one per edge.
     pub edges: Vec<TopologyEdge>,
 }
 
@@ -400,8 +401,11 @@ pub struct TopologyView {
 #[derive(Debug, serde::Serialize)]
 #[non_exhaustive]
 pub struct TopologyEdge {
+    /// The endpoint id at one end, in hex.
     pub from: String,
+    /// The endpoint id at the other end, in hex.
     pub to: String,
+    /// The routing cost of the link.
     pub metric: u32,
 }
 

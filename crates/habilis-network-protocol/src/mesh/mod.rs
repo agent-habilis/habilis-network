@@ -545,6 +545,7 @@ impl Mesh {
         crypto::rendezvous_secret(self.effective_seed())
     }
 
+    /// The lookups that find the mesh.
     #[must_use]
     pub fn lookups(&self) -> &LookupOpts {
         &self.config.lookups

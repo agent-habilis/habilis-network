@@ -176,6 +176,7 @@ impl GossipHandle {
         }
     }
 
+    /// This member's app endpoint id.
     #[must_use]
     pub fn app_id(&self) -> EndpointId {
         self.shared.app_id

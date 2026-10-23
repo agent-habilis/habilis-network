@@ -74,9 +74,13 @@ pub struct SessionCounters {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SessionCounts {
+    /// Frames sent.
     pub sent: u64,
+    /// Frames dropped because the queue was full.
     pub dropped_queue_full: u64,
+    /// Frames dropped because the channel was congested.
     pub dropped_congested: u64,
+    /// Frames refused by the channel.
     pub dropped_refused: u64,
 }
 
@@ -95,9 +99,13 @@ impl SessionCounts {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct DataChannelCounters {
+    /// Bytes sent on the data channel.
     pub bytes_sent: f64,
+    /// Bytes received on the data channel.
     pub bytes_received: f64,
+    /// Messages sent on the data channel.
     pub messages_sent: f64,
+    /// Messages received on the data channel.
     pub messages_received: f64,
 }
 
@@ -107,7 +115,9 @@ pub struct DataChannelCounters {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct SelectedPairStats {
+    /// Bytes sent on the selected candidate pair.
     pub bytes_sent: f64,
+    /// Bytes received on the selected candidate pair.
     pub bytes_received: f64,
     /// `None` when the browser reports no round-trip time yet — distinct from a
     /// real 0 ms, which should not render alike.
@@ -299,6 +309,7 @@ impl BrowserHubTransport {
         })
     }
 
+    /// The endpoint id of this node.
     #[must_use]
     pub fn local_id(&self) -> EndpointId {
         self.local_id

@@ -13,6 +13,7 @@ pub mod clock;
 pub mod consts;
 pub mod cooldown;
 pub mod logs;
+/// Process helpers for the daemon: the parent-process walk that the orphan watch uses.
 #[cfg(feature = "host")]
 pub mod process;
 // Portable: the reading itself is `cfg`'d down to `None` off a libc host, so

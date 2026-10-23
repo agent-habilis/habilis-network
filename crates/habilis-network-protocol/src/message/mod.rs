@@ -100,8 +100,11 @@ pub(crate) const VERSION: &str = "12.0";
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum PresenceSubtype {
+    /// A member joined.
     Joined,
+    /// A member left.
     Left,
+    /// A member is still here.
     Alive,
 }
 
@@ -256,15 +259,21 @@ pub enum MessageKind {
     /// the pending-call registry (`None` for fire-and-forget). Everything else
     /// the payload needs (task id, method, params) rides inside `body`.
     App {
+        /// The application tag.
         tag: AppTag,
+        /// The recipient, when the message is directed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<Nickname>,
+        /// The correlation id of a request or reply.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corr: Option<CorrId>,
     },
+    /// A presence change of a member.
     Presence {
+        /// What changed.
         subtype: PresenceSubtype,
     },
+    /// The identity of a peer.
     PeerInfo,
     /// Anti-entropy digest. Body is a JSON array of recent message ids
     /// the sender holds; a receiver re-broadcasts any of *its* logged
@@ -282,7 +291,9 @@ pub enum MessageKind {
     /// pinger reads the RTT from the probe that the pong names, and drops a pong
     /// that names none of its own. Same plumbing treatment as `Ping`.
     Pong {
+        /// The member that sent the probe.
         to: Nickname,
+        /// The probe that this pong answers.
         probe: MessageId,
     },
     /// A durable `state`-channel event: one Base58 automerge change
@@ -323,7 +334,9 @@ pub enum MessageKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Channel {
+    /// The shared state of the mesh.
     State,
+    /// The metadata of the members.
     Meta,
 }
 
@@ -454,13 +467,19 @@ fn empty_body() -> MessageBody {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Message {
+    /// The protocol version of the message.
     pub version: String,
+    /// The id of the message.
     pub id: MessageId,
+    /// What the message carries.
     pub kind: MessageKind,
+    /// The mesh that the message belongs to.
     pub mesh: MeshId,
+    /// The member that signed the message.
     pub author: Nickname,
     /// Unix timestamp (seconds, UTC).
     pub timestamp: UnixSecs,
+    /// The payload.
     pub body: MessageBody,
     /// Author's Ed25519 public key and the detached signature over the message's
     /// [canonical bytes](Message::canonical_bytes), always together: a message has both or
@@ -477,6 +496,7 @@ pub struct Message {
     /// computed locally (`content_hash_hex`), never transmitted. See
     /// `docs/history-integrity.md`.
     pub seq: Option<u64>,
+    /// The hash of the previous message of the author.
     pub prev: Option<ContentHash>,
     /// Cross-author DAG (Phase 3), `Msg` only: content hashes of the DAG
     /// tips this author had seen when authoring — the causal links. Signed.
@@ -698,9 +718,13 @@ fn is_lower_hex(value: &str, bytes: usize) -> bool {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct AppFrameParams {
+    /// The application tag.
     pub tag: AppTag,
+    /// The recipient, when the frame is directed.
     pub to: Option<Nickname>,
+    /// The correlation id of a request or reply.
     pub corr: Option<CorrId>,
+    /// The payload.
     pub body: MessageBody,
 }
 
@@ -1188,8 +1212,11 @@ impl Message {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ChainCtx {
+    /// The position of the message in its author's chain.
     pub seq: u64,
+    /// The hash of the message before this one.
     pub prev: Option<ContentHash>,
+    /// The hashes of the other messages that this one follows.
     pub parents: Vec<ContentHash>,
 }
 
@@ -1211,9 +1238,13 @@ impl ChainCtx {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct BuildMsgParams<'mesh> {
+    /// The mesh of the message.
     pub mesh: &'mesh MeshId,
+    /// The member that signs the message.
     pub author: &'mesh Nickname,
+    /// The payload.
     pub body: MessageBody,
+    /// Where the message sits in its author's chain.
     pub chain: ChainCtx,
     /// The app tag to stamp. A parameter, not a constant: this fixture is used
     /// across crates, and hardcoding one consumer's tag made it build a frame

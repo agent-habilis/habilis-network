@@ -54,6 +54,7 @@ const POLL_MS: i32 = 50;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct IceServer {
+    /// The STUN and TURN URLs of the server.
     pub urls: Vec<String>,
 }
 
@@ -135,6 +136,7 @@ fn new_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), Js
 /// A negotiated browser session attached into a [`BrowserHubTransport`].
 #[non_exhaustive]
 pub struct BrowserSession {
+    /// The endpoint id of the peer.
     pub remote: EndpointId,
 }
 

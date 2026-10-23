@@ -72,7 +72,12 @@ pub enum Ingested {
     /// Applied to the live doc. `changed` is whether the derived document moved
     /// (a no-op change surfaces nothing); `doc` is the document after applying
     /// this change and draining anything it unblocked.
-    Applied { changed: bool, doc: Value },
+    Applied {
+        /// Whether the derived document moved.
+        changed: bool,
+        /// The document after applying this change and draining anything it unblocked.
+        doc: Value,
+    },
     /// A change we already hold — dropped.
     Duplicate,
     /// Held pending its causal dependencies; not yet applied.

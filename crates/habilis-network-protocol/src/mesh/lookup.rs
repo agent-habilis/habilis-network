@@ -27,8 +27,11 @@ use crate::crypto::PASSWORD_VERIFIER_LEN;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RelayChoice {
+    /// No relay lookup.
     Disabled,
+    /// The pinned relay of the mesh.
     Pinned,
+    /// The relays that the caller names.
     Custom(Vec<RelayUrl>),
 }
 
@@ -39,8 +42,11 @@ pub enum RelayChoice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LookupOpts {
+    /// Whether peers are found on the local network.
     pub mdns: bool,
+    /// Whether peers are found on the mainline DHT.
     pub dht: bool,
+    /// How the relay is used to find peers.
     pub relay_lookup: RelayChoice,
 }
 
@@ -279,6 +285,7 @@ const ISSUER_PUBKEY_LEN: usize = 32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MeshConfig {
+    /// The lookups that find the mesh.
     pub lookups: LookupOpts,
     /// The password verifier — a one-way check value derived from the
     /// Argon2id-stretched password (`crypto::password_verifier`), never the
@@ -684,8 +691,11 @@ impl fmt::Display for Lookup {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LookupSet {
+    /// Whether peers are found on the local network.
     pub mdns: bool,
+    /// Whether peers are found on the mainline DHT.
     pub dht: bool,
+    /// How the relay is used to find peers.
     pub relay_lookup: RelaySelection,
 }
 

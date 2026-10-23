@@ -66,6 +66,7 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
         }
     }
 
+    /// Whether the set holds the item.
     pub fn contains<Q>(&self, item: &Q) -> bool
     where
         T: Borrow<Q>,
@@ -80,11 +81,13 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
     }
 
     #[must_use]
+    /// The number of items.
     pub fn len(&self) -> usize {
         self.set.len()
     }
 
     #[must_use]
+    /// Whether the set holds no items.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

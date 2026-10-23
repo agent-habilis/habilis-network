@@ -1,3 +1,5 @@
+//! Two endpoints that carry a WebRTC session over loopback.
+
 use std::time::Duration;
 
 use habilis_network_iroh_webrtc_transport::{

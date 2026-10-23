@@ -268,6 +268,7 @@ impl Password {
         Self(value)
     }
 
+    /// The text of the value.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -420,7 +421,9 @@ impl std::fmt::Debug for TicketSecret {
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct TicketAuth {
+    /// The secret that the consumer presents.
     pub token: TicketSecret,
+    /// Whether the ticket also needs the password.
     pub password_protected: bool,
 }
 

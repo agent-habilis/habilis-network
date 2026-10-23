@@ -56,13 +56,17 @@ pub fn best_of<'a>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Rung {
+    /// A direct IP path.
     Ip,
+    /// A WebRTC data channel.
     WebRtc,
+    /// A path that hops through other members.
     Multihop,
     /// QUIC packets carried as frames on the mesh gossip topic. It stands above
     /// the relay, which is infrastructure, and below every path between two
     /// members.
     Gossip,
+    /// The relay, the last resort.
     Relay,
     /// A custom transport that the caller does not name, below every other rung.
     Other,

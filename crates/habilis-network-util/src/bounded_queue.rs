@@ -23,6 +23,7 @@ pub struct BoundedQueue<T> {
 
 impl<T> BoundedQueue<T> {
     #[must_use]
+    /// An empty queue that holds at most `capacity` items.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -48,6 +49,7 @@ impl<T> BoundedQueue<T> {
     }
 
     #[must_use]
+    /// Whether the queue holds no items.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }

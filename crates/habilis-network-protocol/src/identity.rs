@@ -46,6 +46,7 @@ impl Identity {
         }
     }
 
+    /// The public half of the key.
     #[must_use]
     pub fn public(&self) -> PublicKey {
         self.secret.public()

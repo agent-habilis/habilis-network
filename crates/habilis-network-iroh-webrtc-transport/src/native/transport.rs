@@ -44,6 +44,7 @@ impl WebRtcTransport {
         })
     }
 
+    /// The endpoint id of this node.
     #[must_use]
     pub fn local_id(&self) -> EndpointId {
         self.local_id
@@ -104,11 +105,13 @@ impl WebRtcTransport {
         self.registry.clear()
     }
 
+    /// Whether a session with `remote` is open.
     #[must_use]
     pub fn has_session(&self, remote: &EndpointId) -> bool {
         self.registry.is_live(remote)
     }
 
+    /// The number of open sessions.
     #[must_use]
     pub fn session_count(&self) -> usize {
         self.registry.live_len()

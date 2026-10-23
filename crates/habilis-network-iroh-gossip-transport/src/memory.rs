@@ -23,6 +23,7 @@ struct Members {
 }
 
 impl Hub {
+    /// An empty hub with no members.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
