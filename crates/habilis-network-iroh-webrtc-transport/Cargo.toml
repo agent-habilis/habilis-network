@@ -49,6 +49,8 @@ native = [
     "dep:noq-udp",
     "dep:n0-watcher",
 ]
+# Forwards str0m's test-only events, so a match can name `Event::Probe`.
+_internal_test_exports = ["str0m?/_internal_test_exports"]
 # Browser backend: the platform's own RTCPeerConnection via web-sys.
 web = [
     "dep:wasm-bindgen",
