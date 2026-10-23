@@ -37,6 +37,10 @@ published to a registry; pin it with
 - `runtime::ipc::ForeignEndpoint`: the error of a client whose endpoint belongs to another
   account (on Windows, a pipe that the user does not own). It is not `NoDaemon`: the endpoint is
   there, and the remedy "start a daemon" does not fit.
+- `util::check_runtime_base` and `util::RuntimeBaseCheck`, on Unix: the checks of
+  `ensure_runtime_base` for a client, which create nothing and change nothing. The base is
+  `Private` (a folder of this user with no group or other bits), `Absent`, or `Refused` with the
+  reason. `runtime::ipc::UnsafeRuntimeBase` is the error of an IPC client whose base is refused.
 - A daemon stops on an IPC `quit`, on every OS: `{"command":"quit","mesh":"<mesh id>"}`. The
   engine answers it before the app sees the line. The daemon answers `{"ok":true}`, then takes
   the path of `SIGTERM`: it removes its state file and its marker, broadcasts `Left`, and exits.
@@ -269,6 +273,14 @@ published to a registry; pin it with
   and `send_to_path` is `send_to_endpoint(&IpcName, ..)`. `send` finds the daemon through its
   marker: a client of this version does not find a daemon of an earlier one, which writes no
   marker. On Unix the socket path does not change. The wire does not change.
+- **Breaking:** on Unix an IPC client checks the runtime base before it reads a marker in it
+  (R12 of `docs/windows.md`). The base is `/tmp/<product>-<uid>`, which another user can create
+  first. A base that is a link, a file, a folder of another user, or a folder that other users
+  can open is refused, with a warn: `send` returns `UnsafeRuntimeBase`, `quit` and `terminate`
+  return it inside `QuitError::Unreached`, and `active_endpoints` returns no endpoint.
+  `terminate` sends no signal then, because the marker in that base cannot be trusted to be of
+  our daemon. A daemon always leaves its base at `0700`; a caller that makes the base
+  itself with `create_dir_all` (`0755` under the usual umask) now gets the refusal.
 - The engine reserves one IPC command: a JSON object whose `command` is `"quit"` and whose
   `mesh` is a valid mesh id. Such a line never reaches `NodeDriver::handle_ipc`. Any other line,
   also a `quit` with no valid `mesh`, reaches the app as before. No app of this workspace or of
