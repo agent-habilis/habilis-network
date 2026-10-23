@@ -19,7 +19,7 @@ Ids, wire formats, the IPC protocol and the C ABI can change.
 ## 2. Current state
 
 The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy, `cargo task ffi` and the tests there.
-The IPC of a daemon works on Windows, over a named pipe. A daemon stops gracefully on an IPC `quit`, when its owner exits, and on ctrl-c, ctrl-break and the close of its console. A logoff and a shutdown do not stop it gracefully yet.
+The IPC of a daemon works on Windows, over a named pipe. A daemon stops gracefully on an IPC `quit`, when its owner exits, on ctrl-c, ctrl-break and the close of its console. A CLI daemon also stops gracefully on a logoff, a shutdown and `taskkill /PID` without `/F`.
 
 | Requirement | State |
 |---|---|
@@ -29,15 +29,15 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
 | R5. Graceful stop | Done. The engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::quit` and `runtime::ipc::terminate` send it on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
 | R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
-| R7. Console events | Done. Ctrl-c, ctrl-break, close, logoff and shutdown feed the quit channel (`crates/habilis-network/src/daemon/shutdown.rs`). A logoff and a shutdown do not reach a node that loaded `user32.dll`, and a node loads it: see R13. |
+| R7. Console events | Done. Ctrl-c, ctrl-break, close, logoff and shutdown feed the quit channel (`crates/habilis-network/src/daemon/shutdown.rs`). A logoff and a shutdown do not reach these listeners in a node that loaded `user32.dll`, and a node loads it: a CLI daemon gets them through a window (R13). |
 | R8. State file | Done. The replace and the remove of the state file and of the IPC marker run again for up to 50 ms while a reader blocks them (`crates/habilis-network-util/src/file_retry.rs`). |
 | R9. FFI | Done. The five calls that returned `long` return `int64_t` (`crates/habilis-network-ffi`), and the loaders read them as `i64`, koffi as `int64_t`. `cargo task ffi` reads `habilis_network_ffi.lib` with `llvm-nm.exe` (`tasks/src/ffi.rs`). |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
-| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the five steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
+| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
 | R12. Runtime base of a Unix client | Done. A Unix client checks the base before it reads a marker (`check_runtime_base`), and refuses one that is not private with `UnsafeRuntimeBase` (`crates/habilis-network/src/transport/ipc.rs`). Follow-up items for agent-gossip are in [R12](#r12-runtime-base-of-a-unix-client). |
-| R13. Logoff and shutdown | Open. A logoff or a shutdown ends a daemon with no `Left`. |
+| R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
 
-[§2.2](#22-runtime-breaks) has no open item except R13. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
+[§2.2](#22-runtime-breaks) has no open item. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
 
 ### 2.1 Build blockers
@@ -66,7 +66,7 @@ These parts were already correct on Windows:
 
 ### 2.2 Runtime breaks
 
-These problems occurred after the workspace compiled. Only R13 is left: a logoff and a shutdown. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5, the owner watch item with R6, the console events item with R7, except a logoff and a shutdown (R13), the state file item with R8, and the two FFI items (the Node mapping and the C ABI) with R9.
+These problems occurred after the workspace compiled. None is left. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5, the owner watch item with R6, the console events item with R7 and R13 (a logoff and a shutdown), the state file item with R8, and the two FFI items (the Node mapping and the C ABI) with R9.
 
 ### 2.3 Tooling and tests
 
@@ -197,8 +197,8 @@ Done.
 
 **Limits.**
 
-- A logoff and a shutdown do not reach a node today. Windows does not give them to the console handler of a process that loaded `user32.dll` or `gdi32.dll`. A node loads both: iroh's `netwatch` uses COM through the `wmi` crate, and the runtime base uses `SHGetKnownFolderPath` of `shell32.dll`. On a node in `Cli` mode, `USER32.dll`, `GDI32.dll`, `ole32.dll` and `combase.dll` were loaded. The listeners stay, for a build that does not load them. R13 is the fix.
-- Only a process with a console gets console events: a node in the foreground of a terminal. A process started with `DETACHED_PROCESS` has no console. With `CREATE_NO_WINDOW` it has a hidden console that nobody closes. The daemon of agent-gossip on Windows (G1) is one of these, so the IPC `quit` of R5 and the owner watch of R6 stop it.
+- A logoff and a shutdown do not reach these listeners. Windows does not give them to the console handler of a process that loaded `user32.dll` or `gdi32.dll`. A node loads both: iroh's `netwatch` uses COM through the `wmi` crate, and the runtime base uses `SHGetKnownFolderPath` of `shell32.dll`. On a node in `Cli` mode, `USER32.dll`, `GDI32.dll`, `ole32.dll` and `combase.dll` were loaded. The listeners stay, for a build that does not load them. A CLI daemon gets them through the window of R13.
+- Only a process with a console gets console events: a node in the foreground of a terminal. A process started with `DETACHED_PROCESS` has no console. With `CREATE_NO_WINDOW` it has a hidden console that nobody closes. The daemon of agent-gossip on Windows (G1) is one of these, so the IPC `quit` of R5 and the owner watch of R6 stop it, and the window of R13 gets its logoff and its shutdown.
 - A process in a new process group (`CREATE_NEW_PROCESS_GROUP`), or the child of a parent that ignores ctrl-c, ignores ctrl-c. Ctrl-break still reaches it.
 
 **The test.** Step 5 of the host lifecycle test starts a node in a console of its own and sends it ctrl-break and ctrl-c from a third process, through `win_console::send_console_event` of `habilis-network-util` (behind `test-fixtures`). Without the listeners, the ctrl-break test fails: the node exits with `0xC000013A`. No process can raise a close, so T6 tests it by hand.
@@ -280,8 +280,9 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 3. IPC `quit` stops the node. The state file and the endpoint are gone.
 4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval plus the `Left` delay.
 5. On Windows, start a node in a console of its own. Ctrl-break and ctrl-c stop it by the graceful path.
+6. On Windows, send the window of one node a logoff (`WM_QUERYENDSESSION`, then `WM_ENDSESSION`), and post the window of another node a `WM_CLOSE`. Each stops its node by the graceful path, and the node logs the line of the event.
 
-The five steps are done. In `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. So every step runs the node in a child process: the test binary itself, with only its `child_node` entry selected. In step 4 the owner is a second child process, the test binary with only its `owner_process` entry selected. In step 5 the sender of the event is a second child process, with only its `console_sender` entry selected. Step 1 kills its child at the end. An abort of an in-process node would drop its endpoint with no `Endpoint::close`, and iroh logs that as an ERROR, which fails a test since #22.
+The six steps are done. In `Cli` mode a quit ends the process with `std::process::exit`, which would end the test binary. So every step runs the node in a child process: the test binary itself, with only its `child_node` entry selected. In step 4 the owner is a second child process, the test binary with only its `owner_process` entry selected. In step 5 the sender of the event is a second child process, with only its `console_sender` entry selected. In step 6 the test sends the messages itself (`win_session::send_session_end` and `post_window_close`, behind `test-fixtures`). In the test nothing ends the node when its window procedure returns, so the wait of the node until its `Left` is tested by hand (T6). Step 1 kills its child at the end. An abort of an in-process node would drop its endpoint with no `Endpoint::close`, and iroh logs that as an ERROR, which fails a test since #22.
 
 **Nightly and e2e.**
 
@@ -311,12 +312,17 @@ Follow-up items for agent-gossip, outside R12:
 
 ### R13. Logoff and shutdown
 
-A logoff or a shutdown ends a daemon with no `Left`, because the process loaded `user32.dll` (see R7). The state file stays with the pid of a dead process. The readers of agent-gossip skip it: `cli/session.rs` checks that the pid is alive and is `agent-gossip`, and `cli/mod.rs` refuses an old `last_updated`.
+Before R13, a logoff or a shutdown ended a daemon with no `Left`, because the process loaded `user32.dll` (see R7). The state file stayed with the pid of a dead process. The readers of agent-gossip skip such a file: `cli/session.rs` checks that the pid is alive and is `agent-gossip`, and `cli/mod.rs` refuses an old `last_updated`.
 
-- Make a hidden top-level window on a thread of its own, with a message loop. A message-only window (`HWND_MESSAGE`) gets no broadcast message, so it does not do.
-- On `WM_QUERYENDSESSION`, return `TRUE`. On `WM_ENDSESSION` with `TRUE`, feed the quit channel, and do not return until the `std::process::exit` of the quit path, inside the deadline (`WaitToKillAppTimeout`).
+Done.
+
+- `win_session::watch_session_end` (`crates/habilis-network-util/src/win_session.rs`) makes a hidden top-level window on a thread of its own, with a message loop. A message-only window (`HWND_MESSAGE`) gets no broadcast message, so it is of no use here. The call returns when the window exists, so the window is there when the node is ready.
+- `WM_QUERYENDSESSION` gets `TRUE`, so the daemon never stops the end of the session. `WM_ENDSESSION` with `TRUE` gives the kind from the bits of `lParam`: a logoff, a shutdown, or a close by the Restart Manager (`ENDSESSION_CLOSEAPP`). `WM_CLOSE`, which `taskkill /PID` without `/F` sends, is an event too. The window does not destroy itself on it.
+- Only the CLI daemon has the window (`spawn_session_end_watch` in `crates/habilis-network/src/daemon/shutdown.rs`): it alone exits the process. On the end of the session it writes `session end; leaving`, feeds the quit channel, and its window thread does not return, because Windows ends the process when it does. The process lives until the `std::process::exit` of the quit path, or until the deadline (`WaitToKillAppTimeout`, 5 s by default). On `WM_CLOSE` it writes `window close; leaving`, feeds the quit channel, and returns, because a close has no deadline.
+- The quit path fits the deadline: the state file and the marker go first (about 130 ms), then the `Left` and its 500 ms, then the release of the rendezvous (up to about 3 s with bad connectivity). The quit arm of the loop is read only when the current arm ends, so a probe that runs adds its time. The console events of R7 have the same gap.
+- When the window cannot be made, the daemon logs a warn and runs on, with the behavior from before R13.
 - A window makes Windows count the process as a window process in the order of a shutdown.
-- Test it on CI with a `SendMessageW` of `WM_ENDSESSION` to the window of a node in a child process.
+- Step 6 of the host lifecycle test ([R11](#r11-windows-on-ci)) sends the messages to the window of a node in a child process. The wait of the node until its `Left` is tested by hand, in T6.
 
 ## 4. Requirements: agent-gossip
 
@@ -380,7 +386,7 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R12 is done too.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R12 and R13 are done too.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
@@ -486,7 +492,8 @@ Pass:
 | Kill the Claude Code process that owns the daemon (`Stop-Process -Force`), after G1. | The daemon stops within one owner-watch interval plus the `Left` delay, about 2 s. macOS sees the peer leave. |
 | Close the console window of a foreground node. | The graceful `Left` arrives on macOS (`ctrl_close`). |
 | Stop a daemon with an IPC `quit` (`/gossip-leave` after G3). | The graceful `Left` arrives on macOS. The state file and the marker are gone. |
-| Sign out, then sign in. | Until R13, the daemon sends no `Left`, and its state file stays with a dead pid, which agent-gossip skips. After R13, no stale state file stays. |
+| Sign out, then sign in, with a CLI daemon running. | The graceful `Left` arrives on macOS, and no stale state file stays (R13). While the daemon holds `WM_ENDSESSION`, Windows can show its screen of the apps that are still open; "Sign out anyway" can end the daemon before its quit path ends, and then the `Left` can be lost. |
+| Stop a daemon with `taskkill /PID <pid>`, without `/F`. | The daemon logs `window close; leaving`, the graceful `Left` arrives on macOS, and the state file and the marker are gone (R13). |
 | Pid reuse after the owner dies. | A unit test covers this: the start time does not match, so the watch stops the daemon. |
 | Read the state file with `Get-Content` in a loop while a daemon runs. | `last_updated` keeps moving, and the daemon logs no `state file write failed`. |
 
