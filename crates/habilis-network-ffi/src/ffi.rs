@@ -37,6 +37,7 @@ thread_local! {
 /// the engine defaults (G is 32, C is 64).
 #[repr(C)]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct HabilisNetworkOpts {
     pub mesh: *const c_char,
     pub topic: *const c_char,
@@ -54,6 +55,24 @@ pub struct HabilisNetworkOpts {
     pub max_peers: usize,
     /// C: the ceiling of direct connections, `WebRTC` sessions and unicast connections together.
     pub max_direct: usize,
+}
+
+impl HabilisNetworkOpts {
+    /// Every pointer NULL and every number zero, which takes the engine defaults.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            mesh: std::ptr::null(),
+            topic: std::ptr::null(),
+            nick: std::ptr::null(),
+            name: std::ptr::null(),
+            lookup: std::ptr::null(),
+            transport: std::ptr::null(),
+            relay_urls: std::ptr::null(),
+            max_peers: 0,
+            max_direct: 0,
+        }
+    }
 }
 
 /// The layout `packages/habilis-network-ffi/src/dlopen/opts-struct.ts` hand-encodes,
@@ -120,10 +139,23 @@ const _: () = {
 /// many bytes it has, excluding the NUL.
 #[repr(C)]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct HabilisNetworkMsg {
     pub nick: [c_char; NICK_CAP],
     pub directed: c_int,
     pub len: usize,
+}
+
+impl HabilisNetworkMsg {
+    /// No nickname, no directed flag and no text.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            nick: [0; NICK_CAP],
+            directed: 0,
+            len: 0,
+        }
+    }
 }
 
 /// The layout `packages/habilis-network-ffi/src/msg.ts` hand-decodes, pinned like
@@ -666,10 +698,23 @@ pub unsafe extern "C" fn habilis_network_mesh_close(handle: *mut HabilisNetworkM
 /// selectors a stream has no use for.
 #[repr(C)]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct HabilisNetworkStreamOpts {
     pub lookup: *const c_char,
     pub transport: *const c_char,
     pub relay_urls: *const c_char,
+}
+
+impl HabilisNetworkStreamOpts {
+    /// Every pointer NULL, which takes the engine defaults.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            lookup: std::ptr::null(),
+            transport: std::ptr::null(),
+            relay_urls: std::ptr::null(),
+        }
+    }
 }
 
 /// Pinned like `HabilisNetworkOpts`: a reordered field would silently misread a
