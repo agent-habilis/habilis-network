@@ -441,7 +441,7 @@ mod tests {
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
     use super::*;
-    use crate::memory::MemoryHub;
+    use crate::memory::Hub;
     use crate::{GOSSIP_TRANSPORT_ID, frame};
 
     const ECHO_ALPN: &[u8] = b"habilis-network-gossip/test-echo/0";
@@ -519,12 +519,12 @@ mod tests {
 
     /// Two nodes with gossip as the only transport, joined by an in-memory flood.
     async fn pair() -> (
-        MemoryHub,
+        Hub,
         (Endpoint, GossipHandle),
         (Endpoint, GossipHandle),
         Router,
     ) {
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let alice_handle = GossipHandle::new(secret(1).public());
         let bob_handle = GossipHandle::new(secret(2).public());
         hub.join(&alice_handle);
@@ -855,7 +855,7 @@ mod tests {
     /// A dial by id alone reaches the peer: the lookup supplies the gossip address.
     #[test]
     async fn a_dial_by_id_alone_is_resolved_by_the_gossip_lookup() {
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice_handle, bob_handle) = (
             GossipHandle::new(secret(1).public()),
             GossipHandle::new(secret(2).public()),

@@ -62,7 +62,7 @@ mod tests {
     use iroh::protocol::{AcceptError, ProtocolHandler, Router};
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
-    use crate::memory::MemoryHub;
+    use crate::memory::Hub;
     use crate::{GossipHandle, gossip_addr};
 
     const ALPN: &[u8] = b"habilis-network-gossip/test-selector/0";
@@ -79,7 +79,7 @@ mod tests {
 
     /// An endpoint with a loopback UDP socket and the gossip transport. With `ladder` it has the
     /// selector of the handle, without it iroh's default.
-    async fn node(seed: u8, hub: &MemoryHub, ladder: bool) -> Endpoint {
+    async fn node(seed: u8, hub: &Hub, ladder: bool) -> Endpoint {
         let key = SecretKey::from_bytes(&[seed; 32]);
         let handle = GossipHandle::new(key.public());
         hub.join(&handle);
@@ -133,7 +133,7 @@ mod tests {
     /// both open, the mesh topic would carry the bytes. This is what the ladder prevents.
     #[test]
     async fn an_endpoint_with_ip_and_gossip_selects_ip() {
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, bob) = (node(31, &hub, true).await, node(32, &hub, true).await);
         assert!(selects_ip(&alice, &bob).await);
         alice.close().await;
@@ -142,7 +142,7 @@ mod tests {
     /// The same endpoints without the ladder: the guard that the test above can fail.
     #[test]
     async fn without_the_ladder_an_endpoint_with_ip_and_gossip_selects_gossip() {
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, bob) = (node(33, &hub, false).await, node(34, &hub, false).await);
         assert!(!selects_ip(&alice, &bob).await);
         alice.close().await;
@@ -151,7 +151,7 @@ mod tests {
     /// The ladder hides nothing: with no other path, gossip is the one that is selected.
     #[test]
     async fn the_ladder_selects_gossip_when_it_is_the_only_path() {
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let key = |seed: u8| SecretKey::from_bytes(&[seed; 32]);
         let bind = |seed: u8| {
             let handle = GossipHandle::new(key(seed).public());

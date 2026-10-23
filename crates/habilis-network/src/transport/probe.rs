@@ -2172,7 +2172,7 @@ mod tests {
     // The real `selected_kind`, on a real connection whose only transport is gossip.
     #[test]
     async fn a_connection_on_the_gossip_path_reads_as_the_gossip_kind() {
-        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
         use iroh::endpoint::{Connection, presets};
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -2191,7 +2191,7 @@ mod tests {
             SecretKey::from_bytes(&[21; 32]),
             SecretKey::from_bytes(&[22; 32]),
         );
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice_handle, bob_handle) = (
             GossipHandle::new(alice_key.public()),
             GossipHandle::new(bob_key.public()),

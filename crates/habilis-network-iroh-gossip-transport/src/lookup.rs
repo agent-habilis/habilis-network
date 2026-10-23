@@ -48,7 +48,7 @@ mod tests {
     use iroh::{SecretKey, TransportAddr};
     use n0_future::StreamExt;
 
-    use crate::memory::MemoryHub;
+    use crate::memory::Hub;
     use crate::{GossipHandle, gossip_addr};
 
     fn id(seed: u8) -> iroh::EndpointId {
@@ -68,7 +68,7 @@ mod tests {
         let handle = GossipHandle::new(id(1));
         assert_eq!(answer(&handle, id(2)).await, None, "before attach");
 
-        MemoryHub::new().join(&handle);
+        Hub::new().join(&handle);
 
         assert_eq!(
             answer(&handle, id(2)).await,
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     async fn the_lookup_does_not_answer_for_the_node_itself() {
         let handle = GossipHandle::new(id(1));
-        MemoryHub::new().join(&handle);
+        Hub::new().join(&handle);
 
         assert_eq!(answer(&handle, id(1)).await, None);
     }

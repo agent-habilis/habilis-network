@@ -248,8 +248,6 @@ allow_attributes = "warn"
 # Forbid `_ =>` catch-all arms on enum matches: a new variant must be
 # handled explicitly rather than silently swallowed by a wildcard.
 wildcard_enum_match_arm = "warn"
-# documented opt-out (noise / not a readability win): keep CI signal useful
-module_name_repetitions = "allow"
 # Transitive duplicate crate versions are not controllable from a leaf
 # binary (verified: ~16 dup crates, all pulled by iroh/reqwest/etc.);
 # the lint is noise here, not an actionable signal.

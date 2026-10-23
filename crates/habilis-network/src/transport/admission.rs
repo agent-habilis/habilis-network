@@ -2197,7 +2197,7 @@ mod tests {
     /// is off, which is its default.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
-        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
         use iroh::endpoint::ConnectionError;
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -2219,7 +2219,7 @@ mod tests {
             SecretKey::from_bytes(&[11; 32]),
             SecretKey::from_bytes(&[12; 32]),
         );
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice_handle, bob_handle) = (
             GossipHandle::new(alice_key.public()),
             GossipHandle::new(bob_key.public()),
@@ -2319,7 +2319,7 @@ mod tests {
     /// reported to its own table, which keeps the gossip handle.
     async fn ip_and_gossip_node(
         seed: u8,
-        hub: &habilis_network_iroh_gossip_transport::memory::MemoryHub,
+        hub: &habilis_network_iroh_gossip_transport::memory::Hub,
         with_ip: bool,
     ) -> (
         iroh::Endpoint,
@@ -2372,10 +2372,10 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
-        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(41, &hub, true).await;
         let (bob, bob_table, bob_handle) = ip_and_gossip_node(42, &hub, true).await;
         let router = iroh::protocol::Router::builder(bob.clone())
@@ -2422,10 +2422,10 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
-        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(43, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(44, &hub, false).await;
         let router = iroh::protocol::Router::builder(bob.clone())
@@ -2459,10 +2459,10 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
-        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(45, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, false).await;
         let sessions = FakeHub::default();
@@ -2497,10 +2497,10 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_and_a_connection_on_the_gossip_rung_is_allowed_for_gossip() {
         use habilis_network_iroh_gossip_transport::gossip_addr;
-        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(47, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(48, &hub, false).await;
         let sessions = FakeHub::default();

@@ -1992,7 +1992,7 @@ mod tests {
             gossip: true,
             ..TransportOpts::default()
         };
-        let hub = habilis_network_iroh_gossip_transport::memory::MemoryHub::new();
+        let hub = habilis_network_iroh_gossip_transport::memory::Hub::new();
         let mut members = Vec::new();
         for _ in 0..2 {
             let table = crate::transport::SignalAdmission::new(8);
