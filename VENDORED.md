@@ -26,7 +26,8 @@ been renamed to `habilis-network-*` and split; see [FORKED.md](FORKED.md).
   `tests/c_suite.rs` was dropped (it hardcodes paths into upstream's
   `examples/`, which is not vendored here).
 - Root `Cargo.lock` and `rust-toolchain.toml`, copied verbatim from the
-  upstream workspace root.
+  upstream workspace root. (`rust-toolchain.toml` has since changed to one
+  pinned nightly for the whole project, issue #29.)
 
 Not vendored: `examples/`, `target/`, `.cargo/config.toml`, and any
 `agent-gossip` (CLI app) crates — none of these are needed to build the FFI
