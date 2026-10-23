@@ -476,13 +476,7 @@ impl NodeApp for MembershipApp {
         // publishes no a2a card, so it can neither seal to a peer nor be sealed
         // to, and the addressee must pass a directed plaintext body straight
         // through instead of trying (and failing) to unseal it.
-        AppClass {
-            loggable: false,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE.union(AppClass::VALID)
     }
 
     async fn on_app_frame(

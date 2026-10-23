@@ -89,7 +89,7 @@ pub async fn send_app(
             }
             outcome => {
                 if outcome.is_ok() {
-                    super::recv::retain_own_app_broadcast(state, &frame, &class);
+                    super::recv::retain_own_app_broadcast(state, &frame, class);
                 }
                 return outcome;
             }
@@ -100,7 +100,7 @@ pub async fn send_app(
     if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
         // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
-        super::recv::retain_own_app_broadcast(state, &frame, &class);
+        super::recv::retain_own_app_broadcast(state, &frame, class);
         Ok(crate::transport::Delivered::Done)
     } else {
         anyhow::bail!("pending outbound buffer full; app frame dropped")

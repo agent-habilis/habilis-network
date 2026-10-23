@@ -126,13 +126,7 @@ struct Member;
 #[habilis_network::async_trait]
 impl NodeApp for Member {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
     }
 
     async fn on_app_frame(

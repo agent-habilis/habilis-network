@@ -122,15 +122,7 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
     fn classify(&self, message: &Authored) -> AppClass {
         let tag = message.kind.app_tag().map(AppTag::as_str);
         let ours = matches!(tag, Some(ROLLBACK_TAG | LOBBY_TAG));
-        AppClass {
-            loggable: false,
-            beat: false,
-            // `send_app` never stamps `seq`/`parents`, so a chain would
-            // index nothing.
-            chained: false,
-            sealed: false,
-            valid: ours,
-        }
+        AppClass::NONE.with_if(AppClass::VALID, ours)
     }
 
     async fn on_app_frame(

@@ -7,32 +7,98 @@ use crate::protocol::message::Authored;
 /// surfacing, and fork/DAG indexing without knowing the app's tag taxonomy.
 /// Only meaningful for `MessageKind::App` frames — the engine consults it
 /// solely when [`crate::protocol::MessageKind::app_tag`] is `Some`.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "five independent per-frame wire policies the engine reads; grouping them into sub-enums would only obscure the flat classification"
-)]
-#[derive(Debug)]
-pub struct AppClass {
+///
+/// A set of five independent per-frame wire policies, one bit each. Build one with
+/// [`AppClass::NONE`], the flags, [`AppClass::union`] and [`AppClass::with_if`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct AppClass(u8);
+
+impl AppClass {
+    /// No policy: the frame is not loggable, not a beat, not valid, not chained and not sealed.
+    pub const NONE: Self = Self(0);
     /// Goes in the chat message-log / poll-fetch buffer (vs. plumbing like an
     /// RPC request/response, which reaches its caller via a parked waiter).
-    pub loggable: bool,
+    pub const LOGGABLE: Self = Self(1 << 0);
     /// A task liveness **beat** — never retained or surfaced via poll/fetch,
     /// only emitted as a progress widget event.
-    pub beat: bool,
+    pub const BEAT: Self = Self(1 << 1);
     /// The payload parses and agrees with its frame (id / addressing / role /
     /// correlation). A failing frame is dropped whole before it surfaces.
-    pub valid: bool,
+    pub const VALID: Self = Self(1 << 2);
     /// Carries a per-author hash chain (`seq`/parents) and so participates in
     /// fork-detection + the cross-author DAG (broadcast chat).
-    pub chained: bool,
+    pub const CHAINED: Self = Self(1 << 3);
     /// Does this frame's directed body arrive **sealed** (encrypted) to the
-    /// addressee? When `true`, a directed frame addressed to us must unseal
+    /// addressee? When set, a directed frame addressed to us must unseal
     /// (decrypt) or be dropped — the convention an app picks for its directed tags. When
-    /// `false`, the directed body is plaintext and passes through unchanged (a
+    /// not set, the directed body is plaintext and passes through unchanged (a
     /// consumer with its own data model's explicit choice). Only consulted on the addressee's
     /// directed path; ignored for broadcast/infra frames, which are never
-    /// sealed.
-    pub sealed: bool,
+    /// sealed. `sealed: false` is load-bearing for the membership app (membership/app.rs).
+    pub const SEALED: Self = Self(1 << 4);
+
+    /// Both policies at once.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// This policy, plus `flag` when `on`.
+    #[must_use]
+    pub const fn with_if(self, flag: Self, on: bool) -> Self {
+        if on { self.union(flag) } else { self }
+    }
+
+    /// Whether the frame goes in the message log ([`AppClass::LOGGABLE`]).
+    #[must_use]
+    pub const fn loggable(self) -> bool {
+        self.0 & Self::LOGGABLE.0 != 0
+    }
+
+    /// Whether the frame is a liveness beat ([`AppClass::BEAT`]).
+    #[must_use]
+    pub const fn beat(self) -> bool {
+        self.0 & Self::BEAT.0 != 0
+    }
+
+    /// Whether the frame's payload is valid ([`AppClass::VALID`]).
+    #[must_use]
+    pub const fn valid(self) -> bool {
+        self.0 & Self::VALID.0 != 0
+    }
+
+    /// Whether the frame is chained ([`AppClass::CHAINED`]).
+    #[must_use]
+    pub const fn chained(self) -> bool {
+        self.0 & Self::CHAINED.0 != 0
+    }
+
+    /// Whether the directed body is sealed ([`AppClass::SEALED`]).
+    #[must_use]
+    pub const fn sealed(self) -> bool {
+        self.0 & Self::SEALED.0 != 0
+    }
+}
+
+impl std::ops::BitOr for AppClass {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        self.union(rhs)
+    }
+}
+
+impl std::fmt::Debug for AppClass {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppClass")
+            .field("loggable", &self.loggable())
+            .field("beat", &self.beat())
+            .field("valid", &self.valid())
+            .field("chained", &self.chained())
+            .field("sealed", &self.sealed())
+            .finish()
+    }
 }
 
 /// An inbound `App` frame plus the surfacing decision already made by the

@@ -987,12 +987,12 @@ fn retain_and_index(
     // App frames carry the app's per-tag policy (`classify`, computed once by the
     // caller and threaded in here); infra kinds (`class == None`) use the engine's
     // own rule. A beat is plumbing — never retained/indexed.
-    let loggable = class.map_or_else(|| is_loggable(&message.kind), |cls| cls.loggable);
-    let beat = class.is_some_and(|cls| cls.beat);
+    let loggable = class.map_or_else(|| is_loggable(&message.kind), |cls| cls.loggable());
+    let beat = class.is_some_and(|cls| cls.beat());
     if !loggable || beat {
         return;
     }
-    if class.is_some_and(|cls| cls.chained) {
+    if class.is_some_and(|cls| cls.chained()) {
         let hash = ContentHash::of(canonical);
         // A second, *different* content hash at an already-seen `(author, seq)`
         // is cryptographic proof of equivocation — surface a `fork` once per
@@ -1065,9 +1065,12 @@ pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Verifie
 pub(crate) fn retain_own_app_broadcast(
     state: &mut EventLoopState,
     message: &Verified,
-    class: &AppClass,
+    class: AppClass,
 ) {
-    if !class.loggable || class.beat || !matches!(message.kind, MessageKind::App { to: None, .. }) {
+    if !class.loggable()
+        || class.beat()
+        || !matches!(message.kind, MessageKind::App { to: None, .. })
+    {
         return;
     }
     state.mark_seen(message);
@@ -1211,7 +1214,7 @@ enum Gated {
 /// rather than re-classifying.
 fn gate_app_payload(view: &Authored, app: &dyn NodeApp) -> Option<AppClass> {
     let class = app.classify(view);
-    if class.valid {
+    if class.valid() {
         Some(class)
     } else {
         tracing::warn!(target: "habilis_network::gossip",
@@ -1285,7 +1288,7 @@ fn gate_directed_to_us<F: Proof>(frame: &F, state: &EventLoopState, app: &dyn No
     // signature-authenticated either way; `sealed=false` only means "not
     // additionally encrypted".
     let wire = frame.authored();
-    if !app.classify(&wire).sealed {
+    if !app.classify(&wire).sealed() {
         // Plaintext directed body: the wire body is already the final body.
         let Some(class) = gate_app_payload(&wire, app) else {
             return Gated::Drop;
@@ -1417,7 +1420,7 @@ fn maybe_push_inbound(
     // from the caller's single classification. An infra frame (`class == None`,
     // `app_tag` also `None`) is always pushable past the structural guards above.
     let app_pushable = match message.kind.app_tag() {
-        Some(_) => class.is_some_and(|cls| cls.loggable && !cls.beat),
+        Some(_) => class.is_some_and(|cls| cls.loggable() && !cls.beat()),
         None => true,
     };
     if app_pushable {
@@ -1837,13 +1840,9 @@ mod retain_own_broadcast_tests {
     }
 
     fn class(loggable: bool) -> app::AppClass {
-        app::AppClass {
-            loggable,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        app::AppClass::NONE
+            .with_if(app::AppClass::LOGGABLE, loggable)
+            .union(app::AppClass::VALID)
     }
 
     /// An app broadcast that the app logs is held by its author, as at the ingest of a peer: the
@@ -1853,7 +1852,7 @@ mod retain_own_broadcast_tests {
     fn an_own_app_broadcast_that_the_app_logs_is_retained() {
         let mut state = fresh_state();
         let frame = app_frame(&state, None);
-        super::retain_own_app_broadcast(&mut state, &frame, &class(true));
+        super::retain_own_app_broadcast(&mut state, &frame, class(true));
         assert_eq!(state.message_log.len(), 1);
     }
 
@@ -1864,9 +1863,9 @@ mod retain_own_broadcast_tests {
     fn an_own_app_frame_that_the_app_does_not_log_or_that_is_directed_is_not_retained() {
         let mut state = fresh_state();
         let broadcast = app_frame(&state, None);
-        super::retain_own_app_broadcast(&mut state, &broadcast, &class(false));
+        super::retain_own_app_broadcast(&mut state, &broadcast, class(false));
         let directed = app_frame(&state, Some("you"));
-        super::retain_own_app_broadcast(&mut state, &directed, &class(true));
+        super::retain_own_app_broadcast(&mut state, &directed, class(true));
         assert_eq!(state.message_log.len(), 0);
     }
 
@@ -1938,13 +1937,7 @@ mod evicted_orphan_tests {
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -2121,13 +2114,7 @@ mod first_contact_tests {
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -2289,13 +2276,7 @@ mod first_contact_tests {
     #[async_trait::async_trait]
     impl NodeApp for Counting {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -3215,13 +3196,7 @@ mod left_tests {
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::NONE.union(AppClass::BEAT).union(AppClass::VALID)
         }
 
         async fn on_app_frame(

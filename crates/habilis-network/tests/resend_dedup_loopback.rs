@@ -76,13 +76,9 @@ struct Chat {
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: true,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE
+            .union(AppClass::LOGGABLE)
+            .union(AppClass::VALID)
     }
 
     async fn on_app_frame(
