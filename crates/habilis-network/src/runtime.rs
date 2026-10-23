@@ -44,8 +44,9 @@ pub mod state_file {
 #[cfg(feature = "host")]
 pub mod ipc {
     pub use crate::transport::ipc::{
-        Addressed, ForeignEndpoint, IpcName, NoDaemon, QuitError, QuitTarget, active_endpoints,
-        json_ack, json_error, json_ok_msg, quit, send, send_to_endpoint, terminate,
+        Addressed, ForeignEndpoint, IpcName, NoDaemon, QuitError, QuitTarget, UnsafeRuntimeBase,
+        active_endpoints, json_ack, json_error, json_ok_msg, quit, send, send_to_endpoint,
+        terminate,
     };
 }
 

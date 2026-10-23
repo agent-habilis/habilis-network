@@ -106,6 +106,10 @@ pub mod util {
         ensure_mesh_runtime_dir, ensure_parent_private, ensure_runtime_base, is_under_runtime_base,
         mesh_runtime_dir, runtime_base,
     };
+    // Unix only: on Windows the base is in the profile, which another user
+    // cannot create (R12 of `docs/windows.md`).
+    #[cfg(all(unix, feature = "host"))]
+    pub use habilis_network_util::{RuntimeBaseCheck, check_runtime_base};
     // `bounded_read` is gated on `habilis-network-util`'s `async-io`, which this crate
     // turns on unconditionally in its manifest — so it is always here, and a
     // `#[cfg(feature = "async-io")]` would be checking a feature *this* crate

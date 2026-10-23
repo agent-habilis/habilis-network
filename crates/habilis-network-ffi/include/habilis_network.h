@@ -12,10 +12,18 @@
  *     cc prog.c -I<repo>/crates/habilis-network-ffi/include \
  *        -L<repo>/target/release -lhabilis_network_ffi
  *
+ * On Windows (MSVC) the staticlib is habilis_network_ffi.lib, and the cdylib is
+ * habilis_network_ffi.dll with its import library habilis_network_ffi.dll.lib.
+ * A static link also needs the system libraries that rustc lists with
+ * `--print native-static-libs`.
+ *
  * Conventions
  * -----------
  * - A pointer-returning call yields NULL on failure; an `int` call returns 0 on
  *   success and -1 on failure. `habilis_network_last_error()` then holds the reason.
+ * - A call that returns a count or a length, and also a negative code, returns
+ *   `int64_t`, 64 bits on every target. `long` is not used, because it is 32
+ *   bits on Windows.
  * - Every call is blocking and thread-confined: one handle belongs to one
  *   thread. Distinct handles are independent (a single process may hold several,
  *   each with its own runtime and endpoint).
@@ -104,8 +112,8 @@ int habilis_network_msg_send(habilis_network_mesh *handle, const char *to, const
  * message stays queued, and `out->len` holds its length — retry with a buffer
  * of at least `out->len + 1` bytes.
  */
-long habilis_network_msg_recv(habilis_network_mesh *handle, char *buf, size_t cap, int timeout_ms,
-                     habilis_network_msg *out);
+int64_t habilis_network_msg_recv(habilis_network_mesh *handle, char *buf, size_t cap,
+                                 int timeout_ms, habilis_network_msg *out);
 
 /*
  * The shared state document — a JSON object every peer in the mesh converges on
@@ -119,10 +127,10 @@ long habilis_network_msg_recv(habilis_network_mesh *handle, char *buf, size_t ca
  * written — retry with a bigger buffer. -1 on failure.
  */
 int habilis_network_mesh_state_merge(habilis_network_mesh *handle, const char *json);
-long habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buf, size_t cap);
+int64_t habilis_network_mesh_state_json(habilis_network_mesh *handle, char *buf, size_t cap);
 
 /* The live peer roster as JSON. Same length/`cap` convention as above. */
-long habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buf, size_t cap);
+int64_t habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buf, size_t cap);
 
 /*
  * How many peers other than you are in the mesh right now; 0 means you are
@@ -132,7 +140,7 @@ long habilis_network_mesh_peers_json(habilis_network_mesh *handle, char *buf, si
  * so never reads 0. This is the question a sender waiting for company has, and
  * the answer it can loop on.
  */
-long habilis_network_mesh_peer_count(habilis_network_mesh *handle);
+int64_t habilis_network_mesh_peer_count(habilis_network_mesh *handle);
 
 /*
  * Leave the mesh and free the handle. The handle is freed even when this returns
@@ -209,7 +217,7 @@ habilis_network_reader *habilis_network_stream_open(habilis_network_streams *str
  * abandoned the stream, or the link was lost), or -2 at the end of the stream.
  * Bytes that do not fit in `cap` wait for the next call.
  */
-long habilis_network_stream_read(habilis_network_reader *reader, uint8_t *buf, size_t cap, int timeout_ms);
+int64_t habilis_network_stream_read(habilis_network_reader *reader, uint8_t *buf, size_t cap, int timeout_ms);
 
 /* Free a reader, giving up the stream. NULL is a no-op. */
 int habilis_network_reader_close(habilis_network_reader *reader);

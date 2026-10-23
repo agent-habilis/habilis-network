@@ -8,7 +8,7 @@
     reason = "the surface under test is `unsafe extern \"C\"`; calling it is the test"
 )]
 
-use std::ffi::{CStr, CString, c_char, c_long};
+use std::ffi::{CStr, CString, c_char};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -67,7 +67,7 @@ fn open(opts: &HabilisNetworkOpts) -> *mut HabilisNetworkMesh {
 /// then fill a buffer of that size.
 fn read_json(
     handle: *mut HabilisNetworkMesh,
-    reader: unsafe extern "C" fn(*mut HabilisNetworkMesh, *mut c_char, usize) -> c_long,
+    reader: unsafe extern "C" fn(*mut HabilisNetworkMesh, *mut c_char, usize) -> i64,
 ) -> String {
     // SAFETY: a NULL buffer with a zero capacity is the documented "how long is
     // it?" query — the callee writes nothing.
@@ -363,7 +363,7 @@ fn empty_msg() -> HabilisNetworkMsg {
 
 /// Receive one message into a buffer of `cap` bytes, waiting up to 20 s.
 /// Returns the call's result, the metadata, and the text when it was written.
-fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (c_long, HabilisNetworkMsg, String) {
+fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (i64, HabilisNetworkMsg, String) {
     let mut msg = empty_msg();
     let mut buf = vec![0_u8; cap];
     // SAFETY: live handle, buffer writable for `cap` bytes, `out` writable.
@@ -540,7 +540,7 @@ fn four_peers_converge(public: bool) {
     }
 
     let deadline = Instant::now() + Duration::from_secs(45);
-    let mut counts = vec![0 as c_long; handles.len()];
+    let mut counts = vec![0_i64; handles.len()];
     while Instant::now() < deadline {
         for (idx, &handle) in handles.iter().enumerate() {
             // SAFETY: each handle came from habilis_network_mesh_open and is still open.

@@ -18,7 +18,7 @@ Ids, wire formats, the IPC protocol and the C ABI can change.
 
 ## 2. Current state
 
-The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy and the tests there.
+The workspace compiles on Windows, and the `windows` job of `ci.yml` runs clippy, `cargo task ffi` and the tests there.
 The IPC of a daemon works on Windows, over a named pipe. A daemon stops gracefully on an IPC `quit`, when its owner exits, and on ctrl-c, ctrl-break and the close of its console. A logoff and a shutdown do not stop it gracefully yet.
 
 | Requirement | State |
@@ -31,13 +31,13 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
 | R7. Console events | Done. Ctrl-c, ctrl-break, close, logoff and shutdown feed the quit channel (`crates/habilis-network/src/daemon/shutdown.rs`). A logoff and a shutdown do not reach a node that loaded `user32.dll`, and a node loads it: see R13. |
 | R8. State file | Done. The replace and the remove of the state file and of the IPC marker run again for up to 50 ms while a reader blocks them (`crates/habilis-network-util/src/file_retry.rs`). |
-| R9. FFI | Open. `ffi.rs` and `habilis_network.h` still use `c_long` / `long`. `dlopen/node.ts` and `abi.ts` are not changed. `tasks/src/ffi.rs` still reads `libhabilis_network_ffi.a`. |
+| R9. FFI | Done. The five calls that returned `long` return `int64_t` (`crates/habilis-network-ffi`), and the loaders read them as `i64`, koffi as `int64_t`. `cargo task ffi` reads `habilis_network_ffi.lib` with `llvm-nm.exe` (`tasks/src/ffi.rs`). |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
-| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the five steps of `host_lifecycle.rs` run. Open: `cargo task ffi` (with R9), the `e2e.yml` stream job, and the required-check setting of the repository. The Node `isize` mapping is not tested until R9. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
-| R12. Runtime base of a Unix client | Open. A Unix client does not check the base before it reads a marker. |
+| R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the five steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
+| R12. Runtime base of a Unix client | Done. A Unix client checks the base before it reads a marker (`check_runtime_base`), and refuses one that is not private with `UnsafeRuntimeBase` (`crates/habilis-network/src/transport/ipc.rs`). Follow-up items for agent-gossip are in [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Open. A logoff or a shutdown ends a daemon with no `Left`. |
 
-The descriptions of [§2.2](#22-runtime-breaks) and the open lines of [§2.3](#23-tooling-and-tests) are still true. Their line numbers can be out of date.
+[§2.2](#22-runtime-breaks) has no open item except R13. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
 
 ### 2.1 Build blockers
@@ -66,19 +66,11 @@ These parts were already correct on Windows:
 
 ### 2.2 Runtime breaks
 
-These problems occur after the workspace compiles. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5, the owner watch item with R6, the console events item with R7, except a logoff and a shutdown (R13), and the state file item with R8.
-
-- **Node FFI.** `packages/habilis-network-ffi/src/dlopen/node.ts:26` maps `isize` to koffi `long`. On Win64, `long` is 4 bytes, so return values are truncated. `abi.ts:14` says "8 bytes on every target here", which is false on Windows.
-- **C ABI.** `crates/habilis-network-ffi/src/ffi.rs` returns `c_long`, and `include/habilis_network.h:107`, `:122`, `:125`, `:135`, `:212` declare `long`. Both sides agree, but on Windows the value is 32-bit.
+These problems occurred after the workspace compiled. Only R13 is left: a logoff and a shutdown. The three IPC items that were here (the name, the discovery and the security of the endpoint) are done with R3. The stop item is done with R5, the owner watch item with R6, the console events item with R7, except a logoff and a shutdown (R13), the state file item with R8, and the two FFI items (the Node mapping and the C ABI) with R9.
 
 ### 2.3 Tooling and tests
 
-Open (R9):
-
-- `tasks/src/ffi.rs:17` uses `libhabilis_network_ffi.a`. On MSVC the static library is `habilis_network_ffi.lib`.
-- `tasks/src/ffi.rs` falls back to `nm -gU`, and finds `bin/llvm-nm` with no `.exe`. The symbol filter knows Mach-O and ELF, not COFF.
-
-Open (other):
+Open:
 
 - `tasks/src/util/cdp.rs` has no `win64` Chrome for Testing build. It says so, and `$CHROME_FOR_TESTING` names a local Chrome instead.
 - `tasks/src/util/wasm.rs` looks for clang only in Homebrew paths.
@@ -240,9 +232,11 @@ With a retry every 1 ms for up to 100 ms, no rename and no remove failed. The wo
 
 ### R9. FFI
 
-- Change `c_long` to `i64` in `ffi.rs`, and `long` to `int64_t` in `habilis_network.h`.
-- Map `isize` to a 64-bit integer in `dlopen/node.ts`. Fix the comment in `abi.ts`.
-- `cargo task ffi` (`tasks/src/ffi.rs`) uses `habilis_network_ffi.lib` on Windows, finds `llvm-nm.exe`, and reads COFF symbols.
+Done.
+
+- The five calls that returned `long` return `int64_t` in `habilis_network.h` and `i64` in `ffi.rs`. `long` is 32 bits on Windows: the Bun and Deno loaders read 64 bits, so a -1 came back as 4294967295. On 64-bit Linux and macOS the binary ABI does not change.
+- In `packages/habilis-network-ffi` the `CType` `'isize'` is `'i64'`, and the Node loader gives koffi `int64_t`. `abi.test.ts` holds the return type of each call against the header, and `smoke.test.ts` reads -1 from a call with a NULL handle.
+- `cargo task ffi` (`tasks/src/ffi.rs`) reads `habilis_network_ffi.lib` on Windows with the `llvm-nm.exe` of the `llvm-tools` component. COFF symbols on x86_64 have no underscore, so the same parse reads them, as it reads ELF.
 
 ### R10. Tooling and tests
 
@@ -265,15 +259,15 @@ The real machine of [§6](#6-test-plan-on-a-real-windows-machine) then tests onl
   ```
   cargo clippy --workspace --all-targets -- -D warnings
   cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo task ffi
   cargo test --workspace
   cargo test -p habilis-network --features blob
   cargo test -p habilis-network-iroh-webrtc-transport --features native
-  cargo task ffi
   ```
 
-  `cargo task ffi` is not in the job yet: it needs R9. Add it to the job with R9.
+  `llvm-tools` is in the toolchain step, for `cargo task ffi` (R9).
 - The job sets `CARGO_PROFILE_DEV_DEBUG=0`. With debug info, two debug builds wrote 19.9 GB on a developer machine and did not finish. Without it, all the cargo commands of the job wrote 6 GB.
-- It also runs `bun install --frozen-lockfile` and `bun run test`. This tests `discover.ts` and the Node `isize` mapping on `win32`. Until R9, the smoke test is skipped on Windows, so the `isize` mapping is not tested.
+- It also runs `bun install --frozen-lockfile` and `bun run test`, after `cargo task ffi`. This tests `discover.ts` on `win32`, and the smoke tests load the release DLL through the Bun loader. A second step runs `smoke.test.ts` with `HABILIS_NETWORK_LIB` set to the DLL, so a missing DLL fails the step and the tests are not skipped. The Node loader (koffi) is not run on CI.
 - The Linux job keeps `cargo fmt --check`, `cargo doc` and the wasm32 steps.
 - Steps that need bash stay on Linux: `Clippy list names only functions` and the light-cycles web job.
 
@@ -301,11 +295,19 @@ The five steps are done. In `Cli` mode a quit ends the process with `std::proces
 
 ### R12. Runtime base of a Unix client
 
-On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Today only the writers check the base (`ensure_runtime_base`). If another user creates the base, the daemon refuses to start, but a client reads the socket or the marker that the other user put there, and sends it the commands. This gap was there before R3, with the socket file.
+On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Before R12, only the writers checked the base (`ensure_runtime_base`). If another user created the base, the daemon refused to start, but a client read the socket or the marker that the other user put there, and sent it the commands. This gap was there before R3, with the socket file.
 
-- Add `check_runtime_base(base)`, with the checks of `ensure_runtime_base` and no create: a folder, owned by the user, with no group or other bits.
-- The client calls it before it reads a marker, and returns `ForeignEndpoint` when the base is not the user's.
+Done.
+
+- `check_runtime_base(base)` (`crates/habilis-network-util/src/lib.rs`) has the checks of `ensure_runtime_base`, creates nothing and changes nothing. It returns `RuntimeBaseCheck`: `Private` (a folder of the user with no group or other bits), `Absent`, or `Refused` with the reason. A base at `0755` is refused, not tightened.
+- `send` and `active_endpoints` call it before they read a marker. A refused base gives `UnsafeRuntimeBase` from `send`, and from `quit` and `terminate` inside `QuitError::Unreached`; `active_endpoints` gives no endpoint. Each logs a warn. `terminate` sends no signal then. An absent base is still `NoDaemon`. The error is not `ForeignEndpoint`: no endpoint was reached, and a folder of the user that is open to others is not another user's.
 - On Windows the base is in the profile, which another user cannot create, so the client needs only the owner check of the pipe.
+
+Follow-up items for agent-gossip, outside R12:
+
+- `read_identity`, `read_session_entry` and `read_snapshot` (`runtime::state_file`, in `crates/habilis-network/src/daemon/state_file.rs`) read the state files under the same base and do not check it. agent-gossip reads the pid of a daemon from them. `terminate` sends no signal through a refused base, but the session list and the statusline still trust it. agent-gossip should call `check_runtime_base` before those reads.
+- `doctor` should call `check_runtime_base` itself, to show why it finds no daemon: the warn of `active_endpoints` may not reach the user.
+- The fixtures and tests of agent-gossip that make the base with `create_dir_all` (`0755` under the usual umask) now get the refusal. Check them before the engine change reaches agent-gossip.
 
 ### R13. Logoff and shutdown
 
@@ -378,7 +380,7 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. In step 5, R8 is done.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R12 is done too.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
@@ -445,7 +447,7 @@ bun test packages/habilis-network-ffi
 
 Then run `examples/chat/bun-ffi` on Windows and join a mesh with a macOS peer.
 Send a message in each direction.
-Do it again under Node with koffi. This tests the `isize` fix of R9.
+Do it again under Node with koffi. This tests the koffi `int64_t` mapping of R9, which no CI job runs.
 Pass: the messages arrive, and the peer count is correct on both sides.
 
 ### T4. Runtime directory and IPC security
