@@ -26,6 +26,10 @@
 
 pub mod wire;
 
+mod error;
+
+pub use error::DocError;
+
 use std::collections::{HashMap, HashSet};
 
 use automerge::transaction::Transactable;
@@ -310,10 +314,13 @@ impl MeshDoc {
         &self,
         change: &[u8],
         merge: Option<&Value>,
-    ) -> anyhow::Result<(
-        habilis_network_protocol::MessageBody,
-        habilis_network_protocol::MessageBody,
-    )> {
+    ) -> Result<
+        (
+            habilis_network_protocol::MessageBody,
+            habilis_network_protocol::MessageBody,
+        ),
+        DocError,
+    > {
         let plain = wire::change_body(change, merge)?;
         let wire = match self.key.as_ref() {
             Some(key) => wire::encrypt_body(&plain, key)?,
@@ -408,16 +415,16 @@ impl MeshDoc {
         &self,
         merge: &Value,
         actor_seed: &[u8],
-    ) -> anyhow::Result<Option<Vec<u8>>> {
+    ) -> Result<Option<Vec<u8>>, DocError> {
         let Value::Object(_) = merge else {
-            anyhow::bail!("merge must be a JSON object (automerge's document root is a map)");
+            return Err(DocError::NotAnObject);
         };
         let mut fork = self.doc.fork();
         fork.set_actor(actor_for(actor_seed));
         let heads = fork.get_heads();
         {
             let mut tx = fork.transaction();
-            write_map(&mut tx, &ROOT, merge)?;
+            write_map(&mut tx, &ROOT, merge).map_err(DocError::encode)?;
             tx.commit();
         }
         let mut changes = fork.get_changes(&heads);

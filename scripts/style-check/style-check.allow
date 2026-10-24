@@ -22,8 +22,6 @@ anyhow_pub|crates/habilis-network-chunks/src/fs.rs|1|package 7: typed in a later
 anyhow_pub|crates/habilis-network-chunks/src/idb.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-chunks/src/lib.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-chunks/src/mem.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network-doc/src/lib.rs|2|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network-doc/src/wire.rs|3|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-ffi/src/mesh.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-ffi/src/stream.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-iroh-multihop-transport/src/lib.rs|2|package 7: typed in a later commit

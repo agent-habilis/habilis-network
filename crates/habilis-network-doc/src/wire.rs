@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use habilis_network_protocol::SymmetricKey;
+
+use crate::DocError;
 use habilis_network_protocol::message::MessageBody;
 
 /// The tagged `State`/`Meta` message body.
@@ -48,9 +50,9 @@ enum StateOp {
 /// # Errors
 /// Serialization failure or a body exceeding the size limit.
 #[cfg(any(test, feature = "adversarial"))]
-pub fn merge_body(merge: Value) -> anyhow::Result<MessageBody> {
-    let json = serde_json::to_string(&StateOp::Merge { merge })?;
-    MessageBody::new(json).map_err(|error| anyhow::anyhow!("{error}"))
+pub fn merge_body(merge: Value) -> Result<MessageBody, DocError> {
+    let json = serde_json::to_string(&StateOp::Merge { merge }).map_err(DocError::encode)?;
+    Ok(MessageBody::new(json)?)
 }
 
 /// Wrap one automerge change's raw bytes as a channel-event body. `merge` is the
@@ -60,12 +62,13 @@ pub fn merge_body(merge: Value) -> anyhow::Result<MessageBody> {
 ///
 /// # Errors
 /// Serialization failure or a body exceeding the size limit.
-pub fn change_body(change: &[u8], merge: Option<&Value>) -> anyhow::Result<MessageBody> {
+pub fn change_body(change: &[u8], merge: Option<&Value>) -> Result<MessageBody, DocError> {
     let json = serde_json::to_string(&StateOp::Change {
         data: bs58::encode(change).into_string(),
         merge: merge.cloned(),
-    })?;
-    MessageBody::new(json).map_err(|error| anyhow::anyhow!("{error}"))
+    })
+    .map_err(DocError::encode)?;
+    Ok(MessageBody::new(json)?)
 }
 
 /// Decode a channel-event body back to raw automerge change bytes. `None` for a
@@ -86,12 +89,13 @@ pub fn parse_change_body(body: &str) -> Option<Vec<u8>> {
 ///
 /// # Errors
 /// Serialization or `MessageBody` validation of the envelope fails.
-pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> anyhow::Result<MessageBody> {
+pub fn encrypt_body(plain: &MessageBody, key: &SymmetricKey) -> Result<MessageBody, DocError> {
     let blob = habilis_network_protocol::seal::seal_symmetric(key, plain.as_str().as_bytes());
     let json = serde_json::to_string(&StateOp::Enc {
         data: bs58::encode(blob).into_string(),
-    })?;
-    MessageBody::new(json).map_err(|error| anyhow::anyhow!("{error}"))
+    })
+    .map_err(DocError::encode)?;
+    Ok(MessageBody::new(json)?)
 }
 
 /// Recover the plaintext body string. With a `key` (passworded mesh) the body
