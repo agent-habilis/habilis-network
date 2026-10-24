@@ -57,7 +57,7 @@ impl fmt::Display for InviteError {
 impl Error for InviteError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Base58(error) => Some(error),
+            Self::Base58(error) => error.source(),
             Self::Source { source, .. } => Some(source.as_ref()),
             Self::UnsupportedVersion(_) | Self::Refused(_) | Self::Truncated(_) => None,
         }

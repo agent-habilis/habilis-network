@@ -87,7 +87,13 @@ impl std::fmt::Display for EventLoopError {
     }
 }
 
-impl std::error::Error for EventLoopError {}
+impl std::error::Error for EventLoopError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Internal(error) => error.source(),
+        }
+    }
+}
 
 /// Never returns normally — exits the process on ctrl-c / SIGTERM.
 ///
@@ -1767,5 +1773,24 @@ mod advertised_links_tests {
         let linked = HashSet::from([id(1), id(2)]);
         let links = advertised_links(&linked, &[], 100);
         assert_eq!(sorted(links), sorted(vec![(id(1), 100), (id(2), 100)]));
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use habilis_network_test_tracing::test;
+
+    use super::EventLoopError;
+
+    #[test]
+    fn an_internal_cause_keeps_its_chain() {
+        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let cause = anyhow::Error::new(io).context("bind the endpoint");
+        let error = anyhow::Error::new(EventLoopError::internal(cause));
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("Address already in use"),
+            "the io cause of EventLoopError is lost: {text}"
+        );
     }
 }

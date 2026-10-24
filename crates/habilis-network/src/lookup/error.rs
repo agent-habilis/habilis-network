@@ -41,4 +41,30 @@ impl fmt::Display for EndpointError {
     }
 }
 
-impl std::error::Error for EndpointError {}
+impl std::error::Error for EndpointError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Internal(error) => error.source(),
+            Self::CapRefused(_) | Self::NotANeighbor(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use habilis_network_test_tracing::test;
+
+    use super::EndpointError;
+
+    #[test]
+    fn an_internal_cause_keeps_its_chain() {
+        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let cause = anyhow::Error::new(io).context("bind the endpoint");
+        let error = anyhow::Error::new(EndpointError::internal(cause));
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("Address already in use"),
+            "the io cause of EndpointError is lost: {text}"
+        );
+    }
+}

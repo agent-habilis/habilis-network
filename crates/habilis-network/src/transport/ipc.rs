@@ -288,7 +288,14 @@ impl std::fmt::Display for IpcError {
     }
 }
 
-impl std::error::Error for IpcError {}
+impl std::error::Error for IpcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Internal(error) => error.source(),
+            Self::NoDaemon(_) => None,
+        }
+    }
+}
 
 /// Client-side: send an IPC command to the running server and return the raw JSON response.
 ///
@@ -653,5 +660,24 @@ mod tests {
 
         handler.abort();
         listener_handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use habilis_network_test_tracing::test;
+
+    use super::IpcError;
+
+    #[test]
+    fn an_internal_cause_keeps_its_chain() {
+        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let cause = anyhow::Error::new(io).context("bind the endpoint");
+        let error = anyhow::Error::new(IpcError::internal(cause));
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("Address already in use"),
+            "the io cause of IpcError is lost: {text}"
+        );
     }
 }

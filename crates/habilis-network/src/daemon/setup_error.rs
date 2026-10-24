@@ -65,10 +65,20 @@ impl fmt::Display for SetupError {
 }
 
 impl Error for SetupError {
-    /// The forwarding variants show the wrapped text, so they are their own cause
-    /// and name no source; `Internal` shows its cause's text, so it names none either.
+    /// The forwarding variants print their inner text, so the chain continues at the inner
+    /// error's own source. Naming the inner error here would print its text twice.
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        None
+        match self {
+            Self::Unlock(error) => error.source(),
+            Self::Invite(error) => error.source(),
+            Self::Resolve(error) => error.source(),
+            Self::Config(error) => error.source(),
+            Self::Internal(error) => error.source(),
+            Self::PasswordRequired
+            | Self::InviteNoPassword
+            | Self::MeshAndTopic
+            | Self::EmptyTopic => None,
+        }
     }
 }
 
@@ -89,6 +99,25 @@ mod tests {
         assert_eq!(
             SetupError::Unlock(UnlockError::WrongPassword).to_string(),
             "wrong password"
+        );
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use habilis_network_test_tracing::test;
+
+    use super::SetupError;
+
+    #[test]
+    fn an_internal_cause_keeps_its_chain() {
+        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let cause = anyhow::Error::new(io).context("bind the endpoint");
+        let error = anyhow::Error::new(SetupError::internal(cause));
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("Address already in use"),
+            "the io cause of SetupError is lost: {text}"
         );
     }
 }

@@ -234,7 +234,18 @@ impl std::fmt::Display for SendError {
     }
 }
 
-impl std::error::Error for SendError {}
+impl std::error::Error for SendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Internal(error) => error.source(),
+            Self::Held { .. }
+            | Self::Undeliverable(_)
+            | Self::Oversize(_)
+            | Self::InvalidAddressee(_)
+            | Self::Stopped => None,
+        }
+    }
+}
 
 /// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
 /// a send could not dial it without one. So is a frame held for a pair that lost its direct path
@@ -1683,5 +1694,24 @@ mod tests {
         returned_endpoint.close().await;
         other_net.endpoint.close().await;
         net.endpoint.close().await;
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use habilis_network_test_tracing::test;
+
+    use super::SendError;
+
+    #[test]
+    fn an_internal_cause_keeps_its_chain() {
+        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let cause = anyhow::Error::new(io).context("bind the endpoint");
+        let error = anyhow::Error::new(SendError::internal(cause));
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("Address already in use"),
+            "the io cause of SendError is lost: {text}"
+        );
     }
 }
