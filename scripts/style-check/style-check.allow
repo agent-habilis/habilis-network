@@ -19,9 +19,6 @@ catch_unwind|crates/habilis-network-test-tracing/src/lib.rs|1|catch_panic, the h
 # anyhow_pub: a public signature returns anyhow. Each library file is typed in a later commit of
 # package 7, and its line goes with that commit.
 anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network-protocol/src/base58check.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network-protocol/src/invite/ticket.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network-protocol/src/resolver/mod.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/blob/consume.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/blob/mod.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/blob/produce.rs|1|package 7: typed in a later commit
