@@ -13,7 +13,8 @@ use habilis_network_protocol::ConfigError;
 /// The named variants are the causes a caller acts on: the frontends prompt for a
 /// password, drop a flag, or print the text that the agent-gossip skills grep for.
 /// [`SetupError::Internal`] holds the other causes, which no caller acts on; it
-/// keeps their text and their chain.
+/// keeps their text and their chain. A connect timeout to the creator of a mesh (the
+/// "creator unreachable" that the gossip-join skill describes) lands in `Internal`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SetupError {
