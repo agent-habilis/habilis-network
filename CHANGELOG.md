@@ -61,10 +61,10 @@ published to a registry; pin it with
   start time of the owner with the one it read at startup, so a reused pid does not fool it. The
   daemon then takes the path of `SIGTERM`. A daemon with no `--owner-pid` has no watch on Windows:
   Windows does not reparent an orphan, and the pid of a dead parent can be reused, so the watch of
-  the parent pid stays Unix only. On every OS the watch now writes an `info` line with the target
-  `habilis_network::lifecycle` when it stops the daemon. The error of an owner refused at startup
-  now says "is not running or cannot be read", and an owner that cannot be read later counts as
-  gone.
+  the parent pid stays Unix only. On Windows the watch writes an `info` line with the target
+  `habilis_network::lifecycle` when it stops the daemon, and the error of an owner refused at
+  startup says "is not running or cannot be read". An owner that cannot be read later counts as
+  gone. On Unix the watch and its error text are as before.
 - `habilis-network-util`'s `file_retry`, re-exported as `habilis_network::util::file_retry` under
   `host`: `retry_while_shared` runs a rename or a remove again on Windows while a reader blocks it
   (error 5 or 32), every `tuning::SHARED_FILE_RETRY_STEP` (1 ms) up to
@@ -623,8 +623,8 @@ published to a registry; pin it with
   it. The rename and the remove run again every 1 ms while they fail with error 5 or 32, for up
   to 50 ms (`habilis-network-util`'s `file_retry::retry_while_shared`, re-exported as
   `habilis_network::util::file_retry`). With a PowerShell reader in a tight loop, most renames
-  failed before. `StateFile::remove` now logs a remove that fails for a reason other than a
-  missing file.
+  failed before. On Windows `StateFile::remove` logs a remove that fails for a reason other than
+  a missing file, and a failed rename removes its tmp file. On Unix both are as before.
 - A loopback room no longer stays split into separate meshes when a joiner took the rung of a
   holder that left: a member that let go of the rendezvous owes a return when its walk reads a
   holder that no member of its mesh hosts (#4).

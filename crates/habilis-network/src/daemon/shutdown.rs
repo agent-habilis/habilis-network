@@ -306,8 +306,13 @@ fn owner_start(pid: u32) -> anyhow::Result<u64> {
         pid != std::process::id(),
         "owner pid {pid} is this process itself"
     );
-    crate::util::process::live_start_time(pid)
-        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running or cannot be read"))
+    #[cfg(windows)]
+    let start = crate::util::process::live_start_time(pid)
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running or cannot be read"));
+    #[cfg(not(windows))]
+    let start = crate::util::process::live_start_time(pid)
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"));
+    start
 }
 /// The process a detached daemon lives for, in place of its parent. The pid
 /// alone cannot tell the owner from a later process that reuses the pid, so
@@ -383,12 +388,6 @@ fn spawn_parent_watch(quit_tx: mpsc::Sender<()>, interval: Duration) {
             n0_future::time::sleep(interval).await;
             let current_ppid = unsafe { libc::getppid() };
             if parent_lost(original_ppid, current_ppid) {
-                tracing::info!(
-                    target: "habilis_network::lifecycle",
-                    original_ppid,
-                    current_ppid,
-                    "parent changed; leaving"
-                );
                 let _ = quit_tx.send(()).await;
                 return;
             }
@@ -403,6 +402,7 @@ async fn watch_owner(owner: Owner, interval: Duration, quit_tx: mpsc::Sender<()>
     loop {
         n0_future::time::sleep(interval).await;
         if owner.lost() {
+            #[cfg(windows)]
             tracing::info!(
                 target: "habilis_network::lifecycle",
                 owner_pid = owner.pid(),

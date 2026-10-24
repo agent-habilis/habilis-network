@@ -174,13 +174,13 @@ Done.
 
 Done.
 
-**The watch.** A daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) watches its owner on every OS, with the same code. Every `PPID_WATCH_INTERVAL` (1.5 s), `Owner::lost` compares `live_start_time` of the owner with the start time that it read at startup. The start time guards against pid reuse. The watch calls `live_start_time` only, not `is_alive`: on Windows `live_start_time` gives `None` for an owner that exited, also while a handle still holds it, as `is_alive` does. When the owner is gone, the watch writes `owner exited; leaving` (target `habilis_network::lifecycle`) and feeds the quit channel. The daemon then takes the path of `SIGTERM`.
+**The watch.** A daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) watches its owner on every OS, with the same code. Every `PPID_WATCH_INTERVAL` (1.5 s), `Owner::lost` compares `live_start_time` of the owner with the start time that it read at startup. The start time guards against pid reuse. The watch calls `live_start_time` only, not `is_alive`: on Windows `live_start_time` gives `None` for an owner that exited, also while a handle still holds it, as `is_alive` does. When the owner is gone, the watch feeds the quit channel, and on Windows it writes `owner exited; leaving` (target `habilis_network::lifecycle`). The daemon then takes the path of `SIGTERM`.
 
 **No owner, no watch on Windows.** Windows has no `getppid`, does not reparent an orphan, and can reuse the pid of a dead parent. So a daemon with no owner pid has no watch on Windows. The watch of the parent pid stays Unix only.
 
 **Limits.**
 
-- An owner that this process cannot read is refused at startup ("is not running or cannot be read"). On Windows that is a live owner of another account. An owner that cannot be read later counts as gone: the watch fails closed. An owner of the same user is readable also across integrity levels.
+- An owner that this process cannot read is refused at startup. On Windows the error says "is not running or cannot be read", and that is a live owner of another account. On Unix the error is "is not running", as on `main`. An owner that cannot be read later counts as gone: the watch fails closed. An owner of the same user is readable also across integrity levels.
 - An owner that exits with the code 259 (`STILL_ACTIVE`) reads as alive while a handle holds it.
 - The start time has the resolution of the system clock (about 15.6 ms). A reused pid with the same start time would need the owner to exit, every handle to close, and the pid to come back within one tick.
 - An owner that puts the daemon in a job with `KILL_ON_JOB_CLOSE` kills it hard, before the watch, with no `Left`.
@@ -221,7 +221,7 @@ Done.
 
 With a retry every 1 ms for up to 100 ms, no rename and no remove failed. The worst wait was 10.7 ms for a rename and 17.6 ms for a remove.
 
-**The fix.** `util::file_retry::retry_while_shared` runs the rename and the remove again every `SHARED_FILE_RETRY_STEP` (1 ms) while they fail with error 5 or 32, up to `SHARED_FILE_RETRY_DEADLINE` (50 ms). Any other error comes back at once. It wraps the rename of `write_private_atomic`, `StateFile::remove`, and the remove of the marker (`IpcMarker::remove_if_ours`). `StateFile::remove` now logs a remove that fails for a reason other than a missing file. On Unix the retry runs the operation once.
+**The fix.** `util::file_retry::retry_while_shared` runs the rename and the remove again every `SHARED_FILE_RETRY_STEP` (1 ms) while they fail with error 5 or 32, up to `SHARED_FILE_RETRY_DEADLINE` (50 ms). Any other error comes back at once. It wraps the rename of `write_private_atomic`, the remove of `StateFile::remove` on Windows, and the remove of the marker (`IpcMarker::remove_if_ours`). On Windows `StateFile::remove` logs a remove that fails for a reason other than a missing file, and a failed rename removes its tmp file. On Unix the retry runs the operation once, and both are as on `main`.
 
 **Limits.**
 
@@ -340,11 +340,11 @@ Done.
 
 - The client check of the runtime base ([R12](#r12-runtime-base-of-a-unix-client)) is out of the port.
 - On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` are back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` work on every OS. The IPC log lines of Unix have the target, the text and the fields of `main`.
+- The lines and the messages that the port added to the daemon are Windows only: the warn of a failed remove of the state file, the removal of the tmp file after a failed rename, the `info` line of the owner watch, and the "or cannot be read" of a refused owner. The `info` line of the parent watch, which is Unix only, is gone.
 - The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, `quit` is `QuitError::Unsupported`, and `terminate` sends `SIGTERM`. The signal handlers and the owner watch of Unix start where they started on `main`, after the bind of the IPC socket.
 
 To do.
 
-- The lines and the messages that the port added to the daemon, such as the warn of a failed remove of the state file, are Windows only.
 - The C header keeps `long` on every target but Windows.
 
 ## 4. Requirements: agent-gossip
