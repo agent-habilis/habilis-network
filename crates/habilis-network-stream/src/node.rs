@@ -246,7 +246,10 @@ impl StreamNode {
             .await
             && !relay_ok
         {
-            if matches!(error, habilis_network::net::EndpointError::CapRefused(_)) {
+            if matches!(
+                error,
+                habilis_network::net::EndpointError::CapRefused { .. }
+            ) {
                 return Err(StreamError::Refused(Refused::AtCap));
             }
             return Err(StreamError::Open {

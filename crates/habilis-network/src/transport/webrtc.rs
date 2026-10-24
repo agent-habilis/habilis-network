@@ -287,11 +287,17 @@ fn refused_not_a_neighbor(conn: &Connection) -> bool {
 /// exchange's own cause.
 fn with_refusal(conn: &Connection, error: anyhow::Error, remote: EndpointId) -> EndpointError {
     if refused_at_cap(conn) {
-        return EndpointError::CapRefused(remote);
+        return EndpointError::CapRefused {
+            remote,
+            source: error.into(),
+        };
     }
     #[cfg(any(feature = "multihop", test))]
     if refused_not_a_neighbor(conn) {
-        return EndpointError::NotANeighbor(remote);
+        return EndpointError::NotANeighbor {
+            remote,
+            source: error.into(),
+        };
     }
     EndpointError::internal(error)
 }
@@ -1105,7 +1111,7 @@ fn spawn_offer_round(
         let started = n0_future::time::Instant::now();
         tracing::debug!(target: LOG_TARGET, node = %node.fmt_short(), %peer, book = ?book.get_endpoint_info(peer), "offer round started");
         if let Err(error) = Box::pin(dial_signal(&endpoint, &book, addr, &handle, ice)).await {
-            if matches!(error, EndpointError::CapRefused(_)) {
+            if matches!(error, EndpointError::CapRefused { .. }) {
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, age_ms = started.elapsed().as_millis(), "webrtc offer failed");
@@ -2162,7 +2168,7 @@ mod tests {
         .await
         .expect_err("the evicted peer is refused for a minute");
         assert!(
-            matches!(error, EndpointError::CapRefused(_)),
+            matches!(error, EndpointError::CapRefused { .. }),
             "the dialer reads the refusal as a code to wait on: {error:#}"
         );
         assert!(

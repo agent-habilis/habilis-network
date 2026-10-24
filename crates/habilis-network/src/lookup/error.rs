@@ -13,10 +13,22 @@ use iroh::EndpointId;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EndpointError {
-    /// The peer is at its direct-peer cap and turned the offer away.
-    CapRefused(EndpointId),
-    /// The underlay of the peer turned us away: we are not a neighbor of it yet.
-    NotANeighbor(EndpointId),
+    /// The peer is at its direct-peer cap and turned the offer away. `source` is the
+    /// exchange error the refusal came from.
+    CapRefused {
+        /// The peer that refused.
+        remote: EndpointId,
+        /// The exchange error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// The underlay of the peer turned us away: we are not a neighbor of it yet. `source` is
+    /// the exchange error the refusal came from.
+    NotANeighbor {
+        /// The peer that refused.
+        remote: EndpointId,
+        /// The exchange error.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// A cause no caller acts on. It keeps its text and its chain.
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -31,8 +43,10 @@ impl EndpointError {
 impl fmt::Display for EndpointError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CapRefused(remote) => write!(formatter, "{remote} is at its direct-peer cap"),
-            Self::NotANeighbor(remote) => write!(
+            Self::CapRefused { remote, .. } => {
+                write!(formatter, "{remote} is at its direct-peer cap")
+            }
+            Self::NotANeighbor { remote, .. } => write!(
                 formatter,
                 "{remote} holds no link vector of ours yet: not a neighbor"
             ),
@@ -44,8 +58,10 @@ impl fmt::Display for EndpointError {
 impl std::error::Error for EndpointError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::CapRefused { source, .. } | Self::NotANeighbor { source, .. } => {
+                Some(source.as_ref())
+            }
             Self::Internal(error) => error.source(),
-            Self::CapRefused(_) | Self::NotANeighbor(_) => None,
         }
     }
 }
@@ -66,5 +82,26 @@ mod chain_tests {
             text.contains("Address already in use"),
             "the io cause of EndpointError is lost: {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use habilis_network_test_tracing::test;
+    use iroh::SecretKey;
+
+    use super::EndpointError;
+
+    /// A refusal names the exchange error it came from, so the log shows both.
+    #[test]
+    fn a_refusal_keeps_the_exchange_error_as_its_source() {
+        let remote = SecretKey::from_bytes(&[7; 32]).public();
+        let exchange = std::io::Error::other("connection reset by peer");
+        let refusal = EndpointError::CapRefused {
+            remote,
+            source: Box::new(exchange),
+        };
+        let text = format!("{:#}", anyhow::Error::new(refusal));
+        assert!(text.contains("connection reset by peer"), "{text}");
     }
 }
