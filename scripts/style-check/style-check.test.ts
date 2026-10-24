@@ -199,3 +199,11 @@ test("anyhow_pub: a type alias of the alias counts through its fns", () => {
 test("anyhow_pub: a macro body that names its fn counts", () => {
   expectExit("crates/demo/src/lib.rs", "macro_rules! m {\n    ($name:ident) => {\n        pub fn $name() -> anyhow::Result<()> { Ok(()) }\n    };\n}", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
 });
+
+// Batch 4 prelude (b): string literals are blanked, and `use anyhow as X` names a module alias.
+test("anyhow_pub: a string that holds the signature does not count", () => {
+  expectExit("crates/demo/src/lib.rs", "pub const S: &str = \"pub fn f() -> anyhow::Result<()>\";", 0);
+});
+test("anyhow_pub: a module alias of anyhow counts through its fns", () => {
+  expectExit("crates/demo/src/lib.rs", "use anyhow as ah;\npub fn f() -> ah::Result<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
+});

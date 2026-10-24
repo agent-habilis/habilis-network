@@ -31,16 +31,22 @@ type Rule = {
 // `pub trait` counts the same way, at any indent. A `FromStr` or `TryFrom` impl with anyhow as
 // its error counts once.
 const ANYHOW_ERR = /\btype (?:Err|Error)\s*=\s*(?:::)?anyhow::Error\b/g;
-const PUB_FN = /\bpub (?:const |async |unsafe |extern "C" )*fn (\$?\w+)/g;
+const PUB_FN = /\bpub (?:const |async |unsafe |extern(?: "")? )*fn (\$?\w+)/g;
 const TRAIT_FN = /\bfn (\$?\w+)/g;
 const PUB_TRAIT = /\bpub trait\b[^{;]*\{/g;
 const ANYHOW_USE_AS = /\buse (?:::)?anyhow::Result as (\w+)\s*;/g;
 const ANYHOW_USE_BARE = /^\s*use (?:::)?anyhow::\{?[^;]*\bResult\b(?!\s+as\b)[^;]*;/m;
+const ANYHOW_MODULE_ALIAS = /\buse (?:::)?anyhow as (\w+)\s*;/g;
 const ANYHOW_TYPE_ALIAS = /\btype (\w+)(?:<[^=]*>)?\s*=\s*(?:::)?anyhow::Result\b/g;
 
 /** Text with line comments and block comments blanked, so a commented-out signature counts nothing. */
 function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, "");
+}
+
+/** Text with the body of each string literal blanked, so a string that holds a signature counts nothing. */
+function blankStrings(text: string): string {
+  return text.replace(/"(?:[^"\\\n]|\\.)*"/g, "\"\"");
 }
 
 /** The index of the `}` that closes the `{` at `open`. */
@@ -98,13 +104,16 @@ function isBareOneArg(ret: string, name: string): boolean {
 }
 
 function countAnyhowPub(raw: string): number {
-  const text = stripTestModules(stripComments(raw));
+  const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
   if (ANYHOW_USE_BARE.test(text)) bare.add("Result");
   for (const m of text.matchAll(ANYHOW_USE_AS)) bare.add(m[1]);
   for (const m of text.matchAll(ANYHOW_TYPE_ALIAS)) bare.add(m[1]);
+  const modules = [...text.matchAll(ANYHOW_MODULE_ALIAS)].map((m) => m[1]);
   const anyhowRet = (ret: string): boolean =>
-    /\banyhow::(?:Result|Error)\b/.test(ret) || [...bare].some((name) => isBareOneArg(ret, name));
+    /\banyhow::(?:Result|Error)\b/.test(ret) ||
+    modules.some((module) => new RegExp(`\\b${module}::(?:Result|Error)\\b`).test(ret)) ||
+    [...bare].some((name) => isBareOneArg(ret, name));
   let count = [...text.matchAll(ANYHOW_ERR)].length;
   for (const m of text.matchAll(PUB_FN)) {
     if (anyhowRet(returnType(text, m.index! + m[0].length))) count++;
