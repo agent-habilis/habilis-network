@@ -18,7 +18,7 @@ pub enum ConfigError {
     Truncated(&'static str),
     /// A field does not parse.
     Source {
-        /// The step that failed, for example `Invalid mesh name UTF-8`.
+        /// The step that failed, for example `invalid mesh name UTF-8`.
         step: &'static str,
         /// The error of the parser.
         source: BoxedError,

@@ -620,7 +620,7 @@ impl LockedMesh {
         let mut pos = 0usize;
         let version = *bytes
             .get(pos)
-            .ok_or(ConfigError::Truncated("Mesh identifier too short"))?;
+            .ok_or(ConfigError::Truncated("mesh identifier too short"))?;
         pos += 1;
         if version != VERSION {
             return Err(ConfigError::Invalid(format!(
@@ -631,7 +631,7 @@ impl LockedMesh {
 
         let seed_slice = bytes
             .get(pos..pos + SEED_LEN)
-            .ok_or(ConfigError::Truncated("Mesh identifier too short"))?;
+            .ok_or(ConfigError::Truncated("mesh identifier too short"))?;
         let mut seed_bytes = [0u8; SEED_LEN];
         seed_bytes.copy_from_slice(seed_slice);
         let seed = Seed::from_bytes(seed_bytes);
@@ -639,32 +639,32 @@ impl LockedMesh {
 
         let name_len = *bytes
             .get(pos)
-            .ok_or(ConfigError::Truncated("Truncated mesh name length"))?
+            .ok_or(ConfigError::Truncated("truncated mesh name length"))?
             as usize;
         pos += 1;
         if name_len == 0 || name_len > NAME_MAX_BYTES {
             return Err(ConfigError::Invalid(format!(
-                "Invalid mesh name length: {name_len}"
+                "invalid mesh name length: {name_len}"
             )));
         }
         let name_raw = bytes
             .get(pos..pos + name_len)
-            .ok_or(ConfigError::Truncated("Truncated mesh name"))?;
+            .ok_or(ConfigError::Truncated("truncated mesh name"))?;
         pos += name_len;
         let name_str = std::str::from_utf8(name_raw)
-            .map_err(ConfigError::source("Invalid mesh name UTF-8"))?;
-        let name = MeshName::new(name_str).map_err(ConfigError::source("Invalid mesh name"))?;
+            .map_err(ConfigError::source("invalid mesh name UTF-8"))?;
+        let name = MeshName::new(name_str).map_err(ConfigError::source("invalid mesh name"))?;
 
         let config_len = lookup::read_u16(bytes, &mut pos)
-            .map_err(ConfigError::source("Truncated config length"))?
+            .map_err(ConfigError::source("truncated config length"))?
             as usize;
         let config_raw = bytes
             .get(pos..pos + config_len)
-            .ok_or(ConfigError::Truncated("Truncated mesh config"))?;
+            .ok_or(ConfigError::Truncated("truncated mesh config"))?;
         pos += config_len;
         if pos != bytes.len() {
             return Err(ConfigError::Invalid(
-                "Trailing bytes in mesh identifier".to_owned(),
+                "trailing bytes in mesh identifier".to_owned(),
             ));
         }
         let config = MeshConfig::from_bytes(config_raw)?;
