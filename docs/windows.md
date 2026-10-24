@@ -34,8 +34,9 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R9. FFI | Done. The five calls that returned `long` return `int64_t` (`crates/habilis-network-ffi`), and the loaders read them as `i64`, koffi as `int64_t`. `cargo task ffi` reads `habilis_network_ffi.lib` with `llvm-nm.exe` (`tasks/src/ffi.rs`). |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
 | R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
-| R12. Runtime base of a Unix client | Done. A Unix client checks the base before it reads a marker (`check_runtime_base`), and refuses one that is not private with `UnsafeRuntimeBase` (`crates/habilis-network/src/transport/ipc.rs`). Follow-up items for agent-gossip are in [R12](#r12-runtime-base-of-a-unix-client). |
+| R12. Runtime base of a Unix client | Partly done. `check_runtime_base` exists. The IPC client does not call it in this port, because the port leaves Unix as it is on `main` ([R14](#r14-unix-as-on-main)). The client check goes to its own change on `main`. See [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
+| R14. Unix as on `main` | In progress. The client check of R12 is out of the port. The marker, the IPC `quit` and the C header still change Unix. See [R14](#r14-unix-as-on-main). |
 
 [§2.2](#22-runtime-breaks) has no open item. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
@@ -296,19 +297,19 @@ The six steps are done. In `Cli` mode a quit ends the process with `std::process
 
 ### R12. Runtime base of a Unix client
 
-On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Before R12, only the writers checked the base (`ensure_runtime_base`). If another user created the base, the daemon refused to start, but a client read the socket or the marker that the other user put there, and sent it the commands. This gap was there before R3, with the socket file.
+On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Only the writers check the base (`ensure_runtime_base`). If another user creates the base, the daemon refuses to start, but a client reads the socket or the marker that the other user put there, and sends it the commands. This gap was there before R3, with the socket file.
 
-Done.
+Partly done.
 
 - `check_runtime_base(base)` (`crates/habilis-network-util/src/lib.rs`) has the checks of `ensure_runtime_base`, creates nothing and changes nothing. It returns `RuntimeBaseCheck`: `Private` (a folder of the user with no group or other bits), `Absent`, or `Refused` with the reason. A base at `0755` is refused, not tightened.
-- `send` and `active_endpoints` call it before they read a marker. A refused base gives `UnsafeRuntimeBase` from `send`, and from `quit` and `terminate` inside `QuitError::Unreached`; `active_endpoints` gives no endpoint. Each logs a warn. `terminate` sends no signal then. An absent base is still `NoDaemon`. The error is not `ForeignEndpoint`: no endpoint was reached, and a folder of the user that is open to others is not another user's.
+- The IPC client does not call it. A port commit made `send` and `active_endpoints` refuse a base that is not private, with `UnsafeRuntimeBase`. R14 took that commit out, because it changed the behavior of a Unix client, and the port leaves Unix as it is on `main`.
 - On Windows the base is in the profile, which another user cannot create, so the client needs only the owner check of the pipe.
 
-Follow-up items for agent-gossip, outside R12:
+Follow-up items, outside the port:
 
-- `read_identity`, `read_session_entry` and `read_snapshot` (`runtime::state_file`, in `crates/habilis-network/src/daemon/state_file.rs`) read the state files under the same base and do not check it. agent-gossip reads the pid of a daemon from them. `terminate` sends no signal through a refused base, but the session list and the statusline still trust it. agent-gossip should call `check_runtime_base` before those reads.
-- `doctor` should call `check_runtime_base` itself, to show why it finds no daemon: the warn of `active_endpoints` may not reach the user.
-- The fixtures and tests of agent-gossip that make the base with `create_dir_all` (`0755` under the usual umask) now get the refusal. Check them before the engine change reaches agent-gossip.
+- A change on `main` makes the IPC client check the base, in its own pull request, and names it as a change of behavior. On `main`, `send` connects to the socket path and `active_socket_paths` lists the sockets, so the change is written for that code, not taken from the port.
+- In the same change: `read_identity`, `read_session_entry` and `read_snapshot` (`runtime::state_file`) read the state files under the same base and do not check it. `doctor` in agent-gossip should show why it finds no daemon.
+- A caller that makes the base itself with `create_dir_all` (`0755` under the usual umask), as some fixtures and tests of agent-gossip do, would get the refusal. Check them before that change lands.
 
 ### R13. Logoff and shutdown
 
@@ -330,6 +331,21 @@ Follow-up items, outside R13:
 - agent-gossip needs no code change for R13, only the engine version that has it. After G1, the sign-out row and the `taskkill` row of T6 check it.
 - The window gets the end of the session only in the interactive session of the user, on window station `WinSta0`. A child process gets the window station and the desktop of its parent, and the creation flags of G1 do not change them. So the daemon of G1 gets the end of the session only when its parent is in that session. A daemon under a service or an SSH session gets none. A service gets `SERVICE_CONTROL_SHUTDOWN` from the service control manager instead.
 - The window thread does not return from `WM_ENDSESSION`, so the screen of the apps that are still open can list the daemon, by the title of the window (`habilis-network-session`) or by the name of the program. In T6 a logoff with one CLI daemon and no peer showed no such screen. The daemon logged `leaving mesh`, after its `Left`, and left no state file or marker. T6 did not show why: the quit path may have ended before the deadline, or Windows may not list a hidden window. A slow quit path, such as a release of the rendezvous with bad connectivity, can still make the screen show. T6 did not test that. `ShutdownBlockReasonCreate` sets a reason that a user can read, such as "leaving the mesh". It is not known whether a reason makes the screen show on each logoff, so R13 does not use it. Add it only when a user sees the screen.
+
+### R14. Unix as on `main`
+
+Many projects build on the engine. The port leaves Linux and macOS as they are on `main`: the API, the ABI, the C header, the wire and the behavior. A change of the port is Windows only, or it adds an item and changes none. A change of Unix behavior goes to its own pull request on `main`.
+
+Done.
+
+- The client check of the runtime base ([R12](#r12-runtime-base-of-a-unix-client)) is out of the port.
+
+To do.
+
+- On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` come back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` stay on every OS.
+- The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, and `terminate` sends `SIGTERM`.
+- The lines and the messages that the port added to the daemon, such as the warn of a failed remove of the state file, are Windows only.
+- The C header keeps `long` on every target but Windows.
 
 ## 4. Requirements: agent-gossip
 
@@ -393,7 +409,7 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R12 and R13 are done too.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R13 is done too, and R12 is partly done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.

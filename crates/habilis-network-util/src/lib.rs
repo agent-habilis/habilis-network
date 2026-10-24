@@ -315,8 +315,9 @@ pub enum RuntimeBaseCheck {
 /// [`ensure_runtime_base`].
 ///
 /// The base is `/tmp/<product>-<uid>`, a path that another user can create
-/// first. Without this check, a client reads the marker that the other user
-/// put there and talks to the other user's endpoint.
+/// first. A client that does not check it can reach an endpoint that the
+/// other user put there. The IPC client of `habilis-network` does not call
+/// it yet.
 ///
 /// # Errors
 /// The base could not be read for a reason other than its absence.

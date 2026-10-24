@@ -591,84 +591,13 @@ impl std::fmt::Display for ForeignEndpoint {
 
 impl std::error::Error for ForeignEndpoint {}
 
-/// The runtime folder of a client is not a private folder of this user, so the
-/// client reads no marker in it (R12 of `docs/windows.md`). On Unix the folder
-/// is `/tmp/<product>-<uid>`, which another user can create first: a link, a
-/// file, a folder of another user, or a folder that other users can open. Not
-/// [`ForeignEndpoint`]: no endpoint was reached, and a folder of this user that
-/// is open to others is not another user's. Only a Unix client returns it: on
-/// Windows the folder is in the profile, and the client checks the owner of the
-/// pipe.
-#[derive(Debug)]
-pub struct UnsafeRuntimeBase {
-    /// The folder that was refused.
-    pub base: std::path::PathBuf,
-    /// Why it was refused.
-    reason: std::io::Error,
-}
-
-impl UnsafeRuntimeBase {
-    /// Why the folder was refused, with its kind: `AlreadyExists` for a link or
-    /// a file, `PermissionDenied` for a folder of another user or one that other
-    /// users can open.
-    #[must_use]
-    pub fn reason(&self) -> &std::io::Error {
-        &self.reason
-    }
-}
-
-impl std::fmt::Display for UnsafeRuntimeBase {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "The runtime folder {} is not private to this user; refusing to use it: {}",
-            self.base.display(),
-            self.reason
-        )
-    }
-}
-
-impl std::error::Error for UnsafeRuntimeBase {}
-
-/// Check the runtime folder of a client before it reads a marker in it (R12 of
-/// `docs/windows.md`). `Ok(None)` for a private folder, and for an absent one,
-/// which holds no daemon. A refused folder is a warn and its error.
-///
-/// # Errors
-/// The folder could not be read for a reason other than its absence.
-#[cfg(unix)]
-fn unsafe_base(base: &std::path::Path) -> Result<Option<UnsafeRuntimeBase>> {
-    use crate::util::RuntimeBaseCheck;
-
-    match crate::util::check_runtime_base(base) {
-        Ok(RuntimeBaseCheck::Private | RuntimeBaseCheck::Absent) => Ok(None),
-        Ok(RuntimeBaseCheck::Refused(reason)) => {
-            tracing::warn!(
-                target: "habilis_network::lifecycle",
-                base = %base.display(),
-                %reason,
-                "IPC: the runtime folder is not private; refusing it"
-            );
-            Ok(Some(UnsafeRuntimeBase {
-                base: base.to_path_buf(),
-                reason,
-            }))
-        }
-        Err(error) => Err(anyhow::anyhow!(
-            "read the runtime folder {}: {error}",
-            base.display()
-        )),
-    }
-}
-
 /// Why a client could not reach an endpoint.
 enum Unreached {
     /// Nothing accepts on the name: a stale marker, or a pipe whose DACL leaves
     /// us out, which is no endpoint of ours either.
     Absent(std::io::Error),
     /// The endpoint belongs to another account. Only the Windows connect can
-    /// tell: on Unix the socket sits in the runtime folder, which the client
-    /// checks before it reads a marker ([`unsafe_base`]).
+    /// tell: on Unix the socket sits in the private runtime folder.
     #[cfg_attr(
         not(windows),
         expect(dead_code, reason = "only the Windows connect reads the owner")
@@ -687,10 +616,9 @@ fn pipe_busy_retry(attempt: u32) -> Option<Duration> {
     (attempt < TRIES).then_some(Duration::from_millis(50))
 }
 
-/// Connect to `name`. On Unix the socket sits in the runtime folder, and a name
-/// from [`send`] or from [`active_endpoints`] comes from a folder that they
-/// checked first, so a connect is enough. On Windows the client opens the pipe
-/// itself with `SECURITY_IDENTIFICATION`, so the server cannot act as the client, and checks
+/// Connect to `name`. On Unix the socket sits in the private runtime folder, so
+/// a connect is enough. On Windows the client opens the pipe itself with
+/// `SECURITY_IDENTIFICATION`, so the server cannot act as the client, and checks
 /// that `owner` owns the pipe before it sends a byte.
 async fn connect(
     name: &IpcName,
@@ -753,10 +681,8 @@ fn current_owner() -> Result<crate::util::win_security::Sid> {
 /// If called with a command that carries no mesh id — never: `Info` uses `send_to_endpoint`.
 /// # Errors
 /// [`NoDaemon`] when no marker exists or nothing accepts on its name;
-/// [`ForeignEndpoint`] when the endpoint belongs to another account;
-/// [`UnsafeRuntimeBase`] on Unix when `base` is not a private folder of this
-/// user; otherwise an unreadable folder or marker, an invalid marker, or a
-/// failed request/response round trip.
+/// [`ForeignEndpoint`] when the endpoint belongs to another account; otherwise
+/// an unreadable or invalid marker, or a failed request/response round trip.
 pub async fn send<C>(base: &std::path::Path, cmd: &C, nickname: &Nickname) -> Result<String>
 where
     C: Serialize + Addressed,
@@ -767,10 +693,6 @@ where
     let no_daemon = || NoDaemon {
         nickname: nickname.clone(),
     };
-    #[cfg(unix)]
-    if let Some(refused) = unsafe_base(base)? {
-        return Err(refused.into());
-    }
     let Some(name) = read_marker(&marker_path(base, mesh, nickname))? else {
         return Err(no_daemon().into());
     };
@@ -903,15 +825,6 @@ pub async fn quit(target: &QuitTarget<'_>) -> std::result::Result<(), QuitError>
     quit_outcome(&reply)
 }
 
-/// Whether the quit failed because the runtime folder was refused.
-#[cfg(unix)]
-fn base_was_refused(error: &QuitError) -> bool {
-    match error {
-        QuitError::Unreached(inner) => inner.is::<UnsafeRuntimeBase>(),
-        QuitError::OldDaemon(_) | QuitError::Refused(_) => false,
-    }
-}
-
 /// What the answer to a quit means.
 fn quit_outcome(reply: &str) -> std::result::Result<(), QuitError> {
     if reply.is_empty() {
@@ -938,9 +851,7 @@ fn quit_outcome(reply: &str) -> std::result::Result<(), QuitError> {
 /// Stop the daemon of `target`: [`quit`] on every OS. On Unix, when the quit
 /// was not heard or the daemon is too old to know it, send `SIGTERM` to `pid`
 /// instead ([`crate::util::process::terminate`]), which takes the same path in
-/// the daemon. A daemon that refused the quit gets no signal, and neither does
-/// `pid` when the runtime folder was refused ([`UnsafeRuntimeBase`]): the
-/// marker in it cannot be trusted to be of our daemon.
+/// the daemon. A daemon that refused the quit gets no signal.
 ///
 /// Not the same function as `util::process::terminate`: that one only signals
 /// a pid, and on Windows it can do nothing. This one stops a daemon.
@@ -956,9 +867,7 @@ pub async fn terminate(target: &QuitTarget<'_>, pid: u32) -> Result<()> {
     match quit(target).await {
         Ok(()) => Ok(()),
         #[cfg(unix)]
-        Err(error @ (QuitError::Unreached(_) | QuitError::OldDaemon(_)))
-            if !base_was_refused(&error) =>
-        {
+        Err(error @ (QuitError::Unreached(_) | QuitError::OldDaemon(_))) => {
             tracing::info!(
                 target: "habilis_network::lifecycle",
                 %error,
@@ -997,28 +906,12 @@ async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
 /// The endpoint of every daemon that has a marker under `base`: one
 /// `<nick>.ipc` inside each mesh folder (`<base>/<mesh-prefix>/`). Best-effort:
 /// a missing base gives an empty list, and a marker that cannot be read or holds
-/// no valid name is skipped with a warn. On Unix a base that is not a private
-/// folder of this user gives an empty list and a warn (R12 of
-/// `docs/windows.md`). The tmp file of a marker write
+/// no valid name is skipped with a warn. The tmp file of a marker write
 /// (`<nick>.ipc.tmp.<pid>`) has another extension and is not read. A marker of
 /// a daemon that died stays until a client fails to connect to it, as a stale
 /// socket file did. The list is sorted, so its order is stable.
 #[must_use]
 pub fn active_endpoints(base: &std::path::Path) -> Vec<IpcName> {
-    #[cfg(unix)]
-    match unsafe_base(base) {
-        Ok(None) => {}
-        // `unsafe_base` gave the warn.
-        Ok(Some(_)) => return Vec::new(),
-        Err(error) => {
-            tracing::warn!(
-                target: "habilis_network::lifecycle",
-                %error,
-                "IPC: skip the runtime folder"
-            );
-            return Vec::new();
-        }
-    }
     let Ok(mesh_dirs) = std::fs::read_dir(base) else {
         return Vec::new();
     };
@@ -1051,8 +944,6 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     #[cfg(unix)]
-    use super::UnsafeRuntimeBase;
-    #[cfg(unix)]
     use super::new_endpoint_name;
     use super::{
         Addressed, EngineCommand, EngineControl, IpcMarker, IpcMessage, IpcName, MeshId, Nickname,
@@ -1060,7 +951,7 @@ mod tests {
         json_error, json_ok, marker_path, mpsc, pipe_busy_retry, quit, quit_outcome, read_marker,
         send, send_to_endpoint, serve, terminate,
     };
-    use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
+    use crate::util::mesh_runtime_dir;
 
     /// A minimal mesh-addressed command standing in for the app's real
     /// `IpcCommand` (which lives app-side): exercises the engine's generic
@@ -1129,7 +1020,7 @@ mod tests {
             let path = std::path::Path::new("/tmp").join(name);
             #[cfg(not(unix))]
             let path = std::env::temp_dir().join(name);
-            remove_any(&path);
+            let _ = std::fs::remove_dir_all(&path);
             Self(path)
         }
 
@@ -1140,15 +1031,7 @@ mod tests {
 
     impl Drop for TestBase {
         fn drop(&mut self) {
-            remove_any(&self.0);
-        }
-    }
-
-    /// Remove a folder, a link or a file at `path`. `remove_dir_all` removes a
-    /// link itself, not its target, and fails on a file.
-    fn remove_any(path: &std::path::Path) {
-        if std::fs::remove_dir_all(path).is_err() {
-            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
@@ -1236,9 +1119,7 @@ mod tests {
         let base = TestBase::new("stale");
         let mesh = test_mesh("stale");
         let nickname = Nickname::from("ghost");
-        // A private base, as a daemon leaves it: on Unix a client refuses
-        // another one.
-        ensure_mesh_runtime_dir(base.path(), mesh.as_str()).unwrap();
+        std::fs::create_dir_all(mesh_runtime_dir(base.path(), mesh.as_str())).unwrap();
         IpcMarker::write(
             marker_path(base.path(), &mesh, &nickname),
             absent_name("stale"),
@@ -1260,8 +1141,10 @@ mod tests {
         );
         let base = TestBase::new("discover");
         assert!(active_endpoints(base.path()).is_empty(), "an absent base");
-        let first = ensure_mesh_runtime_dir(base.path(), "meshaaaaaaaaaaaa").unwrap();
-        let second = ensure_mesh_runtime_dir(base.path(), "meshbbbbbbbbbbbb").unwrap();
+        let first = base.path().join("meshaaaaaaaaaaaa");
+        let second = base.path().join("meshbbbbbbbbbbbb");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
         let late = absent_name("zz");
         let early = absent_name("aa");
         IpcMarker::write(first.join("one.ipc"), late.clone()).unwrap();
@@ -1273,81 +1156,6 @@ mod tests {
         std::fs::create_dir_all(second.join("dir.ipc")).unwrap();
         std::fs::write(base.path().join("loose.ipc"), format!("{early}\n")).unwrap();
         assert_eq!(active_endpoints(base.path()), vec![early, late]);
-    }
-
-    /// A base with a marker of a live-looking name, opened to other users with
-    /// mode `0755`. The mode is set, not left to the umask.
-    #[cfg(unix)]
-    fn open_base_with_a_marker(tag: &str) -> (TestBase, MeshId, Nickname) {
-        use std::os::unix::fs::PermissionsExt as _;
-        let base = TestBase::new(tag);
-        let mesh = test_mesh(tag);
-        let nickname = Nickname::from("victim");
-        ensure_mesh_runtime_dir(base.path(), mesh.as_str()).unwrap();
-        IpcMarker::write(marker_path(base.path(), &mesh, &nickname), absent_name(tag)).unwrap();
-        std::fs::set_permissions(base.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        (base, mesh, nickname)
-    }
-
-    #[cfg(unix)]
-    #[test]
-    async fn send_refuses_a_base_that_is_open_to_other_users() {
-        habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "IPC: the runtime folder is not private; refusing it",
-        );
-        let (base, mesh, nickname) = open_base_with_a_marker("sendopen");
-        let error = send(base.path(), &TestCommand::Ping { mesh }, &nickname)
-            .await
-            .expect_err("refused");
-        let refused = error
-            .downcast_ref::<UnsafeRuntimeBase>()
-            .unwrap_or_else(|| panic!("not UnsafeRuntimeBase: {error}"));
-        assert_eq!(refused.base, base.path());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn active_endpoints_skip_a_base_that_is_open_to_other_users() {
-        habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "IPC: the runtime folder is not private; refusing it",
-        );
-        let (base, _mesh, _nickname) = open_base_with_a_marker("listopen");
-        assert!(active_endpoints(base.path()).is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    async fn send_refuses_a_base_that_is_a_link_or_a_file() {
-        habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "IPC: the runtime folder is not private; refusing it",
-        );
-        let real = TestBase::new("linkreal");
-        let mesh = test_mesh("linkreal");
-        let nickname = Nickname::from("victim");
-        ensure_mesh_runtime_dir(real.path(), mesh.as_str()).unwrap();
-        IpcMarker::write(
-            marker_path(real.path(), &mesh, &nickname),
-            absent_name("linkreal"),
-        )
-        .unwrap();
-        let link = TestBase::new("link");
-        std::os::unix::fs::symlink(real.path(), link.path()).unwrap();
-        let file = TestBase::new("file");
-        std::fs::write(file.path(), b"").unwrap();
-
-        for base in [link.path(), file.path()] {
-            let error = send(base, &TestCommand::Ping { mesh: mesh.clone() }, &nickname)
-                .await
-                .expect_err("refused");
-            assert!(
-                error.downcast_ref::<UnsafeRuntimeBase>().is_some(),
-                "{}: {error}",
-                base.display()
-            );
-        }
     }
 
     // Two names, as two daemons have on Windows, where the pipe name is per
@@ -2008,37 +1816,6 @@ mod tests {
             matches!(
                 error.downcast_ref::<QuitError>(),
                 Some(QuitError::Refused(_))
-            ),
-            "{error}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(child.try_wait().unwrap().is_none(), "no signal was sent");
-        child.kill().unwrap();
-        child.wait().unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    async fn terminate_sends_no_signal_when_the_base_is_unsafe() {
-        habilis_network_test_tracing::expect_warn(
-            "habilis_network::lifecycle",
-            "IPC: the runtime folder is not private; refusing it",
-        );
-        let (base, mesh, nickname) = open_base_with_a_marker("termopen");
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let target = QuitTarget {
-            base: base.path(),
-            mesh: &mesh,
-            nickname: &nickname,
-        };
-        let error = terminate(&target, child.id()).await.expect_err("refused");
-        assert!(
-            matches!(
-                error.downcast_ref::<QuitError>(),
-                Some(QuitError::Unreached(inner)) if inner.is::<UnsafeRuntimeBase>()
             ),
             "{error}"
         );
