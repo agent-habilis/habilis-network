@@ -107,9 +107,9 @@ function countAnyhowPub(raw: string): number {
   const text = stripTestModules(blankStrings(stripComments(raw)));
   const bare = new Set<string>();
   if (ANYHOW_USE_BARE.test(text)) bare.add("Result");
-  for (const m of text.matchAll(ANYHOW_USE_AS)) bare.add(m[1]);
-  for (const m of text.matchAll(ANYHOW_TYPE_ALIAS)) bare.add(m[1]);
-  const modules = [...text.matchAll(ANYHOW_MODULE_ALIAS)].map((m) => m[1]);
+  for (const [, name] of text.matchAll(ANYHOW_USE_AS)) if (name) bare.add(name);
+  for (const [, name] of text.matchAll(ANYHOW_TYPE_ALIAS)) if (name) bare.add(name);
+  const modules = [...text.matchAll(ANYHOW_MODULE_ALIAS)].flatMap(([, name]) => (name ? [name] : []));
   const anyhowRet = (ret: string): boolean =>
     /\banyhow::(?:Result|Error)\b/.test(ret) ||
     modules.some((module) => new RegExp(`\\b${module}::(?:Result|Error)\\b`).test(ret)) ||
