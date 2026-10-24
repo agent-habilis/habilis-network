@@ -13,6 +13,6 @@ pub mod stun;
 mod transport;
 
 pub use driver::NegotiatedSession;
-pub use jsep::{PendingAnswer, PendingOffer, answer, answer_with, offer, offer_with};
+pub use jsep::{JsepError, PendingAnswer, PendingOffer, answer, answer_with, offer, offer_with};
 pub use stun::IceConfig;
 pub use transport::WebRtcTransport;

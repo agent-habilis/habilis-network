@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use anyhow::Context as _;
 use iroh::EndpointId;
 use str0m::Rtc;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
@@ -17,6 +16,94 @@ use crate::SignalEnvelope;
 
 // The channel label is crate-root protocol, shared with the browser backend.
 use crate::DATA_CHANNEL_LABEL;
+
+/// Why a JSEP negotiation failed. Each variant names the step that failed, so
+/// a caller can tell a bad envelope from a dead socket from a missed deadline.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum JsepError {
+    /// The UDP socket for the negotiation could not bind.
+    Bind(std::io::Error),
+    /// str0m had no pending change to turn into an offer.
+    NoOffer,
+    /// The envelope is not the kind this step takes.
+    Envelope {
+        /// The kind this step takes: `offer` or `answer`.
+        expected: &'static str,
+        /// The envelope it was given, in debug form.
+        got: String,
+    },
+    /// An SDP string does not parse, or str0m does not accept it.
+    Sdp {
+        /// The step that failed, for example `parse SDP answer`.
+        step: &'static str,
+        /// The error from the SDP parser or from str0m.
+        source: BoxedError,
+    },
+    /// str0m failed while it drove the negotiation.
+    Engine {
+        /// The step that failed, for example `str0m poll_output`.
+        step: &'static str,
+        /// The error from str0m.
+        source: BoxedError,
+    },
+    /// The data channel did not open before the deadline.
+    Timeout {
+        /// What the handshake loop ignored on the way, or nothing.
+        detail: String,
+    },
+}
+
+type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+
+impl JsepError {
+    pub(crate) fn engine<E>(step: &'static str) -> impl FnOnce(E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        move |source| Self::Engine {
+            step,
+            source: Box::new(source),
+        }
+    }
+
+    fn sdp<E>(step: &'static str) -> impl FnOnce(E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        move |source| Self::Sdp {
+            step,
+            source: Box::new(source),
+        }
+    }
+}
+
+impl std::fmt::Display for JsepError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bind(_) => formatter.write_str("could not bind the WebRTC UDP socket"),
+            Self::NoOffer => formatter.write_str("str0m produced no offer for the pending change"),
+            Self::Envelope { expected, got } => {
+                write!(formatter, "expected an {expected} envelope, got {got}")
+            }
+            Self::Sdp { step, .. } | Self::Engine { step, .. } => formatter.write_str(step),
+            Self::Timeout { detail } => write!(
+                formatter,
+                "timed out waiting for the WebRTC data channel to open{detail}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for JsepError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Bind(error) => Some(error),
+            Self::Sdp { source, .. } | Self::Engine { source, .. } => Some(source.as_ref()),
+            Self::NoOffer | Self::Envelope { .. } | Self::Timeout { .. } => None,
+        }
+    }
+}
 
 /// Offerer-side JSEP state between sending the offer and applying the
 /// remote answer.
@@ -55,11 +142,9 @@ impl std::fmt::Debug for Negotiating {
 /// answerer advertising the same *kinds* of candidate. Gathering must happen
 /// before the SDP is produced: this is vanilla ICE, so candidates ride inside
 /// the SDP and there is no trickle message to add them later.
-async fn start(ice: &IceConfig) -> anyhow::Result<Negotiating> {
+async fn start(ice: &IceConfig) -> Result<Negotiating, JsepError> {
     let mut rtc = build_rtc(Instant::now());
-    let (socket, advertised) = bind_ephemeral_udp()
-        .await
-        .context("bind WebRTC UDP socket")?;
+    let (socket, advertised) = bind_ephemeral_udp().await.map_err(JsepError::Bind)?;
     add_host_candidate(&mut rtc, advertised)?;
     // Same socket as the media, or the NAT mapping we learn describes a hole
     // the data will not arrive through.
@@ -78,7 +163,7 @@ async fn start(ice: &IceConfig) -> anyhow::Result<Negotiating> {
 /// # Errors
 ///
 /// Fails if the UDP socket can't bind or str0m rejects the setup.
-pub async fn offer(local: EndpointId) -> anyhow::Result<(PendingOffer, SignalEnvelope)> {
+pub async fn offer(local: EndpointId) -> Result<(PendingOffer, SignalEnvelope), JsepError> {
     offer_with(local, &IceConfig::default()).await
 }
 
@@ -91,7 +176,7 @@ pub async fn offer(local: EndpointId) -> anyhow::Result<(PendingOffer, SignalEnv
 pub async fn offer_with(
     local: EndpointId,
     ice: &IceConfig,
-) -> anyhow::Result<(PendingOffer, SignalEnvelope)> {
+) -> Result<(PendingOffer, SignalEnvelope), JsepError> {
     let mut inner = start(ice).await?;
     let mut change = inner.rtc.sdp_api();
     // Unreliable + unordered: the channel carries QUIC datagrams, and QUIC
@@ -105,9 +190,7 @@ pub async fn offer_with(
         reliability: Reliability::MaxRetransmits { retransmits: 0 },
         ..ChannelConfig::default()
     });
-    let (sdp_offer, pending) = change
-        .apply()
-        .context("str0m produced no offer for the pending change")?;
+    let (sdp_offer, pending) = change.apply().ok_or(JsepError::NoOffer)?;
     let envelope = SignalEnvelope::offer(local, sdp_offer.to_sdp_string());
     Ok((
         PendingOffer {
@@ -130,22 +213,25 @@ impl PendingOffer {
         self,
         answer: &SignalEnvelope,
         deadline: Duration,
-    ) -> anyhow::Result<NegotiatedSession> {
+    ) -> Result<NegotiatedSession, JsepError> {
         let Self {
             mut inner,
             pending,
             channel_id,
         } = self;
         let SignalEnvelope::Answer { sdp, .. } = answer else {
-            anyhow::bail!("expected an answer envelope, got {answer:?}");
+            return Err(JsepError::Envelope {
+                expected: "answer",
+                got: format!("{answer:?}"),
+            });
         };
-        let sdp_answer = SdpAnswer::from_sdp_string(sdp)
-            .map_err(|error| anyhow::anyhow!("parse SDP answer: {error}"))?;
+        let sdp_answer =
+            SdpAnswer::from_sdp_string(sdp).map_err(JsepError::sdp("parse SDP answer"))?;
         inner
             .rtc
             .sdp_api()
             .accept_answer(pending, sdp_answer)
-            .context("accept SDP answer")?;
+            .map_err(JsepError::sdp("accept SDP answer"))?;
         let target = ChannelReadyTarget::Offerer(channel_id);
         let opened = drive_until_channel_ready(
             &mut inner.rtc,
@@ -173,7 +259,7 @@ impl PendingOffer {
 pub async fn answer(
     local: EndpointId,
     offer: &SignalEnvelope,
-) -> anyhow::Result<(PendingAnswer, SignalEnvelope)> {
+) -> Result<(PendingAnswer, SignalEnvelope), JsepError> {
     answer_with(local, offer, &IceConfig::default()).await
 }
 
@@ -187,18 +273,20 @@ pub async fn answer_with(
     local: EndpointId,
     offer: &SignalEnvelope,
     ice: &IceConfig,
-) -> anyhow::Result<(PendingAnswer, SignalEnvelope)> {
+) -> Result<(PendingAnswer, SignalEnvelope), JsepError> {
     let SignalEnvelope::Offer { sdp, .. } = offer else {
-        anyhow::bail!("expected an offer envelope, got {offer:?}");
+        return Err(JsepError::Envelope {
+            expected: "offer",
+            got: format!("{offer:?}"),
+        });
     };
     let mut inner = start(ice).await?;
-    let sdp_offer = SdpOffer::from_sdp_string(sdp)
-        .map_err(|error| anyhow::anyhow!("parse SDP offer: {error}"))?;
+    let sdp_offer = SdpOffer::from_sdp_string(sdp).map_err(JsepError::sdp("parse SDP offer"))?;
     let sdp_answer = inner
         .rtc
         .sdp_api()
         .accept_offer(sdp_offer)
-        .context("accept SDP offer")?;
+        .map_err(JsepError::sdp("accept SDP offer"))?;
     let envelope = SignalEnvelope::answer(local, sdp_answer.to_sdp_string());
     Ok((PendingAnswer { inner }, envelope))
 }
@@ -209,7 +297,7 @@ impl PendingAnswer {
     /// # Errors
     ///
     /// Fails on str0m errors or `deadline` expiry.
-    pub async fn complete(self, deadline: Duration) -> anyhow::Result<NegotiatedSession> {
+    pub async fn complete(self, deadline: Duration) -> Result<NegotiatedSession, JsepError> {
         let Self { mut inner } = self;
         let channel_id = drive_until_channel_ready(
             &mut inner.rtc,

@@ -25,6 +25,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection, RtcPeerConnectionState};
 
 use super::jsep::{now_ms, sleep_ms};
+use crate::attach::AttachError;
 use crate::liveness::{ConnectionPhase, DISCONNECT_GRACE_MS, Verdict, judge_state};
 use crate::registry::Registry;
 use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
@@ -233,33 +234,6 @@ fn evict_if_generation(
         )));
     }
 }
-
-/// Why [`BrowserHubTransport::attach`] refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum AttachError {
-    /// Someone already holds this peer's slot — a live session, or another
-    /// negotiation partway through attaching one.
-    ///
-    /// Not necessarily a fault. The mount lane and the mesh lane share one
-    /// registry, so either can reach a peer first; the loser should use the
-    /// winner's session rather than treat this as a failure.
-    ///
-    /// The handles passed to `attach` have already been closed.
-    AlreadyAttached(EndpointId),
-}
-
-impl std::fmt::Display for AttachError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyAttached(remote) => {
-                write!(formatter, "a WebRTC session for {remote} already exists")
-            }
-        }
-    }
-}
-
-impl std::error::Error for AttachError {}
 
 /// A session that is attached but not yet proven to carry traffic.
 ///

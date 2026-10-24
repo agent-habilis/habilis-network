@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use std::io;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -14,6 +13,7 @@ use tokio::sync::mpsc;
 use super::driver::{NegotiatedSession, drive_session};
 use super::endpoint::WebRtcEndpoint;
 use super::session::{InboundPacket, SessionHandle, SessionRegistry};
+use crate::attach::AttachError;
 use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
 /// Factory for the `WebRTC` datagram lane of one iroh endpoint.
@@ -55,8 +55,13 @@ impl WebRtcTransport {
     /// # Errors
     ///
     /// Fails if a live session for `remote` already exists (detach first,
-    /// or let the old driver notice the dead channel and clean up).
-    pub fn attach(&self, remote: EndpointId, session: NegotiatedSession) -> anyhow::Result<()> {
+    /// or let the old driver notice the dead channel and clean up), or if the
+    /// session ends before it is recorded.
+    pub fn attach(
+        &self,
+        remote: EndpointId,
+        session: NegotiatedSession,
+    ) -> Result<(), AttachError> {
         let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
         let dropped_tx = Arc::new(AtomicU64::new(0));
         // Claim the slot *before* spawning. The driver retires its own
@@ -66,7 +71,7 @@ impl WebRtcTransport {
         let reservation = self
             .registry
             .reserve(remote)
-            .with_context(|| format!("a live WebRTC session for {remote} already exists"))?;
+            .ok_or(AttachError::AlreadyAttached(remote))?;
         let generation = reservation.generation();
         let task = tokio::spawn(drive_session(
             session,
@@ -82,9 +87,7 @@ impl WebRtcTransport {
         // aborts the task rather than recording a session nothing pumps.
         let guard = reservation
             .fulfil(SessionHandle::new(out_tx, dropped_tx, task))
-            .with_context(|| {
-                format!("the session for {remote} was retired before it was recorded")
-            })?;
+            .ok_or(AttachError::Retired(remote))?;
         guard.commit();
         tracing::debug!(%remote, "webrtc session attached");
         Ok(())
