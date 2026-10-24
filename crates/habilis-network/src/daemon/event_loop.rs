@@ -61,6 +61,34 @@ use crate::transport::ipc;
 use crate::transport::underlay_webrtc;
 use crate::transport::{outbox, probe, webrtc};
 use crate::util::version;
+/// Why the event loop of a mesh stopped with an error.
+///
+/// [`EventLoopError::Internal`] holds the causes that no caller acts on: the loop ended
+/// on a failure of one of its tasks or of its endpoint. It keeps their text and chain.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum EventLoopError {
+    /// A cause no caller acts on. It keeps its text and its chain.
+    Internal(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl EventLoopError {
+    /// Wraps a cause no caller acts on, keeping its text and its chain.
+    fn internal(error: anyhow::Error) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl std::fmt::Display for EventLoopError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), formatter),
+        }
+    }
+}
+
+impl std::error::Error for EventLoopError {}
+
 /// Never returns normally — exits the process on ctrl-c / SIGTERM.
 ///
 /// The engine loop is generic over the application: `app` implements
@@ -71,11 +99,22 @@ use crate::util::version;
 ///
 /// # Errors
 /// Propagates a fatal setup/transport error that terminates the event loop.
+pub async fn run<A: NodeDriver>(
+    cfg: EventLoopConfig,
+    app: A,
+    session_rx: Option<mpsc::Receiver<A::Session>>,
+    http_rx: Option<mpsc::Receiver<A::Http>>,
+) -> Result<(), EventLoopError> {
+    run_checked(cfg, app, session_rx, http_rx)
+        .await
+        .map_err(EventLoopError::internal)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "session setup + secrets + sender/receiver wiring before handing off to event_loop; each step is a single call, and splitting further would only scatter sequential setup across helpers"
 )]
-pub async fn run<A: NodeDriver>(
+async fn run_checked<A: NodeDriver>(
     cfg: EventLoopConfig,
     app: A,
     session_rx: Option<mpsc::Receiver<A::Session>>,

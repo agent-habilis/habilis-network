@@ -42,7 +42,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Nickname};
@@ -369,23 +369,35 @@ pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
 /// # Errors
 /// The file exists but is not valid JSON, or is missing the `ready` /
 /// `last_updated` fields.
-pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>> {
+pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>, StateFileError> {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        Err(source) => {
+            return Err(StateFileError::Unreadable {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
     };
     let value: serde_json::Value =
-        serde_json::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
+        serde_json::from_str(&contents).map_err(|source| StateFileError::Unparsable {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let ready = value["ready"]
         .as_bool()
-        .with_context(|| format!("state file {} missing bool field `ready`", path.display()))?;
-    let last_updated = value["last_updated"].as_u64().with_context(|| {
-        format!(
-            "state file {} missing integer field `last_updated`",
-            path.display()
-        )
-    })?;
+        .ok_or_else(|| StateFileError::MissingField {
+            path: path.to_path_buf(),
+            what: "bool field `ready`",
+        })?;
+    let last_updated =
+        value["last_updated"]
+            .as_u64()
+            .ok_or_else(|| StateFileError::MissingField {
+                path: path.to_path_buf(),
+                what: "integer field `last_updated`",
+            })?;
     Ok(Some(ReadySnapshot {
         ready,
         last_updated,
@@ -751,5 +763,54 @@ mod tests {
         std::fs::write(&path, r#"{"ready":true,"gossip":"round"}"#).unwrap();
         assert!(super::read_snapshot(&path).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Why a state file cannot be read as a snapshot.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum StateFileError {
+    /// The file exists but cannot be read.
+    Unreadable {
+        /// The file.
+        path: PathBuf,
+        /// The read error.
+        source: std::io::Error,
+    },
+    /// The file is not valid JSON.
+    Unparsable {
+        /// The file.
+        path: PathBuf,
+        /// The parse error.
+        source: serde_json::Error,
+    },
+    /// The file lacks a field the snapshot needs.
+    MissingField {
+        /// The file.
+        path: PathBuf,
+        /// The field and its type, for example: bool field `ready`.
+        what: &'static str,
+    },
+}
+
+impl std::fmt::Display for StateFileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable { path, .. } => write!(formatter, "reading {}", path.display()),
+            Self::Unparsable { path, .. } => write!(formatter, "parsing {}", path.display()),
+            Self::MissingField { path, what } => {
+                write!(formatter, "state file {} missing {what}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for StateFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreadable { source, .. } => Some(source),
+            Self::Unparsable { source, .. } => Some(source),
+            Self::MissingField { .. } => None,
+        }
     }
 }

@@ -36,11 +36,13 @@ use crate::transport::PayloadPath;
 
 use crate::protocol::{crypto, identity};
 mod consume;
+mod error;
 mod produce;
 mod store;
 mod ticket;
 
 pub use consume::fetch;
+pub use error::BlobError;
 pub use produce::BlobServer;
 pub use ticket::BlobTicket;
 
@@ -102,6 +104,17 @@ pub async fn offload(
     lookups: &LookupOpts,
     relay_transport: PayloadPath,
     request: OffloadRequest,
+) -> Result<BlobTicket, BlobError> {
+    offload_checked(server, lookups, relay_transport, request)
+        .await
+        .map_err(BlobError::internal)
+}
+
+async fn offload_checked(
+    server: &mut Option<BlobServer>,
+    lookups: &LookupOpts,
+    relay_transport: PayloadPath,
+    request: OffloadRequest,
 ) -> Result<BlobTicket> {
     let OffloadRequest {
         path,
@@ -118,6 +131,7 @@ pub async fn offload(
         .expect("server set above")
         .register(&path, content_id)
         .await
+        .map_err(anyhow::Error::from)
 }
 
 /// ALPN for the blob channel — a raw bidirectional QUIC stream with its own

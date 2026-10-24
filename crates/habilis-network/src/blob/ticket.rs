@@ -102,7 +102,11 @@ impl BlobTicket {
     /// # Errors
     /// Bad Base58/checksum, the wrong ticket kind, a bad version, or a
     /// malformed payload.
-    pub fn decode(ticket: &str) -> Result<Self> {
+    pub fn decode(ticket: &str) -> Result<Self, super::BlobError> {
+        Self::decode_checked(ticket).map_err(super::BlobError::internal)
+    }
+
+    fn decode_checked(ticket: &str) -> Result<Self> {
         let framed = base58check::decode(ticket.trim(), "blob ticket")?;
         let version = *framed.first().context("ticket too short")?;
         if version != VERSION {

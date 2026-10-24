@@ -33,7 +33,7 @@ pub struct Node<A: NodeDriver> {
     nickname: Nickname,
     req_tx: mpsc::Sender<A::Session>,
     quit_tx: mpsc::Sender<()>,
-    task: Option<JoinHandle<anyhow::Result<()>>>,
+    task: Option<JoinHandle<Result<(), super::event_loop::EventLoopError>>>,
     /// The ports this node's endpoint is bound on, for a test that names which
     /// nodes to cut from which. Read once at spawn: the ports do not change.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -261,7 +261,7 @@ impl<A: NodeDriver + 'static> Node<A> {
                 joined = task => {
                     joined
                         .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("mesh task panicked: {error}")))?
-                        .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("mesh loop error: {error}")))?;
+                        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
                 }
                 () = timeout => {}
             }

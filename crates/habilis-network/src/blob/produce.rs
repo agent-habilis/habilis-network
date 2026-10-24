@@ -102,6 +102,17 @@ impl BlobServer {
         spool_dir: PathBuf,
         password: Option<Password>,
         relay_transport: PayloadPath,
+    ) -> Result<Self, super::BlobError> {
+        Self::start_checked(lookups, spool_dir, password, relay_transport)
+            .await
+            .map_err(super::BlobError::internal)
+    }
+
+    async fn start_checked(
+        lookups: LookupOpts,
+        spool_dir: PathBuf,
+        password: Option<Password>,
+        relay_transport: PayloadPath,
     ) -> Result<Self> {
         Self::start_with_limits(
             lookups,
@@ -178,7 +189,17 @@ impl BlobServer {
     ///
     /// # Errors
     /// The file is unreadable, exceeds `MAX_BLOB_BYTES`, or snapshotting fails.
-    pub async fn register(&self, path: &Path, content_id: ContentId) -> Result<BlobTicket> {
+    pub async fn register(
+        &self,
+        path: &Path,
+        content_id: ContentId,
+    ) -> Result<BlobTicket, super::BlobError> {
+        self.register_checked(path, content_id)
+            .await
+            .map_err(super::BlobError::internal)
+    }
+
+    async fn register_checked(&self, path: &Path, content_id: ContentId) -> Result<BlobTicket> {
         let (sha256, size) = hash_file(path.to_path_buf()).await?;
         if size > MAX_BLOB_BYTES {
             bail!("file too large to offload ({size} bytes > {MAX_BLOB_BYTES})");

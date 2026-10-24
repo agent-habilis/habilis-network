@@ -8,7 +8,7 @@ pub use crate::daemon::SetupError;
 pub use crate::daemon::config::{
     CoHostPolicy, DIRECTORY_ADVERTISER_COHOST, DriverMode, EventLoopConfig,
 };
-pub use crate::daemon::event_loop::run;
+pub use crate::daemon::event_loop::{EventLoopError, run};
 pub use crate::daemon::node::{Node, SignalHandling};
 pub use crate::daemon::params::{
     CreateParams, JoinParams, Resolved, TopicParams, derive_topic_mesh, derive_topic_mesh_config,
