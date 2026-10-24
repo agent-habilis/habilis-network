@@ -14,14 +14,16 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_gossip::net::Gossip;
 use n0_future::time::Instant;
 
+use super::PayloadPath;
 use super::path::{
     GOSSIP_RELAY_REFUSED_CODE, PROBE_DEADLINE, refuse_unless_direct, selected_is_direct,
 };
 
+use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub(crate) struct DirectOnlyGossip {
     inner: Gossip,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
     /// Set on a node with no UDP path, whose only direct path to anyone is a
     /// `WebRTC` session. See [`DirectOnlyGossip::accept`]. The third element is
     /// this node's own id: the lower id of a pair offers, and the gate treats
@@ -32,7 +34,7 @@ pub(crate) struct DirectOnlyGossip {
 impl DirectOnlyGossip {
     pub(crate) fn new(
         inner: Gossip,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
         session_gate: Option<(WebRtcHandle, super::SignalAdmission, iroh::EndpointId)>,
     ) -> Self {
         Self {
@@ -58,7 +60,7 @@ impl ProtocolHandler for DirectOnlyGossip {
     /// through the rendezvous before any session exists.
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
-        if !self.relay_transport
+        if !self.relay_transport.relay_allowed()
             && let Some((webrtc, admission, local)) = &self.session_gate
             && refuse_before_session(
                 webrtc.has_session(&remote),
@@ -80,7 +82,7 @@ impl ProtocolHandler for DirectOnlyGossip {
         {
             return Ok(());
         }
-        if !self.relay_transport {
+        if !self.relay_transport.relay_allowed() {
             watch_relay_policy(&conn, None);
         }
         self.inner
@@ -118,7 +120,7 @@ impl ProtocolHandler for DirectOnlyGossip {
 /// gossip has dropped.
 pub(super) fn watch_relay_policy(
     gossip_conn: &Connection,
-    path_sink: Option<tokio::sync::mpsc::UnboundedSender<super::probe::PathChange>>,
+    path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
 ) {
     let weak = gossip_conn.weak_handle();
     let mut events = gossip_conn.path_events();
@@ -190,6 +192,11 @@ mod watcher_tests {
 
     use super::watch_relay_policy;
 
+    #[cfg(feature = "iroh-test-utils")]
+    use crate::lookup::test_relay;
+    use iroh::endpoint::presets;
+    #[cfg(feature = "iroh-test-utils")]
+    use tokio::sync::mpsc;
     /// The watcher must not keep a link open that gossip has dropped. A handler
     /// that starts the watch and returns drops the last strong handle, so the
     /// connection must close, and the dialer sees it close. A watcher that held
@@ -207,7 +214,7 @@ mod watcher_tests {
             }
         }
         let bind = || async {
-            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await
@@ -242,7 +249,7 @@ mod watcher_tests {
         const ALPN: &[u8] = b"habilis-mesh/test-watch-relay/0";
 
         #[derive(Debug, Clone)]
-        struct WatchAndHold(tokio::sync::mpsc::UnboundedSender<PathChange>);
+        struct WatchAndHold(mpsc::UnboundedSender<PathChange>);
         impl ProtocolHandler for WatchAndHold {
             async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
                 watch_relay_policy(&conn, Some(self.0.clone()));
@@ -250,13 +257,11 @@ mod watcher_tests {
                 Ok(())
             }
         }
-        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
         let bind = || {
             let relay_url = relay_url.clone();
             async move {
-                iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                iroh::Endpoint::builder(presets::Minimal)
                     .relay_mode(iroh::RelayMode::custom([relay_url]))
                     .clear_ip_transports()
                     .bind()
@@ -264,7 +269,7 @@ mod watcher_tests {
                     .expect("bind a relay-only endpoint")
             }
         };
-        let (sink, mut reports) = tokio::sync::mpsc::unbounded_channel();
+        let (sink, mut reports) = mpsc::unbounded_channel();
         let server = bind().await;
         let router = Router::builder(server.clone())
             .accept(ALPN, WatchAndHold(sink))

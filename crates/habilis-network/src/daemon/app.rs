@@ -170,8 +170,12 @@ pub trait NodeDriver: NodeApp {
 /// session's mesh name — the value cluster [`NodeDriver::handle_ipc`] needs
 /// beyond the loop state and handler context.
 #[derive(Debug)]
-pub struct IpcRequest<'a, C> {
+#[non_exhaustive]
+pub struct IpcRequest<'name, C> {
+    /// The parsed IPC command.
     pub cmd: C,
+    /// Gets the text of the answer.
     pub resp: oneshot::Sender<String>,
-    pub name: &'a MeshName,
+    /// The name of the mesh.
+    pub name: &'name MeshName,
 }

@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use iroh_base::EndpointId;
 use serde::{Deserialize, Serialize};
 
@@ -21,22 +20,34 @@ pub const MAX_ENVELOPE_BYTES: usize = 64 * 1024;
 /// breaks the liar's own session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum SignalEnvelope {
+    /// A session offer, with the SDP of the caller.
     Offer {
+        /// The protocol version of the envelope.
         #[serde(rename = "v")]
         version: u32,
+        /// The endpoint id of the sender, in hex.
         endpoint_id: String,
+        /// The session description.
         sdp: String,
     },
+    /// A session answer, with the SDP of the callee.
     Answer {
+        /// The protocol version of the envelope.
         #[serde(rename = "v")]
         version: u32,
+        /// The endpoint id of the sender, in hex.
         endpoint_id: String,
+        /// The session description.
         sdp: String,
     },
+    /// A failure to set the session up, with the reason.
     Error {
+        /// The protocol version of the envelope.
         #[serde(rename = "v")]
         version: u32,
+        /// Why the session failed.
         reason: String,
     },
 }
@@ -62,6 +73,7 @@ impl SignalEnvelope {
         }
     }
 
+    /// An error envelope with the given reason.
     #[must_use]
     pub fn error(reason: impl Into<String>) -> Self {
         Self::Error {
@@ -73,14 +85,50 @@ impl SignalEnvelope {
     /// The endpoint id the remote side claims in this envelope.
     ///
     /// # Errors
-    ///
-    /// Fails on an `Error` envelope or an unparseable id.
-    pub fn claimed_endpoint(&self) -> anyhow::Result<EndpointId> {
+    /// # Errors
+    /// [`SignalError::Remote`] for an error envelope, or [`SignalError::EndpointId`]
+    /// for an endpoint id that does not parse.
+    pub fn claimed_endpoint(&self) -> Result<EndpointId, SignalError> {
         match self {
             Self::Offer { endpoint_id, .. } | Self::Answer { endpoint_id, .. } => endpoint_id
                 .parse()
-                .context("unparseable endpoint id in signal envelope"),
-            Self::Error { reason, .. } => anyhow::bail!("remote signaling error: {reason}"),
+                .map_err(|error| SignalError::EndpointId(Box::new(error))),
+            Self::Error { reason, .. } => Err(SignalError::Remote {
+                reason: reason.clone(),
+            }),
+        }
+    }
+}
+
+/// Why a signal envelope does not name a usable endpoint.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SignalError {
+    /// The remote side answered with an error envelope.
+    Remote {
+        /// The reason the remote side gave.
+        reason: String,
+    },
+    /// The endpoint id in the envelope does not parse.
+    EndpointId(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl std::fmt::Display for SignalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Remote { reason } => write!(formatter, "remote signaling error: {reason}"),
+            Self::EndpointId(_) => {
+                formatter.write_str("unparseable endpoint id in signal envelope")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SignalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Remote { .. } => None,
+            Self::EndpointId(source) => Some(source.as_ref()),
         }
     }
 }

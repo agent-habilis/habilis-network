@@ -94,8 +94,11 @@ pub fn directory_config(lookups: LookupOpts) -> MeshConfig {
 /// discoverers ignore unknown keys via serde's default behaviour and
 /// ignore unparseable bodies entirely).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Ad {
+    /// The mesh that this ad advertises.
     pub id: MeshId,
+    /// How many members the mesh has, this advertiser included.
     pub peers: usize,
 }
 
@@ -124,8 +127,11 @@ impl Ad {
 
 /// One live directory entry, decoded from an [`Ad`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Listing {
+    /// The id of the listed mesh.
     pub mesh: MeshId,
+    /// The name of the listed mesh.
     pub name: MeshName,
     /// `true` if the advertised mesh's id decodes to the public
     /// network (the norm — `--advertise` requires `--public`).
@@ -133,6 +139,7 @@ pub struct Listing {
     /// `true` if the advertised id carries a password verifier — joining
     /// needs the password, so the ad alone does not admit.
     pub password: bool,
+    /// How many members the mesh has, this advertiser included.
     pub peers: usize,
     /// Local instant of the most recent ad; drives expiry.
     pub last_seen: Instant,
@@ -147,6 +154,7 @@ pub struct Listing {
 /// [`Listings::expire`], which returns the aged-out ids directly. A consumer
 /// maps this onto its own public directory-event type.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ListingChange {
     /// A mesh seen for the first time.
     Found(MeshId),
@@ -173,6 +181,7 @@ pub struct Listings {
 }
 
 impl Listings {
+    /// An empty set of listings.
     #[must_use]
     pub fn new() -> Self {
         Self::default()

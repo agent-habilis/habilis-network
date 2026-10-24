@@ -16,9 +16,12 @@ use crate::protocol::Nickname;
 use crate::protocol::message::{Verified, WireFrame, sole_addressee};
 use crate::transport::MeshSender;
 
+use crate::daemon::state::DirectState;
+use crate::util::clock;
 /// What [`deliver`] did with a frame.
 #[derive(Debug)]
 #[must_use = "a dropped Pending handle loses the verdict of the send"]
+#[non_exhaustive]
 pub enum Delivered {
     /// Sent, or handed to a warm connection: nothing is left to wait for.
     Done,
@@ -49,13 +52,17 @@ pub async fn deliver(
     bytes: WireFrame,
     state: &EventLoopState,
     sender: &MeshSender,
-) -> Result<Delivered> {
+) -> Result<Delivered, SendError> {
     match resolve(msg, bytes, state)? {
         Resend::Broadcast(bytes) => {
-            broadcast(sender, bytes).await?;
+            broadcast(sender, bytes)
+                .await
+                .map_err(SendError::internal)?;
             Ok(Delivered::Done)
         }
-        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool).await,
+        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool)
+            .await
+            .map_err(SendError::internal),
     }
 }
 
@@ -65,11 +72,15 @@ pub async fn deliver(
 /// # Errors
 /// The same as [`deliver`] for a message that has no path now: held for a
 /// direct path, or its addressee has no known endpoint.
-pub(crate) fn resolve(msg: &Verified, bytes: WireFrame, state: &EventLoopState) -> Result<Resend> {
+pub(crate) fn resolve(
+    msg: &Verified,
+    bytes: WireFrame,
+    state: &EventLoopState,
+) -> Result<Resend, SendError> {
     match route(msg, state) {
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
-        Route::Held(eid) => Err(HeldForDirect { eid }.into()),
+        Route::Held(eid) => Err(SendError::Held { eid }),
         Route::Undeliverable => {
             let addressee = sole_addressee(&msg.kind);
             let name = addressee.map_or("<none>", Nickname::as_str);
@@ -83,9 +94,9 @@ pub(crate) fn resolve(msg: &Verified, bytes: WireFrame, state: &EventLoopState) 
             } else {
                 "no known endpoint (PeerInfo not yet received)"
             };
-            Err(anyhow::anyhow!(
+            Err(SendError::Undeliverable(format!(
                 "directed message to {name} undeliverable: {cause}"
-            ))
+            )))
         }
     }
 }
@@ -175,44 +186,74 @@ pub(crate) fn unicast_answer_target(
     (state.linked_endpoints.contains(&eid) && !held(eid, state)).then_some(eid)
 }
 
-/// The error [`deliver`] returns for a [`Route::Held`] frame. Typed, so a
-/// caller that would rather park the frame than fail it (`send_app`) can tell
-/// it from a real send failure with a downcast.
+/// Why a frame could not be sent.
+///
+/// [`SendError::Held`] is the one a caller parks rather than fails on (`send_app`), so it
+/// is a variant and not a downcast. [`SendError::Internal`] holds the causes no caller acts on.
 #[derive(Debug)]
-pub(crate) struct HeldForDirect {
-    eid: EndpointId,
+#[non_exhaustive]
+pub enum SendError {
+    /// The frame waits for a direct path: its peer's only path is the relay, which is lookup
+    /// only on this mesh.
+    Held {
+        /// The endpoint the frame is held for.
+        eid: EndpointId,
+    },
+    /// The addressee has no known path: a route that waits on `PeerInfo`, or the rendezvous.
+    Undeliverable(String),
+    /// The message is larger than one frame carries.
+    Oversize(String),
+    /// The addressee is not a valid nickname.
+    InvalidAddressee(String),
+    /// The mesh event loop has stopped, so nothing can carry the message.
+    Stopped,
+    /// A cause no caller acts on. It keeps its text and its chain.
+    Internal(Box<dyn std::error::Error + Send + Sync>),
 }
 
-impl std::fmt::Display for HeldForDirect {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "directed message held: {}'s only path is the relay, which is lookup only on this mesh",
-            self.eid
-        )
+impl SendError {
+    /// Wraps a cause no caller acts on, keeping its text and its chain.
+    pub(crate) fn internal(error: anyhow::Error) -> Self {
+        Self::Internal(error.into())
     }
 }
 
-impl std::error::Error for HeldForDirect {}
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Held { eid } => write!(
+                f,
+                "directed message held: {eid}'s only path is the relay, which is lookup only on this mesh"
+            ),
+            Self::Undeliverable(message)
+            | Self::Oversize(message)
+            | Self::InvalidAddressee(message) => f.write_str(message),
+            Self::Stopped => f.write_str("mesh event loop has stopped"),
+            Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), f),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
 
 /// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
 /// a send could not dial it without one. So is a frame held for a pair that lost its direct path
-/// and reads as the relay. Call this when a send failed with [`HeldForDirect`]; any other error,
+/// and reads as the relay. Call this when a send failed with [`SendError::Held`]; any other error,
 /// and a peer that has an IP path and no relay reading, change nothing.
-pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
-    let Some(held) = error.downcast_ref::<HeldForDirect>() else {
+pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
+    let SendError::Held { eid } = error else {
         return;
     };
     let needs_lane = state
         .peer_endpoints
         .values()
-        .find(|addr| addr.id == held.eid)
+        .find(|addr| addr.id == *eid)
         .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport));
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
-    let reads_as_relay = state.pair_path_kind(held.eid) == Some(super::probe::PathKind::Relay);
+    let reads_as_relay = state.pair_path_kind(*eid) == Some(super::probe::PathKind::Relay);
     if needs_lane || reads_as_relay {
-        state.want_lane_session(held.eid, crate::util::clock::Instant::now());
+        state.want_lane_session(*eid, clock::Instant::now());
     }
 }
 
@@ -220,8 +261,7 @@ pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
 /// only and no direct path to the peer is proven yet. An unprobed peer is
 /// held too — the alive tick probes every known peer, so the hold is short.
 fn held(eid: EndpointId, state: &EventLoopState) -> bool {
-    !state.relay_transport
-        && state.direct.get(&eid) != Some(&crate::daemon::state::DirectState::Direct)
+    !state.relay_transport.relay_allowed() && state.direct.get(&eid) != Some(&DirectState::Direct)
 }
 
 /// The lane a directed frame to `nick` would take right now — `Route`
@@ -230,14 +270,18 @@ fn held(eid: EndpointId, state: &EventLoopState) -> bool {
 /// real send decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Lane {
+    /// A direct unicast send.
     Unicast,
+    /// A send through other members.
     Multihop,
     /// The peer's only path is the relay. Only reported on a mesh whose relay
     /// is lookup only, where that path carries no payload; elsewhere it reads
     /// `unicast`.
     #[serde(rename = "relay-only")]
     RelayOnly,
+    /// No path to the peer.
     Unreachable,
 }
 
@@ -353,16 +397,24 @@ async fn broadcast(sender: &MeshSender, bytes: WireFrame) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::testing::{endpoint_id, fresh_state, nick};
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
 
     use iroh::EndpointId;
 
     use super::{Lane, Route, lane_for, note_held, resolve, route};
     use crate::daemon::state::EventLoopState;
-    use crate::protocol::message::AppFrameParams;
-    use crate::protocol::message::{Verified, WireFrame};
+    use crate::protocol::message::{AppFrameParams, Verified, WireFrame};
     use crate::protocol::{AppTag, CorrId, Identity, MeshId, Message, MessageBody, MessageId};
 
+    use crate::daemon::ctx;
+    use crate::daemon::state::DirectState;
+    use crate::gossip::{antientropy, event};
+    use crate::protocol::identity;
+    use crate::transport::path;
+    use crate::util::{clock, tuning};
+    use iroh::endpoint::presets;
+    use tokio::sync::oneshot;
     fn mesh() -> MeshId {
         MeshId::from("test")
     }
@@ -381,9 +433,7 @@ mod tests {
         state
             .peer_endpoints
             .insert(nick("bob"), iroh::EndpointAddr::new(bob));
-        state
-            .direct
-            .insert(bob, crate::daemon::state::DirectState::Direct);
+        state.direct.insert(bob, DirectState::Direct);
         (state, bob)
     }
 
@@ -397,12 +447,12 @@ mod tests {
         Message::new_app(
             &mesh(),
             &nick("alice"),
-            AppFrameParams {
-                tag: AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: body(),
-            },
+            AppFrameParams::new(
+                AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                body(),
+            ),
         )
         .sign(&Identity::generate())
     }
@@ -414,7 +464,7 @@ mod tests {
     fn state_knowing_a_lane_bob() -> (EventLoopState, EndpointId) {
         let mut state = fresh_state();
         state.meshed = true;
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
         state.peer_endpoints.insert(
             nick("bob"),
@@ -428,7 +478,7 @@ mod tests {
     #[test]
     fn a_frame_held_for_a_lane_peer_marks_its_session_wanted() {
         let (mut state, bob) = state_knowing_a_lane_bob();
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         assert!(!state.lane_session_wanted(bob, now), "nothing is held yet");
 
         let error = resolve(
@@ -452,7 +502,7 @@ mod tests {
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
 
         let error = resolve(
             &directed_msg(),
@@ -462,7 +512,7 @@ mod tests {
         .expect_err("a lookup-only relay holds the frame");
         note_held(&mut state, &error);
 
-        assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+        assert!(!state.lane_session_wanted(bob, clock::Instant::now()));
     }
 
     /// A pair that had a direct path and lost it reads as the relay. Its parked frame asks for a
@@ -478,7 +528,7 @@ mod tests {
             nick("bob"),
             iroh::EndpointAddr::new(bob).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.direct.insert(bob, DirectState::RelayOnly);
         state.path_kinds.insert(bob, PathKind::Relay);
 
@@ -490,7 +540,7 @@ mod tests {
         .expect_err("a lookup-only relay holds the frame");
         note_held(&mut state, &error);
 
-        assert!(state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+        assert!(state.lane_session_wanted(bob, clock::Instant::now()));
     }
 
     /// On a mesh whose relay carries payload, the cold send to a lane peer is not held: it goes
@@ -498,7 +548,7 @@ mod tests {
     #[test]
     fn on_a_payload_relay_the_cold_send_to_a_lane_peer_is_not_held() {
         let (mut state, bob) = state_knowing_a_lane_bob();
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
 
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
     }
@@ -559,7 +609,7 @@ mod tests {
     /// A loopback endpoint with no relay, and a gossip sender on a peerless
     /// topic: the real pieces a directed send needs, and nothing reachable.
     async fn loopback_node() -> (iroh::Endpoint, crate::transport::MeshSender) {
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .alpns(vec![crate::transport::UNICAST_ALPN.to_vec()])
             .bind()
@@ -580,9 +630,7 @@ mod tests {
         let mut state = fresh_state();
         state.meshed = true;
         state.unicast_pool = crate::transport::UnicastPool::new(endpoint.clone(), false);
-        state
-            .direct
-            .insert(bob_addr.id, crate::daemon::state::DirectState::Direct);
+        state.direct.insert(bob_addr.id, DirectState::Direct);
         crate::lookup::add_peer_addr(&crate::lookup::address_book(endpoint), bob_addr.clone());
         state.peer_endpoints.insert(nick("bob"), bob_addr);
         state
@@ -746,7 +794,7 @@ mod tests {
             .await
             .expect("warm the pool");
         assert!(
-            crate::transport::path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
+            path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
             "loopback selects a direct path"
         );
         let msg = directed_msg();
@@ -790,12 +838,15 @@ mod tests {
         let req = Message::new_app(
             &mesh(),
             &nick("alice"),
-            AppFrameParams {
-                tag: AppTag::from("app_req"),
-                to: Some(nick("bob")),
-                corr: Some(CorrId::from("00000000-0000-0000-0000-0000000000aa")),
-                body: body(),
-            },
+            AppFrameParams::new(
+                AppTag::new("app_req").expect("a valid app tag"),
+                Some(nick("bob")),
+                Some(
+                    CorrId::new("00000000-0000-0000-0000-0000000000aa")
+                        .expect("a valid correlation id"),
+                ),
+                body(),
+            ),
         )
         .sign(&Identity::generate());
         let pong = Message::new_pong(&mesh(), &nick("alice"), nick("bob"), &MessageId::random())
@@ -853,9 +904,9 @@ mod tests {
         use crate::daemon::state::DirectState;
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         assert_eq!(route(&directed_msg(), &state), Route::Unicast(bob));
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         for unproven in [
             None,
             Some(DirectState::Pending),
@@ -902,9 +953,9 @@ mod tests {
         use crate::daemon::state::DirectState;
         let (mut state, bob) = state_knowing_bob();
         state.direct.insert(bob, DirectState::RelayOnly);
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         assert_eq!(lane_for(&nick("bob"), &state), Lane::RelayOnly);
         state.direct.insert(bob, DirectState::Direct);
         assert_eq!(lane_for(&nick("bob"), &state), Lane::Unicast);
@@ -929,9 +980,7 @@ mod tests {
         let linked = || {
             let mut state = fresh_state();
             prove(&mut state, &bob_key, bob);
-            state
-                .direct
-                .insert(bob, crate::daemon::state::DirectState::Direct);
+            state.direct.insert(bob, DirectState::Direct);
             state.linked_endpoints.insert(bob);
             state
         };
@@ -975,7 +1024,7 @@ mod tests {
 
     /// [`prove`] for the key of `identity`.
     fn prove_identity(state: &mut EventLoopState, identity: &Identity, endpoint: EndpointId) {
-        let pubkey = crate::protocol::identity::encode_pubkey(&identity.public());
+        let pubkey = identity::encode_pubkey(&identity.public());
         prove(state, &pubkey, endpoint);
     }
 
@@ -989,12 +1038,12 @@ mod tests {
         identity: Identity,
         our_pubkey: crate::protocol::AuthorKey,
         author: crate::protocol::Nickname,
-        sink: crate::gossip::event::SilentSink,
+        sink: event::SilentSink,
     }
 
     impl Net {
-        fn ctx(&self) -> crate::daemon::ctx::HandlerCtx<'_> {
-            crate::daemon::ctx::HandlerCtx {
+        fn ctx(&self) -> ctx::HandlerCtx<'_> {
+            ctx::HandlerCtx {
                 sender: &self.sender,
                 endpoint: &self.endpoint,
                 mesh: &self.mesh,
@@ -1053,7 +1102,7 @@ mod tests {
             identity,
             our_pubkey,
             author: nick("alice"),
-            sink: crate::gossip::event::SilentSink,
+            sink: event::SilentSink,
         };
         (net, state, frames)
     }
@@ -1099,13 +1148,8 @@ mod tests {
         prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
-        let answered = crate::gossip::antientropy::handle_state_digest(
-            Channel::State,
-            &digest,
-            &mut state,
-            &net.ctx(),
-        )
-        .await;
+        let answered =
+            antientropy::handle_state_digest(Channel::State, &digest, &mut state, &net.ctx()).await;
 
         assert_eq!(answered.broadcast, 0, "nothing went on gossip");
         assert_eq!(answered.unicast, 3);
@@ -1306,7 +1350,7 @@ mod tests {
 
         let (bob_endpoint, _bob_sender) = loopback_node().await;
         let bob_addr = bob_endpoint.addr();
-        let (connected_tx, connected_rx) = tokio::sync::oneshot::channel();
+        let (connected_tx, connected_rx) = oneshot::channel();
         let bob_task = tokio::spawn(async move {
             let conn = bob_endpoint
                 .accept()
@@ -1356,7 +1400,7 @@ mod tests {
             "one change landed since the ask: not a full answer, so no new ask"
         );
 
-        for step in 101..101 + crate::util::tuning::antientropy_max_resend() {
+        for step in 101..101 + tuning::antientropy_max_resend() {
             apply_one(&mut state, &net.mesh, step);
         }
         handle_state_digest(Channel::State, &ahead, &mut state, &ctx).await;
@@ -1400,14 +1444,12 @@ mod tests {
             "handed to the pool as a point-to-point batch"
         );
 
-        tokio::time::sleep(
-            crate::util::tuning::FAST_ROUND_MIN_INTERVAL + std::time::Duration::from_millis(50),
-        )
-        .await;
+        tokio::time::sleep(tuning::FAST_ROUND_MIN_INTERVAL + std::time::Duration::from_millis(50))
+            .await;
         let again = handle_state_digest(Channel::State, &behind, &mut state, &ctx).await;
         assert_eq!(
             again,
-            crate::gossip::antientropy::Answered {
+            antientropy::Answered {
                 unicast: 0,
                 broadcast: 3
             },
@@ -1488,7 +1530,7 @@ mod tests {
             .await
             .expect("warm the pool");
         assert!(
-            crate::transport::path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
+            path::wait_direct(&conn, std::time::Duration::from_secs(5)).await,
             "loopback selects a direct path"
         );
         // Two batches of signed frames, each frame with its own id, so the reader sees four distinct
@@ -1565,13 +1607,7 @@ mod tests {
         prove_identity(&mut state, &asker, bob_id);
         let digest = digest(&net.mesh, Channel::State, &serde_json::json!([]), &asker);
 
-        crate::gossip::antientropy::handle_state_digest(
-            Channel::State,
-            &digest,
-            &mut state,
-            &net.ctx(),
-        )
-        .await;
+        antientropy::handle_state_digest(Channel::State, &digest, &mut state, &net.ctx()).await;
 
         let (got, returned_endpoint) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)
@@ -1611,30 +1647,18 @@ mod tests {
         let (net, mut state, _none) = holder(bob_endpoint.addr(), 0).await;
         let bob = Identity::generate();
         prove_identity(&mut state, &bob, bob_endpoint.id());
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
 
         let own = serde_json::json!(state.doc(Channel::State).heads());
         let up_to_date = digest(&net.mesh, Channel::State, &own, &bob);
-        crate::gossip::antientropy::handle_state_digest(
-            Channel::State,
-            &up_to_date,
-            &mut state,
-            &net.ctx(),
-        )
-        .await;
+        antientropy::handle_state_digest(Channel::State, &up_to_date, &mut state, &net.ctx()).await;
         assert!(
             !state.fast_rounds.active(Channel::State, now),
             "heads we hold"
         );
 
         let from_ahead = digest(&net.mesh, Channel::State, &ahead_heads, &bob);
-        crate::gossip::antientropy::handle_state_digest(
-            Channel::State,
-            &from_ahead,
-            &mut state,
-            &net.ctx(),
-        )
-        .await;
+        antientropy::handle_state_digest(Channel::State, &from_ahead, &mut state, &net.ctx()).await;
         assert!(
             !state.fast_rounds.active(Channel::State, now),
             "bob is not linked"
@@ -1642,13 +1666,7 @@ mod tests {
 
         state.linked_endpoints.insert(bob_endpoint.id());
         let received = read_frames(bob_endpoint, 1);
-        crate::gossip::antientropy::handle_state_digest(
-            Channel::State,
-            &from_ahead,
-            &mut state,
-            &net.ctx(),
-        )
-        .await;
+        antientropy::handle_state_digest(Channel::State, &from_ahead, &mut state, &net.ctx()).await;
         assert!(state.fast_rounds.active(Channel::State, now), "asked bob");
         let (got, returned_endpoint) =
             tokio::time::timeout(std::time::Duration::from_secs(5), received)

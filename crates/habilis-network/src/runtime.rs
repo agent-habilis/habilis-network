@@ -4,11 +4,12 @@
 //! [`setup_mesh`] → [`Node::spawn`] (or [`run`] for a consumer that owns the
 //! task itself). [`EventLoopConfig`] is opaque between the second and third.
 
+pub use crate::daemon::SetupError;
 pub use crate::daemon::config::{
     CoHostPolicy, DIRECTORY_ADVERTISER_COHOST, DriverMode, EventLoopConfig,
 };
-pub use crate::daemon::event_loop::run;
-pub use crate::daemon::node::Node;
+pub use crate::daemon::event_loop::{EventLoopError, run};
+pub use crate::daemon::node::{Node, SignalHandling};
 pub use crate::daemon::params::{
     CreateParams, JoinParams, Resolved, TopicParams, derive_topic_mesh, derive_topic_mesh_config,
     derive_topic_mesh_with,
@@ -18,8 +19,9 @@ pub use crate::daemon::setup::{
     refuse_in_browser, setup_mesh,
 };
 #[cfg(feature = "host")]
-pub use crate::daemon::validate_owner_pid;
+pub use crate::daemon::{OwnerPidError, validate_owner_pid};
 pub use crate::lookup::MdnsHandle;
+pub use crate::transport::SendError;
 
 /// The session state file the daemon writes for external readers — its sole
 /// writer. Daemon-session state, not a generic filesystem helper.
@@ -43,8 +45,8 @@ pub mod state_file {
 #[cfg(feature = "host")]
 pub mod ipc {
     pub use crate::transport::ipc::{
-        Addressed, NoDaemon, active_socket_paths, json_ack, json_error, json_ok_msg, send,
-        send_to_path,
+        Addressed, IpcError, NoDaemon, active_socket_paths, json_ack, json_error, json_ok_msg,
+        send, send_to_path,
     };
 }
 

@@ -7,8 +7,8 @@
 //!
 //! The unstable-feature gate lives here, not in `main.rs`: only `ui.rs`
 //! writes components with the bare `yield` keyword, and that code lives
-//! in this library. See `native/rust-toolchain.toml` for why `native/` is
-//! pinned to a specific nightly.
+//! in this library. The root `rust-toolchain.toml` pins a nightly for
+//! the whole project, which is what `native/` needs.
 #![feature(coroutines, yield_expr)]
 
 pub mod app;

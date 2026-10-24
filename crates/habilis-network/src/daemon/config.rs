@@ -4,9 +4,11 @@
 //! consumed by [`daemon::run`](super::run). Split out of `mod.rs` so the
 //! orchestrator file reads as pure lifecycle narrative.
 
+use crate::transport::UdpTransport;
 use std::path::PathBuf;
 
-use iroh::{Endpoint, protocol::Router};
+use iroh::Endpoint;
+use iroh::protocol::Router;
 use iroh_gossip::api::GossipTopic;
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -16,12 +18,19 @@ use crate::protocol::message::Authored;
 use crate::protocol::{MeshId, Nickname};
 
 use crate::beacon;
+use crate::daemon::node::SignalHandling;
 
+use crate::protocol::{crypto, identity};
+#[cfg(feature = "multihop")]
+use crate::transport::underlay_webrtc;
+use iroh::address_lookup::memory;
+use std::sync::atomic;
 /// Who drives the event loop. The variants make illegal channel
 /// combinations unrepresentable and let the loop *derive* both "exit the
 /// process on quit?" and "spawn the unix-socket listener?" instead of
 /// carrying them as independent, drift-prone bools.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DriverMode {
     /// A long-running CLI daemon. Owns the unix-socket IPC listener
     /// (for `msg` / `poll`); ctrl-c / SIGTERM `std::process::exit`s.
@@ -33,7 +42,9 @@ pub enum DriverMode {
     /// session, or an app that consumes every frame inside the loop). Never
     /// exits the process and binds no socket; shutdown on `quit_rx`.
     InProcess {
+        /// Where the messages go.
         msg_tx: Option<broadcast::Sender<Authored>>,
+        /// Where the quit signal comes from.
         quit_rx: mpsc::Receiver<()>,
         /// Whether this session registers the process-wide
         /// ctrl-c/SIGTERM/SIGHUP/SIGQUIT listeners for a graceful leave.
@@ -43,7 +54,7 @@ pub enum DriverMode {
         /// lifetime (a `--advertise` transfer's directory session, a
         /// directory browse) must pass `false`, or ctrl-c stops killing
         /// the host command.
-        handle_signals: bool,
+        handle_signals: SignalHandling,
     },
 }
 
@@ -54,6 +65,7 @@ pub enum DriverMode {
 /// policy plus the public probe-before-claim (`beacon::ensure`) keep
 /// that from happening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CoHostPolicy {
     /// Co-host from t=0 with no probe — the mesh origin (`create`),
     /// which has no peers to collide with, so a beacon exists before any
@@ -109,7 +121,7 @@ pub struct EventLoopConfig {
     pub(crate) author: Nickname,
     /// This member's signing identity (Ed25519), minted in `setup_mesh`.
     /// In-process / ephemeral for now (see [`crate::protocol::identity`]).
-    pub(crate) identity: std::sync::Arc<crate::protocol::identity::Identity>,
+    pub(crate) identity: std::sync::Arc<identity::Identity>,
     pub(crate) mesh: MeshId,
     /// Decoded mesh name (from the mesh id). Carried so the
     /// shutdown path can print `left #NAME` without re-parsing
@@ -125,7 +137,7 @@ pub struct EventLoopConfig {
     /// time to key blob tickets with the same password — the Argon2id stretch
     /// takes the raw password string, which cannot be recovered from
     /// `mesh_key`. `Password`'s `Debug`/`Display` redact to `***`.
-    pub(crate) mesh_password: Option<crate::protocol::crypto::Password>,
+    pub(crate) mesh_password: Option<crypto::Password>,
     /// The Argon2id-stretched mesh key (`Mesh::mesh_key`), retained to
     /// derive the per-channel keys that encrypt the `state`/`meta` docs and
     /// broadcast chat. `None` for a passwordless mesh — those stay plaintext.
@@ -190,7 +202,7 @@ pub struct EventLoopConfig {
     /// `EventLoopState::underlay_webrtc`. `None` when multihop is off, and on an
     /// injected endpoint, whose underlay the caller built.
     #[cfg(feature = "multihop")]
-    pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    pub(crate) underlay_webrtc: Option<underlay_webrtc::UnderlayWebRtc>,
     /// The members of this mesh that the LAN announces, read by the event loop. `None` when the
     /// endpoint has no mDNS handle: there is no LAN arm then.
     pub(crate) lan_contacts: Option<mpsc::Receiver<crate::lookup::LanEvent>>,
@@ -203,14 +215,14 @@ pub struct EventLoopConfig {
     pub(crate) webrtc_enabled: bool,
     /// See `EventLoopState::local_udp_transport`. With `relay_transport` it
     /// also decides `EventLoopState::rendezvous_graft_needs_session`.
-    pub(crate) local_udp_transport: bool,
+    pub(crate) local_udp_transport: UdpTransport,
     /// The negotiation-slot table this peer's Router acceptor was built with.
     /// `run()` moves it into `EventLoopState::webrtc_admission`, so the dialing
     /// side and the answering side share one direct-peer ceiling.
     pub(crate) webrtc_admission: crate::transport::SignalAdmission,
     /// The address book of the member endpoint. `run()` moves it into
     /// `EventLoopState::address_book`, where the addresses of the peers are registered.
-    pub(crate) address_book: iroh::address_lookup::memory::MemoryLookup,
+    pub(crate) address_book: memory::MemoryLookup,
     /// How far ICE may reach when gathering — host-only on a loopback mesh.
     /// `run()` moves it into `EventLoopState::webrtc_ice`.
     pub(crate) webrtc_ice: crate::transport::IceProfile,
@@ -222,10 +234,10 @@ pub struct EventLoopConfig {
     /// directory re-broadcast task reads the live peer count from. Supplied
     /// up front through `SetupParams::live_count`, so the config is complete
     /// when it is built; `run` stores it before the first advertisement.
-    pub(crate) live_count: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    pub(crate) live_count: Option<std::sync::Arc<atomic::AtomicUsize>>,
     /// `TransportPolicy::relay`, read from the mesh config — never from a
     /// per-node option, so every member agrees.
-    pub(crate) relay_transport: bool,
+    pub(crate) relay_transport: crate::transport::PayloadPath,
     /// Who drives the loop (CLI / in-process) and the channels that driver
     /// needs. Assigned by [`Node::spawn`](super::node::Node::spawn) for an in-process
     /// consumer; a config handed straight to [`run`](super::run) keeps the CLI
@@ -252,7 +264,7 @@ impl EventLoopConfig {
     /// `pid` is 0 or 1, the daemon's own pid, or no live process has it. The
     /// message is one line.
     #[cfg(feature = "host")]
-    pub fn with_owner_pid(mut self, pid: u32) -> anyhow::Result<Self> {
+    pub fn with_owner_pid(mut self, pid: u32) -> Result<Self, super::shutdown::OwnerPidError> {
         self.owner = Some(super::shutdown::Owner::new(pid)?);
         Ok(self)
     }

@@ -34,6 +34,7 @@ impl Runner {
                 self.state.value += sum;
                 self.state.frame += 1;
             }
+            _ => unreachable!("a request this test does not expect"),
         }
     }
 }

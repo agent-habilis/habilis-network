@@ -28,17 +28,9 @@ use habilis_network_ffi::ffi::{
 /// Zeroed selectors: no id and no topic, so [`habilis_network_mesh_open`] mints a private
 /// loopback mesh — no discovery, no network, nothing to clean up but the handle.
 fn create_opts(nick: &CStr) -> HabilisNetworkOpts {
-    HabilisNetworkOpts {
-        mesh: std::ptr::null(),
-        topic: std::ptr::null(),
-        nick: nick.as_ptr(),
-        name: std::ptr::null(),
-        lookup: std::ptr::null(),
-        transport: std::ptr::null(),
-        relay_urls: std::ptr::null(),
-        max_peers: 0,
-        max_direct: 0,
-    }
+    let mut opts = HabilisNetworkOpts::empty();
+    opts.nick = nick.as_ptr();
+    opts
 }
 
 /// The error slot's current contents, as an owned string.
@@ -354,11 +346,7 @@ fn a_joiner_reads_back_the_creators_mesh_name() {
 }
 
 fn empty_msg() -> HabilisNetworkMsg {
-    HabilisNetworkMsg {
-        nick: [0; 64],
-        directed: 0,
-        len: 0,
-    }
+    HabilisNetworkMsg::empty()
 }
 
 /// Receive one message into a buffer of `cap` bytes, waiting up to 20 s.
@@ -487,17 +475,10 @@ fn two_handles_exchange_messages() {
 /// Zeroed selectors except `mesh`, so [`habilis_network_mesh_open`] joins the given id rather
 /// than creating a fresh mesh.
 fn create_opts_for_join(id: &CStr, nick: &CStr) -> HabilisNetworkOpts {
-    HabilisNetworkOpts {
-        mesh: id.as_ptr(),
-        topic: std::ptr::null(),
-        nick: nick.as_ptr(),
-        name: std::ptr::null(),
-        lookup: std::ptr::null(),
-        transport: std::ptr::null(),
-        relay_urls: std::ptr::null(),
-        max_peers: 0,
-        max_direct: 0,
-    }
+    let mut opts = HabilisNetworkOpts::empty();
+    opts.mesh = id.as_ptr();
+    opts.nick = nick.as_ptr();
+    opts
 }
 
 /// Four peers (creator + 3 joiners) must each see the other three.
@@ -557,8 +538,8 @@ fn four_peers_converge(public: bool) {
         "expected every peer to see ≥3 others within 45s (public={public}); peer_counts={counts:?}"
     );
 
-    // SAFETY: each handle came from habilis_network_mesh_open and is not used after this.
     for handle in handles {
+        // SAFETY: each handle came from habilis_network_mesh_open and is not used after this.
         unsafe {
             assert_eq!(
                 habilis_network_mesh_close(handle),
@@ -582,11 +563,7 @@ fn four_peers_converge_on_public() {
 }
 
 fn loopback_streams() -> *mut HabilisNetworkStreams {
-    let opts = HabilisNetworkStreamOpts {
-        lookup: std::ptr::null(),
-        transport: std::ptr::null(),
-        relay_urls: std::ptr::null(),
-    };
+    let opts = HabilisNetworkStreamOpts::empty();
     // SAFETY: a fully-initialized struct with NULL strings.
     let streams = unsafe { habilis_network_streams_bind(&raw const opts) };
     assert!(

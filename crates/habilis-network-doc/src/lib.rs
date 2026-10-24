@@ -26,6 +26,10 @@
 
 pub mod wire;
 
+mod error;
+
+pub use error::DocError;
+
 use std::collections::{HashMap, HashSet};
 
 use automerge::transaction::Transactable;
@@ -67,11 +71,17 @@ struct Refusals {
 
 /// The outcome of ingesting one frame into a [`MeshDoc`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Ingested {
     /// Applied to the live doc. `changed` is whether the derived document moved
     /// (a no-op change surfaces nothing); `doc` is the document after applying
     /// this change and draining anything it unblocked.
-    Applied { changed: bool, doc: Value },
+    Applied {
+        /// Whether the derived document moved.
+        changed: bool,
+        /// The document after applying this change and draining anything it unblocked.
+        doc: Value,
+    },
     /// A change we already hold — dropped.
     Duplicate,
     /// Held pending its causal dependencies; not yet applied.
@@ -101,6 +111,7 @@ pub enum Ingested {
 /// discards one, and a peer's entry is silently erased. Changing either key on a
 /// live mesh is a format break.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SelfWriteGate {
     /// Root key of the per-peer map, keyed by nickname.
     pub map: String,
@@ -298,15 +309,21 @@ impl MeshDoc {
     /// re-serve; `plain` surfaces the author's own human-readable delta locally.
     ///
     /// # Errors
-    /// Body serialization/size or the encryption envelope fails.
+    /// # Errors
+    /// [`DocError::NotAnObject`] when the merge is not a JSON object, [`DocError::Body`]
+    /// when the change body is not a valid message body, or [`DocError::Encode`] when
+    /// the change does not encode.
     pub fn compose_wire_body(
         &self,
         change: &[u8],
         merge: Option<&Value>,
-    ) -> anyhow::Result<(
-        habilis_network_protocol::MessageBody,
-        habilis_network_protocol::MessageBody,
-    )> {
+    ) -> Result<
+        (
+            habilis_network_protocol::MessageBody,
+            habilis_network_protocol::MessageBody,
+        ),
+        DocError,
+    > {
         let plain = wire::change_body(change, merge)?;
         let wire = match self.key.as_ref() {
             Some(key) => wire::encrypt_body(&plain, key)?,
@@ -396,21 +413,23 @@ impl MeshDoc {
     /// public key (see `actor_for`).
     ///
     /// # Errors
-    /// Unrepresentable merge (a non-object at the document root).
+    /// # Errors
+    /// [`DocError::Encode`] when the change does not encode, or [`DocError::Body`] when
+    /// it is not a valid message body.
     pub fn build_change(
         &self,
         merge: &Value,
         actor_seed: &[u8],
-    ) -> anyhow::Result<Option<Vec<u8>>> {
+    ) -> Result<Option<Vec<u8>>, DocError> {
         let Value::Object(_) = merge else {
-            anyhow::bail!("merge must be a JSON object (automerge's document root is a map)");
+            return Err(DocError::NotAnObject);
         };
         let mut fork = self.doc.fork();
         fork.set_actor(actor_for(actor_seed));
         let heads = fork.get_heads();
         {
             let mut tx = fork.transaction();
-            write_map(&mut tx, &ROOT, merge)?;
+            write_map(&mut tx, &ROOT, merge).map_err(DocError::encode)?;
             tx.commit();
         }
         let mut changes = fork.get_changes(&heads);

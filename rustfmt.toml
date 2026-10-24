@@ -1,0 +1,3 @@
+# `imports_granularity` is unstable, so it needs a nightly rustfmt. rust-toolchain.toml pins a
+# nightly for the whole project, so a plain `cargo fmt --check` (CI) enforces it.
+imports_granularity = "Module"

@@ -41,11 +41,10 @@ impl Args {
         } else {
             self.lookup.clone()
         };
-        StreamOpts {
-            lookup,
-            transport: self.transport.clone(),
-            relay_urls: self.relay_urls.clone(),
-        }
+        StreamOpts::default()
+            .with_lookup(lookup)
+            .with_transport(self.transport.clone())
+            .with_relay_urls(self.relay_urls.clone())
     }
 
     /// The page URL for `hash`, when a web address is known. The hash rides in

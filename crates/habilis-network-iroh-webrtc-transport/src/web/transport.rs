@@ -4,14 +4,14 @@
 //! data channels, keyed by remote [`EndpointId`]. The consumer attaches one
 //! session after offering; the producer attaches each peer that signals in.
 
+use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use futures::SinkExt as _;
-use futures::StreamExt as _;
 use futures::channel::mpsc;
+use futures::{SinkExt as _, StreamExt as _};
 use iroh::EndpointId;
 use iroh::endpoint::transports::{
     CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit,
@@ -20,15 +20,15 @@ use iroh_base::CustomAddr;
 use js_sys::Reflect;
 use n0_watcher::Watchable;
 use wasm_bindgen::JsCast as _;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{MessageEvent, RtcDataChannel, RtcPeerConnection, RtcPeerConnectionState};
 
 use super::jsep::{now_ms, sleep_ms};
-use crate::custom_addr;
+use crate::attach::AttachError;
 use crate::liveness::{ConnectionPhase, DISCONNECT_GRACE_MS, Verdict, judge_state};
 use crate::registry::Registry;
-use crate::{IN_QUEUE, OUT_QUEUE};
+use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
 /// Stop queueing into the channel above this much buffered data.
 const BUFFER_CAP: u32 = 1 << 20;
@@ -55,6 +55,7 @@ pub(crate) struct InboundPacket {
 /// demote a peer to the relay can then say *why* rather than inferring it from
 /// a transfer that did not finish.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct SessionCounters {
     /// Datagrams handed to `RTCDataChannel.send` without it throwing.
     pub sent: AtomicU64,
@@ -72,10 +73,15 @@ pub struct SessionCounters {
 /// A snapshot of [`SessionCounters`], since the counters themselves are not
 /// `Clone` and reading four atomics separately would not be one moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SessionCounts {
+    /// Frames sent.
     pub sent: u64,
+    /// Frames dropped because the queue was full.
     pub dropped_queue_full: u64,
+    /// Frames dropped because the channel was congested.
     pub dropped_congested: u64,
+    /// Frames refused by the channel.
     pub dropped_refused: u64,
 }
 
@@ -92,10 +98,15 @@ impl SessionCounts {
 /// positional tuple: every value shares one type, so a swapped pair would
 /// compile silently.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct DataChannelCounters {
+    /// Bytes sent on the data channel.
     pub bytes_sent: f64,
+    /// Bytes received on the data channel.
     pub bytes_received: f64,
+    /// Messages sent on the data channel.
     pub messages_sent: f64,
+    /// Messages received on the data channel.
     pub messages_received: f64,
 }
 
@@ -103,8 +114,11 @@ pub struct DataChannelCounters {
 /// [`DataChannelCounters`] is named: the byte counters share one type, so a
 /// swapped pair would compile silently.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct SelectedPairStats {
+    /// Bytes sent on the selected candidate pair.
     pub bytes_sent: f64,
+    /// Bytes received on the selected candidate pair.
     pub bytes_received: f64,
     /// `None` when the browser reports no round-trip time yet — distinct from a
     /// real 0 ms, which should not render alike.
@@ -145,7 +159,10 @@ type SessionMap = Arc<Registry<SessionHandle>>;
 /// [`DISCONNECT_GRACE_MS`] for `sleep_ms`, which takes the browser's `i32`
 /// milliseconds. Written out rather than cast so the two cannot drift.
 const DISCONNECT_GRACE_MS_I32: i32 = 10_000;
-const _: () = assert!(DISCONNECT_GRACE_MS_I32 as f64 == DISCONNECT_GRACE_MS);
+const _: () = assert!(
+    DISCONNECT_GRACE_MS_I32 as f64 == DISCONNECT_GRACE_MS,
+    "the i32 disconnect grace constant matches the f64 one"
+);
 
 fn phase_of(state: RtcPeerConnectionState) -> ConnectionPhase {
     match state {
@@ -218,32 +235,6 @@ fn evict_if_generation(
     }
 }
 
-/// Why [`BrowserHubTransport::attach`] refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttachError {
-    /// Someone already holds this peer's slot — a live session, or another
-    /// negotiation partway through attaching one.
-    ///
-    /// Not necessarily a fault. The mount lane and the mesh lane share one
-    /// registry, so either can reach a peer first; the loser should use the
-    /// winner's session rather than treat this as a failure.
-    ///
-    /// The handles passed to `attach` have already been closed.
-    AlreadyAttached(EndpointId),
-}
-
-impl std::fmt::Display for AttachError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyAttached(remote) => {
-                write!(formatter, "a WebRTC session for {remote} already exists")
-            }
-        }
-    }
-}
-
-impl std::error::Error for AttachError {}
-
 /// A session that is attached but not yet proven to carry traffic.
 ///
 /// Attaching happens *before* the data channel opens — deliberately, because
@@ -279,6 +270,7 @@ pub struct BrowserHubTransport {
 }
 
 impl BrowserHubTransport {
+    /// A transport for `local_id`, with no sessions yet.
     #[must_use]
     pub fn new(local_id: EndpointId) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(IN_QUEUE);
@@ -291,6 +283,7 @@ impl BrowserHubTransport {
         })
     }
 
+    /// The endpoint id of this node.
     #[must_use]
     pub fn local_id(&self) -> EndpointId {
         self.local_id
@@ -724,11 +717,8 @@ impl std::fmt::Debug for BrowserHubTransport {
 /// would be a plausible-looking lie.
 async fn selected_pair_from_stats(
     peer_connection: &RtcPeerConnection,
-) -> Option<(
-    std::collections::HashMap<String, js_sys::Object>,
-    js_sys::Object,
-)> {
-    let by_id: std::collections::HashMap<String, js_sys::Object> =
+) -> Option<(HashMap<String, js_sys::Object>, js_sys::Object)> {
+    let by_id: HashMap<String, js_sys::Object> =
         stats_rows(peer_connection).await?.into_iter().collect();
 
     let pair_id = selected_pair_id(&by_id)?;
@@ -782,7 +772,7 @@ async fn stats_rows(peer_connection: &RtcPeerConnection) -> Option<Vec<(String, 
 ///    browsers and by older Chrome.
 /// 3. A `succeeded` + `nominated` pair — what the other two are derived from,
 ///    for a browser that publishes neither.
-fn selected_pair_id(by_id: &std::collections::HashMap<String, js_sys::Object>) -> Option<String> {
+fn selected_pair_id(by_id: &HashMap<String, js_sys::Object>) -> Option<String> {
     let field = |stats: &js_sys::Object, key: &str| {
         Reflect::get(stats, &JsValue::from_str(key))
             .ok()

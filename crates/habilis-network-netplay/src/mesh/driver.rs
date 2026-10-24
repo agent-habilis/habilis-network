@@ -25,6 +25,7 @@ pub const LOBBY_TAG: &str = "rb_lobby";
 /// [`RollbackDriver::handle_session`], which is where `&mut EventLoopState`
 /// finally exists.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Outbound {
     /// A rollback packet for one peer, addressed by public key.
     Rollback {
@@ -121,15 +122,7 @@ impl<T: Config> NodeApp for RollbackDriver<T> {
     fn classify(&self, message: &Authored) -> AppClass {
         let tag = message.kind.app_tag().map(AppTag::as_str);
         let ours = matches!(tag, Some(ROLLBACK_TAG | LOBBY_TAG));
-        AppClass {
-            loggable: false,
-            beat: false,
-            // `send_app` never stamps `seq`/`parents`, so a chain would
-            // index nothing.
-            chained: false,
-            sealed: false,
-            valid: ours,
-        }
+        AppClass::NONE.with_if(AppClass::VALID, ours)
     }
 
     async fn on_app_frame(
@@ -255,12 +248,7 @@ fn frame_for(
     };
     Some(habilis_network::ops::app_frame(
         ctx,
-        AppFrameParams {
-            tag,
-            to,
-            corr: None,
-            body,
-        },
+        AppFrameParams::new(tag, to, None, body),
     ))
 }
 

@@ -43,7 +43,9 @@
 //! handle.feed_topology(link_vector);
 //! ```
 
+use tokio::sync::mpsc;
 mod addr;
+mod error;
 mod graph;
 mod lookup;
 mod metric;
@@ -66,10 +68,12 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 use n0_future::time::{Duration, Instant};
 
 pub use addr::{Route, RouteHop};
+pub use error::HandleError;
 pub use graph::Leg;
 
 /// What the data path of a node counted: a test reads them to tell where cells go.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MultihopCounters {
     /// Cells passed on to a next hop for other nodes.
     pub forwarded: u64,
@@ -123,6 +127,7 @@ pub const BROWSER_HOP_FACTOR: u32 = 10;
 /// an endpoint that is injected into a mesh must be built with the values that
 /// mesh's policy implies (see `InjectedEndpoint::bind` in the engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HandleConfig {
     /// Whether the relay may carry cells (the mesh's `relay_transport`). Off, the
     /// relay is for lookup alone: the forwarder drops a cell it would send, and
@@ -156,6 +161,34 @@ impl Default for HandleConfig {
 }
 
 impl HandleConfig {
+    /// Set whether the relay carries payload.
+    #[must_use]
+    pub const fn with_relay_payload(mut self, relay_payload: bool) -> Self {
+        self.relay_payload = relay_payload;
+        self
+    }
+
+    /// Set the age after which a vector entry is dropped.
+    #[must_use]
+    pub const fn with_vector_max_age(mut self, vector_max_age: Duration) -> Self {
+        self.vector_max_age = vector_max_age;
+        self
+    }
+
+    /// Set how long a hop may stay stuck on the relay before it is reported.
+    #[must_use]
+    pub const fn with_relay_stuck_after(mut self, relay_stuck_after: Duration) -> Self {
+        self.relay_stuck_after = relay_stuck_after;
+        self
+    }
+
+    /// Set the cost of a link.
+    #[must_use]
+    pub const fn with_link_cost(mut self, link_cost: u32) -> Self {
+        self.link_cost = link_cost;
+        self
+    }
+
     /// The config of a browser: the default, with a link cost [`BROWSER_HOP_FACTOR`] times
     /// higher, so that routes avoid a browser as a hop and use it only when nothing else
     /// reaches the destination. A native route of up to ten hops costs less than a route through
@@ -212,16 +245,13 @@ impl MultihopHandle {
     /// may sit on the relay: see [`HandleConfig`].
     ///
     /// # Errors
-    /// `underlay` is not bound to [`underlay_secret`]`(secret)`. The underlay has
-    /// a key of its own, because a relay hands an id's packets to one endpoint
-    /// only and the underlay cannot share the application endpoint's. That key is
-    /// derived, so it is stable and tied to the peer rather than a second random
-    /// identity.
+    /// # Errors
+    /// A [`HandleError`] when the forwarder ALPN or the underlay key is not valid.
     pub fn new(
         secret: &SecretKey,
         underlay: Endpoint,
         config: HandleConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, HandleError> {
         Self::with_protocols(secret, underlay, config, Vec::new())
     }
 
@@ -231,25 +261,25 @@ impl MultihopHandle {
     /// only be registered here.
     ///
     /// # Errors
-    /// As [`new`](Self::new), and a protocol takes the ALPN of the forwarder.
+    /// # Errors
+    /// A [`HandleError`] when the forwarder ALPN or the underlay key is not valid.
     pub fn with_protocols(
         secret: &SecretKey,
         underlay: Endpoint,
         config: HandleConfig,
         protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
-    ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            protocols
-                .iter()
-                .all(|(alpn, _)| alpn.as_slice() != underlay::FORWARD_ALPN),
-            "the forwarder keeps its own ALPN on the underlay"
-        );
+    ) -> Result<Self, HandleError> {
+        if protocols
+            .iter()
+            .any(|(alpn, _)| alpn.as_slice() == underlay::FORWARD_ALPN)
+        {
+            return Err(HandleError::ForwarderAlpn);
+        }
         let app_id = AppId::new(secret.public());
-        anyhow::ensure!(
-            underlay.id() == underlay_secret(secret).public(),
-            "the underlay must be bound to `underlay_secret(secret)`, not another key"
-        );
-        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(INBOUND_CAP);
+        if underlay.id() != underlay_secret(secret).public() {
+            return Err(HandleError::UnderlayKey);
+        }
+        let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_CAP);
         let topology = Arc::new(RwLock::new(Topology::with_max_age(config.vector_max_age)));
         let forwarder = Arc::new(Forwarder::new(
             underlay.clone(),
@@ -604,6 +634,8 @@ mod tests {
     use crate::test_support::relay_server;
     use crate::wire::Cell;
 
+    use std::sync::atomic;
+    use std::sync::atomic::Ordering;
     #[test]
     fn the_underlay_key_is_derived_from_the_peer_key() {
         let peer = SecretKey::from_bytes(&[7; 32]);
@@ -757,14 +789,14 @@ mod tests {
 
     /// Counts the connections it accepts, then waits for the dialer to close.
     #[derive(Debug, Clone)]
-    struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    struct Counting(std::sync::Arc<atomic::AtomicUsize>);
 
     impl iroh::protocol::ProtocolHandler for Counting {
         async fn accept(
             &self,
             connection: iroh::endpoint::Connection,
         ) -> Result<(), iroh::protocol::AcceptError> {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.fetch_add(1, Ordering::SeqCst);
             connection.closed().await;
             Ok(())
         }
@@ -774,7 +806,7 @@ mod tests {
 
     #[test]
     async fn an_extra_protocol_is_accepted_on_the_underlay() {
-        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = std::sync::Arc::new(atomic::AtomicUsize::new(0));
         let secret = SecretKey::from_bytes(&[51; 32]);
         let handle = MultihopHandle::with_protocols(
             &secret,
@@ -805,7 +837,7 @@ mod tests {
             .expect("the underlay answers the extra ALPN");
         connection.close(0u32.into(), b"done");
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -15,6 +15,30 @@ use crate::protocol::message::Authored;
 use crate::protocol::{AppFrameParams, AppTag, Channel, MessageBody, MessageKind, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
+#[cfg(all(
+    feature = "iroh-test-utils",
+    feature = "host",
+    not(target_arch = "wasm32")
+))]
+use crate::daemon::event_loop;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::daemon::state::DirectState;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::transport::path;
+#[cfg(all(
+    feature = "iroh-test-utils",
+    not(target_arch = "wasm32"),
+    feature = "multihop"
+))]
+use crate::transport::underlay_webrtc;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::transport::webrtc;
+#[cfg(all(
+    feature = "iroh-test-utils",
+    feature = "host",
+    not(target_arch = "wasm32")
+))]
+use crate::util::clock;
 /// The one `App`-frame tag a member sends: a whole UTF-8 text, broadcast or
 /// directed. Bulk bytes do not ride gossip; they take a stream.
 pub const MSG_TAG: &str = "msg";
@@ -55,22 +79,24 @@ pub fn msg_fits(text: &str) -> bool {
 /// # Errors
 /// `text` holds a control character other than tab, newline or carriage
 /// return, or does not fit one frame (see [`msg_fits`]).
-pub fn msg_body(text: &str) -> Result<MessageBody> {
-    anyhow::ensure!(
-        msg_fits(text),
-        "message too large for one frame: send it as a stream instead"
-    );
-    MessageBody::new(text.to_owned()).map_err(|error| anyhow::anyhow!("{error}"))
+pub fn msg_body(text: &str) -> Result<MessageBody, crate::transport::SendError> {
+    if !msg_fits(text) {
+        return Err(crate::transport::SendError::Oversize(
+            "message too large for one frame: send it as a stream instead".to_owned(),
+        ));
+    }
+    MessageBody::new(text.to_owned())
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))
 }
 
 /// Parse an optional addressee.
 ///
 /// # Errors
 /// `to` is not a valid nickname.
-pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>> {
+pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, crate::transport::SendError> {
     to.map(|nick| Nickname::new(nick.to_owned()))
         .transpose()
-        .map_err(|error| anyhow::anyhow!("{error}"))
+        .map_err(|error| crate::transport::SendError::InvalidAddressee(error.to_string()))
 }
 
 /// `text` as `serde_json` writes it inside quotes.
@@ -85,11 +111,13 @@ fn escaped_len(text: &str) -> usize {
 
 /// One surfaced `msg`, flattened for a consumer outside the engine.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Inbound {
     /// The author's nickname.
     pub nick: String,
     /// The message was addressed to us specifically, not broadcast.
     pub directed: bool,
+    /// The body of the message, as UTF-8.
     pub text: String,
 }
 
@@ -100,11 +128,15 @@ pub struct Inbound {
     missing_debug_implementations,
     reason = "the oneshot reply senders carry no Debug bound worth adding for a value that never reaches a log line"
 )]
+#[non_exhaustive]
 pub enum Request {
     /// Send one `msg`. Build `body` with [`msg_body`].
     Send {
+        /// The recipient, when the message is directed.
         to: Option<Nickname>,
+        /// The body of the message (sealed for a directed frame on a passworded mesh).
         body: MessageBody,
+        /// Gets `Ok` when the request is done, or the error text.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Tests only: send one directed `msg` the way [`Request::Send`] does, but never take the
@@ -114,21 +146,33 @@ pub enum Request {
     /// waits for a direct path on the pooled connection, as the cold path does.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     SendCold {
+        /// The recipient, when the message is directed.
         to: Option<Nickname>,
+        /// The body of the message (sealed for a directed frame on a passworded mesh).
         body: MessageBody,
+        /// Gets `Ok` when the request is done, or the error text.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Merge a change into the shared state.
     StateMerge {
+        /// The RFC 7386 merge to apply.
         merge: serde_json::Value,
+        /// Gets `Ok` when the request is done, or the error text.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// The shared state as JSON.
     StateJson {
+        /// Gets the text of the answer.
         reply: oneshot::Sender<String>,
     },
+    /// The members of the roster.
     Peers {
+        /// Gets the text of the answer.
         reply: oneshot::Sender<String>,
     },
+    /// How many members there are.
     PeerCount {
+        /// Gets the count.
         reply: oneshot::Sender<usize>,
     },
     /// Tests only, and the only request that is a test hook: take UDP away
@@ -137,7 +181,9 @@ pub enum Request {
     /// path events.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlockUdp {
+        /// Whether the block is on.
         blocked: bool,
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: add `addr` to the addresses this node advertises, as an
@@ -145,13 +191,16 @@ pub enum Request {
     /// what a late home relay or an interface change does.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     AddExternalAddr {
+        /// The address to advertise as external.
         addr: std::net::SocketAddr,
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: make the beacon of this node stop answering while it keeps its rung, as a
     /// stopped process or a wedged accept loop does. Nothing happens when it holds no beacon.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     StallBeacon {
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: shed the beacon of this node at once, as a rival re-check shed does, and leave
@@ -159,6 +208,7 @@ pub enum Request {
     /// beacon.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     ShedBeacon {
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: hold this node's rendezvous claims back (`hold`), or let it claim again. A held
@@ -166,7 +216,9 @@ pub enum Request {
     /// holds the old members of a room so that a late joiner takes the free rung first.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     HoldClaims {
+        /// Whether the hold is on.
         hold: bool,
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: make the rung probe of this node read "not ours" whatever answers (`blind`), or
@@ -175,7 +227,9 @@ pub enum Request {
     /// a beacon of its own.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlindRungProbes {
+        /// Whether the probes are blind.
         blind: bool,
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: take UDP away from this node alone, to the nodes bound on
@@ -185,7 +239,9 @@ pub enum Request {
     /// keeps its own links.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlockIpTo {
+        /// The ports of the remote side.
         remote_ports: Vec<u16>,
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: take one rung of the path ladder away from this node alone
@@ -193,8 +249,11 @@ pub enum Request {
     /// the node down the ladder one rung at a time.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlockRung {
+        /// The rung of the path.
         rung: Rung,
+        /// Whether the block is on.
         blocked: bool,
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: take one rung of the path ladder away from this node alone (or
@@ -203,9 +262,13 @@ pub enum Request {
     /// only that rung is cut this way.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     BlockRungTo {
+        /// The rung of the path.
         rung: Rung,
+        /// The peer, by nickname.
         peer: String,
+        /// Whether the block is on.
         blocked: bool,
+        /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: refuse every `WebRTC` session with the member `peer`, on the application
@@ -214,8 +277,11 @@ pub enum Request {
     /// take the multihop route through a third member.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     DenyPeer {
+        /// The peer, by nickname.
         peer: String,
+        /// Whether the peer is denied.
         denied: bool,
+        /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: ping every member and answer with the round trip time in
@@ -223,6 +289,7 @@ pub enum Request {
     /// show that a pair answers over the one path it has.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     Ping {
+        /// Gets each member with its round-trip time.
         reply: oneshot::Sender<Vec<(Nickname, u64)>>,
     },
     /// Tests only: how many gossip connections the recursion rule has closed since the process
@@ -231,6 +298,7 @@ pub enum Request {
     /// so a count that grows without a bound is that loop.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     GossipRecursionCloses {
+        /// Gets the count.
         reply: oneshot::Sender<u64>,
     },
     /// Tests only: how many messages this node holds in its log, the ones that anti-entropy
@@ -238,6 +306,7 @@ pub enum Request {
     /// send path retains it.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     MessageLogLen {
+        /// Gets the count.
         reply: oneshot::Sender<usize>,
     },
     /// Tests only: forget the pooled unicast connection of the member `peer`, and its dial
@@ -246,7 +315,9 @@ pub enum Request {
     /// `false`, because a direct-path probe can pool a connection again.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     ForgetUnicast {
+        /// The peer, by nickname.
         peer: String,
+        /// Gets the answer, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<bool, UnknownPeer>>,
     },
     /// Tests only: forget that the member `peer` is proven direct, and offer it a
@@ -255,14 +326,18 @@ pub enum Request {
     /// next alive tick.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     OfferSession {
+        /// The peer, by nickname.
         peer: String,
+        /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: close the live gossip connections to the member `peer` and nothing else. The
     /// engine then runs its own `NeighborDown` path.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     CloseLink {
+        /// The peer, by nickname.
         peer: String,
+        /// Gets `Ok` when the request is done, or `UnknownPeer` when no member has that nickname.
         reply: oneshot::Sender<Result<(), UnknownPeer>>,
     },
     /// Tests only: run the underlay tick now, as the alive tick does. A test that closes a link
@@ -273,12 +348,14 @@ pub enum Request {
         feature = "multihop"
     ))]
     UnderlayTick {
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: the endpoint id of this node. A test that needs the order of two
     /// ids (the lower id offers a session) reads them here.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     EndpointId {
+        /// Gets the endpoint id.
         reply: oneshot::Sender<iroh::EndpointId>,
     },
     /// Tests only: mark the gossip topic closed without a real end of the stream, as the heal
@@ -286,6 +363,7 @@ pub enum Request {
     /// and the messages that arrive in between must still reach the app.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     SeverGossip {
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: the rung of the selected path on this node's pooled
@@ -295,7 +373,9 @@ pub enum Request {
     /// closes a gossip link that stays on the relay.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     SelectedRung {
+        /// The peer, by nickname.
         peer: String,
+        /// Gets the reason, or `None` when there is none.
         reply: oneshot::Sender<Option<&'static str>>,
     },
     /// Tests only: whether the multihop topology of this node has a route to the
@@ -306,7 +386,9 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     HasRoute {
+        /// The peer, by nickname.
         peer: String,
+        /// Gets the answer.
         reply: oneshot::Sender<bool>,
     },
     /// Tests only: hold this node's link-vector back, or let it go. Holding withdraws the vector
@@ -321,7 +403,9 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     HoldLinkState {
+        /// Whether the hold is on.
         hold: bool,
+        /// Gets `()` when the request is done.
         reply: oneshot::Sender<()>,
     },
     /// Tests only: the multihop view of this node as one line: its edges, and for each
@@ -334,6 +418,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     RouteDiag {
+        /// Gets the text of the answer.
         reply: oneshot::Sender<String>,
     },
     /// Tests only: how many multihop cells this node has passed on for other
@@ -344,6 +429,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     ForwardedCells {
+        /// Gets the count.
         reply: oneshot::Sender<u64>,
     },
     /// Tests only: what the multihop data path of this node counted: cells passed on,
@@ -355,6 +441,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     MultihopCounters {
+        /// Gets the counters of the multihop transport.
         reply: oneshot::Sender<habilis_network_iroh_multihop_transport::MultihopCounters>,
     },
     /// Tests only: how many `WebRTC` sessions the multihop underlay of this node
@@ -365,6 +452,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     UnderlaySessions {
+        /// Gets the count.
         reply: oneshot::Sender<usize>,
     },
     /// Tests only: how many `WebRTC` sessions of this node go to a member that is
@@ -376,6 +464,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     SessionsToNonNeighbors {
+        /// Gets the count.
         reply: oneshot::Sender<usize>,
     },
     /// Tests only: the closes of direct connections, and how many of them were followed by
@@ -390,6 +479,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     RedialCounts {
+        /// Gets the six counters.
         reply: oneshot::Sender<[u64; 6]>,
     },
     /// Tests only: the direct peers the ledger of the ceiling counts now, and by how many it is over
@@ -400,6 +490,7 @@ pub enum Request {
         not(target_arch = "wasm32")
     ))]
     DirectUnits {
+        /// Gets the pair of counts.
         reply: oneshot::Sender<(usize, usize)>,
     },
 }
@@ -450,13 +541,7 @@ impl NodeApp for MembershipApp {
         // publishes no a2a card, so it can neither seal to a peer nor be sealed
         // to, and the addressee must pass a directed plaintext body straight
         // through instead of trying (and failing) to unseal it.
-        AppClass {
-            loggable: false,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::VALID
     }
 
     async fn on_app_frame(
@@ -513,12 +598,12 @@ impl NodeDriver for MembershipApp {
             Request::Send { to, body, reply } => {
                 let frame = app_frame(
                     ctx,
-                    AppFrameParams {
-                        tag: AppTag::from(MSG_TAG),
+                    AppFrameParams::new(
+                        AppTag::new(MSG_TAG).expect("a valid app tag"),
                         to,
-                        corr: None,
+                        None,
                         body,
-                    },
+                    ),
                 );
                 let class = self.classify(&frame.authored());
                 match send_app(state, ctx, frame, class).await {
@@ -545,12 +630,12 @@ impl NodeDriver for MembershipApp {
             Request::SendCold { to, body, reply } => {
                 let frame = app_frame(
                     ctx,
-                    AppFrameParams {
-                        tag: AppTag::from(MSG_TAG),
+                    AppFrameParams::new(
+                        AppTag::new(MSG_TAG).expect("a valid app tag"),
                         to,
-                        corr: None,
+                        None,
                         body,
-                    },
+                    ),
                 );
                 let routed = frame
                     .serialize()
@@ -582,15 +667,7 @@ impl NodeDriver for MembershipApp {
             Request::StateMerge { merge, reply } => {
                 let merged = broadcast_state_merge(
                     state,
-                    StateMergeParams {
-                        mesh: ctx.mesh,
-                        author: ctx.author,
-                        merge,
-                        sender: ctx.sender,
-                        sink: ctx.sink,
-                        channel: Channel::State,
-                        surface: true,
-                    },
+                    StateMergeParams::new(ctx.into(), Channel::State, merge),
                 )
                 .await;
                 let _ = reply.send(merged.map(|_| ()).map_err(|error| error.to_string()));
@@ -632,7 +709,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());
@@ -656,7 +733,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());
@@ -679,7 +756,7 @@ impl NodeDriver for MembershipApp {
                     );
                     let endpoint = ctx.endpoint.clone();
                     n0_future::task::spawn(async move {
-                        crate::transport::webrtc::nudge(&endpoint, remote).await;
+                        webrtc::nudge(&endpoint, remote).await;
                     });
                 });
                 let _ = reply.send(result);
@@ -705,7 +782,7 @@ impl NodeDriver for MembershipApp {
                         );
                     }
                     #[cfg(feature = "multihop")]
-                    crate::transport::underlay_webrtc::tick_now(state);
+                    underlay_webrtc::tick_now(state);
                 }
                 let _ = reply.send(member.map(|_| ()));
                 false
@@ -713,10 +790,8 @@ impl NodeDriver for MembershipApp {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::OfferSession { peer, reply } => {
                 let result = known_peer(state, &peer).cloned().map(|addr| {
-                    state
-                        .direct
-                        .insert(addr.id, crate::daemon::state::DirectState::RelayOnly);
-                    crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
+                    state.direct.insert(addr.id, DirectState::RelayOnly);
+                    webrtc::negotiate_session(state, ctx, addr.id, addr);
                 });
                 let _ = reply.send(result);
                 false
@@ -724,7 +799,7 @@ impl NodeDriver for MembershipApp {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::CloseLink { peer, reply } => {
                 let result = known_peer(state, &peer).map(|addr| {
-                    crate::transport::path::close_gossip_links_to(addr.id);
+                    path::close_gossip_links_to(addr.id);
                 });
                 let _ = reply.send(result);
                 false
@@ -735,7 +810,7 @@ impl NodeDriver for MembershipApp {
                 feature = "multihop"
             ))]
             Request::UnderlayTick { reply } => {
-                crate::transport::underlay_webrtc::tick_now(state);
+                underlay_webrtc::tick_now(state);
                 let _ = reply.send(());
                 false
             }
@@ -757,7 +832,7 @@ impl NodeDriver for MembershipApp {
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             Request::GossipRecursionCloses { reply } => {
-                let _ = reply.send(crate::transport::path::gossip_recursion_closes());
+                let _ = reply.send(path::gossip_recursion_closes());
                 false
             }
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -779,7 +854,7 @@ impl NodeDriver for MembershipApp {
                 n0_future::task::spawn(async move {
                     let rung = match id {
                         Some(id) => pool.warm_or_dial(id).await.ok().and_then(|conn| {
-                            let rung = crate::transport::path::selected_rung(&conn);
+                            let rung = path::selected_rung(&conn);
                             // The same stable id twice is one connection read twice: a test that
                             // waits for a rung can see whether the connection it reads is the one
                             // that climbed.
@@ -810,7 +885,7 @@ impl NodeDriver for MembershipApp {
                     let _ = handle.remove_origin(handle.app_id());
                 }
                 if !hold {
-                    crate::daemon::event_loop::linkstate_arm(state, ctx).await;
+                    event_loop::linkstate_arm(state, ctx).await;
                 }
                 let _ = reply.send(());
                 false
@@ -893,7 +968,7 @@ impl NodeDriver for MembershipApp {
                 not(target_arch = "wasm32")
             ))]
             Request::RedialCounts { reply } => {
-                let now = crate::util::clock::Instant::now();
+                let now = clock::Instant::now();
                 let ids: Vec<_> = state.peer_endpoints.values().map(|addr| addr.id).collect();
                 for id in ids {
                     let quic = state.webrtc_admission.has_live_connection(id);
@@ -956,7 +1031,7 @@ impl NodeDriver for MembershipApp {
                     let endpoint = ctx.endpoint.clone();
                     let peer = addr.id;
                     n0_future::task::spawn(async move {
-                        crate::transport::webrtc::nudge(&endpoint, peer).await;
+                        webrtc::nudge(&endpoint, peer).await;
                     });
                 }
                 let _ = reply.send(());
@@ -988,7 +1063,17 @@ impl NodeDriver for MembershipApp {
 /// does nothing; the node says so, and the test waits for the `PeerInfo` that brings the member.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnknownPeer(pub String);
+
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+impl UnknownPeer {
+    /// The peer that was not found.
+    #[must_use]
+    pub const fn new(peer: String) -> Self {
+        Self(peer)
+    }
+}
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 impl std::fmt::Display for UnknownPeer {
@@ -1090,8 +1175,7 @@ fn route_diag(state: &EventLoopState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Message;
-    use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, RelayLadder};
+    use crate::protocol::{Identity, Lookup, MeshConfig, MeshId, Message, RelayLadder};
     use crate::runtime::derive_topic_mesh_config;
     use habilis_network_test_tracing::test;
 
@@ -1123,12 +1207,12 @@ mod tests {
         Message::new_app(
             &long_mesh(),
             &widest_nick('\u{1F980}'),
-            AppFrameParams {
-                tag: AppTag::from(MSG_TAG),
-                to: Some(widest_nick('\u{1F99E}')),
-                corr: None,
-                body: MessageBody::new(text.to_owned()).expect("body"),
-            },
+            AppFrameParams::new(
+                AppTag::new(MSG_TAG).expect("a valid app tag"),
+                Some(widest_nick('\u{1F99E}')),
+                None,
+                MessageBody::new(text.to_owned()).expect("body"),
+            ),
         )
         .sign(&Identity::generate())
         .wire_len()

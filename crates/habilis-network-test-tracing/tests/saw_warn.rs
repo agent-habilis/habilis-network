@@ -1,7 +1,8 @@
 //! A test waits for a WARN that it expects, and `saw_warn` tells it when the
 //! WARN came.
 
-use habilis_network_test_tracing::{init, saw_warn};
+use habilis_network_test_tracing::{catch_panic, init, saw_warn};
+use std::panic::AssertUnwindSafe;
 
 #[test]
 fn saw_warn_is_false_until_the_warn_is_logged() {
@@ -16,11 +17,11 @@ fn saw_warn_is_false_until_the_warn_is_logged() {
 
 #[test]
 fn saw_warn_ignores_an_error_with_the_same_text() {
-    let result = std::panic::catch_unwind(|| {
+    let result = catch_panic(AssertUnwindSafe(|| {
         let _log = init();
         tracing::error!("link lost");
         assert!(!saw_warn(module_path!(), "link lost"));
-    });
+    }));
     assert!(result.is_err(), "the ERROR must still fail the test");
 }
 

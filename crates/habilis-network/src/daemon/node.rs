@@ -14,6 +14,16 @@ use crate::protocol::message::Authored;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::tuning::{NODE_LEAVE, SESSION_REQUEST_CAP};
 
+/// Whether a session registers the process-wide ctrl-c and SIGTERM listeners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignalHandling {
+    /// Register the listeners: a foreground command that owns the process.
+    Handle,
+    /// Register nothing: a session nested inside a host that owns the signals.
+    Leave,
+}
+
 /// A live in-process membership over a background event loop, generic over the
 /// application driver `A`. Drop it (or call [`Node::leave`]) to wind the loop
 /// down.
@@ -23,7 +33,7 @@ pub struct Node<A: NodeDriver> {
     nickname: Nickname,
     req_tx: mpsc::Sender<A::Session>,
     quit_tx: mpsc::Sender<()>,
-    task: Option<JoinHandle<anyhow::Result<()>>>,
+    task: Option<JoinHandle<Result<(), super::event_loop::EventLoopError>>>,
     /// The ports this node's endpoint is bound on, for a test that names which
     /// nodes to cut from which. Read once at spawn: the ports do not change.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -76,7 +86,7 @@ impl<A: NodeDriver + 'static> Node<A> {
         mut cfg: EventLoopConfig,
         app: A,
         push: Option<broadcast::Sender<Authored>>,
-        handle_signals: bool,
+        handle_signals: SignalHandling,
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<A::Session>(SESSION_REQUEST_CAP);
         let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
@@ -213,11 +223,11 @@ impl<A: NodeDriver + 'static> Node<A> {
     ///
     /// # Errors
     /// Fails if the event loop has stopped (its receiver dropped).
-    pub async fn send(&self, req: A::Session) -> anyhow::Result<()> {
+    pub async fn send(&self, req: A::Session) -> Result<(), crate::transport::SendError> {
         self.req_tx
             .send(req)
             .await
-            .map_err(|_| anyhow::anyhow!("mesh event loop has stopped"))
+            .map_err(|_| crate::transport::SendError::Stopped)
     }
 
     /// A cloneable handle to the same request channel [`Self::send`] uses.
@@ -243,15 +253,15 @@ impl<A: NodeDriver + 'static> Node<A> {
     ///
     /// # Errors
     /// Returns an error if the event-loop task panicked or returned an error.
-    pub async fn leave(mut self) -> anyhow::Result<()> {
+    pub async fn leave(mut self) -> Result<(), crate::transport::SendError> {
         let _ = self.quit_tx.send(()).await;
         if let Some(task) = self.task.take() {
             let timeout = n0_future::time::sleep(NODE_LEAVE);
             tokio::select! {
                 joined = task => {
                     joined
-                        .map_err(|error| anyhow::anyhow!("mesh task panicked: {error}"))?
-                        .map_err(|error| anyhow::anyhow!("mesh loop error: {error}"))?;
+                        .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("mesh task panicked: {error}")))?
+                        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
                 }
                 () = timeout => {}
             }

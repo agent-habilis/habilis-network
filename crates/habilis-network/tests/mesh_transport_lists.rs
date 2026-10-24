@@ -14,6 +14,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// A JSEP round and a graft, with room to spare: a healthy pair is direct in
 /// about 4 s. Below the 15 s heal tick on purpose, so a pair that only links
 /// once a heal re-grafts it fails here instead of passing slowly.
@@ -92,22 +93,22 @@ impl Member {
 
     /// Mint a mesh over the local relay alone, with `transport` as its list.
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(transport)
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 
@@ -272,9 +273,7 @@ fn a_webrtc_only_mesh_carries_every_lane_between_natives() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::WebRtc]).await;
         every_lane_carries(&mut alice, &mut bob).await;
@@ -304,9 +303,7 @@ fn a_udp_only_mesh_never_opens_a_webrtc_session() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let (mut alice, mut bob) = linked_pair(&relay, vec![Transport::Udp]).await;
         every_lane_carries(&mut alice, &mut bob).await;
@@ -330,9 +327,7 @@ fn a_udp_and_webrtc_mesh_races_and_keeps_no_session_once_udp_wins() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let (mut alice, mut bob) =
             linked_pair(&relay, vec![Transport::Udp, Transport::WebRtc]).await;
@@ -394,9 +389,7 @@ fn pair_races_again_when_udp_drops(bob_is_higher: Option<bool>) {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let transport = vec![Transport::Udp, Transport::WebRtc];
         let (mut alice, mut bob) = match bob_is_higher {

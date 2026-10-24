@@ -12,14 +12,13 @@
 use std::fmt;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
 use iroh_base::{PublicKey, Signature};
 
+use super::InviteError;
 use crate::base58check::{self, take_array};
 use crate::crypto::{self, Password, SymmetricKey};
-use crate::identity;
 use crate::mesh::{LockedMesh, Mesh};
-use crate::seal;
+use crate::{identity, seal};
 use habilis_network_util::clock::UnixSecs;
 use zeroize::Zeroizing;
 
@@ -84,13 +83,20 @@ fn signing_bytes(mesh_hash: &str, root: &SymmetricKey, expiry: UnixSecs) -> Vec<
 /// has one) wraps the root so a scraped invite still needs it.
 ///
 /// # Errors
-/// This session is not the creator (holds no issuer key), or `mesh` is not
-/// invite-only.
-pub fn mint(mesh: &Mesh, ttl: Option<Duration>, password: Option<&Password>) -> Result<String> {
-    let issuer_secret = mesh
-        .issuer_secret()
-        .context("only the creator can mint invites (this session holds no issuer key)")?;
-    let root = mesh.invite_key().context("not an invite-only mesh")?;
+/// # Errors
+/// [`InviteError::Refused`] when this session is not the creator (holds no issuer
+/// key), or when `mesh` is not invite-only.
+pub fn mint(
+    mesh: &Mesh,
+    ttl: Option<Duration>,
+    password: Option<&Password>,
+) -> Result<String, InviteError> {
+    let issuer_secret = mesh.issuer_secret().ok_or(InviteError::Refused(
+        "only the creator can mint invites (this session holds no issuer key)",
+    ))?;
+    let root = mesh
+        .invite_key()
+        .ok_or(InviteError::Refused("not an invite-only mesh"))?;
     let mesh_hash = mesh.to_string();
     let expiry = match ttl {
         None => UnixSecs::ZERO,
@@ -149,39 +155,61 @@ impl InviteTicket {
     /// Decode a bare base58 invite ticket — structural parse only.
     ///
     /// # Errors
-    /// Bad Base58/checksum, the wrong kind, a bad version, or a malformed
-    /// payload.
-    pub fn decode(token: &str) -> Result<Self> {
-        let framed = base58check::decode(token.trim(), "invite ticket")?;
-        let version = *framed.first().context("ticket too short")?;
+    /// # Errors
+    /// [`InviteError::Base58`] for a bad Base58 text or checksum, [`InviteError::Truncated`]
+    /// when the ticket ends early, [`InviteError::UnsupportedVersion`] for another
+    /// version, [`InviteError::Refused`] for the wrong kind, and [`InviteError::Source`]
+    /// for a field that does not decode.
+    pub fn decode(token: &str) -> Result<Self, InviteError> {
+        let framed =
+            base58check::decode(token.trim(), "invite ticket").map_err(InviteError::Base58)?;
+        let version = *framed
+            .first()
+            .ok_or(InviteError::Truncated("ticket too short"))?;
         if version != VERSION {
-            bail!(
+            return Err(InviteError::UnsupportedVersion(format!(
                 "unsupported invite ticket version {version}, this build reads version {VERSION}: \
                  upgrade, then ask for a new invite (a ticket names a mesh id, and mesh ids changed)"
-            );
+            )));
         }
-        let kind = *framed.get(1).context("ticket too short")?;
+        let kind = *framed
+            .get(1)
+            .ok_or(InviteError::Truncated("ticket too short"))?;
         if kind != KIND {
-            bail!("not an invite ticket: wrong ticket kind");
+            return Err(InviteError::Refused(
+                "not an invite ticket: wrong ticket kind",
+            ));
         }
         let payload = &framed[2..];
         let mut pos = 0;
-        let expiry =
-            UnixSecs::from_le_bytes(take_array::<8>(payload, &mut pos).context("missing expiry")?);
-        let flags = *payload.get(pos).context("missing flags")?;
+        let expiry = UnixSecs::from_le_bytes(
+            take_array::<8>(payload, &mut pos).ok_or(InviteError::Truncated("missing expiry"))?,
+        );
+        let flags = *payload
+            .get(pos)
+            .ok_or(InviteError::Truncated("missing flags"))?;
         pos += 1;
         let password = flags & PASSWORD_BIT != 0;
-        let sig = take_array::<64>(payload, &mut pos).context("missing signature")?;
+        let sig = take_array::<64>(payload, &mut pos)
+            .ok_or(InviteError::Truncated("missing signature"))?;
         let hash_len = usize::from(u16::from_le_bytes(
-            take_array::<2>(payload, &mut pos).context("missing hash length")?,
+            take_array::<2>(payload, &mut pos)
+                .ok_or(InviteError::Truncated("missing hash length"))?,
         ));
-        let hash_end = pos.checked_add(hash_len).context("hash length overflow")?;
-        let hash_bytes = payload.get(pos..hash_end).context("truncated mesh hash")?;
+        let hash_end = pos
+            .checked_add(hash_len)
+            .ok_or(InviteError::Truncated("hash length overflow"))?;
+        let hash_bytes = payload
+            .get(pos..hash_end)
+            .ok_or(InviteError::Truncated("truncated mesh hash"))?;
         pos = hash_end;
         let mesh_hash = std::str::from_utf8(hash_bytes)
-            .context("invalid mesh hash utf-8")?
+            .map_err(InviteError::with_step("invalid mesh hash utf-8"))?
             .to_owned();
-        let root_field = payload.get(pos..).context("missing root")?.to_vec();
+        let root_field = payload
+            .get(pos..)
+            .ok_or(InviteError::Truncated("missing root"))?
+            .to_vec();
         Ok(Self {
             mesh_hash,
             expiry,
@@ -196,47 +224,64 @@ impl InviteTicket {
     /// expired invite. Returns a mesh ready to join.
     ///
     /// # Errors
-    /// A malformed embedded hash, a missing/wrong password, an invalid issuer
+    /// # Errors
+    /// [`InviteError::Source`] for a malformed embedded hash or a bad issuer key,
+    /// [`InviteError::Refused`] for a missing or unexpected password, an invalid issuer
     /// signature (not creator-minted or tampered), or an expired invite.
-    pub fn redeem(&self, password: Option<&Password>) -> Result<Mesh> {
+    pub fn redeem(&self, password: Option<&Password>) -> Result<Mesh, InviteError> {
         let locked: LockedMesh = self
             .mesh_hash
             .parse()
-            .context("invite carries an invalid mesh id")?;
+            .map_err(InviteError::with_step("invite carries an invalid mesh id"))?;
         let issuer_pubkey = *locked
             .issuer_pubkey()
-            .context("invite is for a non-invite-only mesh")?;
+            .ok_or(InviteError::Refused("invite is for a non-invite-only mesh"))?;
         let root = self.unwrap_root(&locked, password)?;
-        let pubkey = PublicKey::from_bytes(&issuer_pubkey).context("invalid issuer public key")?;
+        let pubkey = PublicKey::from_bytes(&issuer_pubkey)
+            .map_err(InviteError::with_step("invalid issuer public key"))?;
         let signature = Signature::from_bytes(&self.sig);
         if !identity::verify(
             &pubkey,
             &signing_bytes(&self.mesh_hash, &root, self.expiry),
             &signature,
         ) {
-            bail!("invalid invite signature — not creator-minted, or tampered");
+            return Err(InviteError::Refused(
+                "invalid invite signature — not creator-minted, or tampered",
+            ));
         }
         if self.expiry != UnixSecs::ZERO && UnixSecs::now() >= self.expiry {
-            bail!("this invite has expired");
+            return Err(InviteError::Refused("this invite has expired"));
         }
         Ok(locked.redeem_with(root))
     }
 
-    fn unwrap_root(&self, mesh: &LockedMesh, password: Option<&Password>) -> Result<SymmetricKey> {
+    fn unwrap_root(
+        &self,
+        mesh: &LockedMesh,
+        password: Option<&Password>,
+    ) -> Result<SymmetricKey, InviteError> {
         let raw = match (self.password, password) {
             (true, Some(password)) => {
                 let wrap_key = crypto::invite_wrap_key(password, mesh.wrap_salt());
                 seal::open_symmetric(&wrap_key, &self.root_field)
-                    .context("wrong password or corrupt invite")?
+                    .map_err(InviteError::with_step("wrong password or corrupt invite"))?
             }
-            (true, None) => bail!("this invite is password-protected — pass --password"),
-            (false, Some(_)) => bail!("this invite has no password — drop --password"),
+            (true, None) => {
+                return Err(InviteError::Refused(
+                    "this invite is password-protected — pass --password",
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(InviteError::Refused(
+                    "this invite has no password — drop --password",
+                ));
+            }
             (false, None) => self.root_field.clone(),
         };
         let raw = Zeroizing::new(raw);
         let mut bytes = Zeroizing::new([0u8; 32]);
         if raw.len() != bytes.len() {
-            bail!("invite root is not 32 bytes");
+            return Err(InviteError::Refused("invite root is not 32 bytes"));
         }
         bytes.copy_from_slice(&raw);
         Ok(SymmetricKey::from_zeroizing(bytes))

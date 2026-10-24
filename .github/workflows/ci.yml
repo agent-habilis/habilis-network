@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The style scripts under scripts/ are TypeScript.
+      - uses: oven-sh/setup-bun@v2
+
       # Reads rust-toolchain.toml — do not duplicate the version here.
       # The extra target is for `habilis-network-chunks`, whose IndexedDB backend
       # only exists on wasm32 and would otherwise compile nowhere.
@@ -34,6 +37,29 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The crate attr of this unstable lint comes from the command line: a crate root gated by
+      # target_arch drops it, so the wasm32 crates are checked on their own.
+      - name: Omitted patterns
+        env:
+          RUSTFLAGS: -Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint) -D non_exhaustive_omitted_patterns
+        run: |
+          cargo check --workspace --all-targets
+          cargo check --target wasm32-unknown-unknown -p habilis-network-bench-wasm
+          cargo check --target wasm32-unknown-unknown -p habilis-network-chunks --test idb_browser --test origin --test conformance
+
+      # The rules of the Rust style guide that no lint checks (issue #29). The exceptions, each
+      # with its reason, are in scripts/style-check/style-check.allow.
+      - name: Style rules without a lint
+        run: |
+          bun test scripts/style-check/style-check.test.ts
+          bun scripts/style-check/style-check.ts
+
+      # Every script is TypeScript run with Bun (AGENTS.md, "Scripts").
+      - name: Script language
+        run: |
+          bun test scripts/script-language/script-language.test.ts
+          bun scripts/script-language/script-language.ts
 
       # `blob` is off by default (only agent-gossip enables it), so the line
       # above never lints `src/blob/` — ~1,300 lines including its own ALPN
@@ -260,9 +286,8 @@ jobs:
         run: cargo task ffi
 
   # `crates/habilis-network-netplay/examples/light-cycles/native/` is its own cargo
-  # workspace (a separate `rust-toolchain.toml` pins it to nightly —
-  # `visage-rust-tui` uses native generators, a nightly-only feature — so it
-  # can't join the root `check` job's stable toolchain). Not covered by anything
+  # workspace (`visage-rust-tui` uses native generators, a nightly-only feature,
+  # which the root nightly toolchain allows). Not covered by anything
   # above; the root CI doesn't touch `chat-webrtc` either, so this is the first
   # example to get its own job, not a gap being left open.
   light-cycles-native:
@@ -275,17 +300,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # `rust-src-dir` is what makes this read *this workspace's*
-      # rust-toolchain.toml (nightly, for `visage-rust-tui`'s generators)
-      # rather than the repo root's — the action cds into it before looking
-      # for the file, and hard-fails if the path is gone. So the version
-      # still lives in exactly one place, same as the root `check` job.
-      # It also drives the action's embedded rust-cache (`workspaces`
-      # defaults to it), which is why there is no separate cache step here.
+      # The root rust-toolchain.toml applies (rustup walks up from this
+      # workspace), so the version lives in exactly one place, same as the root
+      # `check` job. `cache-workspaces` has to be spelled out, since it otherwise
+      # defaults to `rust-src-dir`, which is unset here.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          rust-src-dir: crates/habilis-network-netplay/examples/light-cycles/native
-          components: clippy, rustfmt
+          cache-workspaces: crates/habilis-network-netplay/examples/light-cycles/native
 
       - name: Format
         run: cargo fmt --check
@@ -318,8 +339,7 @@ jobs:
 
   # `crates/habilis-network-netplay/examples/light-cycles/web/wasm/` is its own cargo
   # workspace (an empty `[workspace]` table, same trick chat-web uses —
-  # `web-sys` doesn't exist off wasm32). Root toolchain applies (no nightly
-  # features here), unlike the native example above.
+  # `web-sys` doesn't exist off wasm32). Root toolchain applies.
   light-cycles-web:
     name: light-cycles (web)
     runs-on: ubuntu-latest
@@ -371,11 +391,11 @@ jobs:
           echo "wasm-bindgen resolved to $version"
           cargo install wasm-bindgen-cli --version "$version" --locked
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Build wasm
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web
-        run: ./build-wasm.sh
-
-      - uses: oven-sh/setup-bun@v2
+        run: bun build-wasm.ts
 
       - name: Install frontend dependencies
         working-directory: crates/habilis-network-netplay/examples/light-cycles/web

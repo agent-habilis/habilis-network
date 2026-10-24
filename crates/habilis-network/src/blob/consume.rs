@@ -9,13 +9,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use iroh::Endpoint;
 use iroh::endpoint::Connection;
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncWrite, AsyncWriteExt as _};
+use sha2::Sha256;
+use tokio::io::AsyncWrite;
 
 use crate::lookup::{add_peer_addr, address_book, build_peer_endpoint};
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret};
 use crate::util::consts::MAX_BLOB_BYTES;
 
+use super::error::BlobError;
 use super::ticket::BlobTicket;
 use super::{BLOB_ALPN, HASH_LEN, SECRET_LEN};
 
@@ -34,14 +35,27 @@ const CHUNK: usize = 64 * 1024;
 /// A password mismatch with the ticket, dial/handshake failure, the producer
 /// refusing (bad secret / unknown blob), a size disagreement, a truncated
 /// stream, or a final digest that does not match the ticket.
-pub async fn fetch<W>(ticket: &BlobTicket, out: &mut W, password: Option<Password>) -> Result<()>
+pub async fn fetch<W>(
+    ticket: &BlobTicket,
+    out: &mut W,
+    password: Option<Password>,
+) -> Result<(), BlobError>
 where
     W: AsyncWrite + Unpin,
 {
     let token = auth_token(ticket, password.as_ref())?;
+    fetch_with_token(ticket, out, &token)
+        .await
+        .map_err(BlobError::internal)
+}
+
+async fn fetch_with_token<W>(ticket: &BlobTicket, out: &mut W, token: &TicketSecret) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let endpoint = build_peer_endpoint(&ticket.lookups).await?;
     add_peer_addr(&address_book(&endpoint), ticket.addr.clone());
-    let result = fetch_over(&endpoint, ticket, &token, out).await;
+    let result = fetch_over(&endpoint, ticket, token, out).await;
     endpoint.close().await;
     result
 }
@@ -55,6 +69,8 @@ async fn fetch_over<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    use sha2::Digest;
+    use tokio::io::AsyncWriteExt as _;
     let conn = dial(endpoint, ticket).await?;
     // A fresh connection to a peer behind NAT starts on the relay and punches
     // inside it, so this waits rather than refusing at once. The producer
@@ -115,11 +131,11 @@ where
 
 /// The 32-byte auth token opening the fetch stream: the raw secret, or its
 /// Argon2id stretch when the ticket is password-protected.
-fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<TicketSecret> {
+fn auth_token(ticket: &BlobTicket, password: Option<&Password>) -> Result<TicketSecret, BlobError> {
     match (ticket.password, password) {
         (true, Some(pw)) => Ok(TicketAuth::blob(&ticket.secret, Some(pw)).token),
-        (true, None) => bail!("this blob ticket is password-protected — pass --password"),
-        (false, Some(_)) => bail!("this blob ticket has no password — drop --password"),
+        (true, None) => Err(BlobError::PasswordRequired),
+        (false, Some(_)) => Err(BlobError::PasswordNotNeeded),
         (false, None) => Ok(ticket.secret.clone()),
     }
 }
@@ -151,4 +167,7 @@ fn refusal(conn: &Connection) -> anyhow::Error {
 
 /// Assert at compile time that the request header the producer reads
 /// (`HASH_LEN + SECRET_LEN`) matches what this side writes.
-const _: () = assert!(HASH_LEN + SECRET_LEN == 64);
+const _: () = assert!(
+    HASH_LEN + SECRET_LEN == 64,
+    "the hash and the secret fill exactly 64 bytes"
+);

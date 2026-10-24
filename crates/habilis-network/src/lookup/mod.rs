@@ -3,10 +3,23 @@
 //! its own submodule — [`mdns`] (LAN multicast), [`dht`] (mainline DHT),
 //! and [`relay`] (the relay ladder + bootstrap-rung selection/failover).
 
+#[cfg(feature = "multihop")]
+use crate::transport::underlay_webrtc;
+use crate::transport::webrtc;
+use crate::util::{clock, tuning};
+#[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
+use std::sync::atomic;
+#[cfg(any(
+    all(feature = "host", feature = "iroh-test-utils"),
+    all(feature = "iroh-test-utils", feature = "multihop")
+))]
+use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
 #[cfg(feature = "host")]
 mod capability;
 #[cfg(all(feature = "host", feature = "dht"))]
 mod dht;
+mod error;
 #[cfg(all(feature = "host", feature = "mdns"))]
 mod mdns;
 mod relay;
@@ -21,11 +34,14 @@ use anyhow::{Context, Result};
 use iroh::address_lookup::memory::MemoryLookup;
 #[cfg(feature = "host")]
 use iroh::endpoint::PortmapperConfig;
-use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, endpoint::presets, protocol::Router};
+use iroh::endpoint::presets;
+use iroh::protocol::Router;
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use iroh_gossip::proto::HyparviewConfig;
 
 use crate::protocol::mesh::{LookupOpts, RelayChoice, TransportPolicy};
+use crate::transport::PayloadPath;
 use crate::util::clock::millis_saturating;
 
 /// A local relay server every side of a test can reach: plain HTTP, so the
@@ -79,10 +95,10 @@ pub mod test_relay {
 
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
-pub(crate) use relay::RungRefresh;
+pub use error::EndpointError;
 pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 pub(crate) use relay::{
-    StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor,
+    RungRefresh, StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor,
 };
 
 /// Build an iroh endpoint for a mesh's lookups.
@@ -109,6 +125,7 @@ pub(crate) use relay::{
 /// UDP sockets), so the field list itself differs per target. `Default` is
 /// "IP and relay only".
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct TransportHandles {
     /// Source-routed multi-hop: reach a peer with no direct path by relaying
     /// through intermediate peers. Built with the `multihop` feature; the native
@@ -162,6 +179,7 @@ impl TransportHandles {
     clippy::struct_excessive_bools,
     reason = "one independent on/off per path this node may carry data on"
 )]
+#[non_exhaustive]
 pub struct TransportOpts {
     /// QUIC on direct and hole-punched UDP paths, plus the address lookups
     /// that find them. Cleared by a WebRTC-only instance.
@@ -183,6 +201,36 @@ pub struct TransportOpts {
     /// other path. Off by default, and set only by [`Self::within`]: it is a choice of the
     /// mesh, which every member makes the same way, and not a limit of this node.
     pub gossip: bool,
+}
+
+impl TransportOpts {
+    /// Set the UDP transport.
+    #[must_use]
+    pub fn with_udp(mut self, udp: bool) -> Self {
+        self.udp = udp;
+        self
+    }
+
+    /// Set the relay.
+    #[must_use]
+    pub fn with_relay(mut self, relay: bool) -> Self {
+        self.relay = relay;
+        self
+    }
+
+    /// Set the WebRTC transport.
+    #[must_use]
+    pub fn with_webrtc(mut self, webrtc: bool) -> Self {
+        self.webrtc = webrtc;
+        self
+    }
+
+    /// Set the gossip transport.
+    #[must_use]
+    pub fn with_gossip(mut self, gossip: bool) -> Self {
+        self.gossip = gossip;
+        self
+    }
 }
 
 impl Default for TransportOpts {
@@ -356,6 +404,18 @@ pub async fn build_endpoint(
     bind_port: Option<u16>,
     alpns: Vec<Vec<u8>>,
     transports: TransportHandles,
+) -> Result<Endpoint, EndpointError> {
+    build_endpoint_checked(lookups, secret_key, bind_port, alpns, transports)
+        .await
+        .map_err(EndpointError::internal)
+}
+
+async fn build_endpoint_checked(
+    lookups: &LookupOpts,
+    secret_key: Option<SecretKey>,
+    bind_port: Option<u16>,
+    alpns: Vec<Vec<u8>>,
+    transports: TransportHandles,
 ) -> Result<Endpoint> {
     Ok(
         build_endpoint_keeping_mdns(lookups, secret_key, bind_port, alpns, transports)
@@ -368,6 +428,7 @@ pub async fn build_endpoint(
 /// other members of its mesh on the LAN. An uninhabited type where mDNS is not compiled in.
 #[cfg(all(feature = "host", feature = "mdns"))]
 pub type MdnsHandle = iroh_mdns_address_lookup::MdnsAddressLookup;
+/// The mDNS handle, when mDNS is not compiled in: no value can exist.
 #[cfg(not(all(feature = "host", feature = "mdns")))]
 pub type MdnsHandle = std::convert::Infallible;
 
@@ -404,7 +465,7 @@ pub(crate) async fn lan_contacts(
     endpoint: &Endpoint,
     mdns: Option<MdnsHandle>,
     topic: &iroh_gossip::proto::TopicId,
-) -> Result<Option<tokio::sync::mpsc::Receiver<LanEvent>>> {
+) -> Result<Option<mpsc::Receiver<LanEvent>>> {
     #[cfg(all(feature = "host", feature = "mdns"))]
     if let Some(handle) = mdns {
         // The tag first, so that the record we announce already says that we are a member.
@@ -634,7 +695,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
 /// so call sites don't carry the rendezvous-only `None, None`.
 /// # Errors
 /// Binding the socket fails, or an address-lookup service cannot be wired.
-pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
+pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint, EndpointError> {
     build_endpoint(lookups, None, None, Vec::new(), TransportHandles::default()).await
 }
 
@@ -644,14 +705,12 @@ pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
 #[cfg(feature = "multihop")]
 #[must_use]
 pub fn multihop_handle_config(
-    relay_payload: bool,
+    relay_payload: PayloadPath,
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
-    habilis_network_iroh_multihop_transport::HandleConfig {
-        relay_payload,
-        vector_max_age: crate::util::tuning::LINKSTATE_MAX_AGE,
-        relay_stuck_after: crate::util::tuning::MULTIHOP_RELAY_STUCK,
-        ..habilis_network_iroh_multihop_transport::HandleConfig::default()
-    }
+    habilis_network_iroh_multihop_transport::HandleConfig::default()
+        .with_relay_payload(relay_payload.relay_allowed())
+        .with_vector_max_age(tuning::LINKSTATE_MAX_AGE)
+        .with_relay_stuck_after(tuning::MULTIHOP_RELAY_STUCK)
 }
 
 /// [`multihop_handle_config`] for a browser: the same numbers, and the link cost of
@@ -668,12 +727,11 @@ pub fn multihop_handle_config(
 )]
 #[must_use]
 pub(crate) fn browser_handle_config(
-    relay_payload: bool,
+    relay_payload: PayloadPath,
 ) -> habilis_network_iroh_multihop_transport::HandleConfig {
-    habilis_network_iroh_multihop_transport::HandleConfig {
-        link_cost: habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost,
-        ..multihop_handle_config(relay_payload)
-    }
+    multihop_handle_config(relay_payload).with_link_cost(
+        habilis_network_iroh_multihop_transport::HandleConfig::for_browser().link_cost,
+    )
 }
 
 /// Assert that an injected endpoint agrees with the mesh it joins.
@@ -750,11 +808,16 @@ pub(crate) fn check_injected_against_mesh(
 pub async fn build_peer_webrtc(
     lookups: &LookupOpts,
     opts: TransportOpts,
-) -> Result<(
-    Endpoint,
-    habilis_network_iroh_webrtc_transport::WebRtcHandle,
-)> {
-    let (endpoint, handle, _mdns) = build_peer_webrtc_with(lookups, opts, None).await?;
+) -> Result<
+    (
+        Endpoint,
+        habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    ),
+    EndpointError,
+> {
+    let (endpoint, handle, _mdns) = build_peer_webrtc_with(lookups, opts, None)
+        .await
+        .map_err(EndpointError::internal)?;
     Ok((endpoint, handle))
 }
 
@@ -875,7 +938,7 @@ pub(crate) async fn build_peer_multihop(
     lookups: &LookupOpts,
     opts: TransportOpts,
     admission: Option<&crate::transport::SignalAdmission>,
-    relay_payload: bool,
+    relay_payload: PayloadPath,
 ) -> Result<(
     Endpoint,
     habilis_network_iroh_multihop_transport::MultihopHandle,
@@ -897,12 +960,12 @@ pub(crate) async fn build_peer_multihop(
 /// leg costs. A flag of the process, like `block_ip_paths`: set it before the node
 /// starts.
 #[cfg(all(feature = "multihop", feature = "iroh-test-utils"))]
-static UNDERLAY_LEG_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static UNDERLAY_LEG_OFF: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 /// Tests only: see `UNDERLAY_LEG_OFF`.
 #[cfg(all(feature = "host", feature = "iroh-test-utils"))]
 pub fn set_underlay_leg_off(off: bool) {
-    UNDERLAY_LEG_OFF.store(off, std::sync::atomic::Ordering::SeqCst);
+    UNDERLAY_LEG_OFF.store(off, Ordering::SeqCst);
 }
 
 /// The cap of the `WebRTC` leg of the underlay for a node with `max_peers` (G):
@@ -917,7 +980,7 @@ pub fn set_underlay_leg_off(off: bool) {
 )]
 pub(crate) fn underlay_cap(max_peers: usize) -> Option<usize> {
     #[cfg(feature = "iroh-test-utils")]
-    if UNDERLAY_LEG_OFF.load(std::sync::atomic::Ordering::SeqCst) {
+    if UNDERLAY_LEG_OFF.load(Ordering::SeqCst) {
         return None;
     }
     Some(max_peers)
@@ -942,7 +1005,7 @@ pub(crate) async fn build_peer_multihop_with(
     Endpoint,
     habilis_network_iroh_multihop_transport::MultihopHandle,
     habilis_network_iroh_webrtc_transport::WebRtcHandle,
-    Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    Option<underlay_webrtc::UnderlayWebRtc>,
     Option<MdnsHandle>,
 )> {
     let secret = mint_secret();
@@ -980,7 +1043,7 @@ pub(crate) async fn build_peer_multihop_with(
     let mut protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)> = Vec::new();
     let mut underlay_webrtc = None;
     if let Some((handle, table)) = underlay_leg {
-        let allowed = crate::transport::underlay_webrtc::Allowed::default();
+        let allowed = underlay_webrtc::Allowed::default();
         let ice = crate::transport::IceProfile {
             host_only: lookups.is_loopback(),
         };
@@ -997,18 +1060,15 @@ pub(crate) async fn build_peer_multihop_with(
         );
         protocols.push((
             crate::transport::MESH_WEBRTC_SIGNAL_ALPN.to_vec(),
-            Box::new(crate::transport::underlay_webrtc::UnderlaySignalGate::new(
+            Box::new(underlay_webrtc::UnderlaySignalGate::new(
                 acceptor,
                 allowed.clone(),
             )),
         ));
         // A session that attached is used only after a connect that completes, and
         // the nudge is that connect: see `webrtc::nudge_session`.
-        protocols.push((
-            crate::transport::webrtc::NUDGE_ALPN.to_vec(),
-            Box::new(crate::transport::webrtc::NudgeAcceptor),
-        ));
-        underlay_webrtc = Some(crate::transport::underlay_webrtc::UnderlayWebRtc {
+        protocols.push((webrtc::NUDGE_ALPN.to_vec(), Box::new(webrtc::NudgeAcceptor)));
+        underlay_webrtc = Some(underlay_webrtc::UnderlayWebRtc {
             handle,
             admission: table,
             endpoint: underlay.clone(),
@@ -1127,7 +1187,7 @@ pub(crate) async fn probe_answer(
     timeout: Duration,
 ) -> ProbeAnswer {
     let addr: EndpointAddr = target.into();
-    let started = crate::util::clock::Instant::now();
+    let started = clock::Instant::now();
     let mut failure = None;
     let answer = match n0_future::time::timeout(
         timeout,
@@ -1201,10 +1261,29 @@ fn answer_of_connect_error(error: &iroh::endpoint::ConnectError) -> ProbeAnswer 
             ..
         } => ProbeAnswer::Foreign,
         ConnectError::Connecting {
+            source:
+                ConnectingError::HandshakeFailure {
+                    source: AuthenticationError::NoAlpn { .. },
+                    ..
+                },
+            ..
+        } => ProbeAnswer::Refused,
+        #[expect(
+            clippy::match_same_arms,
+            reason = "AuthenticationError is non_exhaustive, so this arm keeps the wildcard for the other variants"
+        )]
+        ConnectError::Connecting {
             source: ConnectingError::HandshakeFailure { .. },
             ..
         } => ProbeAnswer::Refused,
-        ConnectError::Connect { .. } | ConnectError::Connecting { .. } | _ => ProbeAnswer::NoAnswer,
+        ConnectError::Connect { .. }
+        | ConnectError::Connecting {
+            source:
+                ConnectingError::InternalConsistencyError { .. }
+                | ConnectingError::LocallyRejected { .. },
+            ..
+        }
+        | _ => ProbeAnswer::NoAnswer,
     }
 }
 
@@ -1239,7 +1318,7 @@ fn answer_of_connection_error(error: &iroh::endpoint::ConnectionError) -> ProbeA
 /// answers to an anti-entropy digest. A late joiner meets the answers of its peers in one burst,
 /// and every change is a message of the topic. The default of 256 overflowed on a loaded host
 /// (the reader got `Lagged`, and the node logged "gossip event stream lagged").
-const TOPIC_EVENT_CAPACITY: usize = 16 * crate::util::tuning::ANTIENTROPY_MAX_RESEND;
+const TOPIC_EVENT_CAPACITY: usize = 16 * tuning::ANTIENTROPY_MAX_RESEND;
 
 /// Build an iroh-gossip instance and a Router that accepts incoming gossip connections.
 ///
@@ -1298,12 +1377,13 @@ pub(crate) fn build_mesh(
     let mut builder = Router::builder(endpoint)
         .accept(
             GOSSIP_ALPN,
-            crate::transport::DirectOnlyGossip::new(gossip.clone(), relay_transport, session_gate),
+            crate::transport::DirectOnlyGossip::new(
+                gossip.clone(),
+                PayloadPath::from(relay_transport),
+                session_gate,
+            ),
         )
-        .accept(
-            crate::transport::webrtc::NUDGE_ALPN,
-            crate::transport::webrtc::NudgeAcceptor,
-        );
+        .accept(webrtc::NUDGE_ALPN, webrtc::NudgeAcceptor);
     // A peer also accepts inbound unicast; the rendezvous/beacon endpoint
     // passes `None` (it is not a peer and carries no unicast traffic).
     if let Some(acceptor) = unicast {
@@ -1345,8 +1425,18 @@ pub(crate) fn build_mesh(
 #[cfg(test)]
 mod tests {
     use super::{LookupOpts, TransportOpts, TransportPolicy, build_peer_endpoint};
+    use crate::transport::PayloadPath;
     use habilis_network_test_tracing::test;
+    use std::collections::HashSet;
 
+    #[cfg(feature = "host")]
+    use crate::transport::path;
+    use crate::transport::webrtc;
+    use iroh::address_lookup::memory;
+    #[cfg(feature = "host")]
+    use iroh::endpoint::presets;
+    #[cfg(all(feature = "host", feature = "mdns"))]
+    use tokio::sync::mpsc;
     /// R1: the tag of a mesh is the same for one topic, differs between topics (the topic id
     /// folds in the password: two rooms of one name with two passwords are two topics) and fits the
     /// user data of an endpoint.
@@ -1434,10 +1524,9 @@ mod tests {
         use futures_util::StreamExt as _;
         use iroh_gossip::api::Event;
 
-        use super::LanEvent;
         use super::{
-            Endpoint, GOSSIP_ALPN, Gossip, MemoryLookup, RelayChoice, Router, TransportHandles,
-            address_book,
+            Endpoint, GOSSIP_ALPN, Gossip, LanEvent, MemoryLookup, RelayChoice, Router,
+            TransportHandles, address_book,
         };
 
         struct Member {
@@ -1445,16 +1534,12 @@ mod tests {
             book: MemoryLookup,
             sender: iroh_gossip::api::GossipSender,
             receiver: iroh_gossip::api::GossipReceiver,
-            events: tokio::sync::mpsc::Receiver<LanEvent>,
+            events: mpsc::Receiver<LanEvent>,
             _router: Router,
         }
 
         async fn member(topic: iroh_gossip::proto::TopicId) -> Member {
-            let lan = LookupOpts {
-                mdns: true,
-                dht: false,
-                relay_lookup: RelayChoice::Disabled,
-            };
+            let lan = LookupOpts::new(RelayChoice::Disabled).with_mdns(true);
             let (endpoint, handle) = super::build_endpoint_keeping_mdns(
                 &lan,
                 None,
@@ -1498,8 +1583,8 @@ mod tests {
         let stranger = member(other_topic).await;
         let ids = (first.endpoint.id(), second.endpoint.id());
         let mut stderr = std::io::stderr();
-        let mut seen_first = std::collections::HashSet::new();
-        let mut seen_second = std::collections::HashSet::new();
+        let mut seen_first = HashSet::new();
+        let mut seen_second = HashSet::new();
         let mut neighbors = (false, false);
 
         let deadline = tokio::time::sleep(Duration::from_secs(30));
@@ -1557,7 +1642,7 @@ mod tests {
     fn replacing_a_peer_address_leaves_exactly_the_new_one() {
         use super::{add_peer_addr, replace_peer_addr};
 
-        let book = iroh::address_lookup::memory::MemoryLookup::new();
+        let book = memory::MemoryLookup::new();
         let id = iroh::SecretKey::generate().public();
         let at = |port: u16| {
             iroh::EndpointAddr::new(id).with_ip_addr(std::net::SocketAddr::from((
@@ -1588,17 +1673,11 @@ mod tests {
 
     #[test]
     fn the_mesh_policy_turns_off_the_paths_it_leaves_out() {
-        let webrtc_only = TransportPolicy {
-            udp: false,
-            ..TransportPolicy::default()
-        };
+        let webrtc_only = TransportPolicy::default().with_udp(false);
         let on_webrtc = TransportOpts::default().within(&webrtc_only);
         assert!(!on_webrtc.udp && on_webrtc.webrtc && on_webrtc.relay);
 
-        let udp_only = TransportPolicy {
-            webrtc: false,
-            ..TransportPolicy::default()
-        };
+        let udp_only = TransportPolicy::default().with_webrtc(false);
         let on_udp = TransportOpts::default().within(&udp_only);
         assert!(on_udp.udp && !on_udp.webrtc && on_udp.relay);
 
@@ -1644,7 +1723,7 @@ mod tests {
         )
         .await
         .expect("bind the receiver");
-        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let sender = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .transport_config(
                 iroh::endpoint::QuicTransportConfig::builder()
@@ -1723,7 +1802,7 @@ mod tests {
         )
         .await
         .expect("bind the receiver");
-        let sender = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let sender = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .transport_config(
                 iroh::endpoint::QuicTransportConfig::builder()
@@ -1842,11 +1921,11 @@ mod tests {
     // Gossip is a choice of the mesh: the opts follow the policy, and it needs a direct path.
     #[test]
     fn the_mesh_policy_decides_gossip_for_the_opts() {
-        let policy = |gossip: bool, udp: bool, webrtc: bool| TransportPolicy {
-            gossip,
-            udp,
-            webrtc,
-            ..TransportPolicy::default()
+        let policy = |gossip: bool, udp: bool, webrtc: bool| {
+            TransportPolicy::default()
+                .with_gossip(gossip)
+                .with_udp(udp)
+                .with_webrtc(webrtc)
         };
         let within = |mesh: TransportPolicy| TransportOpts::default().within(&mesh).gossip;
         assert!(!TransportOpts::default().gossip, "off until the mesh asks");
@@ -1878,7 +1957,7 @@ mod tests {
                 &LookupOpts::loopback(),
                 opts,
                 Some(&table),
-                super::multihop_handle_config(false),
+                super::multihop_handle_config(PayloadPath::DirectOnly),
                 Some(5),
             )
             .await
@@ -1933,7 +2012,7 @@ mod tests {
             gossip: true,
             ..TransportOpts::default()
         };
-        let hub = habilis_network_iroh_gossip_transport::memory::MemoryHub::new();
+        let hub = habilis_network_iroh_gossip_transport::memory::Hub::new();
         let mut members = Vec::new();
         for _ in 0..2 {
             let table = crate::transport::SignalAdmission::new(8);
@@ -1977,7 +2056,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(
-            crate::transport::path::selected_is_ip(&connection),
+            path::selected_is_ip(&connection),
             "IP is above gossip: the ladder of the gossip handle is the selector"
         );
         router.shutdown().await.expect("shutdown");
@@ -1990,17 +2069,11 @@ mod tests {
     #[cfg(feature = "multihop")]
     #[test]
     fn the_handle_config_of_a_browser_differs_from_the_engine_s_in_the_link_cost_only() {
-        let native = super::multihop_handle_config(true);
-        let browser = super::browser_handle_config(true);
+        let native = super::multihop_handle_config(PayloadPath::RelayAllowed);
+        let browser = super::browser_handle_config(PayloadPath::RelayAllowed);
         assert_eq!(native.link_cost, 10);
         assert_eq!(browser.link_cost, 100);
-        assert_eq!(
-            habilis_network_iroh_multihop_transport::HandleConfig {
-                link_cost: native.link_cost,
-                ..browser
-            },
-            native
-        );
+        assert_eq!(browser.with_link_cost(native.link_cost), native);
     }
 
     #[cfg(feature = "host")]
@@ -2011,7 +2084,7 @@ mod tests {
                 &LookupOpts::loopback(),
                 opts,
                 None,
-                super::multihop_handle_config(false),
+                super::multihop_handle_config(PayloadPath::DirectOnly),
                 cap,
             )
             .await
@@ -2068,7 +2141,7 @@ mod tests {
             &LookupOpts::loopback(),
             TransportOpts::default(),
             None,
-            false,
+            PayloadPath::DirectOnly,
         )
         .await
         .expect("a multihop peer binds");
@@ -2177,8 +2250,7 @@ mod tests {
     async fn a_refusal_from_a_listener_of_our_identity_is_not_a_foreign_mesh() {
         use std::net::SocketAddr;
 
-        use iroh::EndpointAddr;
-        use iroh::SecretKey;
+        use iroh::{EndpointAddr, SecretKey};
         use iroh_gossip::net::GOSSIP_ALPN;
 
         use super::{ProbeAnswer, TransportHandles, build_endpoint, probe_answer};
@@ -2237,8 +2309,7 @@ mod tests {
     async fn a_router_that_carries_no_unicast_completes_a_nudge() {
         use std::net::SocketAddr;
 
-        use iroh::EndpointAddr;
-        use iroh::SecretKey;
+        use iroh::{EndpointAddr, SecretKey};
         use iroh_gossip::net::GOSSIP_ALPN;
 
         use super::{TransportHandles, build_endpoint, build_mesh};
@@ -2273,7 +2344,7 @@ mod tests {
 
         let nudge = n0_future::time::timeout(
             std::time::Duration::from_secs(5),
-            dialer.connect(addr, crate::transport::webrtc::NUDGE_ALPN),
+            dialer.connect(addr, webrtc::NUDGE_ALPN),
         )
         .await
         .map(|dialed| dialed.map(|_| ()));

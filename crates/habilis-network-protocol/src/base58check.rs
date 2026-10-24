@@ -11,11 +11,38 @@
 //! compile error — it is a ticket minted by one path that no longer decodes on
 //! another.
 
-use anyhow::{Result, bail};
-use sha2::{Digest, Sha256};
+use std::fmt;
+
+use sha2::Sha256;
 
 /// The double-SHA-256 checksum, truncated to its first 4 bytes.
+/// Why a Base58Check text does not decode. `what` names the text, for example
+/// `mesh identifier`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Base58Error {
+    /// The text is not Base58.
+    Alphabet(String),
+    /// The text is too short to carry a checksum.
+    Short(String),
+    /// The checksum does not match the payload.
+    Checksum(String),
+}
+
+impl fmt::Display for Base58Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Alphabet(what) => write!(formatter, "invalid Base58 in {what}"),
+            Self::Short(what) => write!(formatter, "{what} too short"),
+            Self::Checksum(what) => write!(formatter, "invalid {what} checksum"),
+        }
+    }
+}
+
+impl std::error::Error for Base58Error {}
+
 fn checksum(bytes: &[u8]) -> [u8; 4] {
+    use sha2::Digest;
     let first = Sha256::digest(bytes);
     let second = Sha256::digest(first);
     let mut out = [0u8; 4];
@@ -38,18 +65,20 @@ pub fn encode(payload: &[u8]) -> String {
 /// its own copy.
 ///
 /// # Errors
-/// `encoded` is not Base58, is too short to carry a checksum, or its checksum
-/// does not match the payload.
-pub fn decode(encoded: &str, what: &str) -> Result<Vec<u8>> {
+/// # Errors
+/// [`Base58Error::Alphabet`] when `encoded` is not Base58, [`Base58Error::Short`]
+/// when it is too short to carry a checksum, or [`Base58Error::Checksum`] when the
+/// checksum does not match the payload.
+pub fn decode(encoded: &str, what: &str) -> Result<Vec<u8>, Base58Error> {
     let Ok(decoded) = bs58::decode(encoded).into_vec() else {
-        bail!("invalid Base58 in {what}");
+        return Err(Base58Error::Alphabet(what.to_owned()));
     };
     if decoded.len() < 4 {
-        bail!("{what} too short");
+        return Err(Base58Error::Short(what.to_owned()));
     }
     let (payload, received) = decoded.split_at(decoded.len() - 4);
     if received != checksum(payload) {
-        bail!("invalid {what} checksum");
+        return Err(Base58Error::Checksum(what.to_owned()));
     }
     Ok(payload.to_vec())
 }

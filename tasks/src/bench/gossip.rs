@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use habilis_network_iroh_gossip_transport::iroh_gossip::net::{GOSSIP_ALPN, Gossip};
 use habilis_network_iroh_gossip_transport::iroh_gossip::proto::TopicId;
-use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+use habilis_network_iroh_gossip_transport::memory::Hub;
 use habilis_network_iroh_gossip_transport::{
     GOSSIP_TRANSPORT_ID, GossipHandle, ReceiveLoop, Stats, gossip_addr, spawn_receive_loop,
 };
@@ -87,10 +87,7 @@ struct Tap {
 
 impl ProtocolHandler for Tap {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        *self
-            .served
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connection.clone());
+        *self.served.lock().expect("served slot poisoned") = Some(connection.clone());
         self.inner.accept(connection).await
     }
 }
@@ -100,7 +97,7 @@ impl Tap {
     fn lost_packets(&self) -> u64 {
         self.served
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("served slot poisoned")
             .as_ref()
             .map_or(0, |connection| connection.stats().lost_packets)
     }
@@ -161,7 +158,7 @@ async fn start_flood() -> Result<Flood, String> {
             .collect(),
         endpoints: Vec::new(),
         tap: Tap {
-            inner: Bench,
+            inner: Bench::new(),
             served: Arc::default(),
         },
         routers: Vec::new(),
@@ -417,7 +414,7 @@ async fn run_group(
     with_gossip_path: bool,
     args: &Args,
 ) -> Result<(Value, Vec<Sample>), String> {
-    let hub = MemoryHub::new();
+    let hub = Hub::new();
     let keys: Vec<SecretKey> = (0..members).map(|_| SecretKey::generate()).collect();
     let handles: Vec<GossipHandle> = keys
         .iter()
@@ -435,7 +432,7 @@ async fn run_group(
         }
     };
     let tap = Tap {
-        inner: Bench,
+        inner: Bench::new(),
         served: Arc::default(),
     };
     let router = Router::builder(bob.clone())

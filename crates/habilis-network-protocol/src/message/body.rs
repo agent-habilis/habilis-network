@@ -24,6 +24,7 @@ string_newtype!(
     test_from,
 );
 
+/// A message body with a control character other than tab or newline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BodyError(String);
 

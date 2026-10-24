@@ -9,7 +9,7 @@ use serde::{Serialize, Serializer};
 use bytes::Bytes;
 
 use super::wire::WireFrame;
-use super::{Message, MessageBody};
+use super::{Message, MessageBody, MessageError};
 use crate::AuthorKey;
 
 /// A [`Message`] whose signature was made here or checked over its exact bytes.
@@ -113,9 +113,10 @@ impl Verified {
     /// not reach the `Serialize` impl, which needs a serializer.
     ///
     /// # Errors
-    ///
-    /// Propagates `Message::serialize` failure.
-    pub fn serialize(&self) -> anyhow::Result<WireFrame> {
+    /// # Errors
+    /// A [`MessageError::Source`] when the JSON does not encode, or
+    /// [`MessageError::Oversize`] when the bytes pass `MAX_MESSAGE_SIZE`.
+    pub fn serialize(&self) -> Result<WireFrame, MessageError> {
         Ok(WireFrame::new(Bytes::from((*self.message).serialize()?)))
     }
 

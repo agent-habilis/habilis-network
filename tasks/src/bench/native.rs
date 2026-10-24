@@ -29,6 +29,7 @@ use habilis_network_iroh_webrtc_transport::{
 use super::Args;
 use super::run::{Measured, Outcome, Rtt, Sample, TRANSFER_TIMEOUT};
 
+use habilis_network::net::test_relay;
 /// A JSEP round on loopback is milliseconds; this is the stall bound.
 pub(crate) const JSEP_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -202,7 +203,7 @@ async fn webrtc_pair() -> Result<(WebRtcPeer, WebRtcPeer, Router, f64), String> 
         }
     };
     let router = Router::builder(server.endpoint.clone())
-        .accept(BENCH_ALPN, Bench)
+        .accept(BENCH_ALPN, Bench::new())
         .spawn();
     match Box::pin(negotiate(&client, &server)).await {
         Ok(negotiate_ms) => Ok((client, server, router, negotiate_ms)),
@@ -274,7 +275,9 @@ async fn bench_between<T, F: Future<Output = Result<T, String>>>(
     addr: EndpointAddr,
     measure: impl FnOnce(Endpoint, EndpointAddr) -> F,
 ) -> Result<T, String> {
-    let router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+    let router = Router::builder(server)
+        .accept(BENCH_ALPN, Bench::new())
+        .spawn();
     let result = measure(client.clone(), addr).await;
     close_cell(&client, router).await;
     result
@@ -391,7 +394,7 @@ pub(crate) async fn ladder_webrtc(args: &Args) -> Outcome {
 /// relay between them, throughput and round trips.
 pub(crate) async fn ladder_relay(args: &Args) -> Outcome {
     let run = async {
-        let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
+        let (relay_url, _relay) = test_relay::spawn_plain()
             .await
             .map_err(|error| format!("the local relay failed: {error:#}"))?;
         let bind = || async {

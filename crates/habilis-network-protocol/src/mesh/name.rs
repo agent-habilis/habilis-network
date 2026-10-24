@@ -24,9 +24,13 @@ string_newtype!(
     from_str,
 );
 
+/// Why a mesh name was refused: its length, or a character outside the allowed set.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NameError {
+    /// The name is not the right length.
     Length(usize),
+    /// The name has a character outside the alphabet.
     Charset(String),
 }
 
@@ -181,6 +185,7 @@ impl MeshName {
         Self::new(name).unwrap_or_else(|_| Self::new("topic").expect("`topic` is a valid name"))
     }
 
+    /// The name as bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()

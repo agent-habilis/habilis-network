@@ -7,7 +7,7 @@
 //! (last-writer-wins per origin). Every node folds the freshest vector from each
 //! origin into one metric-weighted graph and runs Dijkstra locally.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iroh::{EndpointAddr, SecretKey};
 use iroh_base::Signature;
@@ -322,7 +322,7 @@ impl Topology {
     pub(crate) fn route_to_avoiding_first_hops(
         &self,
         leg: Leg,
-        refused: &std::collections::HashSet<AppId>,
+        refused: &HashSet<AppId>,
     ) -> Option<Route> {
         let path = self
             .graph()
@@ -389,17 +389,23 @@ impl Topology {
 /// A node's-eye view of the routing graph, ready to serialize to JSON for the
 /// `topology` IPC query.
 #[derive(Debug, serde::Serialize)]
+#[non_exhaustive]
 pub struct TopologyView {
     /// This node's own endpoint id (hex) — the graph's "you".
     pub self_id: String,
+    /// The links of the graph, one per edge.
     pub edges: Vec<TopologyEdge>,
 }
 
 /// One directed, metric-labelled edge in a [`TopologyView`].
 #[derive(Debug, serde::Serialize)]
+#[non_exhaustive]
 pub struct TopologyEdge {
+    /// The endpoint id at one end, in hex.
     pub from: String,
+    /// The endpoint id at the other end, in hex.
     pub to: String,
+    /// The routing cost of the link.
     pub metric: u32,
 }
 

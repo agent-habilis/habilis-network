@@ -4,6 +4,7 @@
 //! made [`StateInit`] painful to extend: one new field meant editing six test
 //! modules that had no reason to know about it. One home instead.
 
+use crate::transport::UdpTransport;
 use std::sync::Arc;
 
 use iroh::{EndpointId, SecretKey};
@@ -13,6 +14,13 @@ use crate::protocol::identity::Identity;
 use crate::protocol::{AuthorKey, Nickname};
 use crate::util::clock::Instant;
 
+#[cfg(feature = "host")]
+use crate::daemon::ctx;
+#[cfg(feature = "host")]
+use crate::gossip::event;
+#[cfg(feature = "host")]
+use crate::protocol::message;
+use iroh::address_lookup::memory;
 /// The key of the test author `name`: its bytes, zero-padded to 32. Two names keep the order
 /// that their bytes have, and a test reads the name back in a failure message.
 pub(crate) fn author_of(name: &str) -> AuthorKey {
@@ -24,13 +32,11 @@ pub(crate) fn author_of(name: &str) -> AuthorKey {
 /// A bare state with a fresh identity: no state file, no secrets, no per-peer
 /// gate. The starting point for a test that only cares about one field.
 pub(crate) fn fresh_state() -> EventLoopState {
-    fresh_state_with_book(iroh::address_lookup::memory::MemoryLookup::new())
+    fresh_state_with_book(memory::MemoryLookup::new())
 }
 
 /// [`fresh_state`] with the given address book.
-pub(crate) fn fresh_state_with_book(
-    address_book: iroh::address_lookup::memory::MemoryLookup,
-) -> EventLoopState {
+pub(crate) fn fresh_state_with_book(address_book: memory::MemoryLookup) -> EventLoopState {
     EventLoopState::new(
         StateInit {
             #[cfg(feature = "host")]
@@ -153,7 +159,7 @@ pub(crate) struct LaneNode {
     pub(crate) identity: Identity,
     pub(crate) our_pubkey: AuthorKey,
     pub(crate) author: Nickname,
-    pub(crate) sink: crate::gossip::event::SilentSink,
+    pub(crate) sink: event::SilentSink,
 }
 
 #[cfg(feature = "host")]
@@ -189,7 +195,7 @@ impl LaneNode {
             our_pubkey: identity.author_key(),
             identity,
             author: nick("alice"),
-            sink: crate::gossip::event::SilentSink,
+            sink: event::SilentSink,
         }
     }
 
@@ -198,8 +204,8 @@ impl LaneNode {
         let _ = self.gossip.shutdown().await;
     }
 
-    pub(crate) fn ctx(&self) -> crate::daemon::ctx::HandlerCtx<'_> {
-        crate::daemon::ctx::HandlerCtx {
+    pub(crate) fn ctx(&self) -> ctx::HandlerCtx<'_> {
+        ctx::HandlerCtx {
             sender: &self.sender,
             endpoint: &self.endpoint,
             mesh: &self.mesh,
@@ -217,7 +223,7 @@ impl LaneNode {
     pub(crate) fn state(&self) -> EventLoopState {
         let mut state = fresh_state();
         state.webrtc = Some(self.handle.clone());
-        state.local_udp_transport = false;
+        state.local_udp_transport = UdpTransport::Absent;
         state.unicast_pool = crate::transport::UnicastPool::new(self.endpoint.clone(), false);
         state.peer_endpoints.insert(
             nick("bob"),
@@ -227,7 +233,7 @@ impl LaneNode {
         state
     }
 
-    pub(crate) fn frame_to_bob(&self) -> crate::protocol::message::Verified {
+    pub(crate) fn frame_to_bob(&self) -> message::Verified {
         crate::protocol::Message::new_pong(
             &self.mesh,
             &self.author,

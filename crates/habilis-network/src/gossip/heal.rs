@@ -8,6 +8,8 @@ use crate::daemon::state::EventLoopState;
 use crate::util::clock::Instant;
 use crate::util::tuning::HEAL_HARD_PROBE;
 
+use crate::gossip::event::NodeEvent;
+use crate::transport::probe;
 /// Let go of the rendezvous if this node is due to
 /// ([`EventLoopState::should_release_rendezvous`]).
 ///
@@ -129,8 +131,8 @@ pub(crate) async fn rebridge_known(state: &mut EventLoopState, ctx: &HandlerCtx<
         count = peers.len(),
         "heal: rendezvous-independent re-bridge (re-dialing known peers)"
     );
-    if !state.relay_transport {
-        crate::transport::probe::retry_direct(state, ctx, true).await;
+    if !state.relay_transport.relay_allowed() {
+        probe::retry_direct(state, ctx, true).await;
         return;
     }
     if let Err(error) = ctx.sender.join_peers(peers).await {
@@ -160,7 +162,7 @@ pub(crate) async fn recover_from_starvation(state: &mut EventLoopState, ctx: &Ha
         trips = state.recovery_trips,
         "mesh starvation: no inbound traffic; re-bridging known peers and re-announcing"
     );
-    ctx.sink.emit(crate::gossip::event::NodeEvent::Info(format!(
+    ctx.sink.emit(NodeEvent::Info(format!(
         "mesh starvation: no traffic for {starved_secs}s; attempting recovery"
     )));
     state.note_degraded();

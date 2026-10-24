@@ -117,6 +117,7 @@ impl<S: Clone> StateCell<S> {
 /// One instruction from the session to the game.
 ///
 /// See the module docs: fulfil in order, fulfil all of them.
+#[non_exhaustive]
 pub enum Request<T: Config> {
     /// Save the current state into `cell`, tagged with `frame`.
     ///

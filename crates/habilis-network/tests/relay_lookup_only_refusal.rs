@@ -25,23 +25,18 @@ use habilis_network::protocol::{
     LookupOpts, MeshConfig, MessageKind, Nickname, PresenceSubtype, RelayChoice, TransportPolicy,
 };
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 use tokio::sync::Notify;
 
+use habilis_network::net::test_relay;
 /// The do-nothing application: presence alone forms a mesh.
 struct Probe;
 
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -111,19 +106,12 @@ async fn spawn(
 ) -> Node<Probe> {
     let mesh = derive_topic_mesh_config(
         topic,
-        MeshConfig {
-            lookups: LookupOpts {
-                mdns: false,
-                dht: false,
-                relay_lookup: RelayChoice::Custom(vec![relay.clone()]),
-            },
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport,
-                ..TransportPolicy::default()
-            },
-        },
+        MeshConfig::new(
+            LookupOpts::new(RelayChoice::Custom(vec![relay.clone()])),
+            None,
+            None,
+            TransportPolicy::default().with_relay_transport(relay_transport),
+        ),
     )
     .expect("derive a relay-only mesh");
     let author = Nickname::new(nick).expect("valid nickname");
@@ -132,29 +120,19 @@ async fn spawn(
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts {
-                udp: false,
-                relay: true,
-                webrtc: false,
-                gossip: false,
-            },
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink)
+            .with_max_peers(16)
+            .with_transports(
+                TransportOpts::default()
+                    .with_udp(false)
+                    .with_relay(true)
+                    .with_webrtc(false)
+                    .with_gossip(false),
+            ),
     )
     .await
     .expect("setup_mesh against a local relay");
-    Node::spawn(config, Probe, None, false)
+    Node::spawn(config, Probe, None, SignalHandling::Leave)
 }
 
 /// Whether two relay-only nodes see each other join within `deadline`.
@@ -191,9 +169,7 @@ fn relay_only_pair_links_only_when_the_relay_may_carry_payload() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
         // Plain HTTP, the same relay flavour the browser matrix uses.
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay server");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay server");
 
         // The control first: the pair *can* meet through this relay.
         assert!(

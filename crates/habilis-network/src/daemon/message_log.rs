@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::protocol::message::Verified;
-use crate::protocol::message::sole_addressee;
+use crate::protocol::message::{Verified, sole_addressee};
 use crate::protocol::{AuthorKey, DedupKey, Nickname, UnixSecs};
 
 /// Where a message sits in the log's total order: its timestamp, then its id
@@ -56,11 +55,11 @@ pub(crate) fn seconds(lo: UnixSecs, hi: UnixSecs) -> WindowRange {
 /// asking — the last because entitlement is per-peer, not global (see
 /// [`resendable_to`]).
 #[derive(Clone, Copy)]
-pub(crate) struct MissingQuery<'a> {
+pub(crate) struct MissingQuery<'query> {
     pub range: WindowRange,
-    pub have: &'a HashSet<DedupKey>,
+    pub have: &'query HashSet<DedupKey>,
     pub max: usize,
-    pub requester: &'a Nickname,
+    pub requester: &'query Nickname,
 }
 
 /// A bounded buffer of the recent messages a member retains — the
@@ -437,12 +436,12 @@ mod tests {
         Message::new_app(
             &crate::protocol::MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: crate::protocol::MessageBody::from(id),
-            },
+            crate::protocol::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                crate::protocol::MessageBody::from(id),
+            ),
         )
     }
 
@@ -555,12 +554,12 @@ mod tests {
         let mut message = Message::new_app(
             &crate::protocol::MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: Some(Nickname::from(to)),
-                corr: None,
-                body: crate::protocol::MessageBody::from(body),
-            },
+            crate::protocol::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                Some(Nickname::from(to)),
+                None,
+                crate::protocol::MessageBody::from(body),
+            ),
         );
         message.timestamp = UnixSecs::from_secs(ts);
         message

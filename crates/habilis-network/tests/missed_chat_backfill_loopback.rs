@@ -15,14 +15,16 @@ use std::time::Duration;
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
     AppFrameParams, AppTag, LookupOpts, Message, MessageBody, MessageId, MessageKind, Nickname,
     PresenceSubtype,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::runtime::tuning;
 /// Bounds a slow join only: with the tick pinned away, nothing but the ask on
 /// the first link can deliver.
 const BUDGET: Duration = Duration::from_secs(15);
@@ -41,13 +43,9 @@ struct Chat {
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: true,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE
+            .union(AppClass::LOGGABLE)
+            .union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -83,12 +81,12 @@ impl NodeDriver for Chat {
         let mut frame = Message::new_app(
             ctx.mesh,
             ctx.author,
-            AppFrameParams {
-                tag: AppTag::from("chat"),
-                to: None,
-                corr: None,
-                body: MessageBody::new("\"hello\"").expect("a JSON body"),
-            },
+            AppFrameParams::new(
+                AppTag::new("chat").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::new("\"hello\"").expect("a JSON body"),
+            ),
         );
         frame.timestamp = frame.timestamp + AHEAD;
         let frame = frame.sign(ctx.identity);
@@ -160,10 +158,7 @@ impl Joined {
 }
 
 fn pin_antientropy_tick() {
-    habilis_network::runtime::tuning::init(habilis_network::runtime::tuning::Tuning {
-        antientropy_interval: Duration::from_hours(1),
-        ..habilis_network::runtime::tuning::Tuning::DEFAULTS
-    });
+    tuning::init(tuning::Tuning::DEFAULTS.with_antientropy_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {
@@ -179,25 +174,16 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Chat, Arc<Joined>) {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author: nick(name),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(nick(name), Arc::clone(&sink) as Arc<dyn NodeSink>).with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
     let chat = Chat::default();
-    (Node::spawn(config, chat.clone(), None, false), chat, sink)
+    (
+        Node::spawn(config, chat.clone(), None, SignalHandling::Leave),
+        chat,
+        sink,
+    )
 }
 
 #[test]

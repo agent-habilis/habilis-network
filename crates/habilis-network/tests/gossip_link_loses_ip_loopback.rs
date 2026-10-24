@@ -20,6 +20,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// Past the point where the relay policy closes a gossip link that stayed on the
 /// relay: the probe deadline of 15 s, and a margin. A broadcast sent before it can
 /// still arrive over the relay, which proves nothing about recovery.
@@ -46,21 +47,21 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 
@@ -114,10 +115,13 @@ impl Member {
 #[test]
 fn a_gossip_pair_that_never_sent_unicast_recovers_when_ip_is_lost() {
     let guard = habilis_network_test_tracing::init();
+    // The test cuts IP on purpose, so the pair stays meshed with no link for a while. The census
+    // calls that a silent partition once the gap outlasts a heal, so that WARN is expected here.
+    // Whether it comes depends on timing, so it is optional. The broadcast after the loss is the
+    // real check, and it stays asserted below.
+    guard.allow_warn("habilis_network::lifecycle", "silent partition");
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let mut bob = Member::join("bob", &alice).await;
 

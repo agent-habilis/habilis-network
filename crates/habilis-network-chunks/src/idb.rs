@@ -3,7 +3,7 @@
 //! Reachable from the main thread, which is what makes it the browser backend
 //! that matters — a tab can seed without spinning up a Worker.
 //!
-//! Unlike [`FsOrigin`], this **does** copy the bytes in. A browser has no path
+//! Unlike [`DiskOrigin`], this **does** copy the bytes in. A browser has no path
 //! back to a file the user picked, so a tab that fetched a chunk has nowhere
 //! else to keep it. That is a property of the platform rather than a design
 //! choice, and it is why the store-versus-source split exists.
@@ -20,12 +20,12 @@
 //! scopes its answers, and must, or holding a chunk becomes a way for anyone to
 //! probe what else you hold.
 //!
-//! [`FsOrigin`]: crate::FsOrigin
+//! [`DiskOrigin`]: crate::DiskOrigin
 
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use anyhow::{Context as _, Result, bail};
+use crate::ChunkError;
 use js_sys::Uint8Array;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
@@ -43,11 +43,12 @@ const MAP_PREFIX: &str = "map/";
 /// Key for the bind table.
 const BINDS_KEY: &str = "binds";
 
-/// JS errors are not `std::error::Error`, so they cannot ride `?` into
-/// `anyhow`. Rendering them at the boundary keeps every signature in the crate
-/// identical across backends.
-fn js_err(context: &str, error: &JsValue) -> anyhow::Error {
-    anyhow::anyhow!("{context}: {error:?}")
+/// A JS value is not `std::error::Error`, so its debug text becomes the source.
+fn js_err(context: &str, error: &JsValue) -> ChunkError {
+    ChunkError::Store {
+        step: context.to_owned(),
+        source: format!("{error:?}").into(),
+    }
 }
 
 /// The success/error closure pair kept alive for the duration of one await.
@@ -71,7 +72,7 @@ type Handlers = Option<(Closure<dyn FnMut()>, Closure<dyn FnMut()>)>;
 /// The closures are dropped when that future completes rather than `forget`-ed:
 /// this runs once per chunk, and leaking a pair per chunk would be a leak
 /// proportional to the data transferred.
-fn watch(request: &IdbRequest) -> impl Future<Output = Result<JsValue>> + use<> {
+fn watch(request: &IdbRequest) -> impl Future<Output = Result<JsValue, ChunkError>> + use<> {
     let mut keep: Handlers = None;
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
         let ok_request = request.clone();
@@ -100,7 +101,7 @@ fn watch(request: &IdbRequest) -> impl Future<Output = Result<JsValue>> + use<> 
 }
 
 /// Await an `IndexedDB` request.
-async fn done(request: &IdbRequest) -> Result<JsValue> {
+async fn done(request: &IdbRequest) -> Result<JsValue, ChunkError> {
     watch(request).await
 }
 
@@ -110,7 +111,7 @@ async fn done(request: &IdbRequest) -> Result<JsValue> {
 /// transaction still abort, and only `oncomplete` means the write is durable.
 /// Reporting a chunk as held before that would advertise bytes that never
 /// landed — the "peer that lies" failure, from the storage end.
-async fn committed(transaction: &IdbTransaction) -> Result<()> {
+async fn committed(transaction: &IdbTransaction) -> Result<(), ChunkError> {
     let mut keep: Handlers = None;
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
         let ok = Closure::<dyn FnMut()>::new(move || {
@@ -179,9 +180,9 @@ impl IdbStore {
     /// Open, creating the database if it is absent.
     ///
     /// # Errors
-    /// `IndexedDB` is unreachable — a browser in private mode may refuse it —
-    /// or the schema upgrade fails.
-    pub async fn open(name: &str) -> Result<Self> {
+    /// # Errors
+    /// [`ChunkError::Store`] when the database cannot be opened.
+    pub async fn open(name: &str) -> Result<Self, ChunkError> {
         let factory: IdbFactory = js_sys::Reflect::get(&js_sys::global(), &"indexedDB".into())
             .map_err(|error| js_err("reaching indexedDB", &error))?
             .dyn_into()
@@ -238,7 +239,7 @@ impl IdbStore {
     }
 
     /// Open at an explicit version, creating whatever stores are absent.
-    async fn open_at(factory: &IdbFactory, name: &str, version: u32) -> Result<Self> {
+    async fn open_at(factory: &IdbFactory, name: &str, version: u32) -> Result<Self, ChunkError> {
         let request = factory
             .open_with_u32(name, version)
             .map_err(|error| js_err(&format!("reopening database {name}"), &error))?;
@@ -261,7 +262,9 @@ impl IdbStore {
             .dyn_into()
             .map_err(|value| js_err("reopen did not yield a database", &value))?;
         if missing_stores(&db) {
-            bail!("{name} is missing its object stores even after an upgrade");
+            return Err(ChunkError::Malformed(format!(
+                "{name} is missing its object stores even after an upgrade"
+            )));
         }
         Ok(Self {
             db,
@@ -290,9 +293,9 @@ impl IdbStore {
     /// `databases()` is the one way to ask the question without answering it.
     ///
     /// # Errors
-    /// `IndexedDB` is unreachable, or the open failed for a reason other than
-    /// absence.
-    pub async fn adopt(name: &str) -> Result<Option<Self>> {
+    /// # Errors
+    /// [`ChunkError::Store`] when the database cannot be reached.
+    pub async fn adopt(name: &str) -> Result<Option<Self>, ChunkError> {
         let factory: IdbFactory = js_sys::Reflect::get(&js_sys::global(), &"indexedDB".into())
             .map_err(|error| js_err("reaching indexedDB", &error))?
             .dyn_into()
@@ -338,7 +341,7 @@ impl IdbStore {
         &self,
         name: &str,
         mode: IdbTransactionMode,
-    ) -> Result<(IdbTransaction, web_sys::IdbObjectStore)> {
+    ) -> Result<(IdbTransaction, web_sys::IdbObjectStore), ChunkError> {
         let transaction = self
             .db
             .transaction_with_str_and_mode(name, mode)
@@ -359,7 +362,7 @@ impl IdbStore {
     /// Every request is issued before any is awaited. That is required twice
     /// over — see [`watch`] — and it is why this collects futures rather than
     /// awaiting in the loop that builds them.
-    async fn present(&self, addresses: &[ChunkHash]) -> Result<Vec<bool>> {
+    async fn present(&self, addresses: &[ChunkHash]) -> Result<Vec<bool>, ChunkError> {
         if addresses.is_empty() {
             return Ok(Vec::new());
         }
@@ -379,7 +382,7 @@ impl IdbStore {
         Ok(held)
     }
 
-    async fn read(&self, name: &str, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn read(&self, name: &str, key: &str) -> Result<Option<Vec<u8>>, ChunkError> {
         let (_transaction, store) = self.object_store(name, IdbTransactionMode::Readonly)?;
         let request = store
             .get(&JsValue::from_str(key))
@@ -391,7 +394,7 @@ impl IdbStore {
         Ok(Some(Uint8Array::new(&value).to_vec()))
     }
 
-    async fn write(&self, name: &str, key: &str, bytes: &[u8]) -> Result<()> {
+    async fn write(&self, name: &str, key: &str, bytes: &[u8]) -> Result<(), ChunkError> {
         let (transaction, store) = self.object_store(name, IdbTransactionMode::Readwrite)?;
         let value = Uint8Array::from(bytes);
         store
@@ -400,7 +403,7 @@ impl IdbStore {
         committed(&transaction).await
     }
 
-    async fn erase(&self, name: &str, keys: &[String]) -> Result<()> {
+    async fn erase(&self, name: &str, keys: &[String]) -> Result<(), ChunkError> {
         if keys.is_empty() {
             return Ok(());
         }
@@ -414,7 +417,7 @@ impl IdbStore {
     }
 
     /// Every chunk address currently stored. Only the sweep needs this.
-    async fn stored_addresses(&self) -> Result<Vec<ChunkHash>> {
+    async fn stored_addresses(&self) -> Result<Vec<ChunkHash>, ChunkError> {
         let (_transaction, store) = self.object_store(CHUNKS, IdbTransactionMode::Readonly)?;
         let request = store
             .get_all_keys()
@@ -475,23 +478,27 @@ fn encode_map(map: &ChunkMap) -> Vec<u8> {
     out
 }
 
-fn decode_map(bytes: &[u8]) -> Result<ChunkMap> {
+fn decode_map(bytes: &[u8]) -> Result<ChunkMap, ChunkError> {
     if bytes.len() < 12 {
-        bail!(
+        return Err(ChunkError::Malformed(format!(
             "a stored chunk map is at least 12 bytes, got {}",
             bytes.len()
-        );
+        )));
     }
     let size = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
     let count = u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")) as usize;
     let expected = 12usize
-        .checked_add(count.checked_mul(32).context("row length overflows")?)
-        .context("row length overflows")?;
+        .checked_add(
+            count
+                .checked_mul(32)
+                .ok_or_else(|| ChunkError::Malformed("row length overflows".to_owned()))?,
+        )
+        .ok_or_else(|| ChunkError::Malformed("row length overflows".to_owned()))?;
     if bytes.len() < expected {
-        bail!(
+        return Err(ChunkError::Malformed(format!(
             "a {count}-leaf row needs {expected} bytes, got {}",
             bytes.len()
-        );
+        )));
     }
     let mut leaves = Vec::with_capacity(count);
     for index in 0..count {
@@ -506,7 +513,7 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap> {
 }
 
 impl ChunkSource for IdbStore {
-    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
         let Some(bytes) = self.read(CHUNKS, &hash.to_hex()).await? else {
             return Ok(None);
         };
@@ -520,7 +527,7 @@ impl ChunkSource for IdbStore {
         Ok(Some(bytes))
     }
 
-    async fn has(&self, hash: ChunkHash) -> Result<bool> {
+    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
         Ok(self
             .present(&[hash])
             .await?
@@ -529,7 +536,7 @@ impl ChunkSource for IdbStore {
             .unwrap_or(false))
     }
 
-    async fn map(&self, root: Root) -> Result<Option<ChunkMap>> {
+    async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         let Some(bytes) = self.read(META, &map_key(root)).await? else {
             return Ok(None);
         };
@@ -544,7 +551,7 @@ impl ChunkSource for IdbStore {
     ///
     /// [`Self::coverage_of`] takes the opposite route, and the two are not in
     /// disagreement: see the note there.
-    async fn coverage(&self, root: Root) -> Result<Coverage> {
+    async fn coverage(&self, root: Root) -> Result<Coverage, ChunkError> {
         let Some(map) = self.map(root).await? else {
             return Ok(Coverage::empty(0));
         };
@@ -568,7 +575,7 @@ impl ChunkSource for IdbStore {
     ///
     /// A root with no stored map covers nothing, and holds its place in the
     /// answer — callers zip these back onto what they asked about.
-    async fn coverage_of(&self, roots: &[Root]) -> Result<Vec<Coverage>> {
+    async fn coverage_of(&self, roots: &[Root]) -> Result<Vec<Coverage>, ChunkError> {
         if roots.is_empty() {
             return Ok(Vec::new());
         }
@@ -590,7 +597,7 @@ impl ChunkSource for IdbStore {
         Ok(out)
     }
 
-    async fn bind(&self, file: &FileId) -> Result<Option<Root>> {
+    async fn bind(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
         for (key, size, mtime, root) in self.load_binds().await {
             if key == file.key {
                 if size != file.size || mtime != file.mtime {
@@ -604,20 +611,22 @@ impl ChunkSource for IdbStore {
 }
 
 impl ChunkStore for IdbStore {
-    async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<()> {
+    async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<(), ChunkError> {
         let actual = chunk_hash(bytes);
         if actual != hash {
-            bail!("these bytes address {actual}, not {hash}");
+            return Err(ChunkError::Malformed(format!(
+                "these bytes address {actual}, not {hash}"
+            )));
         }
         self.write(CHUNKS, &hash.to_hex(), bytes).await
     }
 
-    async fn put_map(&self, map: &ChunkMap) -> Result<()> {
+    async fn put_map(&self, map: &ChunkMap) -> Result<(), ChunkError> {
         self.write(META, &map_key(map.root()), &encode_map(map))
             .await
     }
 
-    async fn set_bind(&self, file: &FileId, root: Root) -> Result<()> {
+    async fn set_bind(&self, file: &FileId, root: Root) -> Result<(), ChunkError> {
         let mut binds = self.load_binds().await;
         binds.retain(|(key, _, _, _)| key != &file.key);
         binds.push((file.key.clone(), file.size, file.mtime, root));
@@ -629,16 +638,19 @@ impl ChunkStore for IdbStore {
         self.write(META, BINDS_KEY, text.as_bytes()).await
     }
 
-    async fn start_marking(&self) -> Result<()> {
+    async fn start_marking(&self) -> Result<(), ChunkError> {
         *self.marks.borrow_mut() = Some(HashSet::new());
         Ok(())
     }
 
-    async fn mark(&self, root: Root) -> Result<()> {
-        let map = self.map(root).await?.context(
-            "cannot mark a root with no stored chunk map — derive the live set \
-             from persisted maps, never from an in-memory held-set",
-        )?;
+    async fn mark(&self, root: Root) -> Result<(), ChunkError> {
+        let map = self.map(root).await?.ok_or_else(|| {
+            ChunkError::Malformed(
+                "cannot mark a root with no stored chunk map — derive the live set \
+             from persisted maps, never from an in-memory held-set"
+                    .to_owned(),
+            )
+        })?;
         let mut marks = self.marks.borrow_mut();
         marks
             .get_or_insert_with(HashSet::new)
@@ -646,7 +658,7 @@ impl ChunkStore for IdbStore {
         Ok(())
     }
 
-    async fn sweep(&self) -> Result<u64> {
+    async fn sweep(&self) -> Result<u64, ChunkError> {
         let live = self.marks.borrow_mut().take().unwrap_or_default();
         let doomed: Vec<String> = self
             .stored_addresses()
@@ -660,7 +672,7 @@ impl ChunkStore for IdbStore {
         Ok(count)
     }
 
-    async fn clear(&self, hashes: &[ChunkHash]) -> Result<()> {
+    async fn clear(&self, hashes: &[ChunkHash]) -> Result<(), ChunkError> {
         let keys: Vec<String> = hashes.iter().map(ChunkHash::to_hex).collect();
         self.erase(CHUNKS, &keys).await
     }

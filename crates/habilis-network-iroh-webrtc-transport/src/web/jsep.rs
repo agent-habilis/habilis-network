@@ -11,8 +11,9 @@
 //! `complete` (which Chromium withholds until every STUN server answered or
 //! timed out).
 
+use futures::channel::oneshot;
 use wasm_bindgen::JsCast as _;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{Closure, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     RtcConfiguration, RtcDataChannel, RtcDataChannelEvent, RtcIceConnectionState,
@@ -51,12 +52,15 @@ const POLL_MS: i32 = 50;
 /// refuses (see [`crate::accept_ice_uri`]). Dropping the fields means a
 /// credentialed server cannot be expressed, let alone configured.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct IceServer {
+    /// The STUN and TURN URLs of the server.
     pub urls: Vec<String>,
 }
 
 /// ICE servers for the browser's own agent.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct IceServers(pub Vec<IceServer>);
 
 impl Default for IceServers {
@@ -73,6 +77,7 @@ impl Default for IceServers {
 }
 
 impl IceServers {
+    /// No STUN or TURN server, so only host addresses are used.
     #[must_use]
     pub fn host_only() -> Self {
         Self(Vec::new())
@@ -129,7 +134,9 @@ fn new_peer_connection(ice: &IceServers) -> Result<(RtcPeerConnection, bool), Js
 }
 
 /// A negotiated browser session attached into a [`BrowserHubTransport`].
+#[non_exhaustive]
 pub struct BrowserSession {
+    /// The endpoint id of the peer.
     pub remote: EndpointId,
 }
 
@@ -215,7 +222,7 @@ impl std::fmt::Debug for PendingOffer {
 pub struct PendingAnswer {
     peer_connection: OpenPeerConnection,
     /// Filled by `ondatachannel` when the remote opens the channel.
-    channel_rx: futures::channel::oneshot::Receiver<RtcDataChannel>,
+    channel_rx: oneshot::Receiver<RtcDataChannel>,
     /// Datagrams that arrived before the hub's handler was installed, in
     /// arrival order — see the buffering handler in [`answer`].
     backlog: std::rc::Rc<std::cell::RefCell<PreAttachBacklog>>,
@@ -387,7 +394,7 @@ pub async fn answer(
     let (peer_connection, expects_srflx) = new_peer_connection(ice)?;
     let peer_connection = OpenPeerConnection::new(peer_connection);
 
-    let (channel_tx, channel_rx) = futures::channel::oneshot::channel::<RtcDataChannel>();
+    let (channel_tx, channel_rx) = oneshot::channel::<RtcDataChannel>();
     let channel_tx = std::cell::RefCell::new(Some(channel_tx));
     // Everything that arrives before the hub's own `onmessage` is installed.
     //

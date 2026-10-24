@@ -27,11 +27,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, SilentSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{
     DirectorySelection, JoinTarget, LookupOpts, MeshConfig, MeshName, TransportPolicy,
 };
-use habilis_network::runtime::{CreateParams, JoinParams, Node, Resolved, SetupParams, setup_mesh};
+use habilis_network::runtime::{
+    CreateParams, JoinParams, Node, Resolved, SetupParams, SignalHandling, setup_mesh,
+};
 
 /// The do-nothing application. A peer that only carries presence still forms a
 /// mesh — payload handling is a separate concern from membership.
@@ -40,13 +41,7 @@ struct Probe;
 #[habilis_network::async_trait]
 impl NodeApp for Probe {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -105,21 +100,16 @@ async fn main() -> anyhow::Result<()> {
         };
         let mesh = habilis_network::runtime::derive_topic_mesh_config(
             &topic,
-            MeshConfig {
-                lookups: LookupOpts {
-                    mdns: true,
-                    dht: true,
-                    relay_lookup: ladder,
-                },
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
-                        .is_some_and(|value| value == "on"),
-                    udp,
-                    ..TransportPolicy::default()
-                },
-            },
+            MeshConfig::new(
+                LookupOpts::new(ladder).with_mdns(true).with_dht(true),
+                None,
+                None,
+                TransportPolicy::default()
+                    .with_relay_transport(
+                        std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
+                    )
+                    .with_udp(udp),
+            ),
         )?;
         return run_peer(
             habilis_network::runtime::SetupKind::Topic {
@@ -132,36 +122,35 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let arg = std::env::args().nth(1);
-    let Resolved { kind, author, .. } = match arg {
-        Some(id) => JoinParams {
-            target: id.parse::<JoinTarget>()?,
-            nickname: None,
-            password: None,
-        }
-        .resolve()?,
-        None => CreateParams {
-            name: MeshName::random(),
-            nickname: None,
+    let Resolved {
+        kind,
+        author,
+        advertise_directory: _advertise_directory,
+        ..
+    } = match arg {
+        Some(id) => JoinParams::new(id.parse::<JoinTarget>()?, None, None).resolve()?,
+        None => CreateParams::new(
+            MeshName::random(),
+            None,
             // Public preset: mDNS + DHT + the pinned relay ladder. The relay
             // rung is the part that matters here — it is the only leg a browser
             // peer has, and the rendezvous homes on it.
-            config: MeshConfig {
-                lookups: LookupOpts::public_preset(),
-                password: None,
-                issuer_pubkey: None,
+            MeshConfig::new(
+                LookupOpts::public_preset(),
+                None,
+                None,
                 // Baked into the id, so a joiner inherits it: only the
                 // creator reads the env var.
-                transport: TransportPolicy {
-                    relay_transport: std::env::var_os("MESH_RELAY_TRANSPORT")
-                        .is_some_and(|value| value == "on"),
-                    udp,
-                    ..TransportPolicy::default()
-                },
-            },
-            advertise: DirectorySelection::Unset,
-            password: None,
-            invite_only: false,
-        }
+                TransportPolicy::default()
+                    .with_relay_transport(
+                        std::env::var_os("MESH_RELAY_TRANSPORT").is_some_and(|value| value == "on"),
+                    )
+                    .with_udp(udp),
+            ),
+            DirectorySelection::Unset,
+        )
+        .with_password(None)
+        .with_invite_only(false)
         .resolve()?,
     };
 
@@ -179,22 +168,9 @@ async fn run_peer(
     let live = Arc::new(AtomicUsize::new(0));
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author: author.clone(),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            // No files and no control socket: this is an embedded peer, not a
-            // daemon something else drives.
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: Some(Arc::clone(&live)),
-        },
+        SetupParams::new(author.clone(), Arc::new(SilentSink::default()))
+            .with_max_peers(16)
+            .with_live_count(Arc::clone(&live)),
     )
     .await?;
 
@@ -204,7 +180,7 @@ async fn run_peer(
     // `handle_signals: false` — registering tokio's signal handlers suppresses
     // the OS default-terminate for the whole process, permanently. This example
     // wants ctrl-c to keep working.
-    let node: Node<Probe> = Node::spawn(config, Probe, None, false);
+    let node: Node<Probe> = Node::spawn(config, Probe, None, SignalHandling::Leave);
 
     let ticker = async {
         loop {

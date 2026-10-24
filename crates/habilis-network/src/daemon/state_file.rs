@@ -42,12 +42,13 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::protocol::mesh::MeshName;
 use crate::protocol::{MeshId, Nickname};
 use crate::util::clock;
 
+use std::sync::atomic;
 /// Owns a session state file for the lifetime of a daemon process.
 /// Drop removes the file (best effort), but because the daemon exits
 /// via `std::process::exit`, callers must also call `remove()`
@@ -68,7 +69,7 @@ pub struct StateFile {
     /// (see [`Self::set_discovery`]). Opaque to the engine, and the reason every
     /// write is 0o600: an app may put a bearer token in here.
     discovery: std::sync::Mutex<serde_json::Map<String, serde_json::Value>>,
-    write_failing: std::sync::atomic::AtomicBool,
+    write_failing: atomic::AtomicBool,
 }
 
 impl StateFile {
@@ -82,7 +83,7 @@ impl StateFile {
             topic: None,
             owner_pid: None,
             discovery: std::sync::Mutex::new(serde_json::Map::new()),
-            write_failing: std::sync::atomic::AtomicBool::new(false),
+            write_failing: atomic::AtomicBool::new(false),
         }
     }
 
@@ -247,8 +248,11 @@ impl Drop for StateFile {
 /// session identity is read separately ([`read_identity`]) only on the success
 /// path, so the poll loop allocates nothing beyond these two fields.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ReadySnapshot {
+    /// Whether the daemon is ready.
     pub ready: bool,
+    /// When the file was last written, in seconds since the epoch.
     pub last_updated: u64,
 }
 
@@ -256,9 +260,13 @@ pub struct ReadySnapshot {
 /// `None` when the state file is unreadable, not JSON, or predates that field
 /// — so the JSON the gate prints carries only the keys actually present.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SessionIdentity {
+    /// The mesh id, as text.
     pub mesh: Option<String>,
+    /// The name of the mesh.
     pub name: Option<String>,
+    /// The nickname of the member.
     pub nickname: Option<String>,
     /// The raw topic string; present only for a topic gossip.
     pub topic: Option<String>,
@@ -305,12 +313,17 @@ fn mesh_field(doc: &serde_json::Value) -> Option<String> {
 /// written by an older binary predates `pid`, and discovery must still be
 /// able to *report* such an entry rather than error on it.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SessionEntry {
+    /// The mesh id, as text.
     pub mesh: Option<String>,
+    /// The name of the mesh.
     pub name: Option<String>,
+    /// The nickname of the member.
     pub nickname: Option<String>,
     /// The raw topic string; present only for a topic gossip.
     pub topic: Option<String>,
+    /// The process id of the daemon.
     pub pid: Option<u32>,
     /// The process the daemon lives for; present only for a daemon started
     /// with an owner (see `EventLoopConfig::with_owner_pid`).
@@ -356,23 +369,35 @@ pub fn read_session_entry(path: &Path) -> Option<SessionEntry> {
 /// # Errors
 /// The file exists but is not valid JSON, or is missing the `ready` /
 /// `last_updated` fields.
-pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>> {
+pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>, StateFileError> {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        Err(source) => {
+            return Err(StateFileError::Unreadable {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
     };
     let value: serde_json::Value =
-        serde_json::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
+        serde_json::from_str(&contents).map_err(|source| StateFileError::Unparsable {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let ready = value["ready"]
         .as_bool()
-        .with_context(|| format!("state file {} missing bool field `ready`", path.display()))?;
-    let last_updated = value["last_updated"].as_u64().with_context(|| {
-        format!(
-            "state file {} missing integer field `last_updated`",
-            path.display()
-        )
-    })?;
+        .ok_or_else(|| StateFileError::MissingField {
+            path: path.to_path_buf(),
+            what: "bool field `ready`",
+        })?;
+    let last_updated =
+        value["last_updated"]
+            .as_u64()
+            .ok_or_else(|| StateFileError::MissingField {
+                path: path.to_path_buf(),
+                what: "integer field `last_updated`",
+            })?;
     Ok(Some(ReadySnapshot {
         ready,
         last_updated,
@@ -738,5 +763,54 @@ mod tests {
         std::fs::write(&path, r#"{"ready":true,"gossip":"round"}"#).unwrap();
         assert!(super::read_snapshot(&path).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Why a state file cannot be read as a snapshot.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum StateFileError {
+    /// The file exists but cannot be read.
+    Unreadable {
+        /// The file.
+        path: PathBuf,
+        /// The read error.
+        source: std::io::Error,
+    },
+    /// The file is not valid JSON.
+    Unparsable {
+        /// The file.
+        path: PathBuf,
+        /// The parse error.
+        source: serde_json::Error,
+    },
+    /// The file lacks a field the snapshot needs.
+    MissingField {
+        /// The file.
+        path: PathBuf,
+        /// The field and its type, for example: bool field `ready`.
+        what: &'static str,
+    },
+}
+
+impl std::fmt::Display for StateFileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable { path, .. } => write!(formatter, "reading {}", path.display()),
+            Self::Unparsable { path, .. } => write!(formatter, "parsing {}", path.display()),
+            Self::MissingField { path, what } => {
+                write!(formatter, "state file {} missing {what}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for StateFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unreadable { source, .. } => Some(source),
+            Self::Unparsable { source, .. } => Some(source),
+            Self::MissingField { .. } => None,
+        }
     }
 }

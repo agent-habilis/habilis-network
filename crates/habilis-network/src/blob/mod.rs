@@ -32,13 +32,17 @@ use anyhow::Result;
 use iroh::Endpoint;
 
 use crate::protocol::mesh::LookupOpts;
+use crate::transport::PayloadPath;
 
+use crate::protocol::{crypto, identity};
 mod consume;
+mod error;
 mod produce;
 mod store;
 mod ticket;
 
 pub use consume::fetch;
+pub use error::BlobError;
 pub use produce::BlobServer;
 pub use ticket::BlobTicket;
 
@@ -51,6 +55,7 @@ pub use ticket::BlobTicket;
 pub struct ContentId(String);
 
 impl ContentId {
+    /// Wraps `id` as it is. Nothing is checked.
     #[must_use]
     pub fn new(id: &str) -> Self {
         Self(id.to_owned())
@@ -61,11 +66,16 @@ impl ContentId {
 /// and the mesh password it inherits (so a scraped ticket cannot be redeemed
 /// without it).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct OffloadRequest {
+    /// The file to offload.
     pub path: PathBuf,
+    /// The directory where the blob is spooled.
     pub spool_dir: PathBuf,
+    /// The content group that the blob belongs to.
     pub content_id: ContentId,
-    pub password: Option<crate::protocol::crypto::Password>,
+    /// The mesh password that the ticket inherits, so a scraped ticket cannot be redeemed without it.
+    pub password: Option<crypto::Password>,
 }
 
 /// Offload a file over the blob channel and return the [`BlobTicket`] that
@@ -92,7 +102,18 @@ pub struct OffloadRequest {
 pub async fn offload(
     server: &mut Option<BlobServer>,
     lookups: &LookupOpts,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
+    request: OffloadRequest,
+) -> Result<BlobTicket, BlobError> {
+    offload_checked(server, lookups, relay_transport, request)
+        .await
+        .map_err(BlobError::internal)
+}
+
+async fn offload_checked(
+    server: &mut Option<BlobServer>,
+    lookups: &LookupOpts,
+    relay_transport: PayloadPath,
     request: OffloadRequest,
 ) -> Result<BlobTicket> {
     let OffloadRequest {
@@ -110,6 +131,7 @@ pub async fn offload(
         .expect("server set above")
         .register(&path, content_id)
         .await
+        .map_err(anyhow::Error::from)
 }
 
 /// ALPN for the blob channel — a raw bidirectional QUIC stream with its own
@@ -146,7 +168,7 @@ impl BlobDigest {
 
 impl std::fmt::Display for BlobDigest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        crate::protocol::identity::write_hex(formatter, &self.0)
+        identity::write_hex(formatter, &self.0)
     }
 }
 
@@ -178,12 +200,15 @@ async fn wait_online(endpoint: &Endpoint) {
 mod tests {
     use super::{BlobServer, ContentId, fetch};
     use crate::protocol::mesh::LookupOpts;
+    use crate::transport::PayloadPath;
     use habilis_network_test_tracing::test;
     use rand::RngCore;
     use std::fs;
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use crate::protocol::crypto;
+    use iroh::endpoint::presets;
     /// A secret that is already in a wiped buffer (the blob salt, the token read off
     /// the wire) moves into its type whole, through the constructor that takes the
     /// buffer, with no plain `[u8; 32]` copy on the way. This does not compile
@@ -262,9 +287,14 @@ mod tests {
     /// Start a loopback producer serving `payload`, fetch it back over a second
     /// loopback endpoint, and return the fetched bytes.
     async fn round_trip(payload: &[u8]) -> Vec<u8> {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .expect("start producer");
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .expect("start producer");
         let src = temp_file(payload);
         let ticket = server
             .register(&src, ContentId::new("blob-test-content"))
@@ -282,17 +312,22 @@ mod tests {
     /// carries the policy to the consumer.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn relay_lookup_only_still_serves_a_direct_fetch() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, false)
-            .await
-            .expect("start producer");
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("start producer");
         let src = temp_file(b"direct bytes");
         let ticket = server
             .register(&src, ContentId::new("blob-test-direct"))
             .await
             .expect("register");
-        assert!(!ticket.relay_transport);
+        assert_eq!(ticket.relay_transport, PayloadPath::DirectOnly);
         let decoded = super::BlobTicket::decode(&ticket.encode()).expect("ticket round-trips");
-        assert!(!decoded.relay_transport);
+        assert_eq!(decoded.relay_transport, PayloadPath::DirectOnly);
         let mut out = Vec::new();
         fetch(&decoded, &mut out, None)
             .await
@@ -318,16 +353,21 @@ mod tests {
             pre_auth: Duration::from_millis(300),
             max_inflight: 4,
         };
-        let server =
-            BlobServer::start_with_limits(LookupOpts::loopback(), temp_spool(), None, true, limits)
-                .await
-                .expect("start producer");
+        let server = BlobServer::start_with_limits(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+            limits,
+        )
+        .await
+        .expect("start producer");
 
         // Connect and then do nothing at all — never open a stream, never send.
         let mut clients = Vec::new();
         let mut idle = Vec::new();
         for _ in 0..12u8 {
-            let client = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            let client = iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await
@@ -388,7 +428,7 @@ mod tests {
         let ticket = super::offload(
             &mut server,
             &LookupOpts::loopback(),
-            true,
+            PayloadPath::RelayAllowed,
             super::OffloadRequest {
                 path: src.clone(),
                 spool_dir: temp_spool(),
@@ -413,7 +453,7 @@ mod tests {
         let again = super::offload(
             &mut server,
             &LookupOpts::loopback(),
-            true,
+            PayloadPath::RelayAllowed,
             super::OffloadRequest {
                 path: src.clone(),
                 spool_dir: temp_spool(),
@@ -439,7 +479,7 @@ mod tests {
             LookupOpts::loopback(),
             temp_spool(),
             Some(password.clone()),
-            true,
+            PayloadPath::RelayAllowed,
         )
         .await
         .unwrap();
@@ -478,9 +518,14 @@ mod tests {
     /// evicting one group must leave the other's ticket redeemable.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn evicting_one_group_keeps_a_shared_blob_for_the_other() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"shared bytes");
         let group_a = ContentId::new("blob-test-group-a");
         let group_b = ContentId::new("blob-test-group-b");
@@ -506,15 +551,20 @@ mod tests {
 
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_bad_secret_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"secret payload");
         let mut ticket = server
             .register(&src, ContentId::new("blob-test-content"))
             .await
             .unwrap();
-        ticket.secret = crate::protocol::crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
+        ticket.secret = crypto::TicketSecret::from_bytes([0u8; super::SECRET_LEN]);
         let mut out = Vec::new();
         assert!(
             fetch(&ticket, &mut out, None).await.is_err(),
@@ -526,9 +576,14 @@ mod tests {
 
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_unknown_hash_is_refused() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"real content");
         let mut ticket = server
             .register(&src, ContentId::new("blob-test-content"))
@@ -546,9 +601,14 @@ mod tests {
 
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_size_disagreement_is_rejected() {
-        let server = BlobServer::start(LookupOpts::loopback(), temp_spool(), None, true)
-            .await
-            .unwrap();
+        let server = BlobServer::start(
+            LookupOpts::loopback(),
+            temp_spool(),
+            None,
+            PayloadPath::RelayAllowed,
+        )
+        .await
+        .unwrap();
         let src = temp_file(b"exactly this many bytes");
         let mut ticket = server
             .register(&src, ContentId::new("blob-test-content"))

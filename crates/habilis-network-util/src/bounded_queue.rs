@@ -13,6 +13,8 @@
 
 use std::collections::VecDeque;
 
+/// A first-in, first-out queue of at most `capacity` items. It keeps duplicates, and a push is
+/// rejected when the queue is full.
 #[derive(Debug)]
 pub struct BoundedQueue<T> {
     capacity: usize,
@@ -21,6 +23,7 @@ pub struct BoundedQueue<T> {
 
 impl<T> BoundedQueue<T> {
     #[must_use]
+    /// An empty queue that holds at most `capacity` items.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -46,6 +49,7 @@ impl<T> BoundedQueue<T> {
     }
 
     #[must_use]
+    /// Whether the queue holds no items.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }

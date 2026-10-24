@@ -183,6 +183,7 @@ mod key_list {
 
 /// Why a match could not be started.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LobbyError {
     /// Fewer than two players are present.
     NotEnoughPlayers,
@@ -211,6 +212,7 @@ impl std::error::Error for LobbyError {}
 
 /// The agreed shape of a match.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StartedMatch {
     /// Which match this is, counting from 1. Every peer agrees on it, so
     /// it doubles as a match number to show a player.

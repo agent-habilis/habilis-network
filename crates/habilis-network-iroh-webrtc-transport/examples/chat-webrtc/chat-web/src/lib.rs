@@ -35,18 +35,20 @@ use chat_proto::{
     CHAT_ALPN, ClientMsg, FRAME_HEADER_LEN, SIGNAL_ALPN, ServerMsg, Ticket, decode_body,
     decode_frame_len, encode_frame,
 };
-use habilis_network_iroh_webrtc_transport::iroh::endpoint::{Connection, Path, RecvStream, presets};
+use futures::StreamExt as _;
+use futures::channel::mpsc;
+use habilis_network_iroh_webrtc_transport::iroh::endpoint::{
+    Connection, Path, RecvStream, presets,
+};
 use habilis_network_iroh_webrtc_transport::iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr,
+    Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr, endpoint,
 };
 use habilis_network_iroh_webrtc_transport::{
     BrowserHubTransport, IceServers, MAX_ENVELOPE_BYTES, SignalEnvelope, WEBRTC_TRANSPORT_ID,
     WebRtcHandle, browser_offer, custom_addr,
 };
-use futures::StreamExt as _;
-use futures::channel::mpsc;
 use serde::Serialize;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 /// What the tab is told, as it happens.
 ///
@@ -58,13 +60,27 @@ use wasm_bindgen::prelude::*;
 enum Event {
     /// Progress during the join, so a tab is never silently busy for the ten
     /// seconds ICE gathering can take.
-    Status { text: String },
-    Welcome { you: String, roster: Vec<String> },
-    Joined { nick: String },
-    Left { nick: String },
-    Said { nick: String, text: String },
+    Status {
+        text: String,
+    },
+    Welcome {
+        you: String,
+        roster: Vec<String>,
+    },
+    Joined {
+        nick: String,
+    },
+    Left {
+        nick: String,
+    },
+    Said {
+        nick: String,
+        text: String,
+    },
     /// The link is gone. Terminal — nothing follows it.
-    Closed { reason: String },
+    Closed {
+        reason: String,
+    },
 }
 
 /// A joined tab.
@@ -177,7 +193,9 @@ impl ChatPeer {
                 you.clone()
             }
             ServerMsg::Joined { .. } | ServerMsg::Left { .. } | ServerMsg::Said { .. } => {
-                return Err(JsValue::from_str("the room answered the join with something else"));
+                return Err(JsValue::from_str(
+                    "the room answered the join with something else",
+                ));
             }
         };
 
@@ -301,7 +319,8 @@ async fn negotiate(
         .map_err(|error| err("write the offer", &error))?;
     // `finish` is the frame boundary: one envelope per direction, delimited by
     // the end of the stream. No length prefix, unlike the chat.
-    send.finish().map_err(|error| err("finish the offer", &error))?;
+    send.finish()
+        .map_err(|error| err("finish the offer", &error))?;
 
     let raw = recv
         .read_to_end(MAX_ENVELOPE_BYTES)
@@ -312,10 +331,17 @@ async fn negotiate(
     match &answer {
         SignalEnvelope::Answer { .. } => {}
         SignalEnvelope::Offer { .. } => {
-            return Err(JsValue::from_str("the room sent an offer where an answer belongs"));
+            return Err(JsValue::from_str(
+                "the room sent an offer where an answer belongs",
+            ));
         }
         SignalEnvelope::Error { reason, .. } => {
             return Err(JsValue::from_str(&format!("the room refused: {reason}")));
+        }
+        _ => {
+            return Err(JsValue::from_str(
+                "the room sent an envelope this client does not know",
+            ));
         }
     }
 
@@ -348,10 +374,7 @@ fn spawn_reader(mut recv: RecvStream, emit: Emitter) {
 }
 
 /// Drain the outbox onto the stream.
-fn spawn_writer(
-    mut send: habilis_network_iroh_webrtc_transport::iroh::endpoint::SendStream,
-    emit: Emitter,
-) -> mpsc::UnboundedSender<String> {
+fn spawn_writer(mut send: endpoint::SendStream, emit: Emitter) -> mpsc::UnboundedSender<String> {
     let (tx, mut rx) = mpsc::unbounded::<String>();
     wasm_bindgen_futures::spawn_local(async move {
         while let Some(text) = rx.next().await {
@@ -406,10 +429,7 @@ fn label_of(addr: &TransportAddr) -> String {
 // The same two reads the CLI does, against the same `chat_proto` helpers. Not
 // shared code only because the stream types cannot be: there is no tokio here.
 
-async fn write_msg<T: Serialize>(
-    send: &mut habilis_network_iroh_webrtc_transport::iroh::endpoint::SendStream,
-    msg: &T,
-) -> Result<(), JsValue> {
+async fn write_msg<T: Serialize>(send: &mut endpoint::SendStream, msg: &T) -> Result<(), JsValue> {
     let frame = encode_frame(msg).map_err(|error| err("encode a frame", &error))?;
     send.write_all(&frame)
         .await

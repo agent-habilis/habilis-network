@@ -136,7 +136,7 @@ async fn direct(args: &Args, open: &mut Open) -> Result<Measured, String> {
             .feed_topology(bob.handle.link_vector(vec![(AppId::new(alice.id), COST)]));
         open.routers.push(
             Router::builder(bob.app.clone())
-                .accept(BENCH_ALPN, Bench)
+                .accept(BENCH_ALPN, Bench::new())
                 .spawn(),
         );
         ladder_measure(&alice.app, EndpointAddr::from(bob.id), args, 0.0).await
@@ -175,7 +175,7 @@ async fn third(args: &Args, open: &mut Open) -> Result<Measured, String> {
         }
         open.routers.push(
             Router::builder(bob.app.clone())
-                .accept(BENCH_ALPN, Bench)
+                .accept(BENCH_ALPN, Bench::new())
                 .spawn(),
         );
         let measured = ladder_measure(&alice.app, EndpointAddr::from(bob.id), args, 0.0).await?;

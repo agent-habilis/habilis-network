@@ -2,7 +2,7 @@
 //! generator/signal reactive core and `visage-tui`'s terminal diffing —
 //! see the plan's `visage-rust-tui` section for scope and provenance.
 //!
-//! Uses native Rust generators (nightly-only; see `native/rust-toolchain.toml`)
+//! Uses native Rust generators (nightly-only; the root `rust-toolchain.toml` pins a nightly)
 //! rather than a stable-Rust emulation crate — a component is written
 //! directly with the `yield` keyword:
 //!

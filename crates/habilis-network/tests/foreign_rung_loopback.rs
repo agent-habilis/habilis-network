@@ -93,11 +93,9 @@ async fn meet(foreign_rungs: &[usize]) -> (bool, [u16; 8]) {
     }
 
     let open = |nick: &'static str| {
-        let opts = membership::Opts {
-            mesh: Some(mesh.to_string()),
-            nick: Some(nick.to_owned()),
-            ..membership::Opts::default()
-        };
+        let opts = membership::Opts::default()
+            .with_mesh(Some(mesh.to_string()))
+            .with_nick(Some(nick.to_owned()));
         async move {
             let (sink, _events) = membership::json_sink();
             membership::join(&opts, sink).await.expect("open a member")

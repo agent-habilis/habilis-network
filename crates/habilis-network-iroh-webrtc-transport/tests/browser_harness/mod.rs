@@ -29,7 +29,7 @@
 //!   `ring_core_*` symbols as imports from a module called `env`. The browser
 //!   then refuses the module with `Failed to resolve module specifier "env"`,
 //!   and the runner reports only `Failed to detect test as having been run`.
-//!   `examples/chat-webrtc/build-wasm.sh` says the same thing.
+//!   `examples/chat-webrtc/build-wasm.ts` says the same thing.
 //! - **`--release`.** The debug build is ~137 MB of wasm and the browser gives
 //!   up loading it, with the same unhelpful message.
 //! - **A `chromedriver` matching the Chrome it drives** — only on the webdriver
@@ -110,7 +110,9 @@ impl Pair {
 
         let client = browser_endpoint(key_client, &client_hub).await?;
         let server = browser_endpoint(key_server, &server_hub).await?;
-        let router = Router::builder(server).accept(BENCH_ALPN, Bench).spawn();
+        let router = Router::builder(server)
+            .accept(BENCH_ALPN, Bench::new())
+            .spawn();
 
         // Host-only ICE: both agents are in this tab, so loopback candidates
         // pair without a STUN round trip — and a test that reached a public

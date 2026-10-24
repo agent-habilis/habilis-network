@@ -246,14 +246,15 @@ mod tests {
     use super::{MeshReceiver, TopicItem, spawn_split};
     use crate::testing::endpoint_id;
 
+    use tokio::sync::mpsc;
     type Mesh = MeshReceiver<BoxStream<'static, TopicItem>>;
 
     /// A topic that the test feeds by hand.
     fn topic() -> (
-        tokio::sync::mpsc::UnboundedSender<TopicItem>,
+        mpsc::UnboundedSender<TopicItem>,
         BoxStream<'static, TopicItem>,
     ) {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let events = stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         })
@@ -271,13 +272,9 @@ mod tests {
 
     /// A frame for the node `app`, as the transport of another member puts it on the topic.
     fn frame_for(app: iroh::EndpointId) -> Bytes {
-        Frame {
-            dst: app,
-            src: endpoint_id(8),
-            datagram: b"datagram",
-        }
-        .encode()
-        .expect("a frame")
+        Frame::fixture(app, endpoint_id(8), b"datagram")
+            .encode()
+            .expect("a frame")
     }
 
     /// Wait until the handle has counted `frames` frames, or fail after 5 s.
@@ -674,13 +671,9 @@ mod real_gossip {
             }
             let mut datagram = vec![7u8; MAX_DATAGRAM_LEN];
             datagram[..8].copy_from_slice(&sent.to_le_bytes());
-            let frame = Frame {
-                dst: b_endpoint.id(),
-                src: a_endpoint.id(),
-                datagram: &datagram,
-            }
-            .encode()
-            .expect("frame");
+            let frame = Frame::fixture(b_endpoint.id(), a_endpoint.id(), &datagram)
+                .encode()
+                .expect("frame");
             a_sender.broadcast(frame).await.expect("send");
             sent += 1;
             if mesh_sent < mesh_total {

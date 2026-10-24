@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use iroh::Endpoint;
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 use crate::lookup::build_endpoint;
 use crate::protocol::crypto::{Password, TicketAuth, TicketSecret, ct_eq};
 use crate::protocol::mesh::LookupOpts;
+use crate::transport::PayloadPath;
 use crate::util::consts::MAX_BLOB_BYTES;
 
 use super::store::BlobStore;
@@ -72,7 +73,7 @@ pub struct BlobServer {
     password: Option<Password>,
     /// `TransportPolicy::relay`. Off, a fetch whose selected path is the
     /// relay is refused before any byte.
-    relay_transport: bool,
+    relay_transport: PayloadPath,
     /// Serves currently in flight. The accept loop holds the counter it
     /// actually reads; this handle exists so a test can observe that a peer
     /// which connects and then goes quiet cannot accumulate them.
@@ -100,7 +101,18 @@ impl BlobServer {
         lookups: LookupOpts,
         spool_dir: PathBuf,
         password: Option<Password>,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
+    ) -> Result<Self, super::BlobError> {
+        Self::start_checked(lookups, spool_dir, password, relay_transport)
+            .await
+            .map_err(super::BlobError::internal)
+    }
+
+    async fn start_checked(
+        lookups: LookupOpts,
+        spool_dir: PathBuf,
+        password: Option<Password>,
+        relay_transport: PayloadPath,
     ) -> Result<Self> {
         Self::start_with_limits(
             lookups,
@@ -118,7 +130,7 @@ impl BlobServer {
         lookups: LookupOpts,
         spool_dir: PathBuf,
         password: Option<Password>,
-        relay_transport: bool,
+        relay_transport: PayloadPath,
         limits: ServeLimits,
     ) -> Result<Self> {
         let endpoint =
@@ -177,7 +189,17 @@ impl BlobServer {
     ///
     /// # Errors
     /// The file is unreadable, exceeds `MAX_BLOB_BYTES`, or snapshotting fails.
-    pub async fn register(&self, path: &Path, content_id: ContentId) -> Result<BlobTicket> {
+    pub async fn register(
+        &self,
+        path: &Path,
+        content_id: ContentId,
+    ) -> Result<BlobTicket, super::BlobError> {
+        self.register_checked(path, content_id)
+            .await
+            .map_err(super::BlobError::internal)
+    }
+
+    async fn register_checked(&self, path: &Path, content_id: ContentId) -> Result<BlobTicket> {
         let (sha256, size) = hash_file(path.to_path_buf()).await?;
         if size > MAX_BLOB_BYTES {
             bail!("file too large to offload ({size} bytes > {MAX_BLOB_BYTES})");
@@ -250,7 +272,7 @@ fn spawn_accept_loop(
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
     inflight: Arc<AtomicUsize>,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) {
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
@@ -282,7 +304,7 @@ async fn handle_incoming(
     store: Arc<Mutex<BlobStore>>,
     limits: ServeLimits,
     inflight: Arc<AtomicUsize>,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) {
     if let Err(error) = serve_connection(incoming, &store, limits, relay_transport).await {
         tracing::debug!(%error, "blob serve connection ended");
@@ -295,7 +317,7 @@ async fn serve_connection(
     incoming: Incoming,
     store: &Mutex<BlobStore>,
     limits: ServeLimits,
-    relay_transport: bool,
+    relay_transport: PayloadPath,
 ) -> Result<()> {
     // One deadline across everything the requester controls. The secret that
     // authorizes this fetch is inside the request we are waiting for, so none
@@ -396,6 +418,7 @@ async fn stream_file(path: &Path, send: &mut SendStream) -> Result<()> {
 /// Read + SHA-256-hash a file off the async runtime (`spawn_blocking`), never
 /// loading it whole. Returns the digest and byte length.
 async fn hash_file(path: PathBuf) -> Result<(BlobDigest, u64)> {
+    use sha2::Digest;
     tokio::task::spawn_blocking(move || {
         let mut file = std::fs::File::open(&path)
             .with_context(|| format!("opening {} failed", path.display()))?;

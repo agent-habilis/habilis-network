@@ -139,10 +139,10 @@ fn synthetic_arrival(mesh: &MeshId, identity: &Identity, triggering: &Verified) 
 /// already computed for it, passed to [`handle_presence`]. Constructed by
 /// [`crate::gossip::recv::ingest`], across the `gossip`/`lifecycle` module
 /// boundary — hence `pub(crate)` rather than module-private.
-pub(crate) struct PresenceEvent<'a> {
-    pub(crate) message: &'a Verified,
+pub(crate) struct PresenceEvent<'message> {
+    pub(crate) message: &'message Verified,
     pub(crate) subtype: PresenceSubtype,
-    pub(crate) update: &'a membership::MembershipUpdate,
+    pub(crate) update: &'message membership::MembershipUpdate,
     pub(crate) surfaceable: bool,
 }
 

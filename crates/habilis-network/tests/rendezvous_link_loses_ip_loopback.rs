@@ -27,6 +27,7 @@ use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::Lookup;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// The probe deadline of 15 s and 10 s more: a link that stayed on the relay
 /// would be closed inside it, and a session round takes a few seconds.
 const WINDOW: Duration = Duration::from_secs(25);
@@ -73,21 +74,21 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 
@@ -135,9 +136,7 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
         "habilis_network=info,habilis_network::transport=debug,habilis_network::gossip=info",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay).await;
         let bob = Member::join("bob", &alice).await;
 
@@ -155,6 +154,21 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
             );
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+        // The roster is presence, not a gossip link. Cut IP only once the member pair is a
+        // neighbor on both ends, or the test cuts a link that was never up.
+        let member_gossip_links = || {
+            logs()
+                .lines()
+                .filter(|line| {
+                    line.contains("gossip neighbor up") && line.contains("is_rendezvous=false")
+                })
+                .count()
+        };
+        assert!(
+            eventually(Duration::from_mins(1), || member_gossip_links() >= 2).await,
+            "the member pair never became a gossip neighbor on both ends\n{}",
+            trace()
+        );
         let downs_before = rendezvous_lines("down");
 
         alice.block_udp(true).await;
@@ -167,9 +181,18 @@ fn the_rendezvous_link_stays_up_when_ip_is_lost() {
          WebRTC session is offered only after the close\n{}",
             trace()
         );
+        let rendezvous = alice.membership.node.endpoint_id().to_string();
+        let attached_to_rendezvous = || {
+            ["answerer", "offerer"].iter().any(|role| {
+                logs().contains(&format!(
+                    "webrtc session attached ({role}) remote={rendezvous}"
+                ))
+            })
+        };
         assert!(
-            logs().contains("webrtc session attached to the linked rendezvous"),
-            "no session attached to the linked rendezvous\n{}",
+            logs().contains("webrtc session attached to the linked rendezvous")
+                || attached_to_rendezvous(),
+            "the rendezvous has no WebRTC session after the IP loss\n{}",
             trace()
         );
         for member in [alice, bob] {

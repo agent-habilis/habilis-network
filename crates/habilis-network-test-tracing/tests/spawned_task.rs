@@ -2,7 +2,8 @@
 //! owns the guard. Alone in its binary: the event comes from a worker thread,
 //! so it reaches every live guard of the binary.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use habilis_network_test_tracing::catch_panic;
+use std::panic::AssertUnwindSafe;
 
 use habilis_network_test_tracing::init;
 
@@ -12,7 +13,7 @@ fn a_warn_from_a_spawned_task_fails() {
         .worker_threads(2)
         .build()
         .expect("runtime");
-    let err = catch_unwind(AssertUnwindSafe(|| {
+    let err = catch_panic(AssertUnwindSafe(|| {
         let _log = init();
         runtime.block_on(async {
             tokio::spawn(async { tracing::warn!("relay actor errored") })

@@ -69,6 +69,7 @@ use n0_future::task::AbortHandle;
 use crate::util::clock::Instant;
 use crate::util::tuning;
 
+use tokio::sync::mpsc;
 /// How long to leave a peer alone after it answered "at my cap", and how that
 /// grows.
 ///
@@ -281,9 +282,9 @@ struct Inner {
     /// The peers that closed a connection of ours with the `EVICTED` code.
     evicted_by: super::ceiling::EvictionBackoff,
     /// Where an answered session is reported to the event loop, set once the loop has its channel.
-    proven_sink: Option<tokio::sync::mpsc::UnboundedSender<super::probe::DirectOutcome>>,
+    proven_sink: Option<mpsc::UnboundedSender<super::probe::DirectOutcome>>,
     /// Where the relay watch of a dialed gossip link reports to the event loop, set with the sink above.
-    path_sink: Option<tokio::sync::mpsc::UnboundedSender<super::probe::PathChange>>,
+    path_sink: Option<mpsc::UnboundedSender<super::probe::PathChange>>,
     /// The gossip transport of the endpoint, when the mesh has `gossip`. The table sees every
     /// connection, so it tells the handle which peers are established and which pairs a higher
     /// rung carries (see [`Inner::sync_gossip`]).
@@ -498,6 +499,7 @@ impl SignalAdmission {
             .saturating_sub(inner.ceiling.units() + inner.rounds_in_flight())
     }
 
+    /// An admission table with a ceiling of `cap` direct connections and none in use.
     #[must_use]
     pub fn new(cap: usize) -> Self {
         Self {
@@ -1028,22 +1030,16 @@ impl SignalAdmission {
     }
 
     /// The event loop's channel for the sessions that this node answered.
-    pub(crate) fn set_proven_sink(
-        &self,
-        sink: tokio::sync::mpsc::UnboundedSender<super::probe::DirectOutcome>,
-    ) {
+    pub(crate) fn set_proven_sink(&self, sink: mpsc::UnboundedSender<super::probe::DirectOutcome>) {
         self.lock().proven_sink = Some(sink);
     }
 
     /// The event loop's channel for the dialed gossip links that left a direct path.
-    pub(crate) fn set_path_sink(
-        &self,
-        sink: tokio::sync::mpsc::UnboundedSender<super::probe::PathChange>,
-    ) {
+    pub(crate) fn set_path_sink(&self, sink: mpsc::UnboundedSender<super::probe::PathChange>) {
         self.lock().path_sink = Some(sink);
     }
 
-    fn path_sink(&self) -> Option<tokio::sync::mpsc::UnboundedSender<super::probe::PathChange>> {
+    fn path_sink(&self) -> Option<mpsc::UnboundedSender<super::probe::PathChange>> {
         self.lock().path_sink.clone()
     }
 
@@ -1192,6 +1188,13 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "iroh-test-utils")]
+    use crate::lookup::test_relay;
+    use crate::transport::path;
+    use iroh::endpoint::presets;
+    #[cfg(feature = "iroh-test-utils")]
+    use tokio::sync::mpsc;
+    use tokio::sync::oneshot;
     fn peer(byte: u8) -> EndpointId {
         iroh::SecretKey::from_bytes(&[byte; 32]).public()
     }
@@ -1783,13 +1786,11 @@ mod tests {
                 Ok(())
             }
         }
-        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
         let bind = |hook: Option<ConnectionHook>| {
             let relay_url = relay_url.clone();
             async move {
-                let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                let mut builder = iroh::Endpoint::builder(presets::Minimal)
                     .relay_mode(iroh::RelayMode::custom([relay_url]))
                     .clear_ip_transports();
                 if let Some(hook) = hook {
@@ -1855,13 +1856,11 @@ mod tests {
                 Ok(())
             }
         }
-        let (relay_url, _relay_server) = crate::lookup::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, _relay_server) = test_relay::spawn_plain().await.expect("local relay");
         let bind = |hook: Option<ConnectionHook>| {
             let relay_url = relay_url.clone();
             async move {
-                let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+                let mut builder = iroh::Endpoint::builder(presets::Minimal)
                     .relay_mode(iroh::RelayMode::custom([relay_url]))
                     .clear_ip_transports();
                 if let Some(hook) = hook {
@@ -1901,19 +1900,17 @@ mod tests {
         node: iroh::Endpoint,
         relay_url: iroh::RelayUrl,
         _relay_server: Box<dyn std::any::Any + Send>,
-        reports: tokio::sync::mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
-        closed: tokio::sync::mpsc::UnboundedReceiver<(EndpointId, iroh::endpoint::ConnectionError)>,
+        reports: mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
+        closed: mpsc::UnboundedReceiver<(EndpointId, iroh::endpoint::ConnectionError)>,
         servers: Vec<(iroh::Endpoint, iroh::protocol::Router)>,
     }
 
     #[cfg(feature = "iroh-test-utils")]
     impl Fixture {
         async fn new(cap: usize) -> Self {
-            let (relay_url, relay_server) = crate::lookup::test_relay::spawn_plain()
-                .await
-                .expect("local relay");
+            let (relay_url, relay_server) = test_relay::spawn_plain().await.expect("local relay");
             let admission = SignalAdmission::new(cap);
-            let (reports, closed) = tokio::sync::mpsc::unbounded_channel();
+            let (reports, closed) = mpsc::unbounded_channel();
             let mut fixture = Self {
                 node: Self::bind(&relay_url, Some(admission.connection_hook())).await,
                 admission,
@@ -1928,7 +1925,7 @@ mod tests {
         }
 
         async fn bind(relay_url: &iroh::RelayUrl, hook: Option<ConnectionHook>) -> iroh::Endpoint {
-            let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            let mut builder = iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::custom([relay_url.clone()]))
                 .clear_ip_transports();
             if let Some(hook) = hook {
@@ -1949,7 +1946,7 @@ mod tests {
             #[derive(Debug, Clone)]
             struct Report(
                 EndpointId,
-                tokio::sync::mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
+                mpsc::UnboundedSender<(EndpointId, iroh::endpoint::ConnectionError)>,
             );
             impl ProtocolHandler for Report {
                 async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
@@ -2201,14 +2198,14 @@ mod tests {
     /// is off, which is its default.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_gossip_connection_on_the_gossip_path_is_closed_by_the_hook() {
-        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
         use iroh::endpoint::ConnectionError;
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
         use iroh::{EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
         #[derive(Debug, Clone)]
-        struct Report(Arc<Mutex<Option<tokio::sync::oneshot::Sender<ConnectionError>>>>);
+        struct Report(Arc<Mutex<Option<oneshot::Sender<ConnectionError>>>>);
         impl ProtocolHandler for Report {
             async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
                 let reason = conn.closed().await;
@@ -2223,7 +2220,7 @@ mod tests {
             SecretKey::from_bytes(&[11; 32]),
             SecretKey::from_bytes(&[12; 32]),
         );
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice_handle, bob_handle) = (
             GossipHandle::new(alice_key.public()),
             GossipHandle::new(bob_key.public()),
@@ -2231,7 +2228,7 @@ mod tests {
         hub.join(&alice_handle);
         hub.join(&bob_handle);
         let bind = |key: SecretKey, handle: GossipHandle, admission: Option<SignalAdmission>| async move {
-            let builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            let builder = iroh::Endpoint::builder(presets::Minimal)
                 .secret_key(key)
                 .relay_mode(RelayMode::Disabled)
                 .add_custom_transport(handle.custom_transport())
@@ -2246,14 +2243,14 @@ mod tests {
         let admission = SignalAdmission::new(8);
         let alice = bind(alice_key, alice_handle, Some(admission.clone())).await;
         let bob = bind(bob_key, bob_handle, None).await;
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let router = Router::builder(bob.clone())
             .accept(
                 iroh_gossip::net::GOSSIP_ALPN,
                 Report(Arc::new(Mutex::new(Some(tx)))),
             )
             .spawn();
-        let before = crate::transport::path::gossip_recursion_closes();
+        let before = path::gossip_recursion_closes();
 
         let connection = alice
             .connect(
@@ -2270,7 +2267,7 @@ mod tests {
             .await
             .expect("the accepted end was not closed")
             .expect("the probe reported");
-        let code = u64::from(super::super::path::GOSSIP_RECURSION_REFUSED_CODE);
+        let code = u64::from(path::GOSSIP_RECURSION_REFUSED_CODE);
         assert!(
             matches!(at_alice, ConnectionError::LocallyClosed),
             "the dialer closed itself: {at_alice:?}"
@@ -2280,7 +2277,7 @@ mod tests {
             "the accepted end reads the code: {at_bob:?}"
         );
         assert!(
-            crate::transport::path::gossip_recursion_closes() > before,
+            path::gossip_recursion_closes() > before,
             "the close is counted"
         );
         assert_eq!(
@@ -2323,7 +2320,7 @@ mod tests {
     /// reported to its own table, which keeps the gossip handle.
     async fn ip_and_gossip_node(
         seed: u8,
-        hub: &habilis_network_iroh_gossip_transport::memory::MemoryHub,
+        hub: &habilis_network_iroh_gossip_transport::memory::Hub,
         with_ip: bool,
     ) -> (
         iroh::Endpoint,
@@ -2338,7 +2335,7 @@ mod tests {
         hub.join(&handle);
         let admission = SignalAdmission::new(8);
         admission.set_gossip(handle.clone());
-        let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let mut builder = iroh::Endpoint::builder(presets::Minimal)
             .secret_key(key)
             .relay_mode(RelayMode::Disabled)
             .add_custom_transport(handle.custom_transport())
@@ -2375,10 +2372,11 @@ mod tests {
     /// both are established: neither end needs a path watcher, which only the lower id has.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_ip_is_blocked_for_gossip_at_both_ends() {
-        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(41, &hub, true).await;
         let (bob, bob_table, bob_handle) = ip_and_gossip_node(42, &hub, true).await;
         let router = iroh::protocol::Router::builder(bob.clone())
@@ -2424,10 +2422,11 @@ mod tests {
     /// established no more, and allowed again.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_on_gossip_is_allowed_and_a_gone_peer_is_forgotten() {
-        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(43, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(44, &hub, false).await;
         let router = iroh::protocol::Router::builder(bob.clone())
@@ -2460,10 +2459,11 @@ mod tests {
     /// would close it before iroh moves it onto the session.
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_is_blocked_for_gossip_without_a_connection() {
-        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(45, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(46, &hub, false).await;
         let sessions = FakeHub::default();
@@ -2497,10 +2497,11 @@ mod tests {
     /// up for the relay, though the session may carry nothing (its rung is cut).
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pair_with_a_session_and_a_connection_on_the_gossip_rung_is_allowed_for_gossip() {
-        use habilis_network_iroh_gossip_transport::{gossip_addr, memory::MemoryHub};
+        use habilis_network_iroh_gossip_transport::gossip_addr;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use iroh::{EndpointAddr, TransportAddr};
 
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice, alice_table, alice_handle) = ip_and_gossip_node(47, &hub, false).await;
         let (bob, _bob_table, _bob_handle) = ip_and_gossip_node(48, &hub, false).await;
         let sessions = FakeHub::default();

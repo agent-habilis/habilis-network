@@ -28,6 +28,7 @@ const LOG_TARGET: &str = "habilis_network::gossip";
 
 /// What became of one ingested shard.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ShardIngest {
     /// Buffered; its group is still incomplete.
     Buffered,
@@ -321,9 +322,13 @@ fn synthesize_logical(group: PartialGroup, group_id: &ShardGroup) -> Option<Auth
 /// One stalled big group's repair ask: which author to query and which shard
 /// indexes we still lack.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct RepairTicket {
+    /// The member that sent the missing shards.
     pub author: Nickname,
+    /// The group of the missing shards.
     pub group: ShardGroup,
+    /// The positions of the missing shards.
     pub missing: Vec<u32>,
 }
 
@@ -428,7 +433,7 @@ mod tests {
             &MeshId::from("test"),
             &Nickname::from("author"),
             AppFrameParams {
-                tag: crate::AppTag::from("app_msg"),
+                tag: crate::AppTag::new("app_msg").expect("a valid app tag"),
                 to: None,
                 corr: None,
                 body: MessageBody::from(body),

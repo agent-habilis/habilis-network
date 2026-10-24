@@ -3,24 +3,25 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
 use habilis_network::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
-    PROBE_DEADLINE, SignalAdmission, WebRtcHandle, WebRtcSignalAcceptor, build_peer_webrtc,
-    dial_signal, is_cap_refusal, pair_needs_lane, wait_direct,
+    PROBE_DEADLINE, PayloadPath, SignalAdmission, UdpTransport, WebRtcHandle, WebRtcSignalAcceptor,
+    build_peer_webrtc, dial_signal, pair_needs_lane, wait_direct,
 };
 use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
-    Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, Transport, TransportPolicy,
+    Lookup, LookupOpts, MeshConfig, RelayChoice, RelayLadder, RelayLadderError, Transport,
+    TransportPolicy,
 };
 use rand::RngCore as _;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::code;
+use crate::error::StreamError;
 use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
@@ -36,6 +37,7 @@ const ONLINE_WAIT: Duration = Duration::from_secs(5);
 /// `deny_unknown_fields` so a typo is an error, not a silent loopback node.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct StreamOpts {
     /// How peers find each other: any of `mdns`, `dht`, `relay`. None is a
     /// loopback node.
@@ -46,6 +48,29 @@ pub struct StreamOpts {
     pub transport: Vec<Transport>,
     /// A custom relay ladder, first preferred. Empty is the default ladder.
     pub relay_urls: Vec<String>,
+}
+
+impl StreamOpts {
+    /// Set the lookups.
+    #[must_use]
+    pub fn with_lookup(mut self, lookup: Vec<Lookup>) -> Self {
+        self.lookup = lookup;
+        self
+    }
+
+    /// Set the transports.
+    #[must_use]
+    pub fn with_transport(mut self, transport: Vec<Transport>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Set the relay URLs.
+    #[must_use]
+    pub fn with_relay_urls(mut self, relay_urls: Vec<String>) -> Self {
+        self.relay_urls = relay_urls;
+        self
+    }
 }
 
 /// One endpoint serving and opening streams. It never joins a gossip mesh.
@@ -68,24 +93,30 @@ impl StreamNode {
     /// Stand up an endpoint with `opts`.
     ///
     /// # Errors
-    /// Conflicting or invalid options, a loopback node in a browser, or an
-    /// endpoint that fails to bind.
-    pub async fn bind(opts: &StreamOpts) -> Result<Self> {
-        anyhow::ensure!(
-            !opts.transport.contains(&Transport::Multihop),
-            "a stream has no multihop: it is one direct lane"
-        );
-        anyhow::ensure!(
-            !opts.transport.contains(&Transport::Gossip),
-            "a stream has no gossip: its node never joins a gossip mesh"
-        );
+    /// # Errors
+    /// [`StreamError::Options`] for a transport a stream does not use,
+    /// [`StreamError::Bind`] when the relay list or the node does not start.
+    pub async fn bind(opts: &StreamOpts) -> Result<Self, StreamError> {
+        if opts.transport.contains(&Transport::Multihop) {
+            return Err(StreamError::Options(
+                "a stream has no multihop: it is one direct lane",
+            ));
+        }
+        if opts.transport.contains(&Transport::Gossip) {
+            return Err(StreamError::Options(
+                "a stream has no gossip: its node never joins a gossip mesh",
+            ));
+        }
         // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
         let list = if opts.transport.is_empty() {
             &[Transport::Udp, Transport::WebRtc][..]
         } else {
             &opts.transport
         };
-        let config = MeshConfig::resolve(&opts.lookup, relay_ladder(&opts.relay_urls)?, list)?;
+        let relays =
+            relay_ladder(&opts.relay_urls).map_err(StreamError::bind("parse the relay list"))?;
+        let config = MeshConfig::resolve(&opts.lookup, relays, list)
+            .map_err(StreamError::bind("resolve the mesh config"))?;
         let transports = TransportOpts::default().within(&config.transport);
         Self::bind_with(config.lookups, config.transport, transports).await
     }
@@ -94,8 +125,9 @@ impl StreamNode {
     /// own lookups and transport list, narrowed to what this target has.
     ///
     /// # Errors
-    /// As [`bind`](Self::bind).
-    pub async fn bind_for(hash: &StreamHash) -> Result<Self> {
+    /// # Errors
+    /// As [`bind`](Self::bind): [`StreamError::Bind`] when the node does not start.
+    pub async fn bind_for(hash: &StreamHash) -> Result<Self, StreamError> {
         let transports = TransportOpts::default().within(&hash.transport);
         Self::bind_with(hash.lookups.clone(), hash.transport, transports).await
     }
@@ -104,20 +136,21 @@ impl StreamNode {
         lookups: LookupOpts,
         transport: TransportPolicy,
         transports: TransportOpts,
-    ) -> Result<Self> {
+    ) -> Result<Self, StreamError> {
         #[cfg(target_arch = "wasm32")]
-        habilis_network::runtime::refuse_in_browser(&lookups, transport, transports)?;
-        let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports).await?;
+        habilis_network::runtime::refuse_in_browser(&lookups, transport, transports)
+            .map_err(StreamError::bind("start the stream node"))?;
+        let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports)
+            .await
+            .map_err(StreamError::bind("start the stream node"))?;
         let producers = address_book(&endpoint);
         let registry = Arc::new(Registry::default());
-        let ice = IceProfile {
-            host_only: lookups.is_loopback(),
-        };
+        let ice = IceProfile::default().with_host_only(lookups.is_loopback());
         let mut router = Router::builder(endpoint.clone()).accept(
             crate::STREAM_ALPN,
             StreamAcceptor {
                 registry: Arc::clone(&registry),
-                relay_transport: transport.relay_transport,
+                relay_transport: PayloadPath::from(transport.relay_transport),
             },
         );
         if transports.webrtc {
@@ -133,7 +166,7 @@ impl StreamNode {
                 ),
             );
             // The answerer of a session dials this when the session attaches.
-            router = router.accept(NUDGE_ALPN, NudgeAcceptor);
+            router = router.accept(NUDGE_ALPN, NudgeAcceptor::new());
         }
         let router = router.spawn();
         Ok(Self {
@@ -178,10 +211,12 @@ impl StreamNode {
     /// Take the consumer slot of the stream behind `hash`.
     ///
     /// # Errors
-    /// The producer cannot be reached, the only path is a relay the stream
-    /// refuses, or the producer refuses the hash (a [`Refused`]).
-    pub async fn open(&self, hash: &StreamHash) -> Result<Reader> {
-        let needs_lane = pair_needs_lane(&hash.addr, self.transports.udp);
+    /// # Errors
+    /// [`StreamError::Refused`] when the producer refuses the hash, or the only path is
+    /// a relay the stream refuses. [`StreamError::Open`] when the producer cannot be
+    /// reached or the stream cannot be opened.
+    pub async fn open(&self, hash: &StreamHash) -> Result<Reader, StreamError> {
+        let needs_lane = pair_needs_lane(&hash.addr, UdpTransport::from(self.transports.udp));
         // A data channel needs `webrtc` on both ends: the producer's list is in
         // the hash, and a producer without it answers no offer.
         let can_lane = self.transports.webrtc && hash.transport.webrtc;
@@ -192,7 +227,7 @@ impl StreamNode {
         // what is left is the relay the stream refuses, so say so now rather
         // than after the direct-path probe.
         if needs_lane && !can_lane && !relay_ok {
-            bail!(Refused::RelayRefused);
+            return Err(StreamError::Refused(Refused::RelayRefused));
         }
         add_peer_addr(&self.producers, hash.addr.clone());
         // The WebRTC lane first: the connect below then finds the session's
@@ -211,23 +246,32 @@ impl StreamNode {
             .await
             && !relay_ok
         {
-            if is_cap_refusal(&error) {
-                bail!(Refused::AtCap);
+            if matches!(error, habilis_network::net::EndpointError::CapRefused(_)) {
+                return Err(StreamError::Refused(Refused::AtCap));
             }
-            return Err(error.context("opening a WebRTC lane to the producer"));
+            return Err(StreamError::Open {
+                step: "open a WebRTC lane to the producer",
+                source: error.into(),
+            });
         }
         let conn = self
             .endpoint
             .connect(hash.addr.clone(), crate::STREAM_ALPN)
             .await
-            .context("connecting to the producer")?;
+            .map_err(StreamError::open("connect to the producer"))?;
         if !relay_ok && !wait_direct(&conn, PROBE_DEADLINE).await {
             conn.close(code::RELAY_REFUSED.into(), b"relay path refused");
-            bail!(Refused::RelayRefused);
+            return Err(StreamError::Refused(Refused::RelayRefused));
         }
-        let (mut send, recv) = conn.open_bi().await.context("opening the stream")?;
-        send.write_all(hash.header_bytes().as_slice()).await?;
-        send.finish()?;
+        let (mut send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(StreamError::open("open the stream"))?;
+        send.write_all(hash.header_bytes().as_slice())
+            .await
+            .map_err(StreamError::open("send the stream hash"))?;
+        send.finish()
+            .map_err(StreamError::open("send the stream hash"))?;
         Ok(Reader::new(conn, recv))
     }
 
@@ -241,14 +285,11 @@ impl StreamNode {
 
 /// The ladder `urls` name, or `None` for the default. Parsed as one list, so an
 /// empty or bad entry is an error rather than a shrunk ladder.
-fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
+fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>, RelayLadderError> {
     if urls.is_empty() {
         return Ok(None);
     }
-    urls.join(",")
-        .parse::<RelayLadder>()
-        .map(Some)
-        .map_err(|error| anyhow::anyhow!("{error}"))
+    urls.join(",").parse::<RelayLadder>().map(Some)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

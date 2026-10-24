@@ -12,6 +12,9 @@ use iroh::TransportAddr;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 
+#[cfg(all(feature = "web", not(feature = "native")))]
+use iroh::endpoint::presets;
+/// The ALPN of the bench handler.
 pub const BENCH_ALPN: &[u8] = b"habilis-network-webrtc/test-bench/0";
 
 /// Bytes the plain bulk case asks for. Comfortably past one QUIC congestion
@@ -32,6 +35,7 @@ pub const MAX_TRANSFER_BYTES: usize = 64 << 20;
 /// "the receive path drops under load" are different claims, and an exchange
 /// that is bulk in both directions cannot distinguish them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Direction {
     /// Small request, bulk reply — the `OP_READ` shape.
     Download,
@@ -42,6 +46,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// The name of this direction in the bench output: `down`, `up` or `both`.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -105,8 +110,17 @@ fn header(direction: Direction, wanted: u32) -> [u8; HEADER_LEN] {
 /// Serves one exchange per bi-stream, as many streams as the client opens,
 /// until the connection closes. A benchmark reuses one connection so only its
 /// warm-up round pays the handshake and the congestion-window ramp.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Bench;
+
+impl Bench {
+    /// The bench protocol handler.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
 
 impl ProtocolHandler for Bench {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -214,7 +228,7 @@ pub async fn browser_endpoint(
     key: iroh::SecretKey,
     hub: &crate::WebRtcHandle,
 ) -> anyhow::Result<iroh::Endpoint> {
-    Ok(iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+    Ok(iroh::Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .relay_mode(iroh::RelayMode::Disabled)
         .add_custom_transport(hub.transport())
@@ -334,7 +348,7 @@ mod tests {
     async fn rtt_samples_returns_one_timed_probe_per_round() {
         let server = loopback_endpoint().await;
         let router = Router::builder(server.clone())
-            .accept(BENCH_ALPN, Bench)
+            .accept(BENCH_ALPN, Bench::new())
             .spawn();
         let socket = server
             .bound_sockets()

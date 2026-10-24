@@ -212,26 +212,104 @@ pub fn ppid_watch_interval() -> Duration {
 /// the flag. Production runs on [`Tuning::DEFAULTS`] (the `crate::consts`
 /// values) when [`init`] is never called (the in-process path).
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct Tuning {
+    /// How long a peer may stay silent before it is quiet.
     pub alive_timeout: Duration,
+    /// How often the sweeper looks for expired peers.
     pub sweep_interval: Duration,
+    /// How often the mesh checks its links and heals them.
     pub heal_interval: Duration,
+    /// How often a node sends its digest to look for missing messages.
     pub antientropy_interval: Duration,
+    /// How long an unmeshed joiner waits before it co-hosts the rendezvous anyway.
     pub cohost_grace: Duration,
+    /// How long a ping round collects pongs before it reports.
     pub ping_window: Duration,
+    /// How often the daemon checks that its parent process is alive.
     pub ppid_watch_interval: Duration,
+    /// How long the mesh may stay unhealthy before it re-bootstraps.
     pub heal_stall_threshold: Duration,
+    /// How long with no verified inbound gossip, while peers are known, before the node re-bridges and re-announces.
     pub starvation_threshold: Duration,
+    /// How often a directory advertiser re-broadcasts its mesh.
     pub advertise_interval: Duration,
+    /// How long a directory entry stays listed without a new advertisement.
     pub directory_expiry: Duration,
+    /// How many messages one received digest may re-broadcast.
     pub antientropy_max_resend: usize,
+    /// Whether a directory advertiser keeps its mesh unlisted.
     pub directory_private: bool,
+    /// How soon the first rival check runs after a probed claim.
     pub rival_recheck_first: Duration,
+    /// How often a lone public beacon holder rechecks for a rival.
     pub rival_recheck: Duration,
+    /// How often a meshed public beacon holder rechecks for a rival.
     pub rival_recheck_meshed: Duration,
+    /// The cap of the ramping recheck interval of a beacon holder with no peers (a topic peer that stays alone).
     pub rival_recheck_alone: Duration,
+    /// How often a node revisits the rendezvous to meet split islands.
     pub rendezvous_periodic_return: Duration,
+    /// Whether a topic mesh looks up peers over mDNS only.
     pub topic_mdns_only: bool,
+}
+
+impl Tuning {
+    /// Set how often anti-entropy runs.
+    #[must_use]
+    pub fn with_antientropy_interval(mut self, antientropy_interval: Duration) -> Self {
+        self.antientropy_interval = antientropy_interval;
+        self
+    }
+
+    /// Set how long the first rival recheck waits.
+    #[must_use]
+    pub fn with_rival_recheck_first(mut self, rival_recheck_first: Duration) -> Self {
+        self.rival_recheck_first = rival_recheck_first;
+        self
+    }
+
+    /// Set how long each rival recheck waits.
+    #[must_use]
+    pub fn with_rival_recheck(mut self, rival_recheck: Duration) -> Self {
+        self.rival_recheck = rival_recheck;
+        self
+    }
+
+    /// Set how long each rival recheck waits once meshed.
+    #[must_use]
+    pub fn with_rival_recheck_meshed(mut self, rival_recheck_meshed: Duration) -> Self {
+        self.rival_recheck_meshed = rival_recheck_meshed;
+        self
+    }
+
+    /// Set how often the heal tick runs.
+    #[must_use]
+    pub fn with_heal_interval(mut self, heal_interval: Duration) -> Self {
+        self.heal_interval = heal_interval;
+        self
+    }
+
+    /// Set the co-host grace period.
+    #[must_use]
+    pub fn with_cohost_grace(mut self, cohost_grace: Duration) -> Self {
+        self.cohost_grace = cohost_grace;
+        self
+    }
+
+    /// Set how long a member waits before it asks for the rendezvous again.
+    #[must_use]
+    pub fn with_rendezvous_periodic_return(mut self, rendezvous_periodic_return: Duration) -> Self {
+        self.rendezvous_periodic_return = rendezvous_periodic_return;
+        self
+    }
+
+    /// Set the rival recheck interval for a lone member.
+    #[must_use]
+    pub fn with_rival_recheck_alone(mut self, rival_recheck_alone: Duration) -> Self {
+        self.rival_recheck_alone = rival_recheck_alone;
+        self
+    }
 }
 
 impl Tuning {
@@ -328,6 +406,7 @@ pub const RESUBSCRIBE_MAX_ATTEMPTS: u32 = 8;
 #[cfg(feature = "host")]
 pub const IPC_ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(100);
 #[cfg(feature = "host")]
+/// The longest wait between two tries to accept an IPC connection.
 pub const IPC_ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 /// Per-connection IPC I/O deadline: how long the daemon waits for a
@@ -344,6 +423,7 @@ pub const IPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// cold daemon start (the file appears sub-second once the process is up).
 /// Client-side, so these are not part of the daemon `Tuning` struct.
 pub const READY_MAX: Duration = Duration::from_secs(30);
+/// How often the readiness gate reads the state file while it waits.
 pub const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How fresh a `ready: true` state-file write must be for the gate to trust
@@ -624,6 +704,7 @@ pub const RELAY_LIVENESS_FAILS_TO_EVICT: u32 = 2;
 /// sparsely). Distinct from `RELAY_LIVENESS_INTERVAL`, which is the
 /// *homed* poll cadence (cheap, no backoff).
 pub const RELAY_REPROBE_BACKOFF_MIN: Duration = Duration::from_secs(30);
+/// The longest wait between two re-probes of a relay rung.
 pub const RELAY_REPROBE_BACKOFF_MAX: Duration = Duration::from_mins(5);
 
 /// Timeout for *one attempt* of the private-mode rendezvous identity

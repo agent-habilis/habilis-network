@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Context as _;
 use bytes::Bytes;
 use iroh::EndpointId;
 use str0m::channel::ChannelId;
@@ -12,6 +11,7 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use super::jsep::JsepError;
 use super::session::{InboundPacket, SessionRegistry};
 
 /// Consecutive receive errors a live session tolerates before giving up. Sized
@@ -64,8 +64,9 @@ pub(crate) async fn bind_ephemeral_udp() -> std::io::Result<(UdpSocket, SocketAd
     Ok((socket, SocketAddr::new(ip, local.port())))
 }
 
-pub(crate) fn add_host_candidate(rtc: &mut Rtc, advertised: SocketAddr) -> anyhow::Result<()> {
-    let candidate = Candidate::host(advertised, "udp").context("ICE host candidate")?;
+pub(crate) fn add_host_candidate(rtc: &mut Rtc, advertised: SocketAddr) -> Result<(), JsepError> {
+    let candidate =
+        Candidate::host(advertised, "udp").map_err(JsepError::engine("ICE host candidate"))?;
     rtc.add_local_candidate(candidate);
     Ok(())
 }
@@ -123,7 +124,7 @@ pub(crate) async fn drive_until_channel_ready(
     advertised: SocketAddr,
     target: &ChannelReadyTarget,
     deadline: Duration,
-) -> anyhow::Result<ChannelId> {
+) -> Result<ChannelId, JsepError> {
     let give_up = Instant::now() + deadline;
     let mut buf = vec![0u8; 2000];
     let mut next_wake = Instant::now();
@@ -139,7 +140,7 @@ pub(crate) async fn drive_until_channel_ready(
         tokio::select! {
             () = tokio::time::sleep(sleep_for) => {
                 rtc.handle_input(Input::Timeout(Instant::now()))
-                    .context("str0m timeout input")?;
+                    .map_err(JsepError::engine("str0m timeout input"))?;
             }
             received = socket.recv_from(&mut buf) => {
                 // Never fatal, for the reason the STUN gather sharing this
@@ -186,12 +187,15 @@ pub(crate) async fn drive_until_channel_ready(
                     continue;
                 };
                 rtc.handle_input(Input::Receive(Instant::now(), receive))
-                    .context("str0m receive input")?;
+                    .map_err(JsepError::engine("str0m receive input"))?;
             }
         }
 
         loop {
-            match rtc.poll_output().context("str0m poll_output")? {
+            match rtc
+                .poll_output()
+                .map_err(JsepError::engine("str0m poll_output"))?
+            {
                 Output::Timeout(wake) => {
                     next_wake = wake;
                     break;
@@ -210,6 +214,31 @@ pub(crate) async fn drive_until_channel_ready(
                         opened = Some(id);
                     }
                 },
+                Output::Event(
+                    Event::Connected
+                    | Event::IceConnectionStateChange(_)
+                    | Event::MediaAdded(_)
+                    | Event::MediaData(_)
+                    | Event::MediaChanged(_)
+                    | Event::ChannelData(_)
+                    | Event::ChannelClose(_)
+                    | Event::ChannelBufferedAmountLow(_)
+                    | Event::PeerStats(_)
+                    | Event::MediaIngressStats(_)
+                    | Event::MediaEgressStats(_)
+                    | Event::EgressBitrateEstimate(_)
+                    | Event::KeyframeRequest(_)
+                    | Event::StreamPaused(_)
+                    | Event::SenderFeedback(_)
+                    | Event::RtpPacket(_)
+                    | Event::AppSpecificFeedback(_)
+                    | Event::Closed
+                    | Event::RawPacket(_),
+                ) => {}
+                #[expect(
+                    clippy::match_same_arms,
+                    reason = "str0m's Event is non_exhaustive, so rustc needs this wildcard after the arm that names every variant"
+                )]
                 Output::Event(_) => {}
             }
         }
@@ -236,21 +265,20 @@ struct HandshakeNoise {
 }
 
 impl HandshakeNoise {
-    fn into_timeout_error(self) -> anyhow::Error {
-        let base = "timed out waiting for the WebRTC data channel to open";
-        match (self.unparseable, self.recv_errors) {
-            (0, 0) => anyhow::anyhow!("{base}"),
+    fn into_timeout_error(self) -> JsepError {
+        let detail = match (self.unparseable, self.recv_errors) {
+            (0, 0) => String::new(),
             (unparseable, errors) => {
                 let from = self.last_source.map_or_else(
                     || String::from("no source recorded"),
                     |src| format!("last from {src}"),
                 );
-                anyhow::anyhow!(
-                    "{base}; ignored {unparseable} unparseable datagrams ({from}) \
-                     and {errors} receive errors"
+                format!(
+                    "; ignored {unparseable} unparseable datagrams ({from}) and {errors} receive errors"
                 )
             }
-        }
+        };
+        JsepError::Timeout { detail }
     }
 }
 
@@ -429,6 +457,32 @@ async fn pump_outputs(
             Output::Event(Event::IceConnectionStateChange(IceConnectionState::Disconnected)) => {
                 return Err(SessionEnd::Closed("ICE disconnected"));
             }
+            Output::Event(
+                Event::Connected
+                | Event::IceConnectionStateChange(_)
+                | Event::MediaAdded(_)
+                | Event::MediaData(_)
+                | Event::MediaChanged(_)
+                | Event::ChannelOpen(_, _)
+                | Event::ChannelData(_)
+                | Event::ChannelClose(_)
+                | Event::ChannelBufferedAmountLow(_)
+                | Event::PeerStats(_)
+                | Event::MediaIngressStats(_)
+                | Event::MediaEgressStats(_)
+                | Event::EgressBitrateEstimate(_)
+                | Event::KeyframeRequest(_)
+                | Event::StreamPaused(_)
+                | Event::SenderFeedback(_)
+                | Event::RtpPacket(_)
+                | Event::AppSpecificFeedback(_)
+                | Event::Closed
+                | Event::RawPacket(_),
+            ) => {}
+            #[expect(
+                clippy::match_same_arms,
+                reason = "str0m's Event is non_exhaustive, so rustc needs this wildcard after the arm that names every variant"
+            )]
             Output::Event(_) => {}
         }
     }

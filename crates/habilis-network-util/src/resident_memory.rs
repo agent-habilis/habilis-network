@@ -60,6 +60,8 @@ pub fn current_resident_memory_mb() -> Option<u64> {
     reason = "libc points to the mach2 crate for the mach calls; one read does not warrant a dependency"
 )]
 fn current_rss_bytes() -> Option<u64> {
+    // SAFETY: `mach_task_basic_info` is a plain C struct of integers, so all-zero bytes are a
+    // valid value.
     let mut info: libc::mach_task_basic_info = unsafe { std::mem::zeroed() };
     let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
     // SAFETY: `info` is a valid, unique `mach_task_basic_info`, `count` is its size

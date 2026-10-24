@@ -24,6 +24,7 @@ pub(crate) struct Graph {
 /// One struct for the pair, because both are an `AppId` and a call that swaps
 /// them compiles and routes the wrong way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Leg {
     /// Where the route starts.
     pub src: AppId,
@@ -163,13 +164,13 @@ impl Graph {
 /// `weight` atop the already-settled `cost` to `node`, gated by `dst` (never
 /// itself blocked) and the `blocked` set.
 #[derive(Clone, Copy)]
-struct RelaxEdge<'a> {
+struct RelaxEdge<'blocked> {
     node: AppId,
     cost: LinkMetric,
     next: AppId,
     weight: LinkMetric,
     dst: AppId,
-    blocked: &'a HashSet<AppId>,
+    blocked: &'blocked HashSet<AppId>,
 }
 
 /// Relax `candidate`: skip it when `next` is blocked (unless it's `dst` itself),

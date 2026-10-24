@@ -39,6 +39,7 @@ use crate::util::tuning::{
 
 use super::broadcast_msg;
 
+use std::collections::hash_map;
 /// One window on the wire: its `[lo, hi]` bounds (`hi` timestamp `i64::MAX` ⇒
 /// open-ended), each a timestamp and the id key of the message at that edge, plus
 /// its dedup keys packed as 16 bytes each, Base58-encoded. The key is what lets an
@@ -392,9 +393,9 @@ pub(crate) enum DigestTrigger {
 }
 
 #[derive(Clone, Copy)]
-struct DigestOrigin<'a> {
-    mesh: &'a MeshId,
-    author: &'a Nickname,
+struct DigestOrigin<'mesh> {
+    mesh: &'mesh MeshId,
+    author: &'mesh Nickname,
 }
 
 async fn broadcast_state_digest(
@@ -760,7 +761,7 @@ fn heads_key_of(state: &EventLoopState, channel: Channel) -> u64 {
         heads: state.doc(channel).heads(),
         closing: false,
     };
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = hash_map::DefaultHasher::new();
     serde_json::to_string(&heads)
         .unwrap_or_default()
         .hash(&mut hasher);
@@ -844,7 +845,7 @@ async fn ask(
 /// A digest's heads as the serve budget keys them: its body is the heads. The
 /// same heads in another order hash differently and get one more answer.
 fn heads_key(digest: &Message) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = hash_map::DefaultHasher::new();
     digest.body.as_str().hash(&mut hasher);
     hasher.finish()
 }
@@ -996,6 +997,7 @@ mod budget_tests {
         ANTIENTROPY_SERVES_PER_WINDOW, FAST_ROUND_ACTIVE, FAST_ROUND_RETRY, antientropy_max_resend,
     };
 
+    use iroh::endpoint::presets;
     fn key() -> (AuthorKey, Channel, Plane) {
         (author_of("asker"), Channel::State, Plane::Unicast)
     }
@@ -1111,7 +1113,7 @@ mod budget_tests {
         use super::{DigestTrigger, broadcast_state_digests};
         use crate::protocol::MeshId;
 
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .bind()
             .await
             .expect("bind a local endpoint");
@@ -1154,7 +1156,7 @@ mod budget_tests {
         use super::{DigestTrigger, broadcast_state_digests};
         use crate::protocol::MeshId;
 
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .bind()
             .await
             .expect("bind a local endpoint");
@@ -1352,6 +1354,8 @@ mod tests {
     };
     use crate::testing::{fresh_state, nick};
 
+    use crate::protocol::message;
+    use crate::util::{consts, tuning};
     fn members(count: usize) -> Vec<Nickname> {
         (0..count)
             .map(|index| nick(&format!("member-{index:02}")))
@@ -1369,7 +1373,7 @@ mod tests {
             .filter(|me| *me != asker)
             .filter(|me| super::answers_digest(me, asker, "digest-1", members.iter()))
             .count();
-        assert_eq!(answering, crate::util::tuning::ANTIENTROPY_ANSWERERS);
+        assert_eq!(answering, tuning::ANTIENTROPY_ANSWERERS);
     }
 
     /// The answerers change with the digest, so a message that only one member
@@ -1440,7 +1444,7 @@ mod tests {
         assert_eq!(state.resend_outbox.queued(), 4, "the outbox is full");
         assert_eq!(
             state.resend_outbox.dropped(),
-            crate::util::tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
+            tuning::ANTIENTROPY_MAX_RESEND as u64 - 4,
             "the rest of the answer is dropped, and counted"
         );
     }
@@ -1643,12 +1647,12 @@ mod tests {
             let mut message = Message::new_app(
                 &MeshId::from("test"),
                 &Nickname::from("author"),
-                crate::protocol::message::AppFrameParams {
-                    tag: crate::protocol::AppTag::from("app_msg"),
-                    to: None,
-                    corr: None,
-                    body: MessageBody::from(format!("m{index}").as_str()),
-                },
+                message::AppFrameParams::new(
+                    crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                    None,
+                    None,
+                    MessageBody::from(format!("m{index}").as_str()),
+                ),
             );
             message.timestamp = UnixSecs::from_secs(1_700_000_000 + i64::try_from(index).unwrap());
             log.push(message.sign(&Identity::generate()));
@@ -1675,10 +1679,10 @@ mod tests {
             .sign(&Identity::generate());
         let wire = digest.serialize().expect("serialize digest");
         assert!(
-            wire.len() <= crate::util::consts::MAX_MESSAGE_SIZE,
+            wire.len() <= consts::MAX_MESSAGE_SIZE,
             "digest is {} bytes, over the {}-byte gossip cap",
             wire.len(),
-            crate::util::consts::MAX_MESSAGE_SIZE
+            consts::MAX_MESSAGE_SIZE
         );
     }
 
@@ -1767,10 +1771,10 @@ mod tests {
         let digest = Message::new_state_digest(&mesh, &author, body).sign(&Identity::generate());
         let wire = digest.serialize().expect("serialize state digest");
         assert!(
-            wire.len() <= crate::util::consts::MAX_MESSAGE_SIZE,
+            wire.len() <= consts::MAX_MESSAGE_SIZE,
             "heads digest is {} bytes, over the {}-byte gossip cap",
             wire.len(),
-            crate::util::consts::MAX_MESSAGE_SIZE
+            consts::MAX_MESSAGE_SIZE
         );
     }
 
@@ -1787,12 +1791,12 @@ mod tests {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &Nickname::from("author"),
-            crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: MessageBody::from(body),
-            },
+            message::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from(body),
+            ),
         );
         message.timestamp = UnixSecs::from_secs(timestamp);
         message
@@ -1901,7 +1905,7 @@ mod tests {
     /// hundreds with the same timestamp.
     #[test]
     fn a_node_that_lost_messages_recovers_them_and_only_them() {
-        let budget = crate::util::tuning::antientropy_max_resend();
+        let budget = tuning::antientropy_max_resend();
         for seconds in [12, 1] {
             let all = scrambled_messages(seconds);
             let mut holder = MessageLog::new(1000);
@@ -1955,7 +1959,7 @@ mod tests {
             }
         }
         let lost = all[ANTIENTROPY_DIGEST_WINDOW_IDS].dedup_key();
-        let budget = crate::util::tuning::antientropy_max_resend();
+        let budget = tuning::antientropy_max_resend();
         let asked = (0..12).any(|_| {
             answer_within_budget(&mut node, &holder, budget)
                 .iter()
@@ -1981,7 +1985,7 @@ mod tests {
         let mut node = fresh_state();
         node.joined_at = UnixSecs::from_secs(second);
         node.message_log.push(larger);
-        let budget = crate::util::tuning::antientropy_max_resend();
+        let budget = tuning::antientropy_max_resend();
 
         let answered = answer_within_budget(&mut node, &holder, budget);
 
@@ -2008,7 +2012,7 @@ mod tests {
         let mut node = fresh_state();
         node.joined_at = UnixSecs::from_secs(second);
         node.message_log.push(larger);
-        let budget = crate::util::tuning::antientropy_max_resend();
+        let budget = tuning::antientropy_max_resend();
 
         let answered = answer_within_budget(&mut node, &holder, budget);
 
@@ -2028,7 +2032,7 @@ mod tests {
     /// the sweep brings them back.
     #[test]
     fn an_author_with_a_fast_clock_does_not_slow_the_newest_messages() {
-        let budget = crate::util::tuning::antientropy_max_resend();
+        let budget = tuning::antientropy_max_resend();
         let base = UnixSecs::now().as_secs() - 3600;
         let ahead = 80;
         let mut all: Vec<Verified> = Vec::new();
@@ -2096,7 +2100,7 @@ mod tests {
     /// evicted, or the other keeps sending it and it evicts it again.
     #[test]
     fn two_full_logs_with_different_history_ask_each_other_for_nothing() {
-        let budget = crate::util::tuning::antientropy_max_resend();
+        let budget = tuning::antientropy_max_resend();
         let base = 1_700_000_000;
         let common: Vec<Verified> = (0..300)
             .map(|index| chat_at(&format!("c{index}"), base + i64::from(index / 3)))

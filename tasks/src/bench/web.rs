@@ -140,9 +140,9 @@ fn rounds(
 }
 
 /// What every browser cell needs: the page server and the run's arguments.
-pub(crate) struct Browser<'a> {
-    pub(crate) server: &'a Static,
-    pub(crate) args: &'a Args,
+pub(crate) struct Browser<'bench> {
+    pub(crate) server: &'bench Static,
+    pub(crate) args: &'bench Args,
 }
 
 impl Browser<'_> {
@@ -192,7 +192,7 @@ impl Browser<'_> {
         let run = async {
             let peer = WebRtcPeer::bind().await?;
             let _router = Router::builder(peer.endpoint.clone())
-                .accept(BENCH_ALPN, Bench)
+                .accept(BENCH_ALPN, Bench::new())
                 .spawn();
 
             let started = Instant::now();

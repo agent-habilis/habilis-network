@@ -22,7 +22,7 @@ use std::fmt;
 use anyhow::Result;
 use iroh_base::{PublicKey, SecretKey, Signature};
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 use crate::{AuthorKey, DedupKey, SymmetricKey};
 
@@ -46,6 +46,7 @@ impl Identity {
         }
     }
 
+    /// The public half of the key.
     #[must_use]
     pub fn public(&self) -> PublicKey {
         self.secret.public()
@@ -107,6 +108,7 @@ pub(crate) fn verify(pubkey: &PublicKey, bytes: &[u8], signature: &Signature) ->
 /// key ⇒ not falsely deduped).
 #[must_use]
 pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> DedupKey {
+    use sha2::Digest;
     let mut hasher = Sha256::new();
     // The hex text of the key, as the signed bytes carry it; nothing for an unsigned message.
     if let Some(author) = author {
@@ -125,6 +127,7 @@ pub(crate) fn dedup_key16(author: Option<&AuthorKey>, id_bytes: &[u8; 16]) -> De
 // hex strings in the JSON envelope, so the `--output json` wire stays
 // inspectable and does not depend on iroh's serde representation.
 
+/// The public key as lowercase hex, 64 characters.
 #[must_use]
 pub fn encode_pubkey(pubkey: &PublicKey) -> String {
     to_hex(pubkey.as_bytes())
@@ -310,7 +313,7 @@ mod tests {
 
     #[test]
     fn write_hex_writes_the_same_text_as_encode_hex() {
-        struct Hex<'a>(&'a [u8]);
+        struct Hex<'bytes>(&'bytes [u8]);
         impl std::fmt::Display for Hex<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 super::write_hex(f, self.0)

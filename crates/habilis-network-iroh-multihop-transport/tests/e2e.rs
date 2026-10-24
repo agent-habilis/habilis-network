@@ -14,6 +14,7 @@ use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, TransportAddr};
 
+use tokio::sync::mpsc;
 const ECHO_ALPN: &[u8] = b"multihop-test/echo/1";
 
 /// Uniform link cost; the exact value is irrelevant when there is one route.
@@ -35,7 +36,7 @@ impl ProtocolHandler for Echo {
 /// Echoes like [`Echo`], then reports how many multihop custom paths its end of the connection
 /// holds, so that a test can read the server side of a connection.
 #[derive(Debug, Clone)]
-struct EchoCountingPaths(tokio::sync::mpsc::UnboundedSender<usize>);
+struct EchoCountingPaths(mpsc::UnboundedSender<usize>);
 
 impl ProtocolHandler for EchoCountingPaths {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
@@ -243,7 +244,7 @@ fn a_route_is_one_custom_path_at_each_end_of_the_connection() {
             (&relay, vec![(alice.id, COST), (bob.id, COST)]),
             (&bob.handle, vec![(relay_id, COST)]),
         ]);
-        let (counted, mut server_side) = tokio::sync::mpsc::unbounded_channel();
+        let (counted, mut server_side) = mpsc::unbounded_channel();
         let echo = Router::builder(bob.app.clone())
             .accept(ECHO_ALPN, EchoCountingPaths(counted))
             .spawn();

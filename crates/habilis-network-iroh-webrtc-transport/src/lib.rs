@@ -42,6 +42,8 @@
 //! same iroh relay rather than to a second relay at the ICE layer. Neither
 //! backend has a TURN client, and neither should grow one.
 
+#[cfg(any(feature = "web", feature = "native"))]
+use iroh::endpoint::transports;
 mod addr;
 mod ice_uri;
 // The session table both backends use. The host backend had a verbatim copy in
@@ -83,7 +85,7 @@ mod signaling;
 
 pub use addr::{WEBRTC_TRANSPORT_ID, custom_addr, parse_custom_addr};
 pub use ice_uri::accept_ice_uri;
-pub use signaling::{MAX_ENVELOPE_BYTES, SIGNAL_VERSION, SignalEnvelope};
+pub use signaling::{MAX_ENVELOPE_BYTES, SIGNAL_VERSION, SignalEnvelope, SignalError};
 
 /// The iroh this crate is built against. **Take it from here, never as your own
 /// dependency.**
@@ -160,12 +162,17 @@ pub(crate) fn drops_are_sustained(total: u64) -> bool {
 #[cfg(all(feature = "bench", any(feature = "native", feature = "web")))]
 pub mod bench;
 
+#[cfg(any(feature = "native", feature = "web"))]
+mod attach;
+#[cfg(any(feature = "native", feature = "web"))]
+pub use attach::AttachError;
+
 #[cfg(feature = "native")]
 mod native;
 
 #[cfg(feature = "native")]
 pub use native::{
-    IceConfig, NegotiatedSession, PendingAnswer, PendingOffer, WebRtcTransport, answer,
+    IceConfig, JsepError, NegotiatedSession, PendingAnswer, PendingOffer, WebRtcTransport, answer,
     answer_with, offer, offer_with, stun,
 };
 
@@ -174,7 +181,7 @@ mod web;
 
 #[cfg(feature = "web")]
 pub use web::{
-    AttachError, BrowserHubTransport, BrowserRtcTransport, BrowserSession, BrowserSessionGuard,
+    BrowserHubTransport, BrowserRtcTransport, BrowserSession, BrowserSessionGuard,
     DataChannelCounters, IceServer, IceServers, PendingAnswer as BrowserPendingAnswer,
     PendingOffer as BrowserPendingOffer, SelectedPairStats, SessionCounters, SessionCounts,
     answer as browser_answer, log_signal_sdps, offer as browser_offer,
@@ -218,19 +225,21 @@ impl WebRtcHandle {
     /// registered — see `crate::selector` for why registering the transport
     /// alone is not enough.
     #[must_use]
-    pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
+    pub fn path_selector(&self) -> std::sync::Arc<dyn transports::PathSelector> {
         std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
     }
 
     /// Attach a negotiated session for `remote`.
     ///
     /// # Errors
-    /// The registry rejects the session (already attached).
+    /// # Errors
+    /// [`AttachError::AlreadyAttached`] when the registry already holds a live session
+    /// for `remote`, or [`AttachError::Retired`] when it ends before it is recorded.
     pub fn attach(
         &self,
         remote: iroh_base::EndpointId,
         session: NegotiatedSession,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), AttachError> {
         self.inner.attach(remote, session)
     }
 
@@ -292,7 +301,7 @@ impl WebRtcHandle {
     /// registered — see [`crate::selector`] for why registering the transport
     /// alone is not enough.
     #[must_use]
-    pub fn path_selector(&self) -> std::sync::Arc<dyn iroh::endpoint::transports::PathSelector> {
+    pub fn path_selector(&self) -> std::sync::Arc<dyn transports::PathSelector> {
         std::sync::Arc::new(selector::WebRtcPreferred::new(self.inner.local_id()))
     }
 

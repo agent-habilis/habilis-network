@@ -15,6 +15,8 @@
 //! The bytes ride a direct path by default (the relay only with
 //! `--transport udp,webrtc,relay`), never gossip, and the reader paces the writer.
 
+#[cfg(unix)]
+use tokio::signal::unix;
 mod args;
 
 use std::io::{IsTerminal as _, Write as _};
@@ -85,7 +87,7 @@ async fn until_stopped(work: impl Future<Output = Result<()>>) -> Result<Result<
 /// with the exit code a shell gives each: 128 plus the signal number. SIGHUP
 /// is left alone when the process inherited it ignored, as under `nohup`;
 /// Ctrl-C is not, even when inherited ignored as in a background job, and
-/// `examples/tail/tail.sh` relies on that. A handler that cannot be installed
+/// `examples/tail/tail.ts` relies on that. A handler that cannot be installed
 /// never fires, as the default action then still applies.
 async fn stop_signal() -> i32 {
     let interrupt = async {
@@ -135,8 +137,8 @@ fn hangup_ignored() -> bool {
 
 /// Resolves with `code` at the first `kind` signal.
 #[cfg(unix)]
-async fn unix_signal(kind: tokio::signal::unix::SignalKind, code: i32) -> i32 {
-    match tokio::signal::unix::signal(kind) {
+async fn unix_signal(kind: unix::SignalKind, code: i32) -> i32 {
+    match unix::signal(kind) {
         Ok(mut signals) => {
             signals.recv().await;
             code

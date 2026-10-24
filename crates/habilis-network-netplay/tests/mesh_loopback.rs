@@ -14,9 +14,10 @@
 use std::time::Duration;
 
 use habilis_network::embed::SilentSink;
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{AuthorKey, LookupOpts, Nickname};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use serde::{Deserialize, Serialize};
 
 use habilis_network_netplay::{
@@ -65,26 +66,14 @@ async fn spawn(topic: &str, nick: &str) -> Player {
     };
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author: author.clone(),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: std::sync::Arc::new(SilentSink),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author.clone(), std::sync::Arc::new(SilentSink::default()))
+            .with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
 
     let (driver, pending) = RollbackDriver::<Game>::new();
-    let node: Node<RollbackDriver<Game>> = Node::spawn(config, driver, None, false);
+    let node: Node<RollbackDriver<Game>> = Node::spawn(config, driver, None, SignalHandling::Leave);
     let transport = pending.connect(node.sender());
 
     Player {
@@ -116,6 +105,7 @@ impl Player {
                 self.state.value += sum;
                 self.state.frame += 1;
             }
+            _ => unreachable!("a request this test does not expect"),
         }
     }
 
@@ -202,6 +192,11 @@ impl Player {
             Ok(requests) => requests,
             // Normal: the peer is behind, or we are yielding pace.
             Err(RollbackError::PredictionLimit) => return,
+            Err(
+                error @ (RollbackError::InvalidPlayer(_)
+                | RollbackError::MissingLocalInput
+                | RollbackError::Desync { .. }),
+            ) => panic!("unexpected session error: {error}"),
             Err(other) => panic!("unexpected session error: {other}"),
         };
         for request in requests {

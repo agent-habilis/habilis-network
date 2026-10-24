@@ -1,8 +1,9 @@
 //! `init_with_writer` sends the events to the writer of the test and still
 //! fails the test on a WARN or ERROR event.
 
+use habilis_network_test_tracing::catch_panic;
 use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use habilis_network_test_tracing::init_with_writer;
@@ -34,7 +35,7 @@ fn the_writer_gets_the_events_and_the_guard_fails_on_an_error() {
         || {
             let sink = Sink::default();
             let seen = Arc::clone(&sink.0);
-            let err = catch_unwind(AssertUnwindSafe(|| {
+            let err = catch_panic(AssertUnwindSafe(|| {
                 let _log = init_with_writer("writer=info", {
                     let sink = sink.clone();
                     move || sink.clone()

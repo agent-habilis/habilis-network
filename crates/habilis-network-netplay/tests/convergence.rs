@@ -11,7 +11,7 @@
 //! arbitrary per-frame lag — and asserts the final states match exactly.
 
 use habilis_network_netplay::{Config, Frame, PlayerHandle, Request, SyncTestSession};
-use proptest::prelude::*;
+use proptest::prelude::{prop, prop_assert_eq, proptest};
 use serde::{Deserialize, Serialize};
 
 // The rollback core is `pub(crate)`, so drive it through the one public
@@ -22,16 +22,24 @@ mod harness;
 
 use harness::{Runner, sim};
 
+/// The input of one player in a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Input(pub i32);
 
+/// The game state that every peer must agree on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct State {
+    /// The sum of every input applied so far.
     pub value: i64,
+    /// The frame that the state belongs to.
     pub frame: Frame,
 }
 
+/// The game under test.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Game;
 
 impl Config for Game {
@@ -109,6 +117,7 @@ fn a_rollback_loads_then_re_saves_and_re_advances() {
                 Request::SaveState { .. } => 'S',
                 Request::LoadState { .. } => 'L',
                 Request::AdvanceFrame { .. } => 'A',
+                _ => unreachable!("a request this test does not expect"),
             });
             // Fulfilling is not optional: the next rollback loads a state
             // this must have saved. Collecting without fulfilling is the

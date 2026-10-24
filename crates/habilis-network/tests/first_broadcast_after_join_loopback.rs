@@ -44,15 +44,17 @@ use habilis_network::embed::{
 };
 use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Inbound, Membership, Request};
-use habilis_network::net::TransportOpts;
 use habilis_network::ops::{app_frame, send_app};
 use habilis_network::protocol::{
     AppFrameParams, AppTag, Lookup, LookupOpts, MessageBody, Nickname, Transport,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
+use habilis_network::net::test_relay;
 /// How long a broadcast may take to reach the creator before the test calls it lost.
 const EXPECTED: Duration = Duration::from_mins(1);
 /// How long the test keeps looking, to tell a late message from one that never comes: past the
@@ -78,22 +80,22 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(transport)
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 
@@ -242,13 +244,9 @@ enum ChatSession {
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: true,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE
+            .union(AppClass::LOGGABLE)
+            .union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -283,12 +281,12 @@ impl NodeDriver for Chat {
             ChatSession::Send(text, reply) => {
                 let frame = app_frame(
                     ctx,
-                    AppFrameParams {
-                        tag: AppTag::from("chat"),
-                        to: None,
-                        corr: None,
-                        body: MessageBody::new(text).expect("a short body"),
-                    },
+                    AppFrameParams::new(
+                        AppTag::new("chat").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::new(text).expect("a short body"),
+                    ),
                 );
                 let class = self.classify(&frame.authored());
                 let sent = send_app(state, ctx, frame, class).await.map(|_| ());
@@ -328,26 +326,17 @@ impl LoggingMember {
                 mesh,
                 topic_string: topic.to_owned(),
             },
-            SetupParams {
-                author: Nickname::new(name).expect("valid nickname"),
-                max_peers: 16,
-                max_direct: 0,
-                endpoint: None,
-                protocols: Vec::new(),
-                transports: TransportOpts::default(),
-                runtime_base: None,
-                state_file: None,
-                sink: Arc::new(Quiet),
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+            SetupParams::new(
+                Nickname::new(name).expect("valid nickname"),
+                Arc::new(Quiet),
+            )
+            .with_max_peers(16),
         )
         .await
         .expect("setup_mesh on a loopback mesh");
         let chat = Chat::default();
         Self {
-            node: Node::spawn(config, chat.clone(), None, false),
+            node: Node::spawn(config, chat.clone(), None, SignalHandling::Leave),
             chat,
         }
     }
@@ -538,9 +527,7 @@ fn membership_race(
 ) {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay_url, _relay) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, _relay) = test_relay::spawn_plain().await.expect("local relay");
         let creator = Member::create("creator", &relay_url, transport).await;
         let j1 = Member::join("joiner-one", &creator).await;
         let j2 = Member::join("joiner-two", &creator).await;

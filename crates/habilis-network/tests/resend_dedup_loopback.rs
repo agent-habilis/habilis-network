@@ -19,12 +19,13 @@ use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeSink, SilentSink,
     TestDrop,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::ops::{StateMergeParams, app_frame, broadcast_state_merge, send_app};
 use habilis_network::protocol::{
     AppFrameParams, AppTag, Channel, LookupOpts, MessageBody, Nickname,
 };
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::oneshot;
 
 /// Two anti-entropy cycles (10 s each) and margin, less than the 90 s dedup of the gossip layer.
@@ -74,13 +75,9 @@ struct Chat {
 #[habilis_network::async_trait]
 impl NodeApp for Chat {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: true,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::NONE
+            .union(AppClass::LOGGABLE)
+            .union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -113,12 +110,12 @@ impl NodeDriver for Chat {
             Request::Say(text, done) => {
                 let frame = app_frame(
                     ctx,
-                    AppFrameParams {
-                        tag: AppTag::from("app_msg"),
-                        to: None,
-                        corr: None,
-                        body: MessageBody::from(text.as_str()),
-                    },
+                    AppFrameParams::new(
+                        AppTag::new("app_msg").expect("a valid app tag"),
+                        None,
+                        None,
+                        MessageBody::from(text.as_str()),
+                    ),
                 );
                 let class = self.classify(&frame.authored());
                 let _ = send_app(state, ctx, frame, class)
@@ -139,15 +136,7 @@ impl NodeDriver for Chat {
             Request::Merge(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams {
-                        mesh: ctx.mesh,
-                        author: ctx.author,
-                        merge,
-                        sender: ctx.sender,
-                        sink: ctx.sink,
-                        channel: Channel::State,
-                        surface: false,
-                    },
+                    StateMergeParams::new(ctx.into(), Channel::State, merge).with_surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
@@ -180,20 +169,11 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>)
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author: nick(name),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink) as Arc<dyn NodeSink>,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(
+            nick(name),
+            Arc::new(SilentSink::default()) as Arc<dyn NodeSink>,
+        )
+        .with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
@@ -203,7 +183,7 @@ async fn spawn(topic: &str, name: &str) -> (Node<Chat>, Arc<Mutex<Vec<String>>>)
             read: Arc::clone(&read),
         },
         None,
-        false,
+        SignalHandling::Leave,
     );
     (node, read)
 }

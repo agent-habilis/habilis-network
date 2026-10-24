@@ -25,6 +25,7 @@ use habilis_network::membership::{self, Inbound, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// Long enough for the gossip path to be tried and chosen: a probe goes every second.
 const STEP_DEADLINE: Duration = Duration::from_mins(2);
 const PAYLOAD_DEADLINE: Duration = Duration::from_secs(20);
@@ -49,22 +50,22 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::Udp, Transport::Gossip],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(vec![Transport::Udp, Transport::Gossip])
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 
@@ -217,9 +218,7 @@ struct Fixture {
 
 impl Fixture {
     async fn stand_up(name: &str) -> Self {
-        let (relay_url, relay) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay_url, relay) = test_relay::spawn_plain().await.expect("local relay");
         let alice = Member::create("alice", &relay_url).await;
         let bob = Member::join("bob", &alice).await;
         let carol = Member::join("carol", &alice).await;

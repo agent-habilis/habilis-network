@@ -16,9 +16,10 @@ use std::time::Duration;
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
 type Rtts = Vec<(Nickname, u64)>;
@@ -40,13 +41,7 @@ struct Pinger;
 #[habilis_network::async_trait]
 impl NodeApp for Pinger {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -124,24 +119,11 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Pinger> {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink).with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
-    Node::spawn(config, Pinger, None, false)
+    Node::spawn(config, Pinger, None, SignalHandling::Leave)
 }
 
 async fn ping(node: &Node<Pinger>) -> Rtts {

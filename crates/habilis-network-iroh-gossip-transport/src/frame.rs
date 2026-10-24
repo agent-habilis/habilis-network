@@ -32,23 +32,41 @@ pub const MAX_DATAGRAM_LEN: usize = MAX_FRAME_LEN - HEADER_LEN;
 /// A frame: the two ends and the datagram. A decode borrows the datagram from the
 /// input, and an encode writes this value out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Frame<'a> {
+#[non_exhaustive]
+pub struct Frame<'datagram> {
+    /// The member the frame is addressed to.
     pub dst: EndpointId,
+    /// The member that sent the frame.
     pub src: EndpointId,
-    pub datagram: &'a [u8],
+    /// The payload, borrowed from the input.
+    pub datagram: &'datagram [u8],
+}
+
+#[cfg(feature = "test-fixtures")]
+impl<'datagram> Frame<'datagram> {
+    /// A frame from its two ends and its datagram, for the engine's tests.
+    #[must_use]
+    pub fn fixture(dst: EndpointId, src: EndpointId, datagram: &'datagram [u8]) -> Self {
+        Self { dst, src, datagram }
+    }
 }
 
 /// Why a datagram cannot be framed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EncodeError {
     /// There is nothing to send.
     Empty,
     /// The datagram does not fit one gossip message.
-    TooLarge { len: usize },
+    TooLarge {
+        /// The length of the datagram.
+        len: usize,
+    },
 }
 
 /// Why bytes are not a frame this build reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// The first byte is not [`FRAME_KIND`]: this is another kind of message.
     NotAFrame,
@@ -57,7 +75,10 @@ pub enum DecodeError {
     /// Shorter than the header plus one byte of datagram.
     Truncated,
     /// Longer than [`MAX_FRAME_LEN`].
-    TooLarge { len: usize },
+    TooLarge {
+        /// The length the frame claimed.
+        len: usize,
+    },
     /// An id that is not a valid endpoint id.
     BadId,
 }

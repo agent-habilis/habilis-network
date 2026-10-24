@@ -9,11 +9,11 @@
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
-use iroh::EndpointId;
-use iroh::TransportAddr;
 use iroh::address_lookup::{AddressLookup, Error, Item};
 use iroh::endpoint_info::{EndpointData, EndpointInfo};
-use n0_future::{boxed::BoxStream, stream};
+use iroh::{EndpointId, TransportAddr};
+use n0_future::boxed::BoxStream;
+use n0_future::stream;
 
 use crate::addr::Route;
 use crate::graph::Leg;

@@ -13,6 +13,8 @@ use iroh::endpoint::Connection;
 
 use super::LOG_TARGET;
 
+use std::sync::atomic;
+use std::sync::atomic::Ordering;
 /// How long a hold waits for iroh to select a non-relay path. Hole punching
 /// starts as soon as the connection has both sides' candidates, and a first
 /// round lands within seconds; a punch that has not landed by now is
@@ -29,12 +31,12 @@ pub(crate) const GOSSIP_RELAY_REFUSED_CODE: u32 = super::webrtc::close_code::GOS
 pub(crate) const GOSSIP_RECURSION_REFUSED_CODE: u32 =
     super::webrtc::close_code::GOSSIP_ON_GOSSIP_PATH;
 
-static GOSSIP_RECURSION_CLOSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GOSSIP_RECURSION_CLOSES: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// How many gossip connections the recursion rule closed since the process started: a total,
 /// not a delta. A count that grows without bound is a pair that dials again after each close.
 pub(crate) fn gossip_recursion_closes() -> u64 {
-    GOSSIP_RECURSION_CLOSES.load(std::sync::atomic::Ordering::Relaxed)
+    GOSSIP_RECURSION_CLOSES.load(Ordering::Relaxed)
 }
 
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -76,7 +78,7 @@ pub(crate) fn watch_gossip_recursion(
         conn,
         GOSSIP_RECURSION_REFUSED_CODE,
         move || {
-            GOSSIP_RECURSION_CLOSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            GOSSIP_RECURSION_CLOSES.fetch_add(1, Ordering::Relaxed);
             admission.note_closed_on_rung(remote);
             tracing::info!(target: LOG_TARGET, %remote, "gossip connection closed: its path is the gossip rung");
         },
@@ -146,6 +148,34 @@ pub(crate) async fn wait_ip(conn: &Connection, deadline: Duration) -> bool {
     wait_selected(conn, deadline, selected_is_ip).await
 }
 
+/// Whether a payload may flow on the relay path, or only on a direct one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PayloadPath {
+    /// Only direct paths.
+    DirectOnly,
+    /// Direct paths, or the relay.
+    RelayAllowed,
+}
+
+impl PayloadPath {
+    /// The flag form that the wire and the handle config still carry.
+    #[must_use]
+    pub const fn relay_allowed(self) -> bool {
+        matches!(self, Self::RelayAllowed)
+    }
+}
+
+impl From<bool> for PayloadPath {
+    fn from(relay_allowed: bool) -> Self {
+        if relay_allowed {
+            Self::RelayAllowed
+        } else {
+            Self::DirectOnly
+        }
+    }
+}
+
 /// How a wait for a selected path ended.
 #[derive(Debug, PartialEq, Eq)]
 enum PathWait {
@@ -191,11 +221,11 @@ async fn wait_selected_outcome(
 /// may flow on `conn`.
 pub async fn refuse_unless_direct(
     conn: &Connection,
-    relay_transport: bool,
+    relay: PayloadPath,
     deadline: Duration,
     close_code: u32,
 ) -> bool {
-    let outcome = if relay_transport {
+    let outcome = if relay.relay_allowed() {
         PathWait::Selected
     } else {
         wait_selected_outcome(conn, deadline, selected_is_direct).await
@@ -241,11 +271,11 @@ pub async fn refuse_unless_direct(
 #[cfg(feature = "blob")]
 pub(crate) async fn refuse_relayed(
     conn: &Connection,
-    relay_transport: bool,
+    relay: PayloadPath,
     deadline: Duration,
     close_code: u32,
 ) -> anyhow::Result<()> {
-    if refuse_unless_direct(conn, relay_transport, deadline, close_code).await {
+    if refuse_unless_direct(conn, relay, deadline, close_code).await {
         return Ok(());
     }
     anyhow::bail!("{RELAY_REFUSED}")
@@ -256,7 +286,8 @@ mod tests {
     use habilis_network_test_tracing::test;
     use std::time::Duration;
 
-    use iroh::{Endpoint, RelayMode, endpoint::presets};
+    use iroh::endpoint::presets;
+    use iroh::{Endpoint, RelayMode};
 
     use super::{Connection, PathWait, wait_selected_outcome};
 

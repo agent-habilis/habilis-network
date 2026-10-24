@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "examples/tail/tail.ts",
+    "crates/habilis-network-iroh-webrtc-transport/examples/chat-webrtc/build-wasm.ts",
+    "crates/habilis-network-netplay/examples/light-cycles/web/build-wasm.ts"
+  ]
+}

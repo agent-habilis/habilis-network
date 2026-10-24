@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use habilis_network::net::test_relay;
 const BINARY: &str = env!("CARGO_BIN_EXE_habilis-network-stream");
 /// A relay dial, a direct path and the whole payload on one machine.
 const BUDGET: Duration = Duration::from_mins(1);
@@ -77,9 +78,7 @@ fn exit_code(child: &mut Child) -> Option<i32> {
 fn bytes_piped_in_come_out_of_another_binary_byte_exact() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
-        let (url, _relay) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("relay");
+        let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
         tokio::task::spawn_blocking(move || {
             let sent = payload(8 * 1024 * 1024);
@@ -127,9 +126,7 @@ fn bytes_piped_in_come_out_of_another_binary_byte_exact() {
 fn a_producer_stopped_by_sigterm_abandons_its_reader_at_once() {
     let guard = habilis_network_test_tracing::init();
     habilis_network_test_tracing::run_multi_thread(guard, 2, async {
-        let (url, _relay) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("relay");
+        let (url, _relay) = test_relay::spawn_plain().await.expect("relay");
         let url = url.to_string();
         tokio::task::spawn_blocking(move || {
             let (mut producer, notes) = producer(&url);

@@ -1,3 +1,4 @@
+use crate::transport::UdpTransport;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +30,16 @@ use crate::util::tuning::{
     rendezvous_periodic_return,
 };
 
+use crate::gossip::{antientropy, lan};
+use crate::protocol::{crypto, message};
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use crate::transport::redial;
+#[cfg(feature = "multihop")]
+use crate::transport::underlay_webrtc;
+use crate::transport::{endpoint_proof, graft_backoff, probe};
+use crate::util::tuning;
+use iroh::address_lookup::memory;
+use tokio::sync::{mpsc, oneshot};
 /// How long after it let go of the rendezvous a node wants it again. Every node waits the same
 /// period, plus a share of up to half of it that the id of the node fixes: the pubkey bytes are
 /// uniform, so n members do not come back together.
@@ -51,14 +62,18 @@ const UNREADABLE_DIGEST_LOG_WINDOW: Duration = Duration::from_mins(10);
 /// `peer_endpoints`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Reach {
+    /// A direct path.
     Direct,
+    /// No direct link: the peer is heard over the gossip topic, through other members or the relay.
     Gossip,
 }
 
 /// Tests only: which inbound frame the drop hook takes.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TestDrop {
     /// The app frame whose body is this text.
     AppBody(String),
@@ -131,11 +146,17 @@ impl Default for ParkedLinkStates {
 /// is a gossip-overlay link fact). Serialized directly into the
 /// consumer's roster surfaces.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct RosterEntry {
+    /// The nickname of the member.
     pub nickname: Nickname,
+    /// Seconds since the member was last heard from.
     pub last_seen_secs_ago: Option<u64>,
+    /// Whether the member has been silent past the alive timeout.
     pub quiet: bool,
+    /// How the member is reached.
     pub reach: Reach,
+    /// The transport that carries the member's traffic.
     pub transport: crate::transport::Lane,
 }
 
@@ -143,8 +164,11 @@ pub struct RosterEntry {
 /// most-recently-seen first, plus `count == peers.len() + 1` (the
 /// `+1` is self — same definition as the statusline `peer_count`).
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct RosterSnapshot {
+    /// The members of the roster.
     pub peers: Vec<RosterEntry>,
+    /// How many members there are.
     pub count: usize,
 }
 
@@ -236,29 +260,27 @@ pub struct EventLoopState {
     /// carrying payload.
     pub(crate) direct: HashMap<EndpointId, DirectState>,
     /// Mirrors `TransportPolicy::relay`, set once at loop start.
-    pub(crate) relay_transport: bool,
+    pub(crate) relay_transport: crate::transport::PayloadPath,
     /// Where a direct-path probe reports its verdict; the loop's receiver
     /// grafts on it (`transport::probe::on_outcome`). A detached sender until
     /// the real loop installs its channel.
-    pub(crate) direct_proven:
-        tokio::sync::mpsc::UnboundedSender<crate::transport::probe::DirectOutcome>,
+    pub(crate) direct_proven: mpsc::UnboundedSender<probe::DirectOutcome>,
     /// The gossip transport, when the engine installs one (Phase 6, step 10). The split of the
     /// mesh topic hands it the frames, and counts a lag on it.
     pub(crate) gossip_handle: Option<habilis_network_iroh_gossip_transport::GossipHandle>,
     /// Where a path watcher reports a change of the selected path to a peer
     /// the race covers (`transport::probe::on_path_change`).
-    pub(crate) path_changes:
-        tokio::sync::mpsc::UnboundedSender<crate::transport::probe::PathChange>,
+    pub(crate) path_changes: mpsc::UnboundedSender<probe::PathChange>,
     /// Where a flushed frame whose dial failed comes back to the loop, to be buffered again
     /// (`gossip::requeue_failed`). A detached sender until the real loop installs its channel.
-    pub(crate) flush_failed: tokio::sync::mpsc::UnboundedSender<(Verified, WireFrame)>,
+    pub(crate) flush_failed: mpsc::UnboundedSender<(Verified, WireFrame)>,
     /// The pooled connection each watched peer's watcher follows, by stable
     /// id (`None` while its dial runs), so a replaced connection gets a fresh
     /// watcher and a stale one's reports are dropped.
     pub(crate) path_watchers: HashMap<EndpointId, Option<usize>>,
     /// The last selected path kind each watcher reported, for the alive
     /// tick's nudge of peers riding `WebRTC`.
-    pub(crate) path_kinds: HashMap<EndpointId, crate::transport::probe::PathKind>,
+    pub(crate) path_kinds: HashMap<EndpointId, probe::PathKind>,
     /// The multihop route that was last dialed for each pair on the relay, so that a route that
     /// arrives between two alive ticks is dialed once, and a route that was dialed is not dialed
     /// again by a link-state event (the alive tick dials it as the backstop).
@@ -273,7 +295,7 @@ pub struct EventLoopState {
     /// The endpoint each signing key proved in its `PeerInfo`: the only
     /// point-to-point target an anti-entropy answer may take, since a
     /// nickname is a label any signer can claim.
-    pub(crate) proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints,
+    pub(crate) proven_endpoints: endpoint_proof::ProvenEndpoints,
     /// Our own `PeerInfo` proof, made once: it is the same for the session.
     pub(crate) peer_info_proof: Option<String>,
     /// Per-endpoint re-link throttle: caps re-dialing + re-flooding a peer
@@ -294,14 +316,14 @@ pub struct EventLoopState {
     pub(crate) last_flooded_addr: Option<EndpointAddr>,
     /// Tests only: the closes of direct connections and the reconnects soon after.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    pub(crate) redials: crate::transport::redial::Redials,
+    pub(crate) redials: redial::Redials,
     /// Since when this node holds two or more links fewer than G, with the link to
     /// the rendezvous counted. Cleared as soon as it holds G - 1. See `note_link_count`.
     pub(crate) below_target_since: Option<Instant>,
     /// When a graft last fell back to a `Join` for a starved node.
     pub(crate) join_fallback_at: Option<Instant>,
     /// The peers that refused a `Neighbor` request, and the wait before they are asked again.
-    pub(crate) graft_backoff: crate::transport::graft_backoff::GraftBackoff,
+    pub(crate) graft_backoff: graft_backoff::GraftBackoff,
     /// The lane peers that a frame is held for, and since when. Such a peer is offered a
     /// session although nothing was sent over a connection yet.
     lane_wanted: HashMap<EndpointId, Instant>,
@@ -325,15 +347,15 @@ pub struct EventLoopState {
     /// Tests only: how many frames the hook dropped.
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) test_drops_fired: u32,
-    pub(crate) resend_receiver: Option<tokio::sync::mpsc::Receiver<crate::transport::Resend>>,
+    pub(crate) resend_receiver: Option<mpsc::Receiver<crate::transport::Resend>>,
     /// When each asker's state or meta digest was last served, per plane. A
     /// new node sends a digest pair for every peer it sees, all with the same
     /// heads, and every holder hears each one; the plane is in the key so the
     /// asker's re-ask at its first real-peer link, answered point-to-point,
     /// is not refused by the gossip answer before it.
-    pub(crate) state_digest_serves: crate::gossip::antientropy::ServeBudget,
+    pub(crate) state_digest_serves: antientropy::ServeBudget,
     /// This node's own fast rounds of state digests while it backfills.
-    pub(crate) fast_rounds: crate::gossip::antientropy::FastRounds,
+    pub(crate) fast_rounds: antientropy::FastRounds,
     /// Membership layer: the peer roster. Nickname-keyed set of
     /// other peers, feeding the state file's `peer_count`
     /// (`peers.len() + 1`). Excludes self. Driven by
@@ -490,7 +512,7 @@ pub struct EventLoopState {
     /// on wasm). The local half of every `WebRTC` lane decision — read from
     /// here, not from the endpoint address, which is empty whenever the relay
     /// link is down.
-    pub(crate) local_udp_transport: bool,
+    pub(crate) local_udp_transport: UdpTransport,
     /// Set once we've broadcast our arrival (`joined` + `PeerInfo`).
     /// The announce is deferred to the first `NeighborUp` so it isn't
     /// lost into an unconnected overlay; subsequent neighbors only get
@@ -522,7 +544,7 @@ pub struct EventLoopState {
     /// endpoint. `None` when multihop is off. See
     /// [`crate::transport::underlay_webrtc`].
     #[cfg(feature = "multihop")]
-    pub(crate) underlay_webrtc: Option<crate::transport::underlay_webrtc::UnderlayWebRtc>,
+    pub(crate) underlay_webrtc: Option<underlay_webrtc::UnderlayWebRtc>,
     /// The link vectors whose author has no endpoint bound in the roster yet, until the binding
     /// is written (see `bind_peer_endpoint`).
     #[cfg(feature = "multihop")]
@@ -558,7 +580,7 @@ pub struct EventLoopState {
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     pub(crate) stall_requested: bool,
     /// What this node already asked of the members it heard on the LAN.
-    pub(crate) lan_grafts: crate::gossip::lan::LanGrafts,
+    pub(crate) lan_grafts: lan::LanGrafts,
     /// The `WebRTC` transport handle, when one is registered on this peer's
     /// endpoint. Portable — it is the browser's only direct path, and an
     /// opportunistic extra one for a native peer. `None` on the beacon.
@@ -576,7 +598,7 @@ pub struct EventLoopState {
     pub(crate) webrtc_admission: crate::transport::SignalAdmission,
     /// The address book of the member endpoint (`lookup::address_book`): where the addresses of the
     /// peers are registered with `lookup::add_peer_addr`.
-    pub(crate) address_book: iroh::address_lookup::memory::MemoryLookup,
+    pub(crate) address_book: memory::MemoryLookup,
     /// How far ICE may reach when this peer gathers candidates. Host-only on a
     /// loopback mesh, which promises to make no external network call —
     /// `IceConfig::default()` would query two public STUN servers.
@@ -611,7 +633,7 @@ pub struct EventLoopState {
     pub(crate) rival_recheck_deferrals: u32,
     /// The close of the beacon that a rival re-check just shed: when it resolves the loop
     /// re-probes the id at once, instead of at the next reclaim tick. `None` when no shed runs.
-    pub(crate) beacon_closing: Option<tokio::sync::oneshot::Receiver<()>>,
+    pub(crate) beacon_closing: Option<oneshot::Receiver<()>>,
     /// Recently-seen message ids, for duplicate suppression. Gossip
     /// (GRAFT/repair, topology churn, our own re-broadcasts, anti-entropy
     /// re-sends, the rendezvous double-path) can deliver the same message
@@ -733,7 +755,7 @@ pub struct EventLoopState {
     /// otherwise). Handed to the blob server on its first offload so every
     /// blob ticket inherits the same password — a scraped ticket then can't be
     /// redeemed without it. Kept out of logs (`Password` redacts its `Debug`).
-    pub(crate) mesh_password: Option<crate::protocol::crypto::Password>,
+    pub(crate) mesh_password: Option<crypto::Password>,
     /// The invite-only **creator's** mesh (secrets and all), retained so the
     /// `invite` IPC command can mint. `Some` only on the creator; set from
     /// [`EventLoopConfig`] after construction, so `new` defaults it to `None`
@@ -815,7 +837,7 @@ pub(crate) struct PingRound {
     /// delivered here instead of only emitted as a `ping_report` event — the
     /// in-process driver has no event stream to read the report from. `None`
     /// for the CLI/IPC path, which consumes the event.
-    pub(crate) resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
+    pub(crate) resp: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
 }
 
 impl PingRound {
@@ -824,7 +846,7 @@ impl PingRound {
         first: &Message,
         t1: TokioInstant,
         deadline: TokioInstant,
-        resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
+        resp: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
     ) -> Self {
         Self {
             t1,
@@ -863,7 +885,7 @@ impl PingRound {
 /// once the per-channel keys are derived) without blowing its argument budget.
 #[derive(Default)]
 pub(crate) struct MeshSecrets {
-    pub password: Option<crate::protocol::crypto::Password>,
+    pub password: Option<crypto::Password>,
     pub key: Option<SymmetricKey>,
 }
 
@@ -886,7 +908,7 @@ pub(crate) struct StateInit {
     pub(crate) webrtc_admission: crate::transport::SignalAdmission,
     /// The address book of the member endpoint, made by `lookup::address_book` where the
     /// endpoint was built.
-    pub(crate) address_book: iroh::address_lookup::memory::MemoryLookup,
+    pub(crate) address_book: memory::MemoryLookup,
     /// How far ICE may reach, derived from the mesh's own lookups so it cannot
     /// disagree with them.
     pub(crate) webrtc_ice: crate::transport::IceProfile,
@@ -917,7 +939,7 @@ impl EventLoopState {
             key: mesh_key,
         } = secrets;
         let (resend_outbox, resend_receiver) =
-            crate::transport::ResendOutbox::new(crate::util::tuning::RESEND_OUTBOX_CAP);
+            crate::transport::ResendOutbox::new(tuning::RESEND_OUTBOX_CAP);
         // Per-channel encryption keys, domain-separated from each other and from
         // every other seed-derived secret. `None` (passwordless) ⇒ the docs and
         // broadcast chat stay plaintext, exactly as before.
@@ -928,18 +950,16 @@ impl EventLoopState {
             linked_endpoints: HashSet::new(),
             zero_links_since: None,
             direct: HashMap::new(),
-            relay_transport: false,
-            direct_proven: tokio::sync::mpsc::unbounded_channel().0,
+            relay_transport: crate::transport::PayloadPath::DirectOnly,
+            direct_proven: mpsc::unbounded_channel().0,
             gossip_handle: None,
-            path_changes: tokio::sync::mpsc::unbounded_channel().0,
-            flush_failed: tokio::sync::mpsc::unbounded_channel().0,
+            path_changes: mpsc::unbounded_channel().0,
+            flush_failed: mpsc::unbounded_channel().0,
             path_watchers: HashMap::new(),
             path_kinds: HashMap::new(),
             route_dialed: HashMap::new(),
             known_endpoints: BoundedFifoSet::new(KNOWN_ENDPOINTS_CAP),
-            proven_endpoints: crate::transport::endpoint_proof::ProvenEndpoints::new(
-                KNOWN_ENDPOINTS_CAP,
-            ),
+            proven_endpoints: endpoint_proof::ProvenEndpoints::new(KNOWN_ENDPOINTS_CAP),
             peer_info_proof: None,
             relink: Cooldown::new(RELINK_COOLDOWN),
             peerinfo_flooded_at: None,
@@ -947,12 +967,12 @@ impl EventLoopState {
             last_flooded_addr: None,
             below_target_since: None,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-            redials: crate::transport::redial::Redials::default(),
+            redials: redial::Redials::default(),
             join_fallback_at: None,
-            graft_backoff: crate::transport::graft_backoff::GraftBackoff::default(),
+            graft_backoff: graft_backoff::GraftBackoff::default(),
             lane_wanted: HashMap::new(),
             regraft_at: HashMap::new(),
-            digest_serves: Cooldown::new(habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN),
+            digest_serves: Cooldown::new(tuning::ANTIENTROPY_SERVE_COOLDOWN),
             digest_unreadable: Cooldown::new(UNREADABLE_DIGEST_LOG_WINDOW),
             resend_outbox,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
@@ -960,8 +980,8 @@ impl EventLoopState {
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             test_drops_fired: 0,
             resend_receiver: Some(resend_receiver),
-            state_digest_serves: crate::gossip::antientropy::ServeBudget::default(),
-            fast_rounds: crate::gossip::antientropy::FastRounds::default(),
+            state_digest_serves: antientropy::ServeBudget::default(),
+            fast_rounds: antientropy::FastRounds::default(),
             peers: HashSet::new(),
             last_seen: HashMap::new(),
             peer_endpoints: HashMap::new(),
@@ -983,14 +1003,14 @@ impl EventLoopState {
             yield_to_lower: false,
             beacon_flag_flooded: false,
             rival_holders: HashMap::new(),
-            rendezvous_release_links: crate::util::tuning::RENDEZVOUS_RELEASE_LINKS,
+            rendezvous_release_links: tuning::RENDEZVOUS_RELEASE_LINKS,
             rendezvous_session_stale: false,
             rendezvous_offer_fallback: false,
             rendezvous_answers_jsep: true,
             rendezvous_probe_read_free: false,
             probe_backoff: super::probe_backoff::ProbeBackoff::default(),
             rendezvous_graft_needs_session: false,
-            local_udp_transport: true,
+            local_udp_transport: UdpTransport::Present,
             announced: false,
             meshed: false,
             unicast_pool: crate::transport::UnicastPool::disconnected(),
@@ -1015,7 +1035,7 @@ impl EventLoopState {
             shed_requested: false,
             #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
             stall_requested: false,
-            lan_grafts: crate::gossip::lan::LanGrafts::default(),
+            lan_grafts: lan::LanGrafts::default(),
             webrtc: None,
             webrtc_admission,
             address_book,
@@ -1223,7 +1243,7 @@ impl EventLoopState {
         spread: f64,
     ) -> bool {
         if self.direct.get(&peer) != Some(&DirectState::Direct)
-            || self.pair_path_kind(peer) == Some(crate::transport::probe::PathKind::Relay)
+            || self.pair_path_kind(peer) == Some(probe::PathKind::Relay)
             || self.rides_gossip_rung(peer)
             || self.relink_on_cooldown(peer, now)
         {
@@ -1400,8 +1420,7 @@ impl EventLoopState {
             && roster_len > 0
             && self.linked_endpoints.is_empty()
             && self.zero_links_since.is_some_and(|since| {
-                now.saturating_duration_since(since)
-                    >= crate::util::tuning::silent_partition_after()
+                now.saturating_duration_since(since) >= tuning::silent_partition_after()
             })
     }
 
@@ -1478,7 +1497,7 @@ impl EventLoopState {
         let Some(due) = self.next_rival_recheck.filter(|_| self.hosts_rendezvous) else {
             return;
         };
-        let spacing = crate::util::tuning::rival_recheck_meshed();
+        let spacing = tuning::rival_recheck_meshed();
         if self
             .second_group_sign_at
             .is_some_and(|at| now.saturating_duration_since(at) < spacing)
@@ -1566,7 +1585,7 @@ impl EventLoopState {
     /// A return to the rendezvous is owed from now, for
     /// [`RENDEZVOUS_COMEBACK`](crate::util::tuning::RENDEZVOUS_COMEBACK).
     pub(crate) fn owe_rendezvous_return(&mut self, now: Instant) {
-        self.rendezvous_comeback_until = Some(now + crate::util::tuning::RENDEZVOUS_COMEBACK);
+        self.rendezvous_comeback_until = Some(now + tuning::RENDEZVOUS_COMEBACK);
     }
 
     /// The periodic return, if it fell due, is owed like any other return: for a bounded time,
@@ -1591,7 +1610,7 @@ impl EventLoopState {
             .is_some_and(|due| now >= due);
         let owed_visit = self.rendezvous_comeback_until.take().is_some();
         self.rendezvous_dwell_until =
-            (owed_visit || periodic_visit).then(|| now + crate::util::tuning::RENDEZVOUS_DWELL);
+            (owed_visit || periodic_visit).then(|| now + tuning::RENDEZVOUS_DWELL);
     }
 
     /// Whether this node holds the rendezvous link, has not let go of it yet, is
@@ -1703,6 +1722,7 @@ impl EventLoopState {
                 self.reassembled_groups.insert(shard.group.clone());
                 Some(logical)
             }
+            _ => None,
         }
     }
 
@@ -1713,7 +1733,7 @@ impl EventLoopState {
         let shard = trigger.shard.as_ref()?;
         // A verified shard always has its author key.
         let author = trigger.key();
-        if !crate::protocol::message::shard_fits_log(trigger) {
+        if !message::shard_fits_log(trigger) {
             return None;
         }
         let slots = self
@@ -1747,7 +1767,7 @@ impl EventLoopState {
     /// is proven direct. `gossip::recv` gates its own call for this reason;
     /// the census tick in `daemon::timers` does not, so the gate lives here.
     pub(crate) fn observe_path(&mut self, peer: EndpointId, summary: crate::gossip::PathSummary) {
-        if !self.relay_transport && summary == crate::gossip::PathSummary::Relay {
+        if !self.relay_transport.relay_allowed() && summary == crate::gossip::PathSummary::Relay {
             return;
         }
         if let Some(state) = DirectState::from_summary(summary) {
@@ -1947,6 +1967,7 @@ impl EventLoopState {
         match channel {
             crate::protocol::Channel::State => &self.state_doc,
             crate::protocol::Channel::Meta => &self.meta_doc,
+            _ => unreachable!("a channel added later needs its own document"),
         }
     }
 
@@ -1955,6 +1976,7 @@ impl EventLoopState {
         match channel {
             crate::protocol::Channel::State => &mut self.state_doc,
             crate::protocol::Channel::Meta => &mut self.meta_doc,
+            _ => unreachable!("a channel added later needs its own document"),
         }
     }
 
@@ -1967,7 +1989,7 @@ impl EventLoopState {
     /// The address book of the member endpoint: one per endpoint, made by
     /// `lookup::address_book`. Write to it with `add_peer_addr`.
     #[must_use]
-    pub fn address_book(&self) -> &iroh::address_lookup::memory::MemoryLookup {
+    pub fn address_book(&self) -> &memory::MemoryLookup {
         &self.address_book
     }
 
@@ -2013,7 +2035,7 @@ impl EventLoopState {
 
     /// The raw mesh password, retained for blob-ticket keying.
     #[must_use]
-    pub fn mesh_password(&self) -> Option<&crate::protocol::crypto::Password> {
+    pub fn mesh_password(&self) -> Option<&crypto::Password> {
         self.mesh_password.as_ref()
     }
 
@@ -2084,11 +2106,8 @@ impl EventLoopState {
     /// The selected path of a pair: the path watcher's last report if it has one,
     /// else any live connection of the admission table (see
     /// [`crate::transport::probe::pair_kind`]).
-    pub(crate) fn pair_path_kind(
-        &self,
-        peer: EndpointId,
-    ) -> Option<crate::transport::probe::PathKind> {
-        crate::transport::probe::pair_kind(
+    pub(crate) fn pair_path_kind(&self, peer: EndpointId) -> Option<probe::PathKind> {
+        probe::pair_kind(
             self.path_kinds.get(&peer).copied(),
             self.webrtc_admission.selected_kind(peer),
         )
@@ -2099,7 +2118,7 @@ impl EventLoopState {
     /// Not while a session is attached: it carries the pair whatever one connection reads, and the
     /// link rides it once iroh moves the connection.
     pub(crate) fn rides_gossip_rung(&self, peer: EndpointId) -> bool {
-        self.pair_path_kind(peer) == Some(crate::transport::probe::PathKind::Gossip)
+        self.pair_path_kind(peer) == Some(probe::PathKind::Gossip)
             && !self
                 .webrtc
                 .as_ref()
@@ -2175,7 +2194,7 @@ impl EventLoopState {
             "multihop link-state received after its binding"
         );
         if updated {
-            crate::transport::underlay_webrtc::tick_now(self);
+            underlay_webrtc::tick_now(self);
         }
     }
 
@@ -2230,11 +2249,16 @@ mod tests {
         KNOWN_ENDPOINTS_CAP, Message, PingRound, QUIET_CAP, RELINK_COOLDOWN, Reach, RivalFlag,
         TokioInstant,
     };
-    use crate::protocol::{AppFrameParams, MeshId, MessageBody, MessageId};
-    use crate::protocol::{AuthorKey, ContentHash, UnixSecs};
+    use crate::protocol::{
+        AppFrameParams, AuthorKey, ContentHash, MeshId, MessageBody, MessageId, UnixSecs,
+    };
     use crate::testing::{author_of, endpoint_id, fresh_state, fresh_state_with_book, nick};
     use habilis_network_test_tracing::test;
 
+    use crate::protocol::message;
+    use crate::transport::probe::PathKind;
+    use crate::util::tuning;
+    use iroh::address_lookup::memory;
     fn lower_and_higher() -> (EndpointId, EndpointId) {
         let first = endpoint_id(1);
         let second = endpoint_id(2);
@@ -2303,7 +2327,7 @@ mod tests {
     /// The longest wait that the first round of a re-check can have: its fast base plus the
     /// offset of the id.
     fn brisk_wait() -> Duration {
-        crate::util::tuning::rival_recheck_first() + crate::util::tuning::RIVAL_RECHECK_OFFSET_SPAN
+        tuning::rival_recheck_first() + tuning::RIVAL_RECHECK_OFFSET_SPAN
     }
 
     /// A holder that has found no member has a re-check an hour or two out. A sign that another
@@ -2706,7 +2730,7 @@ mod tests {
     /// written through it is in the book of the endpoint.
     #[test]
     fn the_address_book_of_the_state_is_the_book_it_was_given() {
-        let book = iroh::address_lookup::memory::MemoryLookup::new();
+        let book = memory::MemoryLookup::new();
         let state = fresh_state_with_book(book.clone());
         let bob = endpoint_id(1);
         assert!(
@@ -2985,7 +3009,7 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         state.mark_rendezvous_released(endpoint_id(9));
-        let window = crate::util::tuning::RENDEZVOUS_COMEBACK;
+        let window = tuning::RENDEZVOUS_COMEBACK;
         state.rendezvous_return_due = Instant::now().checked_sub(window + Duration::from_secs(1));
 
         assert!(
@@ -3009,7 +3033,7 @@ mod tests {
         state.pay_periodic_return(now, local);
 
         assert!(state.rendezvous_wanted(), "the visit is wanted now");
-        let period = crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN;
+        let period = tuning::RENDEZVOUS_PERIODIC_RETURN;
         let next = state.rendezvous_return_due.expect("it is set again");
         assert!(next >= now + period, "the next return is a period away");
         let owed_until = state.rendezvous_comeback_until;
@@ -3026,7 +3050,7 @@ mod tests {
 
     #[test]
     fn the_return_of_a_node_that_let_go_falls_due_one_period_later_at_the_earliest() {
-        let period = crate::util::tuning::RENDEZVOUS_PERIODIC_RETURN;
+        let period = tuning::RENDEZVOUS_PERIODIC_RETURN;
         for seed in 1..=8 {
             let after = super::rendezvous_return_after(endpoint_id(seed));
             assert!(
@@ -3060,7 +3084,7 @@ mod tests {
             !state.should_release_rendezvous(now),
             "the visit lasts its dwell time: the beacon needs it to introduce the islands"
         );
-        let after_dwell = now + crate::util::tuning::RENDEZVOUS_DWELL;
+        let after_dwell = now + tuning::RENDEZVOUS_DWELL;
         assert!(state.should_release_rendezvous(after_dwell));
     }
 
@@ -3132,7 +3156,7 @@ mod tests {
         state.linked_endpoints.insert(endpoint_id(1));
         state.linked_endpoints.insert(endpoint_id(2));
         let long_ago = Instant::now()
-            .checked_sub(crate::util::tuning::RENDEZVOUS_COMEBACK + Duration::from_secs(1))
+            .checked_sub(tuning::RENDEZVOUS_COMEBACK + Duration::from_secs(1))
             .expect("a past instant");
         state.owe_rendezvous_return(long_ago);
 
@@ -3156,7 +3180,7 @@ mod tests {
             "the visit has just begun"
         );
 
-        let later = now + crate::util::tuning::RENDEZVOUS_DWELL + Duration::from_secs(1);
+        let later = now + tuning::RENDEZVOUS_DWELL + Duration::from_secs(1);
 
         assert!(
             state.should_release_rendezvous(later),
@@ -3180,7 +3204,7 @@ mod tests {
 
     /// An unsigned chat message carrying `id` — enough to exercise
     /// `mark_seen`, which keys on `dedup_key()` (`SHA-256(pubkey ‖ id)`).
-    fn msg_with_id(id: &MessageId) -> crate::protocol::message::Verified {
+    fn msg_with_id(id: &MessageId) -> message::Verified {
         plain_with_id(id).sign(&crate::protocol::Identity::generate())
     }
 
@@ -3188,12 +3212,12 @@ mod tests {
         let mut message = Message::new_app(
             &MeshId::from("test"),
             &nick("author-nick"),
-            AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: MessageBody::from("body"),
-            },
+            AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from("body"),
+            ),
         );
         message.id = id.clone();
         message
@@ -3392,7 +3416,7 @@ mod tests {
         // The mapping only reaches `RelayOnly` on a mesh whose relay may carry
         // payload; the lookup-only half is
         // `a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh`.
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         state.observe_path(endpoint_id(1), PathSummary::Direct);
         state.observe_path(endpoint_id(2), PathSummary::Relay);
         state.direct.insert(endpoint_id(3), DirectState::Pending);
@@ -3440,7 +3464,7 @@ mod tests {
     fn a_relay_reading_never_demotes_a_proven_peer_on_a_lookup_only_mesh() {
         use crate::gossip::PathSummary;
         let mut state = fresh_state();
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         state.direct.insert(endpoint_id(1), DirectState::Direct);
         state.observe_path(endpoint_id(1), PathSummary::Relay);
         assert_eq!(
@@ -3451,7 +3475,7 @@ mod tests {
 
         // With the relay allowed as transport the reading is real news: the
         // peer is reachable, over the relay, and the lanes may use it.
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         state.observe_path(endpoint_id(1), PathSummary::Relay);
         assert_eq!(
             state.direct.get(&endpoint_id(1)),
@@ -3586,7 +3610,7 @@ mod tests {
     fn a_peer_is_served_one_digest_per_window() {
         let mut state = fresh_state();
         let now = Instant::now();
-        let window = habilis_network_util::tuning::ANTIENTROPY_SERVE_COOLDOWN;
+        let window = tuning::ANTIENTROPY_SERVE_COOLDOWN;
 
         assert!(
             state.admit_digest(author_of("aa"), now),
@@ -3613,11 +3637,11 @@ mod tests {
         // attack. Distinct pubkeys ⇒ distinct `dedup_key`s.
         let mut state = fresh_state();
         let id = MessageId::random();
-        let victim = crate::protocol::message::Verified::fixture_unchecked(
+        let victim = message::Verified::fixture_unchecked(
             plain_with_id(&id),
             AuthorKey::from_bytes([0xaa; 32]),
         );
-        let attacker = crate::protocol::message::Verified::fixture_unchecked(
+        let attacker = message::Verified::fixture_unchecked(
             plain_with_id(&id),
             AuthorKey::from_bytes([0xbb; 32]),
         );
@@ -3859,7 +3883,7 @@ mod tests {
     #[test]
     fn a_meshed_member_without_links_is_a_silent_partition_only_after_a_heal() {
         let (bob, roster) = (endpoint_id(1), 3);
-        let after = crate::util::tuning::silent_partition_after();
+        let after = tuning::silent_partition_after();
         let mut state = fresh_state();
         state.meshed = true;
 
@@ -3906,7 +3930,7 @@ mod tests {
     #[test]
     fn a_degraded_node_that_heals_without_a_link_starts_counting_the_gap() {
         let roster = 3;
-        let after = crate::util::tuning::silent_partition_after();
+        let after = tuning::silent_partition_after();
         let mut state = fresh_state();
         state.note_degraded();
         let healed_at = Instant::now();
@@ -3927,7 +3951,7 @@ mod tests {
     #[test]
     fn a_heal_does_not_restart_a_gap_that_already_runs() {
         let (bob, roster) = (endpoint_id(1), 3);
-        let after = crate::util::tuning::silent_partition_after();
+        let after = tuning::silent_partition_after();
         let mut state = fresh_state();
         state.meshed = true;
         state.link(bob);
@@ -4023,9 +4047,7 @@ mod tests {
             .peer_endpoints
             .insert(nick("bob"), iroh::EndpointAddr::new(bob));
         state.path_watchers.insert(bob, Some(7));
-        state
-            .path_kinds
-            .insert(bob, crate::transport::probe::PathKind::WebRtc);
+        state.path_kinds.insert(bob, PathKind::WebRtc);
         state.forget_peer_endpoint("bob");
         assert!(state.path_watchers.is_empty());
         assert!(state.path_kinds.is_empty());

@@ -16,13 +16,13 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::TaskOutcome;
-use crate::util::output;
-use crate::util::{repo_root, wait_for};
+use crate::util::{output, repo_root, wait_for};
 
 use super::mesh::{BunServer, launch_page};
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
+use habilis_network::net::test_relay;
 type Failure = Box<dyn std::error::Error>;
 
 /// Lookup over the relay, JSEP and the direct path on a cold pair; generous
@@ -303,7 +303,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let server = BunServer::serve(
         &repo_root().join("packages/habilis-network-stream-web"),
@@ -699,7 +699,7 @@ fn fail<T>(cli: &mut Cli, page: Option<&Page>, reason: &str) -> Result<T, Failur
             page.console()
         );
     }
-    let dump = cli.transcript() + &browser;
+    let dump = format!("{}{browser}", cli.transcript());
     let path = repo_root().join("target/stream-e2e.log");
     let _ = std::fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));

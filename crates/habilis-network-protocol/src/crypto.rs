@@ -180,9 +180,9 @@ impl std::fmt::Debug for SymmetricKey {
 /// place. Two types feed one derivation because a mesh has one or the other,
 /// never both, and the derivations are the same hash over either.
 #[derive(Clone, Copy)]
-pub(crate) enum Keying<'a> {
-    Wire(&'a Seed),
-    Secret(&'a SymmetricKey),
+pub(crate) enum Keying<'key> {
+    Wire(&'key Seed),
+    Secret(&'key SymmetricKey),
 }
 
 impl Keying<'_> {
@@ -262,11 +262,13 @@ pub(crate) fn rendezvous_ports(source: Keying<'_>) -> [u16; RENDEZVOUS_LADDER] {
 pub struct Password(String);
 
 impl Password {
+    /// Wraps an operator password. Its `Debug` output is `***`.
     #[must_use]
     pub fn new(value: String) -> Self {
         Self(value)
     }
 
+    /// The password in plain text. `Debug` hides it; this does not.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -417,8 +419,11 @@ impl std::fmt::Debug for TicketSecret {
 /// directory ad (which carries the secret) is not enough to redeem a
 /// passworded ticket.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct TicketAuth {
+    /// The secret that the consumer presents.
     pub token: TicketSecret,
+    /// Whether the ticket also needs the password.
     pub password_protected: bool,
 }
 
@@ -518,6 +523,7 @@ mod derive_secret_tests {
         rendezvous_secret, topic_seed,
     };
     use habilis_network_test_tracing::test;
+    use std::collections::HashSet;
 
     const SEED_A: [u8; 32] = [7u8; 32];
     const SEED_B: [u8; 32] = [9u8; 32];
@@ -665,7 +671,7 @@ mod derive_secret_tests {
     #[test]
     fn rendezvous_ports_rungs_are_near_certainly_distinct() {
         let ladder = rendezvous_ports(Keying::Wire(&Seed::from_bytes(SEED_A)));
-        let unique: std::collections::HashSet<_> = ladder.iter().collect();
+        let unique: HashSet<_> = ladder.iter().collect();
         // A rare in-ladder dup is harmless, but the fixed test seed
         // must not regress into a degenerate all-same ladder.
         assert!(unique.len() >= RENDEZVOUS_LADDER - 1);

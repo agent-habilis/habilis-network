@@ -1,4 +1,3 @@
-use anyhow::Context as _;
 use std::io;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -14,8 +13,8 @@ use tokio::sync::mpsc;
 use super::driver::{NegotiatedSession, drive_session};
 use super::endpoint::WebRtcEndpoint;
 use super::session::{InboundPacket, SessionHandle, SessionRegistry};
-use crate::custom_addr;
-use crate::{IN_QUEUE, OUT_QUEUE};
+use crate::attach::AttachError;
+use crate::{IN_QUEUE, OUT_QUEUE, custom_addr};
 
 /// Factory for the `WebRTC` datagram lane of one iroh endpoint.
 ///
@@ -32,6 +31,7 @@ pub struct WebRtcTransport {
 }
 
 impl WebRtcTransport {
+    /// A transport for `local_id`, with no sessions yet.
     #[must_use]
     pub fn new(local_id: EndpointId) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(IN_QUEUE);
@@ -44,6 +44,7 @@ impl WebRtcTransport {
         })
     }
 
+    /// The endpoint id of this node.
     #[must_use]
     pub fn local_id(&self) -> EndpointId {
         self.local_id
@@ -52,10 +53,14 @@ impl WebRtcTransport {
     /// Adopts a negotiated session for `remote` and starts its driver.
     ///
     /// # Errors
-    ///
-    /// Fails if a live session for `remote` already exists (detach first,
-    /// or let the old driver notice the dead channel and clean up).
-    pub fn attach(&self, remote: EndpointId, session: NegotiatedSession) -> anyhow::Result<()> {
+    /// # Errors
+    /// [`AttachError::AlreadyAttached`] when a live session for `remote` already
+    /// exists, or [`AttachError::Retired`] when the session ends before it is recorded.
+    pub fn attach(
+        &self,
+        remote: EndpointId,
+        session: NegotiatedSession,
+    ) -> Result<(), AttachError> {
         let (out_tx, out_rx) = mpsc::channel(OUT_QUEUE);
         let dropped_tx = Arc::new(AtomicU64::new(0));
         // Claim the slot *before* spawning. The driver retires its own
@@ -65,7 +70,7 @@ impl WebRtcTransport {
         let reservation = self
             .registry
             .reserve(remote)
-            .with_context(|| format!("a live WebRTC session for {remote} already exists"))?;
+            .ok_or(AttachError::AlreadyAttached(remote))?;
         let generation = reservation.generation();
         let task = tokio::spawn(drive_session(
             session,
@@ -81,9 +86,7 @@ impl WebRtcTransport {
         // aborts the task rather than recording a session nothing pumps.
         let guard = reservation
             .fulfil(SessionHandle::new(out_tx, dropped_tx, task))
-            .with_context(|| {
-                format!("the session for {remote} was retired before it was recorded")
-            })?;
+            .ok_or(AttachError::Retired(remote))?;
         guard.commit();
         tracing::debug!(%remote, "webrtc session attached");
         Ok(())
@@ -104,11 +107,13 @@ impl WebRtcTransport {
         self.registry.clear()
     }
 
+    /// Whether a session with `remote` is open.
     #[must_use]
     pub fn has_session(&self, remote: &EndpointId) -> bool {
         self.registry.is_live(remote)
     }
 
+    /// The number of open sessions.
     #[must_use]
     pub fn session_count(&self) -> usize {
         self.registry.live_len()

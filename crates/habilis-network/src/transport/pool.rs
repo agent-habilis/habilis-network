@@ -24,6 +24,7 @@ use crate::util::clock::Instant;
 use crate::util::cooldown::Cooldown;
 use crate::util::tuning::{DIRECT_IDLE_BACKSTOP, PROBE_HOLD};
 
+use crate::protocol::message;
 /// How long an inline dial keeps trying before giving up. Deliberately short —
 /// far under the application's 90s discovery deadline — because the dial blocks the send,
 /// and an unreachable peer should surface as an error now, not stall the
@@ -110,6 +111,10 @@ struct PoolInner {
     /// [`UnicastPool::send_registered`] and [`UnicastPool::send_batch_in_background`]: an inline
     /// dial through [`UnicastPool::warm_or_dial`] does not.
     dialing: std::sync::Mutex<HashMap<EndpointId, watch::Receiver<DialOutcome>>>,
+    /// Tests only: the next dial waits on this before it connects, so a test can queue a send
+    /// behind it.
+    #[cfg(test)]
+    dial_gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// Each peer's full address, from its `PeerInfo`. Dialed instead of the
     /// bare id so the relay is in the address book before the handshake:
     /// iroh opens a connection's relay path only then, and with it a UDP loss
@@ -171,6 +176,8 @@ impl UnicastPool {
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashMap::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                dial_gate: std::sync::Mutex::new(None),
                 relay_transport,
                 admission: std::sync::OnceLock::new(),
             }),
@@ -205,6 +212,8 @@ impl UnicastPool {
                 dial_attempts: AtomicU64::new(0),
                 dialing: std::sync::Mutex::new(HashMap::new()),
                 addrs: std::sync::Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                dial_gate: std::sync::Mutex::new(None),
                 relay_transport: false,
                 admission: std::sync::OnceLock::new(),
             }),
@@ -376,6 +385,16 @@ impl UnicastPool {
         true
     }
 
+    /// Tests only: hold the next dial until the returned [`Notify`](tokio::sync::Notify) is notified.
+    #[cfg(test)]
+    pub(crate) fn hold_next_dial(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        if let Ok(mut slot) = self.inner.dial_gate.lock() {
+            *slot = Some(gate.clone());
+        }
+        gate
+    }
+
     /// Forget the pooled connection of `eid` and its dial-failure cooldown, and keep its address,
     /// so that the next send to it is cold. For a test that needs a cold send. The connection is
     /// closed. Returns whether one was pooled.
@@ -415,11 +434,11 @@ impl UnicastPool {
     pub(crate) async fn send_batch_in_background(
         &self,
         eid: EndpointId,
-        frames: Vec<crate::protocol::message::WireFrame>,
+        frames: Vec<message::WireFrame>,
     ) -> bool {
         let frames: Vec<Bytes> = frames
             .into_iter()
-            .map(crate::protocol::message::WireFrame::into_bytes)
+            .map(message::WireFrame::into_bytes)
             .collect();
         if let Some(conn) = self.warm(eid).await {
             if !payload_allowed_on(&conn, self.inner.relay_transport) {
@@ -669,6 +688,18 @@ impl UnicastPool {
             .ok()
             .and_then(|addrs| addrs.get(&eid).cloned())
             .unwrap_or_else(|| EndpointAddr::new(eid));
+        #[cfg(test)]
+        {
+            let gate = self
+                .inner
+                .dial_gate
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+        }
         match dial(&endpoint, addr).await {
             Ok(conn) => {
                 self.inner.dial_failures.lock().await.forget(&eid);
@@ -819,6 +850,9 @@ mod tests {
 
     use super::{Cooldown, DIAL_FAILURE_COOLDOWN};
 
+    use crate::util::tuning;
+    use iroh::endpoint::presets;
+    use tokio::sync::mpsc;
     #[test]
     fn a_fresh_failure_puts_the_endpoint_on_cooldown() {
         let mut failures = Cooldown::new(DIAL_FAILURE_COOLDOWN);
@@ -865,7 +899,7 @@ mod tests {
             }
         }
         let bind = || async {
-            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await
@@ -922,7 +956,7 @@ mod tests {
             }
         }
         let bind = || async {
-            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await
@@ -1028,7 +1062,7 @@ mod tests {
             }
         }
         let bind = || async {
-            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await
@@ -1101,7 +1135,7 @@ mod tests {
         // leaves the endpoint a runtime to close on.
         let endpoint_runtime = tokio::runtime::Runtime::new().expect("an endpoint runtime");
         let endpoint = endpoint_runtime.block_on(async {
-            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await
@@ -1161,13 +1195,13 @@ mod tests {
         iroh::EndpointId,
         iroh::protocol::Router,
         iroh::Endpoint,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
     ) {
         use iroh::endpoint::Connection;
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 
         #[derive(Debug, Clone)]
-        struct Collect(tokio::sync::mpsc::UnboundedSender<Vec<u8>>);
+        struct Collect(mpsc::UnboundedSender<Vec<u8>>);
         impl ProtocolHandler for Collect {
             async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
                 while let Ok(mut stream) = conn.accept_uni().await {
@@ -1179,13 +1213,13 @@ mod tests {
             }
         }
         let bind = || async {
-            iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            iroh::Endpoint::builder(presets::Minimal)
                 .relay_mode(iroh::RelayMode::Disabled)
                 .bind()
                 .await
                 .expect("bind a loopback endpoint")
         };
-        let (frames_tx, frames) = tokio::sync::mpsc::unbounded_channel();
+        let (frames_tx, frames) = mpsc::unbounded_channel();
         let server = bind().await;
         let router = Router::builder(server.clone())
             .accept(super::super::UNICAST_ALPN, Collect(frames_tx))
@@ -1206,7 +1240,7 @@ mod tests {
     ) {
         let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent socket");
         let bob = iroh::SecretKey::generate().public();
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
@@ -1222,7 +1256,7 @@ mod tests {
         (pool, bob, endpoint, silent)
     }
 
-    async fn next_frame(frames: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
+    async fn next_frame(frames: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
         tokio::time::timeout(Duration::from_secs(10), frames.recv())
             .await
             .expect("a frame arrives in time")
@@ -1285,17 +1319,18 @@ mod tests {
     async fn a_background_frame_during_a_dial_is_delivered_after_it() {
         let (pool, server, router, client, mut frames) = pool_with_collecting_server().await;
 
+        let gate = pool.hold_next_dial();
         assert!(
             pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"one"))
                 .await,
             "the first frame starts the dial"
         );
-        tokio::task::yield_now().await;
         assert!(
             pool.dial_and_send_in_background(server, bytes::Bytes::from_static(b"two"))
                 .await,
             "the second frame waits for the dial instead of being dropped"
         );
+        gate.notify_one();
 
         let mut got = vec![next_frame(&mut frames).await, next_frame(&mut frames).await];
         got.sort();
@@ -1416,17 +1451,20 @@ mod tests {
         use super::super::accept::UnicastAcceptor;
         use super::super::admission::SignalAdmission;
 
-        let (tx, _frames) = tokio::sync::mpsc::channel(8);
-        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let (tx, _frames) = mpsc::channel(8);
+        let server = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .expect("bind a loopback endpoint");
         let router = Router::builder(server.clone())
-            .accept(super::super::UNICAST_ALPN, UnicastAcceptor::new(tx, true))
+            .accept(
+                super::super::UNICAST_ALPN,
+                UnicastAcceptor::new(tx, crate::transport::PayloadPath::RelayAllowed),
+            )
             .spawn();
         let admission = SignalAdmission::new(8);
-        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let node = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .hooks(admission.connection_hook())
             .bind()
@@ -1464,17 +1502,20 @@ mod tests {
         use super::super::accept::UnicastAcceptor;
         use super::super::admission::SignalAdmission;
 
-        let (tx, _frames) = tokio::sync::mpsc::channel(8);
-        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let (tx, _frames) = mpsc::channel(8);
+        let server = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .expect("bind a loopback endpoint");
         let router = Router::builder(server.clone())
-            .accept(super::super::UNICAST_ALPN, UnicastAcceptor::new(tx, true))
+            .accept(
+                super::super::UNICAST_ALPN,
+                UnicastAcceptor::new(tx, crate::transport::PayloadPath::RelayAllowed),
+            )
             .spawn();
         let admission = SignalAdmission::new(8);
-        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let node = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .hooks(admission.connection_hook())
             .bind()
@@ -1502,7 +1543,7 @@ mod tests {
     fn a_pool_closes_an_idle_connection_after_the_one_backstop() {
         assert_eq!(
             super::UnicastPool::disconnected().inner.idle,
-            crate::util::tuning::DIRECT_IDLE_BACKSTOP
+            tuning::DIRECT_IDLE_BACKSTOP
         );
     }
 
@@ -1528,7 +1569,7 @@ mod tests {
             }
         }
 
-        let server = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let server = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
@@ -1537,7 +1578,7 @@ mod tests {
             .accept(super::super::UNICAST_ALPN, SlowReader)
             .spawn();
         let admission = SignalAdmission::new(8);
-        let node = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let node = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(iroh::RelayMode::Disabled)
             .hooks(admission.connection_hook())
             .bind()

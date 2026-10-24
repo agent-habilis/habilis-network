@@ -15,14 +15,14 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::TaskOutcome;
-use crate::util::output;
 use crate::util::page::rand_token;
-use crate::util::{repo_root, wait_for};
+use crate::util::{output, repo_root, wait_for};
 
 use super::mesh::{BunServer, launch_page};
 use super::page::{Page, call_page, urlencode};
 use super::{Args, Skip, build};
 
+use habilis_network::net::test_relay;
 /// Beacon claim + JSEP + graft on a cold pair; generous like the mesh
 /// suite's link budget, for the same reason.
 const LINK_TIMEOUT: Duration = Duration::from_secs(150);
@@ -200,7 +200,7 @@ pub(super) fn run(args: &Args) -> TaskOutcome {
         .build()
         .map_err(|error| format!("no tokio runtime: {error}"))?;
     let (relay_url, _relay_server) = runtime
-        .block_on(habilis_network::net::test_relay::spawn_plain())
+        .block_on(test_relay::spawn_plain())
         .map_err(|error| format!("no local relay: {error:#}"))?;
     let server = BunServer::serve(
         &repo_root().join("examples/chat/web"),
@@ -337,7 +337,7 @@ fn fail(robot: &mut Robot, page: Option<&Page>, reason: &str) -> TaskOutcome {
             page.console()
         );
     }
-    let dump = robot.transcript() + &browser;
+    let dump = format!("{}{browser}", robot.transcript());
     let path = repo_root().join("target/chat-e2e.log");
     let _ = std::fs::write(&path, dump);
     output::detail(&format!("full log: {}", path.display()));

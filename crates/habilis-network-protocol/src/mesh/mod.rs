@@ -15,7 +15,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
 use iroh_base::{EndpointId, SecretKey};
 use rand::RngCore;
 use zeroize::Zeroizing;
@@ -23,17 +22,19 @@ use zeroize::Zeroizing;
 use super::crypto::{self, Keying, Seed, SymmetricKey};
 use crate::base58check;
 
+mod error;
 mod id;
 mod lookup;
 mod name;
 mod transport;
 
+pub use error::ConfigError;
 pub use id::{MeshId, MeshIdError};
 pub use lookup::{
     AdvertiseRequiresReachable, DEFAULT_DIRECTORY, DirectorySelection, Lookup, LookupOpts,
-    MeshConfig, RelayChoice, resolve_lookups, validate_advertise,
+    LookupSet, MeshConfig, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection,
+    resolve_lookups, validate_advertise,
 };
-pub use lookup::{LookupSet, OptFlag, RelayLadder, RelayLadderError, RelaySelection};
 pub use name::{MeshName, NameError};
 pub use transport::{Transport, TransportPolicy};
 
@@ -142,6 +143,7 @@ pub struct LockedMesh {
 
 /// Why a [`LockedMesh`] would not unlock. The messages are the operator's text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnlockError {
     /// The id is invite-only: a bare hash never joins, redeem an invite.
     InviteOnly,
@@ -230,12 +232,13 @@ impl fmt::Debug for Mesh {
 /// Refuse a config that names a secret the caller does not hold. A password
 /// verifier needs the password to unlock it, and an issuer needs the minting
 /// session, so neither may arrive with a bare [`Mesh`].
-fn refuse_secret_config(config: &MeshConfig) -> Result<()> {
+fn refuse_secret_config(config: &MeshConfig) -> Result<(), ConfigError> {
     if config.password.is_some() || config.issuer_pubkey.is_some() {
-        bail!(
+        return Err(ConfigError::Invalid(
             "a config with a password or an invite issuer is set by set_password or set_invite, \
              or unlocked from a LockedMesh"
-        );
+                .to_owned(),
+        ));
     }
     Ok(())
 }
@@ -371,11 +374,11 @@ impl Mesh {
     /// A mesh with the wire `seed` of its id.
     ///
     /// # Errors
-    /// The config carries a password verifier or an invite issuer. Such a
-    /// mesh has a secret the caller does not hold, so it is set by
-    /// [`Mesh::set_password`] or [`Mesh::set_invite`], or unlocked from a
-    /// [`LockedMesh`].
-    pub fn new(seed: Seed, name: MeshName, config: MeshConfig) -> Result<Self> {
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the config carries a password verifier or an
+    /// invite issuer. Such a mesh has a secret the caller does not hold, so it is set by
+    /// [`Mesh::set_password`] or [`Mesh::set_invite`], or unlocked from a [`LockedMesh`].
+    pub fn new(seed: Seed, name: MeshName, config: MeshConfig) -> Result<Self, ConfigError> {
         refuse_secret_config(&config)?;
         Ok(Mesh {
             name,
@@ -393,9 +396,10 @@ impl Mesh {
     /// same id with zero coordination.
     ///
     /// # Errors
-    /// The config carries a password verifier or an invite issuer (see
-    /// [`Mesh::new`]). A topic's secret is the string itself.
-    pub fn from_topic(topic: &str, config: MeshConfig) -> Result<Self> {
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the config carries a password verifier or an
+    /// invite issuer (see [`Mesh::new`]). A topic's secret is the string itself.
+    pub fn from_topic(topic: &str, config: MeshConfig) -> Result<Self, ConfigError> {
         refuse_secret_config(&config)?;
         let seed = crypto::topic_seed(topic);
         let name = MeshName::from_topic_string(topic);
@@ -544,6 +548,7 @@ impl Mesh {
         crypto::rendezvous_secret(self.effective_seed())
     }
 
+    /// The lookups that find the mesh.
     #[must_use]
     pub fn lookups(&self) -> &LookupOpts {
         &self.config.lookups
@@ -612,45 +617,56 @@ fn encode_id(seed: &Seed, name: &MeshName, config: &MeshConfig) -> Vec<u8> {
 }
 
 impl LockedMesh {
-    fn decode_bytes(bytes: &[u8]) -> Result<Self> {
+    fn decode_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
         let mut pos = 0usize;
-        let version = *bytes.get(pos).context("Mesh identifier too short")?;
+        let version = *bytes
+            .get(pos)
+            .ok_or(ConfigError::Truncated("mesh identifier too short"))?;
         pos += 1;
         if version != VERSION {
-            bail!(
+            return Err(ConfigError::Invalid(format!(
                 "unsupported mesh id version {version}, this build reads version {VERSION}: \
                  upgrade every member, then create the mesh again"
-            );
+            )));
         }
 
         let seed_slice = bytes
             .get(pos..pos + SEED_LEN)
-            .context("Mesh identifier too short")?;
+            .ok_or(ConfigError::Truncated("mesh identifier too short"))?;
         let mut seed_bytes = [0u8; SEED_LEN];
         seed_bytes.copy_from_slice(seed_slice);
         let seed = Seed::from_bytes(seed_bytes);
         pos += SEED_LEN;
 
-        let name_len = *bytes.get(pos).context("Truncated mesh name length")? as usize;
+        let name_len = *bytes
+            .get(pos)
+            .ok_or(ConfigError::Truncated("truncated mesh name length"))?
+            as usize;
         pos += 1;
         if name_len == 0 || name_len > NAME_MAX_BYTES {
-            bail!("Invalid mesh name length: {name_len}");
+            return Err(ConfigError::Invalid(format!(
+                "invalid mesh name length: {name_len}"
+            )));
         }
         let name_raw = bytes
             .get(pos..pos + name_len)
-            .context("Truncated mesh name")?;
+            .ok_or(ConfigError::Truncated("truncated mesh name"))?;
         pos += name_len;
-        let name_str = std::str::from_utf8(name_raw).context("Invalid mesh name UTF-8")?;
-        let name = MeshName::new(name_str).context("Invalid mesh name")?;
+        let name_str = std::str::from_utf8(name_raw)
+            .map_err(ConfigError::with_step("invalid mesh name UTF-8"))?;
+        let name = MeshName::new(name_str).map_err(ConfigError::with_step("invalid mesh name"))?;
 
-        let config_len =
-            lookup::read_u16(bytes, &mut pos).context("Truncated config length")? as usize;
+        let config_len = lookup::read_u16(bytes, &mut pos)
+            .map_err(ConfigError::with_step("truncated config length"))?
+            as usize;
         let config_raw = bytes
             .get(pos..pos + config_len)
-            .context("Truncated mesh config")?;
+            .ok_or(ConfigError::Truncated("truncated mesh config"))?;
         pos += config_len;
         if pos != bytes.len() {
-            bail!("Trailing bytes in mesh identifier");
+            return Err(ConfigError::Invalid(
+                "trailing bytes in mesh identifier".to_owned(),
+            ));
         }
         let config = MeshConfig::from_bytes(config_raw)?;
 
@@ -672,10 +688,11 @@ impl fmt::Display for Mesh {
 }
 
 impl FromStr for LockedMesh {
-    type Err = anyhow::Error;
+    type Err = ConfigError;
 
-    fn from_str(s: &str) -> Result<Self> {
-        let bytes = base58check::decode(s, "mesh identifier")?;
+    fn from_str(s: &str) -> Result<Self, ConfigError> {
+        let bytes = base58check::decode(s, "mesh identifier")
+            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         Self::decode_bytes(&bytes)
     }
 }

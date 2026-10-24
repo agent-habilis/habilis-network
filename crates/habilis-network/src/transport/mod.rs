@@ -19,6 +19,7 @@
 //! path as gossip (`gossip::ingest`), so signature-verify, the mesh gate, and
 //! cross-transport dedup are identical on both planes.
 
+use tokio::sync::oneshot;
 mod accept;
 mod admission;
 pub(crate) mod ceiling;
@@ -50,7 +51,7 @@ pub(crate) mod underlay_webrtc;
 /// portable is what lets the event loop's IPC `select!` arm compile everywhere
 /// and simply never fire — a browser binds no socket, so its receiver is always
 /// `None`. Only the socket *server* needs `interprocess`.
-pub(crate) type IpcMessage<C> = (C, tokio::sync::oneshot::Sender<String>);
+pub(crate) type IpcMessage<C> = (C, oneshot::Sender<String>);
 mod send;
 pub(crate) mod sender;
 
@@ -60,16 +61,13 @@ pub(crate) use direct_gossip::DirectOnlyGossip;
 pub(crate) use outbox::{Resend, ResendOutbox};
 #[cfg(feature = "blob")]
 pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};
-pub(crate) use path::{RELAY_REFUSED, payload_allowed_on};
+pub(crate) use path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
-pub use send::Lane;
-pub(crate) use send::lane_for;
-pub use send::{Delivered, PendingSend, deliver, deliver_in_background};
-pub(crate) use send::{HeldForDirect, note_held};
-pub(crate) use send::{resolve, send_best_effort, unicast_answer_target};
+pub use send::{Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background};
+pub(crate) use send::{lane_for, note_held, resolve, send_best_effort, unicast_answer_target};
 pub use sender::MeshSender;
 pub use webrtc::MAX_DIRECT_PEERS;
-pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, WebRtcSignalAcceptor};
+pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, UdpTransport, WebRtcSignalAcceptor};
 
 /// ALPN for the unicast channel — a raw bidirectional QUIC stream with its own
 /// protocol identity, distinct from `GOSSIP_ALPN` and the application's own bridge ALPN.

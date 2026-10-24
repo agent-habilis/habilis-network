@@ -11,7 +11,7 @@ use crate::{FrameSink, GossipHandle};
 
 /// The members that share one flood.
 #[derive(Debug, Default, Clone)]
-pub struct MemoryHub {
+pub struct Hub {
     inner: Arc<Mutex<Members>>,
 }
 
@@ -22,7 +22,8 @@ struct Members {
     sent: Vec<Bytes>,
 }
 
-impl MemoryHub {
+impl Hub {
+    /// An empty hub with no members.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -62,7 +63,7 @@ impl MemoryHub {
 
 #[derive(Debug)]
 struct MemorySink {
-    hub: MemoryHub,
+    hub: Hub,
     from: GossipHandle,
 }
 

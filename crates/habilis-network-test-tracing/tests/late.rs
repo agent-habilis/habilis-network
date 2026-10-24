@@ -2,7 +2,8 @@
 //! runtime that drops its endpoints after the test body, fails the next test
 //! and names the test that ended.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use habilis_network_test_tracing::catch_panic;
+use std::panic::AssertUnwindSafe;
 use std::thread;
 
 use habilis_network_test_tracing::init;
@@ -23,7 +24,7 @@ fn an_event_after_the_guard_dropped_fails_the_next_test() {
         tracing::error!("endpoint dropped by the runtime");
     });
     let err = named("late_second", || {
-        catch_unwind(AssertUnwindSafe(|| drop(init()))).expect_err("the guard must panic")
+        catch_panic(AssertUnwindSafe(|| drop(init()))).expect_err("the guard must panic")
     });
     let text = err.downcast_ref::<String>().expect("panic text");
     assert!(

@@ -75,8 +75,7 @@ pub mod protocol {
 /// `resolver::JoinTarget::Invite`; `mint` is re-exported for consumers
 /// through [`ops::invite`](crate::ops::invite).
 pub(crate) use habilis_network_protocol::directory;
-pub(crate) use habilis_network_protocol::invite;
-pub(crate) use habilis_network_protocol::resolver;
+pub(crate) use habilis_network_protocol::{invite, resolver};
 
 pub(crate) use habilis_network_protocol::reassembly;
 

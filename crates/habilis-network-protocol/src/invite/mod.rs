@@ -6,12 +6,14 @@
 //! root, but not a *valid* (creator-signed) invite. See [`crate::mesh`]
 //! for the invite-only mesh itself.
 
+mod error;
 mod ticket;
 
 // `InviteTicket` rides the **public** `JoinTarget::Invite`, so it must be at
 // least as public as that enum (re-exported at the crate root in `lib.rs`); its
 // methods are `pub`, but the ticket exposes no field, so externally it is an
 // opaque join token.
+pub use error::InviteError;
 pub use ticket::InviteTicket;
 // `pub` so the application layer's `invite` command can mint from the retained
 // creator mesh (`EventLoopState::mint_mesh`). `InviteTicket::decode` and

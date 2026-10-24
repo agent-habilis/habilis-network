@@ -8,7 +8,6 @@
 
 use std::fmt;
 
-use anyhow::{Context, Result, bail};
 use iroh_base::Signature;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +20,7 @@ use super::{AuthorKey, ContentHash, DedupKey};
 use crate::newtype::string_newtype;
 
 mod body;
+mod error;
 mod id;
 mod shard;
 mod verified;
@@ -30,9 +30,9 @@ pub use verified::{Authored, Proof, Verified};
 pub use wire::WireFrame;
 
 pub use body::{BodyError, MessageBody};
+pub use error::{AppTagError, CorrIdError, MessageError};
 pub use id::{IdError, MessageId};
-pub use shard::shard_fits_log;
-pub use shard::{Shard, ShardGroup};
+pub use shard::{Shard, ShardGroup, shard_fits_log};
 
 /// Maximum serialized message size — a network-wide wire contract kept
 /// under iroh-gossip's payload budget so a message we accept always fits
@@ -99,9 +99,13 @@ pub(crate) const VERSION: &str = "12.0";
 /// by the heartbeat-based peer tracker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum PresenceSubtype {
+    /// A member joined.
     Joined,
+    /// A member left.
     Left,
+    /// A member is still here.
     Alive,
 }
 
@@ -162,20 +166,28 @@ impl AppTag {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     }
 
+    /// There is no `From<&str>`: a bad literal would panic, so every caller handles the error.
+    ///
+    /// ```compile_fail
+    /// use habilis_network_protocol::AppTag;
+    /// let _ = AppTag::from("app_msg");
+    /// ```
+    ///
+    /// ```
+    /// use habilis_network_protocol::AppTag;
+    /// assert!(AppTag::new("app_msg").is_ok());
+    /// ```
+    ///
     /// # Errors
-    /// The tag is empty, longer than 32 bytes, or not an ASCII slug.
-    pub fn new(raw: impl Into<String>) -> Result<Self, &'static str> {
+    /// # Errors
+    /// A [`AppTagError::Invalid`] when the tag is empty, longer than 32 bytes, or not
+    /// an ASCII slug.
+    pub fn new(raw: impl Into<String>) -> Result<Self, AppTagError> {
         let raw = raw.into();
         if !Self::validate(&raw) {
-            return Err("invalid app tag");
+            return Err(AppTagError::Invalid);
         }
         Ok(Self(raw))
-    }
-}
-
-impl From<&str> for AppTag {
-    fn from(raw: &str) -> Self {
-        Self::new(raw).expect("invalid app tag")
     }
 }
 
@@ -186,7 +198,7 @@ string_newtype!(
 /// mints and interprets its value (the application layer uses a UUID). Kept generic so
 /// the engine correlates without knowing the payload model.
     CorrId,
-    error = &'static str,
+    error = CorrIdError,
 );
 
 impl CorrId {
@@ -194,12 +206,26 @@ impl CorrId {
         !raw.is_empty() && raw.len() <= 64
     }
 
+    /// There is no `From<&str>`: a bad literal would panic, so every caller handles the error.
+    ///
+    /// ```compile_fail
+    /// use habilis_network_protocol::CorrId;
+    /// let _ = CorrId::from("aaaa");
+    /// ```
+    ///
+    /// ```
+    /// use habilis_network_protocol::CorrId;
+    /// assert!(CorrId::new("aaaa").is_ok());
+    /// ```
+    ///
     /// # Errors
-    /// The correlation id is empty or longer than 64 bytes.
-    pub fn new(raw: impl Into<String>) -> Result<Self, &'static str> {
+    /// # Errors
+    /// A [`CorrIdError::Invalid`] when the correlation id is empty or longer than 64
+    /// bytes.
+    pub fn new(raw: impl Into<String>) -> Result<Self, CorrIdError> {
         let raw = raw.into();
         if !Self::validate(&raw) {
-            return Err("invalid correlation id");
+            return Err(CorrIdError::Invalid);
         }
         Ok(Self(raw))
     }
@@ -219,12 +245,6 @@ impl<'de> Deserialize<'de> for CorrId {
     }
 }
 
-impl From<&str> for CorrId {
-    fn from(raw: &str) -> Self {
-        Self::new(raw).expect("invalid correlation id")
-    }
-}
-
 /// Message kind — the frame's routing discriminator. The engine owns the
 /// infrastructure kinds (presence, peer-info, digests, ping/pong, channel
 /// events, link-state); all application payloads ride the single generic
@@ -236,6 +256,7 @@ impl From<&str> for CorrId {
 /// - `PeerInfo`: infrastructure — carries endpoint address for mesh formation. Not user-visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum MessageKind {
     /// An application payload. `tag` is the wire discriminant the app dispatches
     /// on (the engine treats it opaquely); `to` is the directed addressee
@@ -243,15 +264,21 @@ pub enum MessageKind {
     /// the pending-call registry (`None` for fire-and-forget). Everything else
     /// the payload needs (task id, method, params) rides inside `body`.
     App {
+        /// The application tag, which routes the frame to its app handler.
         tag: AppTag,
+        /// The recipient, when the message is directed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<Nickname>,
+        /// The correlation id of a request or reply.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corr: Option<CorrId>,
     },
+    /// A presence change of a member.
     Presence {
+        /// What changed.
         subtype: PresenceSubtype,
     },
+    /// The identity of a peer.
     PeerInfo,
     /// Anti-entropy digest. Body is a JSON array of recent message ids
     /// the sender holds; a receiver re-broadcasts any of *its* logged
@@ -269,7 +296,9 @@ pub enum MessageKind {
     /// pinger reads the RTT from the probe that the pong names, and drops a pong
     /// that names none of its own. Same plumbing treatment as `Ping`.
     Pong {
+        /// The member that sent the probe.
         to: Nickname,
+        /// The probe that this pong answers.
         probe: MessageId,
     },
     /// A durable `state`-channel event: one Base58 automerge change
@@ -308,8 +337,11 @@ pub enum MessageKind {
 /// Which shared-state channel an event/digest belongs to. The two channels share
 /// all machinery; this selects the wire kind, the log, and the surfaced name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Channel {
+    /// The shared state of the mesh.
     State,
+    /// The metadata of the members.
     Meta,
 }
 
@@ -386,11 +418,14 @@ impl MessageKind {
     /// A broadcast [`App`](MessageKind::App) kind (no addressee, no correlation)
     /// with tag `tag` — the test/fixture ergonomic for what used to be a bare
     /// unit variant per app tag.
+    ///
+    /// # Panics
+    /// `tag` is not a valid [`AppTag`]. A fixture names a fixed literal.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn app_broadcast(tag: &str) -> Self {
         MessageKind::App {
-            tag: AppTag::from(tag),
+            tag: AppTag::new(tag).expect("a valid app tag"),
             to: None,
             corr: None,
         }
@@ -399,11 +434,14 @@ impl MessageKind {
     /// A directed [`App`](MessageKind::App) kind addressed to `to`, tag `tag`,
     /// with an optional correlation id — the test ergonomic for the former
     /// directed app variants.
+    ///
+    /// # Panics
+    /// `tag` is not a valid [`AppTag`]. A fixture names a fixed literal.
     #[cfg(any(test, feature = "test-fixtures"))]
     #[must_use]
     pub fn app_to(tag: &str, to: Nickname, corr: Option<CorrId>) -> Self {
         MessageKind::App {
-            tag: AppTag::from(tag),
+            tag: AppTag::new(tag).expect("a valid app tag"),
             to: Some(to),
             corr,
         }
@@ -432,14 +470,21 @@ fn empty_body() -> MessageBody {
 /// `to` (the addressee nickname) is inlined into the JSON for a directed app frame.
 /// `ext`: free-form object for experimental/future fields; parsers MUST ignore unknown keys inside it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Message {
+    /// The protocol version of the message.
     pub version: String,
+    /// The id of the message.
     pub id: MessageId,
+    /// What the message carries.
     pub kind: MessageKind,
+    /// The mesh that the message belongs to.
     pub mesh: MeshId,
+    /// The member that signed the message.
     pub author: Nickname,
     /// Unix timestamp (seconds, UTC).
     pub timestamp: UnixSecs,
+    /// The body of the message (sealed for a directed frame on a passworded mesh).
     pub body: MessageBody,
     /// Author's Ed25519 public key and the detached signature over the message's
     /// [canonical bytes](Message::canonical_bytes), always together: a message has both or
@@ -456,6 +501,7 @@ pub struct Message {
     /// computed locally (`content_hash_hex`), never transmitted. See
     /// `docs/history-integrity.md`.
     pub seq: Option<u64>,
+    /// The hash of the previous message of the author.
     pub prev: Option<ContentHash>,
     /// Cross-author DAG (Phase 3), `Msg` only: content hashes of the DAG
     /// tips this author had seen when authoring — the causal links. Signed.
@@ -531,38 +577,38 @@ struct WireIn {
 
 /// A [`Message`] as the wire has it, written. The field order is the order of the JSON text.
 #[derive(Serialize)]
-struct WireOut<'a> {
+struct WireOut<'message> {
     #[serde(rename = "v")]
-    version: &'a str,
-    id: &'a MessageId,
+    version: &'message str,
+    id: &'message MessageId,
     #[serde(flatten)]
-    kind: &'a MessageKind,
-    mesh: &'a MeshId,
-    author: &'a Nickname,
+    kind: &'message MessageKind,
+    mesh: &'message MeshId,
+    author: &'message Nickname,
     #[serde(rename = "ts")]
     timestamp: i64,
-    body: &'a MessageBody,
+    body: &'message MessageBody,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pubkey: Option<HexOut<'a>>,
+    pubkey: Option<HexOut<'message>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    sig: Option<HexOut<'a>>,
+    sig: Option<HexOut<'message>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    prev: &'a Option<ContentHash>,
+    prev: &'message Option<ContentHash>,
     #[serde(skip_serializing_if = "<[ContentHash]>::is_empty")]
-    parents: &'a [ContentHash],
+    parents: &'message [ContentHash],
     #[serde(skip_serializing_if = "Option::is_none")]
-    shard: &'a Option<Shard>,
-    ext: &'a serde_json::Value,
+    shard: &'message Option<Shard>,
+    ext: &'message serde_json::Value,
 }
 
 /// Bytes written as lowercase hex, straight into the serializer.
-struct HexOut<'a>(&'a [u8]);
+struct HexOut<'bytes>(&'bytes [u8]);
 
 impl Serialize for HexOut<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        struct Hex<'a>(&'a [u8]);
+        struct Hex<'bytes>(&'bytes [u8]);
         impl fmt::Display for Hex<'_> {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 identity::write_hex(formatter, self.0)
@@ -574,7 +620,7 @@ impl Serialize for HexOut<'_> {
 
 /// The wire form of a message. The serde impl lives on this private wrapper, not on [`Message`], so a
 /// message that a caller holds through a `Deref` (an [`Authored`] view) has no public `Serialize`.
-struct Wire<'a>(&'a Message);
+struct Wire<'message>(&'message Message);
 
 impl Serialize for Wire<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -675,11 +721,34 @@ fn is_lower_hex(value: &str, bytes: usize) -> bool {
 /// Parameters for [`Message::new_app`] (and `habilis_network::ops::send_app`, which
 /// shares the same `App` frame shape).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct AppFrameParams {
+    /// The application tag, which routes the frame to its app handler.
     pub tag: AppTag,
+    /// The recipient, when the frame is directed.
     pub to: Option<Nickname>,
+    /// The correlation id of a request or reply.
     pub corr: Option<CorrId>,
+    /// The body the app sends.
     pub body: MessageBody,
+}
+
+impl AppFrameParams {
+    /// The parts of an app frame: its tag, the addressee and the request id, if any, and the body.
+    #[must_use]
+    pub const fn new(
+        tag: AppTag,
+        to: Option<Nickname>,
+        corr: Option<CorrId>,
+        body: MessageBody,
+    ) -> Self {
+        Self {
+            tag,
+            to,
+            corr,
+            body,
+        }
+    }
 }
 
 impl Message {
@@ -732,6 +801,7 @@ impl Message {
         Self::new(mesh, author, MessageKind::App { tag, to, corr }, body)
     }
 
+    /// A presence message for `author` joining `mesh`. It has no body.
     #[must_use]
     pub fn new_joined(mesh: &MeshId, author: &Nickname) -> Self {
         // Presence carries no body; peer metadata (model/harness/host) is application
@@ -746,6 +816,7 @@ impl Message {
         )
     }
 
+    /// A presence message for `author` leaving `mesh`. It has no body.
     #[must_use]
     pub fn new_left(mesh: &MeshId, author: &Nickname) -> Self {
         Self::new(
@@ -758,6 +829,7 @@ impl Message {
         )
     }
 
+    /// A presence message that `author` is alive on `mesh`. It has no body.
     #[must_use]
     pub fn new_alive(mesh: &MeshId, author: &Nickname) -> Self {
         Self::new(
@@ -853,31 +925,34 @@ impl Message {
     /// Serialize to compact JSON bytes for the gossip wire. Outside this crate only a [`Verified`]
     /// serializes, through [`Verified::serialize`]: an unverified or an authored view has no wire form.
     /// # Errors
-    /// Serialization of a field fails.
-    pub(crate) fn serialize(&self) -> Result<Vec<u8>> {
-        let bytes = serde_json::to_vec(&Wire(self)).context("failed to serialize message")?;
+    /// # Errors
+    /// A [`MessageError::Source`] when the JSON does not encode, or
+    /// [`MessageError::Oversize`] when the bytes pass `MAX_MESSAGE_SIZE`.
+    pub(crate) fn serialize(&self) -> Result<Vec<u8>, MessageError> {
+        let bytes = serde_json::to_vec(&Wire(self))
+            .map_err(MessageError::with_step("failed to serialize message"))?;
         if bytes.len() > MAX_MESSAGE_SIZE {
-            bail!(
-                "message too large: {} bytes (max {})",
-                bytes.len(),
-                MAX_MESSAGE_SIZE
-            );
+            return Err(MessageError::Oversize { bytes: bytes.len() });
         }
         Ok(bytes)
     }
 
     /// Parse a message from JSON bytes.
     /// # Errors
-    /// The bytes are malformed or truncated.
-    pub fn parse(data: &[u8]) -> Result<Self> {
+    /// # Errors
+    /// A [`MessageError::TooLarge`] past `MAX_MESSAGE_SIZE`, a [`MessageError::Source`]
+    /// when the JSON does not parse, [`MessageError::UnsupportedVersion`] for another
+    /// protocol version, or [`MessageError::Invalid`] for a field the protocol does not allow.
+    pub fn parse(data: &[u8]) -> Result<Self, MessageError> {
         if data.len() > MAX_MESSAGE_SIZE {
-            bail!("message too large");
+            return Err(MessageError::TooLarge);
         }
-        let wire: WireIn = serde_json::from_slice(data).context("failed to parse message JSON")?;
+        let wire: WireIn = serde_json::from_slice(data)
+            .map_err(MessageError::with_step("failed to parse message JSON"))?;
         if wire.version != VERSION {
-            bail!("unsupported protocol version: {}", wire.version);
+            return Err(MessageError::UnsupportedVersion(wire.version));
         }
-        Message::try_from(wire).map_err(|reason| anyhow::anyhow!(reason))
+        Message::try_from(wire).map_err(MessageError::Invalid)
     }
 
     /// Parse a gossip payload that may end in the trailer of a resend (see
@@ -885,8 +960,9 @@ impl Message {
     /// outside the signature: it changes the gossip message id and nothing else.
     ///
     /// # Errors
-    /// The frame is malformed, as for [`Message::parse`].
-    pub fn parse_wire(data: &[u8]) -> Result<(Self, Option<u64>)> {
+    /// # Errors
+    /// A [`MessageError`] as for [`Message::parse`].
+    pub fn parse_wire(data: &[u8]) -> Result<(Self, Option<u64>), MessageError> {
         let (frame, nonce) = split_resend_trailer(data);
         Ok((Self::parse(frame)?, nonce))
     }
@@ -1135,7 +1211,7 @@ impl Message {
 /// command, the library API send path, and interactive stdin.
 ///
 /// # Errors
-/// Propagates `Message::serialize` failure (oversized payload).
+/// A [`MessageError`] from the message encoding: an oversized payload or a JSON failure.
 /// The per-author log + DAG position to stamp on an outbound `Msg`: the
 /// chain `seq`/`prev` (Phase 2) and the DAG `parents` (Phase 3). Bundled so
 /// [`build_msg_bytes`] stays within the argument budget. Test-only now that the
@@ -1143,9 +1219,13 @@ impl Message {
 /// the multipart split.
 #[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ChainCtx {
+    /// The position of the message in its author's chain.
     pub seq: u64,
+    /// The hash of the message before this one.
     pub prev: Option<ContentHash>,
+    /// The hashes of the other messages that this one follows.
     pub parents: Vec<ContentHash>,
 }
 
@@ -1162,12 +1242,18 @@ impl ChainCtx {
     }
 }
 
+/// The inputs of a test message: the mesh, the author, the body, the chain and the app tag.
 #[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug)]
-pub struct BuildMsgParams<'a> {
-    pub mesh: &'a MeshId,
-    pub author: &'a Nickname,
+#[non_exhaustive]
+pub struct BuildMsgParams<'mesh> {
+    /// The mesh of the message.
+    pub mesh: &'mesh MeshId,
+    /// The member that signs the message.
+    pub author: &'mesh Nickname,
+    /// The body to sign.
     pub body: MessageBody,
+    /// Where the message sits in its author's chain.
     pub chain: ChainCtx,
     /// The app tag to stamp. A parameter, not a constant: this fixture is used
     /// across crates, and hardcoding one consumer's tag made it build a frame
@@ -1181,7 +1267,7 @@ pub struct BuildMsgParams<'a> {
 pub fn build_msg_bytes(
     params: BuildMsgParams<'_>,
     identity: &Identity,
-) -> Result<(WireFrame, Verified)> {
+) -> Result<(WireFrame, Verified), MessageError> {
     let msg = Message::new_app(
         params.mesh,
         params.author,
@@ -1209,6 +1295,7 @@ impl Message {
         self
     }
 
+    /// A fixed test message of `kind` with `body`, from `alice-bot` on mesh `test`.
     #[must_use]
     pub fn fixture(kind: MessageKind, body: &str) -> Self {
         Message {

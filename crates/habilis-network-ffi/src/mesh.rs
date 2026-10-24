@@ -18,15 +18,11 @@ use tokio::sync::{mpsc, oneshot};
 
 // Re-exported rather than re-imported at every use site, so the C shim next
 // door names `crate::mesh::…` only.
-pub use habilis_network::membership::{Inbound, MAX_MSG, Opts};
+pub(crate) use habilis_network::membership::{Inbound, MAX_MSG, Opts};
 
 /// A live mesh membership, driven synchronously from a foreign caller's thread.
 /// Owns the tokio runtime the event loop runs on.
-#[expect(
-    missing_debug_implementations,
-    reason = "a tokio Runtime has no Debug impl; the fields a reader would want (id, nickname) are exposed as accessors"
-)]
-pub struct Mesh {
+pub(crate) struct Mesh {
     runtime: tokio::runtime::Runtime,
     /// `None` after [`Mesh::close`] has taken it — `Node::leave` consumes it.
     node: Option<Node<MembershipApp>>,
@@ -44,7 +40,7 @@ impl Mesh {
     /// # Errors
     /// An unparseable id/topic/nickname, conflicting selectors, or a failure
     /// standing up the endpoint and gossip overlay.
-    pub fn open(opts: &Opts) -> Result<Self> {
+    pub(crate) fn open(opts: &Opts) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -54,10 +50,9 @@ impl Mesh {
         // learns about joins, leaves and state changes by polling the roster and
         // the document. The browser peer passes `json_sink()`'s here instead,
         // which is the one thing that differs between the two.
-        let Membership { node, inbound } = runtime.block_on(habilis_network::membership::join(
-            opts,
-            Arc::new(SilentSink),
-        ))?;
+        let Membership { node, inbound, .. } = runtime.block_on(
+            habilis_network::membership::join(opts, Arc::new(SilentSink::default())),
+        )?;
 
         Ok(Self {
             habilis_network_id: node.mesh_id().as_str().to_owned(),
@@ -70,18 +65,21 @@ impl Mesh {
         })
     }
 
+    /// The id of the mesh.
     #[must_use]
-    pub fn habilis_network_id(&self) -> &str {
+    pub(crate) fn habilis_network_id(&self) -> &str {
         &self.habilis_network_id
     }
 
+    /// The nickname of this member.
     #[must_use]
-    pub fn nickname(&self) -> &str {
+    pub(crate) fn nickname(&self) -> &str {
         &self.nickname
     }
 
+    /// The name of the mesh.
     #[must_use]
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
@@ -91,7 +89,7 @@ impl Mesh {
     /// # Errors
     /// The message does not fit one frame, the addressee is not a nickname, the
     /// event loop has stopped, or the engine refused the frame.
-    pub fn send(&self, to: Option<&str>, text: &str) -> Result<()> {
+    pub(crate) fn send(&self, to: Option<&str>, text: &str) -> Result<()> {
         let to = habilis_network::membership::parse_to(to)?;
         let body = habilis_network::membership::msg_body(text)?;
         let (reply, answer) = oneshot::channel();
@@ -105,7 +103,7 @@ impl Mesh {
     ///
     /// # Errors
     /// The event loop has stopped and the queue is drained.
-    pub fn recv(&mut self, timeout: Duration) -> Result<Option<Inbound>> {
+    pub(crate) fn recv(&mut self, timeout: Duration) -> Result<Option<Inbound>> {
         if let Some(pending) = self.pending.take() {
             return Ok(Some(pending));
         }
@@ -121,7 +119,7 @@ impl Mesh {
 
     /// Put back a message the caller could not take, so the next
     /// [`recv`](Self::recv) returns it first.
-    pub fn keep(&mut self, msg: Inbound) {
+    pub(crate) fn keep(&mut self, msg: Inbound) {
         self.pending = Some(msg);
     }
 
@@ -131,7 +129,7 @@ impl Mesh {
     /// # Errors
     /// `json` is not a JSON object, the merge is unrepresentable, the resulting
     /// frame is oversize, or the event loop has stopped.
-    pub fn state_merge(&self, json: &str) -> Result<()> {
+    pub(crate) fn state_merge(&self, json: &str) -> Result<()> {
         let merge: serde_json::Value =
             serde_json::from_str(json).context("parsing the merge document")?;
         let (reply, answer) = oneshot::channel();
@@ -144,7 +142,7 @@ impl Mesh {
     ///
     /// # Errors
     /// The event loop has stopped.
-    pub fn state_json(&self) -> Result<String> {
+    pub(crate) fn state_json(&self) -> Result<String> {
         let (reply, answer) = oneshot::channel();
         self.dispatch(Request::StateJson { reply })?;
         self.await_reply(answer)
@@ -154,7 +152,7 @@ impl Mesh {
     ///
     /// # Errors
     /// The event loop has stopped.
-    pub fn peers_json(&self) -> Result<String> {
+    pub(crate) fn peers_json(&self) -> Result<String> {
         let (reply, answer) = oneshot::channel();
         self.dispatch(Request::Peers { reply })?;
         self.await_reply(answer)
@@ -166,7 +164,7 @@ impl Mesh {
     ///
     /// # Errors
     /// The event loop has stopped.
-    pub fn peer_count(&self) -> Result<usize> {
+    pub(crate) fn peer_count(&self) -> Result<usize> {
         let (reply, answer) = oneshot::channel();
         self.dispatch(Request::PeerCount { reply })?;
         self.await_reply(answer)
@@ -177,19 +175,22 @@ impl Mesh {
     ///
     /// # Errors
     /// The event loop returned an error or panicked.
-    pub fn close(&mut self) -> Result<()> {
+    pub(crate) fn close(&mut self) -> Result<()> {
         let Some(node) = self.node.take() else {
             return Ok(());
         };
         self.runtime
             .block_on(habilis_network::membership::depart(node))
+            .map_err(anyhow::Error::from)
     }
 
     fn dispatch(&self, req: Request) -> Result<()> {
         let Some(node) = self.node.as_ref() else {
             anyhow::bail!("this mesh handle is closed");
         };
-        self.runtime.block_on(node.send(req))
+        self.runtime
+            .block_on(node.send(req))
+            .map_err(anyhow::Error::from)
     }
 
     fn await_reply<T>(&self, answer: oneshot::Receiver<T>) -> Result<T> {

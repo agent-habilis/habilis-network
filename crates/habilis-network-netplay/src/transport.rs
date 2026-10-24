@@ -36,6 +36,7 @@ use crate::frame::Frame;
 /// a different one, so a straggler from a previous match cannot be mistaken
 /// for live input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Message<I> {
     /// The sender's session nonce.
     pub magic: u32,
@@ -45,6 +46,7 @@ pub struct Message<I> {
 
 /// The packet kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Body<I> {
     /// Handshake, outbound: "echo this back". Repeated a few times so both
     /// sides have evidence the path works in both directions before either
@@ -100,6 +102,7 @@ pub enum Body<I> {
 
 /// A run of consecutive inputs starting at `start_frame`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InputPacket<I> {
     /// The frame `inputs[0]` belongs to; each subsequent entry is one frame
     /// later.

@@ -54,7 +54,7 @@ impl<T: Config> RollbackDriver<T> {
     ///
     /// ```ignore
     /// let (driver, pending) = RollbackDriver::<MyGame>::new();
-    /// let node = Node::spawn(config, driver, None, false);
+    /// let node = Node::spawn(config, driver, None, SignalHandling::Leave);
     /// let transport = pending.connect(node.sender());
     /// ```
     ///

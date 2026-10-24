@@ -15,6 +15,7 @@ use habilis_network::protocol::{Lookup, Transport};
 use habilis_network::runtime::tuning::{Tuning, init};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use habilis_network::net::test_relay;
 /// The creator, who hosts the rendezvous, and three joiners. Each joiner ends with three links,
 /// which is the release count.
 const GROUP: usize = 4;
@@ -92,22 +93,22 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::Udp],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(vec![Transport::Udp])
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 }
@@ -124,14 +125,9 @@ fn a_member_that_let_go_of_the_rendezvous_comes_back_and_lets_go_again() {
     );
     habilis_network_test_tracing::clear_captured_logs();
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        init(Tuning {
-            rendezvous_periodic_return: PERIOD,
-            ..Tuning::DEFAULTS
-        });
+        init(Tuning::DEFAULTS.with_rendezvous_periodic_return(PERIOD));
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
 
         let creator = Member::create("member-0", &relay).await;
         assert!(

@@ -28,10 +28,11 @@ use std::time::{Duration, Instant};
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MessageKind, Nickname, PresenceSubtype, RelayChoice};
 use habilis_network::runtime::tuning::{Tuning, init};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::Notify;
 
 /// The time that a mesh of members has to converge. A quiet run converges in 15 to 25
@@ -103,14 +104,14 @@ fn round_log_path(topic: &str) -> std::path::PathBuf {
 fn init_process() -> habilis_network_test_tracing::Guard {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        init(Tuning {
-            heal_interval: Duration::from_secs(5),
-            rival_recheck_first: Duration::from_secs(3),
-            rival_recheck: Duration::from_secs(8),
-            rival_recheck_meshed: Duration::from_secs(12),
-            rival_recheck_alone: Duration::from_secs(12),
-            ..Tuning::DEFAULTS
-        });
+        init(
+            Tuning::DEFAULTS
+                .with_heal_interval(Duration::from_secs(5))
+                .with_rival_recheck_first(Duration::from_secs(3))
+                .with_rival_recheck(Duration::from_secs(8))
+                .with_rival_recheck_meshed(Duration::from_secs(12))
+                .with_rival_recheck_alone(Duration::from_secs(12)),
+        );
     });
     habilis_network_test_tracing::init_with_writer(
         "habilis_network=info,habilis_network::beacon=info",
@@ -124,13 +125,7 @@ struct Member;
 #[habilis_network::async_trait]
 impl NodeApp for Member {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -214,11 +209,7 @@ impl Joined {
 
 /// The reach of a public topic room cut down to the LAN. See the doc of the file.
 fn mdns_only() -> LookupOpts {
-    LookupOpts {
-        mdns: true,
-        dht: false,
-        relay_lookup: RelayChoice::Disabled,
-    }
+    LookupOpts::new(RelayChoice::Disabled).with_mdns(true)
 }
 
 async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
@@ -229,24 +220,11 @@ async fn spawn(topic: &str, nick: &str, sink: Arc<Joined>) -> Node<Member> {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink).with_max_peers(16),
     )
     .await
     .expect("setup_mesh on an mDNS-only mesh");
-    Node::spawn(config, Member, None, false)
+    Node::spawn(config, Member, None, SignalHandling::Leave)
 }
 
 /// How the members of a round start.

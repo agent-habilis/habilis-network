@@ -12,13 +12,14 @@
 use std::fmt;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
 use habilis_network::iroh::EndpointAddr;
 use habilis_network::net::{endpoint_addr_from_json, endpoint_addr_to_json};
 use habilis_network::protocol::base58check::{self, take_array};
 use habilis_network::protocol::identity::write_hex;
 use habilis_network::protocol::{LookupOpts, TransportPolicy, ct_eq};
 use zeroize::Zeroizing;
+
+use crate::error::HashError;
 
 /// Framing version. An unknown version is rejected on decode.
 const VERSION: u8 = 1;
@@ -125,6 +126,7 @@ impl fmt::Debug for StreamSecret {
 /// }
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct StreamHash {
     /// The producer's endpoint: its id, its relay, and its direct addresses.
     pub addr: EndpointAddr,
@@ -206,46 +208,61 @@ impl StreamHash {
     /// Decode a bare Base58Check token.
     ///
     /// # Errors
-    /// A bad checksum, another kind of token, an unknown version, or a
-    /// malformed payload.
-    pub fn decode(hash: &str) -> Result<Self> {
-        let framed = base58check::decode(hash.trim(), "stream hash")?;
-        let version = *framed.first().context("stream hash too short")?;
+    /// # Errors
+    /// [`HashError::Field`] when the Base58Check text or a field does not decode,
+    /// [`HashError::UnknownVersion`] or [`HashError::UnknownFlags`] for a version or
+    /// flags this build does not know, [`HashError::WrongKind`] for another kind of
+    /// token, and [`HashError::Truncated`] when the payload ends early.
+    pub fn decode(hash: &str) -> Result<Self, HashError> {
+        let framed = base58check::decode(hash.trim(), "stream hash")
+            .map_err(HashError::field("decode the Base58Check token"))?;
+        let version = *framed
+            .first()
+            .ok_or(HashError::Truncated("stream hash too short"))?;
         if version != VERSION {
-            bail!("unsupported stream hash version: {version}");
+            return Err(HashError::UnknownVersion(version));
         }
-        let kind = *framed.get(1).context("stream hash too short")?;
+        let kind = *framed
+            .get(1)
+            .ok_or(HashError::Truncated("stream hash too short"))?;
         if kind != KIND {
-            bail!("not a stream hash: wrong ticket kind");
+            return Err(HashError::WrongKind);
         }
         let payload = &framed[2..];
-        let flags = *payload.first().context("stream hash missing flags")?;
+        let flags = *payload
+            .first()
+            .ok_or(HashError::Truncated("stream hash missing flags"))?;
         if flags & !KNOWN_FLAGS != 0 {
-            bail!("unsupported stream hash flags {flags:#04x}: upgrade to a newer build");
+            return Err(HashError::UnknownFlags(flags));
         }
         let mut pos = 1;
         let id = StreamId::from_bytes(
-            take_array::<ID_LEN>(payload, &mut pos).context("stream hash missing id")?,
+            take_array::<ID_LEN>(payload, &mut pos)
+                .ok_or(HashError::Truncated("stream hash missing id"))?,
         );
         let secret = StreamSecret::from_bytes(
-            take_array::<SECRET_LEN>(payload, &mut pos).context("stream hash missing secret")?,
+            take_array::<SECRET_LEN>(payload, &mut pos)
+                .ok_or(HashError::Truncated("stream hash missing secret"))?,
         );
-        let lookups = LookupOpts::decode_from(payload, &mut pos)?;
-        let addr_json = payload.get(pos..).context("stream hash missing address")?;
-        let value: serde_json::Value =
-            serde_json::from_slice(addr_json).context("invalid stream hash address")?;
-        let (_id, addr) = endpoint_addr_from_json(&value)?;
+        let lookups = LookupOpts::decode_from(payload, &mut pos)
+            .map_err(HashError::field("decode the lookups"))?;
+        let addr_json = payload
+            .get(pos..)
+            .ok_or(HashError::Truncated("stream hash missing address"))?;
+        let value: serde_json::Value = serde_json::from_slice(addr_json)
+            .map_err(HashError::field("invalid stream hash address"))?;
+        let (_id, addr) = endpoint_addr_from_json(&value)
+            .map_err(HashError::field("invalid stream hash address"))?;
         Ok(Self {
             addr,
             lookups,
-            transport: TransportPolicy {
-                udp: flags & NO_UDP_BIT == 0,
-                webrtc: flags & NO_WEBRTC_BIT == 0,
+            transport: TransportPolicy::default()
+                .with_udp(flags & NO_UDP_BIT == 0)
+                .with_webrtc(flags & NO_WEBRTC_BIT == 0)
                 // A stream is one direct lane: its node has no multi-hop.
-                multihop: false,
-                gossip: false,
-                relay_transport: flags & RELAY_TRANSPORT_BIT != 0,
-            },
+                .with_multihop(false)
+                .with_gossip(false)
+                .with_relay_transport(flags & RELAY_TRANSPORT_BIT != 0),
             id,
             secret,
         })
@@ -259,9 +276,9 @@ impl fmt::Display for StreamHash {
 }
 
 impl FromStr for StreamHash {
-    type Err = anyhow::Error;
+    type Err = HashError;
 
-    fn from_str(hash: &str) -> Result<Self> {
+    fn from_str(hash: &str) -> Result<Self, HashError> {
         Self::decode(hash)
     }
 }
@@ -290,13 +307,12 @@ mod tests {
     }
 
     fn policy(udp: bool, webrtc: bool, relay_transport: bool) -> TransportPolicy {
-        TransportPolicy {
-            udp,
-            webrtc,
-            multihop: false,
-            gossip: false,
-            relay_transport,
-        }
+        TransportPolicy::default()
+            .with_udp(udp)
+            .with_webrtc(webrtc)
+            .with_multihop(false)
+            .with_gossip(false)
+            .with_relay_transport(relay_transport)
     }
 
     #[test]

@@ -37,10 +37,15 @@ thread_local! {
 /// the engine defaults (G is 32, C is 64).
 #[repr(C)]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct HabilisNetworkOpts {
+    /// The mesh id to join, NUL-terminated, or NULL. Set at most one of `mesh` and `topic`.
     pub mesh: *const c_char,
+    /// A shared string to derive a public mesh from, NUL-terminated, or NULL.
     pub topic: *const c_char,
+    /// The nickname, as a NUL-terminated string.
     pub nick: *const c_char,
+    /// The mesh name on create, NUL-terminated. NULL falls back to `habilis-network`.
     pub name: *const c_char,
     /// Comma-separated lookups, any of `mdns`, `dht`, `relay`; NULL ⇒ none
     /// (a loopback mesh on create).
@@ -54,6 +59,24 @@ pub struct HabilisNetworkOpts {
     pub max_peers: usize,
     /// C: the ceiling of direct connections, `WebRTC` sessions and unicast connections together.
     pub max_direct: usize,
+}
+
+impl HabilisNetworkOpts {
+    /// Every pointer NULL and every number zero, which takes the engine defaults.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            mesh: std::ptr::null(),
+            topic: std::ptr::null(),
+            nick: std::ptr::null(),
+            name: std::ptr::null(),
+            lookup: std::ptr::null(),
+            transport: std::ptr::null(),
+            relay_urls: std::ptr::null(),
+            max_peers: 0,
+            max_direct: 0,
+        }
+    }
 }
 
 /// The layout `packages/habilis-network-ffi/src/dlopen/opts-struct.ts` hand-encodes,
@@ -73,16 +96,46 @@ const _: () = {
         size_of::<HabilisNetworkOpts>() == 72,
         "opts-struct.ts OPTS_BYTES"
     );
-    assert!(align_of::<HabilisNetworkOpts>() == 8);
-    assert!(offset_of!(HabilisNetworkOpts, mesh) == 0);
-    assert!(offset_of!(HabilisNetworkOpts, topic) == 8);
-    assert!(offset_of!(HabilisNetworkOpts, nick) == 16);
-    assert!(offset_of!(HabilisNetworkOpts, name) == 24);
-    assert!(offset_of!(HabilisNetworkOpts, lookup) == 32);
-    assert!(offset_of!(HabilisNetworkOpts, transport) == 40);
-    assert!(offset_of!(HabilisNetworkOpts, relay_urls) == 48);
-    assert!(offset_of!(HabilisNetworkOpts, max_peers) == 56);
-    assert!(offset_of!(HabilisNetworkOpts, max_direct) == 64);
+    assert!(
+        align_of::<HabilisNetworkOpts>() == 8,
+        "HabilisNetworkOpts has the alignment the C header declares, 8"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, mesh) == 0,
+        "mesh is at offset 0 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, topic) == 8,
+        "topic is at offset 8 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, nick) == 16,
+        "nick is at offset 16 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, name) == 24,
+        "name is at offset 24 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, lookup) == 32,
+        "lookup is at offset 32 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, transport) == 40,
+        "transport is at offset 40 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, relay_urls) == 48,
+        "relay_urls is at offset 48 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, max_peers) == 56,
+        "max_peers is at offset 56 of HabilisNetworkOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkOpts, max_direct) == 64,
+        "max_direct is at offset 64 of HabilisNetworkOpts"
+    );
 };
 
 /// One received message's metadata, mirroring `habilis_network_msg` in the header. The
@@ -90,10 +143,26 @@ const _: () = {
 /// many bytes it has, excluding the NUL.
 #[repr(C)]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct HabilisNetworkMsg {
+    /// The nickname of the sender, NUL-terminated.
     pub nick: [c_char; NICK_CAP],
+    /// Non-zero when the message was directed to us.
     pub directed: c_int,
+    /// The length of the body, in bytes.
     pub len: usize,
+}
+
+impl HabilisNetworkMsg {
+    /// No nickname, no directed flag and no text.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            nick: [0; NICK_CAP],
+            directed: 0,
+            len: 0,
+        }
+    }
 }
 
 /// The layout `packages/habilis-network-ffi/src/msg.ts` hand-decodes, pinned like
@@ -102,13 +171,25 @@ const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
     assert!(size_of::<HabilisNetworkMsg>() == 80, "msg.ts MSG_BYTES");
-    assert!(align_of::<HabilisNetworkMsg>() == 8);
-    assert!(offset_of!(HabilisNetworkMsg, nick) == 0);
-    assert!(offset_of!(HabilisNetworkMsg, directed) == 64);
-    assert!(offset_of!(HabilisNetworkMsg, len) == 72);
+    assert!(
+        align_of::<HabilisNetworkMsg>() == 8,
+        "HabilisNetworkMsg has the alignment the C header declares, 8"
+    );
+    assert!(
+        offset_of!(HabilisNetworkMsg, nick) == 0,
+        "nick is at offset 0 of HabilisNetworkMsg"
+    );
+    assert!(
+        offset_of!(HabilisNetworkMsg, directed) == 64,
+        "directed is at offset 64 of HabilisNetworkMsg"
+    );
+    assert!(
+        offset_of!(HabilisNetworkMsg, len) == 72,
+        "len is at offset 72 of HabilisNetworkMsg"
+    );
 };
 
-/// The opaque handle behind `habilis_network_mesh *`. Holds the [`Mesh`] plus
+/// The opaque handle behind `habilis_network_mesh *`. Holds the `Mesh` plus
 /// NUL-terminated copies of the identity strings, so [`habilis_network_mesh_id`] /
 /// [`habilis_network_mesh_nickname`] can hand out pointers that stay valid for the
 /// handle's lifetime.
@@ -324,17 +405,16 @@ pub unsafe extern "C" fn habilis_network_mesh_open(
         let relay_urls: Vec<String> = relay_urls
             .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
             .unwrap_or_default();
-        let parsed = Opts {
-            mesh: mesh.map(str::to_owned),
-            topic: topic.map(str::to_owned),
-            nick: nick.map(str::to_owned),
-            name: name.map(str::to_owned),
-            lookup,
-            transport,
-            relay_urls,
-            max_peers: opts.max_peers,
-            max_direct: opts.max_direct,
-        };
+        let parsed = Opts::default()
+            .with_mesh(mesh.map(str::to_owned))
+            .with_topic(topic.map(str::to_owned))
+            .with_nick(nick.map(str::to_owned))
+            .with_name(name.map(str::to_owned))
+            .with_lookup(lookup)
+            .with_transport(transport)
+            .with_relay_urls(relay_urls)
+            .with_max_peers(opts.max_peers)
+            .with_max_direct(opts.max_direct);
         match Mesh::open(&parsed) {
             Ok(opened) => {
                 // The nickname the engine settled on — not `nick` above, which is
@@ -475,7 +555,12 @@ pub unsafe extern "C" fn habilis_network_msg_recv(
             handle.mesh.keep(msg);
             return -2;
         }
-        let Inbound { text, .. } = msg;
+        let Inbound {
+            text,
+            nick: _nick,
+            directed: _directed,
+            ..
+        } = msg;
         // SAFETY: `text.len() + 1 <= cap` bytes are writable per the contract
         // above, and the source is a distinct Rust-owned allocation.
         unsafe {
@@ -620,10 +705,26 @@ pub unsafe extern "C" fn habilis_network_mesh_close(handle: *mut HabilisNetworkM
 /// selectors a stream has no use for.
 #[repr(C)]
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct HabilisNetworkStreamOpts {
+    /// The lookups, as a NUL-terminated string.
     pub lookup: *const c_char,
+    /// The transports, as a NUL-terminated string.
     pub transport: *const c_char,
+    /// The relay URLs, as a NUL-terminated string.
     pub relay_urls: *const c_char,
+}
+
+impl HabilisNetworkStreamOpts {
+    /// Every pointer NULL, which takes the engine defaults.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            lookup: std::ptr::null(),
+            transport: std::ptr::null(),
+            relay_urls: std::ptr::null(),
+        }
+    }
 }
 
 /// Pinned like `HabilisNetworkOpts`: a reordered field would silently misread a
@@ -631,11 +732,26 @@ pub struct HabilisNetworkStreamOpts {
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
 
-    assert!(size_of::<HabilisNetworkStreamOpts>() == 24);
-    assert!(align_of::<HabilisNetworkStreamOpts>() == 8);
-    assert!(offset_of!(HabilisNetworkStreamOpts, lookup) == 0);
-    assert!(offset_of!(HabilisNetworkStreamOpts, transport) == 8);
-    assert!(offset_of!(HabilisNetworkStreamOpts, relay_urls) == 16);
+    assert!(
+        size_of::<HabilisNetworkStreamOpts>() == 24,
+        "HabilisNetworkStreamOpts has the size the C header declares, 24"
+    );
+    assert!(
+        align_of::<HabilisNetworkStreamOpts>() == 8,
+        "HabilisNetworkStreamOpts has the alignment the C header declares, 8"
+    );
+    assert!(
+        offset_of!(HabilisNetworkStreamOpts, lookup) == 0,
+        "lookup is at offset 0 of HabilisNetworkStreamOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkStreamOpts, transport) == 8,
+        "transport is at offset 8 of HabilisNetworkStreamOpts"
+    );
+    assert!(
+        offset_of!(HabilisNetworkStreamOpts, relay_urls) == 16,
+        "relay_urls is at offset 16 of HabilisNetworkStreamOpts"
+    );
 };
 
 /// The opaque handle behind `habilis_network_streams *`.
@@ -702,13 +818,14 @@ pub unsafe extern "C" fn habilis_network_streams_bind(
         let (Ok(lookup), Ok(transport)) = (comma_list(lookup), comma_list(transport)) else {
             return std::ptr::null_mut();
         };
-        let parsed = habilis_network_stream::StreamOpts {
-            lookup,
-            transport,
-            relay_urls: relay_urls
-                .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
-                .unwrap_or_default(),
-        };
+        let parsed = habilis_network_stream::StreamOpts::default()
+            .with_lookup(lookup)
+            .with_transport(transport)
+            .with_relay_urls(
+                relay_urls
+                    .map(|urls| urls.split(',').map(|url| url.trim().to_owned()).collect())
+                    .unwrap_or_default(),
+            );
         boxed(Streams::bind(&parsed).map(|streams| HabilisNetworkStreams { streams }))
     })
 }

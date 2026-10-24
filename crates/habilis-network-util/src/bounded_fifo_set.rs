@@ -13,6 +13,8 @@ use std::borrow::Borrow;
 use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 
+/// A set that holds at most `capacity` items. When an insert goes past the limit, the oldest item
+/// is dropped.
 #[derive(Debug)]
 pub struct BoundedFifoSet<T> {
     capacity: usize,
@@ -21,6 +23,7 @@ pub struct BoundedFifoSet<T> {
 }
 
 impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
+    /// A capacity of 0 is raised to 1.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -63,6 +66,7 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
         }
     }
 
+    /// Whether the set holds the item.
     pub fn contains<Q>(&self, item: &Q) -> bool
     where
         T: Borrow<Q>,
@@ -71,16 +75,19 @@ impl<T: Clone + Eq + Hash> BoundedFifoSet<T> {
         self.set.contains(item)
     }
 
+    /// The items, in no particular order.
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.set.iter()
     }
 
     #[must_use]
+    /// The number of items.
     pub fn len(&self) -> usize {
         self.set.len()
     }
 
     #[must_use]
+    /// Whether the set holds no items.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

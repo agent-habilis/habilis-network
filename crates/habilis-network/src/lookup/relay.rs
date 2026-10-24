@@ -16,10 +16,8 @@ use std::future::Future;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use iroh::{
-    Endpoint, RelayConfig, RelayMode, RelayUrl,
-    endpoint::{default_relay_mode, presets},
-};
+use iroh::endpoint::{default_relay_mode, presets};
+use iroh::{Endpoint, RelayConfig, RelayMode, RelayUrl};
 use n0_future::task::JoinHandle;
 use tokio::sync::watch;
 
@@ -85,11 +83,16 @@ static RENDEZVOUS_RELAY_LADDER_URLS: LazyLock<Vec<RelayUrl>> = LazyLock::new(|| 
 /// first reachable rung (`select_bootstrap_rung`) — the beacon leg of
 /// `relay_mode` and `daemon::setup::register_rendezvous` must agree or
 /// the relay-direct bootstrap dial finds nothing.
+#[expect(
+    clippy::match_same_arms,
+    reason = "the named variants are listed on purpose, so a new variant stays visible"
+)]
 pub fn relay_ladder(choice: &RelayChoice) -> Vec<RelayUrl> {
     match choice {
         RelayChoice::Disabled => Vec::new(),
         RelayChoice::Pinned => RENDEZVOUS_RELAY_LADDER_URLS.clone(),
         RelayChoice::Custom(ladder) => ladder.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -133,6 +136,7 @@ pub(super) fn relay_mode(choice: &RelayChoice) -> RelayMode {
             tracing::debug!("peer on iroh resilient multi-relay default");
             default_relay_mode()
         }
+        _ => RelayMode::Disabled,
     }
 }
 
@@ -461,7 +465,11 @@ mod tests {
         select_first_reachable, should_evict_rung,
     };
     use habilis_network_test_tracing::test;
+    use std::collections::HashSet;
 
+    use crate::lookup::test_relay;
+    use crate::util::tuning;
+    use iroh::endpoint::presets;
     /// Tripwire: the iroh fallback rungs of our pinned rendezvous ladder
     /// must stay equal to iroh's `defaults::prod` relay hosts, **in
     /// order** (rung 1 = NA-east). Rung 0 is our own operated relay and
@@ -577,7 +585,7 @@ mod tests {
     #[test]
     fn backoff_doubles_then_saturates_at_max() {
         let max = super::RELAY_REPROBE_BACKOFF_MAX;
-        let min = crate::util::tuning::RELAY_REPROBE_BACKOFF_MIN;
+        let min = tuning::RELAY_REPROBE_BACKOFF_MIN;
         // Doubles each round...
         let mut backoff = min;
         let next = next_relay_backoff(backoff);
@@ -618,8 +626,7 @@ mod tests {
     /// Run the ladder walk with a set of hosts treated as unreachable;
     /// returns `(selected, probed_in_order)`.
     async fn walk(ladder: &[RelayUrl], down: &[&str]) -> (Option<RelayUrl>, Vec<String>) {
-        let down: std::collections::HashSet<String> =
-            down.iter().map(|host| (*host).to_string()).collect();
+        let down: HashSet<String> = down.iter().map(|host| (*host).to_string()).collect();
         let probed = std::cell::RefCell::new(Vec::new());
         let selected = select_first_reachable(ladder, |rung| {
             let host = short_host(&rung);
@@ -703,10 +710,10 @@ mod tests {
     /// packet.
     #[tokio::test]
     async fn an_endpoint_on_a_plain_http_rung_is_online_without_the_probe_timeout() {
-        let (url, _server) = crate::lookup::test_relay::spawn_plain()
+        let (url, _server) = test_relay::spawn_plain()
             .await
             .expect("a plain local relay");
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(super::relay_mode(&RelayChoice::Custom(vec![url])))
             .bind()
             .await

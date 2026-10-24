@@ -26,9 +26,13 @@ string_newtype!(
     test_from,
 );
 
+/// Why a nickname was refused: its length, or a character outside the allowed set.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NicknameError {
+    /// The nickname is not the right length.
     Length(usize),
+    /// The nickname has a character outside the alphabet.
     Charset(String),
 }
 

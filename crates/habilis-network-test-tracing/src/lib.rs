@@ -25,11 +25,10 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
-use std::io;
 #[cfg(not(target_arch = "wasm32"))]
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::thread;
+use std::{io, thread};
 
 pub use habilis_network_test_tracing_macros::test;
 use tracing::field::{Field, Visit};
@@ -597,6 +596,17 @@ impl Visit for Fields {
             write!(self.text, "{}={value:?}", field.name())
         };
     }
+}
+
+/// Runs `body` and returns the panic it raises, so that a test can check the panic.
+///
+/// # Errors
+///
+/// Returns the panic payload when `body` panics.
+pub fn catch_panic<F: FnOnce() -> R, R>(
+    body: std::panic::AssertUnwindSafe<F>,
+) -> thread::Result<R> {
+    std::panic::catch_unwind(body)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

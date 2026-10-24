@@ -7,8 +7,12 @@ const MAX_ANCESTRY_DEPTH: usize = 64;
 #[expect(unsafe_code, reason = "libc::proc_pidinfo FFI; no safe wrapper exists")]
 fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
     let pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: `proc_bsdinfo` is a plain C struct of integers and byte arrays, so all-zero bytes
+    // are a valid value.
     let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
     let size = i32::try_from(size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: `info` is a live, unique local of exactly `size` bytes, and `size` is the size that
+    // the call gets, so the kernel writes inside the buffer. The kernel checks `pid`.
     let written =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
     // A short read means the pid vanished mid-call or the struct layout
@@ -16,12 +20,14 @@ fn bsdinfo_for(pid: u32) -> Option<libc::proc_bsdinfo> {
     (written == size).then_some(info)
 }
 
+/// The parent pid of `pid`, or `None` if the lookup fails.
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
     Some(bsdinfo_for(pid)?.pbi_ppid)
 }
 
+/// The command name of `pid`, or `None` if the lookup fails or the name is not UTF-8.
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
@@ -46,6 +52,7 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
         .then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
+/// The parent pid of `pid`, or `None` if the lookup fails.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn parent_of(pid: u32) -> Option<u32> {
@@ -74,6 +81,7 @@ pub fn live_start_time(pid: u32) -> Option<u64> {
     fields.nth(18)?.parse().ok()
 }
 
+/// The command name of `pid`, or `None` if the lookup fails or the name is not UTF-8.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn comm_of(pid: u32) -> Option<String> {
@@ -92,6 +100,8 @@ pub fn is_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
+    // SAFETY: signal 0 sends no signal. The call reads no memory of ours, and `pid` is a valid
+    // `pid_t`.
     let status = unsafe { libc::kill(pid, 0) };
     status == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
@@ -100,10 +110,17 @@ pub fn is_alive(pid: u32) -> bool {
 /// catches it, broadcasts `left`, and removes its state file.
 #[expect(unsafe_code, reason = "libc::kill FFI; no safe wrapper")]
 /// # Errors
-/// Propagates the `kill(2)` failure — no such process, or no permission.
+/// `InvalidInput` for pid 0, which `kill(2)` reads as our own process group, and for a pid that
+/// does not fit a `pid_t`. Otherwise it propagates the `kill(2)` failure — no such process, or
+/// no permission.
 pub fn terminate(pid: u32) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
     let pid = libc::pid_t::try_from(pid)
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: the call reads no memory of ours. `pid` is a valid `pid_t`, and the kernel checks
+    // the permission.
     let status = unsafe { libc::kill(pid, libc::SIGTERM) };
     if status == 0 {
         Ok(())
@@ -145,8 +162,16 @@ mod tests {
     }
 
     #[test]
+    fn terminate_refuses_pid_zero() {
+        // `kill(0, SIGTERM)` would signal every process of our own group, the test run included.
+        let error = terminate(0).expect_err("pid 0 must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn parent_of_self_is_our_ppid() {
         #[expect(unsafe_code, reason = "libc::getppid FFI; always succeeds")]
+        // SAFETY: `getppid` takes no argument and always succeeds.
         let ppid = unsafe { libc::getppid() };
         assert_eq!(parent_of(self_pid()), u32::try_from(ppid).ok());
     }

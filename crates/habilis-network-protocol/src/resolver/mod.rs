@@ -1,11 +1,34 @@
+use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
-
-use anyhow::{Result, anyhow, bail};
 
 use crate::MeshId;
 use crate::invite::InviteTicket;
 use crate::mesh::{LockedMesh, MeshIdError};
+
+/// Why a join target does not resolve to a locked mesh.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ResolveError {
+    /// The mesh id does not decode. The text names why.
+    InvalidId(String),
+    /// An invite reached `resolve`, which takes only a mesh id. The join redeems
+    /// an invite in `JoinParams::resolve`.
+    InviteTarget,
+}
+
+impl fmt::Display for ResolveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidId(reason) => write!(formatter, "invalid mesh id: {reason}"),
+            Self::InviteTarget => {
+                formatter.write_str("internal: an invite target must be redeemed via JoinParams")
+            }
+        }
+    }
+}
+
+impl Error for ResolveError {}
 
 /// What a join accepts: a bare base58 mesh id, or a creator-minted bare
 /// base58 invite to an invite-only mesh. A shared *string* is not a join
@@ -13,6 +36,7 @@ use crate::mesh::{LockedMesh, MeshIdError};
 /// validated **once**, at the boundary (clap `FromStr` / MCP entry), so
 /// `resolve` matches the variant instead of re-sniffing a `String`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JoinTarget {
     /// A bare base58 mesh id — resolves with no I/O.
     Mesh(MeshId),
@@ -29,6 +53,7 @@ pub enum JoinTarget {
 ///
 /// [`Unrecognized`]: JoinTargetError::Unrecognized
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JoinTargetError {
     /// Looked like a mesh id (base58) but failed checksum/payload validation.
     MalformedMeshId(MeshIdError),
@@ -49,7 +74,7 @@ impl fmt::Display for JoinTargetError {
     }
 }
 
-impl std::error::Error for JoinTargetError {}
+impl Error for JoinTargetError {}
 
 impl FromStr for JoinTarget {
     type Err = JoinTargetError;
@@ -77,21 +102,21 @@ impl FromStr for JoinTarget {
 }
 
 /// # Errors
-/// The mesh id fails to decode, or the invite ticket fails to redeem.
-pub fn resolve(target: &JoinTarget) -> Result<LockedMesh> {
+/// # Errors
+/// [`ResolveError::InvalidId`] when the mesh id does not decode, or
+/// [`ResolveError::InviteTarget`] for an invite, which the join redeems itself.
+pub fn resolve(target: &JoinTarget) -> Result<LockedMesh, ResolveError> {
     match target {
         JoinTarget::Mesh(id) => {
             // Refusing an invite-only id is `LockedMesh::unlock`'s job, the one
             // place a bare hash can become a joinable mesh.
             id.as_str()
                 .parse::<LockedMesh>()
-                .map_err(|error| anyhow!("invalid mesh id: {error}"))
+                .map_err(|error| ResolveError::InvalidId(error.to_string()))
         }
         // An invite carries the join key and needs the password to unwrap it, so
         // it is redeemed in `JoinParams::resolve`; `resolve` never sees it alone.
-        JoinTarget::Invite(_) => {
-            bail!("internal: an invite target must be redeemed via JoinParams")
-        }
+        JoinTarget::Invite(_) => Err(ResolveError::InviteTarget),
     }
 }
 

@@ -28,6 +28,7 @@
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
 mod common;
+use habilis_network::net::test_relay;
 mod until_known;
 
 use std::time::{Duration, Instant};
@@ -226,6 +227,10 @@ impl Cell {
     }
 
     /// Whether the transport list lets `rung` carry payload.
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the named variants are listed on purpose, so a new variant stays visible"
+    )]
     fn allows(self, rung: Rung) -> bool {
         match rung {
             Rung::Ip => self.has(Transport::Udp),
@@ -234,12 +239,17 @@ impl Cell {
             Rung::Gossip => self.has(Transport::Gossip),
             Rung::Relay => self.has(Transport::Relay),
             Rung::Other => false,
+            _ => false,
         }
     }
 
     /// The rung of the ladder, as a pure function: the highest rung that the
     /// list allows and that the cell leaves available. `None`: no rung may carry
     /// payload, so the pair stays unlinked for it.
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the named variants are listed on purpose, so a new variant stays visible"
+    )]
     fn expected(self) -> Option<Rung> {
         habilis_network_iroh_webrtc_transport::expected_rung(
             |rung| self.allows(rung),
@@ -250,6 +260,7 @@ impl Cell {
                 Rung::Gossip => self.blocked < Blocked::IpWebRtcMultihopGossip,
                 Rung::Other => false,
                 Rung::Relay => true,
+                _ => false,
             },
         )
     }
@@ -263,6 +274,7 @@ fn rung_name(rung: Rung) -> &'static str {
         Rung::Gossip => "gossip",
         Rung::Relay => "relay",
         Rung::Other => "other",
+        _ => "unknown",
     }
 }
 
@@ -284,22 +296,22 @@ impl Member {
     }
 
     async fn create(nick: &str, relay: &RelayUrl, transport: Vec<Transport>) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            lookup: vec![Lookup::Relay],
-            transport,
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(transport)
+                .with_relay_urls(vec![relay.to_string()]),
+        )
         .await
     }
 
     async fn join(nick: &str, creator: &Self) -> Self {
-        Self::open(&membership::Opts {
-            nick: Some(nick.to_owned()),
-            mesh: Some(creator.membership.node.mesh_id().to_string()),
-            ..membership::Opts::default()
-        })
+        Self::open(
+            &membership::Opts::default()
+                .with_nick(Some(nick.to_owned()))
+                .with_mesh(Some(creator.membership.node.mesh_id().to_string())),
+        )
         .await
     }
 
@@ -758,9 +770,7 @@ async fn run(cell: Cell, name: &str, sender_id: SenderId) {
         !cell.target_full && !cell.kinds.is_empty(),
         "{name}: a cell with a full target has no test before Phase 2"
     );
-    let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-        .await
-        .expect("local relay");
+    let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
     let (alice, mut bob, carol) = members(&relay, cell.transports, sender_id).await;
     assert!(
         rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
@@ -921,9 +931,7 @@ fn udp_webrtc_ip_direct_sender_has_the_higher_id_parks_a_frame() {
             .find(|(cell, _)| *cell == "udp_webrtc_ip_direct")
             .expect("the cell is in the table");
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Higher).await;
         assert!(
             rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,
@@ -1179,9 +1187,7 @@ fn a_send_with_gossip_off_and_no_direct_path_fails_with_a_clear_error() {
             .expect("the cell is in the table");
 
         assert!(!cell.has(Transport::Gossip) && cell.expected().is_none());
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (alice, mut bob, carol) = members(&relay, cell.transports, SenderId::Any).await;
         assert!(
             rosters_hold(&[&alice, &bob, &carol], 2, Duration::from_mins(1)).await,

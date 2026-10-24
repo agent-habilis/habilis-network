@@ -17,6 +17,9 @@ use crate::beacon;
 use crate::gossip::event::NodeEvent;
 use crate::util::clock::Instant;
 
+use crate::gossip::heal;
+use crate::transport::webrtc;
+use crate::util::tuning;
 /// Close the co-hosted rendezvous endpoint before this loop's stack unwinds.
 ///
 /// The `Rendezvous` is a loop local, and letting it merely *drop* aborts its
@@ -105,18 +108,16 @@ pub(super) fn may_cohost(cohost: CoHostPolicy, meshed: bool, started: Instant) -
     match cohost {
         CoHostPolicy::Never => false,
         CoHostPolicy::Eager | CoHostPolicy::EagerProbed => true,
-        CoHostPolicy::Deferred => {
-            meshed || started.elapsed() >= crate::util::tuning::cohost_grace()
-        }
+        CoHostPolicy::Deferred => meshed || started.elapsed() >= tuning::cohost_grace(),
     }
 }
 /// The co-host decision inputs a heal/reclaim tick needs: which policy
 /// governs this session, the rendezvous params to (re)claim under, and
 /// (for the unmeshed-joiner grace `maybe_cohost` alone reads) when the
 /// event loop started.
-pub(super) struct CohostArm<'a> {
+pub(super) struct CohostArm<'params> {
     pub(super) policy: CoHostPolicy,
-    pub(super) params: &'a beacon::RendezvousParams,
+    pub(super) params: &'params beacon::RendezvousParams,
     pub(super) started: Instant,
 }
 /// Heal-tick co-host: stand up the beacon if this member may serve it
@@ -209,7 +210,7 @@ pub(super) async fn maybe_cohost(
 /// often the walk runs: to the log, and to the sink so that the app can tell its user.
 fn note_no_rung_free(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, ports: usize) {
     let now = Instant::now();
-    let repeat = crate::util::tuning::NO_RUNG_REPEAT;
+    let repeat = tuning::NO_RUNG_REPEAT;
     if state
         .no_rung_noted_at
         .is_some_and(|at| now.saturating_duration_since(at) < repeat)
@@ -231,7 +232,7 @@ fn note_no_rung_free(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, ports: us
 /// this member that was started while nobody held the rendezvous was ended by
 /// [`schedule_rival_recheck`].
 pub(super) fn offer_to_the_new_holder(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    crate::transport::webrtc::offer_rendezvous_off_tick(state, ctx);
+    webrtc::offer_rendezvous_off_tick(state, ctx);
 }
 
 /// A probe found a holder of the rendezvous that is not us ("staying peer"): the holder changed for
@@ -304,13 +305,13 @@ pub(super) async fn maybe_reclaim(
             beacon::Held::Idle => {}
         }
         if regrafts_rendezvous(state.rendezvous_linked, state.rendezvous_wanted())
-            && crate::transport::webrtc::rendezvous_graftable(state)
+            && webrtc::rendezvous_graftable(state)
         {
             tracing::info!(
                 target: "habilis_network::gossip",
                 "reclaim tick: re-graft the rendezvous (link lost)"
             );
-            crate::gossip::heal::tick_heal(arm.params.id, ctx.sender).await;
+            heal::tick_heal(arm.params.id, ctx.sender).await;
         }
     }
 }
@@ -445,9 +446,9 @@ pub(super) fn rival_recheck_applies(policy: CoHostPolicy, public: bool) -> bool 
 /// count the other, and that split is the one the brisk cap exists for.
 pub(super) fn next_recheck_delay(round: u32, roster: usize, endpoint_id: EndpointId) -> Duration {
     use crate::util::clock::millis_saturating;
-    use crate::util::tuning::{RIVAL_RECHECK_OFFSET_SPAN, RIVAL_RECHECK_SMALL_ROSTER};
     use crate::util::tuning::{
-        rival_recheck, rival_recheck_alone, rival_recheck_first, rival_recheck_meshed,
+        RIVAL_RECHECK_OFFSET_SPAN, RIVAL_RECHECK_SMALL_ROSTER, rival_recheck, rival_recheck_alone,
+        rival_recheck_first, rival_recheck_meshed,
     };
 
     if round == 0 {
@@ -563,7 +564,7 @@ pub(super) fn shed_rival_beacon_if_due(
         .map_or_else(beacon::Dependents::default, |held| held.dependents(peer));
     if !state.yield_to_lower && defer_shed(dependents.count(), state.rival_recheck_deferrals) {
         state.rival_recheck_deferrals = state.rival_recheck_deferrals.saturating_add(1);
-        state.next_rival_recheck = Some(Instant::now() + crate::util::tuning::rival_recheck());
+        state.next_rival_recheck = Some(Instant::now() + tuning::rival_recheck());
         tracing::info!(
             target: "habilis_network::gossip",
             node = %peer.fmt_short(),
@@ -630,6 +631,10 @@ mod tests {
     use habilis_network_test_tracing::{expect_warn, test};
     use std::time::Duration;
 
+    use crate::daemon::{config, state};
+    use crate::protocol::mesh;
+    use crate::util::{clock, tuning};
+    use tokio::sync::{mpsc, watch};
     /// A shed cuts the rendezvous a browser reached us through, and the tab
     /// has nothing else: its roster empties mid-transfer. Observed as a
     /// terminal cycling claim and release while a tab saw no peers at all.
@@ -647,17 +652,17 @@ mod tests {
             id: secret.public(),
             secret,
             bind_ports: Vec::new(),
-            lookups: crate::protocol::mesh::LookupOpts::loopback(),
-            relay_transport: false,
+            lookups: mesh::LookupOpts::loopback(),
+            relay_transport: crate::transport::PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: tokio::sync::watch::channel(None).0,
+            rung_tx: watch::channel(None).0,
         }
     }
 
     /// An endpoint on loopback, closed at the end of the test whatever the test does with it.
     async fn loopback_endpoint() -> iroh::Endpoint {
         let endpoint = crate::lookup::build_endpoint(
-            &crate::protocol::mesh::LookupOpts::loopback(),
+            &mesh::LookupOpts::loopback(),
             None,
             None,
             Vec::new(),
@@ -696,10 +701,10 @@ mod tests {
         let arm = super::CohostArm {
             policy: CoHostPolicy::EagerProbed,
             params: &params,
-            started: crate::util::clock::Instant::now(),
+            started: clock::Instant::now(),
         };
         let mut state = crate::testing::fresh_state();
-        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        state.next_rival_recheck = Some(clock::Instant::now());
         let (mut rendezvous, _round) =
             beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
 
@@ -720,7 +725,7 @@ mod tests {
         let mut state = crate::testing::fresh_state();
         let own = iroh::SecretKey::generate().public();
         let holder = iroh::SecretKey::generate().public();
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         assert!(super::may_probe_to_claim(&state), "no holder known: probe");
 
         state.note_rival_beacon_flag(
@@ -765,7 +770,7 @@ mod tests {
                 proven: true,
                 held: true,
             },
-            crate::util::clock::Instant::now(),
+            clock::Instant::now(),
         );
 
         assert!(
@@ -784,10 +789,10 @@ mod tests {
         let arm = super::CohostArm {
             policy: CoHostPolicy::EagerProbed,
             params: &params,
-            started: crate::util::clock::Instant::now(),
+            started: clock::Instant::now(),
         };
         let mut state = crate::testing::fresh_state();
-        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        state.next_rival_recheck = Some(clock::Instant::now());
         state.yield_to_lower = true;
         let (mut rendezvous, _round) =
             beacon_with_a_negotiating_tab(&params, loopback_endpoint().await);
@@ -824,7 +829,7 @@ mod tests {
         let arm = super::CohostArm {
             policy: CoHostPolicy::EagerProbed,
             params: &params,
-            started: crate::util::clock::Instant::now(),
+            started: clock::Instant::now(),
         };
         let endpoint = loopback_endpoint().await;
         let mut state = crate::testing::fresh_state();
@@ -834,7 +839,7 @@ mod tests {
         super::schedule_rival_recheck(&mut state, arm.policy, &params, &endpoint);
 
         let (mut rendezvous, _round) = beacon_with_a_negotiating_tab(&params, endpoint);
-        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        state.next_rival_recheck = Some(clock::Instant::now());
         assert!(
             !super::shed_rival_beacon_if_due(
                 &mut state,
@@ -909,9 +914,9 @@ mod tests {
             secret,
             bind_ports: vec![port],
             lookups: LookupOpts::loopback(),
-            relay_transport: false,
+            relay_transport: crate::transport::PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: tokio::sync::watch::channel(None).0,
+            rung_tx: watch::channel(None).0,
         };
 
         let endpoint = crate::lookup::build_endpoint(
@@ -980,8 +985,8 @@ mod tests {
     /// rung of the ladder. `configure` sets the member's state before the tick. Returns the state
     /// after it, and whether the member still holds no beacon.
     async fn heal_tick_beside_a_foreign_holder(
-        configure: impl FnOnce(&mut crate::daemon::state::EventLoopState),
-    ) -> (crate::daemon::state::EventLoopState, bool) {
+        configure: impl FnOnce(&mut state::EventLoopState),
+    ) -> (state::EventLoopState, bool) {
         use iroh_gossip::net::Gossip;
 
         use super::{CohostArm, maybe_cohost};
@@ -1005,9 +1010,9 @@ mod tests {
             secret,
             bind_ports: vec![port],
             lookups: LookupOpts::loopback(),
-            relay_transport: false,
+            relay_transport: crate::transport::PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: tokio::sync::watch::channel(None).0,
+            rung_tx: watch::channel(None).0,
         };
 
         // The holder: another member of the same room, on the only rung.
@@ -1057,7 +1062,7 @@ mod tests {
         let mut state = fresh_state();
         state.meshed = true;
         configure(&mut state);
-        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, mut arrivals) = mpsc::unbounded_channel();
         state.rungs = crate::beacon::RungWatch::new(reports);
         let mut rendezvous = None;
         let mut probe = None;
@@ -1179,9 +1184,9 @@ mod tests {
                 secret,
                 bind_ports: vec![port],
                 lookups: LookupOpts::loopback(),
-                relay_transport: false,
+                relay_transport: crate::transport::PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: tokio::sync::watch::channel(None).0,
+                rung_tx: watch::channel(None).0,
             }
         };
         let params = params_of(6);
@@ -1233,7 +1238,7 @@ mod tests {
 
         let mut state = fresh_state();
         state.meshed = true;
-        let (reports, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (reports, mut arrivals) = mpsc::unbounded_channel();
         state.rungs = crate::beacon::RungWatch::new(reports);
         let mut rendezvous = None;
         let mut probe = None;
@@ -1256,7 +1261,7 @@ mod tests {
         let said = sink.count();
         maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
         let again = sink.count();
-        let repeat = crate::util::tuning::NO_RUNG_REPEAT + Duration::from_secs(1);
+        let repeat = tuning::NO_RUNG_REPEAT + Duration::from_secs(1);
         state.no_rung_noted_at = state.no_rung_noted_at.and_then(|at| at.checked_sub(repeat));
         maybe_cohost(&mut state, &ctx, &arm, &mut rendezvous, &mut probe).await;
         let later = sink.count();
@@ -1284,8 +1289,8 @@ mod tests {
         rendezvous: Option<crate::beacon::Rendezvous>,
         probe: Option<crate::beacon::RivalProbe>,
         first_port: u16,
-        state: crate::daemon::state::EventLoopState,
-        arrivals: tokio::sync::mpsc::UnboundedReceiver<crate::beacon::RungReport>,
+        state: state::EventLoopState,
+        arrivals: mpsc::UnboundedReceiver<crate::beacon::RungReport>,
     }
 
     impl HolderOnTheSecondRung {
@@ -1303,10 +1308,10 @@ mod tests {
                 id: secret.public(),
                 secret,
                 bind_ports: vec![first_port, second_port],
-                lookups: crate::protocol::mesh::LookupOpts::loopback(),
-                relay_transport: false,
+                lookups: mesh::LookupOpts::loopback(),
+                relay_transport: crate::transport::PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: tokio::sync::watch::channel(None).0,
+                rung_tx: watch::channel(None).0,
             };
             // A beacon of another mesh holds the first rung: this member reads it as foreign and
             // binds the second.
@@ -1316,10 +1321,10 @@ mod tests {
                 id: other_secret.public(),
                 secret: other_secret,
                 bind_ports: vec![first_port],
-                lookups: crate::protocol::mesh::LookupOpts::loopback(),
-                relay_transport: false,
+                lookups: mesh::LookupOpts::loopback(),
+                relay_transport: crate::transport::PayloadPath::DirectOnly,
                 bootstrap_relay: None,
-                rung_tx: tokio::sync::watch::channel(None).0,
+                rung_tx: watch::channel(None).0,
             };
             let other_endpoint = loopback_endpoint().await;
             let other_book = crate::lookup::address_book(&other_endpoint);
@@ -1360,7 +1365,7 @@ mod tests {
             other_endpoint.close().await;
             let mut state = crate::testing::fresh_state();
             state.meshed = true;
-            let (reports, arrivals) = tokio::sync::mpsc::unbounded_channel();
+            let (reports, arrivals) = mpsc::unbounded_channel();
             state.rungs = crate::beacon::RungWatch::new(reports);
             Self {
                 params,
@@ -1602,11 +1607,11 @@ mod tests {
         let arm = super::CohostArm {
             policy: CoHostPolicy::EagerProbed,
             params: &params,
-            started: crate::util::clock::Instant::now(),
+            started: clock::Instant::now(),
         };
         let endpoint = loopback_endpoint().await;
         let mut state = crate::testing::fresh_state();
-        state.next_rival_recheck = Some(crate::util::clock::Instant::now());
+        state.next_rival_recheck = Some(clock::Instant::now());
         let old_beacon = iroh::EndpointAddr::new(params.id)
             .with_ip_addr("127.0.0.1:4000".parse().expect("addr"));
         crate::lookup::add_peer_addr(&state.address_book, old_beacon);
@@ -1688,9 +1693,9 @@ mod tests {
             secret,
             bind_ports: vec![port],
             lookups: LookupOpts::loopback(),
-            relay_transport: false,
+            relay_transport: crate::transport::PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: tokio::sync::watch::channel(None).0,
+            rung_tx: watch::channel(None).0,
         };
 
         let endpoint = crate::lookup::build_endpoint(
@@ -1792,9 +1797,9 @@ mod tests {
             secret,
             bind_ports: vec![port],
             lookups: LookupOpts::loopback(),
-            relay_transport: false,
+            relay_transport: crate::transport::PayloadPath::DirectOnly,
             bootstrap_relay: None,
-            rung_tx: tokio::sync::watch::channel(None).0,
+            rung_tx: watch::channel(None).0,
         };
 
         let endpoint = crate::lookup::build_endpoint(
@@ -1866,7 +1871,7 @@ mod tests {
         // a duplicate (which partitioned the directory in public mode — only
         // one mesh was discoverable). The pre-fix policy was the no-probe
         // `Eager` (claims, doesn't probe), which the probe assertion guards.
-        let advertiser = crate::daemon::config::DIRECTORY_ADVERTISER_COHOST;
+        let advertiser = config::DIRECTORY_ADVERTISER_COHOST;
         assert!(claims_at_startup(advertiser), "must claim at t=0");
         assert!(
             probes_before_claim(advertiser),

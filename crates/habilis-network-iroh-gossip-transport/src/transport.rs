@@ -26,12 +26,11 @@ use crate::counters::{Counters, Stats};
 use crate::frame::{self, EncodeError, Frame};
 use crate::{gossip_addr, parse_gossip_addr};
 
-/// The guard of `mutex`. A poisoned lock holds data with no invariant to break
-/// (a sink slot, a queue end), so it is used as it is and not turned into a panic.
+use iroh::endpoint::transports;
+/// The guard of `mutex`. A poisoned lock means a panic happened while it was held,
+/// so this function panics too.
 pub(crate) fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex.lock().expect("the lock is poisoned")
 }
 
 /// Packets waiting for iroh to read them.
@@ -40,6 +39,7 @@ const INBOUND_CAP: usize = 256;
 /// Where a frame goes: the mesh gossip topic, once the engine has joined it.
 /// It never blocks. `false` means the frame was not accepted.
 pub trait FrameSink: std::fmt::Debug + Send + Sync + 'static {
+    /// Hand over one frame. It never blocks. Returns `false` if the frame was not accepted.
     fn try_send(&self, frame: Bytes) -> bool;
 
     /// Whether the sink can still carry a frame. A sink whose topic has closed
@@ -51,6 +51,7 @@ pub trait FrameSink: std::fmt::Debug + Send + Sync + 'static {
 
 /// What became of a frame that arrived from the topic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Delivery {
     /// Queued for iroh.
     Queued,
@@ -88,10 +89,11 @@ pub(crate) struct Shared {
 impl Shared {
     /// A path is valid while a sink is attached and alive.
     pub(crate) fn path_is_valid(&self) -> bool {
-        self.attached.load(Ordering::SeqCst)
-            && locked(&self.sink)
-                .as_ref()
-                .is_some_and(|sink| sink.is_alive())
+        if !self.attached.load(Ordering::SeqCst) {
+            return false;
+        }
+        let sink = locked(&self.sink).clone();
+        sink.is_some_and(|sink| sink.is_alive())
     }
 
     /// One QUIC datagram to `dst`: framed and handed to the sink. A datagram that
@@ -149,6 +151,7 @@ pub struct GossipHandle {
 }
 
 impl GossipHandle {
+    /// A handle with no sink. The path is not valid until `attach` is called.
     #[must_use]
     pub fn new(app_id: EndpointId) -> Self {
         let shared = Arc::new(Shared {
@@ -173,6 +176,7 @@ impl GossipHandle {
         }
     }
 
+    /// This member's app endpoint id.
     #[must_use]
     pub fn app_id(&self) -> EndpointId {
         self.shared.app_id
@@ -200,7 +204,7 @@ impl GossipHandle {
     /// and no other selector is: iroh's default treats a custom transport as primary, and the
     /// mesh topic would carry the bytes of a pair that has an IP path.
     #[must_use]
-    pub fn path_selector(&self) -> Arc<dyn iroh::endpoint::transports::PathSelector> {
+    pub fn path_selector(&self) -> Arc<dyn transports::PathSelector> {
         Arc::new(crate::selector::GossipLadder::new(self.app_id()))
     }
 
@@ -438,7 +442,7 @@ mod tests {
     use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 
     use super::*;
-    use crate::memory::MemoryHub;
+    use crate::memory::Hub;
     use crate::{GOSSIP_TRANSPORT_ID, frame};
 
     const ECHO_ALPN: &[u8] = b"habilis-network-gossip/test-echo/0";
@@ -455,6 +459,20 @@ mod tests {
         fn try_send(&self, frame: Bytes) -> bool {
             locked(&self.0).push(frame);
             true
+        }
+    }
+
+    /// A sink whose liveness check panics, as a foreign call may.
+    #[derive(Debug)]
+    struct Panicking;
+
+    impl FrameSink for Panicking {
+        fn try_send(&self, _frame: Bytes) -> bool {
+            true
+        }
+
+        fn is_alive(&self) -> bool {
+            panic!("the liveness check panics")
         }
     }
 
@@ -502,12 +520,12 @@ mod tests {
 
     /// Two nodes with gossip as the only transport, joined by an in-memory flood.
     async fn pair() -> (
-        MemoryHub,
+        Hub,
         (Endpoint, GossipHandle),
         (Endpoint, GossipHandle),
         Router,
     ) {
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let alice_handle = GossipHandle::new(secret(1).public());
         let bob_handle = GossipHandle::new(secret(2).public());
         hub.join(&alice_handle);
@@ -553,6 +571,23 @@ mod tests {
         assert!(sender.is_valid_send_addr(&to_bob), "after attach");
         handle.detach();
         assert!(!sender.is_valid_send_addr(&to_bob), "after detach");
+    }
+
+    #[test]
+    fn a_panic_in_the_liveness_check_does_not_poison_the_sink_lock() {
+        let handle = GossipHandle::new(secret(1).public());
+        handle.attach(Arc::new(Panicking));
+
+        let outcome =
+            habilis_network_test_tracing::catch_panic(std::panic::AssertUnwindSafe(|| {
+                handle.shared.path_is_valid()
+            }));
+
+        assert!(outcome.is_err(), "the liveness check should panic");
+        assert!(
+            !handle.shared.sink.is_poisoned(),
+            "a panic in the liveness check poisoned the sink lock"
+        );
     }
 
     /// The guard is on the frame, and the frame holds 3774 bytes of datagram.
@@ -821,7 +856,7 @@ mod tests {
     /// A dial by id alone reaches the peer: the lookup supplies the gossip address.
     #[test]
     async fn a_dial_by_id_alone_is_resolved_by_the_gossip_lookup() {
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice_handle, bob_handle) = (
             GossipHandle::new(secret(1).public()),
             GossipHandle::new(secret(2).public()),

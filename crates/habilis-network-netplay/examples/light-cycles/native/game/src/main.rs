@@ -18,16 +18,14 @@ use crossterm::{cursor, execute, terminal};
 use tokio::time::MissedTickBehavior;
 
 use habilis_network::embed::SilentSink;
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MeshConfig, MeshName, Nickname, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 
 use habilis_network_netplay::RollbackDriver;
 
-use light_cycles_native::app::Snapshot;
-use light_cycles_native::app::{Game, LightCycles};
+use light_cycles_native::app::{Game, LightCycles, Snapshot};
 use light_cycles_native::grid::{Dir, GRID_H, GRID_W, TICK_MS};
 use light_cycles_native::ui;
 
@@ -169,15 +167,12 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
     };
     let mesh = derive_topic_mesh_config(
         room,
-        MeshConfig {
+        MeshConfig::new(
             lookups,
-            password: None,
-            issuer_pubkey: None,
-            transport: TransportPolicy {
-                relay_transport,
-                ..TransportPolicy::default()
-            },
-        },
+            None,
+            None,
+            TransportPolicy::default().with_relay_transport(relay_transport),
+        ),
     )?;
     let author = Nickname::new(nick)?;
     let my_nick = author.clone();
@@ -188,20 +183,7 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
 
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author,
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, Arc::new(SilentSink::default())).with_max_peers(16),
     )
     .await?;
 
@@ -210,7 +192,8 @@ async fn run(room: &str, nick: &str, local: bool, relay_transport: bool) -> Resu
     // whole process, permanently. This CLI races its own `ctrl_c()` in
     // `render_loop` instead, and always reaches `node.leave()` below.
     let (driver, pending) = RollbackDriver::<LightCycles>::new();
-    let node: Node<RollbackDriver<LightCycles>> = Node::spawn(config, driver, None, false);
+    let node: Node<RollbackDriver<LightCycles>> =
+        Node::spawn(config, driver, None, SignalHandling::Leave);
     let mut game = Game::new(pending.connect(node.sender()), room.to_string(), my_nick);
 
     let result = render_loop(&mut game).await;

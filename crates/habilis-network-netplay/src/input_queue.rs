@@ -127,7 +127,8 @@ impl<T: Config> InputQueue<T> {
     /// rolled back and re-simulated. Everything before `frame` is settled.
     pub(crate) fn reset_prediction(&mut self, frame: Frame) {
         debug_assert!(
-            self.first_incorrect_frame == Frame::NULL || frame <= self.first_incorrect_frame
+            self.first_incorrect_frame == Frame::NULL || frame <= self.first_incorrect_frame,
+            "no incorrect frame is recorded, or the reset starts at or before it"
         );
         self.prediction.frame = Frame::NULL;
         self.first_incorrect_frame = Frame::NULL;
@@ -191,7 +192,10 @@ impl<T: Config> InputQueue<T> {
             return None;
         }
         let slot = self.inputs[(self.tail + offset) % QUEUE_LEN];
-        debug_assert_eq!(slot.frame, frame);
+        debug_assert_eq!(
+            slot.frame, frame,
+            "the input slot holds the frame that was asked for"
+        );
         Some(slot.input)
     }
 
@@ -271,7 +275,10 @@ impl<T: Config> InputQueue<T> {
         if self.prediction.frame == Frame::NULL {
             return;
         }
-        debug_assert_eq!(frame, self.prediction.frame);
+        debug_assert_eq!(
+            frame, self.prediction.frame,
+            "the prediction is at the frame being added"
+        );
         // The guess was wrong: remember the earliest frame it went wrong at.
         if self.first_incorrect_frame == Frame::NULL && self.prediction.input != input {
             self.first_incorrect_frame = frame;

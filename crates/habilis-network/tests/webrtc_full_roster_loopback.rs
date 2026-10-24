@@ -9,6 +9,7 @@
 
 #![cfg(all(feature = "host", feature = "iroh-test-utils"))]
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,7 @@ use habilis_network::iroh::RelayUrl;
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
+use habilis_network::net::test_relay;
 /// One more than `MAX_DIRECT_PEERS + 1`, so that a node cannot hold a session
 /// to every other member and still keep one for the rendezvous.
 const MEMBERS: usize = 18;
@@ -34,10 +36,7 @@ fn logs() -> String {
 
 async fn open(nick: &str, opts: membership::Opts) -> Membership {
     let (sink, _events) = membership::json_sink();
-    let opts = membership::Opts {
-        nick: Some(nick.to_owned()),
-        ..opts
-    };
+    let opts = opts.with_nick(Some(nick.to_owned()));
     membership::join(&opts, sink).await.expect("open a member")
 }
 
@@ -65,12 +64,10 @@ async fn roster_len(member: &Membership) -> usize {
 async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
     let creator = open(
         "member-00",
-        membership::Opts {
-            lookup: vec![Lookup::Relay],
-            transport: vec![Transport::WebRtc],
-            relay_urls: vec![relay.to_string()],
-            ..membership::Opts::default()
-        },
+        membership::Opts::default()
+            .with_lookup(vec![Lookup::Relay])
+            .with_transport(vec![Transport::WebRtc])
+            .with_relay_urls(vec![relay.to_string()]),
     )
     .await;
     let beacon_wait = Instant::now();
@@ -88,10 +85,7 @@ async fn start_group(relay: &RelayUrl) -> Vec<Membership> {
         members.push(
             open(
                 &format!("member-{index:02}"),
-                membership::Opts {
-                    mesh: Some(mesh.clone()),
-                    ..membership::Opts::default()
-                },
+                membership::Opts::default().with_mesh(Some(mesh.clone())),
             )
             .await,
         );
@@ -137,9 +131,7 @@ fn every_member_of_a_webrtc_only_mesh_past_the_ceiling_gets_the_full_roster() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let members = start_group(&relay).await;
 
         let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
@@ -178,9 +170,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         let _serial = serial().lock().await;
         habilis_network_test_tracing::clear_captured_logs();
 
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let mut members = start_group(&relay).await;
         let rosters = rosters_until(&members, MEMBERS - 1, FORMATION_DEADLINE).await;
         assert!(
@@ -228,10 +218,7 @@ fn a_joiner_after_a_crash_still_gets_the_full_roster() {
         members.push(
             open(
                 "late-joiner",
-                membership::Opts {
-                    mesh: Some(mesh),
-                    ..membership::Opts::default()
-                },
+                membership::Opts::default().with_mesh(Some(mesh)),
             )
             .await,
         );
@@ -269,7 +256,7 @@ fn rendezvous_visits() -> usize {
 /// event after it is none of these: it did not come back.
 fn rendezvous_holders(log: &str) -> usize {
     let after_the_crash = log.split("member crashed").nth(1).unwrap_or_default();
-    let mut last_is_up = std::collections::HashMap::new();
+    let mut last_is_up = HashMap::new();
     for line in after_the_crash
         .lines()
         .filter(|line| line.contains("is_rendezvous=true"))

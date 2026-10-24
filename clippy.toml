@@ -8,12 +8,9 @@
 # on every configurable lint even though their lint sets match, and code that
 # passes in one fails in the other.
 #
-# One deliberate divergence: agent-share also sets
-# `warn-on-all-wildcard-imports = true`. That cannot hold here. `habilis-network`'s
-# `protocol` and `util` facades are `pub use habilis_network_protocol::*` /
-# `pub use habilis_network_util::*`, which is the whole mechanism by which the split
-# crates keep their old module paths; enumerating those names by hand would
-# drift on every new public item in a leaf crate.
+# Wildcard imports are flagged. Clippy exempts `pub use ...::*` facades and `use super::*` in
+# test modules, so the crate facades and the test modules stay as they are.
+warn-on-all-wildcard-imports = true
 
 # Flag single-character identifiers; keep idiomatic generics and loop vars.
 min-ident-chars-threshold = 1
@@ -62,3 +59,11 @@ disallowed-methods = [
     { path = "tokio::time::interval", reason = "panics in a browser: use n0_future::time::interval" },
     { path = "tokio::time::interval_at", reason = "panics in a browser: use n0_future::time::interval" },
 ]
+
+# Google Rust Style Guide (issue #29): a test may call `unwrap`, because a failed `unwrap` fails the
+# test with a line number. `clippy::unwrap_used` is on for all other code (Cargo.toml).
+allow-unwrap-in-tests = true
+
+# Google Rust Style Guide (issue 29): a path names at most three segments. A longer one imports
+# its parent module (absolute_paths, Cargo.toml).
+absolute-paths-max-segments = 3

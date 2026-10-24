@@ -11,6 +11,7 @@
 //! peer that never proves a direct path stays `RelayOnly`, retried on the
 //! alive tick, and is never grafted through the relay.
 
+use crate::transport::UdpTransport;
 use std::collections::HashMap;
 
 use futures_util::StreamExt as _;
@@ -23,6 +24,9 @@ use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState};
 use crate::util::clock::Instant;
 
+#[cfg(feature = "multihop")]
+use crate::transport::underlay_webrtc;
+use crate::util::tuning;
 /// A probe's verdict, reported back to the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectOutcome {
@@ -150,7 +154,7 @@ pub(crate) fn ensure_watchers(
     local: EndpointId,
     rendezvous: EndpointId,
 ) {
-    if state.webrtc.is_none() || !state.local_udp_transport {
+    if state.webrtc.is_none() || state.local_udp_transport == UdpTransport::Absent {
         return;
     }
     let peers: Vec<EndpointId> = state
@@ -273,7 +277,12 @@ pub(crate) fn nudge_climbing_pairs(
                     .webrtc
                     .as_ref()
                     .is_some_and(|handle| handle.has_session(&addr.id));
-                (addr.id, kind, has_session, route_to(state, addr.id))
+                PairToClimb {
+                    peer: addr.id,
+                    kind,
+                    has_session,
+                    route: route_to(state, addr.id),
+                }
             })
         })
         .collect();
@@ -309,7 +318,13 @@ fn forget_route_unless_climbing(
 
 /// A pair that a route can still climb from: the peer, the kind of its selected path (the relay or
 /// gossip), whether it has a session, and the route that the topology has for it.
-pub(crate) type PairToClimb = (EndpointId, PathKind, bool, Option<iroh::TransportAddr>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PairToClimb {
+    pub(crate) peer: EndpointId,
+    pub(crate) kind: PathKind,
+    pub(crate) has_session: bool,
+    pub(crate) route: Option<iroh::TransportAddr>,
+}
 
 /// Pure: the dials of one pass over the pairs that read as the relay or as gossip, as `(peer,
 /// kind, has a session, route)`. A pair is dialed when it has a session address or a route to carry. With
@@ -324,9 +339,15 @@ pub(crate) fn plan_relay_dials(
     gossip_on: bool,
 ) -> Vec<(EndpointId, NudgeAddrs)> {
     let pairs: Vec<_> = pairs.into_iter().collect();
-    route_dialed.retain(|peer, _| pairs.iter().any(|(climbing, ..)| climbing == peer));
+    route_dialed.retain(|peer, _| pairs.iter().any(|climbing| climbing.peer == *peer));
     let mut dials = Vec::new();
-    for (peer, kind, has_session, route) in pairs {
+    for PairToClimb {
+        peer,
+        kind,
+        has_session,
+        route,
+    } in pairs
+    {
         let input = StepInput {
             kind,
             has_session,
@@ -402,7 +423,7 @@ pub(crate) async fn on_path_change(
     // The pair may have just reached WebRTC, or IP: the underlay opens or drops its
     // session now, not at the alive tick.
     #[cfg(feature = "multihop")]
-    crate::transport::underlay_webrtc::tick_now(state);
+    underlay_webrtc::tick_now(state);
     // The fast path of the gossip drop rule for a watched pair: the table reads the pair from
     // all of its connections, so that this path and the sweep never disagree on what to tell
     // the gossip transport.
@@ -685,7 +706,7 @@ pub(crate) fn ensure_direct(
     peer: EndpointId,
     peer_addr: &iroh::EndpointAddr,
 ) -> bool {
-    if state.relay_transport {
+    if state.relay_transport.relay_allowed() {
         return true;
     }
     let needs_webrtc = needs_webrtc_lane(peer_addr) || needs_webrtc_lane(&ctx.endpoint.addr());
@@ -888,7 +909,7 @@ pub(crate) async fn retry_direct(
     let now = Instant::now();
     state.note_link_count(state.linked_endpoints.len(), ctx.max_peers, now);
     state.settle_graft_backoff(now);
-    if state.relay_transport {
+    if state.relay_transport.relay_allowed() {
         fill_active_view(state, ctx).await;
         return;
     }
@@ -917,7 +938,7 @@ pub(crate) fn plan_lane_offers(
     in_flight: usize,
     pick: usize,
 ) -> Vec<iroh::EndpointAddr> {
-    let budget = crate::util::tuning::LANE_OFFERS_IN_FLIGHT.saturating_sub(in_flight);
+    let budget = tuning::LANE_OFFERS_IN_FLIGHT.saturating_sub(in_flight);
     let (mut browsers, mut natives): (Vec<_>, Vec<_>) =
         lane.into_iter().partition(needs_webrtc_lane);
     let mut ordered = Vec::new();
@@ -967,7 +988,7 @@ async fn retry_one(
 /// next members do not wait for the alive tick. The members are not served in a fair order: the
 /// random start spreads the load, and nothing more is promised.
 pub(crate) async fn top_up_lane_offers(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    if state.relay_transport || state.webrtc.is_none() {
+    if state.relay_transport.relay_allowed() || state.webrtc.is_none() {
         return;
     }
     let lane: Vec<_> = retry_candidates(state, ctx.rendezvous_id, ctx.max_peers, false)
@@ -1147,6 +1168,8 @@ fn retry_candidates_at(
 
 #[cfg(test)]
 mod tests {
+    use super::PairToClimb;
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
     use iroh::EndpointAddr;
 
@@ -1160,6 +1183,9 @@ mod tests {
     // A multihop route proves a pair that no watcher reports: not a watched peer (its watcher
     // decides), not a proven one, not a pair on the relay, on IP or on gossip, not a pair with
     // no selected path.
+    use crate::gossip::event;
+    use crate::transport::graft_backoff;
+    use crate::util::{clock, tuning};
     #[test]
     fn a_pair_on_a_multihop_route_with_no_watcher_is_proven() {
         use super::proven_by_route;
@@ -1206,7 +1232,7 @@ mod tests {
     fn a_graft_asks_with_low_priority_except_for_the_rendezvous() {
         let mut state = fresh_state();
         let rendezvous = endpoint_id(3);
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         assert_eq!(
             graft_request(
                 &mut state,
@@ -1243,8 +1269,8 @@ mod tests {
         use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
-        let window = crate::util::tuning::STARVED;
+        let start = clock::Instant::now();
+        let window = tuning::STARVED;
         // G = 4 and two links: G - 2.
         state.linked_endpoints.insert(endpoint_id(10));
         state.linked_endpoints.insert(endpoint_id(11));
@@ -1296,7 +1322,7 @@ mod tests {
             .peer_endpoints
             .insert(nick("refuser"), native(refuser));
         state.peer_endpoints.insert(nick("other"), native(other));
-        let start = crate::util::clock::Instant::now();
+        let start = clock::Instant::now();
 
         // The request is not paced: it goes out and is recorded.
         assert_eq!(
@@ -1312,7 +1338,7 @@ mod tests {
             ),
             GraftRequest::Neighbor
         );
-        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let later = start + tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         state.settle_graft_backoff(later);
 
         assert_eq!(
@@ -1385,8 +1411,8 @@ mod tests {
             nick("tombstone"),
             EndpointAddr::new(tombstone).with_ip_addr("127.0.0.1:4000".parse().expect("addr")),
         );
-        let start = crate::util::clock::Instant::now();
-        let window = crate::util::tuning::STARVED;
+        let start = clock::Instant::now();
+        let window = tuning::STARVED;
         // G = 4 and two links: starved once the window has passed.
         state.linked_endpoints.insert(endpoint_id(10));
         state.linked_endpoints.insert(endpoint_id(11));
@@ -1403,7 +1429,7 @@ mod tests {
             ),
             GraftRequest::Neighbor
         );
-        let refused = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let refused = start + tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         state.settle_graft_backoff(refused);
         assert_eq!(
             graft_request(
@@ -1453,10 +1479,10 @@ mod tests {
         let addr = |port: u16| {
             EndpointAddr::new(peer).with_ip_addr(format!("127.0.0.1:{port}").parse().expect("addr"))
         };
-        let start = crate::util::clock::Instant::now();
-        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let start = clock::Instant::now();
+        let later = start + tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         let refuse = |node: &mut EventLoopState| {
-            node.graft_backoff = crate::transport::graft_backoff::GraftBackoff::default();
+            node.graft_backoff = graft_backoff::GraftBackoff::default();
             let _ = graft_request(node, GraftTarget { peer, rendezvous }, 8, start, false);
             node.settle_graft_backoff(later);
             assert!(node.graft_blocked(peer, later), "refused");
@@ -1489,8 +1515,8 @@ mod tests {
         use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
-        let later = start + crate::util::tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
+        let start = clock::Instant::now();
+        let later = start + tuning::GRAFT_REFUSED_AFTER + Duration::from_secs(1);
         let _ = graft_request(
             &mut state,
             GraftTarget { peer, rendezvous },
@@ -1634,11 +1660,11 @@ mod tests {
     fn a_node_with_g_minus_one_links_is_not_starved() {
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
+        let start = clock::Instant::now();
         for seed in 10..13 {
             state.linked_endpoints.insert(endpoint_id(seed));
         }
-        let late = start + crate::util::tuning::STARVED * 2;
+        let late = start + tuning::STARVED * 2;
         assert_eq!(
             graft_request(&mut state, GraftTarget { peer, rendezvous }, 4, start, true),
             GraftRequest::Neighbor
@@ -1654,8 +1680,8 @@ mod tests {
         use std::time::Duration;
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
-        let window = crate::util::tuning::STARVED;
+        let start = clock::Instant::now();
+        let window = tuning::STARVED;
         state.linked_endpoints.insert(endpoint_id(10));
         assert_eq!(
             graft_request(&mut state, GraftTarget { peer, rendezvous }, 4, start, true),
@@ -1702,8 +1728,8 @@ mod tests {
     fn a_peer_info_graft_never_falls_back_to_a_join() {
         let mut state = fresh_state();
         let (rendezvous, peer) = (endpoint_id(3), endpoint_id(4));
-        let start = crate::util::clock::Instant::now();
-        let late = start + crate::util::tuning::STARVED * 3;
+        let start = clock::Instant::now();
+        let late = start + tuning::STARVED * 3;
         assert_eq!(
             graft_request(
                 &mut state,
@@ -1734,7 +1760,7 @@ mod tests {
         };
         let rendezvous = endpoint_id(3);
         state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(local)));
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state
             .peer_endpoints
             .insert(nick("peer"), EndpointAddr::new(peer));
@@ -1754,7 +1780,7 @@ mod tests {
     #[test]
     fn a_re_bridge_keeps_linked_peers_as_candidates() {
         let mut state = fresh_state();
-        state.relay_transport = false;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
         let rendezvous = endpoint_id(1);
         let linked = endpoint_id(2);
         let unlinked = endpoint_id(3);
@@ -2009,7 +2035,12 @@ mod tests {
         let bob = endpoint_id(2);
         let mut dialed = HashMap::new();
         let dials = plan_relay_dials(
-            [(bob, PathKind::Gossip, false, Some(a_route()))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Gossip,
+                has_session: false,
+                route: Some(a_route()),
+            }],
             &mut dialed,
             true,
             true,
@@ -2141,7 +2172,7 @@ mod tests {
     // The real `selected_kind`, on a real connection whose only transport is gossip.
     #[test]
     async fn a_connection_on_the_gossip_path_reads_as_the_gossip_kind() {
-        use habilis_network_iroh_gossip_transport::memory::MemoryHub;
+        use habilis_network_iroh_gossip_transport::memory::Hub;
         use habilis_network_iroh_gossip_transport::{GossipHandle, gossip_addr};
         use iroh::endpoint::{Connection, presets};
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
@@ -2160,7 +2191,7 @@ mod tests {
             SecretKey::from_bytes(&[21; 32]),
             SecretKey::from_bytes(&[22; 32]),
         );
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice_handle, bob_handle) = (
             GossipHandle::new(alice_key.public()),
             GossipHandle::new(bob_key.public()),
@@ -2233,7 +2264,12 @@ mod tests {
         let mut dialed = HashMap::new();
 
         let first = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route(1)))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route(1)),
+            }],
             &mut dialed,
             true,
             false,
@@ -2243,7 +2279,12 @@ mod tests {
         assert_eq!(first[0].1.route, Some(route(1)), "with the route");
 
         let same = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route(1)))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route(1)),
+            }],
             &mut dialed,
             true,
             false,
@@ -2251,7 +2292,12 @@ mod tests {
         assert!(same.is_empty(), "the same route is not dialed again");
 
         let changed = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route(2)))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route(2)),
+            }],
             &mut dialed,
             true,
             false,
@@ -2260,7 +2306,12 @@ mod tests {
         assert_eq!(changed[0].1.route, Some(route(2)));
 
         let tick = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route(2)))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route(2)),
+            }],
             &mut dialed,
             false,
             false,
@@ -2283,7 +2334,12 @@ mod tests {
         let mut dialed = HashMap::new();
         assert!(
             plan_relay_dials(
-                [(bob, PathKind::Relay, true, None)],
+                [PairToClimb {
+                    peer: bob,
+                    kind: PathKind::Relay,
+                    has_session: true,
+                    route: None
+                }],
                 &mut dialed,
                 true,
                 false
@@ -2292,7 +2348,12 @@ mod tests {
             "an event with no route dials nothing"
         );
         let tick = plan_relay_dials(
-            [(bob, PathKind::Relay, true, None)],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: true,
+                route: None,
+            }],
             &mut dialed,
             false,
             false,
@@ -2301,7 +2362,12 @@ mod tests {
         assert!(tick[0].1.session);
         assert!(
             plan_relay_dials(
-                [(bob, PathKind::Relay, false, None)],
+                [PairToClimb {
+                    peer: bob,
+                    kind: PathKind::Relay,
+                    has_session: false,
+                    route: None
+                }],
                 &mut dialed,
                 false,
                 false
@@ -2326,8 +2392,18 @@ mod tests {
 
         let first = plan_relay_dials(
             [
-                (bob, PathKind::Relay, false, Some(route.clone())),
-                (carol, PathKind::Relay, false, Some(route.clone())),
+                PairToClimb {
+                    peer: bob,
+                    kind: PathKind::Relay,
+                    has_session: false,
+                    route: Some(route.clone()),
+                },
+                PairToClimb {
+                    peer: carol,
+                    kind: PathKind::Relay,
+                    has_session: false,
+                    route: Some(route.clone()),
+                },
             ],
             &mut dialed,
             true,
@@ -2344,7 +2420,12 @@ mod tests {
         );
 
         let again = plan_relay_dials(
-            [(bob, PathKind::Relay, false, Some(route))],
+            [PairToClimb {
+                peer: bob,
+                kind: PathKind::Relay,
+                has_session: false,
+                route: Some(route),
+            }],
             &mut dialed,
             true,
             false,
@@ -2431,7 +2512,7 @@ mod tests {
         ids.sort_unstable();
         let [local, rendezvous, bob] = ids;
         state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(local)));
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.peer_endpoints.insert(
             nick("bob"),
             EndpointAddr::from_parts(
@@ -2451,9 +2532,9 @@ mod tests {
     #[test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_rendezvous_is_not_watched() {
         use habilis_network_iroh_webrtc_transport::{WebRtcHandle, WebRtcTransport};
-        use iroh::endpoint::Connection;
+        use iroh::endpoint::{Connection, presets};
         use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-        use iroh::{RelayMode, SecretKey, endpoint::presets};
+        use iroh::{RelayMode, SecretKey};
 
         #[derive(Debug, Clone)]
         struct Hold;
@@ -2494,7 +2575,7 @@ mod tests {
             .collect();
         let mut state = fresh_state();
         state.webrtc = Some(WebRtcHandle::new(WebRtcTransport::new(client.id())));
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         state.unicast_pool = crate::transport::UnicastPool::new(client.clone(), false);
         for (name, server) in [("bob", &bob), ("beacon", &beacon)] {
             crate::lookup::add_peer_addr(&crate::lookup::address_book(&client), server.addr());
@@ -2534,7 +2615,7 @@ mod tests {
                 [TransportAddr::Ip("127.0.0.1:1".parse().expect("addr"))],
             )
         };
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         let lost = ids[0];
         let isolated = || {
             let mut state = fresh_state();
@@ -2572,7 +2653,7 @@ mod tests {
         assert_eq!(
             pick(
                 &state,
-                now + crate::util::tuning::RECLAIM_WINDOW + Duration::from_secs(1)
+                now + tuning::RECLAIM_WINDOW + Duration::from_secs(1)
             ),
             None,
             "the window is closed"
@@ -2618,7 +2699,7 @@ mod tests {
         state.peer_endpoints.insert(nick("free-a"), native(ids[3]));
         state.peer_endpoints.insert(nick("free-b"), native(ids[4]));
         state.linked_endpoints.insert(ids[1]);
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         state.note_relink(ids[2], now);
         let mut free = [ids[3], ids[4]];
         free.sort_unstable();
@@ -2644,7 +2725,8 @@ mod tests {
     async fn the_alive_tick_fills_one_member_per_tick_on_a_relay_transport_mesh() {
         use crate::protocol::MeshId;
         use crate::protocol::identity::Identity;
-        use iroh::{RelayMode, TransportAddr, endpoint::presets};
+        use iroh::endpoint::presets;
+        use iroh::{RelayMode, TransportAddr};
 
         let endpoint = iroh::Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
@@ -2663,7 +2745,7 @@ mod tests {
         let identity = Identity::generate();
         let our_pubkey = identity.author_key();
         let author = nick("alice");
-        let sink = crate::gossip::event::SilentSink;
+        let sink = event::SilentSink;
         let rendezvous = endpoint_id(1);
         let ctx = crate::daemon::ctx::HandlerCtx {
             sender: &sender,
@@ -2678,7 +2760,7 @@ mod tests {
             sink: &sink,
         };
         let mut state = fresh_state();
-        state.relay_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::RelayAllowed;
         let ids: Vec<_> = (2u8..=4).map(endpoint_id).collect();
         for (index, id) in ids.iter().enumerate() {
             state.peer_endpoints.insert(
@@ -2692,7 +2774,7 @@ mod tests {
         let mut ordered = ids.clone();
         ordered.sort_unstable();
         let tried = |view: &EventLoopState| {
-            let now = crate::util::clock::Instant::now();
+            let now = clock::Instant::now();
             ordered
                 .iter()
                 .filter(|id| view.relink_on_cooldown(**id, now))
@@ -2728,7 +2810,7 @@ mod tests {
         }
         let mut ordered = ids.clone();
         ordered.sort_unstable();
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         let pick = |pick| super::next_fill(&state, 8, rendezvous, now, pick).map(|addr| addr.id);
 
         assert_eq!(pick(0), Some(ordered[0]));

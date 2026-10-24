@@ -1,0 +1,22 @@
+# rule|file|matches allowed|reason
+# Used by scripts/style-check/style-check.ts. Keep the count exact: the check fails when it is too low as well.
+
+# A Drop that runs while a panic unwinds must not panic: a second panic aborts the process.
+poison|crates/habilis-network/src/transport/pool.rs|2|InFlightDial::drop clears the in-flight entry during unwinding. register_dial must read the same map.
+# The guard of a test must survive a test that panicked, or it hides the failure that matters.
+poison|crates/habilis-network-test-tracing/src/lib.rs|2|lock helper of the test guard: the import and the call.
+
+# The light-cycles example uses native generators, a nightly-only feature.
+feature|crates/habilis-network-netplay/examples/light-cycles/native/game/src/lib.rs|1|coroutines, yield_expr (nightly example)
+feature|crates/habilis-network-netplay/examples/light-cycles/native/visage-rust-tui/src/lib.rs|1|coroutines, coroutine_trait (nightly example)
+
+# A panic must not cross the C boundary: this is the defence in depth that the guide allows.
+catch_unwind|crates/habilis-network-ffi/src/ffi.rs|1|FFI boundary
+
+# The one catch_unwind outside the FFI boundary: the helper that the tests use to check a panic.
+catch_unwind|crates/habilis-network-test-tracing/src/lib.rs|1|catch_panic, the helper that the tests use to check a panic
+
+# anyhow_pub: a public signature returns anyhow. Each library file is typed in a later commit of
+# package 7, and its line goes with that commit.
+anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|benchmark harness behind the bench feature, not library API
+anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)

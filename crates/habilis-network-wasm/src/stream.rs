@@ -7,7 +7,7 @@ use std::rc::Rc;
 use habilis_network_stream::{StreamHash, StreamOpts};
 use n0_future::future::or;
 use tokio::sync::{Mutex, watch};
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 use crate::to_js_error;
 
@@ -149,8 +149,15 @@ async fn reached(ending: &watch::Sender<Ending>, at: Ending) {
     let _ = ending.subscribe().wait_for(|now| *now >= at).await;
 }
 
-fn js(error: &anyhow::Error) -> JsValue {
-    to_js_error(&format!("{error:#}"))
+fn js(error: &(dyn std::error::Error + 'static)) -> JsValue {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(source) = cause {
+        text.push_str(": ");
+        text.push_str(&source.to_string());
+        cause = source.source();
+    }
+    to_js_error(&text)
 }
 
 /// One stream's writing end.

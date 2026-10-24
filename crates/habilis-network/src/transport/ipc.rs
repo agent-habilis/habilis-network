@@ -1,20 +1,22 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use interprocess::local_socket::{
-    ListenerOptions, Name,
-    tokio::{Listener, Stream, prelude::*},
-};
-use serde::{Serialize, de::DeserializeOwned};
+use interprocess::local_socket::tokio::{Listener, Stream};
+use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
+use interprocess::local_socket::{ListenerOptions, Name};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use crate::protocol::{MeshId, MessageId, Nickname};
+use crate::gossip::event;
+use crate::protocol::{MeshId, MessageId, Nickname, message};
 use crate::util::bounded_read::{LineRead, read_bounded_line};
 use crate::util::clock::millis_saturating;
 use crate::util::consts::{MAX_IPC_COMMAND_BYTES, MAX_IPC_RESPONSE_BYTES};
 use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
 use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
+use tokio::sync::oneshot;
 
 /// Returns the IPC endpoint identifier for a specific agent on a mesh —
 /// a filesystem socket path (the project targets Unix only). Lives in the
@@ -38,6 +40,7 @@ pub(crate) use super::IpcMessage;
 /// socket path directly (via [`send_to_path`]) and carries no mesh — the
 /// concrete command type is defined app-side, the engine only needs the address.
 pub trait Addressed {
+    /// The mesh this command is for, or `None` for a command that has none.
     fn mesh_id(&self) -> Option<&MeshId>;
 }
 
@@ -51,7 +54,7 @@ pub trait Addressed {
 #[must_use]
 /// # Panics
 /// Panics if an internal invariant is violated.
-pub fn json_ok_msg(id: &MessageId, msg: &crate::protocol::message::Verified) -> String {
+pub fn json_ok_msg(id: &MessageId, msg: &message::Verified) -> String {
     serde_json::json!({
         "ok": true,
         "id": id,
@@ -74,6 +77,7 @@ pub fn json_ack() -> String {
     serde_json::json!({"ok": true}).to_string()
 }
 
+/// The JSON reply of a failed IPC command, with `ok` false and the `error` text.
 #[must_use]
 pub fn json_error(error: &str) -> String {
     serde_json::json!({"ok": false, "error": error}).to_string()
@@ -125,7 +129,7 @@ pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -
 pub(crate) async fn serve<C>(
     listener: Listener,
     tx: mpsc::Sender<IpcMessage<C>>,
-    sink: std::sync::Arc<dyn crate::gossip::event::NodeSink>,
+    sink: std::sync::Arc<dyn event::NodeSink>,
 ) where
     C: DeserializeOwned + Send + 'static,
 {
@@ -148,7 +152,7 @@ pub(crate) async fn serve<C>(
             }
             Err(error) => {
                 if !failing {
-                    sink.emit(crate::gossip::event::NodeEvent::Error(format!(
+                    sink.emit(event::NodeEvent::Error(format!(
                         "IPC: accept error (retrying): {error}"
                     )));
                     failing = true;
@@ -198,6 +202,11 @@ where
             return;
         }
         Ok(Ok(LineRead::Eof) | Err(_)) => return,
+        #[expect(
+            clippy::match_same_arms,
+            reason = "LineRead is non_exhaustive, so rustc needs this wildcard after the arms that name every variant"
+        )]
+        Ok(_) => return,
         Err(_idle) => {
             tracing::debug!("IPC: connection sent nothing within the read deadline; closing");
             return;
@@ -207,7 +216,7 @@ where
     let response = match serde_json::from_str::<C>(line.trim()) {
         Err(error) => json_error(&format!("parse error: {error}")),
         Ok(cmd) => {
-            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+            let (resp_tx, resp_rx) = oneshot::channel();
             if tx.send((cmd, resp_tx)).await.is_err() {
                 json_error("server channel closed")
             } else {
@@ -231,7 +240,9 @@ where
 /// and only the consumer knows what its commands are called. It appends that
 /// half after matching on this.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NoDaemon {
+    /// The nickname of the member.
     pub nickname: Nickname,
 }
 
@@ -247,6 +258,38 @@ impl std::fmt::Display for NoDaemon {
 
 impl std::error::Error for NoDaemon {}
 
+/// Why a command could not reach its daemon.
+///
+/// [`IpcError::NoDaemon`] is the one a caller acts on (no live daemon to ask).
+/// [`IpcError::Internal`] holds the causes no caller acts on: a bad socket name, a
+/// round trip that fails, or a response that is too large.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum IpcError {
+    /// No daemon is listening on the socket.
+    NoDaemon(NoDaemon),
+    /// A cause no caller acts on. It keeps its text and its chain.
+    Internal(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl IpcError {
+    /// Wraps a cause no caller acts on, keeping its text and its chain.
+    pub(crate) fn internal(error: anyhow::Error) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl std::fmt::Display for IpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoDaemon(error) => std::fmt::Display::fmt(error, f),
+            Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), f),
+        }
+    }
+}
+
+impl std::error::Error for IpcError {}
+
 /// Client-side: send an IPC command to the running server and return the raw JSON response.
 ///
 /// # Panics
@@ -254,7 +297,11 @@ impl std::error::Error for NoDaemon {}
 /// # Errors
 /// [`NoDaemon`] when no server is listening; otherwise an invalid socket name
 /// or a failed request/response round trip.
-pub async fn send<C>(base: &std::path::Path, cmd: &C, nickname: &Nickname) -> Result<String>
+pub async fn send<C>(
+    base: &std::path::Path,
+    cmd: &C,
+    nickname: &Nickname,
+) -> Result<String, IpcError>
 where
     C: Serialize + Addressed,
 {
@@ -262,11 +309,14 @@ where
         .mesh_id()
         .expect("send() is only used for mesh-addressed commands; Info uses send_to_path");
     let path = socket_path(base, mesh, nickname);
-    let name = to_name(&path).map_err(|error| anyhow::anyhow!("invalid socket name: {error}"))?;
-    let stream = Stream::connect(name).await.map_err(|_| NoDaemon {
-        nickname: nickname.clone(),
+    let name = to_name(&path)
+        .map_err(|error| IpcError::internal(anyhow::anyhow!("invalid socket name: {error}")))?;
+    let stream = Stream::connect(name).await.map_err(|_| {
+        IpcError::NoDaemon(NoDaemon {
+            nickname: nickname.clone(),
+        })
     })?;
-    round_trip(stream, cmd).await
+    round_trip(stream, cmd).await.map_err(IpcError::internal)
 }
 
 /// Client-side: send an IPC command to a specific socket path. `doctor` uses
@@ -276,15 +326,21 @@ where
 /// # Errors
 /// The path is not valid UTF-8, the socket can't be connected (no live
 /// daemon), or the request/response round trip fails.
-pub async fn send_to_path<C: Serialize>(path: &std::path::Path, cmd: &C) -> Result<String> {
+pub async fn send_to_path<C: Serialize>(
+    path: &std::path::Path,
+    cmd: &C,
+) -> Result<String, IpcError> {
     use anyhow::Context;
-    let path_str = path.to_str().context("socket path is not valid UTF-8")?;
-    let name =
-        to_name(path_str).map_err(|error| anyhow::anyhow!("invalid socket name: {error}"))?;
+    let path_str = path
+        .to_str()
+        .context("socket path is not valid UTF-8")
+        .map_err(IpcError::internal)?;
+    let name = to_name(path_str)
+        .map_err(|error| IpcError::internal(anyhow::anyhow!("invalid socket name: {error}")))?;
     let stream = Stream::connect(name)
         .await
-        .map_err(|error| anyhow::anyhow!("connect {path_str}: {error}"))?;
-    round_trip(stream, cmd).await
+        .map_err(|error| IpcError::internal(anyhow::anyhow!("connect {path_str}: {error}")))?;
+    round_trip(stream, cmd).await.map_err(IpcError::internal)
 }
 
 /// Write `cmd`, half-close, and read back the single-line JSON response.
@@ -301,6 +357,7 @@ async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
         LineRead::Line(line) => Ok(line.trim().to_string()),
         LineRead::Eof => Ok(String::new()),
         LineRead::TooLong => anyhow::bail!("IPC response too large"),
+        _ => anyhow::bail!("IPC response unreadable"),
     }
 }
 
@@ -333,6 +390,8 @@ mod tests {
         socket_path,
     };
 
+    use crate::gossip::event;
+    use crate::util::tuning;
     /// A minimal mesh-addressed command standing in for the app's real
     /// `IpcCommand` (which lives app-side): exercises the engine's generic
     /// socket framing without naming any application type.
@@ -407,7 +466,8 @@ mod tests {
         use crate::util::mesh_prefix;
         use habilis_network_test_tracing::test;
         use proptest::collection::vec as arb_vec;
-        use proptest::{prop_assert, prop_assert_eq, proptest, strategy::Strategy};
+        use proptest::strategy::Strategy;
+        use proptest::{prop_assert, prop_assert_eq, proptest};
 
         use super::{MeshId, json_error, json_ok};
 
@@ -502,11 +562,8 @@ mod tests {
         // Bind synchronously (no sleep needed — the socket is accepting the
         // instant `bind` returns), then spawn the accept loop.
         let listener = bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
-        let listener_handle = tokio::spawn(serve(
-            listener,
-            tx,
-            std::sync::Arc::new(crate::gossip::event::SilentSink),
-        ));
+        let listener_handle =
+            tokio::spawn(serve(listener, tx, std::sync::Arc::new(event::SilentSink)));
 
         // Spawn a handler that responds to messages
         let handler = tokio::spawn(respond_once(rx));
@@ -556,9 +613,9 @@ mod tests {
     // throughout. Real-time: waits out `IPC_IO_TIMEOUT` (10s).
     #[test]
     async fn idle_connection_is_closed_at_the_read_deadline() {
-        use interprocess::local_socket::{
-            GenericFilePath, ToFsName, tokio::Stream, tokio::prelude::*,
-        };
+        use interprocess::local_socket::tokio::Stream;
+        use interprocess::local_socket::traits::tokio::Stream as _;
+        use interprocess::local_socket::{GenericFilePath, ToFsName};
         use tokio::io::AsyncReadExt;
 
         let pid_b58 = bs58::encode(std::process::id().to_le_bytes()).into_string();
@@ -566,11 +623,8 @@ mod tests {
         let nickname = Nickname::from("idle-nick");
         let (tx, rx) = mpsc::channel::<IpcMessage<TestCommand>>(8);
         let listener = bind(&test_base(), &mesh, &nickname).expect("bind IPC socket");
-        let listener_handle = tokio::spawn(serve(
-            listener,
-            tx,
-            std::sync::Arc::new(crate::gossip::event::SilentSink),
-        ));
+        let listener_handle =
+            tokio::spawn(serve(listener, tx, std::sync::Arc::new(event::SilentSink)));
         // Echo handler so a healthy command still round-trips while the
         // idle connection is parked.
         let handler = tokio::spawn(respond_healthy_forever(rx));
@@ -588,7 +642,7 @@ mod tests {
         // The parked connection is closed (EOF) at the deadline, with margin.
         let mut sink = Vec::new();
         let read = tokio::time::timeout(
-            crate::util::tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
+            tuning::IPC_IO_TIMEOUT + std::time::Duration::from_secs(5),
             idle.read_to_end(&mut sink),
         )
         .await;

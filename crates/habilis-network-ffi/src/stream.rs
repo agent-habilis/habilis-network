@@ -10,11 +10,7 @@ use bytes::Bytes;
 use habilis_network_stream::{Producer, Reader, StreamHash, StreamNode, StreamOpts};
 
 /// A stream node, driven synchronously from a foreign caller's thread.
-#[expect(
-    missing_debug_implementations,
-    reason = "a tokio Runtime has no Debug impl"
-)]
-pub struct Streams {
+pub(crate) struct Streams {
     /// `None` after [`Streams::close`].
     node: Option<StreamNode>,
     /// Last in every handle here: fields drop in order, and what the handle
@@ -27,7 +23,7 @@ impl Streams {
     ///
     /// # Errors
     /// Invalid options, or an endpoint that fails to bind.
-    pub fn bind(opts: &StreamOpts) -> Result<Self> {
+    pub(crate) fn bind(opts: &StreamOpts) -> Result<Self> {
         let runtime = runtime()?;
         let node = runtime.block_on(StreamNode::bind(opts))?;
         Ok(Self {
@@ -40,7 +36,7 @@ impl Streams {
     ///
     /// # Errors
     /// `hash` does not decode, or the endpoint fails to bind.
-    pub fn bind_for(hash: &str) -> Result<Self> {
+    pub(crate) fn bind_for(hash: &str) -> Result<Self> {
         let hash: StreamHash = hash.parse()?;
         let runtime = runtime()?;
         let node = runtime.block_on(StreamNode::bind_for(&hash))?;
@@ -54,7 +50,7 @@ impl Streams {
     ///
     /// # Errors
     /// The node is closed.
-    pub fn create(&self) -> Result<Writer> {
+    pub(crate) fn create(&self) -> Result<Writer> {
         let producer = self.runtime.block_on(self.node()?.create());
         let hash = producer.hash().encode();
         Ok(Writer {
@@ -68,7 +64,7 @@ impl Streams {
     ///
     /// # Errors
     /// `hash` does not decode, the producer cannot be reached, or it refuses.
-    pub fn open(&self, hash: &str) -> Result<ReadEnd> {
+    pub(crate) fn open(&self, hash: &str) -> Result<ReadEnd> {
         let hash: StreamHash = hash.parse()?;
         let reader = self.runtime.block_on(self.node()?.open(&hash))?;
         Ok(ReadEnd {
@@ -80,7 +76,7 @@ impl Streams {
     }
 
     /// Shut the node down. Every stream still open is abandoned.
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         if let Some(node) = self.node.take() {
             self.runtime.block_on(node.close());
         }
@@ -92,11 +88,7 @@ impl Streams {
 }
 
 /// A producer, driven synchronously.
-#[expect(
-    missing_debug_implementations,
-    reason = "a tokio Runtime has no Debug impl"
-)]
-pub struct Writer {
+pub(crate) struct Writer {
     /// `None` after [`Writer::close`].
     producer: Option<Producer>,
     hash: String,
@@ -106,7 +98,7 @@ pub struct Writer {
 impl Writer {
     /// The hash the one consumer opens this stream with.
     #[must_use]
-    pub fn hash(&self) -> &str {
+    pub(crate) fn hash(&self) -> &str {
         &self.hash
     }
 
@@ -116,7 +108,7 @@ impl Writer {
     ///
     /// # Errors
     /// The stream is closed, or the consumer went away.
-    pub fn write(&mut self, bytes: &[u8], timeout: Duration) -> Result<bool> {
+    pub(crate) fn write(&mut self, bytes: &[u8], timeout: Duration) -> Result<bool> {
         let producer = self.producer.as_mut().context("this stream is closed")?;
         self.runtime.block_on(async {
             match n0_future::time::timeout(timeout, producer.attached()).await {
@@ -136,9 +128,12 @@ impl Writer {
     ///
     /// # Errors
     /// The consumer went away before the end of stream reached it.
-    pub fn close(&mut self) -> Result<()> {
+    pub(crate) fn close(&mut self) -> Result<()> {
         match self.producer.take() {
-            Some(producer) => self.runtime.block_on(producer.close_or_abandon()),
+            Some(producer) => self
+                .runtime
+                .block_on(producer.close_or_abandon())
+                .map_err(anyhow::Error::from),
             None => Ok(()),
         }
     }
@@ -146,9 +141,11 @@ impl Writer {
 
 /// What [`ReadEnd::read`] produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Read {
+#[non_exhaustive]
+pub(crate) enum Read {
     /// This many bytes are in the caller's buffer.
     Bytes(usize),
+    /// Nothing arrived before the deadline.
     Timeout,
     /// The producer closed the stream; nothing more will come.
     End,
@@ -156,11 +153,7 @@ pub enum Read {
 
 /// A reader, driven synchronously. Bytes that do not fit the caller's buffer
 /// are kept for the next read, as `read(2)` does.
-#[expect(
-    missing_debug_implementations,
-    reason = "a tokio Runtime has no Debug impl"
-)]
-pub struct ReadEnd {
+pub(crate) struct ReadEnd {
     reader: Reader,
     leftover: Bytes,
     ended: bool,
@@ -172,7 +165,7 @@ impl ReadEnd {
     ///
     /// # Errors
     /// The producer refused or abandoned the stream, or the link was lost.
-    pub fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<Read> {
+    pub(crate) fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<Read> {
         if self.leftover.is_empty() && !self.ended {
             let reader = &mut self.reader;
             // Inside `block_on`: the timer registers with the runtime's reactor

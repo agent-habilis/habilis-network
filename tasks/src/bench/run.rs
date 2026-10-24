@@ -7,8 +7,7 @@ use std::time::Duration;
 use habilis_network_iroh_webrtc_transport::bench;
 
 use crate::TaskOutcome;
-use crate::util::wasm;
-use crate::util::{output, repo_root};
+use crate::util::{output, repo_root, wasm};
 
 use super::web::Engine::{Chrome, Safari};
 use super::{Args, Cell, Direction, gossip, multihop, native, serve, wanted, web};

@@ -25,6 +25,7 @@ pub mod identity;
 pub mod invite;
 pub mod mesh;
 pub mod message;
+/// Nicknames: display labels for members. A nickname is not an identity.
 pub mod nickname;
 pub mod peer_addr;
 pub mod reassembly;
@@ -55,18 +56,18 @@ pub use dedup_key::DedupKey;
 pub use habilis_network_util::clock::UnixSecs;
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
-    AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, LockedMesh,
-    Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError,
-    OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
+    AdvertiseRequiresReachable, ChoiceError, ConfigError, DEFAULT_DIRECTORY, DirectorySelection,
+    LockedMesh, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName,
+    NameError, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
     TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
 };
 pub use message::{
-    AppFrameParams, AppTag, Authored, BodyError, Channel, CorrId, IdError, Message, MessageBody,
-    MessageId, MessageKind, PresenceSubtype, Proof, Shard, ShardGroup, Signer, Verified,
-    sole_addressee,
+    AppFrameParams, AppTag, AppTagError, Authored, BodyError, Channel, CorrId, CorrIdError,
+    IdError, Message, MessageBody, MessageError, MessageId, MessageKind, PresenceSubtype, Proof,
+    Shard, ShardGroup, Signer, Verified, sole_addressee,
 };
 pub use nickname::{Nickname, NicknameError};
-pub use seal::seal_to_body;
+pub use seal::{SealError, seal_to_body};
 pub use topic::TopicId;
 
 /// The invite token itself. Minting lives in

@@ -17,6 +17,7 @@ use crate::protocol::base58check::{self, take_array};
 use crate::protocol::crypto::TicketSecret;
 use crate::protocol::mesh::LookupOpts;
 use crate::protocol::peer_addr::{endpoint_addr_from_json, endpoint_addr_to_json};
+use crate::transport::PayloadPath;
 
 use super::{BlobDigest, HASH_LEN, SECRET_LEN};
 
@@ -37,11 +38,17 @@ const RELAY_TRANSPORT_BIT: u8 = 0b0000_0010;
 
 /// A decoded blob ticket.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct BlobTicket {
+    /// The endpoint address of the producer that serves the blob.
     pub addr: EndpointAddr,
+    /// The bearer secret of the ticket.
     pub secret: TicketSecret,
+    /// The SHA-256 of the blob.
     pub sha256: BlobDigest,
+    /// The size of the blob, in bytes.
     pub size: u64,
+    /// The lookups that find the producer's endpoint.
     pub lookups: LookupOpts,
     /// Password-protected: the consumer must present the Argon2id stretch of the
     /// password (salted by `secret`) in the stream header instead of the raw
@@ -50,7 +57,7 @@ pub struct BlobTicket {
     /// Whether the relay may carry the transfer (the producer mesh's
     /// `TransportPolicy::relay`). `false` ⇒ the consumer refuses to fetch over
     /// a relayed path, as the producer refuses to serve one.
-    pub relay_transport: bool,
+    pub relay_transport: PayloadPath,
 }
 
 impl BlobTicket {
@@ -65,7 +72,7 @@ impl BlobTicket {
         if self.password {
             flags |= PASSWORD_BIT;
         }
-        if self.relay_transport {
+        if self.relay_transport.relay_allowed() {
             flags |= RELAY_TRANSPORT_BIT;
         }
         payload.push(flags);
@@ -95,7 +102,11 @@ impl BlobTicket {
     /// # Errors
     /// Bad Base58/checksum, the wrong ticket kind, a bad version, or a
     /// malformed payload.
-    pub fn decode(ticket: &str) -> Result<Self> {
+    pub fn decode(ticket: &str) -> Result<Self, super::BlobError> {
+        Self::decode_checked(ticket).map_err(super::BlobError::internal)
+    }
+
+    fn decode_checked(ticket: &str) -> Result<Self> {
         let framed = base58check::decode(ticket.trim(), "blob ticket")?;
         let version = *framed.first().context("ticket too short")?;
         if version != VERSION {
@@ -113,7 +124,7 @@ impl BlobTicket {
         let flags = *payload.get(pos).context("ticket missing flags")?;
         pos += 1;
         let password = flags & PASSWORD_BIT != 0;
-        let relay_transport = flags & RELAY_TRANSPORT_BIT != 0;
+        let relay_transport = PayloadPath::from(flags & RELAY_TRANSPORT_BIT != 0);
         let sha256 = BlobDigest::from_bytes(
             take_array::<HASH_LEN>(payload, &mut pos).context("ticket missing hash")?,
         );
@@ -144,9 +155,11 @@ mod tests {
     use crate::blob::{BlobDigest, HASH_LEN, SECRET_LEN};
     use crate::protocol::crypto::TicketSecret;
     use crate::protocol::mesh::LookupOpts;
+    use crate::transport::PayloadPath;
     use habilis_network_test_tracing::test;
     use iroh::{EndpointAddr, SecretKey};
 
+    use crate::protocol::mesh;
     fn sample_addr(byte: u8) -> EndpointAddr {
         let id = SecretKey::from_bytes(&[byte; 32]).public();
         EndpointAddr::new(id).with_ip_addr("127.0.0.1:4242".parse().unwrap())
@@ -160,7 +173,7 @@ mod tests {
             size: 1_234_567,
             lookups: LookupOpts::public_preset(),
             password,
-            relay_transport: true,
+            relay_transport: PayloadPath::RelayAllowed,
         }
     }
 
@@ -205,23 +218,26 @@ mod tests {
     fn password_flag_round_trips() {
         let decoded = BlobTicket::decode(&sample(true).encode()).expect("decode");
         assert!(decoded.password);
-        assert!(decoded.relay_transport);
+        assert_eq!(decoded.relay_transport, PayloadPath::RelayAllowed);
     }
 
     #[test]
     fn relay_transport_flag_round_trips_and_is_off_by_default() {
         let ticket = BlobTicket {
-            relay_transport: false,
+            relay_transport: PayloadPath::DirectOnly,
             ..sample(true)
         };
         let decoded = BlobTicket::decode(&ticket.encode()).expect("decode");
-        assert!(!decoded.relay_transport);
+        assert_eq!(decoded.relay_transport, PayloadPath::DirectOnly);
         assert!(decoded.password, "the two flags share a byte");
         let on = BlobTicket {
-            relay_transport: true,
+            relay_transport: PayloadPath::RelayAllowed,
             ..sample(false)
         };
-        assert!(BlobTicket::decode(&on.encode()).unwrap().relay_transport);
+        assert_eq!(
+            BlobTicket::decode(&on.encode()).unwrap().relay_transport,
+            PayloadPath::RelayAllowed
+        );
     }
 
     #[test]
@@ -236,10 +252,10 @@ mod tests {
     fn rejects_a_mesh_token() {
         // A mesh id shares the bare-base58 shape but has a different payload;
         // blob decode must refuse it (wrong kind / structure).
-        let mesh = crate::protocol::mesh::Mesh::new(
+        let mesh = mesh::Mesh::new(
             crate::protocol::Seed::from_bytes([1u8; 32]),
-            crate::protocol::mesh::MeshName::new("t").unwrap(),
-            crate::protocol::mesh::MeshConfig::loopback(),
+            mesh::MeshName::new("t").unwrap(),
+            mesh::MeshConfig::loopback(),
         )
         .unwrap()
         .to_string();

@@ -1,22 +1,29 @@
 //! Selecting a mesh, standing it up, and leaving it — the one ritual every
 //! embedding runs.
 
+use crate::daemon::SetupError;
 use std::sync::Arc;
 
 use crate::embed::NodeSink;
-use crate::net::TransportOpts;
-use crate::protocol::JoinTarget;
-use crate::protocol::Nickname;
-use crate::protocol::{DirectorySelection, Lookup, MeshConfig, MeshName, RelayLadder, Transport};
-use crate::runtime::{CreateParams, JoinParams, Node, Resolved};
-use crate::runtime::{SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh};
+use crate::protocol::{
+    DirectorySelection, JoinTarget, Lookup, MeshConfig, MeshName, Nickname, RelayLadder, Transport,
+};
+use crate::runtime::{
+    CreateParams, JoinParams, Node, Resolved, SetupKind, SetupParams, SignalHandling,
+    derive_topic_mesh_config, setup_mesh,
+};
 use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::sync::atomic;
+#[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
+use std::sync::atomic::Ordering;
+use tokio::sync::oneshot;
 /// How the caller selects a mesh — an id to join, a shared string to derive one
 /// from, or a create over the choices below.
 ///
@@ -30,6 +37,7 @@ use super::app::{DEPARTURE_GRACE, INBOUND_CAP, Inbound, MembershipApp, Request};
 /// than a silently loopback mesh; `default` so every field stays optional.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct Opts {
     /// A `mesh id` to join.
     pub mesh: Option<String>,
@@ -66,6 +74,71 @@ pub struct Opts {
     pub max_direct: usize,
 }
 
+impl Opts {
+    /// Set the topic that derives the mesh.
+    #[must_use]
+    pub fn with_topic(mut self, topic: Option<String>) -> Self {
+        self.topic = topic;
+        self
+    }
+
+    /// Set the nickname.
+    #[must_use]
+    pub fn with_nick(mut self, nick: Option<String>) -> Self {
+        self.nick = nick;
+        self
+    }
+
+    /// Set the mesh name.
+    #[must_use]
+    pub fn with_mesh(mut self, mesh: Option<String>) -> Self {
+        self.mesh = mesh;
+        self
+    }
+
+    /// Set the name to create the mesh with.
+    #[must_use]
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Set the lookups.
+    #[must_use]
+    pub fn with_lookup(mut self, lookup: Vec<Lookup>) -> Self {
+        self.lookup = lookup;
+        self
+    }
+
+    /// Set the transports.
+    #[must_use]
+    pub fn with_transport(mut self, transport: Vec<Transport>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Set the relay URLs.
+    #[must_use]
+    pub fn with_relay_urls(mut self, relay_urls: Vec<String>) -> Self {
+        self.relay_urls = relay_urls;
+        self
+    }
+
+    /// Set the peer cap.
+    #[must_use]
+    pub fn with_max_peers(mut self, max_peers: usize) -> Self {
+        self.max_peers = max_peers;
+        self
+    }
+
+    /// Set the direct-session cap.
+    #[must_use]
+    pub fn with_max_direct(mut self, max_direct: usize) -> Self {
+        self.max_direct = max_direct;
+        self
+    }
+}
+
 /// The ladder these options name, or `None` for the default. Parsed as one
 /// list, so an empty or bad entry is an error rather than a shrunk ladder.
 fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
@@ -83,7 +156,9 @@ fn relay_ladder(urls: &[String]) -> Result<Option<RelayLadder>> {
     missing_debug_implementations,
     reason = "Node's Debug is manual and says nothing a caller wants; the identity a reader would look for is on `node` already"
 )]
+#[non_exhaustive]
 pub struct Membership {
+    /// The running node that this membership drives.
     pub node: Node<MembershipApp>,
     /// Inbound `msg` frames in arrival order, bounded at [`INBOUND_CAP`].
     pub inbound: mpsc::Receiver<Inbound>,
@@ -92,14 +167,13 @@ pub struct Membership {
 /// Tests only: whether a member that is set up now has its rung probes blind from its first walk.
 /// [`Request::BlindRungProbes`] can only reach a member that is up, after its startup walk ran.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-static NEW_MEMBERS_ARE_BLIND: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static NEW_MEMBERS_ARE_BLIND: atomic::AtomicBool = atomic::AtomicBool::new(false);
 
 /// Tests only: make every member that [`join`] sets up from now on blind (`blind`), or not. The
 /// dial is process-wide, so a test turns it on around the opens that it means and off again.
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub fn blind_new_members(blind: bool) {
-    NEW_MEMBERS_ARE_BLIND.store(blind, std::sync::atomic::Ordering::SeqCst);
+    NEW_MEMBERS_ARE_BLIND.store(blind, Ordering::SeqCst);
 }
 
 /// Resolve `opts`, stand the mesh up, and spawn the event loop.
@@ -114,13 +188,13 @@ pub fn blind_new_members(blind: bool) {
 /// # Errors
 /// An unparseable id/topic/nickname, conflicting selectors, a mesh no peer on
 /// this target could reach, or a failure standing up the endpoint and overlay.
-pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
+pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership, SetupError> {
     let nickname = opts
         .nick
         .clone()
         .map(Nickname::new)
         .transpose()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
     let (kind, author) = resolve_kind(opts, nickname)?;
     let max_peers = if opts.max_peers == 0 {
         GOSSIP_ACTIVE_VIEW_CAPACITY
@@ -140,50 +214,29 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
             SetupKind::Create { config, .. } => config.lookups.is_loopback(),
             SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.is_loopback(),
         };
-        anyhow::ensure!(
-            !loopback,
-            "a browser peer cannot reach a loopback mesh: name a lookup (`relay`), or a topic / mesh id"
-        );
+        if loopback {
+            return Err(SetupError::internal(anyhow::anyhow!(
+                "a browser peer cannot reach a loopback mesh: name a lookup (`relay`), or a topic / mesh id"
+            )));
+        }
     }
 
     let (inbound_tx, inbound) = mpsc::channel(INBOUND_CAP);
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author,
-            max_peers,
-            max_direct: opts.max_direct,
-            // An embedded library writes no files and binds no control
-            // socket, so it claims no /tmp root of its own.
-            runtime_base: None,
-            state_file: None,
-            sink,
-            // The engine binds its own endpoint and serves no extra
-            // ALPNs here: injecting either is for a consumer that
-            // already owns an iroh endpoint, which an embedded member does
-            // not.
-            endpoint: None,
-            protocols: Vec::new(),
-            // Everything this target has; the mesh's transport list narrows
-            // it in `setup_mesh`.
-            transports: TransportOpts::default(),
-            // An embedded member publishes no per-peer identity, so `meta`
-            // stays free-form.
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author, sink)
+            .with_max_peers(max_peers)
+            .with_max_direct(opts.max_direct),
     )
-    .await
-    .context("setting up the mesh")?;
+    .await?;
 
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
-    if NEW_MEMBERS_ARE_BLIND.load(std::sync::atomic::Ordering::SeqCst) {
+    if NEW_MEMBERS_ARE_BLIND.load(Ordering::SeqCst) {
         // Before the loop is spawned, so that the startup walk is blind too.
         crate::beacon::set_blind_rung_probes(config.endpoint.id(), true);
     }
 
-    // `handle_signals: false` — this is a library inside somebody else's
+    // `SignalHandling::Leave` — this is a library inside somebody else's
     // process, unlike a CLI that owns its own: installing process-wide ctrl-c /
     // SIGTERM listeners would hijack the host's own handling. A foreign caller
     // traps signals itself and closes the handle.
@@ -191,7 +244,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
         config,
         MembershipApp::new(inbound_tx),
         /* push */ None,
-        /* handle_signals */ false,
+        SignalHandling::Leave,
     );
 
     Ok(Membership { node, inbound })
@@ -206,9 +259,9 @@ impl Membership {
     /// The event loop stopped, or dropped the reply.
     pub async fn request<T>(
         &self,
-        build: impl FnOnce(tokio::sync::oneshot::Sender<T>) -> Request,
+        build: impl FnOnce(oneshot::Sender<T>) -> Request,
     ) -> Result<T, String> {
-        let (reply, answer) = tokio::sync::oneshot::channel();
+        let (reply, answer) = oneshot::channel();
         self.node
             .sender()
             .send(build(reply))
@@ -231,9 +284,11 @@ impl Membership {
 ///
 /// # Errors
 /// The event loop returned an error or panicked.
-pub async fn depart(node: Node<MembershipApp>) -> Result<()> {
+pub async fn depart(node: Node<MembershipApp>) -> Result<(), SetupError> {
     n0_future::time::sleep(DEPARTURE_GRACE).await;
-    node.leave().await
+    node.leave()
+        .await
+        .map_err(|error| SetupError::Internal(error.into()))
 }
 
 /// Resolve the selectors into a [`SetupKind`] plus our nickname. Exactly one
@@ -246,18 +301,18 @@ pub async fn depart(node: Node<MembershipApp>) -> Result<()> {
 /// # Errors
 /// Both `mesh` and `topic` set, an unparseable id or topic, an invalid mesh
 /// name, or a create whose advertise target is unreachable.
-pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKind, Nickname)> {
+pub fn resolve_kind(
+    opts: &Opts,
+    nickname: Option<Nickname>,
+) -> Result<(SetupKind, Nickname), SetupError> {
     match (&opts.mesh, &opts.topic) {
-        (Some(_), Some(_)) => anyhow::bail!("pass only one of mesh / topic"),
+        (Some(_), Some(_)) => Err(SetupError::MeshAndTopic),
         (Some(id), None) => {
-            let target: JoinTarget = id.parse().map_err(|error| anyhow::anyhow!("{error}"))?;
-            let Resolved { kind, author, .. } = JoinParams {
-                target,
-                nickname,
-                password: None,
-            }
-            .resolve()
-            .context("resolving the mesh id")?;
+            let target: JoinTarget = id
+                .parse()
+                .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
+            let Resolved { kind, author, .. } =
+                JoinParams::new(target, nickname, None).resolve()?;
             Ok((kind, author))
         }
         (None, Some(string)) => {
@@ -271,11 +326,11 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             // same values.
             let config = MeshConfig::resolve(
                 &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
-                relay_ladder(&opts.relay_urls)?,
+                relay_ladder(&opts.relay_urls).map_err(SetupError::internal)?,
                 &opts.transport,
-            )?;
-            let mesh =
-                derive_topic_mesh_config(string, config).context("resolving the topic string")?;
+            )
+            .map_err(SetupError::Config)?;
+            let mesh = derive_topic_mesh_config(string, config)?;
             Ok((
                 SetupKind::Topic {
                     mesh,
@@ -287,25 +342,22 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
         (None, None) => {
             let config = MeshConfig::resolve(
                 &opts.lookup,
-                relay_ladder(&opts.relay_urls)?,
+                relay_ladder(&opts.relay_urls).map_err(SetupError::internal)?,
                 &opts.transport,
-            )?;
+            )
+            .map_err(SetupError::Config)?;
             let name = MeshName::new(
                 opts.name
                     .clone()
                     .unwrap_or_else(|| "habilis-network".to_string()),
             )
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-            let Resolved { kind, author, .. } = CreateParams {
-                name,
-                nickname,
-                config,
-                advertise: DirectorySelection::Unset,
-                password: None,
-                invite_only: false,
-            }
-            .resolve()
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
+            let Resolved { kind, author, .. } =
+                CreateParams::new(name, nickname, config, DirectorySelection::Unset)
+                    .with_password(None)
+                    .with_invite_only(false)
+                    .resolve()
+                    .map_err(|error| SetupError::internal(anyhow::Error::from(error)))?;
             Ok((kind, author))
         }
     }

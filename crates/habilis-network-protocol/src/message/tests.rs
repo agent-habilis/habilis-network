@@ -1,6 +1,6 @@
 use super::{
-    AppFrameParams, AppTag, BuildMsgParams, ChainCtx, MeshId, Message, MessageBody, MessageId,
-    MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
+    AppFrameParams, AppTag, AppTagError, BuildMsgParams, ChainCtx, CorrIdError, MeshId, Message,
+    MessageBody, MessageId, MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
 };
 use habilis_network_test_tracing::test;
 
@@ -18,7 +18,7 @@ fn test_round_trip() {
         &sid(),
         &nick("word-word"),
         AppFrameParams {
-            tag: AppTag::from("app_msg"),
+            tag: AppTag::new("app_msg").expect("a valid app tag"),
             to: None,
             corr: None,
             body: MessageBody::from("Hello, world!"),
@@ -32,15 +32,21 @@ fn test_round_trip() {
 }
 
 #[test]
-#[should_panic(expected = "invalid app tag")]
 fn app_tag_constructor_rejects_an_invalid_value() {
-    let _ = AppTag::from("not-valid!");
+    assert_eq!(
+        AppTag::new("not-valid!"),
+        Err(AppTagError::Invalid),
+        "a tag with a dash is refused"
+    );
 }
 
 #[test]
-#[should_panic(expected = "invalid correlation id")]
 fn correlation_id_constructor_rejects_an_invalid_value() {
-    let _ = super::CorrId::from("");
+    assert_eq!(
+        super::CorrId::new(""),
+        Err(CorrIdError::Invalid),
+        "an empty id is refused"
+    );
 }
 
 #[test]
@@ -98,7 +104,7 @@ fn test_task_status_round_trip() {
         &sid(),
         &nick("word-word"),
         AppFrameParams {
-            tag: AppTag::from("app_status"),
+            tag: AppTag::new("app_status").expect("a valid app tag"),
             to: Some(target.clone()),
             corr: None,
             body: MessageBody::from(r#"{"kind":"status-update"}"#),
@@ -137,7 +143,7 @@ fn test_ext_round_trip() {
         &sid(),
         &nick("word-word"),
         AppFrameParams {
-            tag: AppTag::from("app_msg"),
+            tag: AppTag::new("app_msg").expect("a valid app tag"),
             to: None,
             corr: None,
             body: MessageBody::from("With ext."),
@@ -222,8 +228,8 @@ fn parse_rejects_malformed_integrity_fields() {
     };
     // Each malformed field comes with a well-formed partner, so that the pairing rule (a key
     // without a signature) cannot be the reason for the reject, and the error names the field.
-    let good_sig = r#","sig":""#.to_owned() + &"cd".repeat(64) + "\"";
-    let good_key = r#","pubkey":""#.to_owned() + &"ab".repeat(32) + "\"";
+    let good_sig = format!(r#","sig":"{}""#, "cd".repeat(64));
+    let good_key = format!(r#","pubkey":"{}""#, "ab".repeat(32));
     for (extra, reason) in [
         // 3KB garbage pubkey, and an uppercase one that is also too short.
         (
@@ -266,7 +272,7 @@ fn build_msg_bytes_message() {
     let identity = crate::identity::Identity::generate();
     let (bytes, built) = build_msg_bytes(
         BuildMsgParams {
-            tag: AppTag::from("app_msg"),
+            tag: AppTag::new("app_msg").expect("a valid app tag"),
             mesh: &sid(),
             author: &alice,
             body: MessageBody::from("hello"),
@@ -339,12 +345,20 @@ mod signing {
     #[test]
     fn tampered_corr_breaks_signature() {
         let mut msg = Message::fixture(
-            MessageKind::app_to("app_req", "calm-otter".into(), Some(CorrId::from("aaaa"))),
+            MessageKind::app_to(
+                "app_req",
+                "calm-otter".into(),
+                Some(CorrId::new("aaaa").expect("a valid correlation id")),
+            ),
             "{}",
         )
         .sign(&identity())
         .into_message();
-        msg.kind = MessageKind::app_to("app_req", "calm-otter".into(), Some(CorrId::from("bbbb")));
+        msg.kind = MessageKind::app_to(
+            "app_req",
+            "calm-otter".into(),
+            Some(CorrId::new("bbbb").expect("a valid correlation id")),
+        );
         assert!(!msg.verify_signature(), "`corr` is a signed field");
     }
 
@@ -526,7 +540,10 @@ mod snapshots {
             MessageKind::app_to(
                 "app_req",
                 Nickname::from("addressed-nick"),
-                Some(CorrId::from("00000000-0000-0000-0000-0000000000aa")),
+                Some(
+                    CorrId::new("00000000-0000-0000-0000-0000000000aa")
+                        .expect("a valid correlation id"),
+                ),
             ),
             r#"{"op":"list","args":{}}"#,
         );
@@ -541,7 +558,10 @@ mod snapshots {
             MessageKind::app_to(
                 "app_resp",
                 Nickname::from("addressed-nick"),
-                Some(CorrId::from("00000000-0000-0000-0000-0000000000aa")),
+                Some(
+                    CorrId::new("00000000-0000-0000-0000-0000000000aa")
+                        .expect("a valid correlation id"),
+                ),
             ),
             r#"{"result":{"items":[]}}"#,
         );
@@ -552,10 +572,10 @@ mod snapshots {
 
 mod prop {
     use habilis_network_test_tracing::test;
-    use proptest::{
-        collection::vec as arb_vec, prelude::any, prop_assert, prop_assert_eq, proptest,
-        strategy::Strategy,
-    };
+    use proptest::collection::vec as arb_vec;
+    use proptest::prelude::any;
+    use proptest::strategy::Strategy;
+    use proptest::{prop_assert, prop_assert_eq, proptest};
 
     use super::super::{
         AppFrameParams, AppTag, MAX_MESSAGE_SIZE, Message, MessageBody, MessageKind, Nickname,
@@ -579,7 +599,7 @@ mod prop {
             author in arb_nickname(),
         ) {
             let body = MessageBody::new(body).unwrap();
-            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::from("app_msg"), to: None, corr: None, body });
+            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
             let bytes = msg.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
             prop_assert_eq!(&parsed.body, &msg.body);
@@ -619,7 +639,7 @@ mod prop {
         ) {
             let body = MessageBody::new(body).unwrap();
             let expected = body.clone();
-            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::from("app_msg"), to: None, corr: None, body });
+            let msg = Message::new_app(&sid(), &author, AppFrameParams { tag: AppTag::new("app_msg").expect("a valid app tag"), to: None, corr: None, body });
             let bytes = msg.serialize().unwrap();
             let parsed = Message::parse(&bytes).unwrap();
             prop_assert_eq!(&parsed.body, &expected);
@@ -633,7 +653,7 @@ mod prop {
                 &sid(),
                 &Nickname::from("nick-name"),
                 AppFrameParams {
-                    tag: AppTag::from("app_msg"),
+                    tag: AppTag::new("app_msg").expect("a valid app tag"),
                     to: None,
                     corr: None,
                     body: MessageBody::new(body).unwrap(),
@@ -653,7 +673,7 @@ fn a_resend_trailer_is_outside_the_frame_and_the_signature() {
         &sid(),
         &nick("word-word"),
         AppFrameParams {
-            tag: AppTag::from("app_msg"),
+            tag: AppTag::new("app_msg").expect("a valid app tag"),
             to: None,
             corr: None,
             body: MessageBody::from("Hello, world!"),

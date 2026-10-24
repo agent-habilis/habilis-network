@@ -27,6 +27,15 @@ use super::app::{AppClass, InboundApp, NodeApp};
 use super::broadcast::{announce_arrival, broadcast_peer_info};
 use super::{antientropy, conn_path};
 
+#[cfg(feature = "multihop")]
+use crate::daemon::event_loop;
+use crate::doc::wire;
+use crate::logging::messages;
+use crate::protocol::{message, peer_addr, seal};
+#[cfg(feature = "multihop")]
+use crate::transport::underlay_webrtc;
+use crate::transport::{endpoint_proof, probe, webrtc};
+use tokio::sync::mpsc;
 /// Dispatch a single item from the gossip receiver stream:
 /// `Received` → `ingest`; `NeighborUp` →
 /// announce / `PeerInfo` re-send; `NeighborDown` → prune the link and
@@ -104,8 +113,8 @@ pub(crate) async fn handle_gossip_event(
                 // A new neighbor: the underlay may owe it a session, and may take
                 // its signal.
                 #[cfg(feature = "multihop")]
-                crate::transport::underlay_webrtc::tick_now(state);
-                if state.relay_transport {
+                underlay_webrtc::tick_now(state);
+                if state.relay_transport.relay_allowed() {
                     state.observe_path(node_id, conn);
                 } else {
                     // The accept gate and the graft probe both admit a link
@@ -152,7 +161,7 @@ pub(crate) async fn handle_gossip_event(
                 // leave the first session for the moment that the relay watcher closes the
                 // links that stayed on the relay.
                 #[cfg(feature = "multihop")]
-                crate::daemon::event_loop::linkstate_now(state, ctx).await;
+                event_loop::linkstate_now(state, ctx).await;
                 super::heal::release_rendezvous_if_due(state, ctx).await;
             }
         }
@@ -166,7 +175,7 @@ pub(crate) async fn handle_gossip_event(
                 let spread = rand::Rng::random_range(&mut rand::rng(), -1.0..=1.0);
                 state.plan_regraft_on_link_loss(node_id, Instant::now(), spread);
                 if let Some(addr) = state.relay_race_on_link_loss(node_id, Instant::now()) {
-                    crate::transport::webrtc::negotiate_session(state, ctx, node_id, addr);
+                    webrtc::negotiate_session(state, ctx, node_id, addr);
                 }
             }
             if arms_reclaim(
@@ -257,7 +266,7 @@ fn rendezvous_neighbor_down(
     // Re-offer now rather than on the next heal tick: every
     // saved interval halves the relink cycle a beacon shed costs
     // a webrtc-shaped peer.
-    crate::transport::webrtc::offer_rendezvous_off_tick(state, ctx);
+    webrtc::offer_rendezvous_off_tick(state, ctx);
 }
 
 /// Whether a `NeighborDown` should arm the fast reclaim burst — the
@@ -416,7 +425,7 @@ fn watch_flush(
     handle: crate::transport::PendingSend,
     msg: Verified,
     bytes: WireFrame,
-    failed: tokio::sync::mpsc::UnboundedSender<(Verified, WireFrame)>,
+    failed: mpsc::UnboundedSender<(Verified, WireFrame)>,
 ) {
     n0_future::task::spawn(async move {
         match handle.await {
@@ -564,7 +573,7 @@ pub(crate) async fn ingest(
     // Heartbeat + membership + surfacing + join horizon. The lifecycle
     // layer owns every roster/presentation side effect; the gossip
     // layer only routes by kind below.
-    crate::logging::messages::log_in(&verified);
+    messages::log_in(&verified);
     let observed = lifecycle::observe(&verified, state, ctx);
     let surfaceable = observed.surfaceable;
     if observed.update.joined_new {
@@ -607,27 +616,23 @@ pub(crate) async fn ingest(
 
     maybe_push_inbound(ctx, &view, surfaceable, app_class.as_ref());
 
-    match &view.kind {
+    // `true` means the kind is fully handled and never reaches retention.
+    let stop = match &view.kind {
+        // The app-payload seam: dispatch RPC legs / chat / task frames.
+        // `false` means the frame is plumbing or addressed elsewhere —
+        // stop before retention.
         MessageKind::App { .. } => {
-            // The app-payload seam: dispatch RPC legs / chat / task frames.
-            // `false` means the frame is plumbing or addressed elsewhere —
-            // stop before retention.
-            if !app
-                .on_app_frame(
-                    InboundApp {
-                        message: &view,
-                        surfaceable,
-                    },
-                    state,
-                    ctx,
-                )
-                .await
-            {
-                return;
-            }
+            !app.on_app_frame(
+                InboundApp {
+                    message: &view,
+                    surfaceable,
+                },
+                state,
+                ctx,
+            )
+            .await
         }
-        // Everything the engine owns itself. `Break` means the kind is fully
-        // handled and never reaches retention. Spelled out rather than `_` so
+        // Everything the engine owns itself. Spelled out rather than `_` so
         // a new kind has to be routed deliberately.
         MessageKind::Presence { .. }
         | MessageKind::PeerInfo
@@ -639,13 +644,14 @@ pub(crate) async fn ingest(
         | MessageKind::Meta
         | MessageKind::MetaDigest
         | MessageKind::LinkState => {
-            if dispatch_infra(&verified, surfaceable, &observed.update, state, app, ctx)
+            dispatch_infra(&verified, surfaceable, &observed.update, state, app, ctx)
                 .await
                 .is_break()
-            {
-                return;
-            }
         }
+        _ => false,
+    };
+    if stop {
+        return;
     }
 
     retain_and_index(
@@ -741,7 +747,7 @@ async fn dispatch_infra(
         }
         MessageKind::LinkState => {
             if handle_link_state(message, state) {
-                crate::transport::probe::nudge_climbing_pairs(state, ctx, true);
+                probe::nudge_climbing_pairs(state, ctx, true);
             }
             return ControlFlow::Break(());
         }
@@ -760,6 +766,7 @@ async fn dispatch_infra(
             .await;
         }
         MessageKind::App { .. } => unreachable!("the app seam is handled by `ingest`"),
+        _ => {}
     }
     ControlFlow::Continue(())
 }
@@ -827,7 +834,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
                 // neighbor needs before the underlay can offer it a session.
                 #[cfg(feature = "multihop")]
                 if updated {
-                    crate::transport::underlay_webrtc::tick_now(state);
+                    underlay_webrtc::tick_now(state);
                 }
                 updated
             }
@@ -856,7 +863,7 @@ fn handle_link_state(message: &Message, state: &mut EventLoopState) -> bool {
 async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'_>) {
     let pong = Message::new_pong(ctx.mesh, ctx.author, message.author.clone(), &message.id)
         .sign(ctx.identity);
-    crate::logging::messages::log_out(&pong);
+    messages::log_out(&pong);
     let warm_endpoint = state
         .peer_endpoints
         .get(message.author.as_str())
@@ -874,9 +881,9 @@ async fn auto_pong(message: &Message, state: &EventLoopState, ctx: &HandlerCtx<'
     }
 }
 
-struct InboundFrame<'a> {
-    message: &'a Verified,
-    canonical: &'a [u8],
+struct InboundFrame<'message> {
+    message: &'message Verified,
+    canonical: &'message [u8],
     surfaceable: bool,
 }
 
@@ -915,7 +922,7 @@ async fn handle_shard(
     // side too (`shard_fits_log`) — and the group heals via shard repair.
     // (RPC shards are plumbing — `retain_and_index` skips them by kind
     // either way.)
-    if crate::protocol::message::shard_fits_log(message) {
+    if message::shard_fits_log(message) {
         retain_and_index(
             message.clone(),
             RetainMeta {
@@ -965,9 +972,9 @@ async fn handle_shard(
 /// must stay out of the fork/DAG indexes (see the `task` glossary invariant).
 /// Presence is loggable but not indexed.
 #[derive(Clone, Copy)]
-struct RetainMeta<'a> {
-    canonical: &'a [u8],
-    class: Option<&'a AppClass>,
+struct RetainMeta<'meta> {
+    canonical: &'meta [u8],
+    class: Option<&'meta AppClass>,
 }
 
 fn retain_and_index(
@@ -980,12 +987,12 @@ fn retain_and_index(
     // App frames carry the app's per-tag policy (`classify`, computed once by the
     // caller and threaded in here); infra kinds (`class == None`) use the engine's
     // own rule. A beat is plumbing — never retained/indexed.
-    let loggable = class.map_or_else(|| is_loggable(&message.kind), |cls| cls.loggable);
-    let beat = class.is_some_and(|cls| cls.beat);
+    let loggable = class.map_or_else(|| is_loggable(&message.kind), |cls| cls.loggable());
+    let beat = class.is_some_and(|cls| cls.beat());
     if !loggable || beat {
         return;
     }
-    if class.is_some_and(|cls| cls.chained) {
+    if class.is_some_and(|cls| cls.chained()) {
         let hash = ContentHash::of(canonical);
         // A second, *different* content hash at an already-seen `(author, seq)`
         // is cryptographic proof of equivocation — surface a `fork` once per
@@ -1058,9 +1065,12 @@ pub(crate) fn retain_own_broadcast(state: &mut EventLoopState, message: &Verifie
 pub(crate) fn retain_own_app_broadcast(
     state: &mut EventLoopState,
     message: &Verified,
-    class: &AppClass,
+    class: AppClass,
 ) {
-    if !class.loggable || class.beat || !matches!(message.kind, MessageKind::App { to: None, .. }) {
+    if !class.loggable()
+        || class.beat()
+        || !matches!(message.kind, MessageKind::App { to: None, .. })
+    {
         return;
     }
     state.mark_seen(message);
@@ -1072,9 +1082,9 @@ pub(crate) fn retain_own_app_broadcast(
 /// field so the borrow released by [`ingest_channel_event`] frees `state` for the
 /// address adoption.
 #[derive(Clone, Copy)]
-struct ChannelEvent<'a> {
+struct ChannelEvent<'message> {
     channel: Channel,
-    message: &'a Verified,
+    message: &'message Verified,
     surfaceable: bool,
 }
 
@@ -1121,6 +1131,10 @@ fn surface_view(frame: &Verified, plain: Option<String>) -> Authored {
 /// and we're past the join horizon (a backfilling joiner updates its doc silently
 /// instead of reacting to replayed intermediate states). A received event is
 /// never our own (`is_self = false`). Both channels share this path verbatim.
+#[expect(
+    clippy::match_same_arms,
+    reason = "the named variants are listed on purpose, so a new variant stays visible"
+)]
 fn ingest_channel_event(
     event: ChannelEvent<'_>,
     doc: &mut crate::doc::MeshDoc,
@@ -1162,6 +1176,7 @@ fn ingest_channel_event(
         }
         Ingested::Applied { .. } | Ingested::Duplicate | Ingested::Buffered | Ingested::Ignored => {
         }
+        _ => {}
     }
 }
 
@@ -1199,7 +1214,7 @@ enum Gated {
 /// rather than re-classifying.
 fn gate_app_payload(view: &Authored, app: &dyn NodeApp) -> Option<AppClass> {
     let class = app.classify(view);
-    if class.valid {
+    if class.valid() {
         Some(class)
     } else {
         tracing::warn!(target: "habilis_network::gossip",
@@ -1273,7 +1288,7 @@ fn gate_directed_to_us<F: Proof>(frame: &F, state: &EventLoopState, app: &dyn No
     // signature-authenticated either way; `sealed=false` only means "not
     // additionally encrypted".
     let wire = frame.authored();
-    if !app.classify(&wire).sealed {
+    if !app.classify(&wire).sealed() {
         // Plaintext directed body: the wire body is already the final body.
         let Some(class) = gate_app_payload(&wire, app) else {
             return Gated::Drop;
@@ -1309,7 +1324,7 @@ fn decrypt_broadcast<F: std::ops::Deref<Target = Message>>(
     // cleartext or tampered — drop it, but say so (mirroring the directed-drop
     // warn) rather than vanishing silently. A generic `send_app` broadcast that
     // did not mesh-key-seal its body lands here; see `send_app`'s doc.
-    let Some(plain) = crate::doc::wire::decrypt_body(message.body.as_str(), Some(key)) else {
+    let Some(plain) = wire::decrypt_body(message.body.as_str(), Some(key)) else {
         tracing::warn!(target: "habilis_network::gossip",
             author = %message.author,
             "dropping a broadcast body that failed mesh-key decryption (cleartext on a passworded mesh?)"
@@ -1326,7 +1341,7 @@ fn decrypt_directed<F: std::ops::Deref<Target = Message>>(
     message: &F,
     state: &EventLoopState,
 ) -> Option<MessageBody> {
-    match crate::protocol::seal::unseal_from_body(&state.identity.seal_secret(), &message.body) {
+    match seal::unseal_from_body(&state.identity.seal_secret(), &message.body) {
         Ok(plaintext) => MessageBody::new(plaintext).ok(),
         Err(error) => {
             tracing::warn!(target: "habilis_network::gossip", %error, author = %message.author, "dropping a directed frame sealed to us that failed to open");
@@ -1335,6 +1350,14 @@ fn decrypt_directed<F: std::ops::Deref<Target = Message>>(
     }
 }
 
+#[expect(
+    clippy::match_same_arms,
+    reason = "the named variants are listed on purpose, so a new variant stays visible"
+)]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
+)]
 fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
     match &message.kind {
         MessageKind::App { to: Some(to), .. } => to == us,
@@ -1350,6 +1373,7 @@ fn addressed_to_us(message: &Message, us: &Nickname) -> bool {
         | MessageKind::State
         | MessageKind::Meta
         | MessageKind::LinkState => true,
+        _ => true,
     }
 }
 
@@ -1396,7 +1420,7 @@ fn maybe_push_inbound(
     // from the caller's single classification. An infra frame (`class == None`,
     // `app_tag` also `None`) is always pushable past the structural guards above.
     let app_pushable = match message.kind.app_tag() {
-        Some(_) => class.is_some_and(|cls| cls.loggable && !cls.beat),
+        Some(_) => class.is_some_and(|cls| cls.loggable() && !cls.beat()),
         None => true,
     };
     if app_pushable {
@@ -1456,8 +1480,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(message.body.as_str()) else {
         return;
     };
-    let Ok((peer_id, peer_addr)) = crate::protocol::peer_addr::endpoint_addr_from_json(&parsed)
-    else {
+    let Ok((peer_id, peer_addr)) = peer_addr::endpoint_addr_from_json(&parsed) else {
         return;
     };
     if peer_id == ctx.endpoint.id() {
@@ -1483,7 +1506,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
     let signer = message.key();
     if let Some(proof) = parsed["proof"].as_str()
         && state.proven_endpoints.get(&signer) != Some(peer_id)
-        && crate::transport::endpoint_proof::verifies(peer_id, ctx.mesh, &signer, proof)
+        && endpoint_proof::verifies(peer_id, ctx.mesh, &signer, proof)
     {
         state
             .proven_endpoints
@@ -1585,7 +1608,7 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
     // Negotiate a direct WebRTC session alongside the graft, never in front of
     // it. Blocking the graft on the session deadlocks mesh formation — see the
     // note on `negotiate_session`.
-    crate::transport::webrtc::negotiate_session(state, ctx, peer_id, peer_addr.clone());
+    webrtc::negotiate_session(state, ctx, peer_id, peer_addr.clone());
     // No `rendezvous_wanted` gate on this graft: `peer_id` is never the
     // rendezvous here, which returned above.
     if !defer_first_dial
@@ -1600,10 +1623,8 @@ async fn handle_peer_info(message: &Verified, state: &mut EventLoopState, ctx: &
         state.unicast_pool.note_addr(&peer_addr);
         // With the relay lookup only, the graft waits for a proven direct
         // path (`transport::probe`); the loop grafts on the probe's verdict.
-        if crate::transport::probe::ensure_direct(state, ctx, peer_id, &peer_addr) {
-            if let Err(error) =
-                crate::transport::probe::request_graft(state, ctx, peer_id, false).await
-            {
+        if probe::ensure_direct(state, ctx, peer_id, &peer_addr) {
+            if let Err(error) = probe::request_graft(state, ctx, peer_id, false).await {
                 tracing::warn!(target: "habilis_network::gossip", endpoint_id = %peer_id, %error, "PeerInfo graft request failed");
             }
         } else {
@@ -1766,6 +1787,8 @@ mod retain_own_broadcast_tests {
     use crate::protocol::message::Verified;
     use crate::protocol::{DedupKey, MeshId, Message, Nickname};
 
+    use crate::gossip::app;
+    use crate::protocol::message;
     fn joined(state: &EventLoopState, author: &str) -> Verified {
         Message::new_joined(&MeshId::from("💬test"), &Nickname::from(author)).sign(&state.identity)
     }
@@ -1806,24 +1829,20 @@ mod retain_own_broadcast_tests {
         Message::new_app(
             &MeshId::from("💬test"),
             &Nickname::from("me"),
-            crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: to.map(Nickname::from),
-                corr: None,
-                body: crate::protocol::MessageBody::from("hello"),
-            },
+            message::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                to.map(Nickname::from),
+                None,
+                crate::protocol::MessageBody::from("hello"),
+            ),
         )
         .sign(&state.identity)
     }
 
-    fn class(loggable: bool) -> crate::gossip::app::AppClass {
-        crate::gossip::app::AppClass {
-            loggable,
-            beat: false,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+    fn class(loggable: bool) -> app::AppClass {
+        app::AppClass::NONE
+            .with_if(app::AppClass::LOGGABLE, loggable)
+            .union(app::AppClass::VALID)
     }
 
     /// An app broadcast that the app logs is held by its author, as at the ingest of a peer: the
@@ -1833,7 +1852,7 @@ mod retain_own_broadcast_tests {
     fn an_own_app_broadcast_that_the_app_logs_is_retained() {
         let mut state = fresh_state();
         let frame = app_frame(&state, None);
-        super::retain_own_app_broadcast(&mut state, &frame, &class(true));
+        super::retain_own_app_broadcast(&mut state, &frame, class(true));
         assert_eq!(state.message_log.len(), 1);
     }
 
@@ -1844,9 +1863,9 @@ mod retain_own_broadcast_tests {
     fn an_own_app_frame_that_the_app_does_not_log_or_that_is_directed_is_not_retained() {
         let mut state = fresh_state();
         let broadcast = app_frame(&state, None);
-        super::retain_own_app_broadcast(&mut state, &broadcast, &class(false));
+        super::retain_own_app_broadcast(&mut state, &broadcast, class(false));
         let directed = app_frame(&state, Some("you"));
-        super::retain_own_app_broadcast(&mut state, &directed, &class(true));
+        super::retain_own_app_broadcast(&mut state, &directed, class(true));
         assert_eq!(state.message_log.len(), 0);
     }
 
@@ -1918,13 +1937,7 @@ mod evicted_orphan_tests {
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -2070,6 +2083,7 @@ mod evicted_orphan_tests {
 
 #[cfg(test)]
 mod first_contact_tests {
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
     use iroh::endpoint::presets;
     use iroh_gossip::api::Event;
@@ -2081,24 +2095,26 @@ mod first_contact_tests {
     use crate::gossip::app::{AppClass, InboundApp, NodeApp};
     use crate::gossip::event::SilentSink;
     use crate::protocol::identity::Identity;
-    use crate::protocol::message::MessageBody;
-    use crate::protocol::message::{Authored, Verified};
+    use crate::protocol::message::{Authored, MessageBody, Verified};
     use crate::protocol::{Channel, MeshId, Message, Nickname};
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
 
+    use crate::daemon::state::DirectState;
+    use crate::gossip::split;
+    use crate::lifecycle::heartbeat;
+    use crate::protocol::message;
+    use crate::transport::webrtc;
+    use crate::util::{clock, tuning};
+    use std::sync::atomic;
+    use std::sync::atomic::Ordering;
+    use tokio::sync::mpsc;
     struct Inert;
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -2187,11 +2203,9 @@ mod first_contact_tests {
         let mut state = fresh_state();
         state.meshed = true;
         state.unicast_pool = crate::transport::UnicastPool::new(node.endpoint.clone(), false);
-        state
-            .direct
-            .insert(bob, crate::daemon::state::DirectState::Direct);
+        state.direct.insert(bob, DirectState::Direct);
         state.peer_endpoints.insert(nick("bob"), bob_addr);
-        let (failed_tx, mut failed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (failed_tx, mut failed_rx) = mpsc::unbounded_channel();
         state.flush_failed = failed_tx;
         let frame = Message::new_pong(
             &node.mesh,
@@ -2257,18 +2271,12 @@ mod first_contact_tests {
     }
 
     /// An app frame counts the times that it reaches the app.
-    struct Counting(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    struct Counting(std::sync::Arc<atomic::AtomicUsize>);
 
     #[async_trait::async_trait]
     impl NodeApp for Counting {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -2277,7 +2285,7 @@ mod first_contact_tests {
             _state: &mut EventLoopState,
             _ctx: &HandlerCtx<'_>,
         ) -> bool {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0.fetch_add(1, Ordering::Relaxed);
             true
         }
     }
@@ -2289,17 +2297,17 @@ mod first_contact_tests {
         let node = Node::spawn().await;
         let ctx = node.ctx();
         let mut state = fresh_state();
-        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads = std::sync::Arc::new(atomic::AtomicUsize::new(0));
         let mut app = Counting(reads.clone());
         let frame = Message::new_app(
             &node.mesh,
             &nick("alice"),
-            crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: MessageBody::from("hello"),
-            },
+            message::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                MessageBody::from("hello"),
+            ),
         )
         .sign(&Identity::generate());
         let original = frame.serialize().expect("serialize");
@@ -2309,7 +2317,7 @@ mod first_contact_tests {
         ingest(resend.into_bytes(), &mut state, &mut app, &ctx).await;
 
         assert_eq!(
-            reads.load(std::sync::atomic::Ordering::Relaxed),
+            reads.load(Ordering::Relaxed),
             1,
             "the first delivery reaches the app and the resend does not"
         );
@@ -2333,12 +2341,12 @@ mod first_contact_tests {
             .into_iter()
             .map(|name| Message::new_joined(&node.mesh, &nick(name)).sign(&author))
             .collect();
-        let (feed_topic, topic_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (feed_topic, topic_rx) = mpsc::unbounded_channel();
         let events = stream::unfold(topic_rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         })
         .boxed();
-        let mut receiver = crate::gossip::split::spawn_split(events, None);
+        let mut receiver = split::spawn_split(events, None);
         for frame in &frames {
             let content = frame.serialize().expect("serialize").into_bytes();
             let delivered = GossipMessage {
@@ -2383,11 +2391,15 @@ mod first_contact_tests {
             .bind()
             .await
             .expect("bind bob");
-        let (inbox, mut frames) = tokio::sync::mpsc::channel(8);
+        let (inbox, mut frames) = mpsc::channel(8);
         let router = Router::builder(bob.clone())
             .accept(
                 UNICAST_ALPN,
-                UnicastAcceptor::with_idle(inbox, false, std::time::Duration::from_mins(1)),
+                UnicastAcceptor::with_idle(
+                    inbox,
+                    crate::transport::PayloadPath::DirectOnly,
+                    std::time::Duration::from_mins(1),
+                ),
             )
             .spawn();
         crate::lookup::add_peer_addr(&crate::lookup::address_book(&node.endpoint), bob.addr());
@@ -2536,7 +2548,7 @@ mod first_contact_tests {
         let mut state = fresh_state();
         state.rendezvous_release_links = 1;
         state.rendezvous_released = true;
-        state.owe_rendezvous_return(crate::util::clock::Instant::now());
+        state.owe_rendezvous_return(clock::Instant::now());
 
         feed(Event::NeighborUp(ctx.rendezvous_id), &mut state, &ctx).await;
 
@@ -2572,19 +2584,19 @@ mod first_contact_tests {
         }
         feed(Event::NeighborDown(ctx.rendezvous_id), &mut state, &ctx).await;
         assert!(!state.rendezvous_wanted(), "an island of its own, content");
-        assert!(!crate::transport::webrtc::rendezvous_graftable(&state));
+        assert!(!webrtc::rendezvous_graftable(&state));
 
-        let silent = crate::util::clock::Instant::now()
-            .checked_sub(crate::util::tuning::alive_timeout() + Duration::from_secs(10))
+        let silent = clock::Instant::now()
+            .checked_sub(tuning::alive_timeout() + Duration::from_secs(10))
             .expect("a past instant");
         state.last_seen.insert(nick("far-side"), silent);
         state.peers.insert(nick("far-side"));
         state.surfaced.insert(nick("far-side"));
-        crate::lifecycle::heartbeat::tick_sweep(&mut state, &SilentSink);
+        heartbeat::tick_sweep(&mut state, &SilentSink);
 
         assert!(state.rendezvous_wanted(), "the sweep owes one return");
         assert!(
-            crate::transport::webrtc::rendezvous_graftable(&state),
+            webrtc::rendezvous_graftable(&state),
             "so the heal tick may graft it"
         );
         node.endpoint.close().await;
@@ -2661,7 +2673,7 @@ mod first_contact_tests {
             MultihopHandle::new(
                 secret,
                 underlay,
-                crate::lookup::multihop_handle_config(false),
+                crate::lookup::multihop_handle_config(crate::transport::PayloadPath::DirectOnly),
             )
             .expect("underlay on the derived key")
         }
@@ -3017,8 +3029,8 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut state = fresh_state();
         state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
-        state.relay_transport = false;
-        state.local_udp_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+        state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_linked = true;
 
         handle_gossip_event(
@@ -3030,7 +3042,7 @@ mod first_contact_tests {
         .await;
 
         assert!(
-            crate::transport::webrtc::rendezvous_graftable(&state),
+            webrtc::rendezvous_graftable(&state),
             "the rendezvous loss held the timer graft"
         );
         node.endpoint.close().await;
@@ -3046,14 +3058,14 @@ mod first_contact_tests {
         let ctx = node.ctx();
         let mut state = fresh_state();
         state.webrtc = Some(crate::lookup::new_webrtc_handle(node.endpoint.id()));
-        state.relay_transport = false;
-        state.local_udp_transport = true;
+        state.relay_transport = crate::transport::PayloadPath::DirectOnly;
+        state.local_udp_transport = UdpTransport::Present;
         state.rendezvous_answers_jsep = false;
 
-        crate::transport::webrtc::negotiate_rendezvous_session(&mut state, &ctx);
+        webrtc::negotiate_rendezvous_session(&mut state, &ctx);
 
         assert!(
-            crate::transport::webrtc::rendezvous_graftable(&state),
+            webrtc::rendezvous_graftable(&state),
             "the heal tick held the timer graft on a private mesh"
         );
         node.endpoint.close().await;
@@ -3082,7 +3094,7 @@ mod link_state_tests {
         MultihopHandle::new(
             secret,
             underlay,
-            crate::lookup::multihop_handle_config(false),
+            crate::lookup::multihop_handle_config(crate::transport::PayloadPath::DirectOnly),
         )
         .expect("underlay on the derived key")
     }
@@ -3177,19 +3189,14 @@ mod left_tests {
     use crate::testing::{endpoint_id, fresh_state, nick};
     use crate::transport::MeshSender;
 
+    use iroh::endpoint::presets;
     /// A `Left` never reaches the app's frame hook, so it only has to exist.
     struct Inert;
 
     #[async_trait::async_trait]
     impl NodeApp for Inert {
         fn classify(&self, _message: &Authored) -> AppClass {
-            AppClass {
-                loggable: false,
-                beat: true,
-                valid: true,
-                chained: false,
-                sealed: false,
-            }
+            AppClass::BEAT.union(AppClass::VALID)
         }
 
         async fn on_app_frame(
@@ -3205,14 +3212,22 @@ mod left_tests {
     #[test]
     async fn a_peer_that_left_takes_its_advertised_links_with_it() {
         let lookups = LookupOpts::loopback();
-        let (endpoint, handle, _webrtc) =
-            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
-                .await
-                .expect("a multihop peer binds");
-        let (leaver_endpoint, leaver_handle, _leaver_webrtc) =
-            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
-                .await
-                .expect("a second multihop peer binds");
+        let (endpoint, handle, _webrtc) = build_peer_multihop(
+            &lookups,
+            TransportOpts::default(),
+            None,
+            crate::transport::PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("a multihop peer binds");
+        let (leaver_endpoint, leaver_handle, _leaver_webrtc) = build_peer_multihop(
+            &lookups,
+            TransportOpts::default(),
+            None,
+            crate::transport::PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("a second multihop peer binds");
         let leaver_id = leaver_handle.app_id().to_string();
         let advertises = |held_by: &habilis_network_iroh_multihop_transport::MultihopHandle| {
             held_by
@@ -3303,27 +3318,32 @@ mod left_tests {
         use crate::daemon::event_loop::linkstate_arm;
 
         let lookups = LookupOpts::loopback();
-        let (endpoint, peer_handle, _webrtc) =
-            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
-                .await
-                .expect("a multihop peer binds");
+        let (endpoint, peer_handle, _webrtc) = build_peer_multihop(
+            &lookups,
+            TransportOpts::default(),
+            None,
+            crate::transport::PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("a multihop peer binds");
         // Our own handle, with a short max age so that a test can wait it out.
         let secret = iroh::SecretKey::generate();
-        let underlay = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let underlay = iroh::Endpoint::builder(presets::Minimal)
             .secret_key(underlay_secret(&secret))
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await
             .expect("bind an underlay");
-        let config = HandleConfig {
-            vector_max_age: Duration::from_millis(400),
-            ..HandleConfig::default()
-        };
+        let config = HandleConfig::default().with_vector_max_age(Duration::from_millis(400));
         let handle = MultihopHandle::new(&secret, underlay, config).expect("a handle");
-        let (leaver_endpoint, leaver_handle, _leaver_webrtc) =
-            build_peer_multihop(&lookups, TransportOpts::default(), None, false)
-                .await
-                .expect("a second multihop peer binds");
+        let (leaver_endpoint, leaver_handle, _leaver_webrtc) = build_peer_multihop(
+            &lookups,
+            TransportOpts::default(),
+            None,
+            crate::transport::PayloadPath::DirectOnly,
+        )
+        .await
+        .expect("a second multihop peer binds");
         let leaver_id = leaver_handle.app_id().to_string();
         let advertises = |held_by: &MultihopHandle| {
             held_by
@@ -3387,6 +3407,7 @@ mod requeue_tests {
     use super::requeue;
     use crate::testing::{LaneNode, nick};
 
+    use crate::util::clock;
     /// A frame is parked before its addressee is known. The peer becomes known with a relay-only
     /// address, the flush delivers the frame again and it is held: the requeue asks for the session
     /// and offers it at once, so that the frame does not wait for the next tick of the retry pass.
@@ -3402,7 +3423,7 @@ mod requeue_tests {
             .expect("the fixture knows bob");
         let frame = node.frame_to_bob();
         let bytes = frame.serialize().expect("serialize");
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         crate::transport::resolve(&frame, bytes.clone(), &state)
             .expect_err("no endpoint is known for bob yet");
         assert!(requeue(&mut state, &ctx, frame.clone(), bytes.clone()));
@@ -3450,7 +3471,7 @@ mod parked_link_state_tests {
         MultihopHandle::new(
             secret,
             underlay,
-            crate::lookup::multihop_handle_config(false),
+            crate::lookup::multihop_handle_config(crate::transport::PayloadPath::DirectOnly),
         )
         .expect("underlay on the derived key")
     }

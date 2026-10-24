@@ -10,10 +10,10 @@
 //! It also exposes byte streams: a producer creates one and hands its hash to
 //! one consumer, over a direct QUIC path rather than gossip.
 //!
-//! [`mesh`] is the blocking handle over `habilis_network::membership`, [`stream`] the
+//! `mesh` is the blocking handle over `habilis_network::membership`, `stream` the
 //! blocking handles over `habilis-network-stream`; [`ffi`] is the thin unsafe shim over
 //! both.
 
 pub mod ffi;
-pub mod mesh;
-pub mod stream;
+pub(crate) mod mesh;
+pub(crate) mod stream;

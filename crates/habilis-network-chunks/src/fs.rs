@@ -2,13 +2,13 @@
 //!
 //! The split is the crate's central asymmetry made concrete.
 //!
-//! - [`FsStore`] **owns** its chunks. A mirror, a seeder, anyone who fetched
+//! - [`DiskStore`] **owns** its chunks. A mirror, a seeder, anyone who fetched
 //!   bytes from the network and has nowhere else to put them.
-//! - [`FsOrigin`] **borrows** them. It serves the user's own files where they
+//! - [`DiskOrigin`] **borrows** them. It serves the user's own files where they
 //!   already sit, holding nothing but addresses and offsets, so publishing a
 //!   500 GB tree costs a `stat` walk rather than a copy of it.
 //!
-//! `FsOrigin` implements [`ChunkSource`] and not [`ChunkStore`], and that is
+//! `DiskOrigin` implements [`ChunkSource`] and not [`ChunkStore`], and that is
 //! the honest shape rather than a missing feature: `put` on an origin would
 //! have to copy the caller's bytes into a store — the one thing this design
 //! exists to avoid — or silently do nothing.
@@ -20,24 +20,33 @@
 //! there is no separate range set that can outlive the data it describes and
 //! leave this peer advertising bytes it cannot serve. What remains is making a
 //! chunk file appear whole or not at all, which is what the temp-file-then-
-//! rename in [`FsStore::put`] is for. A half-written chunk under its final name
+//! rename in [`DiskStore::put`] is for. A half-written chunk under its final name
 //! would be a peer that lies.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context as _, Result, bail};
+use crate::ChunkError;
 
 use crate::{
     CHUNK_BYTES, CHUNK_BYTES_USIZE, ChunkHash, ChunkMap, ChunkMapBuilder, ChunkSource, ChunkStore,
     Coverage, FileId, Root, chunk_hash,
 };
 
-fn poisoned(what: &str) -> anyhow::Error {
-    anyhow::anyhow!("the {what} lock was poisoned by a panic in another thread")
+/// Wraps a backend's error as a store failure. The step is built only when the
+/// call fails, so a `format!` in it costs nothing on the success path.
+fn store<E, S>(step: impl FnOnce() -> S) -> impl FnOnce(E) -> ChunkError
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    S: Into<String>,
+{
+    move |source| ChunkError::Store {
+        step: step().into(),
+        source: source.into(),
+    }
 }
 
 /// Write `bytes` to `path` so a reader sees all of it or none of it.
@@ -45,9 +54,11 @@ fn poisoned(what: &str) -> anyhow::Error {
 /// Temp file, flush, rename. Rename is atomic within a filesystem, so a crash
 /// leaves either the old content or the new, never a torn chunk under a name
 /// that claims to address it.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path.parent().context("a chunk path has a parent")?;
-    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ChunkError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ChunkError::Malformed("a chunk path has a parent".to_owned()))?;
+    fs::create_dir_all(parent).map_err(store(|| format!("creating {}", parent.display())))?;
     let temp = parent.join(format!(
         ".{}.tmp",
         path.file_name()
@@ -56,11 +67,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     ));
     {
         let mut handle =
-            fs::File::create(&temp).with_context(|| format!("creating {}", temp.display()))?;
-        handle.write_all(bytes)?;
-        handle.sync_all()?;
+            fs::File::create(&temp).map_err(store(|| format!("creating {}", temp.display())))?;
+        handle.write_all(bytes).map_err(store(|| "write a chunk"))?;
+        handle.sync_all().map_err(store(|| "sync a chunk"))?;
     }
-    fs::rename(&temp, path).with_context(|| format!("renaming into {}", path.display()))?;
+    fs::rename(&temp, path).map_err(store(|| format!("renaming into {}", path.display())))?;
     Ok(())
 }
 
@@ -79,27 +90,31 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// of thousands of entries is slow to enumerate on every filesystem that
 /// matters.
 #[derive(Debug)]
-pub struct FsStore {
+pub struct DiskStore {
     root: PathBuf,
     binds: Mutex<HashMap<String, (u64, i64, Root)>>,
-    /// Live set for the current reclamation pass; see [`MemStore`]'s note on
+    /// Live set for the current reclamation pass; see [`InMemoryStore`]'s note on
     /// why `None` means "nothing is protected".
     ///
-    /// [`MemStore`]: crate::MemStore
+    /// [`InMemoryStore`]: crate::InMemoryStore
     marks: Mutex<Option<HashSet<ChunkHash>>>,
 }
 
-impl FsStore {
+impl DiskStore {
     /// Open or create a store under `root`.
     ///
     /// # Errors
-    /// The directory cannot be created, or an existing bind table is unreadable.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
+    /// # Errors
+    /// [`ChunkError::Store`] when the directories cannot be created or the binds file
+    /// cannot be read.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, ChunkError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(root.join("chunks"))
-            .with_context(|| format!("creating {}", root.join("chunks").display()))?;
-        fs::create_dir_all(root.join("maps"))
-            .with_context(|| format!("creating {}", root.join("maps").display()))?;
+        fs::create_dir_all(root.join("chunks")).map_err(store(|| {
+            format!("creating {}", root.join("chunks").display())
+        }))?;
+        fs::create_dir_all(root.join("maps")).map_err(store(|| {
+            format!("creating {}", root.join("maps").display())
+        }))?;
         let binds = load_binds(&root.join("binds.tsv"));
         Ok(Self {
             root,
@@ -143,7 +158,7 @@ impl FsStore {
         found
     }
 
-    fn flush_binds(&self, binds: &HashMap<String, (u64, i64, Root)>) -> Result<()> {
+    fn flush_binds(&self, binds: &HashMap<String, (u64, i64, Root)>) -> Result<(), ChunkError> {
         let mut text = String::new();
         for (key, (size, mtime, root)) in binds {
             // A key with a tab or newline in it would corrupt the table; paths
@@ -221,21 +236,21 @@ fn encode_map(map: &ChunkMap) -> Vec<u8> {
     out
 }
 
-fn decode_map(bytes: &[u8]) -> Result<ChunkMap> {
+fn decode_map(bytes: &[u8]) -> Result<ChunkMap, ChunkError> {
     if bytes.len() < 12 {
-        bail!(
+        return Err(ChunkError::Malformed(format!(
             "a stored chunk map is at least 12 bytes, got {}",
             bytes.len()
-        );
+        )));
     }
     let size = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
     let count = u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")) as usize;
     let expected = 12 + count * 32;
     if bytes.len() < expected {
-        bail!(
+        return Err(ChunkError::Malformed(format!(
             "a {count}-leaf row needs {expected} bytes, got {}",
             bytes.len()
-        );
+        )));
     }
     let mut leaves = Vec::with_capacity(count);
     for index in 0..count {
@@ -249,28 +264,28 @@ fn decode_map(bytes: &[u8]) -> Result<ChunkMap> {
     ChunkMap::from_leaves(leaves, size)
 }
 
-impl ChunkSource for FsStore {
-    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>> {
+impl ChunkSource for DiskStore {
+    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
         match fs::read(self.chunk_path(hash)) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).context("reading a chunk"),
+            Err(error) => Err(error).map_err(store(|| "reading a chunk")),
         }
     }
 
-    async fn has(&self, hash: ChunkHash) -> Result<bool> {
+    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
         Ok(self.chunk_path(hash).is_file())
     }
 
-    async fn map(&self, root: Root) -> Result<Option<ChunkMap>> {
+    async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         match fs::read(self.map_path(root)) {
             Ok(bytes) => Ok(Some(decode_map(&bytes)?)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).context("reading a chunk map"),
+            Err(error) => Err(error).map_err(store(|| "reading a chunk map")),
         }
     }
 
-    async fn coverage(&self, root: Root) -> Result<Coverage> {
+    async fn coverage(&self, root: Root) -> Result<Coverage, ChunkError> {
         let Some(map) = self.map(root).await? else {
             return Ok(Coverage::empty(0));
         };
@@ -286,8 +301,11 @@ impl ChunkSource for FsStore {
         Ok(coverage)
     }
 
-    async fn bind(&self, file: &FileId) -> Result<Option<Root>> {
-        let binds = self.binds.lock().map_err(|_| poisoned("bind"))?;
+    async fn bind(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
+        let binds = self
+            .binds
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("bind"))?;
         let Some((size, mtime, root)) = binds.get(&file.key) else {
             return Ok(None);
         };
@@ -298,50 +316,64 @@ impl ChunkSource for FsStore {
     }
 }
 
-impl ChunkStore for FsStore {
-    async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<()> {
+impl ChunkStore for DiskStore {
+    async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<(), ChunkError> {
         let actual = chunk_hash(bytes);
         if actual != hash {
-            bail!("these bytes address {actual}, not {hash}");
+            return Err(ChunkError::Malformed(format!(
+                "these bytes address {actual}, not {hash}"
+            )));
         }
         write_atomic(&self.chunk_path(hash), bytes)
     }
 
-    async fn put_map(&self, map: &ChunkMap) -> Result<()> {
+    async fn put_map(&self, map: &ChunkMap) -> Result<(), ChunkError> {
         write_atomic(&self.map_path(map.root()), &encode_map(map))
     }
 
-    async fn set_bind(&self, file: &FileId, root: Root) -> Result<()> {
+    async fn set_bind(&self, file: &FileId, root: Root) -> Result<(), ChunkError> {
         let snapshot = {
-            let mut binds = self.binds.lock().map_err(|_| poisoned("bind"))?;
+            let mut binds = self
+                .binds
+                .lock()
+                .map_err(|_| ChunkError::Poisoned("bind"))?;
             binds.insert(file.key.clone(), (file.size, file.mtime, root));
             binds.clone()
         };
         self.flush_binds(&snapshot)
     }
 
-    async fn start_marking(&self) -> Result<()> {
-        *self.marks.lock().map_err(|_| poisoned("mark"))? = Some(HashSet::new());
+    async fn start_marking(&self) -> Result<(), ChunkError> {
+        *self
+            .marks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("mark"))? = Some(HashSet::new());
         Ok(())
     }
 
-    async fn mark(&self, root: Root) -> Result<()> {
-        let map = self.map(root).await?.context(
-            "cannot mark a root with no stored chunk map — derive the live set \
-             from persisted maps, never from an in-memory held-set",
-        )?;
-        let mut marks = self.marks.lock().map_err(|_| poisoned("mark"))?;
+    async fn mark(&self, root: Root) -> Result<(), ChunkError> {
+        let map = self.map(root).await?.ok_or_else(|| {
+            ChunkError::Malformed(
+                "cannot mark a root with no stored chunk map — derive the live set \
+             from persisted maps, never from an in-memory held-set"
+                    .to_owned(),
+            )
+        })?;
+        let mut marks = self
+            .marks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("mark"))?;
         marks
             .get_or_insert_with(HashSet::new)
             .extend(map.leaves().iter().copied());
         Ok(())
     }
 
-    async fn sweep(&self) -> Result<u64> {
+    async fn sweep(&self) -> Result<u64, ChunkError> {
         let live = self
             .marks
             .lock()
-            .map_err(|_| poisoned("mark"))?
+            .map_err(|_| ChunkError::Poisoned("mark"))?
             .take()
             .unwrap_or_default();
         let mut dropped = 0u64;
@@ -356,7 +388,7 @@ impl ChunkStore for FsStore {
         Ok(dropped)
     }
 
-    async fn clear(&self, hashes: &[ChunkHash]) -> Result<()> {
+    async fn clear(&self, hashes: &[ChunkHash]) -> Result<(), ChunkError> {
         for hash in hashes {
             // Absent is fine: eviction races a sweep, and both removing the same
             // chunk is ordinary rather than an error.
@@ -377,11 +409,11 @@ struct Borrowed {
 /// A source that serves the user's own files in place, copying nothing.
 ///
 /// This is what makes `serve ~/Movies` a `stat` walk. Addresses are computed
-/// **lazily, per file, on first interest** — [`FsOrigin::adopt`] reads one file
+/// **lazily, per file, on first interest** — [`DiskOrigin::adopt`] reads one file
 /// once and keeps its row — so publishing a tree costs nothing until somebody
 /// actually asks for something in it.
 #[derive(Debug, Default)]
-pub struct FsOrigin {
+pub struct DiskOrigin {
     files: Mutex<HashMap<Root, Borrowed>>,
     /// The reverse index that lets a bare `hash` find bytes it does not own.
     ///
@@ -393,7 +425,7 @@ pub struct FsOrigin {
     binds: Mutex<HashMap<String, (u64, i64, Root)>>,
 }
 
-impl FsOrigin {
+impl DiskOrigin {
     /// A source serving nothing yet.
     #[must_use]
     pub fn new() -> Self {
@@ -406,11 +438,13 @@ impl FsOrigin {
     /// size. Returns the root, which is also what a caller publishes.
     ///
     /// # Errors
-    /// The file cannot be opened or read, or its size changed while being read.
-    pub fn adopt(&self, file: &FileId, path: impl AsRef<Path>) -> Result<Root> {
+    /// # Errors
+    /// [`ChunkError::Store`] when the file cannot be read, or
+    /// [`ChunkError::Malformed`] when it changed while it was read.
+    pub fn adopt(&self, file: &FileId, path: impl AsRef<Path>) -> Result<Root, ChunkError> {
         let path = path.as_ref().to_path_buf();
         let mut handle =
-            fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+            fs::File::open(&path).map_err(store(|| format!("opening {}", path.display())))?;
         let mut builder = ChunkMapBuilder::new();
         let mut buffer = vec![0u8; CHUNK_BYTES_USIZE];
         loop {
@@ -419,7 +453,9 @@ impl FsOrigin {
             // treated as a chunk boundary would produce addresses nobody else
             // computes. Fill the buffer before hashing.
             while filled < buffer.len() {
-                let read = handle.read(&mut buffer[filled..])?;
+                let read = handle
+                    .read(&mut buffer[filled..])
+                    .map_err(store(|| "read a file for hashing"))?;
                 if read == 0 {
                     break;
                 }
@@ -435,16 +471,19 @@ impl FsOrigin {
         }
         let map = builder.finish();
         if map.size() != file.size {
-            bail!(
+            return Err(ChunkError::Malformed(format!(
                 "{} is {} bytes but was described as {}; it changed while being read",
                 path.display(),
                 map.size(),
                 file.size
-            );
+            )));
         }
         let root = map.root();
         {
-            let mut locations = self.locations.lock().map_err(|_| poisoned("location"))?;
+            let mut locations = self
+                .locations
+                .lock()
+                .map_err(|_| ChunkError::Poisoned("location"))?;
             for (index, leaf) in map.leaves().iter().enumerate() {
                 // First writer wins. Two files sharing a chunk both resolve to
                 // whichever was adopted first, and either answers correctly —
@@ -452,17 +491,20 @@ impl FsOrigin {
                 locations.entry(*leaf).or_insert((root, index));
             }
         }
-        self.files.lock().map_err(|_| poisoned("file"))?.insert(
-            root,
-            Borrowed {
-                path,
-                file: file.clone(),
-                map,
-            },
-        );
+        self.files
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("file"))?
+            .insert(
+                root,
+                Borrowed {
+                    path,
+                    file: file.clone(),
+                    map,
+                },
+            );
         self.binds
             .lock()
-            .map_err(|_| poisoned("bind"))?
+            .map_err(|_| ChunkError::Poisoned("bind"))?
             .insert(file.key.clone(), (file.size, file.mtime, root));
         Ok(root)
     }
@@ -471,15 +513,17 @@ impl FsOrigin {
     /// into it. Called when the file underneath changed.
     ///
     /// # Errors
-    /// A lock was poisoned by a panic in another thread.
-    pub fn forget(&self, root: Root) -> Result<()> {
+    /// # Errors
+    /// [`ChunkError::Store`] when the forget cannot be written, or
+    /// [`ChunkError::Poisoned`] when a lock was poisoned.
+    pub fn forget(&self, root: Root) -> Result<(), ChunkError> {
         self.files
             .lock()
-            .map_err(|_| poisoned("file"))?
+            .map_err(|_| ChunkError::Poisoned("file"))?
             .remove(&root);
         self.locations
             .lock()
-            .map_err(|_| poisoned("location"))?
+            .map_err(|_| ChunkError::Poisoned("location"))?
             .retain(|_, (owner, _)| *owner != root);
         Ok(())
     }
@@ -505,20 +549,24 @@ impl FsOrigin {
             && (borrowed.file.mtime == 0 || mtime == borrowed.file.mtime)
     }
 
-    fn borrowed(&self, root: Root) -> Result<Option<Borrowed>> {
+    fn borrowed(&self, root: Root) -> Result<Option<Borrowed>, ChunkError> {
         Ok(self
             .files
             .lock()
-            .map_err(|_| poisoned("file"))?
+            .map_err(|_| ChunkError::Poisoned("file"))?
             .get(&root)
             .cloned())
     }
 }
 
-impl ChunkSource for FsOrigin {
-    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>> {
+impl ChunkSource for DiskOrigin {
+    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
+        use std::io::Seek as _;
         let located = {
-            let locations = self.locations.lock().map_err(|_| poisoned("location"))?;
+            let locations = self
+                .locations
+                .lock()
+                .map_err(|_| ChunkError::Poisoned("location"))?;
             locations.get(&hash).copied()
         };
         let Some((root, index)) = located else {
@@ -534,11 +582,17 @@ impl ChunkSource for FsOrigin {
             return Ok(None);
         }
         let range = borrowed.map.range_of(index);
-        let len = usize::try_from(range.end - range.start).context("a chunk fits in memory")?;
-        let mut handle = fs::File::open(&borrowed.path)?;
-        handle.seek(SeekFrom::Start(range.start))?;
+        let len = usize::try_from(range.end - range.start)
+            .map_err(|_| ChunkError::Malformed("a chunk fits in memory".to_owned()))?;
+        let mut handle =
+            fs::File::open(&borrowed.path).map_err(store(|| "open the file of a chunk"))?;
+        handle
+            .seek(SeekFrom::Start(range.start))
+            .map_err(store(|| "seek in the file of a chunk"))?;
         let mut bytes = vec![0u8; len];
-        handle.read_exact(&mut bytes)?;
+        handle
+            .read_exact(&mut bytes)
+            .map_err(store(|| "read a chunk from its file"))?;
         // Re-verify against the row before answering. Reading through to a file
         // we do not own means the bytes can move under us between the `stat`
         // and the read, and serving unverified bytes is how a peer becomes the
@@ -549,15 +603,15 @@ impl ChunkSource for FsOrigin {
         Ok(Some(bytes))
     }
 
-    async fn has(&self, hash: ChunkHash) -> Result<bool> {
+    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
         Ok(self.get(hash).await?.is_some())
     }
 
-    async fn map(&self, root: Root) -> Result<Option<ChunkMap>> {
+    async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         Ok(self.borrowed(root)?.map(|borrowed| borrowed.map))
     }
 
-    async fn coverage(&self, root: Root) -> Result<Coverage> {
+    async fn coverage(&self, root: Root) -> Result<Coverage, ChunkError> {
         let Some(borrowed) = self.borrowed(root)? else {
             return Ok(Coverage::empty(0));
         };
@@ -571,8 +625,11 @@ impl ChunkSource for FsOrigin {
         }
     }
 
-    async fn bind(&self, file: &FileId) -> Result<Option<Root>> {
-        let binds = self.binds.lock().map_err(|_| poisoned("bind"))?;
+    async fn bind(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
+        let binds = self
+            .binds
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("bind"))?;
         let Some((size, mtime, root)) = binds.get(&file.key) else {
             return Ok(None);
         };

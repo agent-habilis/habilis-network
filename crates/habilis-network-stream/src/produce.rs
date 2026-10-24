@@ -5,15 +5,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use habilis_network::iroh::endpoint::{Connection, SendStream};
 use habilis_network::iroh::protocol::{AcceptError, ProtocolHandler};
-use habilis_network::net::direct::{PROBE_DEADLINE, refuse_unless_direct};
+use habilis_network::net::direct::{PROBE_DEADLINE, PayloadPath, refuse_unless_direct};
 use habilis_network::protocol::ct_eq;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use crate::code;
+use crate::error::StreamError;
 use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 
 /// How long a connection may take to present `id ‖ secret`. Nothing the peer
@@ -43,10 +43,7 @@ pub(crate) struct Registry(Mutex<HashMap<StreamId, Entry>>);
 
 impl Registry {
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<StreamId, Entry>> {
-        // A panic while holding the lock leaves a map that is still whole.
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.0.lock().expect("the stream registry is poisoned")
     }
 
     fn open(&self, id: StreamId, secret: StreamSecret) -> oneshot::Receiver<Link> {
@@ -110,7 +107,7 @@ impl std::fmt::Debug for Registry {
 #[derive(Debug, Clone)]
 pub(crate) struct StreamAcceptor {
     pub(crate) registry: Arc<Registry>,
-    pub(crate) relay_transport: bool,
+    pub(crate) relay_transport: PayloadPath,
 }
 
 impl ProtocolHandler for StreamAcceptor {
@@ -159,7 +156,9 @@ impl ProtocolHandler for StreamAcceptor {
     }
 }
 
-async fn read_header(conn: &Connection) -> Result<(SendStream, (StreamId, StreamSecret))> {
+async fn read_header(
+    conn: &Connection,
+) -> Result<(SendStream, (StreamId, StreamSecret)), Box<dyn std::error::Error + Send + Sync>> {
     let (send, mut recv) = conn.accept_bi().await?;
     let mut id = [0; ID_LEN];
     let mut secret = Zeroizing::new([0; SECRET_LEN]);
@@ -218,15 +217,15 @@ impl Producer {
     /// Wait until the consumer is admitted.
     ///
     /// # Errors
-    /// The node closed before any consumer arrived.
-    pub async fn attached(&mut self) -> Result<()> {
+    /// # Errors
+    /// [`StreamError::Closed`] when the stream is closed, or
+    /// [`StreamError::NodeClosed`] when the node closed before a consumer arrived.
+    pub async fn attached(&mut self) -> Result<(), StreamError> {
         if self.link.is_some() {
             return Ok(());
         }
-        let attach = self.attach.as_mut().context("the stream is closed")?;
-        let link = attach
-            .await
-            .map_err(|_| anyhow::anyhow!("the stream node closed before a consumer arrived"))?;
+        let attach = self.attach.as_mut().ok_or(StreamError::Closed)?;
+        let link = attach.await.map_err(|_| StreamError::NodeClosed)?;
         self.attach = None;
         self.link = Some(link);
         Ok(())
@@ -236,14 +235,16 @@ impl Producer {
     /// room: QUIC flow control paces the producer to the consumer.
     ///
     /// # Errors
-    /// The node closed, or the consumer went away.
-    pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+    /// # Errors
+    /// [`StreamError::NodeClosed`] or [`StreamError::Closed`] as for
+    /// [`attached`](Self::attached), or [`StreamError::ConsumerGone`] when the consumer went away.
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<(), StreamError> {
         self.attached().await?;
-        let link = self.link.as_mut().context("the stream is closed")?;
+        let link = self.link.as_mut().ok_or(StreamError::Closed)?;
         link.send
             .write_all(bytes)
             .await
-            .map_err(|error| anyhow::anyhow!("the consumer went away: {error}"))
+            .map_err(|error| StreamError::ConsumerGone(error.into()))
     }
 
     /// End the stream: the consumer reads everything written, then the end of
@@ -251,13 +252,15 @@ impl Producer {
     /// stream still reaches one.
     ///
     /// # Errors
-    /// The node closed before any consumer arrived, or the consumer went away.
-    pub async fn close(mut self) -> Result<()> {
+    /// # Errors
+    /// [`StreamError::NodeClosed`] or [`StreamError::Closed`] as for
+    /// [`attached`](Self::attached), or [`StreamError::ConsumerGone`] when the consumer went away.
+    pub async fn close(mut self) -> Result<(), StreamError> {
         self.attached().await?;
-        let link = self.link.as_mut().context("the stream is closed")?;
+        let link = self.link.as_mut().ok_or(StreamError::Closed)?;
         link.send
             .finish()
-            .map_err(|error| anyhow::anyhow!("the consumer went away: {error}"))?;
+            .map_err(|error| StreamError::ConsumerGone(error.into()))?;
         let _ = n0_future::time::timeout(DRAIN, link.send.stopped()).await;
         link.conn.close(code::DONE.into(), b"done");
         self.closed = true;
@@ -271,8 +274,9 @@ impl Producer {
     /// consumer that arrives later is refused as unknown.
     ///
     /// # Errors
+    /// # Errors
     /// As [`close`](Self::close), once a consumer has claimed the stream.
-    pub async fn close_or_abandon(self) -> Result<()> {
+    pub async fn close_or_abandon(self) -> Result<(), StreamError> {
         if self.link.is_none() && self.registry.forget_unless_claimed(&self.hash.id) {
             return Ok(());
         }

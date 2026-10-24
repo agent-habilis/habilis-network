@@ -6,6 +6,7 @@ use tokio::io::{self, AsyncBufRead, AsyncBufReadExt};
 
 /// Outcome of [`read_bounded_line`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum LineRead {
     /// Stream closed with nothing buffered.
     Eof,

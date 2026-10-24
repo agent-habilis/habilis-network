@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 use habilis_network::net::test_relay;
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network_stream::{
-    Producer, Reader, Refused, StreamHash, StreamNode, StreamOpts, StreamSecret,
+    Producer, Reader, Refused, StreamError, StreamHash, StreamNode, StreamOpts, StreamSecret,
 };
 
+use habilis_network::iroh::endpoint::presets;
+use habilis_network::net::direct;
 /// Generous: a relay dial, a JSEP round and a hole punch all fit inside it.
 const BUDGET: Duration = Duration::from_mins(1);
 
@@ -21,7 +23,7 @@ async fn loopback() -> StreamNode {
 }
 
 /// Read to the end, or fail with whatever ended the stream.
-async fn read_all(reader: &mut Reader) -> anyhow::Result<Vec<u8>> {
+async fn read_all(reader: &mut Reader) -> Result<Vec<u8>, StreamError> {
     let mut out = Vec::new();
     while let Some(chunk) = reader.read().await? {
         out.extend_from_slice(&chunk);
@@ -29,8 +31,15 @@ async fn read_all(reader: &mut Reader) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn refusal(error: &anyhow::Error) -> Option<Refused> {
-    error.downcast_ref::<Refused>().copied()
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "StreamError is non_exhaustive, so the arm is needed"
+)]
+fn refusal(error: &StreamError) -> Option<Refused> {
+    match error {
+        StreamError::Refused(refused) => Some(*refused),
+        _ => None,
+    }
 }
 
 /// Write `payload` in `chunk`-sized pieces and close.
@@ -341,8 +350,16 @@ fn two_streams_on_one_node_stay_apart() {
         );
         let (first_got, second_got) =
             tokio::join!(read_all(&mut first_reader), read_all(&mut second_reader));
-        assert!(first_got.expect("first") == payload(300_000));
-        assert!(second_got.expect("second") == b"second".repeat(50_000));
+        assert_eq!(
+            first_got.expect("first"),
+            payload(300_000),
+            "the first reader gets the whole first payload"
+        );
+        assert_eq!(
+            second_got.expect("second"),
+            b"second".repeat(50_000),
+            "the second reader gets the whole second payload"
+        );
         writers.0.await.expect("first writer");
         writers.1.await.expect("second writer");
         producer_node.close().await;
@@ -352,11 +369,12 @@ fn two_streams_on_one_node_stay_apart() {
 
 /// A node on the local relay, with `transport` as given.
 async fn on_relay(url: &str, transport: Vec<Transport>) -> StreamNode {
-    StreamNode::bind(&StreamOpts {
-        lookup: vec![Lookup::Relay],
-        transport,
-        relay_urls: vec![url.to_owned()],
-    })
+    StreamNode::bind(
+        &StreamOpts::default()
+            .with_lookup(vec![Lookup::Relay])
+            .with_transport(transport)
+            .with_relay_urls(vec![url.to_owned()]),
+    )
     .await
     .expect("bind a relay node")
 }
@@ -452,14 +470,10 @@ fn a_stream_node_with_webrtc_serves_the_nudge_of_a_peer() {
         let node = loopback().await;
         let producer = node.create().await;
         let addr = producer.hash().addr.clone();
-        let dialer = habilis_network::iroh::Endpoint::bind(
-            habilis_network::iroh::endpoint::presets::Minimal,
-        )
-        .await
-        .expect("bind a dialer");
-        let nudge = dialer
-            .connect(addr, habilis_network::net::direct::NUDGE_ALPN)
-            .await;
+        let dialer = habilis_network::iroh::Endpoint::bind(presets::Minimal)
+            .await
+            .expect("bind a dialer");
+        let nudge = dialer.connect(addr, direct::NUDGE_ALPN).await;
         assert!(nudge.is_ok(), "the nudge was refused: {:?}", nudge.err());
         dialer.close().await;
         node.close().await;
@@ -545,10 +559,7 @@ fn a_stream_node_refuses_the_gossip_and_multihop_transports() {
             (Transport::Gossip, "a stream has no gossip"),
             (Transport::Multihop, "a stream has no multihop"),
         ] {
-            let opts = StreamOpts {
-                transport: vec![Transport::Udp, transport],
-                ..StreamOpts::default()
-            };
+            let opts = StreamOpts::default().with_transport(vec![Transport::Udp, transport]);
             let error = StreamNode::bind(&opts)
                 .await
                 .expect_err("the transport must be refused");

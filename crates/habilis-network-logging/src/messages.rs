@@ -63,6 +63,14 @@ pub fn log_out(msg: &Message) {
     log("out", msg);
 }
 
+#[expect(
+    clippy::match_same_arms,
+    reason = "the named variants are listed on purpose, so a new variant stays visible"
+)]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "foreign non_exhaustive enum: the compiler needs a wildcard arm; the named variants are listed before it"
+)]
 fn log(direction: &'static str, msg: &Message) {
     let plumbing = || {
         tracing::trace!(
@@ -136,7 +144,7 @@ fn log(direction: &'static str, msg: &Message) {
             body = %logged_body(msg),
             "state"
         ),
-        // Plumbing — exhaustive so a new kind forces a decision.
+        // Plumbing. A kind added later falls to the wildcard, which logs no body.
         MessageKind::Presence {
             subtype: PresenceSubtype::Alive,
         }
@@ -147,6 +155,7 @@ fn log(direction: &'static str, msg: &Message) {
         | MessageKind::Ping
         | MessageKind::Pong { .. }
         | MessageKind::LinkState => plumbing(),
+        _ => plumbing(),
     }
 }
 

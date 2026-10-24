@@ -180,6 +180,46 @@ Write `target: "habilis_network::<subsystem>"` on every new `tracing` call in th
 
 The `transport` target has no pin. Its lines appear only when `RUST_LOG` names them.
 
+## Rust style
+
+The Google Rust Style Guide is the reference for Rust style in this repository: https://google.github.io/styleguide/rustguide.html
+
+This file wins over the guide. If the two conflict, follow this file. Issue #29 records each decision.
+
+### What each gate refuses
+
+- `cargo fmt --check` runs in CI. It refuses unformatted code. `rustfmt.toml` sets `imports_granularity = "Module"`, which only a nightly `rustfmt` enforces. `rust-toolchain.toml` pins one toolchain for the whole project, for build, lint and format: `nightly-2026-06-05`. To move the date, rerun the clippy rows of `ci.yml` on both dates first and make it a named commit.
+- `cargo clippy` runs in CI with `-D warnings`. Its lints come from `[workspace.lints]` in `Cargo.toml` and from `clippy.toml`. The `pedantic` group is on. These lints are on by name: `unwrap_used`, `wildcard_enum_match_arm`, `await_holding_lock`, `allow_attributes`, `string_add`, `undocumented_unsafe_blocks`, `excessive_nesting`, `shadow_unrelated`, `min_ident_chars` and `semicolon_inside_block`. The rustc lint `missing_docs` and the clippy lints `exhaustive_enums` and `exhaustive_structs` are on by name too, so an undocumented public item, or a public enum or struct that is not `#[non_exhaustive]`, fails the gate. The rustc lints `unsafe_code` and `non_ascii_idents` are denied.
+- `scripts/style-check/style-check.ts` checks six rules that no compiler lint covers: `poison`, `feature`, `catch_unwind`, `ctor`, `block_doc` and `lifetime`. Each exception is a line in `style-check.allow`, with a count and a reason. A new violation fails the check. An exception whose count is too high fails it too.
+- `scripts/style-check/style-check.ts` rule `anyhow_pub`: a public function of a library file returns a typed error, not `anyhow`. It counts each public fn whose return type names `anyhow::Result` or `anyhow::Error` (also through a `use anyhow::Result as X` or a `pub type` alias, and a `pub trait` method), and it skips binaries, CLIs and `bin/` targets. Its exceptions are its rows in `style-check.allow`, each with a reason.
+- `scripts/script-language/script-language.ts` refuses a `.sh`, `.bash` or `.py` file, and a file with a shell or Python shebang. See the Scripts section.
+- `typecheck:scripts` in `package.json` runs `tsc --noEmit -p tsconfig.scripts.json`. The `typecheck` script runs it too.
+
+### Rules we decline, or leave to the reviewer
+
+- Module names after the primary item: a scan flags 98 of the 156 leaf files that declare a public type. The scan takes the first public type in each file, so it is too noisy to enforce. The reviewer checks it.
+- Glob imports are not allowed. `warn-on-all-wildcard-imports` in `clippy.toml` makes clippy refuse them. Clippy exempts `pub use ...::*` facades and `use super::*` in a test module. Do not define a prelude of our own.
+- `clippy::absolute_paths`: the owner set `absolute-paths-max-segments = 3` in `clippy.toml`. The lint is on in `[workspace.lints]`. `scripts/absolute-paths/` rewrote the hits to import the parent module.
+- `non_exhaustive_omitted_patterns` is an unstable rustc lint. The project toolchain is a nightly. The `Omitted patterns` step in `.github/workflows/ci.yml` runs it with `-Zcrate-attr=feature(non_exhaustive_omitted_patterns_lint)` and `-D non_exhaustive_omitted_patterns`. The step checks three things: the workspace, `habilis-network-bench-wasm` on wasm32, and the `idb_browser`, `origin` and `conformance` tests of `habilis-network-chunks` on wasm32. A crate root gated by `target_arch` drops the crate attribute, so the wasm32 crates are checked on their own. Their test and bench bodies sit in modules for that reason. The step does not check the `wasm_runtime` test on wasm32, because `mio` does not build for wasm32.
+- `exhaustive_enums` and `exhaustive_structs`: the owner decided to mark public types `#[non_exhaustive]`. All public enums are marked. A public struct is marked too, except one that keeps a private field (`AppClass`). A struct that other crates build gets `new` with all fields (up to four, no two adjacent of one type), or `new` with the required fields and a `with_` method for each optional field that a call site sets. Never set a field after `Default`, because `field_reassign_with_default` refuses it.
+- A `match` on a foreign `#[non_exhaustive]` enum names every variant and keeps a wildcard arm last. The compiler needs that arm and `wildcard_enum_match_arm` refuses it, so the arm carries `#[expect(clippy::wildcard_enum_match_arm, reason = "...")]` on the narrowest scope. Use `expect`, never `allow`: a stale `expect` is a warning.
+- Errors in public signatures: a library crate returns a typed error from each public function. The gate is `anyhow_pub` in `scripts/style-check/style-check.ts` (see What each gate refuses). The exceptions are the `anyhow_pub` rows of `style-check.allow`, and nothing else: the webrtc bench harness (`bench.rs`, behind the `bench` feature), and the test relay helper `spawn_plain` (`lookup/mod.rs`, behind `iroh-test-utils`). Binaries, CLIs and `bin/` targets are outside the rule and keep `anyhow`.
+- `Arc`: the reviewer judges each use, and no gate checks it. Use `Arc` to share across tasks or threads, or for a trait object, and write the reason when it is not clear.
+- `From<&str>` that can panic: a type that validates its input has `new` returning a `Result`, and no `From<&str>`. `AppTag` and `CorrId` follow this, and a `compile_fail` doc test pins it.
+
+### Rules of the guide that do not apply
+
+- A rule that the guide tags for Chromium, Android or Fuchsia does not apply. This repository is none of them.
+- The guide names a closure accessor `with_foo`. This repository also uses `with_foo` for a builder method that returns `Self`, for example `EndpointAddr::with_ip_addr` of iroh. Keep the builder meaning.
+
+### Rules still under audit
+
+- Everything else follows the guide until issue #29 records a decision.
+
+## Scripts
+
+Write every script in TypeScript, and run it with Bun (`bun scripts/<name>.ts`). CI fails on any `.sh`, `.bash` or `.py` file, or a shell or Python shebang file, unless `scripts/script-language/script-language.allow` names it with a reason. Do not write a new shell script or Python script. A test for a script is a `bun test` file next to it. A script in another language is a fault to port, not a model to copy.
+
 ## Newtypes
 
 A newtype is a struct with one field that gives a primitive a domain meaning. This section holds the rules for newtypes on this branch.
@@ -316,4 +356,4 @@ Runtime events drive these transitions, so their state is not known at compile t
 | `PendingOffer` / `PendingAnswer` | `habilis-network-iroh-webrtc-transport/src/native/jsep.rs` (and `web/jsep.rs`) | A JSEP offer or answer that waits for the remote side. `complete` consumes it. |
 | `NegotiatedSession` | `habilis-network-iroh-webrtc-transport/src/native/driver.rs` | A data channel that is open and ready to carry datagrams. Only the `complete` of a pending offer or answer produces one. |
 
-The test-only fixture doors are `Verified::fixture_unchecked`, `Verified::fixture_with_signature` and `WireFrame::fixture_raw`. Each one is behind `test-fixtures`: it exists in unit tests and in any build that enables `test-fixtures`, so a release binary must not enable that feature.
+The test-only fixture doors are `Verified::fixture_unchecked`, `Verified::fixture_with_signature`, `WireFrame::fixture_raw` and `Frame::fixture` (in the transport crate). Each one is behind `test-fixtures`: it exists in unit tests and in any build that enables `test-fixtures`, so a release binary must not enable that feature.

@@ -7,16 +7,16 @@
 use std::fmt;
 use std::str::FromStr;
 
-use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use super::ChoiceError;
+use super::{ChoiceError, ConfigError};
 
 /// One path a mesh's members may carry payload over — an entry of the
 /// `transport` list a create names. Mesh-wide: every joiner inherits it from
 /// the mesh id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Transport {
     /// QUIC on a direct or hole-punched UDP socket. A browser has none.
     Udp,
@@ -85,6 +85,7 @@ impl fmt::Display for Transport {
     clippy::struct_excessive_bools,
     reason = "one independent on/off per path; the id writes them as one bitset byte"
 )]
+#[non_exhaustive]
 pub struct TransportPolicy {
     /// QUIC on UDP. Off, no native member binds a UDP path, and a mesh with
     /// `webrtc` rides the data channel alone.
@@ -125,14 +126,51 @@ impl Default for TransportPolicy {
 }
 
 impl TransportPolicy {
+    /// Set the UDP transport. Start from `default()` and chain the `with_` methods.
+    #[must_use]
+    pub const fn with_udp(mut self, udp: bool) -> Self {
+        self.udp = udp;
+        self
+    }
+
+    /// Set the WebRTC transport.
+    #[must_use]
+    pub const fn with_webrtc(mut self, webrtc: bool) -> Self {
+        self.webrtc = webrtc;
+        self
+    }
+
+    /// Set the multihop transport.
+    #[must_use]
+    pub const fn with_multihop(mut self, multihop: bool) -> Self {
+        self.multihop = multihop;
+        self
+    }
+
+    /// Set the gossip transport.
+    #[must_use]
+    pub const fn with_gossip(mut self, gossip: bool) -> Self {
+        self.gossip = gossip;
+        self
+    }
+
+    /// Set whether the relay carries payload.
+    #[must_use]
+    pub const fn with_relay_transport(mut self, relay_transport: bool) -> Self {
+        self.relay_transport = relay_transport;
+        self
+    }
+
     /// The policy a `transport` list names. Empty ⇒ the default,
     /// `udp,webrtc,multihop,gossip`. A list names exactly what it carries: `udp,webrtc,multihop`
     /// has no gossip.
     ///
     /// # Errors
-    /// The list is non-empty and names neither `udp` nor `webrtc`; with
-    /// `multihop` in it, the message says that multihop needs a direct path.
-    pub fn from_transports(transports: &[Transport]) -> Result<Self> {
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the list is non-empty and names neither `udp`
+    /// nor `webrtc`. With `multihop` in it, the message says that multihop needs a direct
+    /// path.
+    pub fn from_transports(transports: &[Transport]) -> Result<Self, ConfigError> {
         if transports.is_empty() {
             return Ok(Self::default());
         }
@@ -144,10 +182,12 @@ impl TransportPolicy {
             relay_transport: transports.contains(&Transport::Relay),
         };
         if policy.multihop_has_no_direct_path() {
-            bail!(MULTIHOP_ALONE);
+            return Err(ConfigError::Invalid(MULTIHOP_ALONE.to_owned()));
         }
         if !policy.udp && !policy.webrtc {
-            bail!("a transport list needs a direct path: name `udp`, `webrtc`, or both");
+            return Err(ConfigError::Invalid(
+                "a transport list needs a direct path: name `udp`, `webrtc`, or both".to_owned(),
+            ));
         }
         Ok(policy)
     }
@@ -185,10 +225,13 @@ impl TransportPolicy {
     /// The policy a mesh id's byte names.
     ///
     /// # Errors
-    /// The byte sets a bit this build does not know.
-    pub(crate) fn from_byte(byte: u8) -> Result<Self> {
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the byte sets a bit this build does not know.
+    pub(crate) fn from_byte(byte: u8) -> Result<Self, ConfigError> {
         if byte & !super::lookup::KNOWN_TRANSPORT_BITS != 0 {
-            bail!("unsupported transport policy bits {byte:#04x}: upgrade to a newer build");
+            return Err(ConfigError::Invalid(format!(
+                "unsupported transport policy bits {byte:#04x}: upgrade to a newer build"
+            )));
         }
         Ok(Self {
             udp: byte & super::lookup::TRANSPORT_UDP != 0,

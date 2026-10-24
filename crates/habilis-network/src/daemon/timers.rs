@@ -10,9 +10,10 @@ use iroh::Endpoint;
 use super::state::EventLoopState;
 use crate::gossip::event::{NodeEvent, NodeSink};
 use crate::util::clock::{Instant, millis_saturating};
-use crate::util::resident_memory;
-use crate::util::tuning;
+use crate::util::{resident_memory, tuning};
 
+use crate::transport::path;
+use crate::util::clock;
 /// The warn-only resident-memory leak check, run on the slow (1-minute)
 /// housekeeping tick (see `run`'s `intervals.prune`). Kept on this tick now
 /// that rate-limiter pruning — its original co-tenant — is gone.
@@ -125,7 +126,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         roster_len,
         link_len,
         meshed = state.meshed,
-        relay_transport = state.relay_transport,
+        relay_transport = state.relay_transport.relay_allowed(),
         links_direct = links.direct,
         links_relay_only = links.relay_only,
         links_pending = links.pending,
@@ -146,7 +147,7 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
         idle_resent = idle.resent,
         idle_resend_dropped = idle.resend_dropped,
         // A total since the process started, unlike the idle fields above, which are per interval.
-        gossip_recursion_closes_total = crate::transport::path::gossip_recursion_closes(),
+        gossip_recursion_closes_total = path::gossip_recursion_closes(),
         "mesh census"
     );
 
@@ -202,14 +203,14 @@ pub(crate) async fn tick_state_refresh(state: &mut EventLoopState, endpoint: &En
 pub(crate) fn note_tick_gap(
     timer: &'static str,
     last: &mut Instant,
-    last_wall: &mut crate::util::clock::UnixSecs,
+    last_wall: &mut clock::UnixSecs,
     expected: Duration,
 ) -> (Duration, Duration) {
     let now = Instant::now();
     let mono_gap = now.duration_since(*last);
     *last = now;
 
-    let now_wall = crate::util::clock::UnixSecs::now();
+    let now_wall = clock::UnixSecs::now();
     let wall_gap = now_wall.since(*last_wall);
     *last_wall = now_wall;
 

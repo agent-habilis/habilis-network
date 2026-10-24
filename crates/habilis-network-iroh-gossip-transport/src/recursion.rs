@@ -69,7 +69,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::{selected_is_gossip, watch_recursion};
-    use crate::memory::MemoryHub;
+    use crate::memory::Hub;
     use crate::{GossipHandle, gossip_addr};
 
     const ALPN: &[u8] = b"habilis-network-gossip/test-recursion/0";
@@ -109,7 +109,7 @@ mod tests {
     /// callback runs once.
     #[test]
     async fn a_connection_on_the_gossip_path_is_closed_with_the_code() {
-        let hub = MemoryHub::new();
+        let hub = Hub::new();
         let (alice_handle, bob_handle) = (
             GossipHandle::new(secret(1).public()),
             GossipHandle::new(secret(2).public()),

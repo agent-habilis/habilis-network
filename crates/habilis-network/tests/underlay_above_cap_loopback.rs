@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use habilis_network::membership::{self, Membership, Request};
 use habilis_network::protocol::{Lookup, Transport};
 
+use habilis_network::net::test_relay;
 const MEMBERS: usize = 4;
 const CAP: usize = 2;
 const MESH_DEADLINE: Duration = Duration::from_mins(3);
@@ -65,19 +66,19 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
         "habilis_network=info,habilis_network::transport=debug",
     );
     habilis_network_test_tracing::run_multi_thread(guard, 4, async {
-        let (relay, _server) = habilis_network::net::test_relay::spawn_plain()
-            .await
-            .expect("local relay");
+        let (relay, _server) = test_relay::spawn_plain().await.expect("local relay");
         let (first_sink, _first_events) = membership::json_sink();
         let creator = membership::join(
-            &membership::Opts {
-                nick: Some("m0".to_owned()),
-                lookup: vec![Lookup::Relay],
-                transport: vec![Transport::WebRtc, Transport::Multihop, Transport::Relay],
-                relay_urls: vec![relay.to_string()],
-                max_peers: CAP,
-                ..membership::Opts::default()
-            },
+            &membership::Opts::default()
+                .with_nick(Some("m0".to_owned()))
+                .with_lookup(vec![Lookup::Relay])
+                .with_transport(vec![
+                    Transport::WebRtc,
+                    Transport::Multihop,
+                    Transport::Relay,
+                ])
+                .with_relay_urls(vec![relay.to_string()])
+                .with_max_peers(CAP),
             first_sink,
         )
         .await
@@ -90,12 +91,10 @@ fn the_underlay_does_not_evict_in_steady_state_above_its_cap() {
             sinks.push(events);
             members.push(
                 membership::join(
-                    &membership::Opts {
-                        nick: Some(format!("m{index}")),
-                        mesh: Some(mesh.clone()),
-                        max_peers: CAP,
-                        ..membership::Opts::default()
-                    },
+                    &membership::Opts::default()
+                        .with_nick(Some(format!("m{index}")))
+                        .with_mesh(Some(mesh.clone()))
+                        .with_max_peers(CAP),
                     sink,
                 )
                 .await

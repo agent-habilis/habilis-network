@@ -25,17 +25,16 @@ mod sim;
 use std::cell::RefCell;
 
 use habilis_network::embed::SilentSink;
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{LookupOpts, MeshConfig, MeshName, Nickname, TransportPolicy};
 use habilis_network::runtime::{
-    Node, SetupKind, SetupParams, derive_topic_mesh_config, setup_mesh,
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_config, setup_mesh,
 };
 use habilis_network::util::clock::Instant;
 use habilis_network_netplay::RollbackDriver;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 use app::{Game, LightCycles};
 use grid::{Dir, GRID_H, GRID_W, TICK_MS};
@@ -158,15 +157,12 @@ impl LightCyclesPeer {
 
         let mesh = derive_topic_mesh_config(
             &room_code,
-            MeshConfig {
-                lookups: LookupOpts::public_preset(),
-                password: None,
-                issuer_pubkey: None,
-                transport: TransportPolicy {
-                    relay_transport,
-                    ..TransportPolicy::default()
-                },
-            },
+            MeshConfig::new(
+                LookupOpts::public_preset(),
+                None,
+                None,
+                TransportPolicy::default().with_relay_transport(relay_transport),
+            ),
         )
         .map_err(to_js_error)?;
         let author = Nickname::new(&nick).map_err(to_js_error)?;
@@ -177,28 +173,15 @@ impl LightCyclesPeer {
 
         let config = setup_mesh(
             kind,
-            SetupParams {
-                author: author.clone(),
-                max_peers: 16,
-                max_direct: 0,
-                endpoint: None,
-                protocols: Vec::new(),
-                transports: TransportOpts::default(),
-                // No files and no control socket: a browser has neither.
-                runtime_base: None,
-                state_file: None,
-                sink: Arc::new(SilentSink),
-                per_peer_gate: None,
-                cohost: None,
-                live_count: None,
-            },
+            SetupParams::new(author.clone(), Arc::new(SilentSink::default())).with_max_peers(16),
         )
         .await
         .map_err(to_js_error)?;
 
         // `handle_signals: false` — nothing to catch in a browser.
         let (driver, pending) = RollbackDriver::<LightCycles>::new();
-        let node: Node<RollbackDriver<LightCycles>> = Node::spawn(config, driver, None, false);
+        let node: Node<RollbackDriver<LightCycles>> =
+            Node::spawn(config, driver, None, SignalHandling::Leave);
         let game = Game::new(pending.connect(node.sender()), author);
 
         Ok(LightCyclesPeer {

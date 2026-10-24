@@ -15,12 +15,14 @@ use std::time::Duration;
 use habilis_network::embed::{
     AppClass, EventLoopState, HandlerCtx, InboundApp, NodeApp, NodeDriver, NodeEvent, NodeSink,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::ops::{StateMergeParams, broadcast_state_merge};
 use habilis_network::protocol::{Channel, LookupOpts, MessageKind, Nickname, PresenceSubtype};
-use habilis_network::runtime::{Node, SetupKind, SetupParams, derive_topic_mesh_with, setup_mesh};
+use habilis_network::runtime::{
+    Node, SetupKind, SetupParams, SignalHandling, derive_topic_mesh_with, setup_mesh,
+};
 use tokio::sync::{Notify, oneshot};
 
+use habilis_network::runtime::tuning;
 /// The agent-gossip late-joiner test's log size: two and a half answers.
 const WRITES: usize = 160;
 /// Changes one digest answer carries (the default `ANTIENTROPY_MAX_RESEND`).
@@ -40,13 +42,7 @@ struct Store;
 #[habilis_network::async_trait]
 impl NodeApp for Store {
     fn classify(&self, _message: &Authored) -> AppClass {
-        AppClass {
-            loggable: false,
-            beat: true,
-            valid: true,
-            chained: false,
-            sealed: false,
-        }
+        AppClass::BEAT.union(AppClass::VALID)
     }
 
     async fn on_app_frame(
@@ -75,15 +71,7 @@ impl NodeDriver for Store {
             Request::Write(merge, done) => {
                 broadcast_state_merge(
                     state,
-                    StateMergeParams {
-                        mesh: ctx.mesh,
-                        author: ctx.author,
-                        merge,
-                        sender: ctx.sender,
-                        sink: ctx.sink,
-                        channel: Channel::State,
-                        surface: false,
-                    },
+                    StateMergeParams::new(ctx.into(), Channel::State, merge).with_surface(false),
                 )
                 .await
                 .expect("a small merge is accepted");
@@ -141,10 +129,7 @@ impl Joined {
 /// a slow join cannot let a tick pass it instead. Per process, and every test
 /// here wants the same value.
 fn pin_antientropy_tick() {
-    habilis_network::runtime::tuning::init(habilis_network::runtime::tuning::Tuning {
-        antientropy_interval: Duration::from_hours(1),
-        ..habilis_network::runtime::tuning::Tuning::DEFAULTS
-    });
+    tuning::init(tuning::Tuning::DEFAULTS.with_antientropy_interval(Duration::from_hours(1)));
 }
 
 fn nick(name: &str) -> Nickname {
@@ -160,24 +145,14 @@ async fn spawn(topic: &str, name: &str) -> (Node<Store>, Arc<Joined>) {
             mesh,
             topic_string: topic.to_owned(),
         },
-        SetupParams {
-            author: nick(name),
-            max_peers: 16,
-            max_direct: 0,
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::clone(&sink) as Arc<dyn NodeSink>,
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(nick(name), Arc::clone(&sink) as Arc<dyn NodeSink>).with_max_peers(16),
     )
     .await
     .expect("setup_mesh on a loopback mesh must not touch the network");
-    (Node::spawn(config, Store, None, false), sink)
+    (
+        Node::spawn(config, Store, None, SignalHandling::Leave),
+        sink,
+    )
 }
 
 /// More changes than one digest answer carries, so the backfill takes several

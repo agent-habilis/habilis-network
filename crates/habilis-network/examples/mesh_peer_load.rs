@@ -23,7 +23,7 @@
 //! - `MESH_FLOOD_PEERS=K`: from the second 30 on, the node sends messages of 3000 bytes to its first
 //!   K roster peers as fast as it can. The RSS against K is the worst case of one connection.
 //! - `MESH_FLOOD_SENDERS=S`: with `MESH_FLOOD_PEERS`, only the nodes with `MESH_NODE_INDEX` up to S
-//!   flood (`scripts/perf/run.sh` sets the index). The others only receive. Each line then ends
+//!   flood (`scripts/perf/run.ts` sets the index). The others only receive. Each line then ends
 //!   with `role sender` or `role receiver`. Unset, every node floods and the line has no role.
 //! - `MESH_BLOCK_UDP_AFTER_SECS=60`: after that many seconds the node takes IP away
 //!   from every connection of the process, once. This is the second phase of the
@@ -47,12 +47,12 @@ use habilis_network::embed::SilentSink;
 use habilis_network::membership::{
     INBOUND_CAP, MembershipApp, Opts, Request, msg_body, resolve_kind,
 };
-use habilis_network::net::TransportOpts;
 use habilis_network::protocol::{Lookup, Nickname, Transport};
-use habilis_network::runtime::{Node, SetupParams, setup_mesh};
+use habilis_network::runtime::{Node, SetupParams, SignalHandling, setup_mesh};
 use habilis_network::util::resident_memory::current_resident_memory_mb;
 use tokio::sync::{mpsc, oneshot};
 
+use habilis_network::net::test_relay;
 /// A number from the environment, `0` when it is unset or not a number.
 fn env_number(name: &str) -> u64 {
     std::env::var(name)
@@ -247,39 +247,23 @@ async fn main() -> anyhow::Result<()> {
 
     let mut relay_server = None;
     let opts = if let Some(id) = std::env::args().nth(1) {
-        Opts {
-            mesh: Some(id),
-            ..Opts::default()
-        }
+        Opts::default().with_mesh(Some(id))
     } else {
-        let (url, server) = habilis_network::net::test_relay::spawn_plain().await?;
+        let (url, server) = test_relay::spawn_plain().await?;
         relay_server = Some(server);
-        Opts {
-            lookup: vec![Lookup::Relay],
-            transport: transports()?,
-            relay_urls: vec![url.to_string()],
-            ..Opts::default()
-        }
+        Opts::default()
+            .with_lookup(vec![Lookup::Relay])
+            .with_transport(transports()?)
+            .with_relay_urls(vec![url.to_string()])
     };
     let (kind, author) = resolve_kind(&opts, None)?;
 
     let (inbound_tx, mut inbound) = mpsc::channel(INBOUND_CAP);
     let config = setup_mesh(
         kind,
-        SetupParams {
-            author: author.clone(),
-            max_peers: usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0),
-            max_direct: usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0),
-            endpoint: None,
-            protocols: Vec::new(),
-            transports: TransportOpts::default(),
-            runtime_base: None,
-            state_file: None,
-            sink: Arc::new(SilentSink),
-            per_peer_gate: None,
-            cohost: None,
-            live_count: None,
-        },
+        SetupParams::new(author.clone(), Arc::new(SilentSink::default()))
+            .with_max_peers(usize::try_from(env_number("MESH_MAX_PEERS")).unwrap_or(0))
+            .with_max_direct(usize::try_from(env_number("MESH_MAX_DIRECT")).unwrap_or(0)),
     )
     .await?;
 
@@ -287,7 +271,12 @@ async fn main() -> anyhow::Result<()> {
     println!("nick    {author}");
 
     let webrtc = config.webrtc_handle();
-    let node = Node::spawn(config, MembershipApp::new(inbound_tx), None, false);
+    let node = Node::spawn(
+        config,
+        MembershipApp::new(inbound_tx),
+        None,
+        SignalHandling::Leave,
+    );
     tokio::spawn(async move { while inbound.recv().await.is_some() {} });
     let sender = node.sender();
 

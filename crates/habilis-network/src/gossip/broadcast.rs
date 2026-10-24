@@ -11,11 +11,15 @@ use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{EventLoopState, PingRound};
 use crate::gossip::app::AppClass;
 use crate::gossip::event::{NodeEvent, NodeSink};
-use crate::protocol::message::AppFrameParams;
-use crate::protocol::message::{Verified, WireFrame};
+use crate::protocol::message::{AppFrameParams, Verified, WireFrame};
 use crate::protocol::{Channel, MeshId, Message, MessageBody, Nickname};
 use crate::util::consts::MAX_MESSAGE_SIZE;
 
+use crate::logging::messages;
+use crate::protocol::{message, peer_addr};
+use crate::transport::{endpoint_proof, webrtc};
+use crate::util::{clock, tuning};
+use tokio::sync::oneshot;
 /// Build → sign → deliver one outbound `App` frame — the payload-generic
 /// counterpart to the application's own (chain-stamping, sharding, sealing) chat /
 /// task builders. A consumer with its own data model emits its `App`-tagged payloads through
@@ -65,27 +69,29 @@ pub async fn send_app(
     ctx: &HandlerCtx<'_>,
     frame: Verified,
     class: AppClass,
-) -> anyhow::Result<crate::transport::Delivered> {
+) -> Result<crate::transport::Delivered, crate::transport::SendError> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
-        anyhow::bail!(
+        return Err(crate::transport::SendError::Oversize(format!(
             "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
             frame.wire_len()
-        );
+        )));
     }
-    let bytes = frame.serialize()?;
-    crate::logging::messages::log_out(&frame);
+    let bytes = frame
+        .serialize()
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
+    messages::log_out(&frame);
     if state.meshed {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
         // `to` — the same routing the application's send path rides. A frame
         // held off a relay-only peer is parked, not failed: the proven direct
         // path flushes it (see `gossip::recv::flush_pending`).
         match crate::transport::deliver(&frame, bytes.clone(), state, ctx.sender).await {
-            Err(error) if error.is::<crate::transport::HeldForDirect>() => {
+            Err(crate::transport::SendError::Held { .. }) => {
                 park_and_offer(state, ctx, &frame, &bytes);
             }
             outcome => {
                 if outcome.is_ok() {
-                    super::recv::retain_own_app_broadcast(state, &frame, &class);
+                    super::recv::retain_own_app_broadcast(state, &frame, class);
                 }
                 return outcome;
             }
@@ -96,10 +102,12 @@ pub async fn send_app(
     if state.pending_outbound.push((frame.clone(), bytes)) {
         // Buffered until the meshed edge flushes it through the same send
         // decision (see `gossip::recv::flush_pending`). A parked frame is still ours.
-        super::recv::retain_own_app_broadcast(state, &frame, &class);
+        super::recv::retain_own_app_broadcast(state, &frame, class);
         Ok(crate::transport::Delivered::Done)
     } else {
-        anyhow::bail!("pending outbound buffer full; app frame dropped")
+        Err(crate::transport::SendError::internal(anyhow::anyhow!(
+            "pending outbound buffer full; app frame dropped"
+        )))
     }
 }
 
@@ -118,7 +126,7 @@ pub fn app_frame(ctx: &HandlerCtx<'_>, params: AppFrameParams) -> Verified {
 /// logged — it means the gossip actor refused the send (the wedge the
 /// roster-collapse soak hit silently), not a routine empty gossip.
 pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
-    crate::logging::messages::log_out(msg);
+    messages::log_out(msg);
     if let Ok(bytes) = msg.serialize()
         && let Err(error) = sender.broadcast(bytes).await
     {
@@ -136,10 +144,10 @@ pub async fn broadcast_msg(sender: &MeshSender, msg: &Verified) {
 pub async fn start_ping_round(
     state: &mut EventLoopState,
     ctx: &HandlerCtx<'_>,
-    resp: Option<tokio::sync::oneshot::Sender<Vec<(Nickname, u64)>>>,
+    resp: Option<oneshot::Sender<Vec<(Nickname, u64)>>>,
 ) {
     let now = n0_future::time::Instant::now();
-    let window = crate::util::tuning::ping_window();
+    let window = tuning::ping_window();
     let probe = Message::new_ping(ctx.mesh, ctx.author).sign(ctx.identity);
     state.arm_ping_round(PingRound::new(&probe, now, now + window, resp));
     broadcast_msg(ctx.sender, &probe).await;
@@ -158,21 +166,83 @@ pub(crate) async fn send_second_probe(state: &mut EventLoopState, ctx: &HandlerC
     broadcast_msg(ctx.sender, &probe).await;
 }
 
-/// Parameters for [`broadcast_state_merge`]. A dedicated struct rather than
-/// reusing `HandlerCtx`: several root-crate callers only hold loose
-/// `mesh`/`author`/`sender`/`sink` locals, not a full `HandlerCtx`.
+/// The four refs that a state write needs from the loop: the mesh, the author, the sender of the
+/// topic, and the sink that reports the write. A [`HandlerCtx`] holds all four.
 #[expect(
     missing_debug_implementations,
     reason = "sink is a &'a dyn NodeSink trait object with no Debug impl"
 )]
-pub struct StateMergeParams<'a> {
-    pub mesh: &'a MeshId,
-    pub author: &'a Nickname,
-    pub merge: serde_json::Value,
-    pub sender: &'a MeshSender,
-    pub sink: &'a dyn NodeSink,
+#[non_exhaustive]
+pub struct MergeCtx<'mesh> {
+    /// The id of the mesh that the write belongs to.
+    pub mesh: &'mesh MeshId,
+    /// The author of the write.
+    pub author: &'mesh Nickname,
+    /// The sender of the topic.
+    pub sender: &'mesh MeshSender,
+    /// The sink that reports the write.
+    pub sink: &'mesh dyn NodeSink,
+}
+
+impl<'mesh> MergeCtx<'mesh> {
+    /// The four refs of a state write, in the order of the struct.
+    #[must_use]
+    pub const fn new(
+        mesh: &'mesh MeshId,
+        author: &'mesh Nickname,
+        sender: &'mesh MeshSender,
+        sink: &'mesh dyn NodeSink,
+    ) -> Self {
+        Self {
+            mesh,
+            author,
+            sender,
+            sink,
+        }
+    }
+}
+
+impl<'ctx> From<&HandlerCtx<'ctx>> for MergeCtx<'ctx> {
+    fn from(ctx: &HandlerCtx<'ctx>) -> Self {
+        Self::new(ctx.mesh, ctx.author, ctx.sender, ctx.sink)
+    }
+}
+
+/// Parameters for [`broadcast_state_merge`]. Agent-driven writes surface to the operator, so
+/// `surface` is `true` unless [`StateMergeParams::with_surface`] says otherwise.
+#[expect(
+    missing_debug_implementations,
+    reason = "the ctx holds a &dyn NodeSink, which has no Debug impl"
+)]
+#[non_exhaustive]
+pub struct StateMergeParams<'mesh> {
+    /// The context of the write.
+    pub ctx: MergeCtx<'mesh>,
+    /// The channel of the write.
     pub channel: Channel,
+    /// The RFC 7386 merge to apply.
+    pub merge: serde_json::Value,
+    /// Whether the write is reported to the operator as a `state` or `meta` event. Default `true`.
     pub surface: bool,
+}
+
+impl<'mesh> StateMergeParams<'mesh> {
+    /// A write on `channel` that surfaces to the operator.
+    #[must_use]
+    pub fn new(ctx: MergeCtx<'mesh>, channel: Channel, merge: serde_json::Value) -> Self {
+        Self {
+            ctx,
+            channel,
+            merge,
+            surface: true,
+        }
+    }
+
+    /// Whether the write is reported to the operator as a `state` or `meta` event.
+    #[must_use]
+    pub fn with_surface(self, surface: bool) -> Self {
+        Self { surface, ..self }
+    }
 }
 
 /// The single shared-state write helper, shared by the IPC `state_merge` command
@@ -202,16 +272,19 @@ pub struct StateMergeParams<'a> {
 pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
-) -> anyhow::Result<Option<WireFrame>> {
+) -> Result<Option<WireFrame>, crate::transport::SendError> {
     use crate::doc::Ingested;
 
     let StateMergeParams {
-        mesh,
-        author,
-        merge,
-        sender,
-        sink,
+        ctx:
+            MergeCtx {
+                mesh,
+                author,
+                sender,
+                sink,
+            },
         channel,
+        merge,
         surface,
     } = params;
 
@@ -221,7 +294,10 @@ pub async fn broadcast_state_merge(
     // rejoined session under a nickname-derived actor would collide seq
     // numbers with its predecessor's history (see `doc::actor_for`).
     let actor_seed = *state.identity.public().as_bytes();
-    let built = state.doc(channel).build_change(&merge, &actor_seed)?;
+    let built = state
+        .doc(channel)
+        .build_change(&merge, &actor_seed)
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
     let Some(change_bytes) = built else {
         return Ok(None);
     };
@@ -233,10 +309,13 @@ pub async fn broadcast_state_merge(
     //    `plain_body` keeps the plaintext for our own surfacing below.
     let (wire_body, plain_body) = state
         .doc(channel)
-        .compose_wire_body(&change_bytes, surface.then_some(&merge))?;
+        .compose_wire_body(&change_bytes, surface.then_some(&merge))
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
     let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
-    let bytes = signed.serialize()?;
-    crate::logging::messages::log_out(&signed);
+    let bytes = signed
+        .serialize()
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
+    messages::log_out(&signed);
 
     // 3. Apply the signed frame to the live doc through the authorization gate.
     //    Ingest retains the frame as the re-serve store (replacing `StateLog`),
@@ -246,10 +325,17 @@ pub async fn broadcast_state_merge(
         Ingested::Applied { doc, .. } => doc,
         Ingested::Duplicate => return Ok(None),
         Ingested::Rejected => {
-            anyhow::bail!("write rejected: a member may only write its own /peers/<nick>/card")
+            return Err(crate::transport::SendError::internal(anyhow::anyhow!(
+                "write rejected: a member may only write its own /peers/<nick>/card"
+            )));
         }
         Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
         Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
+        _ => {
+            return Err(crate::transport::SendError::internal(anyhow::anyhow!(
+                "the document did not take the change"
+            )));
+        }
     };
 
     // 4. Surface our own change, and gossip it (or buffer while no gossip path
@@ -269,7 +355,7 @@ pub async fn broadcast_state_merge(
         sender
             .broadcast(bytes.clone())
             .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("{error}")))?;
     } else {
         // No gossip path yet: buffer until we mesh. (The change is already in
         // the local doc, so heads anti-entropy still reconciles it if the
@@ -318,7 +404,7 @@ pub(crate) fn peer_info_json(
     proof: String,
     holds_beacon: bool,
 ) -> serde_json::Value {
-    let mut json = crate::protocol::peer_addr::endpoint_addr_to_json(addr);
+    let mut json = peer_addr::endpoint_addr_to_json(addr);
     json["proof"] = serde_json::Value::String(proof);
     if holds_beacon {
         json["beacon"] = serde_json::Value::Bool(true);
@@ -333,7 +419,7 @@ pub(crate) fn peer_info_json(
 /// safe to repeat on every new neighbor. Stamps `peerinfo_flooded_at`, the
 /// window the `joined` re-flood gate reads.
 pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &HandlerCtx<'_>) {
-    state.peerinfo_flooded_at = Some(crate::util::clock::Instant::now());
+    state.peerinfo_flooded_at = Some(clock::Instant::now());
     state.peerinfo_deferred = false;
     let our_addr = ctx.endpoint.addr();
     state.last_flooded_addr = Some(our_addr.clone());
@@ -348,7 +434,7 @@ pub(crate) async fn broadcast_peer_info(state: &mut EventLoopState, ctx: &Handle
     let proof = state
         .peer_info_proof
         .get_or_insert_with(|| {
-            crate::transport::endpoint_proof::sign(
+            endpoint_proof::sign(
                 ctx.endpoint.secret_key(),
                 ctx.mesh,
                 &state.identity.author_key(),
@@ -407,25 +493,28 @@ pub(crate) fn park_and_offer(
 /// for the next tick of the retry pass, up to 30 s, and a user waits with it. The peer is a lane peer,
 /// or a pair with an IP path that reads as the relay (`note_held` marks both).
 fn offer_for_parked(state: &mut EventLoopState, ctx: &HandlerCtx<'_>, frame: &Verified) {
-    let Some(nick) = crate::protocol::message::sole_addressee(&frame.kind) else {
+    let Some(nick) = message::sole_addressee(&frame.kind) else {
         return;
     };
     let Some(addr) = state.peer_endpoints.get(nick).cloned() else {
         return;
     };
-    if state.lane_session_wanted(addr.id, crate::util::clock::Instant::now()) {
-        crate::transport::webrtc::negotiate_session(state, ctx, addr.id, addr);
+    if state.lane_session_wanted(addr.id, clock::Instant::now()) {
+        webrtc::negotiate_session(state, ctx, addr.id, addr);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::transport::UdpTransport;
     use habilis_network_test_tracing::test;
 
     use super::{mark_parked, peer_info_json};
     use crate::protocol::{MeshId, Message};
     use crate::testing::{endpoint_id, fresh_state, nick};
 
+    use crate::protocol::{message, peer_addr};
+    use crate::util::clock;
     #[test]
     fn our_peer_info_says_so_while_we_hold_the_rendezvous() {
         let addr = iroh::EndpointAddr::new(iroh::SecretKey::generate().public());
@@ -448,8 +537,7 @@ mod tests {
         let id = iroh::SecretKey::generate().public();
         let json = peer_info_json(&iroh::EndpointAddr::new(id), "proof".to_owned(), true);
 
-        let (read, _) =
-            crate::protocol::peer_addr::endpoint_addr_from_json(&json).expect("the address reads");
+        let (read, _) = peer_addr::endpoint_addr_from_json(&json).expect("the address reads");
 
         assert_eq!(read, id);
     }
@@ -460,7 +548,7 @@ mod tests {
     fn an_unmeshed_directed_frame_to_a_lane_peer_marks_the_peer_wanted() {
         let mut state = fresh_state();
         state.meshed = false;
-        state.local_udp_transport = true;
+        state.local_udp_transport = UdpTransport::Present;
         let bob = endpoint_id(1);
         state.peer_endpoints.insert(
             nick("bob"),
@@ -475,7 +563,7 @@ mod tests {
         )
         .sign(&crate::protocol::Identity::generate());
         let bytes = frame.serialize().expect("serialize");
-        let now = crate::util::clock::Instant::now();
+        let now = clock::Instant::now();
         assert!(
             !state.lane_session_wanted(bob, now),
             "nothing is parked yet"
@@ -498,16 +586,16 @@ mod tests {
         let frame = Message::new_app(
             &MeshId::from("test"),
             &nick("alice"),
-            crate::protocol::message::AppFrameParams {
-                tag: crate::protocol::AppTag::from("app_msg"),
-                to: None,
-                corr: None,
-                body: crate::protocol::MessageBody::from("hi"),
-            },
+            message::AppFrameParams::new(
+                crate::protocol::AppTag::new("app_msg").expect("a valid app tag"),
+                None,
+                None,
+                crate::protocol::MessageBody::from("hi"),
+            ),
         )
         .sign(&crate::protocol::Identity::generate());
         mark_parked(&mut state, &frame, &frame.serialize().expect("serialize"));
-        assert!(!state.lane_session_wanted(bob, crate::util::clock::Instant::now()));
+        assert!(!state.lane_session_wanted(bob, clock::Instant::now()));
     }
 
     /// The offer goes out at once for a peer that is wanted, and a second call does not start a
@@ -521,7 +609,7 @@ mod tests {
         let frame = node.frame_to_bob();
         assert_eq!(state.webrtc_admission.in_flight(), 0);
 
-        state.want_lane_session(node.bob, crate::util::clock::Instant::now());
+        state.want_lane_session(node.bob, clock::Instant::now());
         super::offer_for_parked(&mut state, &ctx, &frame);
         assert_eq!(state.webrtc_admission.in_flight(), 1, "the offer is out");
         super::offer_for_parked(&mut state, &ctx, &frame);

@@ -10,11 +10,13 @@
 //! A stream is 1-1: its hash admits exactly one consumer, and a second one is
 //! [`Refused::Taken`]. What goes over it is up to the producer.
 
+mod error;
 mod hash;
 mod node;
 mod produce;
 mod read;
 
+pub use error::{HashError, StreamError};
 pub use hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 pub use node::{StreamNode, StreamOpts};
 pub use produce::Producer;

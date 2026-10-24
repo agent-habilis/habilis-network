@@ -510,12 +510,10 @@ fn mesh_id_round_trips_max_byte_name() {
 mod prop {
     use super::LockedMesh;
     use habilis_network_test_tracing::test;
-    use proptest::{
-        array::{uniform16, uniform32},
-        prelude::any,
-        prop_assert, prop_assert_eq, prop_assert_ne, prop_assume, proptest,
-        strategy::Strategy,
-    };
+    use proptest::array::{uniform16, uniform32};
+    use proptest::prelude::any;
+    use proptest::strategy::Strategy;
+    use proptest::{prop_assert, prop_assert_eq, prop_assert_ne, prop_assume, proptest};
 
     use super::{Mesh, MeshConfig, MeshName, SEED_LEN};
     use crate::crypto::Seed;
