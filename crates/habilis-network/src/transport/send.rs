@@ -232,7 +232,7 @@ impl std::fmt::Display for SendError {
             | Self::Oversize(message)
             | Self::InvalidAddressee(message) => f.write_str(message),
             Self::Stopped => f.write_str("mesh event loop has stopped"),
-            Self::EventLoop(error) => std::fmt::Display::fmt(error, f),
+            Self::EventLoop(_) => f.write_str("the mesh event loop failed"),
             Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), f),
         }
     }
@@ -241,7 +241,7 @@ impl std::fmt::Display for SendError {
 impl std::error::Error for SendError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::EventLoop(error) => error.source(),
+            Self::EventLoop(error) => Some(error),
             Self::Internal(error) => error.source(),
             Self::Held { .. }
             | Self::Undeliverable(_)
@@ -1734,6 +1734,7 @@ mod leave_tests {
         let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
         let error = SendError::EventLoop(EventLoopError::Internal(Box::new(io)));
         let text = format!("{:#}", anyhow::Error::new(error));
-        assert!(text.contains("Address already in use"), "{text}");
+        assert!(text.starts_with("the mesh event loop failed"), "{text}");
+        assert_eq!(text.matches("Address already in use").count(), 1, "{text}");
     }
 }
