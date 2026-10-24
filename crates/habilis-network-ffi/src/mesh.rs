@@ -188,7 +188,9 @@ impl Mesh {
         let Some(node) = self.node.as_ref() else {
             anyhow::bail!("this mesh handle is closed");
         };
-        self.runtime.block_on(node.send(req))
+        self.runtime
+            .block_on(node.send(req))
+            .map_err(anyhow::Error::from)
     }
 
     fn await_reply<T>(&self, answer: oneshot::Receiver<T>) -> Result<T> {

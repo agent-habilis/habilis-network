@@ -69,14 +69,16 @@ pub async fn send_app(
     ctx: &HandlerCtx<'_>,
     frame: Verified,
     class: AppClass,
-) -> anyhow::Result<crate::transport::Delivered> {
+) -> Result<crate::transport::Delivered, crate::transport::SendError> {
     if frame.wire_len() > MAX_MESSAGE_SIZE {
-        anyhow::bail!(
+        return Err(crate::transport::SendError::Oversize(format!(
             "app frame too large: {} bytes exceeds the {MAX_MESSAGE_SIZE}-byte single-frame limit",
             frame.wire_len()
-        );
+        )));
     }
-    let bytes = frame.serialize()?;
+    let bytes = frame
+        .serialize()
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
     messages::log_out(&frame);
     if state.meshed {
         // Directed vs. broadcast is decided inside `deliver` from the frame's
@@ -84,7 +86,7 @@ pub async fn send_app(
         // held off a relay-only peer is parked, not failed: the proven direct
         // path flushes it (see `gossip::recv::flush_pending`).
         match crate::transport::deliver(&frame, bytes.clone(), state, ctx.sender).await {
-            Err(error) if error.is::<crate::transport::HeldForDirect>() => {
+            Err(crate::transport::SendError::Held { .. }) => {
                 park_and_offer(state, ctx, &frame, &bytes);
             }
             outcome => {
@@ -103,7 +105,9 @@ pub async fn send_app(
         super::recv::retain_own_app_broadcast(state, &frame, class);
         Ok(crate::transport::Delivered::Done)
     } else {
-        anyhow::bail!("pending outbound buffer full; app frame dropped")
+        Err(crate::transport::SendError::internal(anyhow::anyhow!(
+            "pending outbound buffer full; app frame dropped"
+        )))
     }
 }
 
@@ -268,7 +272,7 @@ impl<'mesh> StateMergeParams<'mesh> {
 pub async fn broadcast_state_merge(
     state: &mut EventLoopState,
     params: StateMergeParams<'_>,
-) -> anyhow::Result<Option<WireFrame>> {
+) -> Result<Option<WireFrame>, crate::transport::SendError> {
     use crate::doc::Ingested;
 
     let StateMergeParams {
@@ -290,7 +294,10 @@ pub async fn broadcast_state_merge(
     // rejoined session under a nickname-derived actor would collide seq
     // numbers with its predecessor's history (see `doc::actor_for`).
     let actor_seed = *state.identity.public().as_bytes();
-    let built = state.doc(channel).build_change(&merge, &actor_seed)?;
+    let built = state
+        .doc(channel)
+        .build_change(&merge, &actor_seed)
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
     let Some(change_bytes) = built else {
         return Ok(None);
     };
@@ -302,9 +309,12 @@ pub async fn broadcast_state_merge(
     //    `plain_body` keeps the plaintext for our own surfacing below.
     let (wire_body, plain_body) = state
         .doc(channel)
-        .compose_wire_body(&change_bytes, surface.then_some(&merge))?;
+        .compose_wire_body(&change_bytes, surface.then_some(&merge))
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
     let signed = Message::new_channel_event(mesh, author, wire_body, channel).sign(&state.identity);
-    let bytes = signed.serialize()?;
+    let bytes = signed
+        .serialize()
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
     messages::log_out(&signed);
 
     // 3. Apply the signed frame to the live doc through the authorization gate.
@@ -315,11 +325,17 @@ pub async fn broadcast_state_merge(
         Ingested::Applied { doc, .. } => doc,
         Ingested::Duplicate => return Ok(None),
         Ingested::Rejected => {
-            anyhow::bail!("write rejected: a member may only write its own /peers/<nick>/card")
+            return Err(crate::transport::SendError::internal(anyhow::anyhow!(
+                "write rejected: a member may only write its own /peers/<nick>/card"
+            )));
         }
         Ingested::Buffered => unreachable!("a locally-built change's deps are always present"),
         Ingested::Ignored => unreachable!("a locally-built change body always decodes"),
-        _ => anyhow::bail!("the document did not take the change"),
+        _ => {
+            return Err(crate::transport::SendError::internal(anyhow::anyhow!(
+                "the document did not take the change"
+            )));
+        }
     };
 
     // 4. Surface our own change, and gossip it (or buffer while no gossip path
@@ -339,7 +355,7 @@ pub async fn broadcast_state_merge(
         sender
             .broadcast(bytes.clone())
             .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("{error}")))?;
     } else {
         // No gossip path yet: buffer until we mesh. (The change is already in
         // the local doc, so heads anti-entropy still reconciles it if the

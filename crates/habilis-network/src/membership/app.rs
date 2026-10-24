@@ -79,22 +79,24 @@ pub fn msg_fits(text: &str) -> bool {
 /// # Errors
 /// `text` holds a control character other than tab, newline or carriage
 /// return, or does not fit one frame (see [`msg_fits`]).
-pub fn msg_body(text: &str) -> Result<MessageBody> {
-    anyhow::ensure!(
-        msg_fits(text),
-        "message too large for one frame: send it as a stream instead"
-    );
-    MessageBody::new(text.to_owned()).map_err(|error| anyhow::anyhow!("{error}"))
+pub fn msg_body(text: &str) -> Result<MessageBody, crate::transport::SendError> {
+    if !msg_fits(text) {
+        return Err(crate::transport::SendError::Oversize(
+            "message too large for one frame: send it as a stream instead".to_owned(),
+        ));
+    }
+    MessageBody::new(text.to_owned())
+        .map_err(|error| crate::transport::SendError::Internal(error.into()))
 }
 
 /// Parse an optional addressee.
 ///
 /// # Errors
 /// `to` is not a valid nickname.
-pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>> {
+pub fn parse_to(to: Option<&str>) -> Result<Option<Nickname>, crate::transport::SendError> {
     to.map(|nick| Nickname::new(nick.to_owned()))
         .transpose()
-        .map_err(|error| anyhow::anyhow!("{error}"))
+        .map_err(|error| crate::transport::SendError::InvalidAddressee(error.to_string()))
 }
 
 /// `text` as `serde_json` writes it inside quotes.

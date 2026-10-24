@@ -52,13 +52,17 @@ pub async fn deliver(
     bytes: WireFrame,
     state: &EventLoopState,
     sender: &MeshSender,
-) -> Result<Delivered> {
+) -> Result<Delivered, SendError> {
     match resolve(msg, bytes, state)? {
         Resend::Broadcast(bytes) => {
-            broadcast(sender, bytes).await?;
+            broadcast(sender, bytes)
+                .await
+                .map_err(SendError::internal)?;
             Ok(Delivered::Done)
         }
-        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool).await,
+        Resend::Unicast(eid, bytes) => send_unicast(eid, bytes, &state.unicast_pool)
+            .await
+            .map_err(SendError::internal),
     }
 }
 
@@ -68,11 +72,15 @@ pub async fn deliver(
 /// # Errors
 /// The same as [`deliver`] for a message that has no path now: held for a
 /// direct path, or its addressee has no known endpoint.
-pub(crate) fn resolve(msg: &Verified, bytes: WireFrame, state: &EventLoopState) -> Result<Resend> {
+pub(crate) fn resolve(
+    msg: &Verified,
+    bytes: WireFrame,
+    state: &EventLoopState,
+) -> Result<Resend, SendError> {
     match route(msg, state) {
         Route::Broadcast => Ok(Resend::Broadcast(bytes)),
         Route::Unicast(eid) => Ok(Resend::Unicast(eid, bytes)),
-        Route::Held(eid) => Err(HeldForDirect { eid }.into()),
+        Route::Held(eid) => Err(SendError::Held { eid }),
         Route::Undeliverable => {
             let addressee = sole_addressee(&msg.kind);
             let name = addressee.map_or("<none>", Nickname::as_str);
@@ -86,9 +94,9 @@ pub(crate) fn resolve(msg: &Verified, bytes: WireFrame, state: &EventLoopState) 
             } else {
                 "no known endpoint (PeerInfo not yet received)"
             };
-            Err(anyhow::anyhow!(
+            Err(SendError::Undeliverable(format!(
                 "directed message to {name} undeliverable: {cause}"
-            ))
+            )))
         }
     }
 }
@@ -178,44 +186,74 @@ pub(crate) fn unicast_answer_target(
     (state.linked_endpoints.contains(&eid) && !held(eid, state)).then_some(eid)
 }
 
-/// The error [`deliver`] returns for a [`Route::Held`] frame. Typed, so a
-/// caller that would rather park the frame than fail it (`send_app`) can tell
-/// it from a real send failure with a downcast.
+/// Why a frame could not be sent.
+///
+/// [`SendError::Held`] is the one a caller parks rather than fails on (`send_app`), so it
+/// is a variant and not a downcast. [`SendError::Internal`] holds the causes no caller acts on.
 #[derive(Debug)]
-pub(crate) struct HeldForDirect {
-    eid: EndpointId,
+#[non_exhaustive]
+pub enum SendError {
+    /// The frame waits for a direct path: its peer's only path is the relay, which is lookup
+    /// only on this mesh.
+    Held {
+        /// The endpoint the frame is held for.
+        eid: EndpointId,
+    },
+    /// The addressee has no known path: a route that waits on `PeerInfo`, or the rendezvous.
+    Undeliverable(String),
+    /// The message is larger than one frame carries.
+    Oversize(String),
+    /// The addressee is not a valid nickname.
+    InvalidAddressee(String),
+    /// The mesh event loop has stopped, so nothing can carry the message.
+    Stopped,
+    /// A cause no caller acts on. It keeps its text and its chain.
+    Internal(Box<dyn std::error::Error + Send + Sync>),
 }
 
-impl std::fmt::Display for HeldForDirect {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "directed message held: {}'s only path is the relay, which is lookup only on this mesh",
-            self.eid
-        )
+impl SendError {
+    /// Wraps a cause no caller acts on, keeping its text and its chain.
+    pub(crate) fn internal(error: anyhow::Error) -> Self {
+        Self::Internal(error.into())
     }
 }
 
-impl std::error::Error for HeldForDirect {}
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Held { eid } => write!(
+                f,
+                "directed message held: {eid}'s only path is the relay, which is lookup only on this mesh"
+            ),
+            Self::Undeliverable(message)
+            | Self::Oversize(message)
+            | Self::InvalidAddressee(message) => f.write_str(message),
+            Self::Stopped => f.write_str("mesh event loop has stopped"),
+            Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), f),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
 
 /// A frame held for a lane peer is the reason to open its session: the peer has no IP path, and
 /// a send could not dial it without one. So is a frame held for a pair that lost its direct path
-/// and reads as the relay. Call this when a send failed with [`HeldForDirect`]; any other error,
+/// and reads as the relay. Call this when a send failed with [`SendError::Held`]; any other error,
 /// and a peer that has an IP path and no relay reading, change nothing.
-pub(crate) fn note_held(state: &mut EventLoopState, error: &anyhow::Error) {
-    let Some(held) = error.downcast_ref::<HeldForDirect>() else {
+pub(crate) fn note_held(state: &mut EventLoopState, error: &SendError) {
+    let SendError::Held { eid } = error else {
         return;
     };
     let needs_lane = state
         .peer_endpoints
         .values()
-        .find(|addr| addr.id == held.eid)
+        .find(|addr| addr.id == *eid)
         .is_some_and(|addr| super::webrtc::pair_needs_lane(addr, state.local_udp_transport));
     // A pair that lost its direct path reads as the relay: if its offer failed, nobody would
     // offer again, so the parked frame asks.
-    let reads_as_relay = state.pair_path_kind(held.eid) == Some(super::probe::PathKind::Relay);
+    let reads_as_relay = state.pair_path_kind(*eid) == Some(super::probe::PathKind::Relay);
     if needs_lane || reads_as_relay {
-        state.want_lane_session(held.eid, clock::Instant::now());
+        state.want_lane_session(*eid, clock::Instant::now());
     }
 }
 

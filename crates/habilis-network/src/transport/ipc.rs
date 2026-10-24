@@ -258,6 +258,38 @@ impl std::fmt::Display for NoDaemon {
 
 impl std::error::Error for NoDaemon {}
 
+/// Why a command could not reach its daemon.
+///
+/// [`IpcError::NoDaemon`] is the one a caller acts on (no live daemon to ask).
+/// [`IpcError::Internal`] holds the causes no caller acts on: a bad socket name, a
+/// round trip that fails, or a response that is too large.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum IpcError {
+    /// No daemon is listening on the socket.
+    NoDaemon(NoDaemon),
+    /// A cause no caller acts on. It keeps its text and its chain.
+    Internal(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl IpcError {
+    /// Wraps a cause no caller acts on, keeping its text and its chain.
+    pub(crate) fn internal(error: anyhow::Error) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl std::fmt::Display for IpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoDaemon(error) => std::fmt::Display::fmt(error, f),
+            Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), f),
+        }
+    }
+}
+
+impl std::error::Error for IpcError {}
+
 /// Client-side: send an IPC command to the running server and return the raw JSON response.
 ///
 /// # Panics
@@ -265,7 +297,11 @@ impl std::error::Error for NoDaemon {}
 /// # Errors
 /// [`NoDaemon`] when no server is listening; otherwise an invalid socket name
 /// or a failed request/response round trip.
-pub async fn send<C>(base: &std::path::Path, cmd: &C, nickname: &Nickname) -> Result<String>
+pub async fn send<C>(
+    base: &std::path::Path,
+    cmd: &C,
+    nickname: &Nickname,
+) -> Result<String, IpcError>
 where
     C: Serialize + Addressed,
 {
@@ -273,11 +309,14 @@ where
         .mesh_id()
         .expect("send() is only used for mesh-addressed commands; Info uses send_to_path");
     let path = socket_path(base, mesh, nickname);
-    let name = to_name(&path).map_err(|error| anyhow::anyhow!("invalid socket name: {error}"))?;
-    let stream = Stream::connect(name).await.map_err(|_| NoDaemon {
-        nickname: nickname.clone(),
+    let name = to_name(&path)
+        .map_err(|error| IpcError::internal(anyhow::anyhow!("invalid socket name: {error}")))?;
+    let stream = Stream::connect(name).await.map_err(|_| {
+        IpcError::NoDaemon(NoDaemon {
+            nickname: nickname.clone(),
+        })
     })?;
-    round_trip(stream, cmd).await
+    round_trip(stream, cmd).await.map_err(IpcError::internal)
 }
 
 /// Client-side: send an IPC command to a specific socket path. `doctor` uses
@@ -287,15 +326,21 @@ where
 /// # Errors
 /// The path is not valid UTF-8, the socket can't be connected (no live
 /// daemon), or the request/response round trip fails.
-pub async fn send_to_path<C: Serialize>(path: &std::path::Path, cmd: &C) -> Result<String> {
+pub async fn send_to_path<C: Serialize>(
+    path: &std::path::Path,
+    cmd: &C,
+) -> Result<String, IpcError> {
     use anyhow::Context;
-    let path_str = path.to_str().context("socket path is not valid UTF-8")?;
-    let name =
-        to_name(path_str).map_err(|error| anyhow::anyhow!("invalid socket name: {error}"))?;
+    let path_str = path
+        .to_str()
+        .context("socket path is not valid UTF-8")
+        .map_err(IpcError::internal)?;
+    let name = to_name(path_str)
+        .map_err(|error| IpcError::internal(anyhow::anyhow!("invalid socket name: {error}")))?;
     let stream = Stream::connect(name)
         .await
-        .map_err(|error| anyhow::anyhow!("connect {path_str}: {error}"))?;
-    round_trip(stream, cmd).await
+        .map_err(|error| IpcError::internal(anyhow::anyhow!("connect {path_str}: {error}")))?;
+    round_trip(stream, cmd).await.map_err(IpcError::internal)
 }
 
 /// Write `cmd`, half-close, and read back the single-line JSON response.

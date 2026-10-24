@@ -63,10 +63,8 @@ pub(crate) use outbox::{Resend, ResendOutbox};
 pub(crate) use path::{PROBE_DEADLINE, refuse_relayed};
 pub(crate) use path::{PayloadPath, RELAY_REFUSED, payload_allowed_on};
 pub(crate) use pool::UnicastPool;
-pub use send::{Delivered, Lane, PendingSend, deliver, deliver_in_background};
-pub(crate) use send::{
-    HeldForDirect, lane_for, note_held, resolve, send_best_effort, unicast_answer_target,
-};
+pub use send::{Delivered, Lane, PendingSend, SendError, deliver, deliver_in_background};
+pub(crate) use send::{lane_for, note_held, resolve, send_best_effort, unicast_answer_target};
 pub use sender::MeshSender;
 pub use webrtc::MAX_DIRECT_PEERS;
 pub(crate) use webrtc::{IceProfile, MESH_WEBRTC_SIGNAL_ALPN, UdpTransport, WebRtcSignalAcceptor};

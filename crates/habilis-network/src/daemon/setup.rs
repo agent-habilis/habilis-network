@@ -412,6 +412,7 @@ async fn build_member_endpoint(
 ///     64,
 /// )
 /// .await
+/// .map_err(anyhow::Error::from)
 /// # }
 /// ```
 pub struct InjectedEndpoint {

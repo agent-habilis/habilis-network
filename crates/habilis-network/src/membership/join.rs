@@ -286,7 +286,9 @@ impl Membership {
 /// The event loop returned an error or panicked.
 pub async fn depart(node: Node<MembershipApp>) -> Result<(), SetupError> {
     n0_future::time::sleep(DEPARTURE_GRACE).await;
-    node.leave().await.map_err(SetupError::internal)
+    node.leave()
+        .await
+        .map_err(|error| SetupError::Internal(error.into()))
 }
 
 /// Resolve the selectors into a [`SetupKind`] plus our nickname. Exactly one

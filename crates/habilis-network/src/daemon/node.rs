@@ -223,11 +223,11 @@ impl<A: NodeDriver + 'static> Node<A> {
     ///
     /// # Errors
     /// Fails if the event loop has stopped (its receiver dropped).
-    pub async fn send(&self, req: A::Session) -> anyhow::Result<()> {
+    pub async fn send(&self, req: A::Session) -> Result<(), crate::transport::SendError> {
         self.req_tx
             .send(req)
             .await
-            .map_err(|_| anyhow::anyhow!("mesh event loop has stopped"))
+            .map_err(|_| crate::transport::SendError::Stopped)
     }
 
     /// A cloneable handle to the same request channel [`Self::send`] uses.
@@ -253,15 +253,15 @@ impl<A: NodeDriver + 'static> Node<A> {
     ///
     /// # Errors
     /// Returns an error if the event-loop task panicked or returned an error.
-    pub async fn leave(mut self) -> anyhow::Result<()> {
+    pub async fn leave(mut self) -> Result<(), crate::transport::SendError> {
         let _ = self.quit_tx.send(()).await;
         if let Some(task) = self.task.take() {
             let timeout = n0_future::time::sleep(NODE_LEAVE);
             tokio::select! {
                 joined = task => {
                     joined
-                        .map_err(|error| anyhow::anyhow!("mesh task panicked: {error}"))?
-                        .map_err(|error| anyhow::anyhow!("mesh loop error: {error}"))?;
+                        .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("mesh task panicked: {error}")))?
+                        .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("mesh loop error: {error}")))?;
                 }
                 () = timeout => {}
             }

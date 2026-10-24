@@ -21,6 +21,7 @@ pub use crate::daemon::setup::{
 #[cfg(feature = "host")]
 pub use crate::daemon::{OwnerPidError, validate_owner_pid};
 pub use crate::lookup::MdnsHandle;
+pub use crate::transport::SendError;
 
 /// The session state file the daemon writes for external readers — its sole
 /// writer. Daemon-session state, not a generic filesystem helper.
@@ -44,8 +45,8 @@ pub mod state_file {
 #[cfg(feature = "host")]
 pub mod ipc {
     pub use crate::transport::ipc::{
-        Addressed, NoDaemon, active_socket_paths, json_ack, json_error, json_ok_msg, send,
-        send_to_path,
+        Addressed, IpcError, NoDaemon, active_socket_paths, json_ack, json_error, json_ok_msg,
+        send, send_to_path,
     };
 }
 
