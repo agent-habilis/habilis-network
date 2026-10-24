@@ -45,8 +45,6 @@
 use std::fmt;
 use std::future::Future;
 
-use anyhow::{Result, bail};
-
 /// Bytes per chunk.
 ///
 /// Fixed offsets, deliberately, rather than content-defined chunking. CDC
@@ -111,13 +109,13 @@ macro_rules! digest_newtype {
             ///
             /// # Errors
             /// The text is not exactly 64 hex digits.
-            pub fn from_hex(text: &str) -> Result<Self> {
+            pub fn from_hex(text: &str) -> Result<Self, ChunkError> {
                 let bytes = text.as_bytes();
                 if bytes.len() != 64 {
-                    bail!(
+                    return Err(ChunkError::Malformed(format!(
                         concat!("a ", $what, " is 64 hex digits, got {}"),
                         bytes.len()
-                    );
+                    )));
                 }
                 // Decode from bytes, never by slicing the `&str`: the guard
                 // above counts bytes, and a slice that lands inside a
@@ -125,7 +123,9 @@ macro_rules! digest_newtype {
                 let mut out = [0u8; 32];
                 for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
                     let (Some(high), Some(low)) = (hex_nibble(pair[0]), hex_nibble(pair[1])) else {
-                        bail!(concat!("a ", $what, " is hex"));
+                        return Err(ChunkError::Malformed(
+                            concat!("a ", $what, " is hex").to_owned(),
+                        ));
                     };
                     *slot = (high << 4) | low;
                 }
@@ -204,13 +204,13 @@ impl ChunkMap {
     ///
     /// # Errors
     /// The row length does not match the size it claims to describe.
-    pub fn from_leaves(leaves: Vec<ChunkHash>, size: u64) -> Result<Self> {
+    pub fn from_leaves(leaves: Vec<ChunkHash>, size: u64) -> Result<Self, ChunkError> {
         let expected = chunk_count(size);
         if leaves.len() != expected {
-            bail!(
+            return Err(ChunkError::Malformed(format!(
                 "a {size}-byte file has {expected} chunks, but the row holds {}",
                 leaves.len()
-            );
+            )));
         }
         Ok(Self {
             root: root_of(&leaves, size),
@@ -500,13 +500,13 @@ impl Coverage {
     ///
     /// # Errors
     /// The bitmap is too short for the count it claims to cover.
-    pub fn from_bits(bits: &[u8], len: usize) -> Result<Self> {
+    pub fn from_bits(bits: &[u8], len: usize) -> Result<Self, ChunkError> {
         let needed = len.div_ceil(8);
         if bits.len() < needed {
-            bail!(
+            return Err(ChunkError::Malformed(format!(
                 "a coverage of {len} chunks needs {needed} bytes, got {}",
                 bits.len()
-            );
+            )));
         }
         Ok(Self {
             bits: bits[..needed].to_vec(),
@@ -570,13 +570,13 @@ pub trait ChunkSource {
     /// `None` means "not held", which is ordinary. A backend that does not own
     /// its bytes resolves the address through a reverse index to a file and an
     /// offset, and reads through — see the module docs.
-    fn get(&self, hash: ChunkHash) -> impl Future<Output = Result<Option<Vec<u8>>>>;
+    fn get(&self, hash: ChunkHash) -> impl Future<Output = Result<Option<Vec<u8>>, ChunkError>>;
 
     /// Whether this chunk can be answered for right now.
-    fn has(&self, hash: ChunkHash) -> impl Future<Output = Result<bool>>;
+    fn has(&self, hash: ChunkHash) -> impl Future<Output = Result<bool, ChunkError>>;
 
     /// The leaf row for `root`, if this source knows it.
-    fn map(&self, root: Root) -> impl Future<Output = Result<Option<ChunkMap>>>;
+    fn map(&self, root: Root) -> impl Future<Output = Result<Option<ChunkMap>, ChunkError>>;
 
     /// Which chunks of `root` this source can answer for.
     ///
@@ -587,7 +587,7 @@ pub trait ChunkSource {
     /// **Partial is a first-class answer.** A source holding some of a file
     /// serves those chunks and says so; there is no notion of holding a file
     /// "in full" before it may be shared.
-    fn coverage(&self, root: Root) -> impl Future<Output = Result<Coverage>>;
+    fn coverage(&self, root: Root) -> impl Future<Output = Result<Coverage, ChunkError>>;
 
     /// Coverage for several roots, asked once.
     ///
@@ -605,7 +605,10 @@ pub trait ChunkSource {
     ///
     /// # Errors
     /// Whatever the backend's [`Self::coverage`] would raise for one root.
-    fn coverage_of(&self, roots: &[Root]) -> impl Future<Output = Result<Vec<Coverage>>> {
+    fn coverage_of(
+        &self,
+        roots: &[Root],
+    ) -> impl Future<Output = Result<Vec<Coverage>, ChunkError>> {
         async move {
             let mut out = Vec::with_capacity(roots.len());
             for root in roots {
@@ -620,7 +623,7 @@ pub trait ChunkSource {
     /// `None` means *do not answer for this*: either nothing was ever bound, or
     /// the file moved underneath and the row describes content that is gone.
     /// Both are ordinary, neither is an error.
-    fn bind(&self, file: &FileId) -> impl Future<Output = Result<Option<Root>>>;
+    fn bind(&self, file: &FileId) -> impl Future<Output = Result<Option<Root>, ChunkError>>;
 }
 
 /// The write half: a store that keeps chunks of its own.
@@ -637,20 +640,20 @@ pub trait ChunkStore: ChunkSource {
     ///
     /// # Errors
     /// `blake3(bytes) != hash`, or the backend could not write.
-    fn put(&self, hash: ChunkHash, bytes: &[u8]) -> impl Future<Output = Result<()>>;
+    fn put(&self, hash: ChunkHash, bytes: &[u8]) -> impl Future<Output = Result<(), ChunkError>>;
 
     /// Record a leaf row, so its chunks can be named and swept.
-    fn put_map(&self, map: &ChunkMap) -> impl Future<Output = Result<()>>;
+    fn put_map(&self, map: &ChunkMap) -> impl Future<Output = Result<(), ChunkError>>;
 
     /// Record that this file version hashes to `root`.
-    fn set_bind(&self, file: &FileId, root: Root) -> impl Future<Output = Result<()>>;
+    fn set_bind(&self, file: &FileId, root: Root) -> impl Future<Output = Result<(), ChunkError>>;
 
     /// Begin a reclamation pass, clearing every previous mark.
     ///
     /// Reclamation is mark-and-sweep rather than reference counting: nothing is
     /// mutated in a content-addressed store, so there are no orphans to track —
     /// only garbage, collected when the caller decides.
-    fn start_marking(&self) -> impl Future<Output = Result<()>>;
+    fn start_marking(&self) -> impl Future<Output = Result<(), ChunkError>>;
 
     /// Mark every chunk of `root` as live for the current pass.
     ///
@@ -659,18 +662,22 @@ pub trait ChunkStore: ChunkSource {
     /// delete live data.
     ///
     /// [`sweep`]: ChunkStore::sweep
-    fn mark(&self, root: Root) -> impl Future<Output = Result<()>>;
+    fn mark(&self, root: Root) -> impl Future<Output = Result<(), ChunkError>>;
 
     /// Delete every chunk not marked in the current pass, returning the count.
-    fn sweep(&self) -> impl Future<Output = Result<u64>>;
+    fn sweep(&self) -> impl Future<Output = Result<u64, ChunkError>>;
 
     /// Drop specific chunks, keeping everything else.
     ///
     /// Local eviction, typically under storage pressure. **A caller that clears
     /// must re-advertise**, or readers keep being sent to a peer that no longer
     /// has what it claimed.
-    fn clear(&self, hashes: &[ChunkHash]) -> impl Future<Output = Result<()>>;
+    fn clear(&self, hashes: &[ChunkHash]) -> impl Future<Output = Result<(), ChunkError>>;
 }
+
+mod error;
+
+pub use error::ChunkError;
 
 /// The filesystem backends. Host-only, and gated on the target rather than a
 /// feature so it cannot be misconfigured: a wasm build simply does not have

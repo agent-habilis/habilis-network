@@ -15,16 +15,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use anyhow::{Context as _, Result, bail};
+use crate::ChunkError;
 
 use crate::{ChunkHash, ChunkMap, ChunkSource, ChunkStore, Coverage, FileId, Root, chunk_hash};
 
 /// Poisoning is a panic in another thread, not a condition worth modelling
 /// separately at every call site.
-fn poisoned(what: &str) -> anyhow::Error {
-    anyhow::anyhow!("the {what} lock was poisoned by a panic in another thread")
-}
-
 /// A store that keeps everything in memory and forgets it on drop.
 #[derive(Debug, Default)]
 pub struct InMemoryStore {
@@ -61,35 +57,35 @@ impl InMemoryStore {
 }
 
 impl ChunkSource for InMemoryStore {
-    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, hash: ChunkHash) -> Result<Option<Vec<u8>>, ChunkError> {
         Ok(self
             .chunks
             .lock()
-            .map_err(|_| poisoned("chunk"))?
+            .map_err(|_| ChunkError::Poisoned("chunk"))?
             .get(&hash)
             .cloned())
     }
 
-    async fn has(&self, hash: ChunkHash) -> Result<bool> {
+    async fn has(&self, hash: ChunkHash) -> Result<bool, ChunkError> {
         Ok(self
             .chunks
             .lock()
-            .map_err(|_| poisoned("chunk"))?
+            .map_err(|_| ChunkError::Poisoned("chunk"))?
             .contains_key(&hash))
     }
 
-    async fn map(&self, root: Root) -> Result<Option<ChunkMap>> {
+    async fn map(&self, root: Root) -> Result<Option<ChunkMap>, ChunkError> {
         Ok(self
             .maps
             .lock()
-            .map_err(|_| poisoned("map"))?
+            .map_err(|_| ChunkError::Poisoned("map"))?
             .get(&root)
             .cloned())
     }
 
-    async fn coverage(&self, root: Root) -> Result<Coverage> {
+    async fn coverage(&self, root: Root) -> Result<Coverage, ChunkError> {
         let map = {
-            let maps = self.maps.lock().map_err(|_| poisoned("map"))?;
+            let maps = self.maps.lock().map_err(|_| ChunkError::Poisoned("map"))?;
             maps.get(&root).cloned()
         };
         // A root this store has never seen covers nothing. Not an error: a peer
@@ -97,7 +93,10 @@ impl ChunkSource for InMemoryStore {
         let Some(map) = map else {
             return Ok(Coverage::empty(0));
         };
-        let chunks = self.chunks.lock().map_err(|_| poisoned("chunk"))?;
+        let chunks = self
+            .chunks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("chunk"))?;
         let mut coverage = Coverage::empty(map.len());
         for (index, leaf) in map.leaves().iter().enumerate() {
             if chunks.contains_key(leaf) {
@@ -107,8 +106,11 @@ impl ChunkSource for InMemoryStore {
         Ok(coverage)
     }
 
-    async fn bind(&self, file: &FileId) -> Result<Option<Root>> {
-        let binds = self.binds.lock().map_err(|_| poisoned("bind"))?;
+    async fn bind(&self, file: &FileId) -> Result<Option<Root>, ChunkError> {
+        let binds = self
+            .binds
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("bind"))?;
         let Some((size, mtime, root)) = binds.get(&file.key) else {
             return Ok(None);
         };
@@ -123,74 +125,91 @@ impl ChunkSource for InMemoryStore {
 }
 
 impl ChunkStore for InMemoryStore {
-    async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<()> {
+    async fn put(&self, hash: ChunkHash, bytes: &[u8]) -> Result<(), ChunkError> {
         // Verify before storing, always. A peer that sends bytes addressing
         // something else costs its own bandwidth and nothing of ours; storing
         // first and checking later would let it cost our disk too.
         let actual = chunk_hash(bytes);
         if actual != hash {
-            bail!("these bytes address {actual}, not {hash}");
+            return Err(ChunkError::Malformed(format!(
+                "these bytes address {actual}, not {hash}"
+            )));
         }
         self.chunks
             .lock()
-            .map_err(|_| poisoned("chunk"))?
+            .map_err(|_| ChunkError::Poisoned("chunk"))?
             .insert(hash, bytes.to_vec());
         Ok(())
     }
 
-    async fn put_map(&self, map: &ChunkMap) -> Result<()> {
+    async fn put_map(&self, map: &ChunkMap) -> Result<(), ChunkError> {
         self.maps
             .lock()
-            .map_err(|_| poisoned("map"))?
+            .map_err(|_| ChunkError::Poisoned("map"))?
             .insert(map.root(), map.clone());
         Ok(())
     }
 
-    async fn set_bind(&self, file: &FileId, root: Root) -> Result<()> {
+    async fn set_bind(&self, file: &FileId, root: Root) -> Result<(), ChunkError> {
         self.binds
             .lock()
-            .map_err(|_| poisoned("bind"))?
+            .map_err(|_| ChunkError::Poisoned("bind"))?
             .insert(file.key.clone(), (file.size, file.mtime, root));
         Ok(())
     }
 
-    async fn start_marking(&self) -> Result<()> {
-        *self.marks.lock().map_err(|_| poisoned("mark"))? = Some(HashSet::new());
+    async fn start_marking(&self) -> Result<(), ChunkError> {
+        *self
+            .marks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("mark"))? = Some(HashSet::new());
         Ok(())
     }
 
-    async fn mark(&self, root: Root) -> Result<()> {
+    async fn mark(&self, root: Root) -> Result<(), ChunkError> {
         let leaves = {
-            let maps = self.maps.lock().map_err(|_| poisoned("map"))?;
+            let maps = self.maps.lock().map_err(|_| ChunkError::Poisoned("map"))?;
             maps.get(&root).map(|map| map.leaves().to_vec())
         };
         // Marking a root we hold no row for is a caller error worth naming: it
         // means the live set was derived from something other than the persisted
         // maps, which is precisely how a sweep eats live data.
-        let leaves = leaves.context(
-            "cannot mark a root with no stored chunk map — derive the live set \
-             from persisted maps, never from an in-memory held-set",
-        )?;
-        let mut marks = self.marks.lock().map_err(|_| poisoned("mark"))?;
+        let leaves = leaves.ok_or_else(|| {
+            ChunkError::Malformed(
+                "cannot mark a root with no stored chunk map — derive the live set \
+             from persisted maps, never from an in-memory held-set"
+                    .to_owned(),
+            )
+        })?;
+        let mut marks = self
+            .marks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("mark"))?;
         marks.get_or_insert_with(HashSet::new).extend(leaves);
         Ok(())
     }
 
-    async fn sweep(&self) -> Result<u64> {
+    async fn sweep(&self) -> Result<u64, ChunkError> {
         let live = self
             .marks
             .lock()
-            .map_err(|_| poisoned("mark"))?
+            .map_err(|_| ChunkError::Poisoned("mark"))?
             .take()
             .unwrap_or_default();
-        let mut chunks = self.chunks.lock().map_err(|_| poisoned("chunk"))?;
+        let mut chunks = self
+            .chunks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("chunk"))?;
         let before = chunks.len();
         chunks.retain(|hash, _| live.contains(hash));
         Ok(u64::try_from(before - chunks.len()).unwrap_or(u64::MAX))
     }
 
-    async fn clear(&self, hashes: &[ChunkHash]) -> Result<()> {
-        let mut chunks = self.chunks.lock().map_err(|_| poisoned("chunk"))?;
+    async fn clear(&self, hashes: &[ChunkHash]) -> Result<(), ChunkError> {
+        let mut chunks = self
+            .chunks
+            .lock()
+            .map_err(|_| ChunkError::Poisoned("chunk"))?;
         for hash in hashes {
             chunks.remove(hash);
         }
