@@ -32,8 +32,8 @@ pub use crate::transport::SendError;
 #[cfg(feature = "host")]
 pub mod state_file {
     pub use crate::daemon::state_file::{
-        ReadySnapshot, SessionEntry, SessionIdentity, StateFile, read_identity, read_session_entry,
-        read_snapshot,
+        ReadySnapshot, SessionEntry, SessionIdentity, StateFile, StateFileError, read_identity,
+        read_session_entry, read_snapshot,
     };
 }
 
