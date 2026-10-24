@@ -16,7 +16,7 @@ catch_unwind|crates/habilis-network-ffi/src/ffi.rs|1|FFI boundary
 # The one catch_unwind outside the FFI boundary: the helper that the tests use to check a panic.
 catch_unwind|crates/habilis-network-test-tracing/src/lib.rs|1|catch_panic, the helper that the tests use to check a panic
 
-# anyhow_pub: a public signature returns anyhow. Each library file is typed in a later commit of
-# package 7, and its line goes with that commit.
+# anyhow_pub: a public signature returns anyhow. Exceptions: test and benchmark helpers behind a
+# feature, not library API.
 anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|benchmark harness behind the bench feature, not library API
 anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)
