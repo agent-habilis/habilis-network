@@ -150,6 +150,19 @@ fn spawn_startup_rung_confirmation(
 /// with the rival probe's dial target: the probe asks whether anyone serves
 /// the identity *a joiner would reach*, so the two must name the same place or
 /// it is answering a different question.
+/// The rungs a member leaves out of the rendezvous address it registers at setup. A member that
+/// walks the ladder (every policy but `Never`) leaves out the busy ones: the walk reads each of
+/// them and admits the one that is ours, and a foreign listener never fails its dial. A member that
+/// never walks (`CoHostPolicy::Never`, the `discover` session) reads no rung as ours, so a rung
+/// withheld here is one it never dials, and on one host the busy rung is the beacon it came for.
+/// It keeps them all and takes the foreign-listener risk, as every member did before the walk.
+fn rungs_withheld_at_setup(policy: CoHostPolicy, busy: Vec<u16>) -> Vec<u16> {
+    match policy {
+        CoHostPolicy::Never => Vec::new(),
+        CoHostPolicy::Eager | CoHostPolicy::EagerProbed | CoHostPolicy::Deferred => busy,
+    }
+}
+
 pub(crate) fn register_rendezvous(
     book: &iroh::address_lookup::memory::MemoryLookup,
     params: &RendezvousParams,
@@ -660,6 +673,9 @@ struct SetupBuild<'a> {
     multihop: bool,
     transports: crate::lookup::TransportOpts,
     injected: Option<InjectedEndpoint>,
+    /// The caller's co-host override, read before the policy is final: what a joiner registers
+    /// for the rendezvous depends on whether it will walk the ladder.
+    cohost: Option<CoHostPolicy>,
     /// The caller's ALPN handlers, moved out exactly once by whichever of
     /// create/join runs. Interior mutability because they are boxed trait
     /// objects — not `Clone` — and `SetupBuild` is threaded by reference.
@@ -840,6 +856,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         protocols: std::sync::Mutex::new(protocols),
         rung_tx: &rung_tx,
         relay_transport,
+        cohost: cohost_override,
     };
     let Assembled {
         mesh_id,
@@ -1178,7 +1195,11 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // Must precede the join (the subscribe below): the peer resolves the rendezvous id via
     // this registered address — the loopback port ladder (loopback-only) or
     // the chosen relay rung (reachable across machines).
-    register_rendezvous(&address_book, &rdv, &crate::beacon::busy_rungs(&rdv));
+    let withheld = rungs_withheld_at_setup(
+        build.cohost.unwrap_or(cohost),
+        crate::beacon::busy_rungs(&rdv),
+    );
+    register_rendezvous(&address_book, &rdv, &withheld);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
     // until we are meshed, so we never register a duplicate `rendezvous_id` on
@@ -1239,6 +1260,24 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    /// The `discover` session never walks the ladder, so it keeps the busy rung: on one host that
+    /// is the beacon it came for. A walking member leaves the busy rungs to its walk.
+    #[test]
+    fn a_member_that_never_walks_keeps_the_busy_rungs() {
+        use super::{CoHostPolicy, rungs_withheld_at_setup};
+
+        let busy = vec![4161, 11743];
+        assert!(rungs_withheld_at_setup(CoHostPolicy::Never, busy.clone()).is_empty());
+        assert_eq!(
+            rungs_withheld_at_setup(CoHostPolicy::Deferred, busy.clone()),
+            busy
+        );
+        assert_eq!(
+            rungs_withheld_at_setup(CoHostPolicy::Eager, busy.clone()),
+            busy
+        );
+    }
+
     use habilis_network_test_tracing::test;
     use std::time::Duration;
 
