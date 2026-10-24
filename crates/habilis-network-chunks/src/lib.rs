@@ -108,7 +108,8 @@ macro_rules! digest_newtype {
             /// Parse the form [`Self::to_hex`] writes.
             ///
             /// # Errors
-            /// The text is not exactly 64 hex digits.
+            /// # Errors
+            /// [`ChunkError::Malformed`] when the text is not exactly 64 hex digits, or is not hex.
             pub fn from_hex(text: &str) -> Result<Self, ChunkError> {
                 let bytes = text.as_bytes();
                 if bytes.len() != 64 {
@@ -203,7 +204,8 @@ impl ChunkMap {
     /// write, and this is the one place that would be noticed.
     ///
     /// # Errors
-    /// The row length does not match the size it claims to describe.
+    /// # Errors
+    /// [`ChunkError::Malformed`] when the row length does not match the size it claims to describe.
     pub fn from_leaves(leaves: Vec<ChunkHash>, size: u64) -> Result<Self, ChunkError> {
         let expected = chunk_count(size);
         if leaves.len() != expected {
@@ -499,7 +501,8 @@ impl Coverage {
     /// Rebuild from [`Self::as_bits`] and a known chunk count.
     ///
     /// # Errors
-    /// The bitmap is too short for the count it claims to cover.
+    /// # Errors
+    /// [`ChunkError::Malformed`] when the bitmap is too short for the count it claims to cover.
     pub fn from_bits(bits: &[u8], len: usize) -> Result<Self, ChunkError> {
         let needed = len.div_ceil(8);
         if bits.len() < needed {

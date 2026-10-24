@@ -102,7 +102,9 @@ impl FromStr for JoinTarget {
 }
 
 /// # Errors
-/// The mesh id fails to decode, or the invite ticket fails to redeem.
+/// # Errors
+/// [`ResolveError::InvalidId`] when the mesh id does not decode, or
+/// [`ResolveError::InviteTarget`] for an invite, which the join redeems itself.
 pub fn resolve(target: &JoinTarget) -> Result<LockedMesh, ResolveError> {
     match target {
         JoinTarget::Mesh(id) => {

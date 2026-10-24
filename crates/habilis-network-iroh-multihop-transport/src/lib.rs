@@ -245,11 +245,8 @@ impl MultihopHandle {
     /// may sit on the relay: see [`HandleConfig`].
     ///
     /// # Errors
-    /// [`HandleError::UnderlayKey`]: `underlay` is not bound to [`underlay_secret`]`(secret)`. The underlay has
-    /// a key of its own, because a relay hands an id's packets to one endpoint
-    /// only and the underlay cannot share the application endpoint's. That key is
-    /// derived, so it is stable and tied to the peer rather than a second random
-    /// identity.
+    /// # Errors
+    /// A [`HandleError`] when the forwarder ALPN or the underlay key is not valid.
     pub fn new(
         secret: &SecretKey,
         underlay: Endpoint,
@@ -264,7 +261,8 @@ impl MultihopHandle {
     /// only be registered here.
     ///
     /// # Errors
-    /// [`HandleError::ForwarderAlpn`]: a protocol takes the ALPN of the forwarder. Otherwise as [`new`](Self::new).
+    /// # Errors
+    /// A [`HandleError`] when the forwarder ALPN or the underlay key is not valid.
     pub fn with_protocols(
         secret: &SecretKey,
         underlay: Endpoint,

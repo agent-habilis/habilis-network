@@ -180,8 +180,8 @@ impl IdbStore {
     /// Open, creating the database if it is absent.
     ///
     /// # Errors
-    /// `IndexedDB` is unreachable — a browser in private mode may refuse it —
-    /// or the schema upgrade fails.
+    /// # Errors
+    /// [`ChunkError::Store`] when the database cannot be opened.
     pub async fn open(name: &str) -> Result<Self, ChunkError> {
         let factory: IdbFactory = js_sys::Reflect::get(&js_sys::global(), &"indexedDB".into())
             .map_err(|error| js_err("reaching indexedDB", &error))?
@@ -293,8 +293,8 @@ impl IdbStore {
     /// `databases()` is the one way to ask the question without answering it.
     ///
     /// # Errors
-    /// `IndexedDB` is unreachable, or the open failed for a reason other than
-    /// absence.
+    /// # Errors
+    /// [`ChunkError::Store`] when the database cannot be reached.
     pub async fn adopt(name: &str) -> Result<Option<Self>, ChunkError> {
         let factory: IdbFactory = js_sys::Reflect::get(&js_sys::global(), &"indexedDB".into())
             .map_err(|error| js_err("reaching indexedDB", &error))?

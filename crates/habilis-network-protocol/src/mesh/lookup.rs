@@ -126,8 +126,10 @@ impl LookupOpts {
     /// rejects, and past 255 the count no longer fits its `u8`.
     ///
     /// # Errors
-    /// The custom ladder is longer than `MAX_RELAY_LADDER`, or one of its
-    /// URLs is longer than `MAX_RELAY_URL_BYTES`.
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the custom ladder has more than
+    /// `MAX_RELAY_LADDER` rungs, or one of its URLs is longer than
+    /// `MAX_RELAY_URL_BYTES`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let RelayChoice::Custom(ladder) = &self.relay_lookup else {
             return Ok(());
@@ -187,7 +189,11 @@ impl LookupOpts {
 
     /// Decode from a cursor over the config region, advancing `pos`.
     /// # Errors
-    /// The buffer is truncated, or the encoded length exceeds what remains.
+    /// # Errors
+    /// A [`ConfigError::Truncated`] when the buffer ends before a field, or a
+    /// [`ConfigError::Invalid`] for a flag set without its enabling bit, an empty
+    /// ladder, or one longer than `MAX_RELAY_LADDER`. A [`ConfigError::Source`] when a
+    /// relay URL does not parse.
     pub fn decode_from(bytes: &[u8], pos: &mut usize) -> Result<Self, ConfigError> {
         let flags = *bytes
             .get(*pos)
@@ -383,9 +389,10 @@ impl MeshConfig {
     /// config passes before any network.
     ///
     /// # Errors
-    /// The lookups fail [`LookupOpts::validate`], the transports name neither
-    /// `udp` nor `webrtc`, or `relay_transport` or a missing `udp` needs the
-    /// relay lookup while `lookups.relay_lookup` is `Disabled`.
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the lookups fail [`LookupOpts::validate`], the
+    /// transports name neither `udp` nor `webrtc`, or `relay_transport` or a missing
+    /// `udp` needs the relay lookup while `lookups.relay_lookup` is `Disabled`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.lookups.validate()?;
         let transport = &self.transport;
@@ -421,9 +428,11 @@ impl MeshConfig {
     /// relay carry payload (through [`MeshConfig::validate`]).
     ///
     /// # Errors
-    /// `relay_urls` is given without [`Lookup::Relay`], `transports` leaves
-    /// neither [`Transport::Udp`] nor [`Transport::WebRtc`], or needs a relay
-    /// lookup (see [`MeshConfig::validate`]) while none is on.
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when `relay_urls` is given without [`Lookup::Relay`],
+    /// when `transports` leaves neither [`Transport::Udp`] nor [`Transport::WebRtc`], or
+    /// when the config needs a relay lookup (see [`MeshConfig::validate`]) while none is on.
+    /// A [`ConfigError::Invalid`] also from [`TransportPolicy::from_transports`].
     pub fn resolve(
         lookups: &[Lookup],
         relay_urls: Option<RelayLadder>,
@@ -474,7 +483,10 @@ impl MeshConfig {
     /// (no trailing slack within the length-delimited region we were given).
     ///
     /// # Errors
-    /// The bytes are malformed or do not decode to a valid config region.
+    /// # Errors
+    /// A [`ConfigError::Truncated`] when the bytes end before a field, or
+    /// [`ConfigError::Invalid`] for a non-canonical or unknown feature byte or trailing
+    /// bytes. A [`ConfigError::Source`] when a nested field does not decode.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
         let mut pos = 0;
         let lookups = LookupOpts::decode_from(bytes, &mut pos)?;
@@ -744,8 +756,9 @@ impl LookupSet {
     /// relay lookup homes on (`None` ⇒ the pinned default).
     ///
     /// # Errors
-    /// `relay_urls` is given but `lookups` does not name [`Lookup::Relay`]:
-    /// a ladder says *which* relay, and only a relay lookup uses one.
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when `relay_urls` is given but `lookups` does not
+    /// name [`Lookup::Relay`]: a ladder says *which* relay, and only a relay lookup uses one.
     pub fn from_lookups(
         lookups: &[Lookup],
         relay_urls: Option<RelayLadder>,

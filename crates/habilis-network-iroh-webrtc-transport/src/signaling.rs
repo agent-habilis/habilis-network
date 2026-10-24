@@ -85,8 +85,9 @@ impl SignalEnvelope {
     /// The endpoint id the remote side claims in this envelope.
     ///
     /// # Errors
-    ///
-    /// Fails on an `Error` envelope or an unparseable id.
+    /// # Errors
+    /// [`SignalError::Remote`] for an error envelope, or [`SignalError::EndpointId`]
+    /// for an endpoint id that does not parse.
     pub fn claimed_endpoint(&self) -> Result<EndpointId, SignalError> {
         match self {
             Self::Offer { endpoint_id, .. } | Self::Answer { endpoint_id, .. } => endpoint_id

@@ -232,7 +232,9 @@ impl WebRtcHandle {
     /// Attach a negotiated session for `remote`.
     ///
     /// # Errors
-    /// The registry rejects the session (already attached).
+    /// # Errors
+    /// [`AttachError::AlreadyAttached`] when the registry already holds a live session
+    /// for `remote`, or [`AttachError::Retired`] when it ends before it is recorded.
     pub fn attach(
         &self,
         remote: iroh_base::EndpointId,

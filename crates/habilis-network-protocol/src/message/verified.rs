@@ -113,8 +113,9 @@ impl Verified {
     /// not reach the `Serialize` impl, which needs a serializer.
     ///
     /// # Errors
-    ///
-    /// Propagates `Message::serialize` failure.
+    /// # Errors
+    /// A [`MessageError::Source`] when the JSON does not encode, or
+    /// [`MessageError::Oversize`] when the bytes pass `MAX_MESSAGE_SIZE`.
     pub fn serialize(&self) -> Result<WireFrame, MessageError> {
         Ok(WireFrame::new(Bytes::from((*self.message).serialize()?)))
     }

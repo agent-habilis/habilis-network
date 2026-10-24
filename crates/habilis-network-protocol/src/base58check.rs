@@ -65,8 +65,10 @@ pub fn encode(payload: &[u8]) -> String {
 /// its own copy.
 ///
 /// # Errors
-/// `encoded` is not Base58, is too short to carry a checksum, or its checksum
-/// does not match the payload.
+/// # Errors
+/// [`Base58Error::Alphabet`] when `encoded` is not Base58, [`Base58Error::Short`]
+/// when it is too short to carry a checksum, or [`Base58Error::Checksum`] when the
+/// checksum does not match the payload.
 pub fn decode(encoded: &str, what: &str) -> Result<Vec<u8>, Base58Error> {
     let Ok(decoded) = bs58::decode(encoded).into_vec() else {
         return Err(Base58Error::Alphabet(what.to_owned()));

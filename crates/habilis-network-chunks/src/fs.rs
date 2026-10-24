@@ -104,7 +104,9 @@ impl DiskStore {
     /// Open or create a store under `root`.
     ///
     /// # Errors
-    /// The directory cannot be created, or an existing bind table is unreadable.
+    /// # Errors
+    /// [`ChunkError::Store`] when the directories cannot be created or the binds file
+    /// cannot be read.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ChunkError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("chunks")).map_err(store(|| {
@@ -436,7 +438,9 @@ impl DiskOrigin {
     /// size. Returns the root, which is also what a caller publishes.
     ///
     /// # Errors
-    /// The file cannot be opened or read, or its size changed while being read.
+    /// # Errors
+    /// [`ChunkError::Store`] when the file cannot be read, or
+    /// [`ChunkError::Malformed`] when it changed while it was read.
     pub fn adopt(&self, file: &FileId, path: impl AsRef<Path>) -> Result<Root, ChunkError> {
         let path = path.as_ref().to_path_buf();
         let mut handle =
@@ -509,7 +513,9 @@ impl DiskOrigin {
     /// into it. Called when the file underneath changed.
     ///
     /// # Errors
-    /// A lock was poisoned by a panic in another thread.
+    /// # Errors
+    /// [`ChunkError::Store`] when the forget cannot be written, or
+    /// [`ChunkError::Poisoned`] when a lock was poisoned.
     pub fn forget(&self, root: Root) -> Result<(), ChunkError> {
         self.files
             .lock()

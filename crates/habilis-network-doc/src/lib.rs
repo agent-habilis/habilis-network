@@ -309,7 +309,10 @@ impl MeshDoc {
     /// re-serve; `plain` surfaces the author's own human-readable delta locally.
     ///
     /// # Errors
-    /// Body serialization/size or the encryption envelope fails.
+    /// # Errors
+    /// [`DocError::NotAnObject`] when the merge is not a JSON object, [`DocError::Body`]
+    /// when the change body is not a valid message body, or [`DocError::Encode`] when
+    /// the change does not encode.
     pub fn compose_wire_body(
         &self,
         change: &[u8],
@@ -410,7 +413,9 @@ impl MeshDoc {
     /// public key (see `actor_for`).
     ///
     /// # Errors
-    /// Unrepresentable merge (a non-object at the document root).
+    /// # Errors
+    /// [`DocError::Encode`] when the change does not encode, or [`DocError::Body`] when
+    /// it is not a valid message body.
     pub fn build_change(
         &self,
         merge: &Value,

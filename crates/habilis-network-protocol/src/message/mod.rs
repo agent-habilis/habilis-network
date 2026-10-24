@@ -179,7 +179,9 @@ impl AppTag {
     /// ```
     ///
     /// # Errors
-    /// The tag is empty, longer than 32 bytes, or not an ASCII slug.
+    /// # Errors
+    /// A [`AppTagError::Invalid`] when the tag is empty, longer than 32 bytes, or not
+    /// an ASCII slug.
     pub fn new(raw: impl Into<String>) -> Result<Self, AppTagError> {
         let raw = raw.into();
         if !Self::validate(&raw) {
@@ -217,7 +219,9 @@ impl CorrId {
     /// ```
     ///
     /// # Errors
-    /// The correlation id is empty or longer than 64 bytes.
+    /// # Errors
+    /// A [`CorrIdError::Invalid`] when the correlation id is empty or longer than 64
+    /// bytes.
     pub fn new(raw: impl Into<String>) -> Result<Self, CorrIdError> {
         let raw = raw.into();
         if !Self::validate(&raw) {
@@ -921,7 +925,9 @@ impl Message {
     /// Serialize to compact JSON bytes for the gossip wire. Outside this crate only a [`Verified`]
     /// serializes, through [`Verified::serialize`]: an unverified or an authored view has no wire form.
     /// # Errors
-    /// Serialization of a field fails.
+    /// # Errors
+    /// A [`MessageError::Source`] when the JSON does not encode, or
+    /// [`MessageError::Oversize`] when the bytes pass `MAX_MESSAGE_SIZE`.
     pub(crate) fn serialize(&self) -> Result<Vec<u8>, MessageError> {
         let bytes = serde_json::to_vec(&Wire(self))
             .map_err(MessageError::with_step("failed to serialize message"))?;
@@ -933,7 +939,10 @@ impl Message {
 
     /// Parse a message from JSON bytes.
     /// # Errors
-    /// The bytes are malformed or truncated.
+    /// # Errors
+    /// A [`MessageError::TooLarge`] past `MAX_MESSAGE_SIZE`, a [`MessageError::Source`]
+    /// when the JSON does not parse, [`MessageError::UnsupportedVersion`] for another
+    /// protocol version, or [`MessageError::Invalid`] for a field the protocol does not allow.
     pub fn parse(data: &[u8]) -> Result<Self, MessageError> {
         if data.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge);
@@ -951,7 +960,8 @@ impl Message {
     /// outside the signature: it changes the gossip message id and nothing else.
     ///
     /// # Errors
-    /// The frame is malformed, as for [`Message::parse`].
+    /// # Errors
+    /// A [`MessageError`] as for [`Message::parse`].
     pub fn parse_wire(data: &[u8]) -> Result<(Self, Option<u64>), MessageError> {
         let (frame, nonce) = split_resend_trailer(data);
         Ok((Self::parse(frame)?, nonce))
@@ -1201,7 +1211,7 @@ impl Message {
 /// command, the library API send path, and interactive stdin.
 ///
 /// # Errors
-/// Propagates `Message::serialize` failure (oversized payload).
+/// A [`MessageError`] from the message encoding: an oversized payload or a JSON failure.
 /// The per-author log + DAG position to stamp on an outbound `Msg`: the
 /// chain `seq`/`prev` (Phase 2) and the DAG `parents` (Phase 3). Bundled so
 /// [`build_msg_bytes`] stays within the argument budget. Test-only now that the

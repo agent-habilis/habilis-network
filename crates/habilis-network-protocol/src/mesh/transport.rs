@@ -166,8 +166,10 @@ impl TransportPolicy {
     /// has no gossip.
     ///
     /// # Errors
-    /// The list is non-empty and names neither `udp` nor `webrtc`; with
-    /// `multihop` in it, the message says that multihop needs a direct path.
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the list is non-empty and names neither `udp`
+    /// nor `webrtc`. With `multihop` in it, the message says that multihop needs a direct
+    /// path.
     pub fn from_transports(transports: &[Transport]) -> Result<Self, ConfigError> {
         if transports.is_empty() {
             return Ok(Self::default());
@@ -223,7 +225,8 @@ impl TransportPolicy {
     /// The policy a mesh id's byte names.
     ///
     /// # Errors
-    /// The byte sets a bit this build does not know.
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the byte sets a bit this build does not know.
     pub(crate) fn from_byte(byte: u8) -> Result<Self, ConfigError> {
         if byte & !super::lookup::KNOWN_TRANSPORT_BITS != 0 {
             return Err(ConfigError::Invalid(format!(

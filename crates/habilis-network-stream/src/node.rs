@@ -93,8 +93,9 @@ impl StreamNode {
     /// Stand up an endpoint with `opts`.
     ///
     /// # Errors
-    /// Conflicting or invalid options, a loopback node in a browser, or an
-    /// endpoint that fails to bind.
+    /// # Errors
+    /// [`StreamError::Options`] for a transport a stream does not use,
+    /// [`StreamError::Bind`] when the relay list or the node does not start.
     pub async fn bind(opts: &StreamOpts) -> Result<Self, StreamError> {
         if opts.transport.contains(&Transport::Multihop) {
             return Err(StreamError::Options(
@@ -124,7 +125,8 @@ impl StreamNode {
     /// own lookups and transport list, narrowed to what this target has.
     ///
     /// # Errors
-    /// As [`bind`](Self::bind).
+    /// # Errors
+    /// As [`bind`](Self::bind): [`StreamError::Bind`] when the node does not start.
     pub async fn bind_for(hash: &StreamHash) -> Result<Self, StreamError> {
         let transports = TransportOpts::default().within(&hash.transport);
         Self::bind_with(hash.lookups.clone(), hash.transport, transports).await
@@ -209,8 +211,10 @@ impl StreamNode {
     /// Take the consumer slot of the stream behind `hash`.
     ///
     /// # Errors
-    /// The producer cannot be reached, the only path is a relay the stream
-    /// refuses, or the producer refuses the hash (a [`Refused`]).
+    /// # Errors
+    /// [`StreamError::Refused`] when the producer refuses the hash, or the only path is
+    /// a relay the stream refuses. [`StreamError::Open`] when the producer cannot be
+    /// reached or the stream cannot be opened.
     pub async fn open(&self, hash: &StreamHash) -> Result<Reader, StreamError> {
         let needs_lane = pair_needs_lane(&hash.addr, UdpTransport::from(self.transports.udp));
         // A data channel needs `webrtc` on both ends: the producer's list is in

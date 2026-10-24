@@ -164,8 +164,9 @@ async fn start(ice: &IceConfig) -> Result<Negotiating, JsepError> {
 /// [`PendingOffer::complete`].
 ///
 /// # Errors
-///
-/// Fails if the UDP socket can't bind or str0m rejects the setup.
+/// # Errors
+/// [`JsepError::Bind`] when the UDP socket cannot bind, or [`JsepError::Engine`]
+/// when str0m rejects the setup.
 pub async fn offer(local: EndpointId) -> Result<(PendingOffer, SignalEnvelope), JsepError> {
     offer_with(local, &IceConfig::default()).await
 }
@@ -174,8 +175,9 @@ pub async fn offer(local: EndpointId) -> Result<(PendingOffer, SignalEnvelope), 
 /// [`IceConfig::host_only`] to stay offline.
 ///
 /// # Errors
-///
-/// Fails if the UDP socket can't bind or str0m rejects the setup.
+/// # Errors
+/// [`JsepError::Bind`] when the UDP socket cannot bind, or [`JsepError::Engine`]
+/// when str0m rejects the setup.
 pub async fn offer_with(
     local: EndpointId,
     ice: &IceConfig,
@@ -210,8 +212,10 @@ impl PendingOffer {
     /// channel is open.
     ///
     /// # Errors
-    ///
-    /// Fails on a non-answer envelope, a bad SDP, or `deadline` expiry.
+    /// # Errors
+    /// [`JsepError::Envelope`] for a non-answer envelope, [`JsepError::Sdp`] for a bad
+    /// SDP, [`JsepError::Engine`] when str0m fails, or [`JsepError::Timeout`] when the
+    /// data channel does not open before `deadline`.
     pub async fn complete(
         self,
         answer: &SignalEnvelope,
@@ -257,8 +261,9 @@ impl PendingOffer {
 /// carrier, then await [`PendingAnswer::complete`].
 ///
 /// # Errors
-///
-/// Fails on a non-offer envelope, a bad SDP, or socket setup errors.
+/// # Errors
+/// [`JsepError::Envelope`] for a non-offer envelope, [`JsepError::Sdp`] for a bad
+/// SDP, or [`JsepError::Bind`] when the socket cannot bind.
 pub async fn answer(
     local: EndpointId,
     offer: &SignalEnvelope,
@@ -270,8 +275,9 @@ pub async fn answer(
 /// [`IceConfig::host_only`] to stay offline.
 ///
 /// # Errors
-///
-/// Fails on a non-offer envelope, a bad SDP, or socket setup errors.
+/// # Errors
+/// [`JsepError::Envelope`] for a non-offer envelope, [`JsepError::Sdp`] for a bad
+/// SDP, or [`JsepError::Bind`] when the socket cannot bind.
 pub async fn answer_with(
     local: EndpointId,
     offer: &SignalEnvelope,
@@ -298,8 +304,9 @@ impl PendingAnswer {
     /// Drives ICE/DTLS/SCTP until the offerer's data channel opens here.
     ///
     /// # Errors
-    ///
-    /// Fails on str0m errors or `deadline` expiry.
+    /// # Errors
+    /// [`JsepError::Engine`] when str0m fails, or [`JsepError::Timeout`] when the
+    /// data channel does not open before `deadline`.
     pub async fn complete(self, deadline: Duration) -> Result<NegotiatedSession, JsepError> {
         let Self { mut inner } = self;
         let channel_id = drive_until_channel_ready(

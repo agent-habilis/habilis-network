@@ -59,7 +59,9 @@ impl Error for PeerAddrError {
 
 /// Deserialize an `EndpointAddr` from a JSON value produced by `endpoint_addr_to_json`.
 /// # Errors
-/// The JSON is missing the endpoint id, or a field fails to parse.
+/// # Errors
+/// [`PeerAddrError::Missing`] when the JSON has no endpoint id, or
+/// [`PeerAddrError::Source`] when the id does not parse.
 pub fn endpoint_addr_from_json(
     json: &serde_json::Value,
 ) -> Result<(EndpointId, EndpointAddr), PeerAddrError> {

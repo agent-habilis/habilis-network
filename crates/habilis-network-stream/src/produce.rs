@@ -217,7 +217,9 @@ impl Producer {
     /// Wait until the consumer is admitted.
     ///
     /// # Errors
-    /// The node closed before any consumer arrived.
+    /// # Errors
+    /// [`StreamError::Closed`] when the stream is closed, or
+    /// [`StreamError::NodeClosed`] when the node closed before a consumer arrived.
     pub async fn attached(&mut self) -> Result<(), StreamError> {
         if self.link.is_some() {
             return Ok(());
@@ -233,7 +235,9 @@ impl Producer {
     /// room: QUIC flow control paces the producer to the consumer.
     ///
     /// # Errors
-    /// The node closed, or the consumer went away.
+    /// # Errors
+    /// [`StreamError::NodeClosed`] or [`StreamError::Closed`] as for
+    /// [`attached`](Self::attached), or [`StreamError::ConsumerGone`] when the consumer went away.
     pub async fn write(&mut self, bytes: &[u8]) -> Result<(), StreamError> {
         self.attached().await?;
         let link = self.link.as_mut().ok_or(StreamError::Closed)?;
@@ -248,7 +252,9 @@ impl Producer {
     /// stream still reaches one.
     ///
     /// # Errors
-    /// The node closed before any consumer arrived, or the consumer went away.
+    /// # Errors
+    /// [`StreamError::NodeClosed`] or [`StreamError::Closed`] as for
+    /// [`attached`](Self::attached), or [`StreamError::ConsumerGone`] when the consumer went away.
     pub async fn close(mut self) -> Result<(), StreamError> {
         self.attached().await?;
         let link = self.link.as_mut().ok_or(StreamError::Closed)?;
@@ -267,6 +273,7 @@ impl Producer {
     /// does; otherwise abandon it at once instead of waiting for one. A
     /// consumer that arrives later is refused as unknown.
     ///
+    /// # Errors
     /// # Errors
     /// As [`close`](Self::close), once a consumer has claimed the stream.
     pub async fn close_or_abandon(self) -> Result<(), StreamError> {

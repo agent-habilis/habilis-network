@@ -374,10 +374,10 @@ impl Mesh {
     /// A mesh with the wire `seed` of its id.
     ///
     /// # Errors
-    /// The config carries a password verifier or an invite issuer. Such a
-    /// mesh has a secret the caller does not hold, so it is set by
-    /// [`Mesh::set_password`] or [`Mesh::set_invite`], or unlocked from a
-    /// [`LockedMesh`].
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the config carries a password verifier or an
+    /// invite issuer. Such a mesh has a secret the caller does not hold, so it is set by
+    /// [`Mesh::set_password`] or [`Mesh::set_invite`], or unlocked from a [`LockedMesh`].
     pub fn new(seed: Seed, name: MeshName, config: MeshConfig) -> Result<Self, ConfigError> {
         refuse_secret_config(&config)?;
         Ok(Mesh {
@@ -396,8 +396,9 @@ impl Mesh {
     /// same id with zero coordination.
     ///
     /// # Errors
-    /// The config carries a password verifier or an invite issuer (see
-    /// [`Mesh::new`]). A topic's secret is the string itself.
+    /// # Errors
+    /// A [`ConfigError::Invalid`] when the config carries a password verifier or an
+    /// invite issuer (see [`Mesh::new`]). A topic's secret is the string itself.
     pub fn from_topic(topic: &str, config: MeshConfig) -> Result<Self, ConfigError> {
         refuse_secret_config(&config)?;
         let seed = crypto::topic_seed(topic);

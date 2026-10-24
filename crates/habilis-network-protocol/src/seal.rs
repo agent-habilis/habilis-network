@@ -143,8 +143,9 @@ fn seal(recipient_pub: &PublicKey, plaintext: &[u8]) -> Sealed {
 /// Open a [`Sealed`] with our static X25519 secret.
 ///
 /// # Errors
-/// The AEAD fails to authenticate — a wrong recipient key or a tampered
-/// ciphertext/nonce.
+/// # Errors
+/// A [`SealError::Failed`] when the AEAD fails to authenticate: a wrong recipient
+/// key or a tampered ciphertext or nonce.
 fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>, SealError> {
     let shared = our_secret.diffie_hellman(&PublicKey::from(sealed.epk));
     let key = derive_secret(shared.as_bytes(), SEAL_LABEL);
@@ -164,8 +165,9 @@ fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>, SealErr
 /// envelope as a [`MessageBody`] ready to drop into a directed frame.
 ///
 /// # Errors
-/// The envelope (pure ASCII JSON) somehow fails `MessageBody` validation.
-///
+/// # Errors
+/// A [`SealError::Invalid`] when the envelope (pure ASCII JSON) fails `MessageBody`
+/// validation.
 /// # Panics
 /// If `Envelope` fails to serialize. Its fields are `String`s and a version
 /// tag, so serialization cannot fail short of an allocator failure.
@@ -185,8 +187,10 @@ pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<Messag
 /// plaintext application payload string.
 ///
 /// # Errors
-/// The body is not a sealed envelope, has an unknown version, carries malformed
-/// Base58, or fails to decrypt/authenticate.
+/// # Errors
+/// A [`SealError::Source`] when the body is not a sealed envelope or a field does
+/// not decode, [`SealError::UnsupportedVersion`] for another envelope version, or
+/// [`SealError::Failed`] when the seal does not open.
 pub fn unseal_from_body(
     our_secret: &StaticSecret,
     body: &MessageBody,
@@ -248,8 +252,9 @@ pub fn seal_symmetric(key: &SymmetricKey, plaintext: &[u8]) -> Vec<u8> {
 /// Open a [`seal_symmetric`] blob with the same `key`.
 ///
 /// # Errors
-/// The blob is too short to carry a nonce, or the AEAD fails to authenticate (a
-/// wrong key or tampered bytes).
+/// # Errors
+/// [`SealError::Failed`] when the blob is too short to carry a nonce, or the AEAD
+/// fails to authenticate (a wrong key or tampered bytes).
 pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>, SealError> {
     if blob.len() < 12 {
         return Err(SealError::Failed("symmetric blob too short for a nonce"));

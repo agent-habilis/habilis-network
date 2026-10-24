@@ -53,10 +53,9 @@ impl WebRtcTransport {
     /// Adopts a negotiated session for `remote` and starts its driver.
     ///
     /// # Errors
-    ///
-    /// Fails if a live session for `remote` already exists (detach first,
-    /// or let the old driver notice the dead channel and clean up), or if the
-    /// session ends before it is recorded.
+    /// # Errors
+    /// [`AttachError::AlreadyAttached`] when a live session for `remote` already
+    /// exists, or [`AttachError::Retired`] when the session ends before it is recorded.
     pub fn attach(
         &self,
         remote: EndpointId,

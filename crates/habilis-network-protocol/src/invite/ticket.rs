@@ -83,8 +83,9 @@ fn signing_bytes(mesh_hash: &str, root: &SymmetricKey, expiry: UnixSecs) -> Vec<
 /// has one) wraps the root so a scraped invite still needs it.
 ///
 /// # Errors
-/// This session is not the creator (holds no issuer key), or `mesh` is not
-/// invite-only.
+/// # Errors
+/// [`InviteError::Refused`] when this session is not the creator (holds no issuer
+/// key), or when `mesh` is not invite-only.
 pub fn mint(
     mesh: &Mesh,
     ttl: Option<Duration>,
@@ -154,8 +155,11 @@ impl InviteTicket {
     /// Decode a bare base58 invite ticket — structural parse only.
     ///
     /// # Errors
-    /// Bad Base58/checksum, the wrong kind, a bad version, or a malformed
-    /// payload.
+    /// # Errors
+    /// [`InviteError::Base58`] for a bad Base58 text or checksum, [`InviteError::Truncated`]
+    /// when the ticket ends early, [`InviteError::UnsupportedVersion`] for another
+    /// version, [`InviteError::Refused`] for the wrong kind, and [`InviteError::Source`]
+    /// for a field that does not decode.
     pub fn decode(token: &str) -> Result<Self, InviteError> {
         let framed =
             base58check::decode(token.trim(), "invite ticket").map_err(InviteError::Base58)?;
@@ -220,7 +224,9 @@ impl InviteTicket {
     /// expired invite. Returns a mesh ready to join.
     ///
     /// # Errors
-    /// A malformed embedded hash, a missing/wrong password, an invalid issuer
+    /// # Errors
+    /// [`InviteError::Source`] for a malformed embedded hash or a bad issuer key,
+    /// [`InviteError::Refused`] for a missing or unexpected password, an invalid issuer
     /// signature (not creator-minted or tampered), or an expired invite.
     pub fn redeem(&self, password: Option<&Password>) -> Result<Mesh, InviteError> {
         let locked: LockedMesh = self

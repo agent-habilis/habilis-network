@@ -76,8 +76,9 @@ impl Reader {
     /// The next bytes, in order; `None` once the producer closed the stream.
     ///
     /// # Errors
-    /// A [`Refused`] when the producer refused or abandoned the stream, or the
-    /// link's own error when it was lost.
+    /// # Errors
+    /// [`StreamError::Refused`] when the producer refused or abandoned the stream,
+    /// or [`StreamError::Lost`] when the link was lost.
     pub async fn read(&mut self) -> Result<Option<Bytes>, StreamError> {
         match self.recv.read_chunk(CHUNK).await {
             Ok(chunk) => {

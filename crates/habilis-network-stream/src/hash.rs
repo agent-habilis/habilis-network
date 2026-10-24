@@ -208,8 +208,11 @@ impl StreamHash {
     /// Decode a bare Base58Check token.
     ///
     /// # Errors
-    /// A bad checksum, another kind of token, an unknown version, or a
-    /// malformed payload.
+    /// # Errors
+    /// [`HashError::Field`] when the Base58Check text or a field does not decode,
+    /// [`HashError::UnknownVersion`] or [`HashError::UnknownFlags`] for a version or
+    /// flags this build does not know, [`HashError::WrongKind`] for another kind of
+    /// token, and [`HashError::Truncated`] when the payload ends early.
     pub fn decode(hash: &str) -> Result<Self, HashError> {
         let framed = base58check::decode(hash.trim(), "stream hash")
             .map_err(HashError::field("decode the Base58Check token"))?;
