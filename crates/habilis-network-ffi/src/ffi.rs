@@ -189,7 +189,7 @@ const _: () = {
     );
 };
 
-/// The opaque handle behind `habilis_network_mesh *`. Holds the [`Mesh`] plus
+/// The opaque handle behind `habilis_network_mesh *`. Holds the `Mesh` plus
 /// NUL-terminated copies of the identity strings, so [`habilis_network_mesh_id`] /
 /// [`habilis_network_mesh_nickname`] can hand out pointers that stay valid for the
 /// handle's lifetime.

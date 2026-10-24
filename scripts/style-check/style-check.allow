@@ -22,9 +22,9 @@ anyhow_pub|crates/habilis-network-chunks/src/fs.rs|1|package 7: typed in a later
 anyhow_pub|crates/habilis-network-chunks/src/idb.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-chunks/src/lib.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-chunks/src/mem.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network-ffi/src/mesh.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network-ffi/src/stream.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-iroh-multihop-transport/src/wire.rs|1|pub(crate) cell codec in a private module, not public API
+anyhow_pub|crates/habilis-network-ffi/src/mesh.rs|1|pub(crate) module; the rule counts its anyhow import
+anyhow_pub|crates/habilis-network-ffi/src/stream.rs|1|pub(crate) module; the rule counts its anyhow import
 anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/lib.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/native/jsep.rs|6|package 7: typed in a later commit
