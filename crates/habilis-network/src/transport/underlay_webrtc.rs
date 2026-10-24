@@ -290,14 +290,14 @@ pub(crate) fn tick(state: &state::EventLoopState, underlay: &UnderlayWebRtc) {
                     super::webrtc::nudge_session(&endpoint, peer).await;
                 }
                 Err(error) => {
-                    if super::webrtc::is_cap_refusal(&error) {
+                    if matches!(error, crate::lookup::EndpointError::CapRefused(_)) {
                         admission.note_refused(peer);
                     }
                     tracing::debug!(target: LOG_TARGET, %peer, %error, "underlay webrtc offer failed");
                     // The guard of the round is held for the delay: its end rings the table, and
                     // the loop ticks and offers again (see `event_loop`). A second turn-away in
                     // a row is noted as a refusal: the peer waits, and the round ends at once.
-                    if super::webrtc::is_not_a_neighbor_refusal(&error)
+                    if matches!(error, crate::lookup::EndpointError::NotANeighbor(_))
                         && admission.note_not_a_neighbor(peer)
                     {
                         n0_future::time::sleep(REFUSAL_RETRY).await;
@@ -728,11 +728,11 @@ mod tests {
         .await
         .expect_err("the gate turns a stranger away");
         assert!(
-            webrtc::is_not_a_neighbor_refusal(&error),
+            matches!(error, crate::lookup::EndpointError::NotANeighbor(_)),
             "the refusal is read from the close code: {error:#}"
         );
         assert!(
-            !webrtc::is_cap_refusal(&error),
+            !matches!(error, crate::lookup::EndpointError::CapRefused(_)),
             "a stranger is not a cap refusal: {error:#}"
         );
 
@@ -751,7 +751,7 @@ mod tests {
         .await
         {
             assert!(
-                !webrtc::is_not_a_neighbor_refusal(&late_error),
+                !matches!(late_error, crate::lookup::EndpointError::NotANeighbor(_)),
                 "a neighbor is not turned away: {late_error:#}"
             );
         }

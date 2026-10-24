@@ -9,7 +9,7 @@ use habilis_network::iroh::protocol::Router;
 use habilis_network::net::direct::{
     IceProfile, MAX_DIRECT_PEERS, MESH_WEBRTC_SIGNAL_ALPN, NUDGE_ALPN, NudgeAcceptor,
     PROBE_DEADLINE, PayloadPath, SignalAdmission, UdpTransport, WebRtcHandle, WebRtcSignalAcceptor,
-    build_peer_webrtc, dial_signal, is_cap_refusal, pair_needs_lane, wait_direct,
+    build_peer_webrtc, dial_signal, pair_needs_lane, wait_direct,
 };
 use habilis_network::net::{TransportOpts, add_peer_addr, address_book};
 use habilis_network::protocol::{
@@ -246,7 +246,7 @@ impl StreamNode {
             .await
             && !relay_ok
         {
-            if is_cap_refusal(&error) {
+            if matches!(error, habilis_network::net::EndpointError::CapRefused(_)) {
                 return Err(StreamError::Refused(Refused::AtCap));
             }
             return Err(StreamError::Open {

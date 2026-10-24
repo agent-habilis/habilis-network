@@ -52,7 +52,13 @@ pub struct NetworkCapability {
 ///
 /// # Errors
 /// The endpoint fails to bind (the local network stack is broken).
-pub async fn probe(timeout: Duration) -> Result<NetworkCapability> {
+pub async fn probe(timeout: Duration) -> Result<NetworkCapability, super::EndpointError> {
+    probe_checked(timeout)
+        .await
+        .map_err(super::EndpointError::internal)
+}
+
+async fn probe_checked(timeout: Duration) -> Result<NetworkCapability> {
     let endpoint = build_peer_endpoint(&LookupOpts::public_preset()).await?;
     let node_id = endpoint.id().to_string();
     let local_addrs = endpoint.bound_sockets();

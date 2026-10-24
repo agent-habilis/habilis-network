@@ -25,6 +25,4 @@ anyhow_pub|crates/habilis-network/src/blob/produce.rs|2|package 7: typed in a la
 anyhow_pub|crates/habilis-network/src/blob/ticket.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/daemon/event_loop.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/daemon/state_file.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/lookup/capability.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/lookup/mod.rs|4|3 public fns to type in batch 4, and the test relay helper spawn_plain behind iroh-test-utils (one row per file: the allow file is keyed by file, so it cannot be split)
-anyhow_pub|crates/habilis-network/src/transport/webrtc.rs|1|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/lookup/mod.rs|1|the test relay helper spawn_plain, behind the iroh-test-utils feature (a test helper, not library API)

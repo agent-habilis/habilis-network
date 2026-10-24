@@ -38,6 +38,7 @@ use super::admission::{Refusal, SignalAdmission};
 
 use crate::daemon::state::DirectState;
 use crate::daemon::{ctx, state};
+use crate::lookup::EndpointError;
 use crate::transport::probe;
 use crate::util::{clock, tuning};
 /// ALPN for the JSEP exchange. Wire-load-bearing in the same way
@@ -231,52 +232,9 @@ impl IceProfile {
 /// refusal quiets this peer for a while, a transient failure is retried. Matching
 /// on text could not do that — `anyhow`'s `Display` shows only the outermost
 /// context, so the reason was hidden behind whichever step happened to fail.
-#[derive(Debug)]
-struct CapRefused(EndpointId);
-
-impl std::fmt::Display for CapRefused {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{} is at its direct-peer cap", self.0)
-    }
-}
-
-impl std::error::Error for CapRefused {}
-
-/// Whether a failed offer round was the peer refusing us at its ceiling.
-#[must_use]
-pub fn is_cap_refusal(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<CapRefused>().is_some()
-}
-
 /// The answerer of the multihop underlay turned our offer away because it holds no link vector
 /// of ours yet. That is a race of two vectors that cross, not a verdict: the vector arrives a few
 /// milliseconds after the offer, so the offerer tries again soon (see `underlay_webrtc`).
-#[cfg(any(feature = "multihop", test))]
-#[derive(Debug)]
-struct NotANeighbor(EndpointId);
-
-#[cfg(any(feature = "multihop", test))]
-impl std::fmt::Display for NotANeighbor {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{} holds no link vector of ours yet: not a neighbor",
-            self.0
-        )
-    }
-}
-
-#[cfg(any(feature = "multihop", test))]
-impl std::error::Error for NotANeighbor {}
-
-/// Whether a failed offer round was the underlay of the peer turning us away as not (yet) a
-/// neighbor. Only the multihop underlay asks, so only a build with it has the function.
-#[cfg(feature = "multihop")]
-#[must_use]
-pub(crate) fn is_not_a_neighbor_refusal(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<NotANeighbor>().is_some()
-}
-
 /// Write our envelope and wait for theirs, on an already-open connection.
 ///
 /// Split out so the caller can consult the connection's close reason once for
@@ -325,16 +283,17 @@ fn refused_not_a_neighbor(conn: &Connection) -> bool {
     )
 }
 
-/// `error` of a failed exchange, with the refusal that the close reason of `conn` names.
-fn with_refusal(conn: &Connection, error: anyhow::Error, remote: EndpointId) -> anyhow::Error {
+/// The error of a failed exchange: the refusal that the close reason of `conn` names, or the
+/// exchange's own cause.
+fn with_refusal(conn: &Connection, error: anyhow::Error, remote: EndpointId) -> EndpointError {
     if refused_at_cap(conn) {
-        return error.context(CapRefused(remote));
+        return EndpointError::CapRefused(remote);
     }
     #[cfg(any(feature = "multihop", test))]
     if refused_not_a_neighbor(conn) {
-        return error.context(NotANeighbor(remote));
+        return EndpointError::NotANeighbor(remote);
     }
-    error
+    EndpointError::internal(error)
 }
 
 /// The `ProtocolHandler` the Router runs for [`MESH_WEBRTC_SIGNAL_ALPN`]: read
@@ -574,7 +533,7 @@ pub async fn dial_signal(
     peer: EndpointAddr,
     handle: &WebRtcHandle,
     ice: IceProfile,
-) -> Result<()> {
+) -> Result<(), EndpointError> {
     Box::pin(dial_signal_with(
         endpoint,
         book,
@@ -597,7 +556,7 @@ pub(crate) async fn dial_signal_with(
     handle: &WebRtcHandle,
     deadlines: SignalDeadlines,
     ice: IceProfile,
-) -> Result<()> {
+) -> Result<(), EndpointError> {
     // Bounded as a whole, because every step below can hang and only some of
     // them have a budget of their own. Nothing here was bounded before: the old
     // `JSEP_DEADLINE` wrapped only `complete()`, which runs *after* the answer
@@ -616,12 +575,10 @@ pub(crate) async fn dial_signal_with(
     .await
     {
         Ok(result) => result,
-        Err(_elapsed) => {
-            anyhow::bail!(
-                "webrtc signalling with {remote} exceeded {:?}",
-                deadlines.round
-            )
-        }
+        Err(_elapsed) => Err(EndpointError::internal(anyhow::anyhow!(
+            "webrtc signalling with {remote} exceeded {:?}",
+            deadlines.round
+        ))),
     }
 }
 
@@ -632,7 +589,7 @@ async fn dial_signal_round(
     handle: &WebRtcHandle,
     deadlines: SignalDeadlines,
     ice: IceProfile,
-) -> Result<()> {
+) -> Result<(), EndpointError> {
     let remote = peer.id;
     let local = endpoint.id();
 
@@ -640,7 +597,9 @@ async fn dial_signal_round(
     // soon as our stream opens, and it then sits through our whole gathering
     // budget waiting to read. Gathering first shortens its read window by
     // several seconds and costs us nothing.
-    let offer = build_offer(local, handle, ice).await?;
+    let offer = build_offer(local, handle, ice)
+        .await
+        .map_err(EndpointError::internal)?;
 
     // The connect holds the peer's slot like every later step does, and an id that nobody serves
     // never answers it: without its own bound the round lives to the round deadline.
@@ -650,11 +609,17 @@ async fn dial_signal_round(
     )
     .await
     {
-        Ok(conn) => conn.context("dial the mesh WebRTC signal ALPN")?,
-        Err(_elapsed) => anyhow::bail!(
-            "dial of the mesh WebRTC signal ALPN of {remote} exceeded {:?}",
-            deadlines.exchange
-        ),
+        Ok(conn) => conn.map_err(|error| {
+            EndpointError::internal(
+                anyhow::Error::new(error).context("dial the mesh WebRTC signal ALPN"),
+            )
+        })?,
+        Err(_elapsed) => {
+            return Err(EndpointError::internal(anyhow::anyhow!(
+                "dial of the mesh WebRTC signal ALPN of {remote} exceeded {:?}",
+                deadlines.exchange
+            )));
+        }
     };
 
     // Any step of the exchange can be the one that trips over a refusal: a peer
@@ -662,14 +627,21 @@ async fn dial_signal_round(
     // offer is even written. Consulting the close reason once, on whichever step
     // noticed, is what makes the refusal visible — checking it on only the
     // timeout branch missed every prompt refusal, which is all of them.
-    let offer_bytes = serde_json::to_vec(offer.envelope())?;
+    let offer_bytes = serde_json::to_vec(offer.envelope())
+        .map_err(|error| EndpointError::Internal(error.into()))?;
     let raw = match exchange_envelopes(&conn, &offer_bytes, remote, deadlines).await {
         Ok(raw) => raw,
         Err(error) => return Err(with_refusal(&conn, error, remote)),
     };
-    let answer: SignalEnvelope = serde_json::from_slice(&raw).context("parse signal answer")?;
+    let answer: SignalEnvelope = serde_json::from_slice(&raw).map_err(|error| {
+        EndpointError::internal(anyhow::Error::new(error).context("parse signal answer"))
+    })?;
 
-    offer.with_answer(answer).complete(remote, handle).await?;
+    offer
+        .with_answer(answer)
+        .complete(remote, handle)
+        .await
+        .map_err(EndpointError::internal)?;
     register_session_addr(book, remote);
     // Signalling is done the moment the session is attached; the data rides its
     // own connections from here.
@@ -1133,7 +1105,7 @@ fn spawn_offer_round(
         let started = n0_future::time::Instant::now();
         tracing::debug!(target: LOG_TARGET, node = %node.fmt_short(), %peer, book = ?book.get_endpoint_info(peer), "offer round started");
         if let Err(error) = Box::pin(dial_signal(&endpoint, &book, addr, &handle, ice)).await {
-            if is_cap_refusal(&error) {
+            if matches!(error, EndpointError::CapRefused(_)) {
                 admission.note_refused(peer);
             }
             tracing::debug!(target: LOG_TARGET, %peer, %error, age_ms = started.elapsed().as_millis(), "webrtc offer failed");
@@ -2190,7 +2162,7 @@ mod tests {
         .await
         .expect_err("the evicted peer is refused for a minute");
         assert!(
-            is_cap_refusal(&error),
+            matches!(error, EndpointError::CapRefused(_)),
             "the dialer reads the refusal as a code to wait on: {error:#}"
         );
         assert!(

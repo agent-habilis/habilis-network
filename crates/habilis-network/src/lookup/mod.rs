@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 mod capability;
 #[cfg(all(feature = "host", feature = "dht"))]
 mod dht;
+mod error;
 #[cfg(all(feature = "host", feature = "mdns"))]
 mod mdns;
 mod relay;
@@ -94,6 +95,7 @@ pub mod test_relay {
 
 #[cfg(feature = "host")]
 pub use capability::{NetworkCapability, probe as capability_probe};
+pub use error::EndpointError;
 pub use relay::{RENDEZVOUS_RELAY_LADDER, probe_ladder, relay_ladder};
 pub(crate) use relay::{
     RungRefresh, StoppableTask, plan_rung_refresh, select_bootstrap_rung, spawn_relay_monitor,
@@ -402,6 +404,18 @@ pub async fn build_endpoint(
     bind_port: Option<u16>,
     alpns: Vec<Vec<u8>>,
     transports: TransportHandles,
+) -> Result<Endpoint, EndpointError> {
+    build_endpoint_checked(lookups, secret_key, bind_port, alpns, transports)
+        .await
+        .map_err(EndpointError::internal)
+}
+
+async fn build_endpoint_checked(
+    lookups: &LookupOpts,
+    secret_key: Option<SecretKey>,
+    bind_port: Option<u16>,
+    alpns: Vec<Vec<u8>>,
+    transports: TransportHandles,
 ) -> Result<Endpoint> {
     Ok(
         build_endpoint_keeping_mdns(lookups, secret_key, bind_port, alpns, transports)
@@ -681,7 +695,7 @@ pub(crate) async fn build_endpoint_keeping_mdns(
 /// so call sites don't carry the rendezvous-only `None, None`.
 /// # Errors
 /// Binding the socket fails, or an address-lookup service cannot be wired.
-pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint> {
+pub async fn build_peer_endpoint(lookups: &LookupOpts) -> Result<Endpoint, EndpointError> {
     build_endpoint(lookups, None, None, Vec::new(), TransportHandles::default()).await
 }
 
@@ -794,11 +808,16 @@ pub(crate) fn check_injected_against_mesh(
 pub async fn build_peer_webrtc(
     lookups: &LookupOpts,
     opts: TransportOpts,
-) -> Result<(
-    Endpoint,
-    habilis_network_iroh_webrtc_transport::WebRtcHandle,
-)> {
-    let (endpoint, handle, _mdns) = build_peer_webrtc_with(lookups, opts, None).await?;
+) -> Result<
+    (
+        Endpoint,
+        habilis_network_iroh_webrtc_transport::WebRtcHandle,
+    ),
+    EndpointError,
+> {
+    let (endpoint, handle, _mdns) = build_peer_webrtc_with(lookups, opts, None)
+        .await
+        .map_err(EndpointError::internal)?;
     Ok((endpoint, handle))
 }
 
