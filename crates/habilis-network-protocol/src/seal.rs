@@ -14,11 +14,12 @@
 //! The envelope is a small JSON object with Base58 fields, so it is a valid
 //! [`MessageBody`] (UTF-8, no control characters).
 
-use anyhow::{Context, Result, anyhow};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::fmt;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
@@ -56,6 +57,59 @@ struct Envelope {
     ct: String,
 }
 
+/// Why a seal does not open, or a sealed body does not decode.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SealError {
+    /// The seal does not open, or a fixed check failed. The text says which.
+    Failed(&'static str),
+    /// The envelope names a version this build does not read.
+    UnsupportedVersion(String),
+    /// A value does not have the shape the seal needs.
+    Invalid(String),
+    /// A field does not decode.
+    Source {
+        /// The step that failed, for example `bad nonce`.
+        step: &'static str,
+        /// The error of the decoder.
+        source: Box<dyn Error + Send + Sync>,
+    },
+}
+
+impl SealError {
+    fn source<E>(step: &'static str) -> impl FnOnce(E) -> Self
+    where
+        E: Into<Box<dyn Error + Send + Sync>>,
+    {
+        move |source| Self::Source {
+            step,
+            source: source.into(),
+        }
+    }
+}
+
+impl fmt::Display for SealError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed(text) => formatter.write_str(text),
+            Self::Invalid(text) => formatter.write_str(text),
+            Self::UnsupportedVersion(version) => {
+                write!(formatter, "unsupported seal envelope version: {version}")
+            }
+            Self::Source { step, .. } => formatter.write_str(step),
+        }
+    }
+}
+
+impl Error for SealError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Source { source, .. } => Some(source.as_ref()),
+            Self::Failed(_) | Self::UnsupportedVersion(_) | Self::Invalid(_) => None,
+        }
+    }
+}
+
 /// Seal `plaintext` to `recipient_pub`. Infallible in practice — the only
 /// fallible step is AEAD encryption, which cannot fail for a well-formed
 /// key/nonce.
@@ -91,7 +145,7 @@ fn seal(recipient_pub: &PublicKey, plaintext: &[u8]) -> Sealed {
 /// # Errors
 /// The AEAD fails to authenticate — a wrong recipient key or a tampered
 /// ciphertext/nonce.
-fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>> {
+fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>, SealError> {
     let shared = our_secret.diffie_hellman(&PublicKey::from(sealed.epk));
     let key = derive_secret(shared.as_bytes(), SEAL_LABEL);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key));
@@ -103,7 +157,7 @@ fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>> {
                 aad: SEAL_LABEL,
             },
         )
-        .map_err(|_| anyhow!("unseal failed: wrong recipient key or tampered ciphertext"))
+        .map_err(|_| SealError::Failed("unseal failed: wrong recipient key or tampered ciphertext"))
 }
 
 /// Seal `plaintext` (a serialized application payload) to `recipient_pub`, returning the
@@ -115,7 +169,7 @@ fn unseal(our_secret: &StaticSecret, sealed: &Sealed) -> Result<Vec<u8>> {
 /// # Panics
 /// If `Envelope` fails to serialize. Its fields are `String`s and a version
 /// tag, so serialization cannot fail short of an allocator failure.
-pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<MessageBody> {
+pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<MessageBody, SealError> {
     let sealed = seal(recipient_pub, plaintext.as_bytes());
     let envelope = Envelope {
         version: ENVELOPE_VERSION.to_string(),
@@ -124,7 +178,7 @@ pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<Messag
         ct: bs58::encode(sealed.ct).into_string(),
     };
     let json = serde_json::to_string(&envelope).expect("Envelope always serializes");
-    MessageBody::new(json).map_err(|error| anyhow!("{error}"))
+    MessageBody::new(json).map_err(|error| SealError::Invalid(error.to_string()))
 }
 
 /// Open a sealed directed `body` with our static X25519 secret, recovering the
@@ -133,27 +187,31 @@ pub fn seal_to_body(recipient_pub: &PublicKey, plaintext: &str) -> Result<Messag
 /// # Errors
 /// The body is not a sealed envelope, has an unknown version, carries malformed
 /// Base58, or fails to decrypt/authenticate.
-pub fn unseal_from_body(our_secret: &StaticSecret, body: &MessageBody) -> Result<String> {
-    let envelope: Envelope =
-        serde_json::from_str(body.as_str()).context("body is not a sealed envelope")?;
+pub fn unseal_from_body(
+    our_secret: &StaticSecret,
+    body: &MessageBody,
+) -> Result<String, SealError> {
+    let envelope: Envelope = serde_json::from_str(body.as_str())
+        .map_err(SealError::source("body is not a sealed envelope"))?;
     if envelope.version != ENVELOPE_VERSION {
-        return Err(anyhow!(
-            "unsupported seal envelope version: {}",
-            envelope.version
-        ));
+        return Err(SealError::UnsupportedVersion(envelope.version));
     }
-    let epk = decode_array::<32>(&envelope.epk).context("bad ephemeral key")?;
-    let nonce = decode_array::<12>(&envelope.nonce).context("bad nonce")?;
+    let epk = decode_array::<32>(&envelope.epk).map_err(SealError::source("bad ephemeral key"))?;
+    let nonce = decode_array::<12>(&envelope.nonce).map_err(SealError::source("bad nonce"))?;
     let ct = bs58::decode(&envelope.ct)
         .into_vec()
-        .context("bad ciphertext")?;
+        .map_err(SealError::source("bad ciphertext"))?;
     let plaintext = unseal(our_secret, &Sealed { epk, nonce, ct })?;
-    String::from_utf8(plaintext).context("decrypted payload is not valid UTF-8")
+    String::from_utf8(plaintext).map_err(SealError::source("decrypted payload is not valid UTF-8"))
 }
 
-fn decode_array<const N: usize>(encoded: &str) -> Result<[u8; N]> {
-    let bytes = bs58::decode(encoded).into_vec().context("invalid Base58")?;
-    bytes.try_into().map_err(|_| anyhow!("expected {N} bytes"))
+fn decode_array<const N: usize>(encoded: &str) -> Result<[u8; N], SealError> {
+    let bytes = bs58::decode(encoded)
+        .into_vec()
+        .map_err(SealError::source("invalid Base58"))?;
+    bytes
+        .try_into()
+        .map_err(|_| SealError::Invalid(format!("expected {N} bytes")))
 }
 
 /// Symmetrically seal `plaintext` under a pre-shared `key` (a
@@ -190,9 +248,9 @@ pub fn seal_symmetric(key: &SymmetricKey, plaintext: &[u8]) -> Vec<u8> {
 /// # Errors
 /// The blob is too short to carry a nonce, or the AEAD fails to authenticate (a
 /// wrong key or tampered bytes).
-pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>> {
+pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>, SealError> {
     if blob.len() < 12 {
-        return Err(anyhow!("symmetric blob too short for a nonce"));
+        return Err(SealError::Failed("symmetric blob too short for a nonce"));
     }
     let (nonce, ct) = blob.split_at(12);
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
@@ -204,7 +262,7 @@ pub fn open_symmetric(key: &SymmetricKey, blob: &[u8]) -> Result<Vec<u8>> {
                 aad: SYM_AAD,
             },
         )
-        .map_err(|_| anyhow!("symmetric open failed: wrong key or tampered ciphertext"))
+        .map_err(|_| SealError::Failed("symmetric open failed: wrong key or tampered ciphertext"))
 }
 
 #[cfg(test)]

@@ -8,7 +8,6 @@
 
 use std::fmt;
 
-use anyhow::{Context, Result, bail};
 use iroh_base::Signature;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +20,7 @@ use super::{AuthorKey, ContentHash, DedupKey};
 use crate::newtype::string_newtype;
 
 mod body;
+mod error;
 mod id;
 mod shard;
 mod verified;
@@ -30,6 +30,7 @@ pub use verified::{Authored, Proof, Verified};
 pub use wire::WireFrame;
 
 pub use body::{BodyError, MessageBody};
+pub use error::{AppTagError, CorrIdError, MessageError};
 pub use id::{IdError, MessageId};
 pub use shard::{Shard, ShardGroup, shard_fits_log};
 
@@ -179,10 +180,10 @@ impl AppTag {
     ///
     /// # Errors
     /// The tag is empty, longer than 32 bytes, or not an ASCII slug.
-    pub fn new(raw: impl Into<String>) -> Result<Self, &'static str> {
+    pub fn new(raw: impl Into<String>) -> Result<Self, AppTagError> {
         let raw = raw.into();
         if !Self::validate(&raw) {
-            return Err("invalid app tag");
+            return Err(AppTagError::Invalid);
         }
         Ok(Self(raw))
     }
@@ -195,7 +196,7 @@ string_newtype!(
 /// mints and interprets its value (the application layer uses a UUID). Kept generic so
 /// the engine correlates without knowing the payload model.
     CorrId,
-    error = &'static str,
+    error = CorrIdError,
 );
 
 impl CorrId {
@@ -217,10 +218,10 @@ impl CorrId {
     ///
     /// # Errors
     /// The correlation id is empty or longer than 64 bytes.
-    pub fn new(raw: impl Into<String>) -> Result<Self, &'static str> {
+    pub fn new(raw: impl Into<String>) -> Result<Self, CorrIdError> {
         let raw = raw.into();
         if !Self::validate(&raw) {
-            return Err("invalid correlation id");
+            return Err(CorrIdError::Invalid);
         }
         Ok(Self(raw))
     }
@@ -921,14 +922,11 @@ impl Message {
     /// serializes, through [`Verified::serialize`]: an unverified or an authored view has no wire form.
     /// # Errors
     /// Serialization of a field fails.
-    pub(crate) fn serialize(&self) -> Result<Vec<u8>> {
-        let bytes = serde_json::to_vec(&Wire(self)).context("failed to serialize message")?;
+    pub(crate) fn serialize(&self) -> Result<Vec<u8>, MessageError> {
+        let bytes = serde_json::to_vec(&Wire(self))
+            .map_err(MessageError::source("failed to serialize message"))?;
         if bytes.len() > MAX_MESSAGE_SIZE {
-            bail!(
-                "message too large: {} bytes (max {})",
-                bytes.len(),
-                MAX_MESSAGE_SIZE
-            );
+            return Err(MessageError::Oversize { bytes: bytes.len() });
         }
         Ok(bytes)
     }
@@ -936,15 +934,16 @@ impl Message {
     /// Parse a message from JSON bytes.
     /// # Errors
     /// The bytes are malformed or truncated.
-    pub fn parse(data: &[u8]) -> Result<Self> {
+    pub fn parse(data: &[u8]) -> Result<Self, MessageError> {
         if data.len() > MAX_MESSAGE_SIZE {
-            bail!("message too large");
+            return Err(MessageError::TooLarge);
         }
-        let wire: WireIn = serde_json::from_slice(data).context("failed to parse message JSON")?;
+        let wire: WireIn = serde_json::from_slice(data)
+            .map_err(MessageError::source("failed to parse message JSON"))?;
         if wire.version != VERSION {
-            bail!("unsupported protocol version: {}", wire.version);
+            return Err(MessageError::UnsupportedVersion(wire.version));
         }
-        Message::try_from(wire).map_err(|reason| anyhow::anyhow!(reason))
+        Message::try_from(wire).map_err(MessageError::Invalid)
     }
 
     /// Parse a gossip payload that may end in the trailer of a resend (see
@@ -953,7 +952,7 @@ impl Message {
     ///
     /// # Errors
     /// The frame is malformed, as for [`Message::parse`].
-    pub fn parse_wire(data: &[u8]) -> Result<(Self, Option<u64>)> {
+    pub fn parse_wire(data: &[u8]) -> Result<(Self, Option<u64>), MessageError> {
         let (frame, nonce) = split_resend_trailer(data);
         Ok((Self::parse(frame)?, nonce))
     }
@@ -1258,7 +1257,7 @@ pub struct BuildMsgParams<'mesh> {
 pub fn build_msg_bytes(
     params: BuildMsgParams<'_>,
     identity: &Identity,
-) -> Result<(WireFrame, Verified)> {
+) -> Result<(WireFrame, Verified), MessageError> {
     let msg = Message::new_app(
         params.mesh,
         params.author,

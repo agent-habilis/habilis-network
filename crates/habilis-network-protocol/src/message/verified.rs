@@ -9,7 +9,7 @@ use serde::{Serialize, Serializer};
 use bytes::Bytes;
 
 use super::wire::WireFrame;
-use super::{Message, MessageBody};
+use super::{Message, MessageBody, MessageError};
 use crate::AuthorKey;
 
 /// A [`Message`] whose signature was made here or checked over its exact bytes.
@@ -115,7 +115,7 @@ impl Verified {
     /// # Errors
     ///
     /// Propagates `Message::serialize` failure.
-    pub fn serialize(&self) -> anyhow::Result<WireFrame> {
+    pub fn serialize(&self) -> Result<WireFrame, MessageError> {
         Ok(WireFrame::new(Bytes::from((*self.message).serialize()?)))
     }
 

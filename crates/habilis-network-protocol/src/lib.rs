@@ -62,12 +62,12 @@ pub use mesh::{
     TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
 };
 pub use message::{
-    AppFrameParams, AppTag, Authored, BodyError, Channel, CorrId, IdError, Message, MessageBody,
-    MessageId, MessageKind, PresenceSubtype, Proof, Shard, ShardGroup, Signer, Verified,
-    sole_addressee,
+    AppFrameParams, AppTag, AppTagError, Authored, BodyError, Channel, CorrId, CorrIdError,
+    IdError, Message, MessageBody, MessageError, MessageId, MessageKind, PresenceSubtype, Proof,
+    Shard, ShardGroup, Signer, Verified, sole_addressee,
 };
 pub use nickname::{Nickname, NicknameError};
-pub use seal::seal_to_body;
+pub use seal::{SealError, seal_to_body};
 pub use topic::TopicId;
 
 /// The invite token itself. Minting lives in

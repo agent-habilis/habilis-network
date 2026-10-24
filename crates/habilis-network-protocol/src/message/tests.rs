@@ -1,6 +1,6 @@
 use super::{
-    AppFrameParams, AppTag, BuildMsgParams, ChainCtx, MeshId, Message, MessageBody, MessageId,
-    MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
+    AppFrameParams, AppTag, AppTagError, BuildMsgParams, ChainCtx, CorrIdError, MeshId, Message,
+    MessageBody, MessageId, MessageKind, Nickname, PresenceSubtype, build_msg_bytes,
 };
 use habilis_network_test_tracing::test;
 
@@ -35,7 +35,7 @@ fn test_round_trip() {
 fn app_tag_constructor_rejects_an_invalid_value() {
     assert_eq!(
         AppTag::new("not-valid!"),
-        Err("invalid app tag"),
+        Err(AppTagError::Invalid),
         "a tag with a dash is refused"
     );
 }
@@ -44,7 +44,7 @@ fn app_tag_constructor_rejects_an_invalid_value() {
 fn correlation_id_constructor_rejects_an_invalid_value() {
     assert_eq!(
         super::CorrId::new(""),
-        Err("invalid correlation id"),
+        Err(CorrIdError::Invalid),
         "an empty id is refused"
     );
 }
