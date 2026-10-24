@@ -176,7 +176,10 @@ jobs:
           crate=habilis-network-iroh-gossip-transport
           dead='does not refer to a reachable function'
           probe=$(mktemp -d)
-          echo 'disallowed-methods = [{ path = "tokio::time::sleeeep" }]' > "$probe/clippy.toml"
+          # The probe replaces clippy.toml, so it repeats the setting the workspace lints need to
+          # stay quiet: absolute-paths-max-segments (clippy.toml). Without it clippy fails on
+          # absolute_paths before it reaches the dead path.
+          printf '%s\n' 'absolute-paths-max-segments = 3' 'disallowed-methods = [{ path = "tokio::time::sleeeep" }]' > "$probe/clippy.toml"
           cargo clean -p $crate --target wasm32-unknown-unknown
           out=$(CLIPPY_CONF_DIR="$probe" cargo clippy --target wasm32-unknown-unknown -p $crate 2>&1)
           if ! grep -q "$dead" <<< "$out"; then
