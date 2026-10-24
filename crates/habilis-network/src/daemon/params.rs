@@ -186,6 +186,9 @@ impl JoinParams {
                         .unlock(self.password.as_ref())
                         .map_err(|error| match error {
                             UnlockError::PasswordRequired => SetupError::PasswordRequired,
+                            error @ (UnlockError::InviteOnly
+                            | UnlockError::NoPassword
+                            | UnlockError::WrongPassword) => SetupError::Unlock(error),
                             other => SetupError::Unlock(other),
                         })?;
                 unlocked

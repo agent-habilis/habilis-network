@@ -32,12 +32,19 @@ async fn read_all(reader: &mut Reader) -> Result<Vec<u8>, StreamError> {
 }
 
 #[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "StreamError is non_exhaustive, so the arm is needed"
+    clippy::match_same_arms,
+    reason = "the compiler needs the catch-all arm for a foreign non_exhaustive enum; the named arms return the same None"
 )]
 fn refusal(error: &StreamError) -> Option<Refused> {
     match error {
         StreamError::Refused(refused) => Some(*refused),
+        StreamError::Options(_)
+        | StreamError::Bind { .. }
+        | StreamError::Open { .. }
+        | StreamError::NodeClosed
+        | StreamError::Closed
+        | StreamError::ConsumerGone(_)
+        | StreamError::Lost(_) => None,
         _ => None,
     }
 }
