@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 
 use super::outbox::Resend;
 use super::pool::{COOLDOWN_REFUSED, UnicastPool, WarmSend};
+use crate::daemon::event_loop::EventLoopError;
 use crate::daemon::state::EventLoopState;
 use crate::protocol::Nickname;
 use crate::protocol::message::{Verified, WireFrame, sole_addressee};
@@ -207,6 +208,8 @@ pub enum SendError {
     InvalidAddressee(String),
     /// The mesh event loop has stopped, so nothing can carry the message.
     Stopped,
+    /// The event loop of the node ended with an error, so a leave failed.
+    EventLoop(EventLoopError),
     /// A cause no caller acts on. It keeps its text and its chain.
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -229,6 +232,7 @@ impl std::fmt::Display for SendError {
             | Self::Oversize(message)
             | Self::InvalidAddressee(message) => f.write_str(message),
             Self::Stopped => f.write_str("mesh event loop has stopped"),
+            Self::EventLoop(error) => std::fmt::Display::fmt(error, f),
             Self::Internal(error) => std::fmt::Display::fmt(error.as_ref(), f),
         }
     }
@@ -237,6 +241,7 @@ impl std::fmt::Display for SendError {
 impl std::error::Error for SendError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::EventLoop(error) => error.source(),
             Self::Internal(error) => error.source(),
             Self::Held { .. }
             | Self::Undeliverable(_)
@@ -1713,5 +1718,22 @@ mod chain_tests {
             text.contains("Address already in use"),
             "the io cause of SendError is lost: {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod leave_tests {
+    use habilis_network_test_tracing::test;
+
+    use super::SendError;
+    use crate::daemon::event_loop::EventLoopError;
+
+    /// A leave that fails because the loop ended with an error keeps that error's text.
+    #[test]
+    fn a_leave_failure_keeps_the_event_loop_error() {
+        let io = std::io::Error::new(std::io::ErrorKind::AddrInUse, "Address already in use");
+        let error = SendError::EventLoop(EventLoopError::Internal(Box::new(io)));
+        let text = format!("{:#}", anyhow::Error::new(error));
+        assert!(text.contains("Address already in use"), "{text}");
     }
 }

@@ -261,7 +261,7 @@ impl<A: NodeDriver + 'static> Node<A> {
                 joined = task => {
                     joined
                         .map_err(|error| crate::transport::SendError::internal(anyhow::anyhow!("mesh task panicked: {error}")))?
-                        .map_err(|error| crate::transport::SendError::Internal(error.into()))?;
+                        .map_err(crate::transport::SendError::EventLoop)?;
                 }
                 () = timeout => {}
             }
