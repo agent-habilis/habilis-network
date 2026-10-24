@@ -20,7 +20,8 @@ default = ["host"]
 # listener, which is itself host-only.
 host = ["dep:libc", "dep:windows-sys", "async-io"]
 # Exposes helpers that exist only for assertions (clock::unix_nanos,
-# Cooldown::len, and on Windows the console events of `win_console`).
+# Cooldown::len, and on Windows the console events of `win_console` and the
+# end-of-session messages of `win_session`).
 # habilis-network turns it on through dev-dependencies.
 test-fixtures = ["windows-sys?/Win32_System_Console"]
 # `bounded_read` is the crate's only async code, and its only consumer is the
@@ -63,18 +64,24 @@ libc = { workspace = true, optional = true }
 # the reparse-point attribute; `win_security.rs` uses it for `CreateFileW` and
 # the SQOS flags. `win_security.rs` adds `Win32_Security` for the token, the SID
 # calls and the owner flag, and `Win32_Security_Authorization` for the SID text
-# and `GetSecurityInfo`. `test-fixtures` adds `Win32_System_Console` for the
-# console calls of `win_console.rs`.
+# and `GetSecurityInfo`. `win_session.rs` adds `Win32_UI_WindowsAndMessaging`
+# for the window and its messages, `Win32_Graphics_Gdi`, which gates
+# `WNDCLASSW`, and `Win32_System_LibraryLoader` for `GetModuleHandleW`.
+# `test-fixtures` adds `Win32_System_Console` for the console calls of
+# `win_console.rs`.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, optional = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # The tests of `win_security.rs` make a server pipe with the raw call, so they do

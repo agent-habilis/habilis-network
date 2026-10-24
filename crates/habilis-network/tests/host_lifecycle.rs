@@ -23,6 +23,15 @@
 //! the node and raises the event there, so the test does not depend on the
 //! console of the runner.
 //!
+//! Part 5, the end of the session (R13), on Windows only: a node in a child
+//! process stops on a logoff and on a `WM_CLOSE`. The test sends the messages
+//! that Windows sends to the hidden window of the node, as `taskkill /PID`
+//! without `/F` and a logoff do. The node exits with 0, it logs the line of the
+//! event, and its state file and its marker are gone. No process can end the
+//! session of the runner, and in the test nothing ends the node when its
+//! window procedure returns, so the wait of the node until its `Left` is
+//! tested by hand (T6).
+//!
 //! In CLI mode a quit ends the process with `std::process::exit`, and a node
 //! whose task is aborted drops its endpoint with no `Endpoint::close`, which
 //! iroh logs as an ERROR that fails the test. So every part runs its node in a
@@ -372,6 +381,16 @@ impl ChildNode {
         spawn_entry("child_node", (CHILD_ENV, &spec), Stdio::piped())
     }
 
+    /// The child of part 5, which logs the lines of `habilis_network::lifecycle`
+    /// to its stderr. Without `RUST_LOG` the tracing of the test shows only
+    /// ERROR.
+    #[cfg(windows)]
+    fn spawn_with_lifecycle_log(base: &Path, topic: &str) -> Self {
+        let mut command = Self::command(base, topic, None);
+        command.env("RUST_LOG", "habilis_network::lifecycle=info");
+        Self::start(command)
+    }
+
     /// The child of part 4, in a console of its own (`CREATE_NO_WINDOW`), with
     /// the other creation `flags`. With `ctrl_c` it turns ctrl-c on first.
     #[cfg(windows)]
@@ -581,4 +600,63 @@ async fn ctrl_break_stops_a_cli_node() {
 async fn ctrl_c_stops_a_cli_node() {
     // Not in a new process group: a node in one ignores ctrl-c.
     assert_console_event_stops_a_cli_node("ctrl-c", "c", 0, true).await;
+}
+
+/// Part 5: start a node, `send` it a message of the end of the session from a
+/// blocking thread, and check that it logged `line` and left by the graceful
+/// path.
+#[cfg(windows)]
+async fn assert_window_message_stops_a_cli_node(
+    tag: &str,
+    send: fn(u32) -> std::io::Result<()>,
+    line: &str,
+) {
+    let base = TempBase::new(tag);
+    let topic = format!("host-lifecycle-{tag}-{}", std::process::id());
+    let mut child = ChildNode::spawn_with_lifecycle_log(&base.0, &topic);
+    let name = match child.endpoint(&base.0).await {
+        Ok((name, _)) => name,
+        Err(what) => child.fail(&what).await,
+    };
+    let pid = child.process.id().expect("the child runs");
+    let delivered = tokio::task::spawn_blocking(move || send(pid))
+        .await
+        .expect("the send thread");
+    if let Err(error) = delivered {
+        child
+            .fail(&format!("the message to the window: {error}"))
+            .await;
+    }
+    if let Err(what) = child.exits_with_zero().await {
+        child.fail(&what).await;
+    }
+    let stderr = (&mut child.stderr).await.unwrap_or_default();
+    assert!(
+        stderr.contains(line),
+        "the child did not log {line:?}
+--- child stderr ---
+{stderr}"
+    );
+    assert_left_cleanly(&base.0, &name).await;
+}
+
+/// Without the window of R13, the node has no window to find, and this test
+/// fails.
+#[cfg(windows)]
+#[test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_logoff_stops_a_cli_node() {
+    use habilis_network_util::win_session::send_session_end;
+
+    assert_window_message_stops_a_cli_node("logoff", send_session_end, "session end; leaving")
+        .await;
+}
+
+/// `taskkill /PID` without `/F` sends `WM_CLOSE` to the windows of the process.
+#[cfg(windows)]
+#[test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_window_close_stops_a_cli_node() {
+    use habilis_network_util::win_session::post_window_close;
+
+    assert_window_message_stops_a_cli_node("close", post_window_close, "window close; leaving")
+        .await;
 }

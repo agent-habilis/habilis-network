@@ -21,8 +21,8 @@ use crate::util::tuning::ppid_watch_interval;
 /// Graceful shutdown: remove the statusline state file first, then
 /// announce `Left` and give the broadcast a moment to reach peers.
 /// Shared by the external-quit path and the quit channel (ctrl-c, SIGTERM,
-/// SIGHUP, the console events of Windows, the owner watch, the IPC `quit`) so
-/// they can't drift apart.
+/// SIGHUP, the console events and the end of the session on Windows, the
+/// owner watch, the IPC `quit`) so they can't drift apart.
 ///
 /// The state-file removal is the time-critical step: an external reader
 /// (the shell statusline) shows the mesh pill while the file is fresh,
@@ -101,7 +101,9 @@ pub(super) async fn announce_departure<A: NodeDriver>(
 /// Spawn ctrl-c (all platforms) plus SIGTERM/SIGHUP/SIGQUIT (unix) or the
 /// console events (Windows, [`spawn_console_event_tasks`]) listener tasks,
 /// and for the CLI daemon the owner or parent watch
-/// ([`spawn_orphan_watch`]), all feeding a single internal quit channel.
+/// ([`spawn_orphan_watch`]) and on Windows the window of the end of the
+/// session ([`spawn_session_end_watch`]), all feeding a single internal quit
+/// channel.
 /// Returns both ends: the sender also goes to the IPC accept loop, whose
 /// `quit` feeds the same channel.
 /// `tokio::signal::ctrl_c()` inside a `select!` branch doesn't reliably
@@ -149,6 +151,8 @@ pub(super) fn spawn_quit_signal_tasks(
     // on a host reparent.
     if exit_on_quit {
         spawn_orphan_watch(quit_tx.clone(), owner);
+        #[cfg(windows)]
+        spawn_session_end_watch(&quit_tx);
     }
     (quit_tx, quit_rx)
 }
@@ -164,12 +168,13 @@ pub(super) fn spawn_quit_signal_tasks(
 /// until the `std::process::exit` of the quit path, or until the deadline of
 /// Windows (about 5 s).
 ///
-/// A logoff and a shutdown do not reach a node today. Windows does not give
+/// A logoff and a shutdown do not reach these listeners. Windows does not give
 /// them to the console handler of a process that loaded `user32.dll`, and a
 /// node loads it: iroh's `netwatch` uses COM through `wmi`, and the runtime
-/// base uses `SHGetKnownFolderPath`. The listeners stay, at no cost, for a
-/// build that does not load it. A process with no console gets no console
-/// event at all, and a process in a new process group ignores ctrl-c.
+/// base uses `SHGetKnownFolderPath`. A CLI daemon gets them through the window
+/// of [`spawn_session_end_watch`]. The listeners stay, at no cost, for a build
+/// that does not load it. A process with no console gets no console event at
+/// all, and a process in a new process group ignores ctrl-c.
 #[cfg(all(windows, feature = "host"))]
 fn spawn_console_event_tasks(quit_tx: &mpsc::Sender<()>) {
     use tokio::signal::windows;
@@ -213,6 +218,60 @@ fn spawn_console_event(
         );
         let _ = quit_tx.send(()).await;
     });
+}
+/// The end of the Windows session (R13 of `docs/windows.md`): a logoff, a
+/// shutdown, or a close by the Restart Manager, and a `WM_CLOSE`, which
+/// `taskkill /PID` without `/F` sends. Each feeds the quit channel. Windows
+/// does not give the end of the session to the console handler of a process
+/// that loaded `user32.dll`, only to its windows, so the daemon has a hidden
+/// one ([`crate::util::win_session`]). Only the CLI daemon has it: it alone
+/// exits the process, and it must hold the end of the session until it does.
+///
+/// Windows ends the process when the window procedure returns from
+/// `WM_ENDSESSION`, so on the end of the session the window thread never
+/// returns: it parks until the `std::process::exit` of the quit path, or until
+/// the deadline of Windows (`WaitToKillAppTimeout`, 5 s by default). A
+/// `WM_CLOSE` has no deadline, so the window thread returns from it and still
+/// gets a later end of the session.
+///
+/// With no window, the daemon runs on, and a logoff or a shutdown ends it with
+/// no `Left`, as before R13.
+#[cfg(all(windows, feature = "host"))]
+fn spawn_session_end_watch(quit_tx: &mpsc::Sender<()>) {
+    use crate::util::win_session::{SessionEvent, watch_session_end};
+
+    let quit_tx = quit_tx.clone();
+    // `try_send`: the window thread is not a task of tokio. A full channel is a
+    // quit already on its way, and a closed one is a loop that has ended. The
+    // send comes before the log, so the quit does not wait for it. The call
+    // blocks this worker until the window exists: a few milliseconds, once.
+    let watched = watch_session_end(move |event| match event {
+        SessionEvent::End(kind) => {
+            let _ = quit_tx.try_send(());
+            tracing::info!(
+                target: "habilis_network::lifecycle",
+                ?kind,
+                "session end; leaving"
+            );
+            loop {
+                std::thread::park();
+            }
+        }
+        SessionEvent::Close => {
+            let _ = quit_tx.try_send(());
+            tracing::info!(
+                target: "habilis_network::lifecycle",
+                "window close; leaving"
+            );
+        }
+    });
+    if let Err(error) = watched {
+        tracing::warn!(
+            target: "habilis_network::lifecycle",
+            %error,
+            "no window for the end of the session; a logoff or a shutdown ends this daemon with no Left"
+        );
+    }
 }
 /// Whether `pid` can own a daemon, with the checks and messages of
 /// `EventLoopConfig::with_owner_pid`. For a launcher that must refuse a bad

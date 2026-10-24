@@ -30,6 +30,10 @@ pub mod version;
 // descriptor, the owner check and the identification-only client open.
 #[cfg(all(windows, feature = "host"))]
 pub mod win_security;
+// A hidden window that gets the end of the session: a logoff, a shutdown and a
+// close.
+#[cfg(all(windows, feature = "host"))]
+pub mod win_session;
 // A console event sent to another process, for the tests of the console events
 // of a daemon. Only for tests, so the library that ships does not have it.
 #[cfg(all(windows, feature = "host", feature = "test-fixtures"))]

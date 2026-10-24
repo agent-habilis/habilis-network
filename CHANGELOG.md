@@ -70,9 +70,26 @@ published to a registry; pin it with
   logoff and shutdown) feed the quit channel, and the daemon takes the path of `SIGTERM`. Each
   writes `console event; leaving` with the target `habilis_network::lifecycle`. The listeners are
   made before the node is ready, so an event that comes just after it is not lost. A logoff and a
-  shutdown do not reach a node today: Windows does not give them to the console handler of a
+  shutdown do not reach these listeners: Windows does not give them to the console handler of a
   process that loaded `user32.dll`, and a node loads it (iroh's `netwatch` through COM, and the
-  runtime base through `SHGetKnownFolderPath`). A process with no console gets no console event.
+  runtime base through `SHGetKnownFolderPath`). A CLI daemon gets them through a window (see
+  below). A process with no console gets no console event.
+- On Windows, a logoff, a shutdown and a `WM_CLOSE` take the graceful path of a CLI daemon. The
+  daemon makes a hidden top-level window on a thread of its own, because Windows does not give the
+  end of the session to the console handler of a process that loaded `user32.dll`, only to its
+  windows. `WM_ENDSESSION` feeds the quit channel and writes `session end; leaving` with the kind
+  (`Logoff`, `Shutdown` or `CloseApp`, the Restart Manager) and the target
+  `habilis_network::lifecycle`. The window thread then does not return, because Windows ends the
+  process when it does: the process lives until the quit path exits, or until the deadline of
+  Windows (`WaitToKillAppTimeout`, 5 s by default). `WM_CLOSE`, which `taskkill /PID` without `/F`
+  sends, feeds the quit channel too and writes `window close; leaving`. A daemon with no console
+  gets the end of the session too. Only the CLI daemon has the window: a node in the process of
+  another program does not. When the window cannot be made, the daemon writes a warn and runs on.
+- `habilis-network-util` on Windows: `win_session::watch_session_end` makes the hidden window and
+  gives its events (`SessionEvent::End` with a `SessionEnd`, and `SessionEvent::Close`) to a
+  handler, re-exported as `habilis_network::util::win_session` under `host`. With
+  `test-fixtures`, `win_session::send_session_end` sends a logoff to the windows of another
+  process, as Windows does, and `win_session::post_window_close` posts `WM_CLOSE` to them.
 - `habilis-network-util`, with `test-fixtures` on Windows: `win_console::send_console_event`
   sends ctrl-c or ctrl-break to another process through its console, and
   `win_console::allow_ctrl_c` turns off the flag that makes a process ignore ctrl-c. They exist
