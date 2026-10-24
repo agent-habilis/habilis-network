@@ -9,6 +9,13 @@
 )]
 
 use std::ffi::{CStr, CString, c_char};
+
+/// `habilis_network_len` of the header: `c_long` on every target but Windows,
+/// `i64` on Windows.
+#[cfg(not(windows))]
+type CLen = std::ffi::c_long;
+#[cfg(windows)]
+type CLen = i64;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -67,7 +74,7 @@ fn open(opts: &HabilisNetworkOpts) -> *mut HabilisNetworkMesh {
 /// then fill a buffer of that size.
 fn read_json(
     handle: *mut HabilisNetworkMesh,
-    reader: unsafe extern "C" fn(*mut HabilisNetworkMesh, *mut c_char, usize) -> i64,
+    reader: unsafe extern "C" fn(*mut HabilisNetworkMesh, *mut c_char, usize) -> CLen,
 ) -> String {
     // SAFETY: a NULL buffer with a zero capacity is the documented "how long is
     // it?" query — the callee writes nothing.
@@ -363,7 +370,7 @@ fn empty_msg() -> HabilisNetworkMsg {
 
 /// Receive one message into a buffer of `cap` bytes, waiting up to 20 s.
 /// Returns the call's result, the metadata, and the text when it was written.
-fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (i64, HabilisNetworkMsg, String) {
+fn recv(handle: *mut HabilisNetworkMesh, cap: usize) -> (CLen, HabilisNetworkMsg, String) {
     let mut msg = empty_msg();
     let mut buf = vec![0_u8; cap];
     // SAFETY: live handle, buffer writable for `cap` bytes, `out` writable.

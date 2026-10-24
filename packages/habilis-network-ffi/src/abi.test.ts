@@ -17,7 +17,7 @@ function declared(header: string): Set<string> {
 const HEADER = '../../../crates/habilis-network-ffi/include/habilis_network.h'
 
 /** The C return types of the header, in the vocabulary of `abi.ts`. */
-const C_TYPES: Record<string, string> = { int: 'i32', int64_t: 'i64', size_t: 'usize' }
+const C_TYPES: Record<string, string> = { int: 'i32', habilis_network_len: 'i64', size_t: 'usize' }
 
 /**
  * The return type of each function that the header declares, in the
@@ -58,10 +58,23 @@ describe('the signature table and the header', () => {
     expect(fromHeader).toEqual(fromTable)
   })
 
+  test('the length type is int64_t on Windows and long elsewhere', async () => {
+    // A Windows checkout can have CRLF line ends.
+    const header = (await Bun.file(new URL(HEADER, import.meta.url)).text()).replace(/\r\n/g, '\n')
+    const lines = [
+      '#ifdef _WIN32',
+      'typedef int64_t habilis_network_len;',
+      '#else',
+      'typedef long habilis_network_len;',
+      '#endif',
+    ]
+    expect(header).toContain(lines.join('\n'))
+  })
+
   test('the return-type scrape reads code, not comments, and names a C type the table lacks', () => {
     const header = [
       '/* a longer text: long habilis_network_x(void); */',
-      'int64_t habilis_network_y(void);',
+      'habilis_network_len habilis_network_y(void);',
       'long habilis_network_z(void);',
     ].join('\n')
     expect(returns(header)).toEqual(
@@ -101,7 +114,7 @@ describe('the shape of each signature', () => {
     }
   })
 
-  test('recv returns an int64_t, because 0, -1 and -2 are all meaningful', () => {
+  test('recv returns a habilis_network_len (i64), because 0, -1 and -2 are all meaningful', () => {
     expect(ABI.habilis_network_msg_recv.returns).toBe('i64')
   })
 })

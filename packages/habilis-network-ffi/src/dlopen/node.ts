@@ -23,7 +23,9 @@ function koffiType(type: CType): string {
     case 'i32':
       return 'int'
     case 'i64':
-      return 'int64_t'
+      // `habilis_network_len` of the header: `int64_t` on Windows, where
+      // `long` is 32 bits, and `long` elsewhere, as before.
+      return process.platform === 'win32' ? 'int64_t' : 'long'
     case 'usize':
       return 'size_t'
     case 'ptr':

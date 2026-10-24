@@ -22,12 +22,16 @@ published to a registry; pin it with
   resolves to a loopback-only mesh, and a consumer with another default for that case asks this
   in place of its own copy of the rule (#9).
 - `runtime::ipc::IpcName`: the name of the local control endpoint of a daemon, a socket path on
-  Unix and a named pipe on Windows. A daemon writes it in a marker, `<mesh folder>/<nick>.ipc`,
-  one line, born `0600` on Unix, beside its state file. The marker is written after the endpoint
-  binds and before the daemon reports ready, and it is removed at a graceful exit only while it
-  still names that daemon. On Windows, where the pipe name is per process, a second daemon with
-  the same nickname keeps its marker. On Unix both have the same socket path, and the second
-  bind replaces the first's socket, as before. A marker that cannot be written fails the bind.
+  Unix and a named pipe on Windows. `runtime::ipc::active_endpoints` lists the endpoints under a
+  base, sorted, and `runtime::ipc::send_to_endpoint` sends a command to one, on every OS. On Unix
+  they are the sockets of `active_socket_paths`, and `active_socket_paths` and `send_to_path` do
+  not change.
+- On Windows a daemon writes the name of its pipe in a marker, `<mesh folder>/<nick>.ipc`, one
+  line, beside its state file, and a client finds the pipe through it. The marker is written
+  after the endpoint binds and before the daemon reports ready, and it is removed at a graceful
+  exit only while it still names that daemon, so a second daemon with the same nickname keeps
+  its marker. A marker that cannot be written fails the bind. On Unix a daemon writes no marker,
+  and a client finds the socket by its path, as before.
 - The IPC of a daemon works on Windows, over a named pipe. Its name is `\\.\pipe\habilis-` and
   128 random bits, with no mesh prefix and no nickname in it, because any local account can list
   pipe names. The pipe has the security descriptor `O:<user>D:P(A;;GA;;;<user>)`: the user owns
@@ -40,26 +44,27 @@ published to a registry; pin it with
 - `util::check_runtime_base` and `util::RuntimeBaseCheck`, on Unix: the checks of
   `ensure_runtime_base` for a client, which create nothing and change nothing. The base is
   `Private` (a folder of this user with no group or other bits), `Absent`, or `Refused` with the
-  reason. `runtime::ipc::UnsafeRuntimeBase` is the error of an IPC client whose base is refused.
-- A daemon stops on an IPC `quit`, on every OS: `{"command":"quit","mesh":"<mesh id>"}`. The
+  reason. The IPC client of the engine does not call it yet.
+- On Windows a daemon stops on an IPC `quit`: `{"command":"quit","mesh":"<mesh id>"}`. The
   engine answers it before the app sees the line. The daemon answers `{"ok":true}`, then takes
   the path of `SIGTERM`: it removes its state file and its marker, broadcasts `Left`, and exits.
-  A quit for another mesh is refused, so a stale marker cannot stop another session. On Windows
-  this is the only graceful stop. `runtime::ipc::quit(&QuitTarget)` sends it, at the address that
-  `send` takes (base, mesh, nickname), and returns a `QuitError` (`Unreached`, `OldDaemon`,
-  `Refused`). `runtime::ipc::terminate(&QuitTarget, pid)` sends it on every OS and, on Unix,
-  sends `SIGTERM` to `pid` when the quit was not heard or the daemon is too old to know it.
-  `util::process::terminate` does not change: it signals a pid, and on Windows it stays
-  `Unsupported`.
+  A quit for another mesh is refused, so a stale marker cannot stop another session. This is the
+  only graceful stop of another process there. `runtime::ipc::quit(&QuitTarget)` sends it,
+  at the address that `send` takes (base, mesh, nickname), and returns a `QuitError`
+  (`Unsupported`, `Unreached`, `OldDaemon`, `Refused`). `runtime::ipc::terminate(&QuitTarget,
+  pid)` stops a daemon on every OS: on Windows with the quit, on Unix with `SIGTERM` to `pid`, as
+  `util::process::terminate` does. On Unix the engine answers no command, every line reaches
+  the app, and `quit` is `QuitError::Unsupported`. `util::process::terminate` does not change: it signals a pid, and on
+  Windows it stays `Unsupported`.
 - On Windows, a daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) stops when its
   owner exits, by the same watch as on Unix: every `PPID_WATCH_INTERVAL` (1.5 s) it compares the
   start time of the owner with the one it read at startup, so a reused pid does not fool it. The
   daemon then takes the path of `SIGTERM`. A daemon with no `--owner-pid` has no watch on Windows:
   Windows does not reparent an orphan, and the pid of a dead parent can be reused, so the watch of
-  the parent pid stays Unix only. On every OS the watch now writes an `info` line with the target
-  `habilis_network::lifecycle` when it stops the daemon. The error of an owner refused at startup
-  now says "is not running or cannot be read", and an owner that cannot be read later counts as
-  gone.
+  the parent pid stays Unix only. On Windows the watch writes an `info` line with the target
+  `habilis_network::lifecycle` when it stops the daemon, and the error of an owner refused at
+  startup says "is not running or cannot be read". An owner that cannot be read later counts as
+  gone. On Unix the watch and its error text are as before.
 - `habilis-network-util`'s `file_retry`, re-exported as `habilis_network::util::file_retry` under
   `host`: `retry_while_shared` runs a rename or a remove again on Windows while a reader blocks it
   (error 5 or 32), every `tuning::SHARED_FILE_RETRY_STEP` (1 ms) up to
@@ -245,15 +250,14 @@ published to a registry; pin it with
 
 ### Changed
 
-- **Breaking (C ABI on Windows and 32-bit targets; C header everywhere):** the five calls that
-  returned `long` return `int64_t`: `habilis_network_msg_recv`, `habilis_network_mesh_state_json`,
-  `habilis_network_mesh_peers_json`, `habilis_network_mesh_peer_count` and
-  `habilis_network_stream_read` (R9 of `docs/windows.md`). `long` is 32 bits on Windows, and the
-  Bun and Deno loaders read 64 bits, so a -1 or a -2 came back as a large positive value. On
-  64-bit Linux and macOS the binary ABI does not change; rebuild against the new
-  `include/habilis_network.h`. On macOS `int64_t` is `long long`, so a C caller that keeps these
-  calls in a `long (*)(...)` pointer must change its type. In `packages/habilis-network-ffi` the
-  `CType` `'isize'` is `'i64'`, and the Node loader passes it to koffi as `int64_t`, not `long`.
+- On Windows the five calls that returned `long` return `int64_t`: `habilis_network_msg_recv`,
+  `habilis_network_mesh_state_json`, `habilis_network_mesh_peers_json`,
+  `habilis_network_mesh_peer_count` and `habilis_network_stream_read` (R9 of `docs/windows.md`).
+  `long` is 32 bits on Windows, and the Bun and Deno loaders read 64 bits, so a -1 or a -2 came
+  back as a large positive value. The header names the type `habilis_network_len`: `int64_t`
+  under `_WIN32`, and `long` on every other target, so the type of each call on Linux and macOS
+  does not change. In `packages/habilis-network-ffi` the internal `CType` `'isize'` is `'i64'`, and
+  the Node loader passes it to koffi as `int64_t` on Windows and as `long` elsewhere.
   `abi.test.ts` holds the return type of each call against the header.
 - **Wire change:** the loopback port ladder of a private mesh now maps into `1024..=32767`, not
   `1024..=65535`. The ephemeral bind of another endpoint (Linux 32768-60999, macOS and Windows
@@ -295,23 +299,10 @@ published to a registry; pin it with
   keys of the handles before it binds the endpoint with its transports. Its fields are private,
   so an `InjectedEndpoint { .. }` literal no longer compiles. The transport wiring and the mesh
   check are crate-private.
-- **Breaking:** the discovery of local daemons reads markers, not socket files.
-  `runtime::ipc::active_socket_paths` is `active_endpoints` and returns `Vec<IpcName>`, sorted,
-  and `send_to_path` is `send_to_endpoint(&IpcName, ..)`. `send` finds the daemon through its
-  marker: a client of this version does not find a daemon of an earlier one, which writes no
-  marker. On Unix the socket path does not change. The wire does not change.
-- **Breaking:** on Unix an IPC client checks the runtime base before it reads a marker in it
-  (R12 of `docs/windows.md`). The base is `/tmp/<product>-<uid>`, which another user can create
-  first. A base that is a link, a file, a folder of another user, or a folder that other users
-  can open is refused, with a warn: `send` returns `UnsafeRuntimeBase`, `quit` and `terminate`
-  return it inside `QuitError::Unreached`, and `active_endpoints` returns no endpoint.
-  `terminate` sends no signal then, because the marker in that base cannot be trusted to be of
-  our daemon. A daemon always leaves its base at `0700`; a caller that makes the base
-  itself with `create_dir_all` (`0755` under the usual umask) now gets the refusal.
-- The engine reserves one IPC command: a JSON object whose `command` is `"quit"` and whose
-  `mesh` is a valid mesh id. Such a line never reaches `NodeDriver::handle_ipc`. Any other line,
-  also a `quit` with no valid `mesh`, reaches the app as before. No app of this workspace or of
-  agent-gossip has a `quit` command.
+- On Windows the engine reserves one IPC command: a JSON object whose `command` is `"quit"` and
+  whose `mesh` is a valid mesh id. Such a line never reaches `NodeDriver::handle_ipc`. Any other
+  line, also a `quit` with no valid `mesh`, reaches the app as before. No app of this workspace
+  or of agent-gossip has a `quit` command. On Unix every line reaches the app.
 - A secret key no longer passes through a plain array that the engine writes and nobody wipes.
   The stretched password key, the keys that `SymmetricKey::derive` and `Seed::derive` make, the
   root of an invite, the salt and the token of a blob ticket, and the secret of a stream
@@ -631,8 +622,9 @@ published to a registry; pin it with
   it. The rename and the remove run again every 1 ms while they fail with error 5 or 32, for up
   to 50 ms (`habilis-network-util`'s `file_retry::retry_while_shared`, re-exported as
   `habilis_network::util::file_retry`). With a PowerShell reader in a tight loop, most renames
-  failed before. `StateFile::remove` now logs a remove that fails for a reason other than a
-  missing file.
+  failed before. On Windows `StateFile::remove` logs a remove that fails for a reason other than
+  a missing file. On Unix it is as before. A failed write of the state file removes its tmp file
+  on every OS, as before.
 - A loopback room no longer stays split into separate meshes when a joiner took the rung of a
   holder that left: a member that let go of the rendezvous owes a return when its walk reads a
   holder that no member of its mesh hosts (#4).

@@ -315,8 +315,9 @@ pub enum RuntimeBaseCheck {
 /// [`ensure_runtime_base`].
 ///
 /// The base is `/tmp/<product>-<uid>`, a path that another user can create
-/// first. Without this check, a client reads the marker that the other user
-/// put there and talks to the other user's endpoint.
+/// first. A client that does not check it can reach an endpoint that the
+/// other user put there. The IPC client of `habilis-network` does not call
+/// it yet.
 ///
 /// # Errors
 /// The base could not be read for a reason other than its absence.
@@ -402,8 +403,8 @@ pub fn ensure_parent_private(
 }
 
 /// A mesh's runtime folder — `<base>/<mesh-prefix>/`. All of one mesh's
-/// per-member files (`<nick>.tracing.log`, the IPC marker `<nick>.ipc`, the
-/// socket `<nick>.ipc.sock` on Unix, `<nick>.state.json`) live here, so the
+/// per-member files (`<nick>.tracing.log`, the IPC marker `<nick>.ipc` on
+/// Windows, the socket `<nick>.ipc.sock` on Unix, `<nick>.state.json`) live here, so the
 /// marker, socket, log, and state-file path builders all derive from it. Pure — a path only; use
 /// [`ensure_mesh_runtime_dir`] when about to *create* files under it.
 #[must_use]

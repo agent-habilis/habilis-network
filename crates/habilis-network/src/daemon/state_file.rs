@@ -210,8 +210,11 @@ impl StateFile {
 
     /// Delete the state file. Safe to call on a path that does not exist. On
     /// Windows it runs again for a short time while a reader holds the file,
-    /// and a file that still stays is logged.
+    /// and a file that still stays is logged. On Unix an error is ignored.
     pub(crate) fn remove(&self) {
+        #[cfg(not(windows))]
+        let _ = std::fs::remove_file(&self.path);
+        #[cfg(windows)]
         match retry_while_shared(|| std::fs::remove_file(&self.path)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
                 tracing::warn!(
@@ -415,8 +418,11 @@ pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result
     file.write_all(bytes)?;
     drop(file);
     let renamed = retry_while_shared(|| std::fs::rename(&tmp, path));
+    // On Windows a failed rename removes the tmp file here, for the IPC
+    // marker. `StateFile::write` removes it on every OS after any error, as
+    // before the port.
+    #[cfg(windows)]
     if renamed.is_err() {
-        // A failed rename must not leave the tmp file behind.
         let _ = std::fs::remove_file(&tmp);
     }
     renamed

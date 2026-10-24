@@ -21,6 +21,14 @@ use std::time::Duration;
 use crate::mesh::{Inbound, MAX_MSG, Mesh, Opts};
 use crate::stream::{Read, ReadEnd, Streams, Writer};
 
+/// `habilis_network_len` of the header: the return type of a call that returns
+/// a count or a length. `c_long` on every target but Windows, as before the
+/// port; `i64` on Windows, where `c_long` is 32 bits.
+#[cfg(not(windows))]
+type CLen = std::ffi::c_long;
+#[cfg(windows)]
+type CLen = i64;
+
 /// Capacity of [`HabilisNetworkMsg::nick`], including the NUL. A minted nickname is two
 /// short words; a longer chosen one is truncated to 63 bytes.
 const NICK_CAP: usize = 64;
@@ -182,7 +190,7 @@ unsafe fn json_out(
     buf: *mut c_char,
     cap: usize,
     render: impl FnOnce(&Mesh) -> anyhow::Result<String>,
-) -> i64 {
+) -> CLen {
     guard(-1, || {
         clear_error();
         // SAFETY: live handle or NULL, forwarded from this function's contract.
@@ -247,7 +255,7 @@ where
 ///
 /// # Safety
 /// `buf` is NULL, or writable for `cap` bytes.
-unsafe fn copy_out(text: &str, buf: *mut c_char, cap: usize) -> i64 {
+unsafe fn copy_out(text: &str, buf: *mut c_char, cap: usize) -> CLen {
     let bytes = text.as_bytes();
     let needed = bytes.len();
     if !buf.is_null() && needed < cap {
@@ -259,8 +267,8 @@ unsafe fn copy_out(text: &str, buf: *mut c_char, cap: usize) -> i64 {
         }
     }
     // Lengths here are JSON documents bounded by the automerge doc / roster
-    // size, never anywhere near `i64::MAX`.
-    i64::try_from(needed).unwrap_or(i64::MAX)
+    // size, never anywhere near `CLen::MAX`.
+    CLen::try_from(needed).unwrap_or(CLen::MAX)
 }
 
 /// Fill `HabilisNetworkMsg::nick`, truncating a pathologically long nickname rather than
@@ -440,7 +448,7 @@ pub unsafe extern "C" fn habilis_network_msg_recv(
     cap: usize,
     timeout_ms: c_int,
     out: *mut HabilisNetworkMsg,
-) -> i64 {
+) -> CLen {
     guard(-1, || {
         clear_error();
         // SAFETY: live, exclusively-owned handle per the contract above.
@@ -528,7 +536,7 @@ pub unsafe extern "C" fn habilis_network_mesh_state_json(
     handle: *mut HabilisNetworkMesh,
     buf: *mut c_char,
     cap: usize,
-) -> i64 {
+) -> CLen {
     // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
     // the contract above.
     unsafe {
@@ -552,7 +560,7 @@ pub unsafe extern "C" fn habilis_network_mesh_peers_json(
     handle: *mut HabilisNetworkMesh,
     buf: *mut c_char,
     cap: usize,
-) -> i64 {
+) -> CLen {
     // SAFETY: live handle or NULL, and `buf`/`cap` the caller's buffer, per
     // the contract above.
     unsafe {
@@ -572,7 +580,7 @@ pub unsafe extern "C" fn habilis_network_mesh_peers_json(
 /// # Safety
 /// `handle` must be a live handle from [`habilis_network_mesh_open`], or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn habilis_network_mesh_peer_count(handle: *mut HabilisNetworkMesh) -> i64 {
+pub unsafe extern "C" fn habilis_network_mesh_peer_count(handle: *mut HabilisNetworkMesh) -> CLen {
     guard(-1, || {
         clear_error();
         // SAFETY: live handle or NULL, per the contract above.
@@ -582,7 +590,7 @@ pub unsafe extern "C" fn habilis_network_mesh_peer_count(handle: *mut HabilisNet
         };
         match handle.mesh.peer_count() {
             // A roster is bounded by the active-view cap; this cannot overflow.
-            Ok(count) => i64::try_from(count).unwrap_or(i64::MAX),
+            Ok(count) => CLen::try_from(count).unwrap_or(CLen::MAX),
             Err(error) => {
                 set_error(&format!("{error:#}"));
                 -1
@@ -908,7 +916,7 @@ pub unsafe extern "C" fn habilis_network_stream_read(
     buf: *mut u8,
     cap: usize,
     timeout_ms: c_int,
-) -> i64 {
+) -> CLen {
     guard(-1, || {
         clear_error();
         // SAFETY: live, exclusively-owned handle per the contract above.
@@ -923,7 +931,7 @@ pub unsafe extern "C" fn habilis_network_stream_read(
         // SAFETY: writable for `cap` bytes per the contract above.
         let buf = unsafe { std::slice::from_raw_parts_mut(buf, cap) };
         match handle.reader.read(buf, timeout_of(timeout_ms)) {
-            Ok(Read::Bytes(read)) => i64::try_from(read).unwrap_or(i64::MAX),
+            Ok(Read::Bytes(read)) => CLen::try_from(read).unwrap_or(CLen::MAX),
             Ok(Read::Timeout) => 0,
             Ok(Read::End) => -2,
             Err(error) => {

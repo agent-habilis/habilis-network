@@ -22,7 +22,7 @@ use crate::util::tuning::ppid_watch_interval;
 /// announce `Left` and give the broadcast a moment to reach peers.
 /// Shared by the external-quit path and the quit channel (ctrl-c, SIGTERM,
 /// SIGHUP, the console events and the end of the session on Windows, the
-/// owner watch, the IPC `quit`) so they can't drift apart.
+/// owner watch, the IPC `quit` on Windows) so they can't drift apart.
 ///
 /// The state-file removal is the time-critical step: an external reader
 /// (the shell statusline) shows the mesh pill while the file is fresh,
@@ -45,7 +45,7 @@ pub(super) async fn shutdown<A: NodeDriver>(
     }
     // Explicit, not a `Drop`: in CLI mode the process leaves through
     // `std::process::exit`, which runs no destructor.
-    #[cfg(feature = "host")]
+    #[cfg(all(windows, feature = "host"))]
     if let Some(marker) = state.ipc_marker.as_ref() {
         marker.remove_if_ours();
     }
@@ -104,8 +104,9 @@ pub(super) async fn announce_departure<A: NodeDriver>(
 /// ([`spawn_orphan_watch`]) and on Windows the window of the end of the
 /// session ([`spawn_session_end_watch`]), all feeding a single internal quit
 /// channel.
-/// Returns both ends: the sender also goes to the IPC accept loop, whose
-/// `quit` feeds the same channel.
+/// On Windows it returns both ends: the sender also goes to the IPC accept
+/// loop, whose `quit` feeds the same channel. On Unix it returns the receiver,
+/// as before the port.
 /// `tokio::signal::ctrl_c()` inside a `select!` branch doesn't reliably
 /// interrupt a blocking stdin read, so we offload signal listening to
 /// dedicated tasks.
@@ -117,10 +118,7 @@ pub(super) async fn announce_departure<A: NodeDriver>(
 /// the default action terminated the daemon without cleanup, stranding a
 /// ghost pill on the statusline. Only SIGKILL stays uncatchable.
 #[cfg(feature = "host")]
-pub(super) fn spawn_quit_signal_tasks(
-    exit_on_quit: bool,
-    owner: Option<Owner>,
-) -> (mpsc::Sender<()>, mpsc::Receiver<()>) {
+pub(super) fn spawn_quit_signal_tasks(exit_on_quit: bool, owner: Option<Owner>) -> QuitChannel {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
     #[cfg(not(windows))]
     {
@@ -154,8 +152,20 @@ pub(super) fn spawn_quit_signal_tasks(
         #[cfg(windows)]
         spawn_session_end_watch(&quit_tx);
     }
-    (quit_tx, quit_rx)
+    #[cfg(windows)]
+    let channel = (quit_tx, quit_rx);
+    #[cfg(not(windows))]
+    let channel = quit_rx;
+    channel
 }
+
+/// What [`spawn_quit_signal_tasks`] and [`never_quit`] give: on Windows the
+/// sender and the receiver of the quit channel, because the IPC `quit` feeds
+/// it too; on other OSes the receiver alone.
+#[cfg(all(windows, feature = "host"))]
+pub(super) type QuitChannel = (mpsc::Sender<()>, mpsc::Receiver<()>);
+#[cfg(not(all(windows, feature = "host")))]
+pub(super) type QuitChannel = mpsc::Receiver<()>;
 /// The console events of Windows (R7 of `docs/windows.md`): ctrl-c,
 /// ctrl-break, the close of the console, a logoff and a shutdown all feed the
 /// quit channel, so they take the path of SIGTERM.
@@ -296,8 +306,13 @@ fn owner_start(pid: u32) -> anyhow::Result<u64> {
         pid != std::process::id(),
         "owner pid {pid} is this process itself"
     );
-    crate::util::process::live_start_time(pid)
-        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running or cannot be read"))
+    #[cfg(windows)]
+    let start = crate::util::process::live_start_time(pid)
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running or cannot be read"));
+    #[cfg(not(windows))]
+    let start = crate::util::process::live_start_time(pid)
+        .ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"));
+    start
 }
 /// The process a detached daemon lives for, in place of its parent. The pid
 /// alone cannot tell the owner from a later process that reuses the pid, so
@@ -373,12 +388,6 @@ fn spawn_parent_watch(quit_tx: mpsc::Sender<()>, interval: Duration) {
             n0_future::time::sleep(interval).await;
             let current_ppid = unsafe { libc::getppid() };
             if parent_lost(original_ppid, current_ppid) {
-                tracing::info!(
-                    target: "habilis_network::lifecycle",
-                    original_ppid,
-                    current_ppid,
-                    "parent changed; leaving"
-                );
                 let _ = quit_tx.send(()).await;
                 return;
             }
@@ -393,6 +402,7 @@ async fn watch_owner(owner: Owner, interval: Duration, quit_tx: mpsc::Sender<()>
     loop {
         n0_future::time::sleep(interval).await;
         if owner.lost() {
+            #[cfg(windows)]
             tracing::info!(
                 target: "habilis_network::lifecycle",
                 owner_pid = owner.pid(),
@@ -419,19 +429,28 @@ pub(super) fn orphan_watch_warranted(original_ppid: i32) -> bool {
 pub(super) fn parent_lost(original_ppid: i32, current_ppid: i32) -> bool {
     original_ppid != current_ppid
 }
-/// A quit channel that no signal feeds. A clone of its sender is deliberately
-/// leaked, so the receiver never reads `None` (the loop's quit arm fires on
-/// one), whatever the caller does with the sender that it gets back. The
-/// loop's quit arm then fires only from `external_quit_rx`, or from an IPC
-/// `quit`, and only a CLI session binds an IPC endpoint, which always has its
-/// signals.
-pub(super) fn never_quit() -> (mpsc::Sender<()>, mpsc::Receiver<()>) {
+/// A quit channel that no signal feeds. Its sender is leaked, so the receiver
+/// never reads `None` (the loop's quit arm fires on one). On Windows a clone is
+/// leaked and the sender goes back to the caller, so the arm fires only from
+/// `external_quit_rx` or an IPC `quit`; only a CLI session binds an IPC
+/// endpoint, and it always has its signals. Elsewhere the arm fires only from
+/// `external_quit_rx`.
+pub(super) fn never_quit() -> QuitChannel {
     let (quit_tx, quit_rx) = mpsc::channel::<()>(1);
-    std::mem::forget(quit_tx.clone());
-    (quit_tx, quit_rx)
+    #[cfg(all(windows, feature = "host"))]
+    let channel = {
+        std::mem::forget(quit_tx.clone());
+        (quit_tx, quit_rx)
+    };
+    #[cfg(not(all(windows, feature = "host")))]
+    let channel = {
+        std::mem::forget(quit_tx);
+        quit_rx
+    };
+    channel
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows, feature = "host"))]
 mod never_quit_tests {
     use habilis_network_test_tracing::test;
     use std::time::Duration;

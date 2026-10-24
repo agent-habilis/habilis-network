@@ -11,7 +11,10 @@
 export type CType =
   /** C `int`. */
   | 'i32'
-  /** C `int64_t`. 8 bytes on every target, so it crosses as a bigint. */
+  /**
+   * C `habilis_network_len`: `int64_t` on Windows and `long` elsewhere. 8 bytes
+   * on every target the loaders run on, so it crosses as a bigint.
+   */
   | 'i64'
   /** C `size_t`. Likewise a bigint. */
   | 'usize'

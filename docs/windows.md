@@ -25,17 +25,18 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 |---|---|
 | R1. Compile | Done. `libc` and `windows-sys` come in through `host`, each on its own target. |
 | R2. Runtime base | Done. `runtime_base` returns `<LocalAppData>\<product>\run`, and `ensure_runtime_base` rejects a reparse point at the base (`crates/habilis-network-util/src/lib.rs`). |
-| R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. Discovery reads a `<nick>.ipc` marker on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
+| R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. On Windows discovery reads a `<nick>.ipc` marker. On Unix a client finds the socket by its path, as on `main` (`crates/habilis-network/src/transport/ipc.rs`). |
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
-| R5. Graceful stop | Done. The engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::quit` and `runtime::ipc::terminate` send it on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
+| R5. Graceful stop | Done. On Windows the engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::terminate` stops a daemon on every OS: with the quit on Windows, with `SIGTERM` on Unix, as on `main` (`crates/habilis-network/src/transport/ipc.rs`). |
 | R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
 | R7. Console events | Done. Ctrl-c, ctrl-break, close, logoff and shutdown feed the quit channel (`crates/habilis-network/src/daemon/shutdown.rs`). A logoff and a shutdown do not reach these listeners in a node that loaded `user32.dll`, and a node loads it: a CLI daemon gets them through a window (R13). |
 | R8. State file | Done. The replace and the remove of the state file and of the IPC marker run again for up to 50 ms while a reader blocks them (`crates/habilis-network-util/src/file_retry.rs`). |
-| R9. FFI | Done. The five calls that returned `long` return `int64_t` (`crates/habilis-network-ffi`), and the loaders read them as `i64`, koffi as `int64_t`. `cargo task ffi` reads `habilis_network_ffi.lib` with `llvm-nm.exe` (`tasks/src/ffi.rs`). |
+| R9. FFI | Done. On Windows the five calls that returned `long` return `int64_t`, through the `habilis_network_len` of the header, which stays `long` on every other target (`crates/habilis-network-ffi`). The loaders read them as `i64`, koffi as `int64_t` on Windows. `cargo task ffi` reads `habilis_network_ffi.lib` with `llvm-nm.exe` (`tasks/src/ffi.rs`). |
 | R10. Tooling and tests | Done. `cdp.rs` has no `win64` build and says why. Set `$CHROME_FOR_TESTING` to a local Chrome. |
 | R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
-| R12. Runtime base of a Unix client | Done. A Unix client checks the base before it reads a marker (`check_runtime_base`), and refuses one that is not private with `UnsafeRuntimeBase` (`crates/habilis-network/src/transport/ipc.rs`). Follow-up items for agent-gossip are in [R12](#r12-runtime-base-of-a-unix-client). |
+| R12. Runtime base of a Unix client | Partly done. `check_runtime_base` exists. The IPC client does not call it in this port, because the port leaves Unix as it is on `main` ([R14](#r14-unix-as-on-main)). The client check goes to its own change on `main`. See [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
+| R14. Unix as on `main` | Done, on Windows and on Linux. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, the engine answers no IPC command, the lines of the daemon are as on `main`, and the C header declares `long`. See [R14](#r14-unix-as-on-main). |
 
 [§2.2](#22-runtime-breaks) has no open item. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
@@ -119,7 +120,7 @@ Do this work on the `feat-windows-support` branch (PR #5).
 
 Done. The design changed from the first text of this section, after review. The reasons are below.
 
-**The marker, on every OS.** A daemon writes the name of its endpoint in `<mesh folder>/<nick>.ipc`, one line, after the listener exists and before the daemon reports ready. A client finds the daemon through the marker, so discovery does not depend on the endpoint being a file. `active_endpoints` reads the markers. The marker is written by the writer of the state file (`.tmp.<pid>`, then a rename), born `0600` on Unix. A marker that cannot be written fails the bind. The shutdown removes the marker only while it still names this daemon. The marker is not in the state file, because a `--state-file` override can put the state file outside the base, and an in-process node writes none. On Unix the endpoint is the same socket as before.
+**The marker, on Windows.** A daemon writes the name of its pipe in `<mesh folder>/<nick>.ipc`, one line, after the listener exists and before the daemon reports ready. A client finds the daemon through the marker, because a pipe is not a file in the mesh folder. On Windows `active_endpoints` reads the markers. The marker is written by the writer of the state file (`.tmp.<pid>`, then a rename). A marker that cannot be written fails the bind. The shutdown removes the marker only while it still names this daemon. The marker is not in the state file, because a `--state-file` override can put the state file outside the base, and an in-process node writes none. On Unix a daemon writes no marker: the endpoint is the same socket as on `main`, and a client finds it by its path ([R14](#r14-unix-as-on-main)). The first version of R3 wrote the marker on every OS, so a client of the port did not find a daemon of `main`.
 
 **The name of the pipe.** `\\.\pipe\habilis-` and 128 random bits in hex. Pipe names live in one namespace for the whole machine, and any account can make a pipe with a free name.
 
@@ -135,12 +136,12 @@ Done. The design changed from the first text of this section, after review. The 
 
 **The client.** On Windows a client opens the pipe with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so the server can identify the client but not act as it. Without the flags, an account with `SeImpersonatePrivilege` (every service account) that took the name after a crash could act as the user. Then the client checks that the user owns the pipe, before it sends a byte. A pipe of another owner, or one whose owner cannot be read, is `ForeignEndpoint`. An absent endpoint, a pipe that is still busy after 3 more tries, and a pipe whose DACL leaves the user out are `NoDaemon`.
 
-**The API.** `runtime::ipc::active_socket_paths` is `active_endpoints` (`Vec<IpcName>`), and `send_to_path` is `send_to_endpoint`. `IpcName`, `ForeignEndpoint` and `NoDaemon` are public. The Win32 calls are in `habilis-network-util` (`win_security`).
+**The API.** `active_endpoints` (`Vec<IpcName>`) and `send_to_endpoint` work on every OS, and a client that runs on Windows uses them. On Unix `active_socket_paths` and `send_to_path` stay, with the signatures of `main`, and `active_endpoints` lists the same sockets. `IpcName`, `ForeignEndpoint` and `NoDaemon` are public. The Win32 calls are in `habilis-network-util` (`win_security`).
 
 **Limits.**
 
-- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file did. A graceful stop removes the marker of its own daemon (R5). A hard kill, such as `Stop-Process -Force`, leaves it, as a crash does.
-- On Unix, two daemons with the same nickname on one mesh have the same socket path, and the second bind replaces the first. That is not new.
+- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file does on Unix. A graceful stop removes the marker of its own daemon (R5). A hard kill, such as `Stop-Process -Force`, leaves it, as a crash does.
+- Two daemons with the same nickname on one mesh: the read and the remove of the marker at the exit of the first are two steps, so a write of the second between them is possible. Then the marker of the live second daemon goes, and no client finds it. On Unix the second bind replaces the socket of the first, as on `main`.
 - The DACL cannot be tested with a second user on CI. T4 tests it on the real machine.
 
 ### R4. Process helpers
@@ -159,27 +160,27 @@ Add Windows versions in `crates/habilis-network-util/src/process.rs`:
 
 Done.
 
-**The command.** The engine answers `{"command":"quit","mesh":"<mesh id>"}` on the IPC endpoint, before the app sees the line. Every app with an IPC endpoint gets it, and an app command with that shape never reaches the app. A line that does not parse as that command goes to the app as before.
+**The command.** On Windows the engine answers `{"command":"quit","mesh":"<mesh id>"}` on the IPC endpoint, before the app sees the line. Every app with an IPC endpoint on Windows gets it, and an app command with that shape never reaches the app there. A line that does not parse as that command goes to the app as before. On Unix the engine answers no command, as on `main` ([R14](#r14-unix-as-on-main)): a daemon there stops on `SIGTERM`.
 
 **The path.** The daemon writes `{"ok":true}`, then feeds the quit channel that the signals and the owner watch feed. The shutdown then removes the state file and the marker, broadcasts `Left`, and exits. So the client has the answer before the process exits. The channel is fed also when the client does not read the answer.
 
 **The mesh guard.** A quit for another mesh is refused and stops nothing, so a stale marker cannot stop another session.
 
-**The client.** `runtime::ipc::quit(&QuitTarget)` sends the quit at the address of `send`: the runtime base, the mesh and the nickname. Its `QuitError` tells three cases apart: the quit was not heard (`Unreached`), the daemon is too old to know it (`OldDaemon`), or the daemon refused it (`Refused`). `runtime::ipc::terminate(&QuitTarget, pid)` sends the quit on every OS. On Unix it sends `SIGTERM` to `pid` when the quit was not heard or the daemon is too old. A daemon that refused the quit gets no signal. The caller must know that `pid` is the daemon of the target, for example from its `Info` answer.
+**The client.** `runtime::ipc::quit(&QuitTarget)` sends the quit at the address of `send`: the runtime base, the mesh and the nickname. Its `QuitError` tells the cases apart: the quit was not heard (`Unreached`), the daemon is too old to know it (`OldDaemon`), or the daemon refused it (`Refused`). On Unix it is `Unsupported` and opens no connection. `runtime::ipc::terminate(&QuitTarget, pid)` stops a daemon on every OS: on Windows it sends the quit, and on Unix it sends `SIGTERM` to `pid`. On Unix the caller must know that `pid` is the daemon of the target, for example from its `Info` answer.
 
-**Two `terminate` functions.** `util::process::terminate(pid)` does not change: it only signals a pid, and on Windows it returns `Unsupported`, because the util crate sits below the IPC. G3 renames it to `sigterm`, Unix only, when agent-gossip moves to `runtime::ipc::terminate`.
+**Two `terminate` functions.** `util::process::terminate(pid)` does not change: it only signals a pid, and on Windows it returns `Unsupported`, because the util crate sits below the IPC. It keeps its name, because a rename would break a caller on Unix.
 
 ### R6. Owner watch
 
 Done.
 
-**The watch.** A daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) watches its owner on every OS, with the same code. Every `PPID_WATCH_INTERVAL` (1.5 s), `Owner::lost` compares `live_start_time` of the owner with the start time that it read at startup. The start time guards against pid reuse. The watch calls `live_start_time` only, not `is_alive`: on Windows `live_start_time` gives `None` for an owner that exited, also while a handle still holds it, as `is_alive` does. When the owner is gone, the watch writes `owner exited; leaving` (target `habilis_network::lifecycle`) and feeds the quit channel. The daemon then takes the path of `SIGTERM`.
+**The watch.** A daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) watches its owner on every OS, with the same code. Every `PPID_WATCH_INTERVAL` (1.5 s), `Owner::lost` compares `live_start_time` of the owner with the start time that it read at startup. The start time guards against pid reuse. The watch calls `live_start_time` only, not `is_alive`: on Windows `live_start_time` gives `None` for an owner that exited, also while a handle still holds it, as `is_alive` does. When the owner is gone, the watch feeds the quit channel, and on Windows it writes `owner exited; leaving` (target `habilis_network::lifecycle`). The daemon then takes the path of `SIGTERM`.
 
 **No owner, no watch on Windows.** Windows has no `getppid`, does not reparent an orphan, and can reuse the pid of a dead parent. So a daemon with no owner pid has no watch on Windows. The watch of the parent pid stays Unix only.
 
 **Limits.**
 
-- An owner that this process cannot read is refused at startup ("is not running or cannot be read"). On Windows that is a live owner of another account. An owner that cannot be read later counts as gone: the watch fails closed. An owner of the same user is readable also across integrity levels.
+- An owner that this process cannot read is refused at startup. On Windows the error says "is not running or cannot be read", and that is a live owner of another account. On Unix the error is "is not running", as on `main`. An owner that cannot be read later counts as gone: the watch fails closed. An owner of the same user is readable also across integrity levels.
 - An owner that exits with the code 259 (`STILL_ACTIVE`) reads as alive while a handle holds it.
 - The start time has the resolution of the system clock (about 15.6 ms). A reused pid with the same start time would need the owner to exit, every handle to close, and the pid to come back within one tick.
 - An owner that puts the daemon in a job with `KILL_ON_JOB_CLOSE` kills it hard, before the watch, with no `Left`.
@@ -220,7 +221,7 @@ Done.
 
 With a retry every 1 ms for up to 100 ms, no rename and no remove failed. The worst wait was 10.7 ms for a rename and 17.6 ms for a remove.
 
-**The fix.** `util::file_retry::retry_while_shared` runs the rename and the remove again every `SHARED_FILE_RETRY_STEP` (1 ms) while they fail with error 5 or 32, up to `SHARED_FILE_RETRY_DEADLINE` (50 ms). Any other error comes back at once. It wraps the rename of `write_private_atomic`, `StateFile::remove`, and the remove of the marker (`IpcMarker::remove_if_ours`). `StateFile::remove` now logs a remove that fails for a reason other than a missing file. On Unix the retry runs the operation once.
+**The fix.** `util::file_retry::retry_while_shared` runs the rename and the remove again every `SHARED_FILE_RETRY_STEP` (1 ms) while they fail with error 5 or 32, up to `SHARED_FILE_RETRY_DEADLINE` (50 ms). Any other error comes back at once. It wraps the rename of `write_private_atomic`, the remove of `StateFile::remove` on Windows, and the remove of the marker (`IpcMarker::remove_if_ours`). On Windows `StateFile::remove` logs a remove that fails for a reason other than a missing file, and a failed rename of the marker removes its tmp file. On Unix the retry runs the operation once, and `StateFile::remove` is as on `main`. A failed write of the state file removes its tmp file on every OS, as on `main`.
 
 **Limits.**
 
@@ -234,8 +235,8 @@ With a retry every 1 ms for up to 100 ms, no rename and no remove failed. The wo
 
 Done.
 
-- The five calls that returned `long` return `int64_t` in `habilis_network.h` and `i64` in `ffi.rs`. `long` is 32 bits on Windows: the Bun and Deno loaders read 64 bits, so a -1 came back as 4294967295. On 64-bit Linux and macOS the binary ABI does not change.
-- In `packages/habilis-network-ffi` the `CType` `'isize'` is `'i64'`, and the Node loader gives koffi `int64_t`. `abi.test.ts` holds the return type of each call against the header, and `smoke.test.ts` reads -1 from a call with a NULL handle.
+- The five calls that returned `long` return `habilis_network_len` in `habilis_network.h`, and `CLen` in `ffi.rs`. On Windows it is `int64_t` (`i64`): `long` is 32 bits there, and the Bun and Deno loaders read 64 bits, so a -1 came back as 4294967295. On every other target it is `long` (`c_long`), so the header of Linux and macOS declares the same types as on `main` ([R14](#r14-unix-as-on-main)). The first version of R9 used `int64_t` on every target, which on macOS is `long long`, another C type than `long`.
+- In `packages/habilis-network-ffi` the internal `CType` `'isize'` is `'i64'`, and the Node loader gives koffi `int64_t` on Windows and `long` elsewhere. `abi.test.ts` holds the return type of each call against the header, and the `#ifdef` of the type. `smoke.test.ts` reads -1 from a call with a NULL handle.
 - `cargo task ffi` (`tasks/src/ffi.rs`) reads `habilis_network_ffi.lib` on Windows with the `llvm-nm.exe` of the `llvm-tools` component. COFF symbols on x86_64 have no underscore, so the same parse reads them, as it reads ELF.
 
 ### R10. Tooling and tests
@@ -277,7 +278,7 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 
 1. Start a node in `Cli` driver mode, with a runtime base in a temporary directory.
 2. IPC `Info` returns the node, and `active_endpoints` finds it.
-3. IPC `quit` stops the node. The state file and the endpoint are gone.
+3. On Windows the IPC `quit` stops the node, and on Unix the `SIGTERM` of `terminate`. The state file is gone, and nothing answers on the endpoint.
 4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval plus the `Left` delay.
 5. On Windows, start a node in a console of its own. Ctrl-break and ctrl-c stop it by the graceful path.
 6. On Windows, send the window of one node a logoff (`WM_QUERYENDSESSION`, then `WM_ENDSESSION`), and post the window of another node a `WM_CLOSE`. Each stops its node by the graceful path, and the node logs the line of the event.
@@ -296,19 +297,19 @@ The six steps are done. In `Cli` mode a quit ends the process with `std::process
 
 ### R12. Runtime base of a Unix client
 
-On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Before R12, only the writers checked the base (`ensure_runtime_base`). If another user created the base, the daemon refused to start, but a client read the socket or the marker that the other user put there, and sent it the commands. This gap was there before R3, with the socket file.
+On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Only the writers check the base (`ensure_runtime_base`). If another user creates the base, the daemon refuses to start, but a client connects to a socket that the other user put there, and sends it the commands. This gap was there before R3, with the socket file.
 
-Done.
+Partly done.
 
 - `check_runtime_base(base)` (`crates/habilis-network-util/src/lib.rs`) has the checks of `ensure_runtime_base`, creates nothing and changes nothing. It returns `RuntimeBaseCheck`: `Private` (a folder of the user with no group or other bits), `Absent`, or `Refused` with the reason. A base at `0755` is refused, not tightened.
-- `send` and `active_endpoints` call it before they read a marker. A refused base gives `UnsafeRuntimeBase` from `send`, and from `quit` and `terminate` inside `QuitError::Unreached`; `active_endpoints` gives no endpoint. Each logs a warn. `terminate` sends no signal then. An absent base is still `NoDaemon`. The error is not `ForeignEndpoint`: no endpoint was reached, and a folder of the user that is open to others is not another user's.
+- The IPC client does not call it. A port commit made `send` and `active_endpoints` refuse a base that is not private, with `UnsafeRuntimeBase`. R14 took that commit out, because it changed the behavior of a Unix client, and the port leaves Unix as it is on `main`.
 - On Windows the base is in the profile, which another user cannot create, so the client needs only the owner check of the pipe.
 
-Follow-up items for agent-gossip, outside R12:
+Follow-up items, outside the port:
 
-- `read_identity`, `read_session_entry` and `read_snapshot` (`runtime::state_file`, in `crates/habilis-network/src/daemon/state_file.rs`) read the state files under the same base and do not check it. agent-gossip reads the pid of a daemon from them. `terminate` sends no signal through a refused base, but the session list and the statusline still trust it. agent-gossip should call `check_runtime_base` before those reads.
-- `doctor` should call `check_runtime_base` itself, to show why it finds no daemon: the warn of `active_endpoints` may not reach the user.
-- The fixtures and tests of agent-gossip that make the base with `create_dir_all` (`0755` under the usual umask) now get the refusal. Check them before the engine change reaches agent-gossip.
+- A change on `main` makes the IPC client check the base, in its own pull request, and names it as a change of behavior. On `main`, `send` connects to the socket path and `active_socket_paths` lists the sockets, so the change is written for that code, not taken from the port.
+- In the same change: `read_identity`, `read_session_entry` and `read_snapshot` (`runtime::state_file`) read the state files under the same base and do not check it. `doctor` in agent-gossip should show why it finds no daemon.
+- A caller that makes the base itself with `create_dir_all` (`0755` under the usual umask), as some fixtures and tests of agent-gossip do, would get the refusal. Check them before that change lands.
 
 ### R13. Logoff and shutdown
 
@@ -330,6 +331,33 @@ Follow-up items, outside R13:
 - agent-gossip needs no code change for R13, only the engine version that has it. After G1, the sign-out row and the `taskkill` row of T6 check it.
 - The window gets the end of the session only in the interactive session of the user, on window station `WinSta0`. A child process gets the window station and the desktop of its parent, and the creation flags of G1 do not change them. So the daemon of G1 gets the end of the session only when its parent is in that session. A daemon under a service or an SSH session gets none. A service gets `SERVICE_CONTROL_SHUTDOWN` from the service control manager instead.
 - The window thread does not return from `WM_ENDSESSION`, so the screen of the apps that are still open can list the daemon, by the title of the window (`habilis-network-session`) or by the name of the program. In T6 a logoff with one CLI daemon and no peer showed no such screen. The daemon logged `leaving mesh`, after its `Left`, and left no state file or marker. T6 did not show why: the quit path may have ended before the deadline, or Windows may not list a hidden window. A slow quit path, such as a release of the rendezvous with bad connectivity, can still make the screen show. T6 did not test that. `ShutdownBlockReasonCreate` sets a reason that a user can read, such as "leaving the mesh". It is not known whether a reason makes the screen show on each logoff, so R13 does not use it. Add it only when a user sees the screen.
+
+### R14. Unix as on `main`
+
+Many projects build on the engine. The port leaves Linux and macOS as they are on `main`: the API, the ABI, the C header, the wire and the behavior. A change of the port is Windows only, or it adds an item and changes none. A change of Unix behavior goes to its own pull request on `main`.
+
+Done.
+
+- The client check of the runtime base ([R12](#r12-runtime-base-of-a-unix-client)) is out of the port.
+- On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` are back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` work on every OS. The IPC log lines of Unix have the target, the text and the fields of `main`.
+- The lines and the messages that the port added to the daemon are Windows only: the warn of a failed remove of the state file, the `info` line of the owner watch, and the "or cannot be read" of a refused owner. The `info` line of the parent watch, which is Unix only, is gone.
+- The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, `quit` is `QuitError::Unsupported`, and `terminate` sends `SIGTERM`. The signal handlers and the owner watch of Unix start where they started on `main`, after the bind of the IPC socket.
+- The C header declares `long` on every target but Windows, through `habilis_network_len`, and `int64_t` on Windows.
+
+What stays different on Unix:
+
+- The port adds items, such as `IpcName`, `active_endpoints`, `send_to_endpoint`, `QuitTarget`, `QuitError`, `quit`, `terminate` and `check_runtime_base`. An item that exists on `main` keeps its signature and its behavior. The exception is the internal `CType` of `packages/habilis-network-ffi`, a private package, where `'isize'` is `'i64'` (R9).
+- The `[patch]` of iroh ([R11](#r11-windows-on-ci)) holds in this workspace on every OS, so a build of this workspace on Linux or macOS uses the fork. A project that depends on the engine does not get it. It changes only the level of one relay log line. The patch goes when the fix is in `agent-habilis/iroh`.
+
+The proof, on a Linux machine (kernel 7.0.0-38, 8 threads), with the port as a patch on `5a1fc5c`:
+
+- fmt, clippy with and without `--all-features`, the workspace tests, `ffi_smoke`, `cargo task ffi` and the Bun tests (150) pass.
+- `cargo semver-checks` 0.51.0 against `5a1fc5c`, for the 13 library crates, with the default features and with `--all-features`: no semver update required, 26 of 26.
+- agent-gossip `main` (`05943a2`), with no change, against the engine of `5a1fc5c` and against the port: the same four test targets fail on both (`directory`, `gossip_network`, `mcp_stdio`, `monitor_contract`), so these four target failures do not come from the port. Three tests differed between the two runs: `test_timed_out_file_call_is_cancelled_at_the_worker` failed only against `5a1fc5c`, and two failed only against the port. In 25 more runs of each side, `test_completed_task_is_never_reaped` passed every time, and `test_directed_msg_never_reaches_a_bystander` failed on both, 2 times against `5a1fc5c` and 5 times against the port, with "relay-only path refused" (#32) in each failure whose log was kept.
+
+Follow-up items, outside R14:
+
+- On Unix the target `habilis_network::lifecycle` on the IPC log lines (the warn of a failed `chmod` of the socket, the listening line, an accept error, an idle connection) can go to its own pull request on `main`. A failed write of the state file already removes its tmp file on `main`.
 
 ## 4. Requirements: agent-gossip
 
@@ -361,15 +389,15 @@ Start it after the engine work of [§3](#3-requirements-habilis-network).
 - `cli/bell.rs`: put `mode(0o600)` behind `cfg(unix)`. `File::try_lock` works on Windows.
 - `cli/signal.rs`: on Windows, use ctrl-c only.
 - `home_dir` (`cli/agent.rs`) and `home_path` (`status.rs`): fall back to `USERPROFILE`.
-- The engine renamed two IPC calls (R3): `cli/doctor.rs` and `cli/session.rs` change `active_socket_paths` to `active_endpoints` and `send_to_path` to `send_to_endpoint`, four lines.
+- On Unix `active_socket_paths` and `send_to_path` do not change, so `cli/doctor.rs` and `cli/session.rs` keep them. On Windows they use `active_endpoints` and `send_to_endpoint`, behind `cfg(windows)`.
 - The test fixtures build the path of the unix socket by hand (`agent-gossip-test-fixtures/src/lib.rs`, and the readiness checks of three `tests/*.rs` files). On Unix they keep working. On Windows they use `active_endpoints` and `send_to_endpoint`.
 - `docs/manual.txt` and `docs/windows-port/specs/E3-control-socket.md` name the old socket design. Update them.
 
 ### G3. Leave
 
-`leave` (`cli/session.rs`) stops the daemon with `runtime::ipc::terminate` (R5) in place of `util::process::terminate`. It already has the target (the runtime base, the mesh and the nickname) and the pid that its `Info` check confirms.
+`leave` (`cli/session.rs`) stops the daemon with `runtime::ipc::terminate` (R5) in place of `util::process::terminate`. It already has the target (the runtime base, the mesh and the nickname) and the pid that its `Info` check confirms. On Unix `runtime::ipc::terminate` sends the same `SIGTERM`, so `leave` does what it did before. On Windows it sends the IPC quit.
 
-With that change, rename `util::process::terminate` to `sigterm`, Unix only, and remove its Windows version, which returns `Unsupported`. `cli/session.rs` is its only caller outside the engine. The rename waits for this step, so that agent-gossip does not break before it.
+`util::process::terminate` keeps its name and its Windows version, which returns `Unsupported`: a rename would break a caller on Unix ([R14](#r14-unix-as-on-main)).
 
 ### G4. Skills
 
@@ -393,14 +421,15 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R12 and R13 are done too.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R13 and R14 are done too, and R12 is partly done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
 3. **Runtime base and IPC (R2, R3).** Add the `Info` and `active_endpoints` part of `host_lifecycle.rs`.
 4. **Process helpers, `quit`, owner watch, console events (R4 to R7).** Add the `quit`, owner-watch and console-event parts of `host_lifecycle.rs`.
 5. **State file and FFI ABI (R8, R9).**
-6. **agent-gossip (G0 to G5).**
+6. **Unix as on `main` (R14).** Before agent-gossip, so that the engine it pins changes nothing on Unix.
+7. **agent-gossip (G0 to G5).**
 
 ## 6. Test plan on a real Windows machine
 

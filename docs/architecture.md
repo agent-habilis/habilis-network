@@ -330,7 +330,7 @@ Topic setup makes the first peer claim the beacon eagerly, because a topic mesh 
 
 `DriverMode` is the single branch between the two ways to drive a node.
 `Cli` binds the IPC endpoint and exits the process on quit.
-A quit comes from a signal, a console event, the end of the session or a window close on Windows, the owner watch, or the IPC `quit` command, and all of them take one path: the state file and the marker are removed, then `Left` goes out, then the process exits.
+A quit comes from a signal, the owner watch, or on Windows a console event, the end of the session, a window close or the IPC `quit` command, and all of them take one path: the state file, and on Windows the marker, are removed, then `Left` goes out, then the process exits.
 `InProcess` takes typed requests over channels and returns cleanly.
 A browser node and an embedded node are always `InProcess`.
 
@@ -347,7 +347,7 @@ flowchart LR
         I["IPC commands"]
         S["session requests"]
         W["relay rung watch"]
-        Q["quit signals and IPC quit"]
+        Q["quit signals, and the IPC quit on Windows"]
     end
     subgraph Timers
         T1["alive / sweep"]
@@ -671,8 +671,9 @@ On Windows it is a named pipe with a random name.
 The endpoint is a full control plane with no in-band authentication.
 On Unix the protection is filesystem permissions: a uid-scoped `0700` runtime directory and a `0600` socket.
 On Windows the protection is the DACL of the pipe, which gives access only to the user, and the client checks that the user owns the pipe before it sends a byte.
-The node writes the name of its endpoint into a `<nick>.ipc` marker in the mesh folder, on every OS, and a client finds the endpoint through the marker.
-The bind and the marker come before the node reports ready, so a client that observes readiness always connects.
+On Unix a client finds the socket by its path in the mesh folder.
+On Windows the node writes the name of its pipe into a `<nick>.ipc` marker in the mesh folder, and a client finds the pipe through the marker.
+The bind, and the marker on Windows, come before the node reports ready, so a client that observes readiness always connects.
 The IPC module compiles out on wasm32, and a browser binds nothing.
 `docs/windows.md` (R3) gives the Windows design.
 

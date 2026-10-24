@@ -336,9 +336,9 @@ pub fn is_alive(pid: u32) -> bool {
 /// Ask a process to terminate (SIGTERM) — the graceful path: a mesh daemon
 /// catches it, broadcasts `left`, and removes its state file.
 ///
-/// This only signals a pid. To stop a daemon, use `runtime::ipc::terminate` of
-/// `habilis-network`: it sends the IPC `quit` command on every OS, and this
-/// signal on Unix as its fallback.
+/// This only signals a pid. To stop a daemon on every OS, use
+/// `runtime::ipc::terminate` of `habilis-network`: on Windows it sends the IPC
+/// `quit`, and on Unix it sends this signal.
 #[cfg(unix)]
 #[expect(unsafe_code, reason = "libc::kill FFI; no safe wrapper")]
 /// # Errors
