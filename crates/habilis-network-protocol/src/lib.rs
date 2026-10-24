@@ -56,9 +56,9 @@ pub use dedup_key::DedupKey;
 pub use habilis_network_util::clock::UnixSecs;
 pub use identity::{Identity, encode_pubkey};
 pub use mesh::{
-    AdvertiseRequiresReachable, ChoiceError, DEFAULT_DIRECTORY, DirectorySelection, LockedMesh,
-    Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName, NameError,
-    OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
+    AdvertiseRequiresReachable, ChoiceError, ConfigError, DEFAULT_DIRECTORY, DirectorySelection,
+    LockedMesh, Lookup, LookupOpts, LookupSet, Mesh, MeshConfig, MeshId, MeshIdError, MeshName,
+    NameError, OptFlag, RelayChoice, RelayLadder, RelayLadderError, RelaySelection, Transport,
     TransportPolicy, UnlockError, resolve_lookups, validate_advertise,
 };
 pub use message::{

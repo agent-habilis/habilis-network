@@ -307,10 +307,10 @@ pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh
         anyhow::bail!("topic string must not be empty");
     }
     config.validate()?;
-    Mesh::from_topic(
+    Ok(Mesh::from_topic(
         string,
         MeshConfig::new(config.lookups, None, None, config.transport),
-    )
+    )?)
 }
 
 impl TopicParams {

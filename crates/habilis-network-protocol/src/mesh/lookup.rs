@@ -8,12 +8,11 @@
 use std::fmt;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail};
 use iroh_base::RelayUrl;
 use serde::Deserialize;
 
 use super::transport::{Transport, TransportPolicy};
-use super::{ChoiceError, MeshName};
+use super::{ChoiceError, ConfigError, MeshName};
 use crate::crypto::PASSWORD_VERIFIER_LEN;
 
 /// The connectivity relay. `Disabled` ⇒ no relay at all
@@ -129,20 +128,22 @@ impl LookupOpts {
     /// # Errors
     /// The custom ladder is longer than `MAX_RELAY_LADDER`, or one of its
     /// URLs is longer than `MAX_RELAY_URL_BYTES`.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         let RelayChoice::Custom(ladder) = &self.relay_lookup else {
             return Ok(());
         };
         if ladder.len() > MAX_RELAY_LADDER {
-            bail!(
+            return Err(ConfigError::Invalid(format!(
                 "relay ladder too long: {} rungs, the wire ceiling is {MAX_RELAY_LADDER}",
                 ladder.len()
-            );
+            )));
         }
         for url in ladder {
             let len = url.to_string().len();
             if len > MAX_RELAY_URL_BYTES {
-                bail!("relay URL too long: {len} bytes, the wire ceiling is {MAX_RELAY_URL_BYTES}");
+                return Err(ConfigError::Invalid(format!(
+                    "relay URL too long: {len} bytes, the wire ceiling is {MAX_RELAY_URL_BYTES}"
+                )));
             }
         }
         Ok(())
@@ -187,28 +188,39 @@ impl LookupOpts {
     /// Decode from a cursor over the config region, advancing `pos`.
     /// # Errors
     /// The buffer is truncated, or the encoded length exceeds what remains.
-    pub fn decode_from(bytes: &[u8], pos: &mut usize) -> Result<Self> {
-        let flags = *bytes.get(*pos).context("truncated lookup flags")?;
+    pub fn decode_from(bytes: &[u8], pos: &mut usize) -> Result<Self, ConfigError> {
+        let flags = *bytes
+            .get(*pos)
+            .ok_or(ConfigError::Truncated("truncated lookup flags"))?;
         *pos += 1;
         let mdns = flags & 0b0001 != 0;
         let dht = flags & 0b0010 != 0;
         let relay_enabled = flags & 0b0100 != 0;
         let relay_custom = flags & 0b1000 != 0;
         if relay_custom && !relay_enabled {
-            bail!("custom-relay bit set without relay-enabled bit");
+            return Err(ConfigError::Invalid(
+                "custom-relay bit set without relay-enabled bit".to_owned(),
+            ));
         }
         let relay_lookup = if !relay_enabled {
             RelayChoice::Disabled
         } else if !relay_custom {
             RelayChoice::Pinned
         } else {
-            let count = *bytes.get(*pos).context("truncated relay ladder count")? as usize;
+            let count = *bytes
+                .get(*pos)
+                .ok_or(ConfigError::Truncated("truncated relay ladder count"))?
+                as usize;
             *pos += 1;
             if count == 0 {
-                bail!("custom relay ladder is empty");
+                return Err(ConfigError::Invalid(
+                    "custom relay ladder is empty".to_owned(),
+                ));
             }
             if count > MAX_RELAY_LADDER {
-                bail!("relay ladder too long: {count}");
+                return Err(ConfigError::Invalid(format!(
+                    "relay ladder too long: {count}"
+                )));
             }
             RelayChoice::Custom(decode_relay_ladder(bytes, pos, count)?)
         };
@@ -221,25 +233,42 @@ impl LookupOpts {
 }
 
 /// Decode `count` length-prefixed relay URLs from the cursor, advancing `pos`.
-fn decode_relay_ladder(bytes: &[u8], pos: &mut usize, count: usize) -> Result<Vec<RelayUrl>> {
+fn decode_relay_ladder(
+    bytes: &[u8],
+    pos: &mut usize,
+    count: usize,
+) -> Result<Vec<RelayUrl>, ConfigError> {
     let mut ladder = Vec::with_capacity(count);
     for _ in 0..count {
-        let len = read_u16(bytes, pos).context("truncated relay URL length")? as usize;
+        let len = read_u16(bytes, pos).map_err(ConfigError::source("truncated relay URL length"))?
+            as usize;
         if len > MAX_RELAY_URL_BYTES {
-            bail!("relay URL too long: {len}");
+            return Err(ConfigError::Invalid(format!("relay URL too long: {len}")));
         }
-        let end = pos.checked_add(len).context("relay URL length overflow")?;
-        let raw = bytes.get(*pos..end).context("truncated relay URL")?;
+        let end = pos
+            .checked_add(len)
+            .ok_or(ConfigError::Truncated("relay URL length overflow"))?;
+        let raw = bytes
+            .get(*pos..end)
+            .ok_or(ConfigError::Truncated("truncated relay URL"))?;
         *pos = end;
-        let text = std::str::from_utf8(raw).context("relay URL is not UTF-8")?;
-        ladder.push(text.parse::<RelayUrl>().context("invalid relay URL")?);
+        let text =
+            std::str::from_utf8(raw).map_err(ConfigError::source("relay URL is not UTF-8"))?;
+        ladder.push(
+            text.parse::<RelayUrl>()
+                .map_err(ConfigError::source("invalid relay URL"))?,
+        );
     }
     Ok(ladder)
 }
 
-pub(super) fn read_u16(bytes: &[u8], pos: &mut usize) -> Result<u16> {
-    let end = pos.checked_add(2).context("u16 length overflow")?;
-    let slice = bytes.get(*pos..end).context("truncated u16")?;
+pub(super) fn read_u16(bytes: &[u8], pos: &mut usize) -> Result<u16, ConfigError> {
+    let end = pos
+        .checked_add(2)
+        .ok_or(ConfigError::Truncated("u16 length overflow"))?;
+    let slice = bytes
+        .get(*pos..end)
+        .ok_or(ConfigError::Truncated("truncated u16"))?;
     *pos = end;
     Ok(u16::from_le_bytes([slice[0], slice[1]]))
 }
@@ -356,27 +385,27 @@ impl MeshConfig {
     /// The lookups fail [`LookupOpts::validate`], the transports name neither
     /// `udp` nor `webrtc`, or `relay_transport` or a missing `udp` needs the
     /// relay lookup while `lookups.relay_lookup` is `Disabled`.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         self.lookups.validate()?;
         let transport = &self.transport;
         if transport.multihop_has_no_direct_path() {
-            bail!(super::transport::MULTIHOP_ALONE);
+            return Err(ConfigError::Invalid(
+                super::transport::MULTIHOP_ALONE.to_owned(),
+            ));
         }
         if !transport.udp && !transport.webrtc {
-            bail!("a mesh needs a direct path: transport `udp`, `webrtc`, or both");
+            return Err(ConfigError::Invalid(
+                "a mesh needs a direct path: transport `udp`, `webrtc`, or both".to_owned(),
+            ));
         }
         let no_relay = self.lookups.relay_lookup == RelayChoice::Disabled;
         if transport.relay_transport && no_relay {
-            bail!(
-                "transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload"
-            );
+            return Err(ConfigError::Invalid("transport `relay` needs lookup `relay`: with the relay disabled there is none to carry payload".to_owned()));
         }
         // A native member without UDP has no address a peer could reach, so the
         // JSEP exchange that opens its data channel can only cross the relay.
         if !transport.udp && no_relay {
-            bail!(
-                "a mesh without transport `udp` needs lookup `relay`: the relay is the only path its WebRTC offers can take"
-            );
+            return Err(ConfigError::Invalid("a mesh without transport `udp` needs lookup `relay`: the relay is the only path its WebRTC offers can take".to_owned()));
         }
         Ok(())
     }
@@ -398,7 +427,7 @@ impl MeshConfig {
         lookups: &[Lookup],
         relay_urls: Option<RelayLadder>,
         transports: &[Transport],
-    ) -> Result<Self> {
+    ) -> Result<Self, ConfigError> {
         let config = MeshConfig {
             lookups: resolve_lookups(LookupSet::from_lookups(lookups, relay_urls)?),
             password: None,
@@ -445,12 +474,12 @@ impl MeshConfig {
     ///
     /// # Errors
     /// The bytes are malformed or do not decode to a valid config region.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ConfigError> {
         let mut pos = 0;
         let lookups = LookupOpts::decode_from(bytes, &mut pos)?;
-        let transport_byte = *bytes.get(pos).context(
+        let transport_byte = *bytes.get(pos).ok_or(ConfigError::Truncated(
             "missing transport policy byte: upgrade, this mesh id is from an older build",
-        )?;
+        ))?;
         pos += 1;
         let transport = TransportPolicy::from_byte(transport_byte)?;
         let (password, issuer_pubkey) = if pos == bytes.len() {
@@ -459,19 +488,25 @@ impl MeshConfig {
             let features = bytes[pos];
             pos += 1;
             if features & !KNOWN_FEATURES != 0 {
-                bail!("unsupported mesh feature flags {features:#04x} — upgrade to a newer build");
+                return Err(ConfigError::Invalid(format!(
+                    "unsupported mesh feature flags {features:#04x} — upgrade to a newer build"
+                )));
             }
             if features == 0 {
                 // A zero feature byte re-encodes without itself, silently
                 // changing the topic-derivation bytes — reject the
                 // non-canonical form outright.
-                bail!("non-canonical mesh config: zero feature flags");
+                return Err(ConfigError::Invalid(
+                    "non-canonical mesh config: zero feature flags".to_owned(),
+                ));
             }
             let password = if features & FEATURE_PASSWORD != 0 {
                 let end = pos
                     .checked_add(PASSWORD_VERIFIER_LEN)
-                    .context("password verifier length overflow")?;
-                let raw = bytes.get(pos..end).context("truncated password verifier")?;
+                    .ok_or(ConfigError::Truncated("password verifier length overflow"))?;
+                let raw = bytes
+                    .get(pos..end)
+                    .ok_or(ConfigError::Truncated("truncated password verifier"))?;
                 pos = end;
                 let mut verifier = [0u8; PASSWORD_VERIFIER_LEN];
                 verifier.copy_from_slice(raw);
@@ -482,8 +517,10 @@ impl MeshConfig {
             let issuer_pubkey = if features & FEATURE_INVITE_ONLY != 0 {
                 let end = pos
                     .checked_add(ISSUER_PUBKEY_LEN)
-                    .context("issuer pubkey length overflow")?;
-                let raw = bytes.get(pos..end).context("truncated issuer pubkey")?;
+                    .ok_or(ConfigError::Truncated("issuer pubkey length overflow"))?;
+                let raw = bytes
+                    .get(pos..end)
+                    .ok_or(ConfigError::Truncated("truncated issuer pubkey"))?;
                 pos = end;
                 let mut pubkey = [0u8; ISSUER_PUBKEY_LEN];
                 pubkey.copy_from_slice(raw);
@@ -494,7 +531,9 @@ impl MeshConfig {
             (password, issuer_pubkey)
         };
         if pos != bytes.len() {
-            bail!("trailing bytes in mesh config");
+            return Err(ConfigError::Invalid(
+                "trailing bytes in mesh config".to_owned(),
+            ));
         }
         let config = MeshConfig {
             lookups,
@@ -706,10 +745,15 @@ impl LookupSet {
     /// # Errors
     /// `relay_urls` is given but `lookups` does not name [`Lookup::Relay`]:
     /// a ladder says *which* relay, and only a relay lookup uses one.
-    pub fn from_lookups(lookups: &[Lookup], relay_urls: Option<RelayLadder>) -> Result<Self> {
+    pub fn from_lookups(
+        lookups: &[Lookup],
+        relay_urls: Option<RelayLadder>,
+    ) -> Result<Self, ConfigError> {
         let relay = lookups.contains(&Lookup::Relay);
         if relay_urls.is_some() && !relay {
-            bail!("a relay ladder needs lookup `relay`");
+            return Err(ConfigError::Invalid(
+                "a relay ladder needs lookup `relay`".to_owned(),
+            ));
         }
         let relay_lookup = if relay {
             relay_urls.map_or(RelaySelection::Default, RelaySelection::Named)

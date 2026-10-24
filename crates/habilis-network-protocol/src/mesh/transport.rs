@@ -7,10 +7,9 @@
 use std::fmt;
 use std::str::FromStr;
 
-use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use super::ChoiceError;
+use super::{ChoiceError, ConfigError};
 
 /// One path a mesh's members may carry payload over — an entry of the
 /// `transport` list a create names. Mesh-wide: every joiner inherits it from
@@ -169,7 +168,7 @@ impl TransportPolicy {
     /// # Errors
     /// The list is non-empty and names neither `udp` nor `webrtc`; with
     /// `multihop` in it, the message says that multihop needs a direct path.
-    pub fn from_transports(transports: &[Transport]) -> Result<Self> {
+    pub fn from_transports(transports: &[Transport]) -> Result<Self, ConfigError> {
         if transports.is_empty() {
             return Ok(Self::default());
         }
@@ -181,10 +180,12 @@ impl TransportPolicy {
             relay_transport: transports.contains(&Transport::Relay),
         };
         if policy.multihop_has_no_direct_path() {
-            bail!(MULTIHOP_ALONE);
+            return Err(ConfigError::Invalid(MULTIHOP_ALONE.to_owned()));
         }
         if !policy.udp && !policy.webrtc {
-            bail!("a transport list needs a direct path: name `udp`, `webrtc`, or both");
+            return Err(ConfigError::Invalid(
+                "a transport list needs a direct path: name `udp`, `webrtc`, or both".to_owned(),
+            ));
         }
         Ok(policy)
     }
@@ -223,9 +224,11 @@ impl TransportPolicy {
     ///
     /// # Errors
     /// The byte sets a bit this build does not know.
-    pub(crate) fn from_byte(byte: u8) -> Result<Self> {
+    pub(crate) fn from_byte(byte: u8) -> Result<Self, ConfigError> {
         if byte & !super::lookup::KNOWN_TRANSPORT_BITS != 0 {
-            bail!("unsupported transport policy bits {byte:#04x}: upgrade to a newer build");
+            return Err(ConfigError::Invalid(format!(
+                "unsupported transport policy bits {byte:#04x}: upgrade to a newer build"
+            )));
         }
         Ok(Self {
             udp: byte & super::lookup::TRANSPORT_UDP != 0,
