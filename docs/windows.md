@@ -36,7 +36,7 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
 | R12. Runtime base of a Unix client | Partly done. `check_runtime_base` exists. The IPC client does not call it in this port, because the port leaves Unix as it is on `main` ([R14](#r14-unix-as-on-main)). The client check goes to its own change on `main`. See [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
-| R14. Unix as on `main` | Done on Windows; the run on Linux is open. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, the engine answers no IPC command, the lines of the daemon are as on `main`, and the C header declares `long`. See [R14](#r14-unix-as-on-main). |
+| R14. Unix as on `main` | Done, on Windows and on Linux. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, the engine answers no IPC command, the lines of the daemon are as on `main`, and the C header declares `long`. See [R14](#r14-unix-as-on-main). |
 
 [§2.2](#22-runtime-breaks) has no open item. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
@@ -336,7 +336,7 @@ Follow-up items, outside R13:
 
 Many projects build on the engine. The port leaves Linux and macOS as they are on `main`: the API, the ABI, the C header, the wire and the behavior. A change of the port is Windows only, or it adds an item and changes none. A change of Unix behavior goes to its own pull request on `main`.
 
-Done on Windows.
+Done.
 
 - The client check of the runtime base ([R12](#r12-runtime-base-of-a-unix-client)) is out of the port.
 - On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` are back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` work on every OS. The IPC log lines of Unix have the target, the text and the fields of `main`.
@@ -346,12 +346,14 @@ Done on Windows.
 
 What stays different on Unix:
 
-- The port adds items, such as `IpcName`, `active_endpoints`, `send_to_endpoint`, `QuitTarget`, `QuitError`, `quit`, `terminate` and `check_runtime_base`. An item that exists on `main` keeps its signature and its behavior. The exception is the internal `CType` of `packages/habilis-network-ffi`, a private package, where `'isize'` is `'i64'` (R9). Linux has not checked this yet.
+- The port adds items, such as `IpcName`, `active_endpoints`, `send_to_endpoint`, `QuitTarget`, `QuitError`, `quit`, `terminate` and `check_runtime_base`. An item that exists on `main` keeps its signature and its behavior. The exception is the internal `CType` of `packages/habilis-network-ffi`, a private package, where `'isize'` is `'i64'` (R9).
 - The `[patch]` of iroh ([R11](#r11-windows-on-ci)) holds in this workspace on every OS, so a build of this workspace on Linux or macOS uses the fork. A project that depends on the engine does not get it. It changes only the level of one relay log line. The patch goes when the fix is in `agent-habilis/iroh`.
 
-Open:
+The proof, on a Linux machine (kernel 7.0.0-38, 8 threads), with the port as a patch on `5a1fc5c`:
 
-- The proof runs on a Linux machine before the push: `cargo semver-checks` against `main` for each library crate, and agent-gossip `main` against `main` and against the port, with no change to agent-gossip.
+- fmt, clippy with and without `--all-features`, the workspace tests, `ffi_smoke`, `cargo task ffi` and the Bun tests (150) pass.
+- `cargo semver-checks` 0.51.0 against `5a1fc5c`, for the 13 library crates, with the default features and with `--all-features`: no semver update required, 26 of 26.
+- agent-gossip `main` (`05943a2`), with no change, against the engine of `5a1fc5c` and against the port: the same four test targets fail on both (`directory`, `gossip_network`, `mcp_stdio`, `monitor_contract`), so these four target failures do not come from the port. Three tests differed between the two runs: `test_timed_out_file_call_is_cancelled_at_the_worker` failed only against `5a1fc5c`, and two failed only against the port. In 25 more runs of each side, `test_completed_task_is_never_reaped` passed every time, and `test_directed_msg_never_reaches_a_bystander` failed on both, 2 times against `5a1fc5c` and 5 times against the port, with "relay-only path refused" (#32) in each failure whose log was kept.
 
 Follow-up items, outside R14:
 
@@ -419,7 +421,7 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R13 is done too. R14 is done on Windows, and its run on Linux is open. R12 is partly done.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R13 and R14 are done too, and R12 is partly done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
