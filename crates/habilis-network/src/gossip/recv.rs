@@ -15,6 +15,7 @@ use crate::daemon::ctx::HandlerCtx;
 use crate::daemon::state::{DirectState, EventLoopState, RivalFlag};
 use crate::gossip::event::NodeEvent;
 use crate::lifecycle;
+use crate::lifecycle::membership::MembershipUpdate;
 use crate::lookup::add_peer_addr;
 use crate::protocol::message::{Authored, MessageBody, Proof, Verified, WireFrame};
 use crate::protocol::{Channel, ContentHash, Message, MessageKind, Nickname, PresenceSubtype};
@@ -648,15 +649,17 @@ pub(crate) async fn ingest(
         }
     }
 
-    retain_and_index(
-        verified,
-        RetainMeta {
-            canonical: &canonical,
-            class: app_class.as_ref(),
-        },
-        state,
-        ctx,
-    );
+    if retained_after_lifecycle(&observed.update, &verified.kind) {
+        retain_and_index(
+            verified,
+            RetainMeta {
+                canonical: &canonical,
+                class: app_class.as_ref(),
+            },
+            state,
+            ctx,
+        );
+    }
 }
 
 /// The engine's own message kinds: presence, peer info, digests, ping/pong,
@@ -670,7 +673,7 @@ pub(crate) async fn ingest(
 async fn dispatch_infra(
     message: &Verified,
     surfaceable: bool,
-    update: &lifecycle::membership::MembershipUpdate,
+    update: &MembershipUpdate,
     state: &mut EventLoopState,
     app: &mut dyn NodeApp,
     ctx: &HandlerCtx<'_>,
@@ -968,6 +971,20 @@ async fn handle_shard(
 struct RetainMeta<'a> {
     canonical: &'a [u8],
     class: Option<&'a AppClass>,
+}
+
+/// Whether a frame that membership read goes into the log. A stale presence frame does not: it is
+/// a copy of a departed key's `joined` or `alive`, which `drop_departed_presence` took out of the
+/// log on the goodbye, and `seen` may have forgotten it since. Retained again, it would be a
+/// resend subject again. A stale chat frame stays retainable: the departed key's chat is kept.
+fn retained_after_lifecycle(update: &MembershipUpdate, kind: &MessageKind) -> bool {
+    !(update.stale
+        && matches!(
+            kind,
+            MessageKind::Presence {
+                subtype: PresenceSubtype::Joined | PresenceSubtype::Alive
+            }
+        ))
 }
 
 fn retain_and_index(
@@ -1718,9 +1735,39 @@ mod arms_reclaim_tests {
 
 #[cfg(test)]
 mod is_loggable_tests {
-    use super::is_loggable;
+    use super::{is_loggable, retained_after_lifecycle};
+    use crate::lifecycle::membership::MembershipUpdate;
     use crate::protocol::{MessageKind, PresenceSubtype};
     use habilis_network_test_tracing::test;
+
+    /// A stale `joined` or `alive` is a copy of a departed key's presence: it stays out of the
+    /// log. A stale chat frame and a fresh presence frame go in.
+    #[test]
+    fn a_stale_presence_frame_is_not_retained() {
+        let stale = MembershipUpdate {
+            returned: false,
+            joined_new: false,
+            stale: true,
+        };
+        let fresh = MembershipUpdate {
+            returned: false,
+            joined_new: true,
+            stale: false,
+        };
+        let joined = MessageKind::Presence {
+            subtype: PresenceSubtype::Joined,
+        };
+        let alive = MessageKind::Presence {
+            subtype: PresenceSubtype::Alive,
+        };
+        assert!(!retained_after_lifecycle(&stale, &joined));
+        assert!(!retained_after_lifecycle(&stale, &alive));
+        assert!(retained_after_lifecycle(
+            &stale,
+            &MessageKind::app_broadcast("app_msg")
+        ));
+        assert!(retained_after_lifecycle(&fresh, &joined));
+    }
 
     #[test]
     fn alive_presence_is_not_loggable() {

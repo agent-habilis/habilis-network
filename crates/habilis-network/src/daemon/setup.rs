@@ -9,12 +9,12 @@ use crate::gossip::event::{NodeEvent, NodeSink};
 #[cfg(feature = "multihop")]
 use crate::lookup::build_peer_multihop_with;
 use crate::lookup::{
-    StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
+    ProbeAnswer, StoppableTask, add_peer_addr, build_mesh, relay_ladder, select_bootstrap_rung,
 };
 use crate::protocol::crypto::Password;
 use crate::protocol::mesh::{LookupOpts, Mesh, MeshConfig, MeshName};
 use crate::protocol::{MeshId, Nickname};
-use crate::util::tuning::RELAY_RUNG_PROBE;
+use crate::util::tuning::{RELAY_RUNG_PROBE, SETUP_RUNG_READ};
 
 use crate::beacon::RendezvousParams;
 use crate::lifecycle;
@@ -150,6 +150,24 @@ fn spawn_startup_rung_confirmation(
 /// with the rival probe's dial target: the probe asks whether anyone serves
 /// the identity *a joiner would reach*, so the two must name the same place or
 /// it is answering a different question.
+/// The rungs a member leaves out of the rendezvous address it registers at setup, from what each
+/// busy rung answered to a probe. A member that walks the ladder (every policy but `Never`) keeps
+/// only a rung read as ours: its walk reads the rest and admits one that turns out to be ours, and
+/// a foreign listener never fails its dial. A member that never walks (`CoHostPolicy::Never`, the
+/// `discover` session) leaves out only a rung read as foreign: it reads no rung later, and a rung
+/// that refused or said nothing may be the beacon it came for, starting or loaded.
+fn rungs_withheld_at_setup(policy: CoHostPolicy, read: &[(u16, ProbeAnswer)]) -> Vec<u16> {
+    read.iter()
+        .filter(|(_, answer)| match policy {
+            CoHostPolicy::Never => matches!(answer, ProbeAnswer::Foreign),
+            CoHostPolicy::Eager | CoHostPolicy::EagerProbed | CoHostPolicy::Deferred => {
+                !matches!(answer, ProbeAnswer::Ours)
+            }
+        })
+        .map(|(port, _)| *port)
+        .collect()
+}
+
 pub(crate) fn register_rendezvous(
     book: &iroh::address_lookup::memory::MemoryLookup,
     params: &RendezvousParams,
@@ -660,6 +678,9 @@ struct SetupBuild<'a> {
     multihop: bool,
     transports: crate::lookup::TransportOpts,
     injected: Option<InjectedEndpoint>,
+    /// The caller's co-host override, read before the policy is final: what a joiner registers
+    /// for the rendezvous depends on whether it will walk the ladder.
+    cohost: Option<CoHostPolicy>,
     /// The caller's ALPN handlers, moved out exactly once by whichever of
     /// create/join runs. Interior mutability because they are boxed trait
     /// objects — not `Clone` — and `SetupBuild` is threaded by reference.
@@ -848,6 +869,7 @@ async fn setup_mesh_inner(kind: SetupKind, params: SetupParams) -> Result<EventL
         protocols: std::sync::Mutex::new(protocols),
         rung_tx: &rung_tx,
         relay_transport,
+        cohost: cohost_override,
     };
     let Assembled {
         mesh_id,
@@ -1186,7 +1208,9 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
     // Must precede the join (the subscribe below): the peer resolves the rendezvous id via
     // this registered address — the loopback port ladder (loopback-only) or
     // the chosen relay rung (reachable across machines).
-    register_rendezvous(&address_book, &rdv, &crate::beacon::busy_rungs(&rdv));
+    let read = crate::beacon::read_busy_rungs(&rdv, SETUP_RUNG_READ).await;
+    let withheld = rungs_withheld_at_setup(build.cohost.unwrap_or(cohost), &read);
+    register_rendezvous(&address_book, &rdv, &withheld);
     // We subscribe, background-connect to the rendezvous, and — for a plain
     // join — `daemon::run` defers co-hosting our own (same seed-id) rendezvous
     // until we are meshed, so we never register a duplicate `rendezvous_id` on
@@ -1247,6 +1271,32 @@ async fn setup_join(build: &SetupBuild<'_>, kind: SetupKind) -> Result<Assembled
 
 #[cfg(all(test, feature = "host"))]
 mod tests {
+    /// A walking member keeps only the rung read as ours; the `discover` session, which never
+    /// walks, leaves out only a rung read as foreign: a silent or refusing one may be its beacon.
+    #[test]
+    fn what_a_member_leaves_out_at_setup_follows_its_walk() {
+        use super::{CoHostPolicy, ProbeAnswer, rungs_withheld_at_setup};
+
+        let read = [
+            (4161, ProbeAnswer::Foreign),
+            (5511, ProbeAnswer::Refused),
+            (8450, ProbeAnswer::NoAnswer),
+            (11743, ProbeAnswer::Ours),
+        ];
+        assert_eq!(
+            rungs_withheld_at_setup(CoHostPolicy::Never, &read),
+            vec![4161]
+        );
+        assert_eq!(
+            rungs_withheld_at_setup(CoHostPolicy::Deferred, &read),
+            vec![4161, 5511, 8450]
+        );
+        assert_eq!(
+            rungs_withheld_at_setup(CoHostPolicy::Eager, &read),
+            vec![4161, 5511, 8450]
+        );
+    }
+
     use habilis_network_test_tracing::test;
     use std::time::Duration;
 
