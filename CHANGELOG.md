@@ -22,12 +22,16 @@ published to a registry; pin it with
   resolves to a loopback-only mesh, and a consumer with another default for that case asks this
   in place of its own copy of the rule (#9).
 - `runtime::ipc::IpcName`: the name of the local control endpoint of a daemon, a socket path on
-  Unix and a named pipe on Windows. A daemon writes it in a marker, `<mesh folder>/<nick>.ipc`,
-  one line, born `0600` on Unix, beside its state file. The marker is written after the endpoint
-  binds and before the daemon reports ready, and it is removed at a graceful exit only while it
-  still names that daemon. On Windows, where the pipe name is per process, a second daemon with
-  the same nickname keeps its marker. On Unix both have the same socket path, and the second
-  bind replaces the first's socket, as before. A marker that cannot be written fails the bind.
+  Unix and a named pipe on Windows. `runtime::ipc::active_endpoints` lists the endpoints under a
+  base, sorted, and `runtime::ipc::send_to_endpoint` sends a command to one, on every OS. On Unix
+  they are the sockets of `active_socket_paths`, and `active_socket_paths` and `send_to_path` do
+  not change.
+- On Windows a daemon writes the name of its pipe in a marker, `<mesh folder>/<nick>.ipc`, one
+  line, beside its state file, and a client finds the pipe through it. The marker is written
+  after the endpoint binds and before the daemon reports ready, and it is removed at a graceful
+  exit only while it still names that daemon, so a second daemon with the same nickname keeps
+  its marker. A marker that cannot be written fails the bind. On Unix a daemon writes no marker,
+  and a client finds the socket by its path, as before.
 - The IPC of a daemon works on Windows, over a named pipe. Its name is `\\.\pipe\habilis-` and
   128 random bits, with no mesh prefix and no nickname in it, because any local account can list
   pipe names. The pipe has the security descriptor `O:<user>D:P(A;;GA;;;<user>)`: the user owns
@@ -295,11 +299,6 @@ published to a registry; pin it with
   keys of the handles before it binds the endpoint with its transports. Its fields are private,
   so an `InjectedEndpoint { .. }` literal no longer compiles. The transport wiring and the mesh
   check are crate-private.
-- **Breaking:** the discovery of local daemons reads markers, not socket files.
-  `runtime::ipc::active_socket_paths` is `active_endpoints` and returns `Vec<IpcName>`, sorted,
-  and `send_to_path` is `send_to_endpoint(&IpcName, ..)`. `send` finds the daemon through its
-  marker: a client of this version does not find a daemon of an earlier one, which writes no
-  marker. On Unix the socket path does not change. The wire does not change.
 - The engine reserves one IPC command: a JSON object whose `command` is `"quit"` and whose
   `mesh` is a valid mesh id. Such a line never reaches `NodeDriver::handle_ipc`. Any other line,
   also a `quit` with no valid `mesh`, reaches the app as before. No app of this workspace or of

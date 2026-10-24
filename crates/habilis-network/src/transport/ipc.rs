@@ -13,6 +13,7 @@ use crate::protocol::{MeshId, MessageId, Nickname};
 use crate::util::bounded_read::{LineRead, read_bounded_line};
 use crate::util::clock::millis_saturating;
 use crate::util::consts::{MAX_IPC_COMMAND_BYTES, MAX_IPC_RESPONSE_BYTES};
+#[cfg(windows)]
 use crate::util::file_retry::retry_while_shared;
 use crate::util::tuning::{IPC_ACCEPT_BACKOFF_MAX, IPC_ACCEPT_BACKOFF_MIN, IPC_IO_TIMEOUT};
 use crate::util::{ensure_mesh_runtime_dir, mesh_runtime_dir};
@@ -24,11 +25,12 @@ const MAX_IPC_NAME_BYTES: usize = 512;
 /// The name of the local control endpoint of one daemon: the path of a unix
 /// socket on Unix, the name of a named pipe (`\\.\pipe\…`) on Windows.
 ///
-/// A daemon writes it in its marker (`<mesh folder>/<nick>.ipc`), and a client
-/// reads it from there, so discovery does not depend on the endpoint being a
-/// file. Not a secret: on Windows any local account can list pipe names. That
-/// is why a Windows name carries no mesh prefix and no nickname, only
-/// `habilis-` and 128 random bits.
+/// On Unix the name is the socket path in the mesh folder, which a client
+/// derives as the daemon does. On Windows a daemon writes the name in its
+/// marker (`<mesh folder>/<nick>.ipc`), and a client reads it from there, so
+/// discovery does not depend on the endpoint being a file. Not a secret: on
+/// Windows any local account can list pipe names. That is why a Windows name
+/// carries no mesh prefix and no nickname, only `habilis-` and 128 random bits.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IpcName(String);
 
@@ -86,22 +88,26 @@ impl std::fmt::Display for IpcName {
     }
 }
 
-/// The endpoint name of a new daemon. On Unix it is the socket path in the
-/// mesh folder, beside `<nick>.tracing.log` and `<nick>.state.json`.
+/// Returns the IPC endpoint identifier for a specific agent on a mesh —
+/// a filesystem socket path (the project targets Unix only). Lives in the
+/// mesh's runtime folder beside its `<nick>.tracing.log` / `<nick>.state.json`.
 #[cfg(unix)]
-fn new_endpoint_name(
-    base: &std::path::Path,
-    mesh: &MeshId,
-    nickname: &Nickname,
-) -> Result<IpcName> {
-    let path = mesh_runtime_dir(base, mesh.as_str()).join(format!("{nickname}.ipc.sock"));
-    let text = path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("the socket path {} is not UTF-8", path.display()))?;
-    IpcName::new(text.to_owned())
+pub(crate) fn socket_path(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> String {
+    format!(
+        "{}/{nickname}.ipc.sock",
+        mesh_runtime_dir(base, mesh.as_str()).display()
+    )
+}
+
+#[cfg(unix)]
+fn to_name(path: &str) -> Result<Name<'_>> {
+    use interprocess::local_socket::{GenericFilePath, ToFsName};
+    Ok(path.to_fs_name::<GenericFilePath>()?)
 }
 
 /// The path of the marker of `nickname` on `mesh`: `<mesh folder>/<nick>.ipc`.
+/// Windows only: on Unix a client derives the socket path.
+#[cfg(windows)]
 fn marker_path(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> std::path::PathBuf {
     mesh_runtime_dir(base, mesh.as_str()).join(format!("{nickname}.ipc"))
 }
@@ -110,6 +116,7 @@ fn marker_path(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> st
 ///
 /// # Errors
 /// The marker exists but cannot be read, or its line is no valid [`IpcName`].
+#[cfg(windows)]
 fn read_marker(path: &std::path::Path) -> Result<Option<IpcName>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -124,30 +131,29 @@ fn read_marker(path: &std::path::Path) -> Result<Option<IpcName>> {
 }
 
 /// The marker that one daemon wrote, kept on the event-loop state so the
-/// shutdown removes it.
+/// shutdown removes it. Windows only.
+#[cfg(windows)]
 #[derive(Debug)]
 pub(crate) struct IpcMarker {
     path: std::path::PathBuf,
     name: IpcName,
 }
 
+#[cfg(windows)]
 impl IpcMarker {
-    /// Write `name` to the marker at `path`, atomically and born `0600`.
+    /// Write `name` to the marker at `path`, atomically.
     fn write(path: std::path::PathBuf, name: IpcName) -> std::io::Result<Self> {
         let line = format!("{name}\n");
         crate::daemon::state_file::write_private_atomic(&path, line.as_bytes())?;
         Ok(Self { path, name })
     }
 
-    /// Remove the marker only while it still names this daemon. On Windows the
-    /// pipe name is per process, so a second daemon with the same nickname on
-    /// the same mesh writes another name over ours, and an unconditional remove
-    /// at our exit would hide that live daemon. On Unix both daemons have the
-    /// same socket path, so the names are equal and the check cannot tell them
-    /// apart; there the second bind has already unlinked our socket, which was
-    /// the behavior before the marker. The read and the remove are two steps,
-    /// so a write between them is possible; the worst case is that same old
-    /// behavior.
+    /// Remove the marker only while it still names this daemon. The pipe name
+    /// is per process, so a second daemon with the same nickname on the same
+    /// mesh writes another name over ours, and an unconditional remove at our
+    /// exit would hide that live daemon. The read and the remove are two steps,
+    /// so a write between them is possible: then the marker of the live daemon
+    /// goes, and no client finds it.
     pub(crate) fn remove_if_ours(&self) {
         match read_marker(&self.path) {
             Ok(Some(current)) if current == self.name => {
@@ -167,19 +173,21 @@ impl IpcMarker {
     }
 }
 
-/// What [`bind`] gives back: the accepting listener and the marker that makes
-/// it findable.
+/// What [`bind`] gives back: the accepting listener, and on Windows the marker
+/// that makes it findable.
 pub(crate) struct Bound {
     pub(crate) listener: Listener,
+    #[cfg(windows)]
     pub(crate) marker: IpcMarker,
 }
 
 pub(crate) use super::IpcMessage;
 
-/// A mesh-addressed IPC command. The engine derives the per-mesh socket path
-/// from the mesh id in [`send`]; `None` means the command is addressed by
-/// endpoint directly (via [`send_to_endpoint`]) and carries no mesh — the
-/// concrete command type is defined app-side, the engine only needs the address.
+/// A mesh-addressed IPC command. The engine finds the per-mesh endpoint from
+/// the mesh id in [`send`]; `None` means the command is addressed by endpoint
+/// directly (via [`send_to_endpoint`], or `send_to_path` on Unix) and carries
+/// no mesh — the concrete command type is defined app-side, the engine only
+/// needs the address.
 ///
 /// One command name is the engine's own: a JSON object whose `command` is
 /// `"quit"` and whose `mesh` is a valid mesh id is answered by the engine
@@ -260,6 +268,47 @@ pub fn json_error(error: &str) -> String {
     serde_json::json!({"ok": false, "error": error}).to_string()
 }
 
+/// Bind the local IPC socket synchronously, returning the listening
+/// socket. Done *before* the daemon marks itself ready so that "ready"
+/// can never precede an accepting socket: a `ready` gate that observes
+/// the readiness flag is then guaranteed a subsequent `connect` succeeds.
+///
+/// # Errors
+/// An invalid socket name, or the OS refusing the bind.
+#[cfg(unix)]
+pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Bound> {
+    let path = socket_path(base, mesh, nickname);
+
+    // The runtime base must exist and be private (0700) before the socket is
+    // created inside it: this control socket has no in-band auth, so the base's
+    // permissions are what keep another local user from reaching it. The choke
+    // point validates the base (fails closed on a squat/symlink) and creates
+    // the mesh folder in one step.
+    ensure_mesh_runtime_dir(base, mesh.as_str())
+        .map_err(|error| anyhow::anyhow!("failed to prepare runtime dir: {error}"))?;
+    // Best-effort cleanup of a stale socket file.
+    let _ = std::fs::remove_file(&path);
+
+    let name = to_name(&path)?;
+    let listener = ListenerOptions::new()
+        .name(name)
+        .create_tokio()
+        .map_err(|error| anyhow::anyhow!("failed to bind IPC socket {path}: {error}"))?;
+    // The socket is a full control plane — inject broadcasts, read and merge
+    // mesh/meta state — with no bearer token (unlike the localhost HTTP TCP
+    // binding). Restrict it to the owner. The 0700 base already blocks other
+    // users; this is defense in depth against a permissive umask on the socket.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        {
+            tracing::warn!(?path, %error, "IPC socket: could not restrict to 0600");
+        }
+    }
+    tracing::info!(?path, "IPC socket listening");
+    Ok(Bound { listener })
+}
+
 /// Bind the local IPC endpoint synchronously and write its marker, returning
 /// both. Done *before* the daemon marks itself ready so that "ready" can never
 /// precede an accepting endpoint: the listener exists before the marker, and
@@ -271,22 +320,16 @@ pub fn json_error(error: &str) -> String {
 /// # Errors
 /// The runtime folder is rejected, the OS refuses the bind, or the marker
 /// cannot be written.
+#[cfg(windows)]
 pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> Result<Bound> {
-    // The runtime base must exist and be private (0700) before the socket is
-    // created inside it: this control socket has no in-band auth, so the base's
-    // permissions are what keep another local user from reaching it. The choke
-    // point validates the base (fails closed on a squat/symlink) and creates
-    // the mesh folder in one step.
     ensure_mesh_runtime_dir(base, mesh.as_str())
         .map_err(|error| anyhow::anyhow!("failed to prepare runtime dir: {error}"))?;
-    let (listener, name) = listen(base, mesh, nickname)?;
+    let (listener, name) = listen()?;
     let marker_at = marker_path(base, mesh, nickname);
     let marker = match IpcMarker::write(marker_at.clone(), name.clone()) {
         Ok(marker) => marker,
         Err(error) => {
             drop(listener);
-            #[cfg(unix)]
-            let _ = std::fs::remove_file(name.as_str());
             anyhow::bail!(
                 "failed to write the IPC marker {}: {error}",
                 marker_at.display()
@@ -300,40 +343,6 @@ pub(crate) fn bind(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -
         "IPC listening"
     );
     Ok(Bound { listener, marker })
-}
-
-/// Create the listener of a unix socket in the mesh folder.
-#[cfg(unix)]
-fn listen(
-    base: &std::path::Path,
-    mesh: &MeshId,
-    nickname: &Nickname,
-) -> Result<(Listener, IpcName)> {
-    let name = new_endpoint_name(base, mesh, nickname)?;
-    // Best-effort cleanup of a stale socket file.
-    let _ = std::fs::remove_file(name.as_str());
-    let listener = ListenerOptions::new()
-        .name(name.to_name()?)
-        .create_tokio()
-        .map_err(|error| anyhow::anyhow!("failed to bind IPC socket {name}: {error}"))?;
-    // The socket is a full control plane — inject broadcasts, read and merge
-    // mesh/meta state — with no bearer token (unlike the localhost HTTP TCP
-    // binding). Restrict it to the owner. The 0700 base already blocks other
-    // users; this is defense in depth against a permissive umask on the socket.
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if let Err(error) =
-            std::fs::set_permissions(name.as_str(), std::fs::Permissions::from_mode(0o600))
-        {
-            tracing::warn!(
-                target: "habilis_network::lifecycle",
-                name = %name,
-                %error,
-                "IPC socket: could not restrict to 0600"
-            );
-        }
-    }
-    Ok((listener, name))
 }
 
 /// The prefix of every pipe name of the engine, before the random part.
@@ -354,11 +363,7 @@ const PIPE_PREFIX: &str = r"\\.\pipe\habilis-";
 /// pipe gives read access to Everyone. `interprocess` puts the descriptor on
 /// every instance, the first and each one after an accept.
 #[cfg(windows)]
-fn listen(
-    _base: &std::path::Path,
-    _mesh: &MeshId,
-    _nickname: &Nickname,
-) -> Result<(Listener, IpcName)> {
+fn listen() -> Result<(Listener, IpcName)> {
     use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
     use rand::Rng as _;
@@ -419,6 +424,13 @@ pub(crate) async fn serve<C>(
                     )));
                     failing = true;
                 }
+                #[cfg(unix)]
+                tracing::warn!(
+                    %error,
+                    backoff_ms = millis_saturating(backoff),
+                    "IPC: accept error; retrying"
+                );
+                #[cfg(windows)]
                 tracing::warn!(
                     target: "habilis_network::lifecycle",
                     %error,
@@ -469,6 +481,9 @@ async fn handle_connection<C>(
         }
         Ok(Ok(LineRead::Eof) | Err(_)) => return,
         Err(_idle) => {
+            #[cfg(unix)]
+            tracing::debug!("IPC: connection sent nothing within the read deadline; closing");
+            #[cfg(windows)]
             tracing::debug!(
                 target: "habilis_network::lifecycle",
                 "IPC: connection sent nothing within the read deadline; closing"
@@ -675,7 +690,50 @@ fn current_owner() -> Result<crate::util::win_security::Sid> {
 
 /// Client-side: send an IPC command to the running server and return the raw JSON response.
 ///
+/// # Panics
+/// If called with a command that carries no mesh id — never: `Info` uses `send_to_path`.
+/// # Errors
+/// [`NoDaemon`] when no server is listening; otherwise an invalid socket name
+/// or a failed request/response round trip.
+#[cfg(unix)]
+pub async fn send<C>(base: &std::path::Path, cmd: &C, nickname: &Nickname) -> Result<String>
+where
+    C: Serialize + Addressed,
+{
+    let mesh = cmd
+        .mesh_id()
+        .expect("send() is only used for mesh-addressed commands; Info uses send_to_path");
+    let path = socket_path(base, mesh, nickname);
+    let name = to_name(&path).map_err(|error| anyhow::anyhow!("invalid socket name: {error}"))?;
+    let stream = Stream::connect(name).await.map_err(|_| NoDaemon {
+        nickname: nickname.clone(),
+    })?;
+    round_trip(stream, cmd).await
+}
+
+/// Client-side: send an IPC command to a specific socket path. `doctor` uses
+/// this to query each live daemon discovered under [`crate::util::runtime_base`] — a
+/// missing/dead socket is a plain `Err` the caller can skip.
+///
+/// # Errors
+/// The path is not valid UTF-8, the socket can't be connected (no live
+/// daemon), or the request/response round trip fails.
+#[cfg(unix)]
+pub async fn send_to_path<C: Serialize>(path: &std::path::Path, cmd: &C) -> Result<String> {
+    use anyhow::Context;
+    let path_str = path.to_str().context("socket path is not valid UTF-8")?;
+    let name =
+        to_name(path_str).map_err(|error| anyhow::anyhow!("invalid socket name: {error}"))?;
+    let stream = Stream::connect(name)
+        .await
+        .map_err(|error| anyhow::anyhow!("connect {path_str}: {error}"))?;
+    round_trip(stream, cmd).await
+}
+
+/// Client-side: send an IPC command to the running server and return the raw JSON response.
+///
 /// The server is found through its marker (`<mesh folder>/<nick>.ipc`).
+/// Windows; on Unix the client derives the socket path.
 ///
 /// # Panics
 /// If called with a command that carries no mesh id — never: `Info` uses `send_to_endpoint`.
@@ -683,6 +741,7 @@ fn current_owner() -> Result<crate::util::win_security::Sid> {
 /// [`NoDaemon`] when no marker exists or nothing accepts on its name;
 /// [`ForeignEndpoint`] when the endpoint belongs to another account; otherwise
 /// an unreadable or invalid marker, or a failed request/response round trip.
+#[cfg(windows)]
 pub async fn send<C>(base: &std::path::Path, cmd: &C, nickname: &Nickname) -> Result<String>
 where
     C: Serialize + Addressed,
@@ -696,12 +755,7 @@ where
     let Some(name) = read_marker(&marker_path(base, mesh, nickname))? else {
         return Err(no_daemon().into());
     };
-    let reached = connect(
-        &name,
-        #[cfg(windows)]
-        &current_owner()?,
-    )
-    .await;
+    let reached = connect(&name, &current_owner()?).await;
     match reached {
         Ok(stream) => round_trip(stream, cmd).await,
         Err(Unreached::Absent(_)) => Err(no_daemon().into()),
@@ -887,7 +941,8 @@ pub async fn terminate(target: &QuitTarget<'_>, pid: u32) -> Result<()> {
 }
 
 /// Write `cmd`, half-close, and read back the single-line JSON response.
-/// The shared body of [`send`] and [`send_to_endpoint`].
+/// The shared body of [`send`], [`send_to_endpoint`] and, on Unix,
+/// `send_to_path`.
 async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
     let (read_half, mut write_half) = tokio::io::split(stream);
 
@@ -903,13 +958,50 @@ async fn round_trip<C: Serialize>(stream: Stream, cmd: &C) -> Result<String> {
     }
 }
 
-/// The endpoint of every daemon that has a marker under `base`: one
+/// Every live daemon's IPC socket on this machine — one `<nick>.ipc.sock`
+/// inside each mesh's folder (`<base>/<mesh-prefix>/`). Best-effort: a missing
+/// base yields an empty list. Drives the consumer's active-mesh discovery, so it
+/// walks the per-mesh subfolders.
+#[cfg(unix)]
+#[must_use]
+pub fn active_socket_paths(base: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(mesh_dirs) = std::fs::read_dir(base) else {
+        return Vec::new();
+    };
+    mesh_dirs
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "sock"))
+        .collect()
+}
+
+/// The endpoint of every daemon under `base`, as [`IpcName`]s. On Unix these
+/// are the sockets of [`active_socket_paths`]; a path that is no valid name,
+/// such as one that is not UTF-8, is skipped. The list is sorted, so its order
+/// is stable.
+#[cfg(unix)]
+#[must_use]
+pub fn active_endpoints(base: &std::path::Path) -> Vec<IpcName> {
+    let mut names: Vec<IpcName> = active_socket_paths(base)
+        .into_iter()
+        .filter_map(|path| path.into_os_string().into_string().ok())
+        .filter_map(|text| IpcName::new(text).ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// On Windows, the endpoint of every daemon that has a marker under `base`: one
 /// `<nick>.ipc` inside each mesh folder (`<base>/<mesh-prefix>/`). Best-effort:
 /// a missing base gives an empty list, and a marker that cannot be read or holds
 /// no valid name is skipped with a warn. The tmp file of a marker write
 /// (`<nick>.ipc.tmp.<pid>`) has another extension and is not read. A marker of
 /// a daemon that died stays until a client fails to connect to it, as a stale
 /// socket file did. The list is sorted, so its order is stable.
+#[cfg(windows)]
 #[must_use]
 pub fn active_endpoints(base: &std::path::Path) -> Vec<IpcName> {
     let Ok(mesh_dirs) = std::fs::read_dir(base) else {
@@ -943,14 +1035,17 @@ mod tests {
     use habilis_network_test_tracing::test;
     use serde::{Deserialize, Serialize};
 
-    #[cfg(unix)]
-    use super::new_endpoint_name;
     use super::{
-        Addressed, EngineCommand, EngineControl, IpcMarker, IpcMessage, IpcName, MeshId, Nickname,
-        NoDaemon, QUIT_OF_ANOTHER_MESH, QuitError, QuitTarget, active_endpoints, bind, json_ack,
-        json_error, json_ok, marker_path, mpsc, pipe_busy_retry, quit, quit_outcome, read_marker,
-        send, send_to_endpoint, serve, terminate,
+        Addressed, EngineCommand, EngineControl, IpcMessage, IpcName, MeshId, Nickname, NoDaemon,
+        QUIT_OF_ANOTHER_MESH, QuitError, QuitTarget, active_endpoints, bind, json_ack, json_error,
+        json_ok, mpsc, pipe_busy_retry, quit, quit_outcome, send, send_to_endpoint, serve,
+        terminate,
     };
+    #[cfg(windows)]
+    use super::{IpcMarker, marker_path, read_marker};
+    #[cfg(unix)]
+    use super::{active_socket_paths, send_to_path, socket_path};
+    #[cfg(windows)]
     use crate::util::mesh_runtime_dir;
 
     /// A minimal mesh-addressed command standing in for the app's real
@@ -1041,13 +1136,23 @@ mod tests {
         MeshId::from(format!("{tag}{pid_b58}").as_str())
     }
 
-    /// A valid name that no endpoint has.
+    /// A valid pipe name that no endpoint has.
+    #[cfg(windows)]
     fn absent_name(tag: &str) -> IpcName {
-        #[cfg(unix)]
-        let raw = format!("/tmp/hn-ipc-absent-{}-{tag}.sock", std::process::id());
-        #[cfg(windows)]
         let raw = format!(r"\\.\pipe\habilis-absent-{}-{tag}", std::process::id());
         IpcName::new(raw).expect("a valid name")
+    }
+
+    /// The endpoint of a bound test daemon, found as a client finds it: the
+    /// socket path on Unix, the marker on Windows.
+    fn endpoint_of(base: &std::path::Path, mesh: &MeshId, nickname: &Nickname) -> IpcName {
+        #[cfg(unix)]
+        let name = IpcName::new(socket_path(base, mesh, nickname)).expect("a socket path");
+        #[cfg(windows)]
+        let name = read_marker(&marker_path(base, mesh, nickname))
+            .unwrap()
+            .expect("a marker");
+        name
     }
 
     #[test]
@@ -1082,6 +1187,18 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn socket_path_format() {
+        let mesh = MeshId::from("abcdefghijkmnpqr");
+        let base = crate::util::runtime_base("habilis-network-ipc-test");
+        let path = socket_path(&base, &mesh, &Nickname::from("my-nick"));
+        assert!(path.starts_with(&*base.to_string_lossy()));
+        assert!(path.ends_with("/my-nick.ipc.sock"));
+        assert!(path.contains(&crate::util::mesh_prefix(mesh.as_str())));
+    }
+
+    #[cfg(windows)]
     #[test]
     fn a_marker_holds_one_line_and_reads_back() {
         let base = TestBase::new("marker");
@@ -1103,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    async fn send_without_a_marker_is_no_daemon() {
+    async fn send_with_no_daemon_is_no_daemon() {
         let base = TestBase::new("nomarker");
         let mesh = test_mesh("nomarker");
         let nickname = Nickname::from("nobody");
@@ -1114,6 +1231,7 @@ mod tests {
         assert!(error.downcast_ref::<NoDaemon>().is_some(), "{error}");
     }
 
+    #[cfg(windows)]
     #[test]
     async fn send_to_a_stale_marker_is_no_daemon() {
         let base = TestBase::new("stale");
@@ -1132,6 +1250,44 @@ mod tests {
         assert!(error.downcast_ref::<NoDaemon>().is_some(), "{error}");
     }
 
+    // On Unix discovery lists the sockets, as `active_socket_paths` did before
+    // `active_endpoints`. A plain file stands in for a socket: discovery reads
+    // names only. A `send_to_path` to a path with no socket is an error.
+    #[cfg(unix)]
+    #[test]
+    async fn active_endpoints_lists_the_sockets_sorted() {
+        let base = TestBase::new("discover");
+        assert!(active_endpoints(base.path()).is_empty(), "an absent base");
+        let first = base.path().join("meshaaaaaaaaaaaa");
+        let second = base.path().join("meshbbbbbbbbbbbb");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("zz.ipc.sock"), "").unwrap();
+        std::fs::write(second.join("aa.ipc.sock"), "").unwrap();
+        std::fs::write(first.join("nick.state.json"), "{}").unwrap();
+        let mut paths = active_socket_paths(base.path());
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![first.join("zz.ipc.sock"), second.join("aa.ipc.sock")]
+        );
+        let names: Vec<String> = active_endpoints(base.path())
+            .into_iter()
+            .map(|name| name.as_str().to_owned())
+            .collect();
+        let mut expected: Vec<String> = paths
+            .iter()
+            .map(|path| path.to_str().unwrap().to_owned())
+            .collect();
+        expected.sort();
+        assert_eq!(names, expected);
+        let cmd = TestCommand::Ping {
+            mesh: test_mesh("discover"),
+        };
+        assert!(send_to_path(&paths[0], &cmd).await.is_err(), "no socket");
+    }
+
+    #[cfg(windows)]
     #[test]
     fn active_endpoints_reads_the_markers_sorted_and_skips_the_rest() {
         // The marker with an invalid line is skipped with a warn.
@@ -1160,6 +1316,7 @@ mod tests {
 
     // Two names, as two daemons have on Windows, where the pipe name is per
     // process. On Unix the two names would be the same socket path.
+    #[cfg(windows)]
     #[test]
     fn a_marker_is_removed_only_by_the_daemon_that_it_names() {
         let base = TestBase::new("ours");
@@ -1207,25 +1364,6 @@ mod tests {
             !path.exists(),
             "the marker is removed after the reader closes"
         );
-    }
-
-    // A marker that cannot be written fails the bind, and leaves no socket: an
-    // endpoint that no client can find is no use. A tokio test, because the
-    // unix listener registers with the reactor, as it does inside the daemon.
-    #[cfg(unix)]
-    #[test]
-    async fn a_failed_marker_write_fails_the_bind_and_leaves_no_socket() {
-        let base = TestBase::new("nowrite");
-        let mesh = test_mesh("nowrite");
-        let nickname = Nickname::from("blocked");
-        // A folder where the marker goes makes the rename fail.
-        std::fs::create_dir_all(marker_path(base.path(), &mesh, &nickname)).unwrap();
-        let error = bind(base.path(), &mesh, &nickname)
-            .err()
-            .expect("the bind fails");
-        assert!(error.to_string().contains("IPC marker"), "{error}");
-        let socket = new_endpoint_name(base.path(), &mesh, &nickname).unwrap();
-        assert!(!std::path::Path::new(socket.as_str()).exists(), "no socket");
     }
 
     #[test]
@@ -1418,6 +1556,7 @@ mod tests {
         // instant `bind` returns), then spawn the accept loop. The marker
         // exists the moment `bind` returns, too.
         let bound = bind(base.path(), &mesh, &nickname).expect("bind IPC socket");
+        #[cfg(windows)]
         assert!(marker_path(base.path(), &mesh, &nickname).is_file());
         let (control, mut quit_rx) = test_control(&mesh);
         let listener_handle = tokio::spawn(serve(
@@ -1495,10 +1634,8 @@ mod tests {
         // idle connection is parked.
         let handler = tokio::spawn(respond_healthy_forever(rx));
 
-        // Park a silent connection, found through the marker as a client does.
-        let name = read_marker(&marker_path(base.path(), &mesh, &nickname))
-            .unwrap()
-            .expect("a marker");
+        // Park a silent connection, found as a client finds it.
+        let name = endpoint_of(base.path(), &mesh, &nickname);
         // The parked client uses the plain `interprocess` connect: no SQOS and
         // no owner check. That is fine here: the server is this test's own
         // listener, and the test is about the server's read deadline. The user
@@ -1592,9 +1729,7 @@ mod tests {
         }
 
         fn name(&self) -> IpcName {
-            read_marker(&marker_path(self.base.path(), &self.mesh, &self.nickname))
-                .unwrap()
-                .expect("a marker")
+            endpoint_of(self.base.path(), &self.mesh, &self.nickname)
         }
     }
 
@@ -1684,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    async fn a_quit_with_no_marker_is_not_heard() {
+    async fn a_quit_with_no_daemon_is_not_heard() {
         let base = TestBase::new("quitnone");
         let mesh = test_mesh("quitnone");
         let nickname = Nickname::from("nobody");

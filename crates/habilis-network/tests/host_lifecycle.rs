@@ -1,20 +1,21 @@
 //! The life of a CLI daemon on the host, on every OS (R11 of `docs/windows.md`).
 //!
 //! Part 1, the runtime base and the IPC: a node in CLI mode, in a child
-//! process, with a runtime base in a temporary folder, binds its endpoint and
-//! writes its marker before it is ready, `active_endpoints` finds it, an `Info`
-//! command answers, and the state file is in the mesh folder. On Windows the
-//! endpoint is the named pipe of R3, on Unix the socket. The child itself
-//! checks that the marker is there when it reports ready.
+//! process, with a runtime base in a temporary folder, binds its endpoint
+//! before it is ready, `active_endpoints` finds it, an `Info` command answers,
+//! and the state file is in the mesh folder. On Windows the endpoint is the
+//! named pipe of R3, found through its marker; on Unix it is the socket, found
+//! by its path. The child itself checks that the endpoint is there when it
+//! reports ready.
 //!
 //! Part 2, the quit (R5): a node in a child process stops on an IPC `quit`.
-//! The child exits with 0, and its state file, its marker and its endpoint are
-//! gone.
+//! The child exits with 0, and its state file and its endpoint are gone, and
+//! on Windows its marker.
 //!
 //! Part 3, the owner watch (R6): a node in a child process, with the pid of a
 //! second child process as its owner, stops when that owner is killed. The
-//! node exits with 0, and its state file and its marker are gone, so the watch
-//! took the graceful path.
+//! node exits with 0, and its state file is gone, and on Windows its marker, so
+//! the watch took the graceful path.
 //!
 //! Part 4, the console events (R7), on Windows only: a node in a child process,
 //! in a console of its own, stops on ctrl-break and on ctrl-c. The node exits
@@ -229,10 +230,10 @@ fn files_ending_with(base: &Path, suffix: &str) -> Vec<PathBuf> {
 }
 
 #[test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cli_node_is_found_through_its_marker_and_answers_info() {
+async fn a_cli_node_is_found_and_answers_info() {
     let base = TempBase::new("host");
     let topic = format!("host-lifecycle-{}", std::process::id());
-    // The child exits with 3 when it reports ready before its marker exists.
+    // The child exits with 3 when it reports ready before its endpoint exists.
     let mut child = ChildNode::spawn(&base.0, &topic, None);
     let name = match child.endpoint(&base.0).await {
         Ok((name, _)) => name,
@@ -289,14 +290,14 @@ fn child_node() {
         .expect("a runtime");
     runtime.block_on(async {
         let sink = Arc::new(ReadySink::default());
-        // Ready implies the marker (part 1): the endpoint is there when the
-        // node reports ready, with no wait.
+        // Ready implies the endpoint (part 1): it is there when the node
+        // reports ready, with no wait.
         let watched = Arc::clone(&sink);
         let marker_base = PathBuf::from(base);
         tokio::spawn(async move {
             watched.ready.notified().await;
             if active_endpoints(&marker_base).is_empty() {
-                eprintln!("the node reported ready before its marker existed");
+                eprintln!("the node reported ready before its endpoint existed");
                 std::process::exit(3);
             }
         });
@@ -428,7 +429,7 @@ impl ChildNode {
     }
 
     /// The endpoint of the child and its mesh, from its `Info` answer. The
-    /// marker shows that the endpoint accepts. A slow first start (an
+    /// endpoint is there once the child has bound it. A slow first start (an
     /// antivirus scan of the binary on Windows) is covered by the 30 s.
     async fn endpoint(&mut self, base: &Path) -> Result<(IpcName, MeshId), String> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -440,7 +441,7 @@ impl ChildNode {
                 return Err(format!("the child exited before its endpoint: {status}"));
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err("the child wrote no marker within 30 s".to_owned());
+                return Err("the child bound no endpoint within 30 s".to_owned());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
@@ -470,18 +471,21 @@ async fn read_all(mut pipe: impl AsyncRead + Unpin) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// The node left by the graceful path: the shutdown removed the state file and
-/// the marker. On Unix the socket file stays, as after a SIGTERM, and nothing
-/// accepts on it.
+/// The node left by the graceful path: the shutdown removed the state file,
+/// and on Windows the marker. On Unix the socket file stays, as after a
+/// SIGTERM, and nothing accepts on it.
 async fn assert_left_cleanly(base: &Path, name: &IpcName) {
     let state_files = files_ending_with(base, ".state.json");
     assert!(
         state_files.is_empty(),
         "the state file stays: {state_files:?}"
     );
-    let markers = files_ending_with(base, ".ipc");
-    assert!(markers.is_empty(), "the marker stays: {markers:?}");
-    assert!(active_endpoints(base).is_empty());
+    #[cfg(windows)]
+    {
+        let markers = files_ending_with(base, ".ipc");
+        assert!(markers.is_empty(), "the marker stays: {markers:?}");
+        assert!(active_endpoints(base).is_empty());
+    }
     assert!(
         send_to_endpoint(name, &serde_json::json!({ "command": "info" }))
             .await

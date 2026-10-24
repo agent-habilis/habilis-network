@@ -25,7 +25,7 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 |---|---|
 | R1. Compile | Done. `libc` and `windows-sys` come in through `host`, each on its own target. |
 | R2. Runtime base | Done. `runtime_base` returns `<LocalAppData>\<product>\run`, and `ensure_runtime_base` rejects a reparse point at the base (`crates/habilis-network-util/src/lib.rs`). |
-| R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. Discovery reads a `<nick>.ipc` marker on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
+| R3. IPC | Done. On Windows the endpoint is a named pipe with a random name and a DACL of the user, and a client checks the owner of the pipe. On Windows discovery reads a `<nick>.ipc` marker. On Unix a client finds the socket by its path, as on `main` (`crates/habilis-network/src/transport/ipc.rs`). |
 | R4. Process helpers | Done. `is_alive`, `live_start_time`, `comm_of` and `parent_of` have Windows versions in `process.rs`. `parent_of` also gives no parent when the creator has exited or is newer than its child. |
 | R5. Graceful stop | Done. The engine answers an IPC `quit` and takes the path of `SIGTERM`. `runtime::ipc::quit` and `runtime::ipc::terminate` send it on every OS (`crates/habilis-network/src/transport/ipc.rs`). |
 | R6. Owner watch | Done. A daemon with `--owner-pid` watches its owner on every OS (`crates/habilis-network/src/daemon/shutdown.rs`). The watch of the parent pid stays Unix only. |
@@ -36,7 +36,7 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
 | R12. Runtime base of a Unix client | Partly done. `check_runtime_base` exists. The IPC client does not call it in this port, because the port leaves Unix as it is on `main` ([R14](#r14-unix-as-on-main)). The client check goes to its own change on `main`. See [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
-| R14. Unix as on `main` | In progress. The client check of R12 is out of the port. The marker, the IPC `quit` and the C header still change Unix. See [R14](#r14-unix-as-on-main). |
+| R14. Unix as on `main` | In progress. The client check of R12 is out of the port, and on Unix a client finds a daemon by its socket path again. The IPC `quit` and the C header still change Unix. See [R14](#r14-unix-as-on-main). |
 
 [§2.2](#22-runtime-breaks) has no open item. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
@@ -120,7 +120,7 @@ Do this work on the `feat-windows-support` branch (PR #5).
 
 Done. The design changed from the first text of this section, after review. The reasons are below.
 
-**The marker, on every OS.** A daemon writes the name of its endpoint in `<mesh folder>/<nick>.ipc`, one line, after the listener exists and before the daemon reports ready. A client finds the daemon through the marker, so discovery does not depend on the endpoint being a file. `active_endpoints` reads the markers. The marker is written by the writer of the state file (`.tmp.<pid>`, then a rename), born `0600` on Unix. A marker that cannot be written fails the bind. The shutdown removes the marker only while it still names this daemon. The marker is not in the state file, because a `--state-file` override can put the state file outside the base, and an in-process node writes none. On Unix the endpoint is the same socket as before.
+**The marker, on Windows.** A daemon writes the name of its pipe in `<mesh folder>/<nick>.ipc`, one line, after the listener exists and before the daemon reports ready. A client finds the daemon through the marker, because a pipe is not a file in the mesh folder. On Windows `active_endpoints` reads the markers. The marker is written by the writer of the state file (`.tmp.<pid>`, then a rename). A marker that cannot be written fails the bind. The shutdown removes the marker only while it still names this daemon. The marker is not in the state file, because a `--state-file` override can put the state file outside the base, and an in-process node writes none. On Unix a daemon writes no marker: the endpoint is the same socket as on `main`, and a client finds it by its path ([R14](#r14-unix-as-on-main)). The first version of R3 wrote the marker on every OS, so a client of the port did not find a daemon of `main`.
 
 **The name of the pipe.** `\\.\pipe\habilis-` and 128 random bits in hex. Pipe names live in one namespace for the whole machine, and any account can make a pipe with a free name.
 
@@ -136,12 +136,12 @@ Done. The design changed from the first text of this section, after review. The 
 
 **The client.** On Windows a client opens the pipe with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so the server can identify the client but not act as it. Without the flags, an account with `SeImpersonatePrivilege` (every service account) that took the name after a crash could act as the user. Then the client checks that the user owns the pipe, before it sends a byte. A pipe of another owner, or one whose owner cannot be read, is `ForeignEndpoint`. An absent endpoint, a pipe that is still busy after 3 more tries, and a pipe whose DACL leaves the user out are `NoDaemon`.
 
-**The API.** `runtime::ipc::active_socket_paths` is `active_endpoints` (`Vec<IpcName>`), and `send_to_path` is `send_to_endpoint`. `IpcName`, `ForeignEndpoint` and `NoDaemon` are public. The Win32 calls are in `habilis-network-util` (`win_security`).
+**The API.** `active_endpoints` (`Vec<IpcName>`) and `send_to_endpoint` work on every OS, and a client that runs on Windows uses them. On Unix `active_socket_paths` and `send_to_path` stay, with the signatures of `main`, and `active_endpoints` lists the same sockets. `IpcName`, `ForeignEndpoint` and `NoDaemon` are public. The Win32 calls are in `habilis-network-util` (`win_security`).
 
 **Limits.**
 
-- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file did. A graceful stop removes the marker of its own daemon (R5). A hard kill, such as `Stop-Process -Force`, leaves it, as a crash does.
-- On Unix, two daemons with the same nickname on one mesh have the same socket path, and the second bind replaces the first. That is not new.
+- A marker that a crash leaves stays until a client fails to connect to it, as a stale socket file does on Unix. A graceful stop removes the marker of its own daemon (R5). A hard kill, such as `Stop-Process -Force`, leaves it, as a crash does.
+- Two daemons with the same nickname on one mesh: the read and the remove of the marker at the exit of the first are two steps, so a write of the second between them is possible. Then the marker of the live second daemon goes, and no client finds it. On Unix the second bind replaces the socket of the first, as on `main`.
 - The DACL cannot be tested with a second user on CI. T4 tests it on the real machine.
 
 ### R4. Process helpers
@@ -339,10 +339,10 @@ Many projects build on the engine. The port leaves Linux and macOS as they are o
 Done.
 
 - The client check of the runtime base ([R12](#r12-runtime-base-of-a-unix-client)) is out of the port.
+- On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` are back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` work on every OS. The IPC log lines of Unix have the target, the text and the fields of `main`.
 
 To do.
 
-- On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` come back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` stay on every OS.
 - The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, and `terminate` sends `SIGTERM`.
 - The lines and the messages that the port added to the daemon, such as the warn of a failed remove of the state file, are Windows only.
 - The C header keeps `long` on every target but Windows.
@@ -377,7 +377,7 @@ Start it after the engine work of [§3](#3-requirements-habilis-network).
 - `cli/bell.rs`: put `mode(0o600)` behind `cfg(unix)`. `File::try_lock` works on Windows.
 - `cli/signal.rs`: on Windows, use ctrl-c only.
 - `home_dir` (`cli/agent.rs`) and `home_path` (`status.rs`): fall back to `USERPROFILE`.
-- The engine renamed two IPC calls (R3): `cli/doctor.rs` and `cli/session.rs` change `active_socket_paths` to `active_endpoints` and `send_to_path` to `send_to_endpoint`, four lines.
+- On Unix `active_socket_paths` and `send_to_path` do not change, so `cli/doctor.rs` and `cli/session.rs` keep them. On Windows they use `active_endpoints` and `send_to_endpoint`, behind `cfg(windows)`.
 - The test fixtures build the path of the unix socket by hand (`agent-gossip-test-fixtures/src/lib.rs`, and the readiness checks of three `tests/*.rs` files). On Unix they keep working. On Windows they use `active_endpoints` and `send_to_endpoint`.
 - `docs/manual.txt` and `docs/windows-port/specs/E3-control-socket.md` name the old socket design. Update them.
 

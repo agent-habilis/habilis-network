@@ -73,8 +73,8 @@ fn resolve_log_dir(override_dir: Option<PathBuf>, base: Option<PathBuf>) -> Path
 }
 
 /// Per-member log file — `<mesh_prefix>/<nick>.tracing.log`, inside the
-/// mesh's runtime folder beside its `<nick>.ipc` marker, its `<nick>.ipc.sock`
-/// on Unix, and its `<nick>.state.json`.
+/// mesh's runtime folder beside its `<nick>.ipc` marker on Windows, its
+/// `<nick>.ipc.sock` on Unix, and its `<nick>.state.json`.
 /// The sink's `open()` creates the parent dir, so the nesting needs no
 /// pre-creation here.
 #[cfg(feature = "host")]

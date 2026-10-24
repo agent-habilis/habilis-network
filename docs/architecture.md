@@ -671,8 +671,9 @@ On Windows it is a named pipe with a random name.
 The endpoint is a full control plane with no in-band authentication.
 On Unix the protection is filesystem permissions: a uid-scoped `0700` runtime directory and a `0600` socket.
 On Windows the protection is the DACL of the pipe, which gives access only to the user, and the client checks that the user owns the pipe before it sends a byte.
-The node writes the name of its endpoint into a `<nick>.ipc` marker in the mesh folder, on every OS, and a client finds the endpoint through the marker.
-The bind and the marker come before the node reports ready, so a client that observes readiness always connects.
+On Unix a client finds the socket by its path in the mesh folder.
+On Windows the node writes the name of its pipe into a `<nick>.ipc` marker in the mesh folder, and a client finds the pipe through the marker.
+The bind, and the marker on Windows, come before the node reports ready, so a client that observes readiness always connects.
 The IPC module compiles out on wasm32, and a browser binds nothing.
 `docs/windows.md` (R3) gives the Windows design.
 

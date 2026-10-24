@@ -216,7 +216,7 @@ pub(super) async fn resubscribe_tick(
                 state_file.remove();
             }
             // The exit below runs no destructor, so the marker goes here too.
-            #[cfg(feature = "host")]
+            #[cfg(all(windows, feature = "host"))]
             if let Some(marker) = state.ipc_marker.as_ref() {
                 marker.remove_if_ours();
             }

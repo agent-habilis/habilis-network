@@ -324,9 +324,10 @@ pub async fn run<A: NodeDriver>(
         },
         &author,
         &sink,
-    )
-    .map(|(rx, marker)| {
-        // The shutdown removes the marker, so the state holds it.
+    );
+    // The shutdown removes the marker, so the state holds it.
+    #[cfg(all(windows, feature = "host"))]
+    let ipc_rx = ipc_rx.map(|(rx, marker)| {
         state.ipc_marker = Some(marker);
         rx
     });
@@ -1154,10 +1155,7 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
     control: crate::transport::ipc::EngineControl,
     author: &Nickname,
     sink: &std::sync::Arc<dyn NodeSink>,
-) -> Option<(
-    mpsc::Receiver<IpcMessage<C>>,
-    crate::transport::ipc::IpcMarker,
-)> {
+) -> Option<SpawnedIpc<C>> {
     // In-process mode (in-process: library API or MCP): no socket. Returning `None` leaves
     // the loop's IPC `select!` arm inert (it pends forever), so the
     // unix-socket listener is never bound — those drivers use the typed
@@ -1178,6 +1176,9 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
         Ok(bound) => bound,
         Err(error) => {
             sink.emit(NodeEvent::Error(format!("IPC: {error}")));
+            #[cfg(unix)]
+            tracing::warn!(%error, "IPC: failed to bind socket");
+            #[cfg(windows)]
             tracing::warn!(
                 target: "habilis_network::lifecycle",
                 %error,
@@ -1193,8 +1194,22 @@ fn spawn_ipc_rx<C: serde::de::DeserializeOwned + Send + 'static>(
         control,
         std::sync::Arc::clone(sink),
     ));
-    Some((rx, bound.marker))
+    #[cfg(windows)]
+    let spawned = (rx, bound.marker);
+    #[cfg(not(windows))]
+    let spawned = rx;
+    Some(spawned)
 }
+
+/// What [`spawn_ipc_rx`] gives: the receiver of the IPC commands, and on
+/// Windows the marker of the endpoint.
+#[cfg(all(windows, feature = "host"))]
+type SpawnedIpc<C> = (
+    mpsc::Receiver<IpcMessage<C>>,
+    crate::transport::ipc::IpcMarker,
+);
+#[cfg(all(not(windows), feature = "host"))]
+type SpawnedIpc<C> = mpsc::Receiver<IpcMessage<C>>;
 
 /// Sleep until a ping round's deadline, or pend forever when no round
 /// is active. Lets the event loop's `select!` carry a ping-finalize arm

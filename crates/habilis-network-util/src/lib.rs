@@ -403,8 +403,8 @@ pub fn ensure_parent_private(
 }
 
 /// A mesh's runtime folder — `<base>/<mesh-prefix>/`. All of one mesh's
-/// per-member files (`<nick>.tracing.log`, the IPC marker `<nick>.ipc`, the
-/// socket `<nick>.ipc.sock` on Unix, `<nick>.state.json`) live here, so the
+/// per-member files (`<nick>.tracing.log`, the IPC marker `<nick>.ipc` on
+/// Windows, the socket `<nick>.ipc.sock` on Unix, `<nick>.state.json`) live here, so the
 /// marker, socket, log, and state-file path builders all derive from it. Pure — a path only; use
 /// [`ensure_mesh_runtime_dir`] when about to *create* files under it.
 #[must_use]
