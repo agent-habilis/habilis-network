@@ -527,6 +527,32 @@ mod tests {
     }
 
     /// A key leaves the index with its message: a frame that was evicted can be held again.
+    /// `contains` is what the dedup gate reads for a retained frame, so it must say no the
+    /// moment the log lets a frame go, or a re-send of an evicted frame is never processed.
+    #[test]
+    fn contains_follows_eviction() {
+        let mut log = MessageLog::new(2);
+        let first = msg("m1");
+        let second = msg("m2");
+        assert!(log.push(first.clone()).is_none());
+        assert!(log.push(second.clone()).is_none());
+        assert!(log.contains(&first.dedup_key()) && log.contains(&second.dedup_key()));
+        let gone = log.push(msg("m3")).expect("a third frame evicts one");
+        assert!(
+            !log.contains(&gone.dedup_key()),
+            "an evicted frame is still held"
+        );
+        let kept = if gone.dedup_key() == first.dedup_key() {
+            &second
+        } else {
+            &first
+        };
+        assert!(
+            log.contains(&kept.dedup_key()),
+            "the frame that stayed is not held"
+        );
+    }
+
     #[test]
     fn an_evicted_frame_can_be_held_again() {
         let mut log = MessageLog::new(1);
