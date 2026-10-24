@@ -623,7 +623,8 @@ published to a registry; pin it with
   to 50 ms (`habilis-network-util`'s `file_retry::retry_while_shared`, re-exported as
   `habilis_network::util::file_retry`). With a PowerShell reader in a tight loop, most renames
   failed before. On Windows `StateFile::remove` logs a remove that fails for a reason other than
-  a missing file, and a failed rename removes its tmp file. On Unix both are as before.
+  a missing file. On Unix it is as before. A failed write of the state file removes its tmp file
+  on every OS, as before.
 - A loopback room no longer stays split into separate meshes when a joiner took the rung of a
   holder that left: a member that let go of the rendezvous owes a return when its walk reads a
   holder that no member of its mesh hosts (#4).

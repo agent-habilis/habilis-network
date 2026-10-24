@@ -221,7 +221,7 @@ Done.
 
 With a retry every 1 ms for up to 100 ms, no rename and no remove failed. The worst wait was 10.7 ms for a rename and 17.6 ms for a remove.
 
-**The fix.** `util::file_retry::retry_while_shared` runs the rename and the remove again every `SHARED_FILE_RETRY_STEP` (1 ms) while they fail with error 5 or 32, up to `SHARED_FILE_RETRY_DEADLINE` (50 ms). Any other error comes back at once. It wraps the rename of `write_private_atomic`, the remove of `StateFile::remove` on Windows, and the remove of the marker (`IpcMarker::remove_if_ours`). On Windows `StateFile::remove` logs a remove that fails for a reason other than a missing file, and a failed rename removes its tmp file. On Unix the retry runs the operation once, and both are as on `main`.
+**The fix.** `util::file_retry::retry_while_shared` runs the rename and the remove again every `SHARED_FILE_RETRY_STEP` (1 ms) while they fail with error 5 or 32, up to `SHARED_FILE_RETRY_DEADLINE` (50 ms). Any other error comes back at once. It wraps the rename of `write_private_atomic`, the remove of `StateFile::remove` on Windows, and the remove of the marker (`IpcMarker::remove_if_ours`). On Windows `StateFile::remove` logs a remove that fails for a reason other than a missing file, and a failed rename of the marker removes its tmp file. On Unix the retry runs the operation once, and `StateFile::remove` is as on `main`. A failed write of the state file removes its tmp file on every OS, as on `main`.
 
 **Limits.**
 
@@ -297,7 +297,7 @@ The six steps are done. In `Cli` mode a quit ends the process with `std::process
 
 ### R12. Runtime base of a Unix client
 
-On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Only the writers check the base (`ensure_runtime_base`). If another user creates the base, the daemon refuses to start, but a client reads the socket or the marker that the other user put there, and sends it the commands. This gap was there before R3, with the socket file.
+On Unix the base is `/tmp/<product>-<uid>`, a path that another user can create first. Only the writers check the base (`ensure_runtime_base`). If another user creates the base, the daemon refuses to start, but a client connects to a socket that the other user put there, and sends it the commands. This gap was there before R3, with the socket file.
 
 Partly done.
 
@@ -340,7 +340,7 @@ Done.
 
 - The client check of the runtime base ([R12](#r12-runtime-base-of-a-unix-client)) is out of the port.
 - On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` are back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` work on every OS. The IPC log lines of Unix have the target, the text and the fields of `main`.
-- The lines and the messages that the port added to the daemon are Windows only: the warn of a failed remove of the state file, the removal of the tmp file after a failed rename, the `info` line of the owner watch, and the "or cannot be read" of a refused owner. The `info` line of the parent watch, which is Unix only, is gone.
+- The lines and the messages that the port added to the daemon are Windows only: the warn of a failed remove of the state file, the `info` line of the owner watch, and the "or cannot be read" of a refused owner. The `info` line of the parent watch, which is Unix only, is gone.
 - The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, `quit` is `QuitError::Unsupported`, and `terminate` sends `SIGTERM`. The signal handlers and the owner watch of Unix start where they started on `main`, after the bind of the IPC socket.
 - The C header declares `long` on every target but Windows, through `habilis_network_len`, and `int64_t` on Windows.
 
@@ -357,7 +357,7 @@ The proof, on a Linux machine (kernel 7.0.0-38, 8 threads), with the port as a p
 
 Follow-up items, outside R14:
 
-- On Unix two fixes that R14 made Windows only go to their own pull request on `main`: the removal of the tmp file after a failed rename, and the target `habilis_network::lifecycle` on the IPC log lines (the bind, the listening line, an accept error, an idle connection).
+- On Unix the target `habilis_network::lifecycle` on the IPC log lines (the warn of a failed `chmod` of the socket, the listening line, an accept error, an idle connection) can go to its own pull request on `main`. A failed write of the state file already removes its tmp file on `main`.
 
 ## 4. Requirements: agent-gossip
 

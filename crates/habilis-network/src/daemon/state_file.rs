@@ -418,8 +418,9 @@ pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result
     file.write_all(bytes)?;
     drop(file);
     let renamed = retry_while_shared(|| std::fs::rename(&tmp, path));
-    // On Windows a failed rename does not leave the tmp file behind. On Unix
-    // it stays, as before the port.
+    // On Windows a failed rename removes the tmp file here, for the IPC
+    // marker. `StateFile::write` removes it on every OS after any error, as
+    // before the port.
     #[cfg(windows)]
     if renamed.is_err() {
         let _ = std::fs::remove_file(&tmp);
