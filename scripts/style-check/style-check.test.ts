@@ -167,3 +167,35 @@ test("anyhow_pub: one more than allowed fails", () => {
 test("anyhow_pub: a stale count fails", () => {
   expectExit("crates/demo/src/lib.rs", anyhowFixture, 1, "anyhow_pub|crates/demo/src/lib.rs|6|fixture");
 });
+
+// The advisor's review of the anyhow_pub rule: one case per hole, each failing on the old rule.
+test("anyhow_pub: a bare Result fn counts beside the import, once per fn", () => {
+  expectExit("crates/demo/src/lib.rs", "use anyhow::Result;\npub fn f() -> Result<u8> { Ok(1) }\npub fn g() -> Result<u8> { Ok(2) }", 0, "anyhow_pub|crates/demo/src/lib.rs|2|fixture");
+});
+test("anyhow_pub: a test module strips only its own body", () => {
+  expectExit("crates/demo/src/lib.rs", "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\npub fn late() -> anyhow::Result<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
+});
+test("anyhow_pub: a commented-out signature does not count", () => {
+  expectExit("crates/demo/src/lib.rs", "// pub fn f() -> anyhow::Result<()> { Ok(()) }", 0);
+});
+test("anyhow_pub: the error may be second, and the alias may sit in a Future", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Result<(), anyhow::Error> { Ok(()) }\npub trait T {\n    fn g(&self) -> impl Future<Output = anyhow::Result<()>>;\n}", 0, "anyhow_pub|crates/demo/src/lib.rs|2|fixture");
+});
+test("anyhow_pub: an Option of the alias counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub fn f() -> Option<anyhow::Result<()>> { None }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
+});
+test("anyhow_pub: a pub trait inside an inline module counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub mod m {\n    pub trait T {\n        fn d(&self) -> anyhow::Result<()>;\n    }\n}", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
+});
+test("anyhow_pub: an extern C fn counts", () => {
+  expectExit("crates/demo/src/lib.rs", "pub extern \"C\" fn f() -> anyhow::Result<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
+});
+test("anyhow_pub: a use-as alias counts through its fns", () => {
+  expectExit("crates/demo/src/lib.rs", "use anyhow::Result as AResult;\npub fn f() -> AResult<()> { Ok(()) }\npub fn g() -> AResult<u8> { Ok(1) }", 0, "anyhow_pub|crates/demo/src/lib.rs|2|fixture");
+});
+test("anyhow_pub: a type alias of the alias counts through its fns", () => {
+  expectExit("crates/demo/src/lib.rs", "pub type Res<T> = anyhow::Result<T>;\npub fn f() -> Res<()> { Ok(()) }", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
+});
+test("anyhow_pub: a macro body that names its fn counts", () => {
+  expectExit("crates/demo/src/lib.rs", "macro_rules! m {\n    ($name:ident) => {\n        pub fn $name() -> anyhow::Result<()> { Ok(()) }\n    };\n}", 0, "anyhow_pub|crates/demo/src/lib.rs|1|fixture");
+});

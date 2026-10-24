@@ -24,29 +24,99 @@ type Rule = {
   why: string;
 };
 
-// The public signatures that return anyhow. A `pub fn` whose signature up to `{` or `;` names
-// `anyhow::Result` or `anyhow::Error` (the match may run across lines). A `pub trait` body that
-// declares such a method. A `FromStr` or `TryFrom` impl with anyhow as its error. A `use` of
-// anyhow's `Result` that sits beside a public `Result<T>` fn, which would hide anyhow behind the alias. The `#[cfg(test)] mod tests` tail
-// is cut first, because tests keep anyhow.
-const ANYHOW_FN = /\bpub (?:const |async |unsafe )*fn \w+[^{;]*?->\s*(?:::)?anyhow::(?:Result|Error)\b/g;
-const ANYHOW_TRAIT_FN = /\bfn \w+[^{;]*?->\s*(?:::)?anyhow::(?:Result|Error)\b[^;{]*;/g;
-const ANYHOW_TRAIT = /^pub trait[\s\S]*?^}/gm;
+// The public signatures that return anyhow. Comments and `#[cfg(test)] mod` bodies are cut
+// first. A `pub fn` (also `pub extern "C" fn`, and a `$name` in a macro body) counts when its
+// return type names `anyhow::Result` or `anyhow::Error` anywhere, or a bare one-argument
+// `Result<T>` in a file that imports anyhow's `Result`, or an alias of either. A method of a
+// `pub trait` counts the same way, at any indent. A `FromStr` or `TryFrom` impl with anyhow as
+// its error counts once.
 const ANYHOW_ERR = /\btype (?:Err|Error)\s*=\s*(?:::)?anyhow::Error\b/g;
-const ANYHOW_USE = /^\s*use (?:::)?anyhow::\{?[^;]*\bResult\b/gm;
-// A public fn that returns the one-argument alias `Result<T>`. Only such a fn hides anyhow
-// behind the import, so the import counts only beside one.
-const BARE_RESULT_FN = /\bpub (?:const |async |unsafe )*fn \w+[^{;]*?->\s*Result<(?:[^<>,]|<[^<>]*>)*>/g;
-function countAnyhowPub(text: string): number {
-  const body = text.replace(/#\[cfg\(test\)\]\s*\n\s*mod tests\b[\s\S]*$/, "");
-  const traits = [...body.matchAll(ANYHOW_TRAIT)].map((m) => m[0]).join("\n");
-  const aliasImports = [...body.matchAll(BARE_RESULT_FN)].length > 0 ? [...body.matchAll(ANYHOW_USE)].length : 0;
-  return (
-    [...body.matchAll(ANYHOW_FN)].length +
-    [...traits.matchAll(ANYHOW_TRAIT_FN)].length +
-    [...body.matchAll(ANYHOW_ERR)].length +
-    aliasImports
-  );
+const PUB_FN = /\bpub (?:const |async |unsafe |extern "C" )*fn (\$?\w+)/g;
+const TRAIT_FN = /\bfn (\$?\w+)/g;
+const PUB_TRAIT = /\bpub trait\b[^{;]*\{/g;
+const ANYHOW_USE_AS = /\buse (?:::)?anyhow::Result as (\w+)\s*;/g;
+const ANYHOW_USE_BARE = /^\s*use (?:::)?anyhow::\{?[^;]*\bResult\b(?!\s+as\b)[^;]*;/m;
+const ANYHOW_TYPE_ALIAS = /\btype (\w+)(?:<[^=]*>)?\s*=\s*(?:::)?anyhow::Result\b/g;
+
+/** Text with line comments and block comments blanked, so a commented-out signature counts nothing. */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, "");
+}
+
+/** The index of the `}` that closes the `{` at `open`. */
+function closeBrace(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}" && --depth === 0) return i;
+  }
+  return text.length - 1;
+}
+
+/** `text` with the body of every `#[cfg(test)] mod name { ... }` removed, and nothing else. */
+function stripTestModules(text: string): string {
+  const pattern = /#\[cfg\(test\)\]\s*\n\s*mod \w+\s*\{/;
+  let out = text;
+  for (let m = pattern.exec(out); m; m = pattern.exec(out)) {
+    const open = m.index + m[0].length - 1;
+    out = out.slice(0, m.index) + out.slice(closeBrace(out, open) + 1);
+  }
+  return out;
+}
+
+/** The return type after the parameter list at `from`: up to `{`, `;` or `where`. */
+function returnType(text: string, from: number): string {
+  let depth = 0;
+  let i = from;
+  for (; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    else if (text[i] === ")" && --depth === 0) break;
+  }
+  const arrow = /^\s*->/.exec(text.slice(i + 1));
+  if (!arrow) return "";
+  const rest = text.slice(i + 1 + arrow[0].length);
+  const end = rest.search(/[{;]|\bwhere\b/);
+  return (end < 0 ? rest : rest.slice(0, end)).trim();
+}
+
+/** Whether `ret` has `name` with exactly one top-level type argument, as in `Result<T>`. */
+function isBareOneArg(ret: string, name: string): boolean {
+  const at = new RegExp(`(?:^|[^\\w:])${name}<`).exec(ret);
+  if (!at) return false;
+  let angle = 0;
+  let nested = 0;
+  let commas = 0;
+  for (let i = at.index + at[0].length - 1; i < ret.length; i++) {
+    const c = ret[i];
+    if (c === "<") angle++;
+    else if (c === ">" && --angle === 0) return commas === 0;
+    else if (c === "(" || c === "[") nested++;
+    else if (c === ")" || c === "]") nested--;
+    else if (c === "," && angle === 1 && nested === 0) commas++;
+  }
+  return false;
+}
+
+function countAnyhowPub(raw: string): number {
+  const text = stripTestModules(stripComments(raw));
+  const bare = new Set<string>();
+  if (ANYHOW_USE_BARE.test(text)) bare.add("Result");
+  for (const m of text.matchAll(ANYHOW_USE_AS)) bare.add(m[1]);
+  for (const m of text.matchAll(ANYHOW_TYPE_ALIAS)) bare.add(m[1]);
+  const anyhowRet = (ret: string): boolean =>
+    /\banyhow::(?:Result|Error)\b/.test(ret) || [...bare].some((name) => isBareOneArg(ret, name));
+  let count = [...text.matchAll(ANYHOW_ERR)].length;
+  for (const m of text.matchAll(PUB_FN)) {
+    if (anyhowRet(returnType(text, m.index! + m[0].length))) count++;
+  }
+  for (const m of text.matchAll(PUB_TRAIT)) {
+    const open = m.index! + m[0].length - 1;
+    const body = text.slice(open, closeBrace(text, open));
+    for (const f of body.matchAll(TRAIT_FN)) {
+      if (anyhowRet(returnType(body, f.index! + f[0].length))) count++;
+    }
+  }
+  return count;
 }
 
 const RULES: Rule[] = [

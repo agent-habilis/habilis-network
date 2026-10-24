@@ -18,22 +18,23 @@ catch_unwind|crates/habilis-network-test-tracing/src/lib.rs|1|catch_panic, the h
 
 # anyhow_pub: a public signature returns anyhow. Each library file is typed in a later commit of
 # package 7, and its line goes with that commit.
-anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network-iroh-webrtc-transport/src/bench.rs|3|benchmark harness behind the bench feature, not library API
 anyhow_pub|crates/habilis-network/src/blob/consume.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/blob/mod.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/blob/produce.rs|1|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/blob/produce.rs|2|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/blob/ticket.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/daemon/config.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/daemon/event_loop.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/daemon/node.rs|2|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/daemon/params.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/daemon/setup.rs|1|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/daemon/params.rs|5|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/daemon/setup.rs|3|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/daemon/shutdown.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/daemon/state_file.rs|1|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/gossip/broadcast.rs|2|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/lookup/capability.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/lookup/mod.rs|2|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/membership/app.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/membership/join.rs|1|package 7: typed in a later commit
-anyhow_pub|crates/habilis-network/src/transport/ipc.rs|1|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/lookup/mod.rs|4|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/membership/app.rs|2|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/membership/join.rs|3|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/transport/ipc.rs|2|package 7: typed in a later commit
 anyhow_pub|crates/habilis-network/src/transport/send.rs|1|package 7: typed in a later commit
+anyhow_pub|crates/habilis-network/src/transport/webrtc.rs|1|package 7: typed in a later commit
