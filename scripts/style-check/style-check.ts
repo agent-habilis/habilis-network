@@ -27,21 +27,25 @@ type Rule = {
 // The public signatures that return anyhow. A `pub fn` whose signature up to `{` or `;` names
 // `anyhow::Result` or `anyhow::Error` (the match may run across lines). A `pub trait` body that
 // declares such a method. A `FromStr` or `TryFrom` impl with anyhow as its error. A `use` of
-// anyhow's `Result`, which would hide anyhow behind the alias. The `#[cfg(test)] mod tests` tail
+// anyhow's `Result` that sits beside a public `Result<T>` fn, which would hide anyhow behind the alias. The `#[cfg(test)] mod tests` tail
 // is cut first, because tests keep anyhow.
 const ANYHOW_FN = /\bpub (?:const |async |unsafe )*fn \w+[^{;]*?->\s*(?:::)?anyhow::(?:Result|Error)\b/g;
 const ANYHOW_TRAIT_FN = /\bfn \w+[^{;]*?->\s*(?:::)?anyhow::(?:Result|Error)\b[^;{]*;/g;
 const ANYHOW_TRAIT = /^pub trait[\s\S]*?^}/gm;
 const ANYHOW_ERR = /\btype (?:Err|Error)\s*=\s*(?:::)?anyhow::Error\b/g;
 const ANYHOW_USE = /^\s*use (?:::)?anyhow::\{?[^;]*\bResult\b/gm;
+// A public fn that returns the one-argument alias `Result<T>`. Only such a fn hides anyhow
+// behind the import, so the import counts only beside one.
+const BARE_RESULT_FN = /\bpub (?:const |async |unsafe )*fn \w+[^{;]*?->\s*Result<(?:[^<>,]|<[^<>]*>)*>/g;
 function countAnyhowPub(text: string): number {
   const body = text.replace(/#\[cfg\(test\)\]\s*\n\s*mod tests\b[\s\S]*$/, "");
   const traits = [...body.matchAll(ANYHOW_TRAIT)].map((m) => m[0]).join("\n");
+  const aliasImports = [...body.matchAll(BARE_RESULT_FN)].length > 0 ? [...body.matchAll(ANYHOW_USE)].length : 0;
   return (
     [...body.matchAll(ANYHOW_FN)].length +
     [...traits.matchAll(ANYHOW_TRAIT_FN)].length +
     [...body.matchAll(ANYHOW_ERR)].length +
-    [...body.matchAll(ANYHOW_USE)].length
+    aliasImports
   );
 }
 

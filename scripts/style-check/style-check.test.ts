@@ -141,12 +141,19 @@ const anyhowFixture = [
   "    fn from_str(_: &str) -> Result<Self, Self::Err> { unimplemented!() }",
   "}",
   "use anyhow::Result;",
+  "pub fn g() -> Result<u8> { Ok(1) }",
   "#[cfg(test)]",
   "mod tests {",
   "    pub fn e() -> anyhow::Result<()> { Ok(()) }",
   "}",
 ].join("\n");
 const anyhowMain = "pub fn m() -> anyhow::Result<()> { Ok(()) }";
+test("anyhow_pub: the Result import counts when a public fn returns the bare alias", () => {
+  expectExit("crates/demo/src/lib.rs", "use anyhow::Result;\npub fn e() -> Result<u8> { Ok(1) }", 1);
+});
+test("anyhow_pub: the Result import does not count without a public bare-alias fn", () => {
+  expectExit("crates/demo/src/lib.rs", "use anyhow::Result;\npub(crate) fn f() -> Result<u8> { Ok(1) }\nfn g() -> Result<u8> { Ok(1) }", 0);
+});
 test("anyhow_pub: five public forms, not the pub(crate), the test module, or the binary", () => {
   expectExit("crates/demo/src/lib.rs", anyhowFixture, 1);
   expectExit("crates/demo/src/main.rs", anyhowMain, 0);
