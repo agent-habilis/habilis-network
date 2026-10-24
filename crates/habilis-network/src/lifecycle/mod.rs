@@ -475,6 +475,54 @@ mod departed_tests {
         endpoint.close().await;
     }
 
+    /// A copy of a goodbye reaches `observe` before `handle_presence`. If a later holder of the
+    /// nickname has gone quiet, the copy must not read as that holder's return: it is a frame of a
+    /// key that already said goodbye, and says nothing about whoever holds the nickname now.
+    #[test]
+    async fn a_replayed_left_does_not_return_a_quiet_holder() {
+        let (endpoint, sender) = endpoint_and_sender().await;
+        let identity = Identity::generate();
+        let our_pubkey = identity.author_key();
+        let mesh = MeshId::from("test");
+        let us = nick("us");
+        let sink = SilentSink;
+        let ctx = HandlerCtx {
+            sender: &sender,
+            endpoint: &endpoint,
+            mesh: &mesh,
+            author: &us,
+            identity: &identity,
+            our_pubkey,
+            max_peers: 16,
+            rendezvous_id: endpoint_id(9),
+            external_msg_tx: None,
+            sink: &sink,
+        };
+        let who = nick("swift-cedar");
+        let first_run = Identity::generate();
+        let mut state = fresh_state();
+        state.note_left(&who, first_run.author_key(), UnixSecs::from_secs(1_000));
+        // A second run took the nickname and went quiet.
+        state.quiet.insert(who.clone());
+
+        let replay = Message::new_left(&mesh, &who).sign(&first_run);
+        let observed = observe(&replay, &mut state, &ctx);
+        assert!(observed.update.stale, "a copy of a goodbye is not stale");
+        assert!(
+            !state.peers.contains(who.as_str()),
+            "a replayed goodbye of the first run returned the quiet second run"
+        );
+        assert!(
+            state.quiet.contains(who.as_str()),
+            "a replayed goodbye of the first run took the second run out of quiet"
+        );
+        assert!(
+            !state.last_seen.contains_key(who.as_str()),
+            "a replayed goodbye refreshed the nickname's liveness"
+        );
+        endpoint.close().await;
+    }
+
     #[test]
     async fn a_stale_frame_of_a_departed_key_does_not_refresh_liveness() {
         let (endpoint, sender) = endpoint_and_sender().await;

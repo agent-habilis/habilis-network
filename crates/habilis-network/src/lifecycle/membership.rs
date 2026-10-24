@@ -78,15 +78,11 @@ pub(crate) fn compute(
 }
 
 /// [`compute`] for a verified message, plus the one rule that needs the key: a message signed
-/// by a key that said goodbye is stale at any timestamp.
+/// by a key that said goodbye is stale at any timestamp. That includes a second copy of the
+/// goodbye itself: the first one recorded the key, and a copy must not read as the return of
+/// whoever holds the nickname now.
 pub(crate) fn compute_for(message: &Verified, state: &EventLoopState) -> MembershipUpdate {
-    let is_left = matches!(
-        message.kind,
-        MessageKind::Presence {
-            subtype: PresenceSubtype::Left
-        }
-    );
-    if !is_left && state.key_said_goodbye(message.key()) {
+    if state.key_said_goodbye(message.key()) {
         return MembershipUpdate {
             returned: false,
             joined_new: false,
