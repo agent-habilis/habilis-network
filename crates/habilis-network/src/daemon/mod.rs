@@ -34,6 +34,7 @@ pub(crate) mod params;
 // no longer reads the message log, so log eviction can't break it.
 pub(crate) use crate::reassembly;
 pub(crate) mod setup;
+pub(crate) mod setup_error;
 pub(crate) mod state;
 
 // The session state file the daemon writes for external readers (its
@@ -50,8 +51,9 @@ mod heal;
 mod probe_backoff;
 /// The graceful-exit path, split out of `event_loop`.
 mod shutdown;
+pub use setup_error::SetupError;
 #[cfg(feature = "host")]
-pub use shutdown::validate_owner_pid;
+pub use shutdown::{OwnerPidError, validate_owner_pid};
 
 // Crate-internal shorthands. The public spelling of all of these is
 // `crate::runtime`, which is what a consumer imports.

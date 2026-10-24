@@ -149,21 +149,49 @@ pub(super) fn spawn_quit_signal_tasks(
 /// `pid` is 0 or 1, the calling process's own pid, or no live process has it
 /// (a zombie counts as dead). The message is one line.
 #[cfg(feature = "host")]
-pub fn validate_owner_pid(pid: u32) -> anyhow::Result<()> {
+pub fn validate_owner_pid(pid: u32) -> Result<(), OwnerPidError> {
     owner_start(pid).map(drop)
 }
+
+/// Why a pid cannot be the owner of a detached daemon.
+#[cfg(feature = "host")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnerPidError {
+    /// The pid is `0` or `1`: init, or no process at all.
+    Reserved(u32),
+    /// The pid is the calling process's own.
+    OwnSelf(u32),
+    /// No live process has the pid.
+    NotRunning(u32),
+}
+
+#[cfg(feature = "host")]
+impl std::fmt::Display for OwnerPidError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reserved(pid) => write!(
+                formatter,
+                "owner pid {pid} is init or invalid. Give a live process id greater than 1"
+            ),
+            Self::OwnSelf(pid) => write!(formatter, "owner pid {pid} is this process itself"),
+            Self::NotRunning(pid) => write!(formatter, "owner pid {pid} is not running"),
+        }
+    }
+}
+
+#[cfg(feature = "host")]
+impl std::error::Error for OwnerPidError {}
 /// The start time of a valid owner, the one home of the owner checks.
 #[cfg(feature = "host")]
-fn owner_start(pid: u32) -> anyhow::Result<u64> {
-    anyhow::ensure!(
-        pid > 1,
-        "owner pid {pid} is init or invalid. Give a live process id greater than 1"
-    );
-    anyhow::ensure!(
-        pid != std::process::id(),
-        "owner pid {pid} is this process itself"
-    );
-    process::live_start_time(pid).ok_or_else(|| anyhow::anyhow!("owner pid {pid} is not running"))
+fn owner_start(pid: u32) -> Result<u64, OwnerPidError> {
+    if pid <= 1 {
+        return Err(OwnerPidError::Reserved(pid));
+    }
+    if pid == std::process::id() {
+        return Err(OwnerPidError::OwnSelf(pid));
+    }
+    process::live_start_time(pid).ok_or(OwnerPidError::NotRunning(pid))
 }
 /// The process a detached daemon lives for, in place of its parent. The pid
 /// alone cannot tell the owner from a later process that reuses the pid, so
@@ -179,7 +207,7 @@ pub(crate) struct Owner {
 impl Owner {
     /// # Errors
     /// See [`validate_owner_pid`].
-    pub(crate) fn new(pid: u32) -> anyhow::Result<Self> {
+    pub(crate) fn new(pid: u32) -> Result<Self, OwnerPidError> {
         Ok(Self {
             pid,
             start: owner_start(pid)?,

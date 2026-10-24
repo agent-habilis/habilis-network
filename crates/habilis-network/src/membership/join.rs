@@ -1,6 +1,7 @@
 //! Selecting a mesh, standing it up, and leaving it — the one ritual every
 //! embedding runs.
 
+use crate::daemon::SetupError;
 use std::sync::Arc;
 
 use crate::embed::NodeSink;
@@ -12,7 +13,7 @@ use crate::runtime::{
     derive_topic_mesh_config, setup_mesh,
 };
 use crate::util::tuning::GOSSIP_ACTIVE_VIEW_CAPACITY;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -187,13 +188,13 @@ pub fn blind_new_members(blind: bool) {
 /// # Errors
 /// An unparseable id/topic/nickname, conflicting selectors, a mesh no peer on
 /// this target could reach, or a failure standing up the endpoint and overlay.
-pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
+pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership, SetupError> {
     let nickname = opts
         .nick
         .clone()
         .map(Nickname::new)
         .transpose()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
     let (kind, author) = resolve_kind(opts, nickname)?;
     let max_peers = if opts.max_peers == 0 {
         GOSSIP_ACTIVE_VIEW_CAPACITY
@@ -213,10 +214,11 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
             SetupKind::Create { config, .. } => config.lookups.is_loopback(),
             SetupKind::Join { mesh, .. } | SetupKind::Topic { mesh, .. } => mesh.is_loopback(),
         };
-        anyhow::ensure!(
-            !loopback,
-            "a browser peer cannot reach a loopback mesh: name a lookup (`relay`), or a topic / mesh id"
-        );
+        if loopback {
+            return Err(SetupError::internal(anyhow::anyhow!(
+                "a browser peer cannot reach a loopback mesh: name a lookup (`relay`), or a topic / mesh id"
+            )));
+        }
     }
 
     let (inbound_tx, inbound) = mpsc::channel(INBOUND_CAP);
@@ -226,8 +228,7 @@ pub async fn join(opts: &Opts, sink: Arc<dyn NodeSink>) -> Result<Membership> {
             .with_max_peers(max_peers)
             .with_max_direct(opts.max_direct),
     )
-    .await
-    .context("setting up the mesh")?;
+    .await?;
 
     #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
     if NEW_MEMBERS_ARE_BLIND.load(Ordering::SeqCst) {
@@ -283,9 +284,9 @@ impl Membership {
 ///
 /// # Errors
 /// The event loop returned an error or panicked.
-pub async fn depart(node: Node<MembershipApp>) -> Result<()> {
+pub async fn depart(node: Node<MembershipApp>) -> Result<(), SetupError> {
     n0_future::time::sleep(DEPARTURE_GRACE).await;
-    node.leave().await
+    node.leave().await.map_err(SetupError::internal)
 }
 
 /// Resolve the selectors into a [`SetupKind`] plus our nickname. Exactly one
@@ -298,14 +299,18 @@ pub async fn depart(node: Node<MembershipApp>) -> Result<()> {
 /// # Errors
 /// Both `mesh` and `topic` set, an unparseable id or topic, an invalid mesh
 /// name, or a create whose advertise target is unreachable.
-pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKind, Nickname)> {
+pub fn resolve_kind(
+    opts: &Opts,
+    nickname: Option<Nickname>,
+) -> Result<(SetupKind, Nickname), SetupError> {
     match (&opts.mesh, &opts.topic) {
-        (Some(_), Some(_)) => anyhow::bail!("pass only one of mesh / topic"),
+        (Some(_), Some(_)) => Err(SetupError::MeshAndTopic),
         (Some(id), None) => {
-            let target: JoinTarget = id.parse().map_err(|error| anyhow::anyhow!("{error}"))?;
-            let Resolved { kind, author, .. } = JoinParams::new(target, nickname, None)
-                .resolve()
-                .context("resolving the mesh id")?;
+            let target: JoinTarget = id
+                .parse()
+                .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
+            let Resolved { kind, author, .. } =
+                JoinParams::new(target, nickname, None).resolve()?;
             Ok((kind, author))
         }
         (None, Some(string)) => {
@@ -319,11 +324,11 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
             // same values.
             let config = MeshConfig::resolve(
                 &[Lookup::Mdns, Lookup::Dht, Lookup::Relay],
-                relay_ladder(&opts.relay_urls)?,
+                relay_ladder(&opts.relay_urls).map_err(SetupError::internal)?,
                 &opts.transport,
-            )?;
-            let mesh =
-                derive_topic_mesh_config(string, config).context("resolving the topic string")?;
+            )
+            .map_err(SetupError::Config)?;
+            let mesh = derive_topic_mesh_config(string, config)?;
             Ok((
                 SetupKind::Topic {
                     mesh,
@@ -335,21 +340,22 @@ pub fn resolve_kind(opts: &Opts, nickname: Option<Nickname>) -> Result<(SetupKin
         (None, None) => {
             let config = MeshConfig::resolve(
                 &opts.lookup,
-                relay_ladder(&opts.relay_urls)?,
+                relay_ladder(&opts.relay_urls).map_err(SetupError::internal)?,
                 &opts.transport,
-            )?;
+            )
+            .map_err(SetupError::Config)?;
             let name = MeshName::new(
                 opts.name
                     .clone()
                     .unwrap_or_else(|| "habilis-network".to_string()),
             )
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            .map_err(|error| SetupError::internal(anyhow::anyhow!("{error}")))?;
             let Resolved { kind, author, .. } =
                 CreateParams::new(name, nickname, config, DirectorySelection::Unset)
                     .with_password(None)
                     .with_invite_only(false)
                     .resolve()
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    .map_err(|error| SetupError::internal(anyhow::Error::from(error)))?;
             Ok((kind, author))
         }
     }

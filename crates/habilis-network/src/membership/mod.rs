@@ -10,6 +10,7 @@ mod app;
 mod event;
 mod join;
 
+pub use crate::daemon::SetupError;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]
 pub use app::Rung;
 #[cfg(all(feature = "iroh-test-utils", not(target_arch = "wasm32")))]

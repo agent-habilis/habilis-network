@@ -9,9 +9,7 @@
 //! advertise validation, and the target resolution live — instead of three
 //! near-identical copies in `cli`, `api`, and `mcp`.
 
-use std::fmt;
-
-use anyhow::{Result, bail};
+use super::setup_error::SetupError;
 
 use crate::protocol::Nickname;
 use crate::protocol::crypto::Password;
@@ -110,20 +108,6 @@ impl JoinParams {
     }
 }
 
-/// A passworded id was joined without a password. Typed so callers can
-/// classify it — the MCP server maps it to `invalid_params` (it never
-/// prompts), the CLI prompts on a TTY before resolving.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PasswordRequired;
-
-impl fmt::Display for PasswordRequired {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("this mesh is password-protected — pass --password")
-    }
-}
-
-impl std::error::Error for PasswordRequired {}
-
 /// The topic intent: a mesh derived deterministically from a shared string,
 /// always public. Name + config are derived, not supplied — the string alone
 /// determines the mesh.
@@ -157,7 +141,7 @@ impl CreateParams {
     /// # Errors
     /// Returns [`AdvertiseRequiresReachable`] if `advertise` is set on a
     /// loopback-only mesh.
-    pub fn resolve(self) -> std::result::Result<Resolved, AdvertiseRequiresReachable> {
+    pub fn resolve(self) -> Result<Resolved, AdvertiseRequiresReachable> {
         validate_advertise(&self.advertise, &self.config.lookups)?;
         let advertise_directory = self.advertise.directory();
         Ok(Resolved {
@@ -186,10 +170,10 @@ impl JoinParams {
     /// the password is wrong; or a password was given for a passwordless id.
     ///
     /// [`Mesh`]: crate::protocol::mesh::Mesh
-    pub fn resolve(self) -> Result<Resolved> {
+    pub fn resolve(self) -> Result<Resolved, SetupError> {
         let mesh = match &self.target {
             JoinTarget::Mesh(_) => {
-                let locked = resolver::resolve(&self.target)?;
+                let locked = resolver::resolve(&self.target).map_err(SetupError::Resolve)?;
                 // ~100ms of Argon2id, accepted synchronously: this runs once
                 // per join, before the daemon exists. `unlock` decides whether a
                 // password is needed; only its typed reason is mapped here.
@@ -201,11 +185,8 @@ impl JoinParams {
                     locked
                         .unlock(self.password.as_ref())
                         .map_err(|error| match error {
-                            UnlockError::PasswordRequired => anyhow::Error::from(PasswordRequired),
-                            error @ (UnlockError::InviteOnly
-                            | UnlockError::NoPassword
-                            | UnlockError::WrongPassword) => anyhow::Error::from(error),
-                            other => anyhow::Error::from(other),
+                            UnlockError::PasswordRequired => SetupError::PasswordRequired,
+                            other => SetupError::Unlock(other),
                         })?;
                 unlocked
             }
@@ -215,15 +196,19 @@ impl JoinParams {
             // prompt, and `redeem` unwraps the root with it.
             JoinTarget::Invite(invite) => {
                 match (&self.password, invite.requires_password()) {
-                    (None, true) => return Err(PasswordRequired.into()),
-                    (Some(_), false) => {
-                        bail!("this invite has no password — drop --password")
-                    }
+                    (None, true) => return Err(SetupError::PasswordRequired),
+                    (Some(_), false) => return Err(SetupError::InviteNoPassword),
                     _ => {}
                 }
-                invite.redeem(self.password.as_ref())?
+                invite
+                    .redeem(self.password.as_ref())
+                    .map_err(SetupError::Invite)?
             }
-            _ => anyhow::bail!("this join target is not supported by this build"),
+            _ => {
+                return Err(SetupError::internal(anyhow::anyhow!(
+                    "this join target is not supported by this build"
+                )));
+            }
         };
         Ok(Resolved {
             kind: SetupKind::Join {
@@ -247,7 +232,7 @@ impl JoinParams {
 /// parse-time usage error.)
 /// # Errors
 /// The topic string sanitizes to an empty mesh name.
-pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
+pub fn derive_topic_mesh(string: &str) -> Result<Mesh, SetupError> {
     // `--topic-mdns-only` (test-only): keep the mesh *public-shaped* (an
     // ephemeral, address-lookup-discoverable rendezvous — the beacon-claim
     // race under test lives on that path, not the loopback ladder) while
@@ -287,7 +272,7 @@ pub fn derive_topic_mesh(string: &str) -> Result<Mesh> {
 ///
 /// # Errors
 /// The string is empty or whitespace.
-pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh> {
+pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh, SetupError> {
     derive_topic_mesh_config(
         string,
         MeshConfig::new(lookups, None, None, TransportPolicy::default()),
@@ -302,15 +287,16 @@ pub fn derive_topic_mesh_with(string: &str, lookups: LookupOpts) -> Result<Mesh>
 /// # Errors
 /// The string is empty or whitespace, or `config` fails
 /// [`MeshConfig::validate`].
-pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh> {
+pub fn derive_topic_mesh_config(string: &str, config: MeshConfig) -> Result<Mesh, SetupError> {
     if string.trim().is_empty() {
-        anyhow::bail!("topic string must not be empty");
+        return Err(SetupError::EmptyTopic);
     }
-    config.validate()?;
-    Ok(Mesh::from_topic(
+    config.validate().map_err(SetupError::Config)?;
+    Mesh::from_topic(
         string,
         MeshConfig::new(config.lookups, None, None, config.transport),
-    )?)
+    )
+    .map_err(SetupError::Config)
 }
 
 impl TopicParams {
@@ -321,7 +307,7 @@ impl TopicParams {
     ///
     /// # Errors
     /// Fails if the string is empty or whitespace-only.
-    pub fn resolve(self) -> Result<Resolved> {
+    pub fn resolve(self) -> Result<Resolved, SetupError> {
         let mesh = derive_topic_mesh(&self.string)?;
         Ok(Resolved {
             kind: SetupKind::Topic {
@@ -449,7 +435,7 @@ mod join_password_tests {
         let params = JoinParams::new(passworded_id().parse().unwrap(), None, None);
         let error = params.resolve().unwrap_err();
         assert!(
-            error.downcast_ref::<PasswordRequired>().is_some(),
+            matches!(error, SetupError::PasswordRequired),
             "got: {error}"
         );
     }

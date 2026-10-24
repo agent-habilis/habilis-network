@@ -2,6 +2,8 @@ use crate::transport::UdpTransport;
 use std::path::PathBuf;
 
 use anyhow::Result;
+
+use super::setup_error::SetupError;
 use iroh::{Endpoint, RelayUrl};
 use rand::RngCore;
 use tokio::sync::{mpsc, watch};
@@ -447,6 +449,18 @@ impl InjectedEndpoint {
         lookups: &LookupOpts,
         secret: iroh::SecretKey,
         alpns: Vec<Vec<u8>>,
+        transports: crate::lookup::TransportHandles,
+        max_direct: usize,
+    ) -> Result<Self, SetupError> {
+        Self::bind_checked(lookups, secret, alpns, transports, max_direct)
+            .await
+            .map_err(SetupError::internal)
+    }
+
+    async fn bind_checked(
+        lookups: &LookupOpts,
+        secret: iroh::SecretKey,
+        alpns: Vec<Vec<u8>>,
         mut transports: crate::lookup::TransportHandles,
         max_direct: usize,
     ) -> Result<Self> {
@@ -755,6 +769,14 @@ pub fn refuse_in_browser(
     lookups: &LookupOpts,
     policy: crate::protocol::TransportPolicy,
     transports: crate::lookup::TransportOpts,
+) -> Result<(), SetupError> {
+    refuse_in_browser_checked(lookups, policy, transports).map_err(SetupError::internal)
+}
+
+fn refuse_in_browser_checked(
+    lookups: &LookupOpts,
+    policy: crate::protocol::TransportPolicy,
+    transports: crate::lookup::TransportOpts,
 ) -> Result<()> {
     anyhow::ensure!(
         reaches_relay(lookups, transports),
@@ -887,11 +909,16 @@ fn resolve_caps(max_peers: usize, max_direct: usize) -> (usize, usize) {
 /// # Errors
 /// The join target fails to resolve, the password fails to verify, or the
 /// endpoint cannot bind.
-pub async fn setup_mesh(kind: SetupKind, params: SetupParams) -> Result<EventLoopConfig> {
+pub async fn setup_mesh(
+    kind: SetupKind,
+    params: SetupParams,
+) -> Result<EventLoopConfig, SetupError> {
     // `Box::pin` keeps the assembly future off the frame of every caller that awaits it, so those
     // callers stay under clippy's `large_futures` threshold. The size depends on the target, so
     // boxing the one await is more robust than shaving fields.
-    Box::pin(setup_mesh_inner(kind, params)).await
+    Box::pin(setup_mesh_inner(kind, params))
+        .await
+        .map_err(SetupError::internal)
 }
 
 #[expect(
@@ -1775,6 +1802,7 @@ mod tests {
                 .with_endpoint(injected),
         )
         .await
+        .map_err(anyhow::Error::from)
     }
 
     // An injected endpoint obeys the mesh policy too: a handle on a mesh whose

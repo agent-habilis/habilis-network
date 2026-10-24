@@ -264,7 +264,7 @@ impl EventLoopConfig {
     /// `pid` is 0 or 1, the daemon's own pid, or no live process has it. The
     /// message is one line.
     #[cfg(feature = "host")]
-    pub fn with_owner_pid(mut self, pid: u32) -> anyhow::Result<Self> {
+    pub fn with_owner_pid(mut self, pid: u32) -> Result<Self, super::shutdown::OwnerPidError> {
         self.owner = Some(super::shutdown::Owner::new(pid)?);
         Ok(self)
     }

@@ -4,6 +4,7 @@
 //! [`setup_mesh`] → [`Node::spawn`] (or [`run`] for a consumer that owns the
 //! task itself). [`EventLoopConfig`] is opaque between the second and third.
 
+pub use crate::daemon::SetupError;
 pub use crate::daemon::config::{
     CoHostPolicy, DIRECTORY_ADVERTISER_COHOST, DriverMode, EventLoopConfig,
 };
@@ -18,7 +19,7 @@ pub use crate::daemon::setup::{
     refuse_in_browser, setup_mesh,
 };
 #[cfg(feature = "host")]
-pub use crate::daemon::validate_owner_pid;
+pub use crate::daemon::{OwnerPidError, validate_owner_pid};
 pub use crate::lookup::MdnsHandle;
 
 /// The session state file the daemon writes for external readers — its sole

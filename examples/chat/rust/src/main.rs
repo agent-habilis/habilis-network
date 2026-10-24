@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
             }
         }
     }
-    depart(membership.node).await
+    depart(membership.node).await.map_err(anyhow::Error::from)
 }
 
 /// One line of input. `false` ends the chat.

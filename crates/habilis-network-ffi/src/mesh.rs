@@ -181,6 +181,7 @@ impl Mesh {
         };
         self.runtime
             .block_on(habilis_network::membership::depart(node))
+            .map_err(anyhow::Error::from)
     }
 
     fn dispatch(&self, req: Request) -> Result<()> {
