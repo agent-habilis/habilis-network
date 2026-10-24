@@ -1384,6 +1384,43 @@ async fn build_rendezvous_endpoint(
     }
 }
 
+/// Read the busy rungs of a private ladder without claiming one: admit the rung that serves our
+/// beacon, forget a foreign one, ask about the unknown ones. For a member that may not co-host
+/// yet: its book left the busy rungs out at setup (`register_rendezvous`), and until one is read
+/// as ours it has no address of the rendezvous that answers. The walk of the co-host arm reads the
+/// same way, but a joiner's first walk waits for the reclaim ticker, and its first link with it.
+pub(crate) async fn read_ladder(
+    params: &RendezvousParams,
+    peer: &Endpoint,
+    peer_book: &iroh::address_lookup::memory::MemoryLookup,
+    rungs: &mut RungWatch,
+) {
+    let node = peer.id();
+    let now = Instant::now();
+    for &port in &params.bind_ports {
+        if !rung_is_busy(port) {
+            continue;
+        }
+        match rungs.reading(port, now) {
+            RungRead::Ours => {
+                rungs.clear_foreign(port);
+                settle_on_rung(params, peer, peer_book, port).await;
+                return;
+            }
+            RungRead::Foreign | RungRead::SilentLongEnough => {
+                rungs.mark_foreign(port);
+                forget_rungs(params, peer, peer_book, |rung| rung == port).await;
+            }
+            RungRead::Silent => {
+                if !rungs.refused(port) {
+                    admit_rung(params, peer, peer_book, port).await;
+                }
+            }
+            RungRead::Unknown => rungs.ask(params, node, port, true),
+        }
+    }
+}
+
 /// What [`build_rendezvous_endpoint`] ended with.
 enum Walk {
     /// A rung was free (or, public, the endpoint was built): the beacon can stand up on it.
