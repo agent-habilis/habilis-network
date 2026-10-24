@@ -53,8 +53,8 @@ published to a registry; pin it with
   at the address that `send` takes (base, mesh, nickname), and returns a `QuitError`
   (`Unsupported`, `Unreached`, `OldDaemon`, `Refused`). `runtime::ipc::terminate(&QuitTarget,
   pid)` stops a daemon on every OS: on Windows with the quit, on Unix with `SIGTERM` to `pid`, as
-  `util::process::terminate` does. On Unix the engine answers no command, every line reaches the app, and `quit` is
-  `QuitError::Unsupported`. `util::process::terminate` does not change: it signals a pid, and on
+  `util::process::terminate` does. On Unix the engine answers no command, every line reaches
+  the app, and `quit` is `QuitError::Unsupported`. `util::process::terminate` does not change: it signals a pid, and on
   Windows it stays `Unsupported`.
 - On Windows, a daemon with `--owner-pid` (`EventLoopConfig::with_owner_pid`) stops when its
   owner exits, by the same watch as on Unix: every `PPID_WATCH_INTERVAL` (1.5 s) it compares the

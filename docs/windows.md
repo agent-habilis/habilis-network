@@ -36,7 +36,7 @@ The IPC of a daemon works on Windows, over a named pipe. A daemon stops graceful
 | R11. Windows on CI | Partly done. The `windows` job of `ci.yml`, the Windows leg of `matrix.yml`, and the six steps of `host_lifecycle.rs` run. `cargo task ffi` and the smoke test of the Bun loader against the release DLL run in the `windows` job (R9). Open: the `e2e.yml` stream job, and the required-check setting of the repository. The Node loader (koffi) runs on no CI job, only in T3. Until the fix of #31 is in `agent-habilis/iroh`, a `[patch]` in the root `Cargo.toml` points the iroh family at that fix: on Windows the test relay logged a client reset as ERROR, which failed loopback tests under the rule of #22. The four loopback tests of #31 run on Windows again. The patch holds only in this workspace. |
 | R12. Runtime base of a Unix client | Partly done. `check_runtime_base` exists. The IPC client does not call it in this port, because the port leaves Unix as it is on `main` ([R14](#r14-unix-as-on-main)). The client check goes to its own change on `main`. See [R12](#r12-runtime-base-of-a-unix-client). |
 | R13. Logoff and shutdown | Done. A CLI daemon has a hidden window, and a logoff, a shutdown, a close by the Restart Manager or a `WM_CLOSE` feeds the quit channel (`crates/habilis-network-util/src/win_session.rs`, `crates/habilis-network/src/daemon/shutdown.rs`). |
-| R14. Unix as on `main` | Done. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, the engine answers no IPC command, the lines of the daemon are as on `main`, and the C header declares `long`. See [R14](#r14-unix-as-on-main). |
+| R14. Unix as on `main` | Done on Windows; the run on Linux is open. The client check of R12 is out of the port. On Unix a client finds a daemon by its socket path again, the engine answers no IPC command, the lines of the daemon are as on `main`, and the C header declares `long`. See [R14](#r14-unix-as-on-main). |
 
 [§2.2](#22-runtime-breaks) has no open item. The open lines of [§2.3](#23-tooling-and-tests) are still true, but their line numbers can be out of date.
 [§2.1](#21-build-blockers) is kept as the record of what R1 changed.
@@ -278,7 +278,7 @@ It runs on every OS, so CI tests on Windows what T4 and T6 test by hand:
 
 1. Start a node in `Cli` driver mode, with a runtime base in a temporary directory.
 2. IPC `Info` returns the node, and `active_endpoints` finds it.
-3. On Windows the IPC `quit` stops the node, and on Unix the `SIGTERM` of `terminate`. The state file and the endpoint are gone.
+3. On Windows the IPC `quit` stops the node, and on Unix the `SIGTERM` of `terminate`. The state file is gone, and nothing answers on the endpoint.
 4. Start a node with the pid of a child process as its owner. Kill the child. The node stops within one owner-watch interval plus the `Left` delay.
 5. On Windows, start a node in a console of its own. Ctrl-break and ctrl-c stop it by the graceful path.
 6. On Windows, send the window of one node a logoff (`WM_QUERYENDSESSION`, then `WM_ENDSESSION`), and post the window of another node a `WM_CLOSE`. Each stops its node by the graceful path, and the node logs the line of the event.
@@ -336,13 +336,26 @@ Follow-up items, outside R13:
 
 Many projects build on the engine. The port leaves Linux and macOS as they are on `main`: the API, the ABI, the C header, the wire and the behavior. A change of the port is Windows only, or it adds an item and changes none. A change of Unix behavior goes to its own pull request on `main`.
 
-Done.
+Done on Windows.
 
 - The client check of the runtime base ([R12](#r12-runtime-base-of-a-unix-client)) is out of the port.
 - On Unix a client finds a daemon by its socket path, as on `main`. The IPC marker is Windows only. `active_socket_paths` and `send_to_path` are back on Unix, with the signatures of `main`, and `active_endpoints` and `send_to_endpoint` work on every OS. The IPC log lines of Unix have the target, the text and the fields of `main`.
 - The lines and the messages that the port added to the daemon are Windows only: the warn of a failed remove of the state file, the removal of the tmp file after a failed rename, the `info` line of the owner watch, and the "or cannot be read" of a refused owner. The `info` line of the parent watch, which is Unix only, is gone.
 - The engine answers the IPC `quit` only on Windows. On Unix every line reaches the app, `quit` is `QuitError::Unsupported`, and `terminate` sends `SIGTERM`. The signal handlers and the owner watch of Unix start where they started on `main`, after the bind of the IPC socket.
 - The C header declares `long` on every target but Windows, through `habilis_network_len`, and `int64_t` on Windows.
+
+What stays different on Unix:
+
+- The port adds items, such as `IpcName`, `active_endpoints`, `send_to_endpoint`, `QuitTarget`, `QuitError`, `quit`, `terminate` and `check_runtime_base`. An item that exists on `main` keeps its signature and its behavior. The exception is the internal `CType` of `packages/habilis-network-ffi`, a private package, where `'isize'` is `'i64'` (R9). Linux has not checked this yet.
+- The `[patch]` of iroh ([R11](#r11-windows-on-ci)) holds in this workspace on every OS, so a build of this workspace on Linux or macOS uses the fork. A project that depends on the engine does not get it. It changes only the level of one relay log line. The patch goes when the fix is in `agent-habilis/iroh`.
+
+Open:
+
+- The proof runs on a Linux machine before the push: `cargo semver-checks` against `main` for each library crate, and agent-gossip `main` against `main` and against the port, with no change to agent-gossip.
+
+Follow-up items, outside R14:
+
+- On Unix two fixes that R14 made Windows only go to their own pull request on `main`: the removal of the tmp file after a failed rename, and the target `habilis_network::lifecycle` on the IPC log lines (the bind, the listening line, an accept error, an idle connection).
 
 ## 4. Requirements: agent-gossip
 
@@ -406,14 +419,15 @@ On Windows, Claude Code runs Bash tool calls in Git Bash. There, `$PPID` is an M
 ## 5. Order of work
 
 Make one commit for each step where possible.
-Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R13 is done too, and R12 is partly done.
+Step 1 is done. In step 2, the `windows` job and the `matrix.yml` leg are done. Step 3 is done. In step 4, R4 to R7 are done. Step 5 is done. R13 is done too. R14 is done on Windows, and its run on Linux is open. R12 is partly done.
 
 1. **Compile (R1, R10).** First check from macOS with `cargo xwin check --target x86_64-pc-windows-msvc`. Then build on the Windows machine.
 2. **CI (R11).** Add the `windows` job when the workspace compiles. From this step on, each change must be green on Windows.
 3. **Runtime base and IPC (R2, R3).** Add the `Info` and `active_endpoints` part of `host_lifecycle.rs`.
 4. **Process helpers, `quit`, owner watch, console events (R4 to R7).** Add the `quit`, owner-watch and console-event parts of `host_lifecycle.rs`.
 5. **State file and FFI ABI (R8, R9).**
-6. **agent-gossip (G0 to G5).**
+6. **Unix as on `main` (R14).** Before agent-gossip, so that the engine it pins changes nothing on Unix.
+7. **agent-gossip (G0 to G5).**
 
 ## 6. Test plan on a real Windows machine
 
