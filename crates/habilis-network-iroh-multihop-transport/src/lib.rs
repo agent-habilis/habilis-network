@@ -45,6 +45,7 @@
 
 use tokio::sync::mpsc;
 mod addr;
+mod error;
 mod graph;
 mod lookup;
 mod metric;
@@ -67,6 +68,7 @@ use iroh::{Endpoint, EndpointAddr, SecretKey};
 use n0_future::time::{Duration, Instant};
 
 pub use addr::{Route, RouteHop};
+pub use error::HandleError;
 pub use graph::Leg;
 
 /// What the data path of a node counted: a test reads them to tell where cells go.
@@ -243,7 +245,7 @@ impl MultihopHandle {
     /// may sit on the relay: see [`HandleConfig`].
     ///
     /// # Errors
-    /// `underlay` is not bound to [`underlay_secret`]`(secret)`. The underlay has
+    /// [`HandleError::UnderlayKey`]: `underlay` is not bound to [`underlay_secret`]`(secret)`. The underlay has
     /// a key of its own, because a relay hands an id's packets to one endpoint
     /// only and the underlay cannot share the application endpoint's. That key is
     /// derived, so it is stable and tied to the peer rather than a second random
@@ -252,7 +254,7 @@ impl MultihopHandle {
         secret: &SecretKey,
         underlay: Endpoint,
         config: HandleConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, HandleError> {
         Self::with_protocols(secret, underlay, config, Vec::new())
     }
 
@@ -262,24 +264,23 @@ impl MultihopHandle {
     /// only be registered here.
     ///
     /// # Errors
-    /// As [`new`](Self::new), and a protocol takes the ALPN of the forwarder.
+    /// [`HandleError::ForwarderAlpn`]: a protocol takes the ALPN of the forwarder. Otherwise as [`new`](Self::new).
     pub fn with_protocols(
         secret: &SecretKey,
         underlay: Endpoint,
         config: HandleConfig,
         protocols: Vec<(Vec<u8>, Box<dyn iroh::protocol::DynProtocolHandler>)>,
-    ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            protocols
-                .iter()
-                .all(|(alpn, _)| alpn.as_slice() != underlay::FORWARD_ALPN),
-            "the forwarder keeps its own ALPN on the underlay"
-        );
+    ) -> Result<Self, HandleError> {
+        if protocols
+            .iter()
+            .any(|(alpn, _)| alpn.as_slice() == underlay::FORWARD_ALPN)
+        {
+            return Err(HandleError::ForwarderAlpn);
+        }
         let app_id = AppId::new(secret.public());
-        anyhow::ensure!(
-            underlay.id() == underlay_secret(secret).public(),
-            "the underlay must be bound to `underlay_secret(secret)`, not another key"
-        );
+        if underlay.id() != underlay_secret(secret).public() {
+            return Err(HandleError::UnderlayKey);
+        }
         let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_CAP);
         let topology = Arc::new(RwLock::new(Topology::with_max_age(config.vector_max_age)));
         let forwarder = Arc::new(Forwarder::new(
