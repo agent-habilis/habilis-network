@@ -130,7 +130,10 @@ impl Writer {
     /// The consumer went away before the end of stream reached it.
     pub(crate) fn close(&mut self) -> Result<()> {
         match self.producer.take() {
-            Some(producer) => self.runtime.block_on(producer.close_or_abandon()),
+            Some(producer) => self
+                .runtime
+                .block_on(producer.close_or_abandon())
+                .map_err(anyhow::Error::from),
             None => Ok(()),
         }
     }

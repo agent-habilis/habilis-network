@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use habilis_network::iroh::Endpoint;
 use habilis_network::iroh::address_lookup::memory::MemoryLookup;
 use habilis_network::iroh::protocol::Router;
@@ -21,6 +21,7 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::code;
+use crate::error::StreamError;
 use crate::hash::{ID_LEN, SECRET_LEN, StreamHash, StreamId, StreamSecret};
 use crate::produce::{Producer, Registry, StreamAcceptor};
 use crate::read::{Reader, Refused};
@@ -94,22 +95,27 @@ impl StreamNode {
     /// # Errors
     /// Conflicting or invalid options, a loopback node in a browser, or an
     /// endpoint that fails to bind.
-    pub async fn bind(opts: &StreamOpts) -> Result<Self> {
-        anyhow::ensure!(
-            !opts.transport.contains(&Transport::Multihop),
-            "a stream has no multihop: it is one direct lane"
-        );
-        anyhow::ensure!(
-            !opts.transport.contains(&Transport::Gossip),
-            "a stream has no gossip: its node never joins a gossip mesh"
-        );
+    pub async fn bind(opts: &StreamOpts) -> Result<Self, StreamError> {
+        if opts.transport.contains(&Transport::Multihop) {
+            return Err(StreamError::Options(
+                "a stream has no multihop: it is one direct lane",
+            ));
+        }
+        if opts.transport.contains(&Transport::Gossip) {
+            return Err(StreamError::Options(
+                "a stream has no gossip: its node never joins a gossip mesh",
+            ));
+        }
         // An empty list is `udp,webrtc` for a stream: the mesh default has multihop.
         let list = if opts.transport.is_empty() {
             &[Transport::Udp, Transport::WebRtc][..]
         } else {
             &opts.transport
         };
-        let config = MeshConfig::resolve(&opts.lookup, relay_ladder(&opts.relay_urls)?, list)?;
+        let relays =
+            relay_ladder(&opts.relay_urls).map_err(StreamError::bind("parse the relay list"))?;
+        let config = MeshConfig::resolve(&opts.lookup, relays, list)
+            .map_err(StreamError::bind("resolve the mesh config"))?;
         let transports = TransportOpts::default().within(&config.transport);
         Self::bind_with(config.lookups, config.transport, transports).await
     }
@@ -119,7 +125,7 @@ impl StreamNode {
     ///
     /// # Errors
     /// As [`bind`](Self::bind).
-    pub async fn bind_for(hash: &StreamHash) -> Result<Self> {
+    pub async fn bind_for(hash: &StreamHash) -> Result<Self, StreamError> {
         let transports = TransportOpts::default().within(&hash.transport);
         Self::bind_with(hash.lookups.clone(), hash.transport, transports).await
     }
@@ -128,10 +134,13 @@ impl StreamNode {
         lookups: LookupOpts,
         transport: TransportPolicy,
         transports: TransportOpts,
-    ) -> Result<Self> {
+    ) -> Result<Self, StreamError> {
         #[cfg(target_arch = "wasm32")]
-        habilis_network::runtime::refuse_in_browser(&lookups, transport, transports)?;
-        let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports).await?;
+        habilis_network::runtime::refuse_in_browser(&lookups, transport, transports)
+            .map_err(StreamError::bind("start the stream node"))?;
+        let (endpoint, webrtc) = build_peer_webrtc(&lookups, transports)
+            .await
+            .map_err(StreamError::bind("start the stream node"))?;
         let producers = address_book(&endpoint);
         let registry = Arc::new(Registry::default());
         let ice = IceProfile::default().with_host_only(lookups.is_loopback());
@@ -202,7 +211,7 @@ impl StreamNode {
     /// # Errors
     /// The producer cannot be reached, the only path is a relay the stream
     /// refuses, or the producer refuses the hash (a [`Refused`]).
-    pub async fn open(&self, hash: &StreamHash) -> Result<Reader> {
+    pub async fn open(&self, hash: &StreamHash) -> Result<Reader, StreamError> {
         let needs_lane = pair_needs_lane(&hash.addr, UdpTransport::from(self.transports.udp));
         // A data channel needs `webrtc` on both ends: the producer's list is in
         // the hash, and a producer without it answers no offer.
@@ -214,7 +223,7 @@ impl StreamNode {
         // what is left is the relay the stream refuses, so say so now rather
         // than after the direct-path probe.
         if needs_lane && !can_lane && !relay_ok {
-            bail!(Refused::RelayRefused);
+            return Err(StreamError::Refused(Refused::RelayRefused));
         }
         add_peer_addr(&self.producers, hash.addr.clone());
         // The WebRTC lane first: the connect below then finds the session's
@@ -234,22 +243,31 @@ impl StreamNode {
             && !relay_ok
         {
             if is_cap_refusal(&error) {
-                bail!(Refused::AtCap);
+                return Err(StreamError::Refused(Refused::AtCap));
             }
-            return Err(error.context("opening a WebRTC lane to the producer"));
+            return Err(StreamError::Open {
+                step: "open a WebRTC lane to the producer",
+                source: error.into(),
+            });
         }
         let conn = self
             .endpoint
             .connect(hash.addr.clone(), crate::STREAM_ALPN)
             .await
-            .context("connecting to the producer")?;
+            .map_err(StreamError::open("connect to the producer"))?;
         if !relay_ok && !wait_direct(&conn, PROBE_DEADLINE).await {
             conn.close(code::RELAY_REFUSED.into(), b"relay path refused");
-            bail!(Refused::RelayRefused);
+            return Err(StreamError::Refused(Refused::RelayRefused));
         }
-        let (mut send, recv) = conn.open_bi().await.context("opening the stream")?;
-        send.write_all(hash.header_bytes().as_slice()).await?;
-        send.finish()?;
+        let (mut send, recv) = conn
+            .open_bi()
+            .await
+            .map_err(StreamError::open("open the stream"))?;
+        send.write_all(hash.header_bytes().as_slice())
+            .await
+            .map_err(StreamError::open("send the stream hash"))?;
+        send.finish()
+            .map_err(StreamError::open("send the stream hash"))?;
         Ok(Reader::new(conn, recv))
     }
 

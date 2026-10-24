@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use habilis_network::net::test_relay;
 use habilis_network::protocol::{Lookup, Transport};
 use habilis_network_stream::{
-    Producer, Reader, Refused, StreamHash, StreamNode, StreamOpts, StreamSecret,
+    Producer, Reader, Refused, StreamError, StreamHash, StreamNode, StreamOpts, StreamSecret,
 };
 
 use habilis_network::iroh::endpoint::presets;
@@ -23,7 +23,7 @@ async fn loopback() -> StreamNode {
 }
 
 /// Read to the end, or fail with whatever ended the stream.
-async fn read_all(reader: &mut Reader) -> anyhow::Result<Vec<u8>> {
+async fn read_all(reader: &mut Reader) -> Result<Vec<u8>, StreamError> {
     let mut out = Vec::new();
     while let Some(chunk) = reader.read().await? {
         out.extend_from_slice(&chunk);
@@ -31,8 +31,15 @@ async fn read_all(reader: &mut Reader) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn refusal(error: &anyhow::Error) -> Option<Refused> {
-    error.downcast_ref::<Refused>().copied()
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "StreamError is non_exhaustive, so the arm is needed"
+)]
+fn refusal(error: &StreamError) -> Option<Refused> {
+    match error {
+        StreamError::Refused(refused) => Some(*refused),
+        _ => None,
+    }
 }
 
 /// Write `payload` in `chunk`-sized pieces and close.

@@ -2,18 +2,18 @@
 
 use std::fmt;
 
-use anyhow::Result;
 use bytes::Bytes;
 use habilis_network::iroh::endpoint::{Connection, ConnectionError, RecvStream};
 
 use crate::code;
+use crate::error::StreamError;
 
 /// The largest chunk one `read` hands back.
 const CHUNK: usize = 64 * 1024;
 
 /// Why a producer would not, or no longer will, give this consumer its stream.
-/// Reached through `anyhow::Error::downcast_ref`, so a caller can tell a refusal
-/// from a lost link.
+/// Reached as [`StreamError::Refused`], so a caller can tell a refusal from a
+/// lost link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refused {
@@ -78,7 +78,7 @@ impl Reader {
     /// # Errors
     /// A [`Refused`] when the producer refused or abandoned the stream, or the
     /// link's own error when it was lost.
-    pub async fn read(&mut self) -> Result<Option<Bytes>> {
+    pub async fn read(&mut self) -> Result<Option<Bytes>, StreamError> {
         match self.recv.read_chunk(CHUNK).await {
             Ok(chunk) => {
                 if chunk.is_none() {
@@ -87,8 +87,8 @@ impl Reader {
                 Ok(chunk)
             }
             Err(error) => Err(match refusal(&self.conn) {
-                Some(refused) => refused.into(),
-                None => anyhow::anyhow!("the stream was lost: {error}"),
+                Some(refused) => StreamError::Refused(refused),
+                None => StreamError::Lost(error.into()),
             }),
         }
     }
