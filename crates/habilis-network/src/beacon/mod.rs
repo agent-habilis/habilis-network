@@ -1387,42 +1387,53 @@ async fn build_rendezvous_endpoint(
 /// What the busy rungs of a private ladder answer to an identity probe, by port, before a joiner's
 /// first dial. The book must name the rung that serves our beacon before the joiner subscribes:
 /// a first dial with no address that answers is one the gossip layer keeps for seconds before a
-/// re-graft can replace it. One throwaway endpoint probes every busy rung, `budget` each; a rung
-/// that says nothing in that time is reported as such and read later by the walk. The endpoint
-/// closes off this task: closing one that dialed a silent rung takes seconds.
+/// re-graft can replace it. One throwaway endpoint per rung, as the walk's probes: a prober that
+/// reached the id at one rung may reuse that path for the next port and read a foreign rung as
+/// ours. All rungs at once, `budget` each, so eight silent rungs cost one budget. A rung whose
+/// prober did not bind is left unread, and read later by the walk. Each endpoint closes off this
+/// task: closing one that dialed a silent rung takes seconds.
 pub(crate) async fn read_busy_rungs(
     params: &RendezvousParams,
     budget: std::time::Duration,
 ) -> Vec<(u16, ProbeAnswer)> {
-    let busy: Vec<u16> = params
+    let probes: Vec<_> = params
         .bind_ports
         .iter()
         .copied()
         .filter(|&port| rung_is_busy(port))
+        .map(|port| {
+            let id = params.id;
+            n0_future::task::spawn(async move {
+                let prober = match build_endpoint(
+                    &LookupOpts::loopback(),
+                    None,
+                    None,
+                    Vec::new(),
+                    TransportHandles::default(),
+                )
+                .await
+                {
+                    Ok(prober) => prober,
+                    Err(error) => {
+                        tracing::debug!(target: "habilis_network::beacon", port, %error, "no endpoint to read the busy rung with; the walk reads it");
+                        return None;
+                    }
+                };
+                let addr = EndpointAddr::new(id)
+                    .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+                let answer = probe_answer(&prober, addr, budget).await;
+                tracing::debug!(target: "habilis_network::beacon", port, ?answer, "busy rung read at setup");
+                drop(n0_future::task::spawn(async move { prober.close().await }));
+                Some((port, answer))
+            })
+        })
         .collect();
-    if busy.is_empty() {
-        return Vec::new();
+    let mut read = Vec::with_capacity(probes.len());
+    for probe in probes {
+        if let Ok(Some(reading)) = probe.await {
+            read.push(reading);
+        }
     }
-    let Ok(prober) = build_endpoint(
-        &LookupOpts::loopback(),
-        None,
-        None,
-        Vec::new(),
-        TransportHandles::default(),
-    )
-    .await
-    else {
-        return Vec::new();
-    };
-    let mut read = Vec::with_capacity(busy.len());
-    for port in busy {
-        let addr = EndpointAddr::new(params.id)
-            .with_ip_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
-        let answer = probe_answer(&prober, addr, budget).await;
-        tracing::debug!(target: "habilis_network::beacon", port, ?answer, "busy rung read at setup");
-        read.push((port, answer));
-    }
-    drop(n0_future::task::spawn(async move { prober.close().await }));
     read
 }
 
