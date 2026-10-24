@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::protocol::message::Verified;
 use crate::protocol::message::sole_addressee;
-use crate::protocol::{AuthorKey, DedupKey, Nickname, UnixSecs};
+use crate::protocol::{AuthorKey, DedupKey, MessageKind, Nickname, PresenceSubtype, UnixSecs};
 
 /// Where a message sits in the log's total order: its timestamp, then its id
 /// key. Timestamps are whole seconds and a mesh puts hundreds of messages in one
@@ -174,6 +174,48 @@ impl MessageLog {
             .min_by(|(_, lhs), (_, rhs)| eviction_key(lhs).cmp(&eviction_key(rhs)))
             .map(|(index, _)| index)
             .expect("the fullest author holds at least one message")
+    }
+
+    pub(crate) fn contains(&self, key: &DedupKey) -> bool {
+        self.keys.contains(key)
+    }
+
+    /// Drop the presence frames of `author` and return them, so the caller can prune the indexes
+    /// it keeps beside the log. A key that said goodbye never speaks again, and eviction charges
+    /// the fullest author, so a small departed author's `joined` frames would otherwise stay
+    /// resend subjects for the life of the node. Its chat and its `left` stay: a node that missed
+    /// them can still backfill them. Every node that holds the goodbye does the same, so the
+    /// retained set stays a function of the message set.
+    pub(crate) fn drop_presence_of(&mut self, author: &AuthorKey) -> Vec<Verified> {
+        let is_departed_presence = |msg: &Verified| {
+            msg.key() == *author
+                && matches!(
+                    msg.kind,
+                    MessageKind::Presence {
+                        subtype: PresenceSubtype::Joined | PresenceSubtype::Alive
+                    }
+                )
+        };
+        let mut dropped = Vec::new();
+        self.messages.retain(|msg| {
+            if is_departed_presence(msg) {
+                dropped.push(msg.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for gone in &dropped {
+            self.keys.remove(&gone.dedup_key());
+        }
+        match self.per_author.get_mut(author) {
+            Some(held) if *held > dropped.len() => *held -= dropped.len(),
+            Some(_) => {
+                self.per_author.remove(author);
+            }
+            None => {}
+        }
+        dropped
     }
 
     #[cfg(any(test, feature = "iroh-test-utils"))]
@@ -523,6 +565,32 @@ mod tests {
     }
 
     /// A key leaves the index with its message: a frame that was evicted can be held again.
+    /// `contains` is what the dedup gate reads for a retained frame, so it must say no the
+    /// moment the log lets a frame go, or a re-send of an evicted frame is never processed.
+    #[test]
+    fn contains_follows_eviction() {
+        let mut log = MessageLog::new(2);
+        let first = msg("m1");
+        let second = msg("m2");
+        assert!(log.push(first.clone()).is_none());
+        assert!(log.push(second.clone()).is_none());
+        assert!(log.contains(&first.dedup_key()) && log.contains(&second.dedup_key()));
+        let gone = log.push(msg("m3")).expect("a third frame evicts one");
+        assert!(
+            !log.contains(&gone.dedup_key()),
+            "an evicted frame is still held"
+        );
+        let kept = if gone.dedup_key() == first.dedup_key() {
+            &second
+        } else {
+            &first
+        };
+        assert!(
+            log.contains(&kept.dedup_key()),
+            "the frame that stayed is not held"
+        );
+    }
+
     #[test]
     fn an_evicted_frame_can_be_held_again() {
         let mut log = MessageLog::new(1);
