@@ -376,14 +376,14 @@ pub fn read_snapshot(path: &Path) -> Result<Option<ReadySnapshot>, StateFileErro
         Err(source) => {
             return Err(StateFileError::Unreadable {
                 path: path.to_path_buf(),
-                source,
+                source: Box::new(source),
             });
         }
     };
     let value: serde_json::Value =
         serde_json::from_str(&contents).map_err(|source| StateFileError::Unparsable {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
     let ready = value["ready"]
         .as_bool()
@@ -417,6 +417,26 @@ fn tmp_sibling(path: &Path) -> PathBuf {
 mod tests {
     use habilis_network_test_tracing::test;
     use std::path::PathBuf;
+
+    use super::StateFileError;
+
+    /// The variants of a public error hold a boxed source, so no third-party type is named in
+    /// the public API. This builds them that way.
+    #[test]
+    fn the_state_file_variants_hold_boxed_sources() {
+        let parse = serde_json::from_str::<u8>("x").expect_err("not a number");
+        let unparsable = StateFileError::Unparsable {
+            path: PathBuf::from("state.json"),
+            source: Box::new(parse),
+        };
+        let io = std::io::Error::other("unreadable");
+        let unreadable = StateFileError::Unreadable {
+            path: PathBuf::from("state.json"),
+            source: Box::new(io),
+        };
+        assert!(std::error::Error::source(&unparsable).is_some());
+        assert!(std::error::Error::source(&unreadable).is_some());
+    }
 
     use super::{MeshId, MeshName, Nickname, StateFile, clock};
 
@@ -775,14 +795,14 @@ pub enum StateFileError {
         /// The file.
         path: PathBuf,
         /// The read error.
-        source: std::io::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// The file is not valid JSON.
     Unparsable {
         /// The file.
         path: PathBuf,
         /// The parse error.
-        source: serde_json::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// The file lacks a field the snapshot needs.
     MissingField {
@@ -808,8 +828,9 @@ impl std::fmt::Display for StateFileError {
 impl std::error::Error for StateFileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Unreadable { source, .. } => Some(source),
-            Self::Unparsable { source, .. } => Some(source),
+            Self::Unreadable { source, .. } | Self::Unparsable { source, .. } => {
+                Some(source.as_ref())
+            }
             Self::MissingField { .. } => None,
         }
     }
